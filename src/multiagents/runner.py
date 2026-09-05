@@ -41,6 +41,12 @@ from .tree import Node, Tree, new_id, now
 
 MAX_SUMMARY_CHARS = 6000
 
+# How often stream progress is flushed to the shared tree. The watchdogs read
+# the in-process Supervisor, not the tree, so this bounds disk writes without
+# affecting supervision; it only delays what another process sees in
+# check_agent by at most this long.
+TREE_FLUSH_SECONDS = 2.0
+
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
 # a file that mentions the marker must not park itself.
 NEED_DECISION = re.compile(r"NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
@@ -81,6 +87,40 @@ How this works:
 
 ---
 """
+
+
+class _FlushGate:
+    """Decides when accumulated stream progress is written to the shared tree.
+
+    Every write flocks, reads and rewrites the whole tree, which every nested
+    server shares — so writing per stream line is both disk churn and lock
+    contention. Batching is safe because the watchdogs read the in-process
+    Supervisor, not the tree; the only cost is that another process's
+    check_agent lags by at most `interval`.
+    """
+
+    def __init__(self, interval: float = TREE_FLUSH_SECONDS,
+                 now: float | None = None):
+        self.interval = interval
+        self.pending = 0
+        self.last = time.monotonic() if now is None else now
+
+    def add(self, urgent: bool = False, now: float | None = None) -> int:
+        """Record one event. Returns the batch size to flush, or 0 to hold.
+
+        `urgent` forces a flush — used the moment a session id is first seen,
+        because steer() and answer_question() cannot resume an agent without it.
+        """
+        self.pending += 1
+        moment = time.monotonic() if now is None else now
+        if urgent or moment - self.last >= self.interval:
+            batch, self.pending, self.last = self.pending, 0, moment
+            return batch
+        return 0
+
+    def drain(self) -> int:
+        batch, self.pending = self.pending, 0
+        return batch
 
 
 @dataclass
@@ -427,6 +467,7 @@ class Runner:
         usage: dict[str, Any] = {}
         cost_total = 0.0
         session_id = ""
+        flush = _FlushGate()
 
         try:
             async for line in handle.lines():
@@ -453,15 +494,22 @@ class Runner:
                     # opencode web console shows on its usage page.
                     cost_total += event.cost
                     usage["cost_usd"] = round(cost_total, 6)
-                if event.session_id and not session_id:
+                captured_session = bool(event.session_id and not session_id)
+                if captured_session:
                     session_id = event.session_id
                 if event.status:
                     run.final_status = event.status
 
-                self.tree.note_event(
-                    node_id, steps=run.supervisor.steps or None,
-                    usage=usage or None, session_id=session_id or None,
-                )
+                # Batched: see TREE_FLUSH_SECONDS. A newly captured session id
+                # is flushed immediately regardless, because steer() and
+                # answer_question() cannot resume an agent without it.
+                batch = flush.add(urgent=captured_session)
+                if batch:
+                    self.tree.note_event(
+                        node_id, steps=run.supervisor.steps or None,
+                        usage=usage or None, session_id=session_id or None,
+                        events=batch,
+                    )
 
                 # A decision only a human can make: stop now rather than let
                 # the agent spend another token building on a guess.
@@ -502,6 +550,12 @@ class Runner:
             watchdog.cancel()
             stderr_task.cancel()
             stream_log.close()
+
+        remainder = flush.drain()
+        if remainder:
+            self.tree.note_event(node_id, steps=run.supervisor.steps or None,
+                                 usage=usage or None, session_id=session_id or None,
+                                 events=remainder)
 
         text = "\n".join(run.text_parts).strip()
         stderr = handle.stderr_tail
@@ -562,6 +616,9 @@ class Runner:
         # Auto-merge this agent's own children upward: their work is still
         # quarantined on this agent's branch, so nothing real has changed yet.
         if status == "done":
+            # Children first: this agent's branch should carry their work when
+            # it is itself merged upward, rather than stranding it.
+            await self._merge_pending_children(node_id)
             await self._maybe_merge_into_parent(node_id)
 
         if not run.awaiting:
@@ -630,6 +687,16 @@ class Runner:
             return "failed"
         return "done"
 
+    async def _merge_pending_children(self, node_id: str) -> None:
+        """Merge children that finished while this agent was still working.
+
+        Called once this agent's own run has ended and its worktree has been
+        committed, so nothing lands under it mid-task.
+        """
+        for child in self.tree.children_of(node_id):
+            if child.status == "done" and child.branch:
+                await self._maybe_merge_into_parent(child.id)
+
     async def _maybe_merge_into_parent(self, node_id: str) -> None:
         node = self.tree.get(node_id)
         if not node or not node.branch or not node.parent:
@@ -638,6 +705,17 @@ class Runner:
         if policy.get("inside_tree", "auto") != "auto":
             return
         parent = self.tree.get(node.parent)
+
+        # Never merge into a worktree an agent is actively using. Even with the
+        # dirty-tree guard in gitops.merge — which only refuses when there are
+        # uncommitted changes — landing commits mid-task silently changes files
+        # the parent has already read, invalidating its picture of its own
+        # workspace. The merge is deferred to when the parent's run ends.
+        if parent is not None and parent.status in {"pending", "running"}:
+            self.tree.emit(node_id, "merge_deferred", parent=parent.id,
+                           reason="parent is still working in that worktree")
+            return
+
         target = Path(parent.worktree) if parent and parent.worktree else self.paths.root
         if not target.is_dir():
             return
