@@ -1,3 +1,7 @@
 
 # multiagents runtime state
 .multiagents/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
