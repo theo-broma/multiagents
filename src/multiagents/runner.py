@@ -353,7 +353,18 @@ class Runner:
             self.tree.defer({"agent": agent_name, "task": task}, retry_at, why)
             return {"deferred": True, "reason": why, "retry_after": retry_at}
         if chosen != spec.provider:
-            provider = self.providers[chosen]
+            # The model id belongs to the original provider's namespace, so it
+            # is meaningless to the new one — failing over without remapping
+            # would run `agy --model opencode-go/glm-5.3-flash`. Only fail over
+            # if this agent names a model for the fallback provider too.
+            alternative = (spec.extra.get("models") or {}).get(chosen)
+            if not alternative:
+                why = (f"{spec.provider} is constrained, but {spec.name!r} names no "
+                       f"model for {chosen}; add one under `models:` to allow failover")
+                chosen = spec.provider
+            else:
+                provider = self.providers[chosen]
+                spec = AgentSpec(**{**spec.__dict__, "model": alternative})
 
         # --- git isolation ---------------------------------------------------
         # EVERY agent gets a worktree, including read-only ones. `writes: false`
@@ -593,12 +604,21 @@ class Runner:
                 return
 
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:
-        if looks_like_quota_failure(run.final_status, stderr, text):
+        succeeded = code == 0 and (
+            not run.final_status
+            or run.final_status.upper() in {"SUCCESS", "OK", "COMPLETED"}
+        )
+        # A run that exited cleanly cannot have failed on quota or auth,
+        # whatever words appear anywhere. Checked before the sniffers so no
+        # marker can override the CLI's own verdict.
+        if succeeded and text.strip():
+            return "done"
+        if looks_like_quota_failure(run.final_status, stderr):
             return "quota"
         # Checked before the generic failure paths: an unauthenticated provider
         # produces an empty response that is otherwise indistinguishable from a
         # model that simply said nothing, and the fix is entirely different.
-        if looks_like_auth_failure(run.final_status, stderr, text):
+        if looks_like_auth_failure(run.final_status, stderr):
             return "unauthenticated"
         if run.final_status and run.final_status.upper() not in {"SUCCESS", "OK", "COMPLETED"}:
             return "failed"
@@ -745,12 +765,22 @@ class Runner:
         elif run and run.handle:
             await run.handle.stop()
         else:
+            # Stopping an agent this process did not spawn. node.pid is the
+            # local process — under docker that is the `docker exec` CLIENT, and
+            # killing it leaves the agent running inside the container spending
+            # tokens with nobody reading its output. Ask the executor to reach
+            # in, then fall back to the local pid.
             node = self.tree.get(agent_id)
-            if node and node.pid:
-                try:
-                    os.killpg(os.getpgid(node.pid), 15)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+            if node:
+                executor = self.executor()
+                killer = getattr(executor, "kill_detached", None)
+                if killer is not None:
+                    killer(agent_id)
+                if node.pid:
+                    try:
+                        os.killpg(os.getpgid(node.pid), 15)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
         self.tree.set_status(agent_id, "cancelled", "stopped by parent")
         return {"agent_id": agent_id, "status": "cancelled"}
 
