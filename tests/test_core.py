@@ -1512,3 +1512,64 @@ def test_merge_is_deferred_while_the_parent_is_still_working(tmp_path):
     body = inspect.getsource(r._consume)
     assert body.index("_merge_pending_children") < body.index("_maybe_merge_into_parent(node_id)"), \
         "children must merge before the parent is itself merged upward"
+
+
+def test_every_cli_subcommand_is_wired():
+    """Three commands shipped calling functions deleted in an earlier refactor
+    — `init`, `run` and `mcp-config` each raised NameError at runtime, and each
+    was only found by someone running it. Argparse resolves lazily, so nothing
+    catches this but exercising the parser.
+
+    Checks the actual `func` default rather than guessing a name from the
+    command: `run` is handled by cmd_resume, and a name-based check would have
+    reported that as broken.
+    """
+    import argparse
+    import multiagents.cli as cli
+
+    seen = []
+    real_add_parser = argparse._SubParsersAction.add_parser
+
+    def spy(self, name, **kwargs):
+        parser = real_add_parser(self, name, **kwargs)
+        seen.append((name, parser))
+        return parser
+
+    argparse._SubParsersAction.add_parser = spy
+    try:
+        try:
+            cli.main(["--help"])
+        except SystemExit:
+            pass
+    finally:
+        argparse._SubParsersAction.add_parser = real_add_parser
+
+    assert len(seen) >= 15, [n for n, _ in seen]
+    for name, parser in seen:
+        handler = parser.get_default("func")
+        assert callable(handler), f"`{name}` has no callable handler"
+
+
+def test_no_command_handler_references_a_missing_name():
+    """Catches the specific failure above: a handler calling a helper that a
+    refactor removed."""
+    import inspect
+    import multiagents.cli as cli
+
+    module_names = set(dir(cli))
+    import builtins
+    module_names |= set(dir(builtins))
+
+    for attr in dir(cli):
+        if not attr.startswith("cmd_"):
+            continue
+        source = inspect.getsource(getattr(cli, attr))
+        tree = __import__("ast").parse(source.lstrip())
+        for node in __import__("ast").walk(tree):
+            if isinstance(node, __import__("ast").Call) and \
+               isinstance(node.func, __import__("ast").Name):
+                called = node.func.id
+                # Locals and parameters are not resolvable this way; only flag
+                # module-level helpers, which is where the breakage was.
+                if called.startswith("_") and called not in module_names:
+                    raise AssertionError(f"{attr} calls missing helper {called}()")

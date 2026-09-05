@@ -1,0 +1,54 @@
+.DEFAULT_GOAL := help
+.PHONY: help install check test build run init clean uninstall
+
+UV ?= uv
+
+help:  ## show this help
+	@echo "multiagents"
+	@echo
+	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "} {printf "  \033[1m%-10s\033[0m %s\n", $$1, $$2}'
+	@echo
+	@echo "  Start with 'make install', then 'make check'."
+
+install:  ## install the package and prepare this machine to launch the MCP
+	@command -v $(UV) >/dev/null || { \
+		echo "uv is not installed — see https://docs.astral.sh/uv/"; exit 1; }
+	$(UV) sync
+	@# Seeding writes the editable defaults to ~/.config/multiagents/ and the
+	@# MCP registration the launcher points at. Both are idempotent.
+	@$(UV) run python -c "from multiagents.config import seed_global; print('config      ' + str(seed_global()))"
+	@$(UV) run multiagents mcp-config >/dev/null
+	@$(UV) run python -c "from multiagents.paths import global_config_dir; \
+		print('mcp         ' + str(global_config_dir() / 'mcp.json'))"
+	@echo
+	@echo "Installed. Next:"
+	@echo "  make check                     # are the agent CLIs present and authenticated?"
+	@echo "  cd <your project> && multiagents init"
+
+check:  ## report CLIs, agents, authentication, budget and git readiness
+	@$(UV) run multiagents doctor
+
+test:  ## run the test suite
+	$(UV) run pytest tests/ -q
+
+init:  ## initialise the CURRENT directory as a multiagents project
+	@$(UV) run multiagents init
+
+build:  ## build the container environment and authenticate every provider
+	@$(UV) run multiagents build
+
+run:  ## launch the orchestrator for the current project
+	@$(UV) run multiagents run
+
+clean:  ## remove build and test caches (leaves project state alone)
+	@rm -rf .pytest_cache build dist *.egg-info
+	@find . -name __pycache__ -type d -prune -not -path './.venv/*' -exec rm -rf {} +
+	@echo "caches removed"
+
+uninstall:  ## remove this machine's global config and worktree state
+	@echo "This deletes ~/.config/multiagents and ~/.multiagents,"
+	@echo "including any container-private credentials stored there."
+	@printf "Continue? [y/N] " && read ans && [ "$$ans" = "y" ]
+	@rm -rf "$${XDG_CONFIG_HOME:-$$HOME/.config}/multiagents" "$$HOME/.multiagents"
+	@echo "removed. Per-project .multiagents/ directories are untouched."

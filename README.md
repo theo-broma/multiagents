@@ -20,7 +20,9 @@ you/master  ← explicit merge_agent() gate
 ## The lifecycle
 
 ```bash
-uv sync
+make install             # dependencies, global config, MCP registration
+make check               # are the agent CLIs present and authenticated?
+
 multiagents init         # create the project, copy the global config
 multiagents init-agent   # shape it with the initializer — resumable, takes as long as it takes
 multiagents build        # container environment, then authenticate every provider
@@ -547,10 +549,10 @@ $ multiagents upgrade-config --dry-run
 ## Tests
 
 ```bash
-uv run --with pytest pytest tests/ -q
+make test
 ```
 
-96 tests covering the parts live runs do not reliably exercise: doom-loop
+105 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
