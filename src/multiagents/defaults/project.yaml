@@ -40,13 +40,42 @@ executor:
     # bridge     ordinary docker networking, unrestricted egress
     # none       no network at all
     network: allowlist
+    #
+    # Patterns are anchored, so "example.com" permits api.example.com but not
+    # evil-example.com. Three groups, and the trade differs for each:
     egress_allowlist:
+      # 1. Model endpoints. Without these no agent can run at all.
       - opencode.ai
-      - api.opencode.ai
-      - models.opencode.ai
-      - api.anthropic.com
       - googleapis.com
       - google.com
+      - api.anthropic.com
+
+      # 2. Package registries and docs. Without these an agent cannot install a
+      # dependency or look anything up, and will thrash trying — an isolated
+      # agent that cannot build is not safer, just useless. Trim this group if
+      # your project vendors its dependencies.
+      - pypi.org
+      - files.pythonhosted.org
+      - registry.npmjs.org
+      - crates.io
+      - static.crates.io
+      - proxy.golang.org
+      - sum.golang.org
+      - deb.debian.org
+      - archive.ubuntu.com
+      - security.ubuntu.com
+      - docs.python.org
+      - developer.mozilla.org
+
+      # 3. Source hosting. Needed to clone and to read issues. This is the one
+      # group that could carry data OUT as well as in — but agents hold no
+      # git credentials (GITHUB_TOKEN and GH_TOKEN are in env_block, and
+      # SSH_AUTH_SOCK is never forwarded), so a push has nothing to
+      # authenticate with. Remove it if that is not a trade you want.
+      - github.com
+      - raw.githubusercontent.com
+      - codeload.github.com
+      - objects.githubusercontent.com
 
     # Never enabled. Docker here is rootful and the user is in the `docker`
     # group, so the socket is host root — an agent holding it escapes the

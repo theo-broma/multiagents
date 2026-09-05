@@ -22,6 +22,7 @@ try:
 except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
 
+from . import __version__
 from . import budget as budget_mod
 from . import catalog as catalog_mod
 from . import gitops
@@ -32,7 +33,7 @@ from .paths import ProjectPaths, find_project_root, global_config_dir
 from .redact import scrub
 from .runner import Runner
 
-mcp = _Server("multiagents")
+mcp = _Server("multiagents", version=__version__)
 
 _runner: Runner | None = None
 

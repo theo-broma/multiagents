@@ -402,6 +402,21 @@ def cmd_clean(args: argparse.Namespace) -> int:
             print(f"delete {branch}")
             removed += 1
 
+    if args.tree:
+        from multiagents.tree import TERMINAL
+        with tree.transaction() as state:
+            drop = [
+                nid for nid, n in state["nodes"].items()
+                if n.get("status") in TERMINAL and not n.get("branch")
+                and not n.get("conversation")
+            ]
+            for nid in drop:
+                state["nodes"].pop(nid, None)
+            for n in state["nodes"].values():
+                n["children"] = [c for c in n.get("children", []) if c not in drop]
+        print(f"pruned {len(drop)} finished node(s) holding no branch")
+        removed += len(drop)
+
     if args.homes:
         for home in paths.homes.glob("ag-*"):
             node = data["nodes"].get(home.name)
@@ -561,6 +576,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("clean", help="remove finished agents' branches, worktrees and homes")
     p.add_argument("--branches", action="store_true", help="delete agent branches")
     p.add_argument("--homes", action="store_true", help="delete per-agent HOME directories")
+    p.add_argument("--tree", action="store_true", help="prune finished nodes that hold no branch")
     p.add_argument("--force", action="store_true", help="delete even with unmerged commits")
     p.set_defaults(func=cmd_clean)
 

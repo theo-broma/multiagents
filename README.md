@@ -241,6 +241,26 @@ The socket is never mounted. Setting `mount_docker_socket: true` is *refused* by
 preflight rather than honoured: with rootful Docker and a user in the `docker`
 group, that is host root.
 
+### What the allowlist must include
+
+An isolated agent that cannot install a dependency is not safer, just useless.
+The shipped allowlist covers three groups, and the trade differs for each:
+
+| group | why | if you drop it |
+|---|---|---|
+| model endpoints | no agent runs without them | nothing works |
+| package registries and docs | `pip install`, `npm install`, reading docs | agents thrash |
+| source hosting | cloning, reading issues | no `git clone` |
+
+Source hosting is the only group that could carry data *out*. Agents hold no git
+credentials to push with — `GITHUB_TOKEN` and `GH_TOKEN` are in `env_block` and
+`SSH_AUTH_SOCK` is never forwarded — but remove the group if that is not a trade
+you want.
+
+Verified inside the container: `pip install requests` succeeds,
+`raw.githubusercontent.com` is reachable, and `evil-github.com` and
+`github.com.attacker.net` are both blocked.
+
 ### Mixed execution
 
 An agent can pin its own backend with `executor:` in `agents.yaml`, overriding
