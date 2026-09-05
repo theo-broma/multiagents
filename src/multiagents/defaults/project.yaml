@@ -64,16 +64,12 @@ git:
 security:
   # Environment variables passed through to agents.
   #
-  # The goal is an empty list: every CLI authenticates with credentials it
-  # already stores under its own HOME, so no secret transits the environment.
-  # DEEPINFRA_API_KEY is the one exception today, because opencode's own auth
-  # store is empty and its DeepInfra models are reachable ONLY via this
-  # variable — strip it and every opencode agent fails.
-  #
-  # DELETE THIS LINE once opencode Go is active: the subscription authenticates
-  # through opencode's stored OAuth, and this becomes empty as intended.
-  env_passthrough:
-    - DEEPINFRA_API_KEY
+  # Empty, as intended: every CLI authenticates with credentials it already
+  # stores under its own HOME, so no secret transits the environment at all.
+  # opencode Go authenticates through its own auth.json credential, which the
+  # per-agent HOME links in — DEEPINFRA_API_KEY is no longer needed and is
+  # blocked below.
+  env_passthrough: []
 
   # Never forwarded, and their values are registered as redaction literals so
   # they are masked if they surface in output by another route.
@@ -86,6 +82,7 @@ security:
     - CLAUDE_CODE_MESSAGING_TOKEN
     - ANTHROPIC_API_KEY
     - ANTHROPIC_AUTH_TOKEN
+    - DEEPINFRA_API_KEY
     - GITHUB_TOKEN
     - GH_TOKEN
 

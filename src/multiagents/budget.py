@@ -13,8 +13,9 @@ honestly via ``known`` rather than inventing a number:
   (``cachedUsageUtilization``): percent used per bucket, reset timestamps,
   overage credits. It is a *cache*, refreshed only when Claude Code runs, so
   staleness is reported alongside it.
-* **opencode** — no quota surface today (free zen tier / PAYG credits held in
-  the provider account). Stubbed deliberately: see :func:`probe_opencode`.
+* **opencode** — a Go subscription is detectable (``auth.json``), but the CLI
+  exposes no quota surface even with one active. Spend-only; see
+  :func:`probe_opencode` for what was checked and ruled out.
 * **agy** — has a full quota subsystem internally (``quota_manager.go``,
   ``RetrieveUserQuotaSummary``, refreshed every few minutes per its logs) but
   exposes none of it: no subcommand, no cached file. Spend-only, with
@@ -32,6 +33,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .redact import register_literal
 
 
 @dataclass
@@ -158,32 +161,59 @@ def read_claude() -> Budget:
 
 
 # --------------------------------------------------------------------------
-# opencode — deliberately stubbed until the subscription exists
+# opencode — subscription detectable, headroom not
 # --------------------------------------------------------------------------
 
 
+def detect_opencode_subscription() -> list[str]:
+    """Which opencode providers hold a stored credential.
+
+    The credential lives in ``~/.local/share/opencode/auth.json`` keyed by
+    provider name — an active Go subscription shows as ``opencode-go`` with
+    ``type: api``. Note this is NOT the ``account`` table in opencode.db, which
+    stays empty for an api-key credential.
+
+    Only key *names* are returned. The secret itself is registered as a
+    redaction literal on the way past, so that if it ever reaches output by
+    another route it is masked before anything is written to disk.
+    """
+    path = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+    try:
+        with path.open() as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    for entry in data.values():
+        if isinstance(entry, dict):
+            for field_name in ("key", "access", "refresh", "access_token", "refresh_token"):
+                value = entry.get(field_name)
+                if isinstance(value, str):
+                    register_literal(value)
+    return sorted(data)
+
+
 def probe_opencode() -> dict[str, Any] | None:
-    """Discover opencode's quota surface. Not yet implemented — by design.
+    """Discover opencode's quota surface. Still returns None — verified, not lazy.
 
-    On this machine the ``account`` and ``control_account`` tables in
-    ``~/.local/share/opencode/opencode.db`` are both empty and
-    ``opencode providers list`` reports zero credentials: there is no
-    subscription to read. Rather than guess at a schema, this is left blank
-    until there is a real account to inspect.
+    Checked with an active Go subscription:
 
-    The intended discovery order, once one exists:
+    * **no native subcommand** — ``opencode --help`` and
+      ``opencode providers --help`` gained nothing after subscribing
+    * **no new local state** — opencode.db has the same 20 tables, and the
+      ``account`` / ``control_account`` tables remain empty because the
+      subscription is an api-key credential rather than an OAuth login
+    * **no spend signal** — ``opencode stats`` reports ``Total Cost $0.00``,
+      since subscription models are not billed per token
 
-    1. a native subcommand, if the CLI grows one for subscribers
-       (re-diff ``opencode --help`` and ``opencode providers --help`` after
-       logging in — that is the cheapest signal)
-    2. an authenticated request to ``account.url`` using the stored token
-    3. fall back to spend-only accounting from ``opencode.db``
+    That leaves only an authenticated call to an undocumented endpoint, which
+    would mean sending the user's subscription key to a URL guessed rather than
+    known. Not worth it for a routing hint: opencode stays ``known: False`` and
+    exhaustion is detected reactively from a failed run, exactly as with agy.
 
-    Whichever works gets cached so discovery runs once, not per call.
-
-    **Credential rule for step 2**: the token comes out of a local sqlite DB and
-    must never be logged, returned through an MCP tool, or placed in a child's
-    environment. It is registered as a redaction literal the moment it is read.
+    Re-check after an opencode upgrade — a ``usage`` or ``balance`` subcommand
+    is the cheapest thing to watch for, and would make this a two-line function.
     """
     return None
 
@@ -192,18 +222,22 @@ def read_opencode(spent: dict[str, int] | None = None) -> Budget:
     probed = probe_opencode()
     if probed:                              # pragma: no cover - future path
         return Budget(provider="opencode", known=True, source="probe", **probed)
+
+    providers = detect_opencode_subscription()
+    subscribed = [p for p in providers if p != "opencode"]
+    note = (
+        f"subscription active ({', '.join(subscribed)}) but the CLI exposes no "
+        f"quota surface; exhaustion is detected from failed runs"
+        if subscribed else
+        "no subscription credential found; free tier only"
+    )
     return Budget(
         provider="opencode",
         known=False,
-        source="tree accounting",
+        source="auth.json + tree accounting",
         spent=spent or {},
-        note="no quota surface yet; awaiting subscription (see probe_opencode)",
+        note=note,
     )
-
-
-# --------------------------------------------------------------------------
-# agy — spend only, exhaustion detected reactively
-# --------------------------------------------------------------------------
 
 
 def read_agy(spent: dict[str, int] | None = None) -> Budget:

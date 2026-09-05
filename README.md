@@ -90,6 +90,13 @@ agent's model without restating the roster; lists and scalars replace.
 | `agents/*.md` | per-agent instructions, prepended to every prompt |
 | `models.yaml` | **generated** — `multiagents refresh-models` |
 
+`models_include` in `providers.yaml` decides which model namespaces get
+recorded. It ships restricted to `opencode/*` (free zen tier) and
+`opencode-go/*` (the subscription); `deepinfra/*` is excluded deliberately,
+because those bill against a separate API key rather than the subscription and
+listing them would invite agents onto an account you did not intend to spend
+from. Add the pattern back if you want them.
+
 ### Adding a CLI
 
 Add a block to `providers.yaml`. No Python, provided the CLI streams
@@ -155,8 +162,11 @@ honestly rather than inventing a number:
   bucket, reset times, overage credits. It is a cache, so staleness is reported.
 - **agy** — has a full quota subsystem internally but exposes none of it. Spend
   only; exhaustion is detected reactively from a failed run.
-- **opencode** — stubbed pending a subscription. The intended probe order is
-  documented in `budget.probe_opencode`.
+- **opencode** — a Go subscription is *detectable* (`auth.json`), but the CLI
+  exposes no quota surface even with one active: no subcommand, no new tables,
+  and `opencode stats` reports `$0.00` because subscription models are not
+  billed per token. Spend-only. What was checked and ruled out is recorded in
+  `budget.probe_opencode`.
 
 `known: false` means spend is tracked but capacity is not. Never read it as
 "plenty left". The purpose is *routing*: when your own five-hour bucket is

@@ -14,6 +14,7 @@ lines a new provider's rules are failing to classify.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -67,6 +68,8 @@ class Provider:
     stream: dict[str, Any]
     models_cmd: list[str] = field(default_factory=list)
     models_parse: str = "lines"
+    models_include: list[str] = field(default_factory=list)
+    models_exclude: list[str] = field(default_factory=list)
     home_links: list[str] = field(default_factory=list)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -80,6 +83,8 @@ class Provider:
             stream=data.get("stream", {}) or {},
             models_cmd=list(data.get("models_cmd", []) or []),
             models_parse=data.get("models_parse", "lines"),
+            models_include=list(data.get("models_include", []) or []),
+            models_exclude=list(data.get("models_exclude", []) or []),
             home_links=list(data.get("home_links", []) or []),
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
@@ -199,6 +204,22 @@ class Provider:
 
     # -------------------------------------------------------------- models --
 
+    def allows_model(self, model_id: str) -> bool:
+        """Is this model id one we want recorded as available?
+
+        A CLI may offer models that bill against a different account than the
+        one you intend agents to use — opencode lists ``deepinfra/*`` alongside
+        the subscription's own models. ``models_include`` keeps the generated
+        list to what the subscription actually covers.
+        """
+        if self.models_exclude and any(
+            fnmatch.fnmatch(model_id, pattern) for pattern in self.models_exclude
+        ):
+            return False
+        if not self.models_include:
+            return True
+        return any(fnmatch.fnmatch(model_id, pattern) for pattern in self.models_include)
+
     def parse_models(self, output: str) -> list[dict[str, str]]:
         models: list[dict[str, str]] = []
         for line in output.splitlines():
@@ -207,11 +228,13 @@ class Provider:
                 continue
             if self.models_parse == "tsv" and "\t" in line:
                 ident, _, label = line.partition("\t")
-                models.append({"id": ident.strip(), "label": label.strip()})
+                if self.allows_model(ident.strip()):
+                    models.append({"id": ident.strip(), "label": label.strip()})
             elif self.models_parse == "lines":
                 if line.startswith("Fetching") or " " in line.strip():
                     continue
-                models.append({"id": line.strip(), "label": ""})
+                if self.allows_model(line.strip()):
+                    models.append({"id": line.strip(), "label": ""})
         return models
 
 
