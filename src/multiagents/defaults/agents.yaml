@@ -18,6 +18,19 @@
 
 agents:
 
+  # Shapes the project WITH you before any implementation starts. Launched by
+  # `multiagents init-agent`, resumable by running that again — this stage is
+  # expected to take several sessions. It writes BRIEF.md and fills context/,
+  # and can consult the critic and advisor while it works.
+  initializer:
+    provider: claude
+    model: sonnet
+    instructions: initializer.md
+    description: Shapes the project with you. Launched by `multiagents init-agent`.
+    launch: true
+    role: initializer
+    can_spawn: true
+
   # The orchestrator. Unlike every other entry this one is LAUNCHED, not
   # spawned: `multiagents run` starts this CLI as an MCP client and it drives
   # everything else. Change the provider and model here to orchestrate with a
@@ -28,6 +41,7 @@ agents:
     instructions: orchestrator.md
     description: Drives the project. Launched by `multiagents run`.
     launch: true
+    role: orchestrator
     can_spawn: true
 
 
@@ -100,7 +114,7 @@ agents:
   # A second standing advisor, on Gemini rather than the critic's GPT model.
   # Useful when you want a genuinely different perspective on the same
   # question, or a long technical discussion with a large-context model.
-  gemini:
+  advisor:
     provider: agy
     model: gemini-3.1-pro-high
     instructions: critic.md
@@ -112,3 +126,12 @@ agents:
     can_spawn: false
     timeout: 420
     silence_timeout: 180
+
+  # Renamed to `advisor` so it is not bound to one model family. deep_merge can
+  # only add and override, never delete, so an install that already carries a
+  # `gemini` entry keeps it unless it is shipped explicitly disabled.
+  gemini:
+    disabled: true
+    provider: agy
+    model: gemini-3.1-pro-high
+    description: Deprecated alias for `advisor`.

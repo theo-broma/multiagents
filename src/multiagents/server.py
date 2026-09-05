@@ -404,12 +404,15 @@ def _may_act_on(agent_id: str) -> str | None:
             f"Branch lifecycle belongs to an agent's own parent.")
 
 
-def _root_only(action: str) -> str | None:
+def _root_only(action: str, initializer_too: bool = False) -> str | None:
     """Refuse an action that changes state outside any one agent's subtree."""
     caller = runner().self_id()
-    if caller is None:
-        return None
-    return f"{action} is reserved for the orchestrator; {caller} is a subagent."
+    if caller is not None:
+        return f"{action} is reserved for the orchestrator; {caller} is a subagent."
+    if initializer_too and os.environ.get("MULTIAGENTS_ROLE") == "initializer":
+        return (f"{action} is not available while shaping the project. "
+                f"Nothing is published during initialisation.")
+    return None
 
 
 @mcp.tool()
@@ -489,7 +492,7 @@ def push_branch(agent_id: str = "", remote: str = "") -> dict:
     so it is always an explicit call. With no remote configured, nothing in this
     system ever leaves the machine.
     """
-    denied = _root_only("push_branch")
+    denied = _root_only("push_branch", initializer_too=True)
     if denied:
         return _ok({"error": denied})
     run = runner()

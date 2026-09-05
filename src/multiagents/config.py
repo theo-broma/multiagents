@@ -175,11 +175,13 @@ class AgentSpec:
     writes: bool = True               # False -> branch dropped if it stays empty
     conversational: bool = False      # talked to via consult(), keeps context
     executor: str = ""                # "" = project default; else local | docker
-    # LAUNCHED as an MCP client rather than spawned as a subagent. The one
-    # asymmetric roster entry: `multiagents run` starts it, nothing spawns it.
-    # A real field rather than an `extra` key, because extras are coerced into
-    # command options and `isinstance(True, int)` is True.
+    # LAUNCHED as an MCP client rather than spawned as a subagent. Real fields
+    # rather than `extra` keys, because extras are coerced into command options
+    # and `isinstance(True, int)` is True.
     launch: bool = False
+    # Which command launches it: "orchestrator" for `run`, "initializer" for
+    # `init-agent`. Both are launch: true; the role says which door they use.
+    role: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod

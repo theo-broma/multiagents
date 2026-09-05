@@ -68,12 +68,20 @@ def _write_mcp_config() -> Path:
 # --------------------------------------------------------------------------
 
 
-def _orchestrator_spec(config):
-    """The roster entry marked `launch: true`, or None."""
-    launched = [spec for spec in config.agents.values() if spec.launch]
-    if not launched:
-        return None
-    return launched[0]
+def _launched_spec(config, role: str):
+    """The roster entry launched by a given command, or None.
+
+    Both the orchestrator and the initializer are launched rather than spawned;
+    the role says which door they come through.
+    """
+    for spec in config.agents.values():
+        if spec.launch and spec.role == role:
+            return spec
+    # An entry marked launch: true with no role still serves as the orchestrator,
+    # so a config written before roles existed keeps working.
+    if role == "orchestrator":
+        return next((s for s in config.agents.values() if s.launch and not s.role), None)
+    return None
 
 
 def _launch_context(paths, config, spec) -> dict[str, str]:
@@ -100,6 +108,109 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
         "MULTIAGENTS_LAUNCH_STATE": str(state),
         "MULTIAGENTS_PROJECT": str(paths.root),
     }
+
+
+def _launch_agent(paths, config, role: str, resume: bool) -> int:
+    """Launch a roster entry as an interactive MCP client. Does not return."""
+    spec = _launched_spec(config, role)
+    if spec is None:
+        print(f"No agent in agents.yaml is marked `launch: true, role: {role}`.",
+              file=sys.stderr)
+        return 2
+    providers = load_providers(config.providers)
+    provider = providers.get(spec.provider)
+    if provider is None or not provider.available():
+        print(f"{role} provider {spec.provider!r} is unavailable", file=sys.stderr)
+        return 2
+
+    executor = _executor_for(paths, config, providers)(spec.provider)
+    context = _launch_context(paths, config, spec)
+    # Resuming is only possible if this role has been launched here before.
+    # Passing --continue on a first run makes the CLI error out with no prior
+    # conversation, which would make `run` fail exactly once per project.
+    marker = paths.data / "launch" / f"{role}.launched"
+    first_time = not marker.is_file()
+    context["MULTIAGENTS_RESUME"] = "0" if (first_time or not resume) else "1"
+    context["MULTIAGENTS_ROLE"] = role
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(time.time()))
+
+    code, out, err = scripts.run_action(
+        spec.provider, provider, executor, "prepare",
+        global_config_dir(), paths.config, timeout=60, extra_env=context,
+    )
+    if code not in (0, scripts.UNIMPLEMENTED):
+        print(f"prepare failed for {spec.provider}: {(err or out).strip()[:300]}",
+              file=sys.stderr)
+        return 1
+    if out.strip():
+        print(f"prepare      {out.strip()}")
+
+    built = scripts.exec_action(spec.provider, provider, executor, "launch",
+                                global_config_dir(), paths.config, extra_env=context)
+    if built is None:
+        print(f"no script for provider {spec.provider!r}", file=sys.stderr)
+        return 2
+    argv, env = built
+    print(f"{role:12} {spec.provider}/{spec.model}"
+          f"{'' if context['MULTIAGENTS_RESUME'] == '0' else ' (resuming)'}\n")
+    sys.stdout.flush()
+    os.execvpe(argv[0], argv, env)
+    return 0
+
+
+def cmd_init_agent(args: argparse.Namespace) -> int:
+    """Shape the project with the initializer. Resumable by re-running."""
+    paths = _resolve(args.path)
+    config = load_config(paths)
+
+    brief = paths.root / "BRIEF.md"
+    context_dir = paths.root / "context"
+    print(f"brief        {brief}{'' if brief.is_file() else '  (not written yet)'}")
+    print(f"context      {context_dir}"
+          f"{'' if context_dir.is_dir() else '  (not created yet)'}")
+    if brief.is_file():
+        print("             resuming — the initializer will re-read it")
+    waiting = Tree(paths.tree_file, paths.events_file).open_questions()
+    if waiting:
+        print(f"\n{len(waiting)} question(s) still open; answer with `multiagents ask`")
+    print()
+    return _launch_agent(paths, config, "initializer", resume=args.resume)
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    """Build and start the container environment agents will run in."""
+    paths = _resolve(args.path)
+    config = load_config(paths)
+    if config.executor != "docker":
+        print(f"executor is {config.executor!r}; nothing to build.")
+        print("Set executor.kind: docker in .multiagents/config/project.yaml first.")
+        return 0
+
+    ex = _docker_executor(paths)
+    source = global_config_dir() / "docker"
+    if not source.is_dir():
+        shutil.copytree(Path(__file__).parent / "defaults" / "docker", source)
+    for dockerfile, tag in (("Dockerfile", ex.image), ("Dockerfile.proxy", ex.proxy_image)):
+        if dockerfile == "Dockerfile.proxy" and ex.network_mode != "allowlist":
+            continue
+        if ex.image_exists(tag) and not args.rebuild:
+            print(f"  have  {tag}")
+            continue
+        print(f"building {tag} ...")
+        result = ex.build_image(source / dockerfile, tag)
+        if not result["ok"]:
+            print(result.get("output") or result.get("error"), file=sys.stderr)
+            return 1
+        print(f"  ok    {tag}")
+
+    state = ex.ensure_running()
+    if not state.get("ok"):
+        print(state.get("error"), file=sys.stderr)
+        return 1
+    print(f"\ncontainer    {ex.container} running ({ex.network_mode} networking)")
+    print("next         multiagents run")
+    return 0
 
 
 def _report_catalog(config, provider: str = "opencode-go") -> int:
@@ -159,6 +270,21 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         print(f"git          {gitops.current_branch(root)} @ {gitops.head_sha(root)[:12]}")
 
+    context_dir = root / "context"
+    if not context_dir.exists():
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / "README.md").write_text(
+            "# context\n\n"
+            "Reference material agents need that is not code: requirements,\n"
+            "specifications, links, API docs, design templates, screenshots,\n"
+            "exported tickets, brand assets.\n\n"
+            "This directory and `BRIEF.md` must be **committed**. Agents work in\n"
+            "git worktrees — separate checkouts of their branch — so anything\n"
+            "uncommitted or gitignored does not exist for them.\n\n"
+            "`multiagents init-agent` fills both in, with you.\n"
+        )
+        print(f"context      {context_dir}  (created)")
+
     gitignore = root / ".gitignore"
     existing = gitignore.read_text() if gitignore.is_file() else ""
     if GITIGNORE_LINE not in existing:
@@ -178,11 +304,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     mcp_path = _write_mcp_config()
     print(f"mcp config   {mcp_path}")
-    print(f"prompt       {_orchestrator_prompt()}")
     print("\nNext:")
-    print(f"  edit  {paths.config}/agents.yaml")
-    print(f"  add   {_alias_line()}")
-    print("  then  multiagents doctor")
+    print("  1. multiagents init-agent    shape the project (resumable)")
+    print("  2. edit .multiagents/config/agents.yaml if you want a different roster")
+    print("  3. multiagents build         container environment, if executor is docker")
+    print("  4. multiagents run           launch the orchestrator")
     return 0
 
 
@@ -237,47 +363,14 @@ def cmd_resume(args: argparse.Namespace) -> int:
             print(f"  {q['id']}  {q['agent']} · {q['topic']}: {q['question'][:70]}")
         print("  the orchestrator can answer these, or use `multiagents ask`")
 
+    config = load_config(paths)
     print()
-    _report_catalog(load_config(paths))
+    _report_catalog(config)
 
     if args.no_launch:
         return 0
 
-    spec = _orchestrator_spec(config)
-    if spec is None:
-        print("No agent in agents.yaml is marked `launch: true`.", file=sys.stderr)
-        return 2
-    providers = load_providers(config.providers)
-    provider = providers.get(spec.provider)
-    if provider is None or not provider.available():
-        print(f"orchestrator provider {spec.provider!r} is unavailable", file=sys.stderr)
-        return 2
-
-    executor = _executor_for(paths, config, providers)(spec.provider)
-    context = _launch_context(paths, config, spec)
-    context["MULTIAGENTS_RESUME"] = "1" if args.resume else "0"
-
-    code, out, err = scripts.run_action(
-        spec.provider, provider, executor, "prepare",
-        global_config_dir(), paths.config, timeout=60, extra_env=context,
-    )
-    if code not in (0, scripts.UNIMPLEMENTED):
-        print(f"prepare failed for {spec.provider}: {(err or out).strip()[:300]}",
-              file=sys.stderr)
-        return 1
-    if out.strip():
-        print(f"prepare      {out.strip()}")
-
-    built = scripts.exec_action(spec.provider, provider, executor, "launch",
-                                global_config_dir(), paths.config, extra_env=context)
-    if built is None:
-        print(f"no script for provider {spec.provider!r}", file=sys.stderr)
-        return 2
-    argv, env = built
-    print(f"orchestrator {spec.provider}/{spec.model}"
-          f"{' (resuming)' if args.resume else ''}\n")
-    sys.stdout.flush()
-    os.execvpe(argv[0], argv, env)
+    return _launch_agent(paths, config, "orchestrator", resume=args.resume)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -305,7 +398,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         provider = providers.get(spec.provider)
         mark = " " if provider and provider.available() else "!"
         if spec.launch:
-            tag = "[launched by `multiagents run`]"
+            command = "init-agent" if spec.role == "initializer" else "run"
+            tag = f"[launched by `multiagents {command}`]"
         else:
             where = spec.executor or config.executor
             tag = f"[{where}]" + ("*" if spec.executor else "")
@@ -848,6 +942,16 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--fresh", dest="resume", action="store_false", default=True,
                        help="start a new session instead of continuing the last one")
         p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("init-agent",
+                       help="shape the project with the initializer (resumable)")
+    p.add_argument("--fresh", dest="resume", action="store_false", default=True,
+                   help="start a new session instead of continuing the last one")
+    p.set_defaults(func=cmd_init_agent)
+
+    p = sub.add_parser("build", help="build and start the container environment")
+    p.add_argument("--rebuild", action="store_true", help="rebuild images that exist")
+    p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("doctor", help="check CLIs, agents, models, budget and git")
     p.set_defaults(func=cmd_doctor)

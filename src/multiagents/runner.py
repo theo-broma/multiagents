@@ -72,6 +72,10 @@ How this works:
   answer obvious, you did not need to ask.
 - Your parent sees only your final message, never your intermediate steps. Put
   everything that matters in it.
+- If `BRIEF.md` exists at the top of your working directory, read it first: it
+  is the agreed statement of what this project is and what done looks like.
+  `context/` holds the reference material it points at. Both are reference —
+  read them, and do not edit them unless your task explicitly says to.
 - Work only inside your working directory.
 - Do not merge, rebase, push, or switch branches. Your parent owns that.
 
