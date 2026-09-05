@@ -20,5 +20,14 @@ login)
     echo
     exec "$BIN" auth login
     ;;
-*)  echo "usage: $0 check|login" >&2; exit 64 ;;
+budget)
+    # Deliberately unimplemented. Claude's quota lives in ~/.claude.json under
+    # cachedUsageUtilization — an undocumented internal cache with several
+    # bucket shapes, staleness to account for, and an overage-credits block.
+    # Parsing that defensively in shell would be worse code in two places, so
+    # multiagents falls back to its built-in reader when a script returns 64.
+    # A new provider without a built-in simply implements this action.
+    exit 64
+    ;;
+*)  echo "usage: $0 check|login|budget" >&2; exit 64 ;;
 esac

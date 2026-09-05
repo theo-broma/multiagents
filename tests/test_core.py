@@ -480,7 +480,7 @@ def test_credential_scope_shared_by_default(tmp_path):
 
 
 def _auth_script(tmp_path, name, body):
-    d = tmp_path / "auth"
+    d = tmp_path / "providers"
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     p.write_text("#!/bin/sh\n" + body)
@@ -491,6 +491,8 @@ def _auth_script(tmp_path, name, body):
 class _Prov:
     def __init__(self, auth=None, bin="x"):
         self.auth, self.bin = auth or {}, bin
+        self.script_name = (auth or {}).get("script", "x.sh")
+        self.enabled = True
     def available(self):
         return None
 
@@ -554,12 +556,14 @@ def test_permission_denial_is_not_an_auth_failure():
 
 
 def test_shipped_scripts_exist_and_implement_the_contract():
-    d = Path(auth_mod.__file__).parent / "defaults" / "auth"
+    """One script per provider, carrying every action that CLI needs."""
+    d = Path(auth_mod.__file__).parent / "defaults" / "providers"
     for provider in ("claude", "opencode", "agy"):
         script = d / f"{provider}.sh"
         assert script.is_file(), provider
         body = script.read_text()
         assert "check)" in body and "login)" in body, provider
+        assert "budget)" in body, f"{provider} must answer the budget action"
         assert "exit 10" in body, f"{provider} must be able to report NOT authenticated"
 
 
@@ -592,15 +596,15 @@ def test_untouched_copies_refresh_but_edited_ones_are_kept(tmp_path):
 
     source, target = tmp_path / "shipped", tmp_path / "layer"
     (source / "agents").mkdir(parents=True)
-    (source / "auth").mkdir(parents=True)
+    (source / "providers").mkdir(parents=True)
     (source / "project.yaml").write_text("v: 1\n")
     (source / "agents.yaml").write_text("agents: {}\n")
     (source / "agents" / "a.md").write_text("first\n")
-    (source / "auth" / "x.sh").write_text("#!/bin/sh\nexit 0\n")
+    (source / "providers" / "x.sh").write_text("#!/bin/sh\nexit 0\n")
     target.mkdir()
 
     first = sync_layer(source, target, scope="global")
-    assert "project.yaml" in first["added"] and "auth/x.sh" in first["added"]
+    assert "project.yaml" in first["added"] and "providers/x.sh" in first["added"]
 
     # Ship a new version of both; edit only one of the local copies.
     (source / "project.yaml").write_text("v: 2\n")
@@ -624,17 +628,17 @@ def test_project_layer_does_not_pin_machine_level_files(tmp_path):
 
     source = tmp_path / "s"
     (source / "agents").mkdir(parents=True)
-    (source / "auth").mkdir(parents=True)
+    (source / "providers").mkdir(parents=True)
     for name in ("project.yaml", "providers.yaml", "agents.yaml",
                  "models.yaml", "orchestrator.md"):
         (source / name).write_text("x")
     (source / "agents" / "a.md").write_text("x")
-    (source / "auth" / "a.sh").write_text("x")
+    (source / "providers" / "a.sh").write_text("x")
 
     glob_names = layer_files(source, "global")
     proj_names = layer_files(source, "project")
-    assert "auth/a.sh" in glob_names and "orchestrator.md" in glob_names
-    assert not any(n.startswith("auth/") for n in proj_names)
+    assert "providers/a.sh" in glob_names and "orchestrator.md" in glob_names
+    assert not any(n.startswith("providers/") for n in proj_names)
     assert "orchestrator.md" not in proj_names
     assert "agents/a.md" in proj_names and "project.yaml" in proj_names
 
@@ -904,3 +908,116 @@ def test_docker_mounts_a_symlinked_binary_under_its_path_name(tmp_path):
     mounted = {p for p, _ in ex.mounts()}
     assert link in mounted, "the PATH name itself must be mounted"
     assert real in mounted, "and its resolved target"
+
+
+# --------------------------------------------------------------------------
+# Phase 3: provider-driven budget
+# --------------------------------------------------------------------------
+
+
+def _budget_script(tmp_path, name, body):
+    d = tmp_path / "providers"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text("#!/bin/sh\ncase \"$1\" in\n" + body + "\nesac\n")
+    return d / name
+
+
+def test_a_new_provider_gets_a_budget_entry_with_no_python_change(tmp_path):
+    """The whole point of the refactor: budget used to be a hardcoded three-name
+    table that never consulted the providers map, so a fourth provider could
+    never appear at all."""
+    from multiagents.budget import read_all, invalidate_cache
+    _budget_script(tmp_path, "newcli.sh",
+                   'budget) printf \'{"known": true, "headroom": 0.42, "resets_at": "later"}\'; exit 0 ;;')
+    p = Provider.from_dict("newcli", {"bin": "newcli", "script": "newcli.sh"})
+    invalidate_cache()
+    out = read_all({"newcli": p}, None, tmp_path, None)
+    assert out["newcli"].known is True
+    assert out["newcli"].headroom == 0.42
+    assert out["newcli"].source == "script"
+
+
+def test_unimplemented_budget_falls_back_to_a_builtin(tmp_path):
+    """claude's quota lives in an undocumented cache with several bucket shapes;
+    parsing it defensively in shell would be worse code in two places. exit 64
+    means "use your built-in"."""
+    from multiagents.budget import read_provider, invalidate_cache
+    _budget_script(tmp_path, "claude.sh", "budget) exit 64 ;;")
+    p = Provider.from_dict("claude", {"bin": "claude", "script": "claude.sh"})
+    invalidate_cache()
+    out = read_provider("claude", p, None, tmp_path)
+    assert out.source != "script"        # the built-in answered instead
+
+
+def test_a_broken_budget_script_never_breaks_a_run(tmp_path):
+    """Telemetry must degrade, not raise — read_all sits on the spawn path."""
+    from multiagents.budget import read_provider, invalidate_cache
+    for body, label in [("budget) echo 'not json'; exit 0 ;;", "garbage"),
+                        ("budget) echo boom >&2; exit 3 ;;", "failure"),
+                        ("budget) printf '[1,2]'; exit 0 ;;", "non-object")]:
+        _budget_script(tmp_path, "flaky.sh", body)
+        p = Provider.from_dict("flaky", {"bin": "flaky", "script": "flaky.sh"})
+        invalidate_cache()
+        out = read_provider("flaky", p, None, tmp_path)
+        assert out.known is False, label
+        assert out.note, f"{label} must explain itself"
+
+
+def test_budget_is_cached_so_spawning_does_not_fork_per_agent(tmp_path):
+    """read_all runs on every spawn. Without a cache that is one subprocess per
+    provider per agent start, on the event loop."""
+    from multiagents.budget import read_all, invalidate_cache
+    counter = tmp_path / "calls"
+    counter.write_text("")
+    _budget_script(tmp_path, "counted.sh",
+                   f'budget) echo x >> "{counter}"; printf \'{{"known": false}}\'; exit 0 ;;')
+    p = Provider.from_dict("counted", {"bin": "counted", "script": "counted.sh"})
+    invalidate_cache()
+    for _ in range(5):
+        read_all({"counted": p}, None, tmp_path, None)
+    assert len(counter.read_text().splitlines()) == 1, "should have run once, not five times"
+
+    invalidate_cache()
+    read_all({"counted": p}, None, tmp_path, None)
+    assert len(counter.read_text().splitlines()) == 2
+
+
+def test_disabled_providers_are_left_out_of_budget(tmp_path):
+    from multiagents.budget import read_all, invalidate_cache
+    _budget_script(tmp_path, "off.sh", 'budget) printf \'{"known": false}\'; exit 0 ;;')
+    p = Provider.from_dict("off", {"bin": "off", "script": "off.sh", "enabled": False})
+    invalidate_cache()
+    assert read_all({"off": p}, None, tmp_path, None) == {}
+
+
+def test_legacy_auth_directory_still_resolves_but_loses_to_providers(tmp_path):
+    """An install predating the rename must keep working — but a stale script
+    must not shadow the current one and silently drop its newer actions."""
+    from multiagents.scripts import find_script
+    (tmp_path / "auth").mkdir()
+    (tmp_path / "auth" / "p.sh").write_text("old")
+    assert find_script("p.sh", tmp_path, None) == tmp_path / "auth" / "p.sh"
+
+    (tmp_path / "providers").mkdir()
+    (tmp_path / "providers" / "p.sh").write_text("new")
+    assert find_script("p.sh", tmp_path, None) == tmp_path / "providers" / "p.sh"
+
+
+def test_read_all_hands_the_provider_name_to_executor_for(tmp_path):
+    """read_all calls executor_for(provider_name). Runner.executor takes an
+    AgentSpec, so passing it directly raised AttributeError on every spawn."""
+    from multiagents.budget import read_all, invalidate_cache
+    seen = []
+
+    class _Ex:
+        kind = "local"
+
+    def executor_for(name):
+        seen.append(name)
+        return _Ex()
+
+    _budget_script(tmp_path, "p1.sh", 'budget) printf \'{"known": false}\'; exit 0 ;;')
+    p = Provider.from_dict("p1", {"bin": "p1", "script": "p1.sh"})
+    invalidate_cache()
+    read_all({"p1": p}, executor_for, tmp_path, None)
+    assert seen == ["p1"], "must be called with the provider NAME"

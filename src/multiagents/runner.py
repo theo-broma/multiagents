@@ -299,7 +299,18 @@ class Runner:
         node_id = new_id()
 
         # --- budget routing -------------------------------------------------
-        budgets = budget_mod.read_all(cooldowns=self.tree.read().get("cooldowns", {}))
+        # Budget now shells out to provider scripts, so it must not run on the
+        # event loop: a slow provider would freeze every concurrent _consume,
+        # wait_for_agents and check_agent. Cached for 60s and offloaded.
+        cooldowns = self.tree.read().get("cooldowns", {})
+        budgets = await asyncio.to_thread(
+            budget_mod.read_all, self.providers,
+            # read_all hands the PROVIDER name; Runner.executor takes an
+            # AgentSpec. The budget scripts only need the backend kind and any
+            # container context, so the project default is the right answer.
+            lambda _provider_name: self.executor(),
+            global_config_dir(), self.paths.config, None, cooldowns,
+        )
         chosen, why = budget_mod.choose_provider(
             spec.provider, budgets,
             list(self.config.project.get("budget", {}).get("fallback_chain", [])),

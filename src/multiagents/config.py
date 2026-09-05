@@ -92,7 +92,7 @@ def layer_files(source: Path, scope: str = "global") -> list[str]:
     names += [f"agents/{p.name}" for p in sorted((source / "agents").glob("*.md"))]
     if scope == "global":
         names += [n for n in STANDALONE_FILES if (source / n).is_file()]
-        names += [f"auth/{p.name}" for p in sorted((source / "auth").glob("*"))
+        names += [f"providers/{p.name}" for p in sorted((source / "providers").glob("*"))
                   if p.is_file()]
     return names
 
@@ -140,7 +140,7 @@ def sync_layer(source: Path, target: Path, force: bool = False,
 def seed_global(force: bool = False) -> Path:
     """Copy the package's shipped defaults into the global config dir."""
     target = global_config_dir()
-    for sub in ("", "agents", "auth"):
+    for sub in ("", "agents", "providers"):
         (target / sub).mkdir(parents=True, exist_ok=True)
     sync_layer(shipped_defaults_dir(), target, force=force)
     return target

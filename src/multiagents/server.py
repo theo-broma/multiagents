@@ -454,7 +454,10 @@ def budget_status() -> dict:
         if isinstance(cost, (int, float)):
             entry["cost_usd"] = round(entry["cost_usd"] + cost, 6)
 
-    budgets = budget_mod.read_all(spend, data.get("cooldowns", {}))
+    budgets = budget_mod.read_all(
+        run.providers, lambda name: run.executor(), global_config_dir(),
+        run.paths.config, spend, data.get("cooldowns", {}),
+    )
     reserve = float(run.config.project.get("budget", {}).get("reserve_headroom", 0.15))
     advice = []
     for name, entry in budgets.items():

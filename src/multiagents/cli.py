@@ -276,7 +276,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 print(f"      fix: {state.fix}")
 
     print("\nbudget")
-    for name, entry in read_all().items():
+    _budget = read_all(providers_map, executor_for, global_config_dir(),
+                       paths.config if paths else None)
+    for name, entry in _budget.items():
         data = entry.to_dict()
         if data.get("known"):
             print(f"  {name:12} {data['used_percent']}% used, resets {data.get('resets_at','?')}")

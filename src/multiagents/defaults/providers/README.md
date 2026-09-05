@@ -1,7 +1,7 @@
-# Authentication scripts
+# Provider scripts
 
 One script per provider, implementing a single contract so that every CLI is
-checked and repaired the same way. Adding a provider means adding a block to
+checked, repaired and measured the same way. Adding a provider means adding a block to
 `providers.yaml` and a script here — no Python.
 
 ## Contract
@@ -15,6 +15,14 @@ checked and repaired the same way. Adding a provider means adding a block to
     <provider>.sh login     may be interactive and take over the terminal
                             print what the user must do BEFORE doing it
                             exit 0 on success
+
+    <provider>.sh budget    non-interactive, fast
+                            prints ONE JSON object on stdout:
+                              {"known": bool, "headroom": 0..1, "severity": str,
+                               "resets_at": str, "note": str}
+                            exit 0  = the JSON is usable
+                            exit 64 = not implemented; multiagents falls back to
+                                      a built-in reader if it has one
 
 ## Environment provided
 
