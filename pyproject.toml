@@ -8,6 +8,12 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[dependency-groups]
+# `uv sync` installs this group by default, so tests run without extra flags.
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 multiagents = "multiagents.cli:main"
 

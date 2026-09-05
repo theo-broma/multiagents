@@ -988,7 +988,9 @@ def cmd_mcp_config(args: argparse.Namespace) -> int:
     path = _write_mcp_config()
     print(path)
     print(path.read_text())
-    print(_alias_line())
+    print("Registered automatically for the configured orchestrator by "
+          "`multiagents run`. Point another MCP client at this file to give it "
+          "the same tools.")
     return 0
 
 
