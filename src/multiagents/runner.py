@@ -176,6 +176,85 @@ class Runner:
         parts.append(f"## Task\n\n{task.strip()}\n")
         return "\n".join(parts)
 
+    async def _launch(
+        self,
+        *,
+        node_id: str,
+        spec: AgentSpec,
+        provider: Provider,
+        prompt: str,
+        workdir: Path,
+        branch: str,
+        parent: str | None,
+        depth: int,
+        session_id: str | None = None,
+        timeout: int | None = None,
+    ) -> Run:
+        """Build the environment and command for one turn and start the process.
+
+        Shared by every path that runs an agent — a fresh task, a steer, and a
+        turn of a standing conversation — so identity injection and credential
+        handling cannot drift between them.
+        """
+        home = None
+        if self.config.home_policy == "per-agent":
+            home = prepare_home(self.paths.home(node_id), provider.home_links, "per-agent")
+        env = build_env(
+            passthrough=self.config.env_passthrough,
+            blocked=self.config.env_block,
+            home=home,
+            identity={
+                "MULTIAGENTS_AGENT_ID": node_id,
+                "MULTIAGENTS_PARENT_ID": parent or "",
+                "MULTIAGENTS_DEPTH": str(depth),
+                "MULTIAGENTS_BRANCH": branch,
+                "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
+                "MULTIAGENTS_ROOT": str(self.paths.data),
+                "MULTIAGENTS_PROJECT": str(self.paths.root),
+            },
+        )
+        options = {"effort": spec.effort,
+                   **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
+        argv = provider.build_command(
+            prompt=prompt, model=spec.model, workdir=str(workdir),
+            permission=spec.permission, session_id=session_id, options=options,
+        )
+
+        run_dir = self.paths.run_dir(node_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        turn = len(list(run_dir.glob("prompt*.md")))
+        (run_dir / (f"prompt.{turn}.md" if turn else "prompt.md")).write_text(prompt)
+        # Environment KEYS only — values may be secret and this file is on disk.
+        (run_dir / "command.json").write_text(json.dumps(scrub({
+            "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
+            "provider": provider.name, "model": spec.model,
+            "permission": spec.permission, "resumed": bool(session_id),
+        }), indent=2))
+
+        executor = get_executor(
+            self.config.executor,
+            self.config.project.get("executor", {}).get("docker", {}),
+        )
+        problems = executor.preflight()
+        if problems:
+            raise RuntimeError("; ".join(problems))
+
+        handle = await executor.start(argv, workdir, env)
+        run = Run(
+            node_id=node_id, provider=provider, spec=spec, handle=handle,
+            supervisor=Supervisor(
+                silence_timeout=spec.silence_timeout,
+                wall_timeout=timeout or spec.timeout,
+                max_steps=spec.max_steps,
+                loop_repeats=int(self.config.limits.get("doom_loop_repeats", 3)),
+            ),
+        )
+        self.runs[node_id] = run
+        self.tree.update(node_id, pid=handle.pid)
+        self.tree.set_status(node_id, "running")
+        run.task = asyncio.create_task(self._consume(run))
+        return run
+
     # ----------------------------------------------------------------- start --
 
     async def start(
@@ -237,61 +316,16 @@ class Runner:
         )
         self.tree.add(node)
 
-        # --- environment -----------------------------------------------------
-        home = None
-        if self.config.home_policy == "per-agent":
-            home = prepare_home(self.paths.home(node_id), provider.home_links, "per-agent")
-        env = build_env(
-            passthrough=self.config.env_passthrough,
-            blocked=self.config.env_block,
-            home=home,
-            identity={
-                "MULTIAGENTS_AGENT_ID": node_id,
-                "MULTIAGENTS_PARENT_ID": parent or "",
-                "MULTIAGENTS_DEPTH": str(depth),
-                "MULTIAGENTS_BRANCH": branch,
-                "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
-                "MULTIAGENTS_ROOT": str(self.paths.data),
-                "MULTIAGENTS_PROJECT": str(self.paths.root),
-            },
-        )
-
         prompt = self.compose_prompt(spec, task, node, worktree_path)
-        options = {"effort": spec.effort, **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
-        argv = provider.build_command(
-            prompt=prompt, model=spec.model, workdir=str(worktree_path),
-            permission=spec.permission, options=options,
-        )
-
-        run_dir = self.paths.run_dir(node_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "prompt.md").write_text(prompt)
-        # Environment KEYS only — values may be secret and this file is on disk.
-        (run_dir / "command.json").write_text(json.dumps(scrub({
-            "argv": argv, "cwd": str(worktree_path), "env_keys": sorted(env),
-            "provider": provider.name, "model": spec.model, "permission": spec.permission,
-            "routing": why,
-        }), indent=2))
-
-        executor = get_executor(self.config.executor, self.config.project.get("executor", {}).get("docker", {}))
-        problems = executor.preflight()
-        if problems:
-            self.tree.set_status(node_id, "failed", "; ".join(problems))
-            return {"agent_id": node_id, "status": "failed", "error": "; ".join(problems)}
-
-        handle = await executor.start(argv, worktree_path, env)
-        supervisor = Supervisor(
-            silence_timeout=spec.silence_timeout,
-            wall_timeout=timeout or spec.timeout,
-            max_steps=spec.max_steps,
-            loop_repeats=int(self.config.limits.get("doom_loop_repeats", 3)),
-        )
-        run = Run(node_id=node_id, provider=provider, spec=spec, handle=handle, supervisor=supervisor)
-        self.runs[node_id] = run
-
-        self.tree.update(node_id, pid=handle.pid)
-        self.tree.set_status(node_id, "running")
-        run.task = asyncio.create_task(self._consume(run))
+        try:
+            run = await self._launch(
+                node_id=node_id, spec=spec, provider=provider, prompt=prompt,
+                workdir=worktree_path, branch=branch, parent=parent, depth=depth,
+                timeout=timeout,
+            )
+        except RuntimeError as exc:
+            self.tree.set_status(node_id, "failed", str(exc))
+            return {"agent_id": node_id, "status": "failed", "error": str(exc)}
 
         return {
             "agent_id": node_id,
@@ -302,7 +336,8 @@ class Runner:
             "workdir": str(worktree_path),
             "status": "running",
             "routing": why,
-            "log": str(run_dir),
+            "log": str(self.paths.run_dir(node_id)),
+            "pid": run.handle.pid if run.handle else None,
         }
 
     # --------------------------------------------------------------- consume --
@@ -397,6 +432,10 @@ class Runner:
             self.tree.set_status(node_id, "failed", "quota exhausted")
         elif self.tree.get(node_id) and self.tree.get(node_id).status == "stuck":
             pass                              # keep the trip reason visible
+        elif run.spec.conversational and status == "done":
+            # A conversation is not finished just because a turn is. Park it as
+            # idle so the session stays resumable for the next question.
+            self.tree.set_status(node_id, "idle")
         else:
             self.tree.set_status(node_id, status)
 
@@ -418,8 +457,8 @@ class Runner:
         is a surprise worth being able to inspect.
         """
         node = self.tree.get(node_id)
-        if node is None or not node.branch or spec.writes:
-            return
+        if node is None or not node.branch or spec.writes or spec.conversational:
+            return                            # a live conversation keeps its worktree
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         if gitops.commits_on(self.paths.root, node.branch, base) == 0:
             self._cleanup(node)
@@ -611,40 +650,121 @@ class Runner:
         await self.stop(agent_id)
         spec = self.config.agent(node.agent)
         provider = self.providers[node.provider]
-        argv = provider.build_command(
-            prompt=message, model=node.model, workdir=node.worktree,
-            permission=spec.permission, session_id=node.session_id,
-            options={"effort": spec.effort},
-        )
-        home = prepare_home(self.paths.home(agent_id), provider.home_links, self.config.home_policy)
-        env = build_env(
-            passthrough=self.config.env_passthrough, blocked=self.config.env_block, home=home,
-            identity={
-                "MULTIAGENTS_AGENT_ID": agent_id,
-                "MULTIAGENTS_PARENT_ID": node.parent or "",
-                "MULTIAGENTS_DEPTH": str(node.depth),
-                "MULTIAGENTS_BRANCH": node.branch,
-                "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
-                "MULTIAGENTS_ROOT": str(self.paths.data),
-                "MULTIAGENTS_PROJECT": str(self.paths.root),
-            },
-        )
-        executor = get_executor(self.config.executor, self.config.project.get("executor", {}).get("docker", {}))
-        handle = await executor.start(argv, Path(node.worktree), env)
-        run = Run(
-            node_id=agent_id, provider=provider, spec=spec, handle=handle,
-            supervisor=Supervisor(
-                silence_timeout=spec.silence_timeout, wall_timeout=spec.timeout,
-                max_steps=spec.max_steps,
-                loop_repeats=int(self.config.limits.get("doom_loop_repeats", 3)),
-            ),
-        )
-        self.runs[agent_id] = run
-        self.tree.update(agent_id, pid=handle.pid)
+        try:
+            await self._launch(
+                node_id=agent_id, spec=spec, provider=provider, prompt=message,
+                workdir=Path(node.worktree), branch=node.branch,
+                parent=node.parent, depth=node.depth, session_id=node.session_id,
+            )
+        except RuntimeError as exc:
+            self.tree.set_status(agent_id, "failed", str(exc))
+            return {"agent_id": agent_id, "steered": False, "error": str(exc)}
         self.tree.set_status(agent_id, "running", "steered")
         self.tree.emit(agent_id, "steered", message=message[:400])
-        run.task = asyncio.create_task(self._consume(run))
         return {"agent_id": agent_id, "steered": True, "status": "running"}
+
+    # ---------------------------------------------------------- conversation --
+
+    def _find_conversation(self, agent_name: str) -> Node | None:
+        """The standing conversation node for this agent, if one exists.
+
+        Found by scanning the shared tree rather than an in-process map, so a
+        conversation survives a server restart and is visible to nested agents.
+        """
+        best: Node | None = None
+        for raw in self.tree.read()["nodes"].values():
+            if raw.get("agent") != agent_name or not raw.get("conversation"):
+                continue
+            if raw.get("status") in {"idle", "running", "stuck"} and raw.get("session_id"):
+                node = Node(**raw)
+                if best is None or node.created_at > best.created_at:
+                    best = node
+        return best
+
+    async def consult(
+        self, agent_name: str, message: str, timeout: int | None = None,
+    ) -> dict[str, Any]:
+        """Ask a conversational agent something and wait for its reply.
+
+        Unlike start_agent, this blocks and returns the answer, and the agent
+        keeps its context between calls — the session is resumed rather than
+        restarted. That is what makes an actual back-and-forth possible instead
+        of a series of amnesiac one-shot queries.
+        """
+        spec = self.config.agent(agent_name)
+        if not spec.conversational:
+            raise ValueError(
+                f"Agent {agent_name!r} is not conversational. Use start_agent for "
+                f"task agents, or set `conversational: true` in agents.yaml."
+            )
+        provider = self.providers.get(spec.provider)
+        if provider is None or not provider.available():
+            raise FileNotFoundError(f"provider {spec.provider!r} is unavailable")
+
+        node = self._find_conversation(agent_name)
+        turn = 1
+
+        if node is None:
+            self._preflight(spec)
+            parent = self.self_id()
+            depth = self.self_depth() + 1
+            node_id = new_id()
+            worktree_path, branch = self.paths.root, ""
+            if gitops.is_repo(self.paths.root):
+                base = self.config.base_branch or gitops.current_branch(self.paths.root)
+                worktree_path = self.paths.worktree(node_id)
+                branch = gitops.create_worktree(
+                    self.paths.root, worktree_path,
+                    f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}",
+                    base,
+                )
+            node = Node(
+                id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
+                parent=parent, depth=depth, task=message[:500], branch=branch,
+                worktree=str(worktree_path), status="pending", conversation=True,
+            )
+            self.tree.add(node)
+            prompt = self.compose_prompt(spec, message, node, worktree_path)
+            session_id = None
+        else:
+            node_id = node.id
+            turn = node.turns + 1
+            worktree_path = Path(node.worktree)
+            prompt = message
+            session_id = node.session_id
+
+        self.tree.update(node_id, turns=turn)
+        try:
+            run = await self._launch(
+                node_id=node_id, spec=spec, provider=provider, prompt=prompt,
+                workdir=worktree_path, branch=node.branch, parent=node.parent,
+                depth=node.depth, session_id=session_id, timeout=timeout,
+            )
+        except RuntimeError as exc:
+            self.tree.set_status(node_id, "failed", str(exc))
+            return {"agent_id": node_id, "error": str(exc)}
+
+        limit = timeout or spec.timeout
+        try:
+            await asyncio.wait_for(run.done.wait(), timeout=limit + 30)
+        except (asyncio.TimeoutError, TimeoutError):
+            await self.stop(node_id)
+            return {
+                "agent_id": node_id, "turn": turn, "timed_out": True,
+                "error": f"no reply within {limit}s",
+            }
+
+        final = self.tree.get(node_id)
+        reply = "\n".join(run.text_parts).strip()
+        return {
+            "agent_id": node_id,
+            "agent": agent_name,
+            "turn": turn,
+            "status": final.status if final else "unknown",
+            "reply": reply[-MAX_SUMMARY_CHARS:],
+            "usage": final.usage if final else {},
+            "note": "advisory only — you decide whether to act on this",
+        }
 
     async def wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
         """Block until any of the given agents leaves the running state.

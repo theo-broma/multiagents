@@ -24,6 +24,9 @@ import yaml
 from .paths import ProjectPaths, global_config_dir, shipped_defaults_dir
 
 CONFIG_FILES = ("project.yaml", "providers.yaml", "agents.yaml", "models.yaml")
+# Not merged like the others — it is the orchestrator's system prompt, copied
+# out so the launcher can point --append-system-prompt-file at it.
+STANDALONE_FILES = ("orchestrator.md",)
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -59,6 +62,10 @@ def seed_global(force: bool = False) -> Path:
         dst = target / "agents" / src.name
         if force or not dst.is_file():
             shutil.copy2(src, dst)
+    for name in STANDALONE_FILES:
+        src = source / name
+        if src.is_file() and (force or not (target / name).is_file()):
+            shutil.copy2(src, target / name)
     return target
 
 
@@ -96,7 +103,8 @@ class AgentSpec:
     timeout: int = 900                # wall-clock seconds
     silence_timeout: int = 180        # seconds with no stream event
     max_steps: int = 120
-    writes: bool = True               # False -> no worktree, runs read-only in project
+    writes: bool = True               # False -> branch dropped if it stays empty
+    conversational: bool = False      # talked to via consult(), keeps context
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod

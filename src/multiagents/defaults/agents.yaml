@@ -64,3 +64,22 @@ agents:
     can_spawn: false
     timeout: 1200
     silence_timeout: 180
+
+  # A standing advisor rather than a task runner. Talked to with consult(),
+  # which blocks for a reply and keeps context between calls, so the
+  # orchestrator can hold an actual back-and-forth instead of firing off
+  # amnesiac one-shot questions.
+  #
+  # Deliberately NOT a Claude model: feedback from the same family as the
+  # orchestrator tends to agree with it, which defeats the purpose.
+  critic:
+    provider: opencode
+    model: opencode-go/gpt-5.6-luna
+    instructions: critic.md
+    description: Critical thinker. Advises the orchestrator; decides nothing.
+    conversational: true
+    writes: false
+    permission: readonly
+    can_spawn: false
+    timeout: 300
+    silence_timeout: 120

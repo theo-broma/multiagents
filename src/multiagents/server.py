@@ -23,11 +23,12 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
 
 from . import budget as budget_mod
+from . import catalog as catalog_mod
 from . import gitops
 from .config import load as load_config
 from .config import seed_project
 from .models import refresh_models
-from .paths import ProjectPaths, find_project_root
+from .paths import ProjectPaths, find_project_root, global_config_dir
 from .redact import scrub
 from .runner import Runner
 
@@ -254,6 +255,75 @@ async def stop_agent(agent_id: str) -> dict:
     """Stop an agent and everything it spawned. Its branch and logs survive."""
     run = runner()
     return _ok(await run.stop(agent_id))
+
+
+# --------------------------------------------------------------------------
+# Model catalog — is the ground under the roster still where we left it?
+# --------------------------------------------------------------------------
+
+
+@mcp.tool()
+def check_model_catalog(provider: str = "opencode-go") -> dict:
+    """Compare the local model-catalog snapshot against the live public catalog.
+
+    Call this at the start of a session. `agents.yaml` pins specific model ids,
+    so a model that disappears, loses tool-calling, or has its context halved
+    breaks an agent in a confusing way rather than an obvious one.
+
+    Writes nothing. Read `assessment.severity`:
+
+    * `none`    — nothing changed, or nothing that touches your roster
+    * `info`    — roster models changed in ways that probably do not matter
+    * `warning` — a roster model was repriced or resized
+    * `critical`— a roster model was removed or lost tool_call
+
+    If anything touches the roster, the expected next step is to consult the
+    critic with what you intend to do about it, decide, and then act. Recording
+    the new baseline is update_model_catalog.
+    """
+    run = runner()
+    result = catalog_mod.check(
+        global_config_dir(), provider, run.config.agents,
+    )
+    return _ok(result)
+
+
+@mcp.tool()
+def update_model_catalog(provider: str = "opencode-go") -> dict:
+    """Record the live catalog as the new local baseline.
+
+    Do this once you have looked at what changed. Until you do, every session
+    will keep reporting the same diff.
+    """
+    return _ok(catalog_mod.apply(global_config_dir(), provider))
+
+
+# --------------------------------------------------------------------------
+# Conversation
+# --------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def consult(agent: str, message: str, timeout: int = 0) -> dict:
+    """Ask a conversational agent something and wait for its reply.
+
+    Unlike start_agent, this blocks and returns the answer, and the agent keeps
+    its context between calls — so this is a real back-and-forth, not a series
+    of one-shot questions.
+
+    Use it with `critic` before any decision worth a second opinion: changing
+    agents.yaml, picking between approaches, deciding whether a stuck agent
+    should be steered or discarded. Tell it what you intend to do and why, not
+    just what the problem is — it can only critique a proposal it can see.
+
+    The reply is advice. You decide, including deciding against it. Nothing
+    here gates anything, and you do not need the critic's agreement to act.
+    """
+    run = runner()
+    try:
+        return _ok(await run.consult(agent, message, timeout or None))
+    except (ValueError, KeyError, FileNotFoundError, PermissionError, RuntimeError) as exc:
+        return _ok({"error": f"{type(exc).__name__}: {exc}"})
 
 
 # --------------------------------------------------------------------------

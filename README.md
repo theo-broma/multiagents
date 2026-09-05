@@ -28,8 +28,14 @@ generates `models.yaml` from the installed CLIs, and writes an MCP registration.
 Add the orchestrator alias it prints:
 
 ```bash
-alias mao='claude --model sonnet --mcp-config ~/.config/multiagents/mcp.json'
+alias mao='claude --model sonnet \
+  --mcp-config ~/.config/multiagents/mcp.json \
+  --append-system-prompt-file ~/.config/multiagents/orchestrator.md'
 ```
+
+`orchestrator.md` carries the session protocol: check the catalog at start,
+consult the critic before consequential decisions, own every branch. Run
+`multiagents mcp-config` to print the exact line.
 
 The project needs to be a git repository with at least one commit — agents work
 on branches, and a worktree cannot be branched from nothing.
@@ -75,6 +81,59 @@ can follow a run without touching the MCP layer:
 multiagents watch     # tail every state transition, live
 multiagents tree      # snapshot
 ```
+
+## The critic
+
+One agent in the roster is not a task runner. `critic` is a standing advisor,
+talked to with `consult()` — which blocks for a reply and **keeps its context
+between calls**, so the orchestrator holds an actual conversation rather than
+firing off amnesiac one-shot questions.
+
+```
+consult("critic", "The catalog says glm-5.3-flash input price rose 7.5x.
+                   My researcher pins it. I intend to leave agents.yaml
+                   alone — is that reasonable?")
+```
+
+It advises; it decides nothing and gates nothing. The orchestrator is
+accountable for the outcome, and "the critic said so" is not a reason. Its
+instructions push against both failure modes — rubber-stamping and
+obstructing — and it is told to say "this doesn't need review" when consulted
+about trivia.
+
+It runs on a deliberately non-Claude model: feedback from the same family as
+the orchestrator tends to agree with it.
+
+Conversational agents sit in an `idle` state between turns — not active (so
+they do not count against the concurrency limit), not terminal (so their
+session stays resumable and their worktree survives).
+
+## Model catalog drift
+
+`agents.yaml` pins specific model ids, and the ground underneath them moves. A
+model can be withdrawn, repriced, or lose `tool_call` — the last of which makes
+it unusable as an agent and fails runs in a confusing way.
+
+`multiagents catalog` compares a local snapshot of the public catalog
+(`models.opencode.ai/api.json`) against the live one and reports only what
+matters:
+
+```
+catalog      3 change(s) since 2026-09-05T18:24:11+0200  [warning]
+             WARNING  changed: glm-5.3-flash (cost input 0.01 -> 0.075)
+                      used by: researcher
+             1 other change(s) not touching your roster
+             -> consult the critic before editing agents.yaml
+```
+
+It runs automatically on `init` and `resume`, and the orchestrator is
+instructed to call `check_model_catalog` at the start of each session. Cosmetic
+churn (descriptions, release notes) is ignored; only `cost`, `limit`,
+`tool_call`, `reasoning`, `structured_output` and `modalities` are watched.
+
+Nothing edits `agents.yaml` automatically. The tool reports, the orchestrator
+consults the critic about what it intends to do, and then the orchestrator
+decides.
 
 ## Configuration
 

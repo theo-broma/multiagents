@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import catalog as catalog_mod
 from . import gitops
 from .budget import read_all
 from .config import load as load_config
@@ -65,6 +66,49 @@ def _write_mcp_config() -> Path:
 # --------------------------------------------------------------------------
 
 
+def _orchestrator_prompt() -> Path:
+    return global_config_dir() / "orchestrator.md"
+
+
+def _alias_line() -> str:
+    return (
+        f"alias mao='claude --model sonnet "
+        f"--mcp-config {_mcp_config_path()} "
+        f"--append-system-prompt-file {_orchestrator_prompt()}'"
+    )
+
+
+def _report_catalog(config, provider: str = "opencode-go") -> int:
+    """Print the catalog diff. Returns the count of roster-affecting changes."""
+    result = catalog_mod.check(global_config_dir(), provider, config.agents)
+    if not result.get("ok"):
+        print(f"catalog      unreachable — {result.get('error','')}")
+        return 0
+    if result.get("first_run"):
+        catalog_mod.apply(global_config_dir(), provider)
+        print(f"catalog      baseline recorded ({result['models']} {provider} models)")
+        return 0
+
+    assessment = result.get("assessment", {})
+    affecting = assessment.get("affecting_roster", [])
+    if not result.get("changed"):
+        print(f"catalog      up to date ({result['models']} {provider} models)")
+        return 0
+
+    print(f"catalog      {result['changed']} change(s) since "
+          f"{result.get('fetched_at_local','?')}  [{assessment.get('severity')}]")
+    for item in affecting:
+        print(f"             {item['severity'].upper():8} {item['detail']}")
+        print(f"                      used by: {', '.join(item['used_by'])}")
+    unrelated = assessment.get("unrelated_changes", 0)
+    if unrelated:
+        print(f"             {unrelated} other change(s) not touching your roster")
+    if affecting:
+        print("             -> consult the critic before editing agents.yaml")
+    print("             record the new baseline with `multiagents catalog --update`")
+    return len(affecting)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     root = Path(args.path or ".").expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -106,11 +150,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     for name, problem in result["problems"].items():
         print(f"models       {name}: {problem}")
 
+    _report_catalog(load_config(paths))
+
     mcp_path = _write_mcp_config()
     print(f"mcp config   {mcp_path}")
+    print(f"prompt       {_orchestrator_prompt()}")
     print("\nNext:")
     print(f"  edit  {paths.config}/agents.yaml")
-    print(f"  add   alias mao='claude --model sonnet --mcp-config {mcp_path}'")
+    print(f"  add   {_alias_line()}")
     print("  then  multiagents doctor")
     return 0
 
@@ -156,6 +203,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if data.get("deferred"):
         print(f"\n{len(data['deferred'])} task(s) deferred on quota")
 
+    print()
+    _report_catalog(load_config(paths))
+
     if args.no_launch:
         return 0
 
@@ -163,6 +213,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if not mcp_path.is_file():
         _write_mcp_config()
     argv = ["claude", "--continue", "--model", args.model, "--mcp-config", str(mcp_path)]
+    if _orchestrator_prompt().is_file():
+        argv += ["--append-system-prompt-file", str(_orchestrator_prompt())]
     print(f"\n$ {' '.join(argv)}\n")
     try:
         os.execvp(argv[0], argv)
@@ -358,11 +410,21 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_catalog(args: argparse.Namespace) -> int:
+    paths = _resolve(args.path) if find_project_root() else None
+    config = load_config(paths)
+    if args.update:
+        result = catalog_mod.apply(global_config_dir(), args.provider)
+        print(result.get("written") or result.get("error"))
+        return 0 if result.get("ok") else 1
+    return 0 if _report_catalog(config, args.provider) == 0 else 0
+
+
 def cmd_mcp_config(args: argparse.Namespace) -> int:
     path = _write_mcp_config()
     print(path)
     print(path.read_text())
-    print(f"alias mao='claude --model sonnet --mcp-config {path}'")
+    print(_alias_line())
     return 0
 
 
@@ -411,6 +473,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--homes", action="store_true", help="delete per-agent HOME directories")
     p.add_argument("--force", action="store_true", help="delete even with unmerged commits")
     p.set_defaults(func=cmd_clean)
+
+    p = sub.add_parser("catalog", help="compare the local model catalog against the live one")
+    p.add_argument("--provider", default="opencode-go")
+    p.add_argument("--update", action="store_true", help="record the live catalog as the baseline")
+    p.set_defaults(func=cmd_catalog)
 
     p = sub.add_parser("mcp-config", help="write and print the MCP registration")
     p.set_defaults(func=cmd_mcp_config)

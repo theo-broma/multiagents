@@ -29,6 +29,9 @@ from .redact import scrub
 # Terminal states never transition again.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned"}
 ACTIVE = {"pending", "running", "stuck"}
+# `idle` is neither: a standing conversation between turns. Its process has
+# exited but its session is resumable, so it must not be counted against the
+# concurrency limit, reaped as an orphan, or cleaned up as finished work.
 
 
 def new_id() -> str:
@@ -58,6 +61,8 @@ class Node:
     usage: dict[str, Any] = field(default_factory=dict)
     steps: int = 0
     events: int = 0
+    conversation: bool = False        # a standing dialogue, resumed each turn
+    turns: int = 0
     created_at: float = field(default_factory=now)
     started_at: float | None = None
     ended_at: float | None = None
@@ -290,7 +295,10 @@ class Tree:
             usage = node.get("usage") or {}
             tokens = usage.get("total") or usage.get("total_tokens") or 0
             cost = usage.get("cost_usd") or 0
-            bits = [f"{node['id']}", f"{node.get('agent','?')}", f"[{status}]"]
+            label = f"[{status}]"
+            if node.get("conversation"):
+                label = f"[{status} · {node.get('turns', 0)} turns]"
+            bits = [f"{node['id']}", f"{node.get('agent','?')}", label]
             if node.get("reason"):
                 bits.append(f"({node['reason']})")
             if tokens:
