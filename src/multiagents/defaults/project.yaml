@@ -78,6 +78,11 @@ executor:
       - codeload.github.com
       - objects.githubusercontent.com
 
+    # Where a provider's container-private credentials live.
+    #   shared   one login per machine, reused by every project (default)
+    #   project  a separate login per project, if you want separate accounts
+    credential_scope: shared
+
     # Never enabled. Docker here is rootful and the user is in the `docker`
     # group, so the socket is host root — an agent holding it escapes the
     # container in one command. Setting this true is refused, not honoured.
