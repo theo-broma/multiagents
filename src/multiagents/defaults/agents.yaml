@@ -95,3 +95,21 @@ agents:
     can_spawn: false
     timeout: 300
     silence_timeout: 120
+
+  # A second standing advisor, on Gemini rather than the critic's GPT model.
+  # Useful when you want a genuinely different perspective on the same
+  # question, or a long technical discussion with a large-context model.
+  # Pinned local for the same reason as the other agy agents.
+  gemini:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: critic.md
+    description: Conversational advisor on Gemini 3.1 Pro. Advises; decides nothing.
+    conversational: true
+    writes: false
+    permission: readonly
+    effort: high
+    can_spawn: false
+    executor: local
+    timeout: 420
+    silence_timeout: 180
