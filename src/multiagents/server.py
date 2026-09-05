@@ -413,6 +413,40 @@ def _root_only(action: str) -> str | None:
 
 
 @mcp.tool()
+def list_questions(agent_id: str = "") -> dict:
+    """List questions agents have parked on, waiting for a decision.
+
+    An agent that emits NEED_DECISION stops immediately rather than guessing,
+    keeping its branch and session. Check this whenever wait_for_agents reports
+    `awaiting_user`, and at the start of a session.
+
+    Answer anything within your remit with answer_question — that is the point
+    of you seeing these first. Leave only genuinely user-level choices, which
+    the user resolves with `multiagents ask`.
+    """
+    run = runner()
+    questions = run.tree.open_questions(agent_id or None)
+    return _ok({
+        "open": questions,
+        "count": len(questions),
+        "note": ("answer what is within your remit; leave the rest for the user"
+                 if questions else "nothing is waiting on a decision"),
+    })
+
+
+@mcp.tool()
+async def answer_question(question_id: str, answer: str) -> dict:
+    """Answer a parked agent's question and resume it where it stopped.
+
+    The agent continues with its full context — its session is resumed, not
+    restarted. Answer only what you can genuinely settle: guessing here defeats
+    the reason the agent stopped.
+    """
+    run = runner()
+    return _ok(await run.answer_question(question_id, answer, answered_by="orchestrator"))
+
+
+@mcp.tool()
 def merge_agent(agent_id: str, into: str = "") -> dict:
     """Merge a finished agent's branch, then remove its worktree and branch.
 

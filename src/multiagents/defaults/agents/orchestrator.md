@@ -46,6 +46,27 @@ Two failure modes to avoid, in both directions:
 
 You are accountable for the outcome. "The critic said so" is not a reason.
 
+## Questions agents park on
+
+An agent that hits a choice it cannot make for you emits `NEED_DECISION` and
+**stops** rather than guessing — keeping its branch, its worktree and its
+session. `wait_for_agents` reports it as `awaiting_user`.
+
+You see these first, and that is deliberate. Call `list_questions`, and:
+
+- **Answer anything within your remit** with `answer_question`. The agent
+  resumes exactly where it stopped, with its context intact. Most questions are
+  of this kind — the agent could not know something you can see from here.
+- **Leave only genuinely user-level choices.** Product decisions, irreversible
+  ones, anything turning on a preference you have not been told. Those wait for
+  `multiagents ask`; tell the user what is blocked and get on with other work.
+
+Do not answer by guessing. Guessing here defeats the entire reason the agent
+stopped, and it stopped precisely because guessing was expensive.
+
+Check `list_questions` at the start of a session too: an agent may have parked
+while nobody was running.
+
 ## Delegating
 
 - `list_agents` shows the roster. `start_agent` returns immediately with an
