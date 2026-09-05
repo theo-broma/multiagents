@@ -29,9 +29,13 @@ from .redact import scrub
 # Terminal states never transition again.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned"}
 ACTIVE = {"pending", "running", "stuck"}
-# `idle` is neither: a standing conversation between turns. Its process has
-# exited but its session is resumable, so it must not be counted against the
-# concurrency limit, reaped as an orphan, or cleaned up as finished work.
+# Two states are neither, for the same reason: the process has exited but the
+# session is resumable, so they must not be counted against the concurrency
+# limit, reaped as orphans, or cleaned up as finished work.
+#   idle           a standing conversation between turns
+#   awaiting_user  parked on a question only a human can answer
+AWAITING = "awaiting_user"
+PAUSED = {"idle", AWAITING}
 
 
 def new_id() -> str:
@@ -63,6 +67,7 @@ class Node:
     events: int = 0
     conversation: bool = False        # a standing dialogue, resumed each turn
     turns: int = 0
+    paused_at: float | None = None    # entered idle / awaiting_user at
     created_at: float = field(default_factory=now)
     started_at: float | None = None
     ended_at: float | None = None
@@ -85,7 +90,8 @@ class Tree:
     # ------------------------------------------------------------------ io --
 
     def _empty(self) -> dict:
-        return {"version": 1, "nodes": {}, "deferred": [], "cooldowns": {}}
+        return {"version": 1, "nodes": {}, "deferred": [], "cooldowns": {},
+                "questions": []}
 
     def _read_unlocked(self) -> dict:
         if not self.path.is_file():
@@ -101,6 +107,7 @@ class Tree:
         data.setdefault("nodes", {})
         data.setdefault("deferred", [])
         data.setdefault("cooldowns", {})
+        data.setdefault("questions", [])
         return data
 
     def _write_unlocked(self, data: dict) -> None:
@@ -185,6 +192,7 @@ class Tree:
                 node["reason"] = reason
             if status == "running" and not node.get("started_at"):
                 node["started_at"] = now()
+            node["paused_at"] = now() if status in PAUSED else None
             if status in TERMINAL:
                 node["ended_at"] = now()
             else:
@@ -253,6 +261,63 @@ class Tree:
             for k, v in total.items()
         }
 
+    # ------------------------------------------------------------ questions --
+    #
+    # Authoritative records live here rather than in a side file: several server
+    # processes hold this tree (one per nested agent), it is already flock-
+    # protected and already scrubbed on write, and answering is a read-modify-
+    # write that a plain append cannot do safely. events.jsonl keeps the
+    # append-only audit trail, mirroring the tree.json / events.jsonl split.
+
+    def add_question(self, agent_id: str, topic: str, question: str,
+                     proposed: str = "") -> dict:
+        record = {
+            "id": "q-" + uuid.uuid4().hex[:6],
+            "agent": agent_id,
+            "topic": topic,
+            "question": question,
+            "proposed_default": proposed,
+            "asked_at": now(),
+            "status": "open",
+            "answer": "",
+            "answered_at": None,
+            "answered_by": "",
+        }
+        with self.transaction() as data:
+            data["questions"].append(record)
+        self.emit(agent_id, "question", topic=topic, question=question[:300],
+                  proposed=proposed[:200], question_id=record["id"])
+        return record
+
+    def open_questions(self, agent_id: str | None = None) -> list[dict]:
+        return [
+            q for q in self.read()["questions"]
+            if q.get("status") == "open" and (agent_id is None or q.get("agent") == agent_id)
+        ]
+
+    def get_question(self, question_id: str) -> dict | None:
+        return next((q for q in self.read()["questions"] if q["id"] == question_id), None)
+
+    def answer_question(self, question_id: str, answer: str,
+                        answered_by: str = "user") -> dict | None:
+        """Record an answer. Returns the updated record, or None if unknown.
+
+        Claiming and answering happen in one locked transaction so two
+        processes cannot both decide they are the one resuming the agent.
+        """
+        with self.transaction() as data:
+            record = next((q for q in data["questions"] if q["id"] == question_id), None)
+            if record is None:
+                return None
+            if record.get("status") == "answered":
+                return dict(record, already_answered=True)
+            record.update({"status": "answered", "answer": answer,
+                           "answered_at": now(), "answered_by": answered_by})
+            result = dict(record)
+        self.emit(result["agent"], "answered", question_id=question_id,
+                  answered_by=answered_by, answer=answer[:300])
+        return result
+
     # ------------------------------------------------------------- deferred --
 
     def defer(self, spec: dict, retry_after: float, reason: str) -> None:
@@ -304,6 +369,11 @@ class Tree:
             label = f"[{status}]"
             if node.get("conversation"):
                 label = f"[{status} · {node.get('turns', 0)} turns]"
+            if status == AWAITING:
+                # An agent parked overnight would otherwise read as a runaway,
+                # because elapsed() keeps growing while it waits on a human.
+                waited = now() - (node.get("paused_at") or now())
+                label = f"[awaiting you · {waited / 60:.0f}m]"
             bits = [f"{node['id']}", f"{node.get('agent','?')}", label]
             if node.get("reason"):
                 bits.append(f"({node['reason']})")
@@ -321,6 +391,13 @@ class Tree:
 
         for root in roots:
             walk(root, "", True, top=True)
+        pending = [q for q in data.get("questions", []) if q.get("status") == "open"]
+        if pending:
+            lines.append("")
+            for q in pending[:6]:
+                lines.append(f"  ? {q['agent']} asks about {q['topic']}: {q['question'][:70]}")
+            lines.append(f"  answer with `multiagents ask`  ({len(pending)} open)")
+
         rollup = self.rollup_usage()
         total_cost = rollup.get("cost_usd", 0)
         total_tokens = rollup.get("total", 0) + rollup.get("total_tokens", 0)

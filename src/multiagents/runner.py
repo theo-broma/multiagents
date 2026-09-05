@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,11 @@ from .tree import Node, Tree, new_id, now
 
 MAX_SUMMARY_CHARS = 6000
 
+# Matched against an agent's TEXT only, never tool arguments — an agent reading
+# a file that mentions the marker must not park itself.
+NEED_DECISION = re.compile(r"NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
+PROPOSED_DEFAULT = re.compile(r"(?im)^\s*DEFAULT\s*:\s*(.+)$")
+
 
 PREAMBLE = """\
 You are an autonomous subagent in a delegated agent tree. This block is
@@ -53,10 +59,17 @@ generated — it tells you where you stand.
 How this works:
 
 - Nobody is watching you interactively and you cannot ask a question mid-run.
-  If you are blocked on something only another agent or your parent knows, emit
-  a line of exactly the form `NEED_INFO(<topic>): <question>` and continue with
-  your best assumption, stating it. Your parent will see that line and can
-  answer it in a follow-up.
+  Two markers are available, and choosing the right one matters:
+
+  `NEED_INFO(<topic>): <question>` — for something another agent or your parent
+  could tell you. Non-blocking: state your assumption and carry on. Prefer this.
+
+  `NEED_DECISION(<topic>): <question>` — for a choice that changes what
+  "correct" means, where guessing wrong wastes everything built on it. This
+  STOPS you immediately, so use it sparingly and only when you genuinely
+  cannot proceed sensibly either way. You must follow it with a line
+  `DEFAULT: <what you would have chosen>` — if writing that line makes the
+  answer obvious, you did not need to ask.
 - Your parent sees only your final message, never your intermediate steps. Put
   everything that matters in it.
 - Work only inside your working directory.
@@ -80,6 +93,7 @@ class Run:
     text_parts: list[str] = field(default_factory=list)
     final_status: str = ""
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
+    awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -434,6 +448,20 @@ class Runner:
                     usage=usage or None, session_id=session_id or None,
                 )
 
+                # A decision only a human can make: stop now rather than let
+                # the agent spend another token building on a guess.
+                if event.kind == "text" and event.text:
+                    match = NEED_DECISION.search(event.text)
+                    if match and run.awaiting is None:
+                        default = PROPOSED_DEFAULT.search(event.text)
+                        run.awaiting = {
+                            "topic": match.group(1).strip(),
+                            "question": match.group(2).strip(),
+                            "proposed": default.group(1).strip() if default else "",
+                        }
+                        await handle.stop()
+                        break
+
                 trip = run.supervisor.observe(event)
                 if trip:
                     self.tree.set_status(node_id, "stuck", f"{trip.reason}: {trip.detail}")
@@ -462,12 +490,19 @@ class Runner:
 
         text = "\n".join(run.text_parts).strip()
         stderr = handle.stderr_tail
-        status = self._classify(run, code, text, stderr)
+        # Checked first and unconditionally. Stopping the process makes wait()
+        # return a signal code, which _classify would read as "failed"; and a
+        # silence trip in the window before exit would otherwise leave the node
+        # `stuck` with the question invisible.
+        status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
 
         # Commit anything the agent left uncommitted so no work is stranded on
-        # an unreferenced worktree.
+        # an unreferenced worktree. Skipped while parked on a question: the
+        # agent is mid-thought and will resume in the same worktree, and a
+        # commit per question would both add noise and change what
+        # _drop_if_empty decides for every later run.
         node = self.tree.get(node_id)
-        if node and node.branch and Path(node.worktree).is_dir():
+        if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
             gitops.commit_all(Path(node.worktree), f"{node.agent}: work in progress ({node_id})")
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
@@ -477,7 +512,17 @@ class Runner:
         }), indent=2))
 
         self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
-        if status == "unauthenticated":
+        if run.awaiting:
+            question = self.tree.add_question(
+                node_id, run.awaiting["topic"], run.awaiting["question"],
+                run.awaiting["proposed"],
+            )
+            self.tree.update(node_id, summary=summary[:2000])
+            self.tree.set_status(
+                node_id, "awaiting_user",
+                f"needs a decision on {run.awaiting['topic'] or 'something'} ({question['id']})",
+            )
+        elif status == "unauthenticated":
             self.tree.set_status(
                 node_id, "failed",
                 f"{run.provider.name} is not authenticated — "
@@ -504,7 +549,9 @@ class Runner:
         if status == "done":
             await self._maybe_merge_into_parent(node_id)
 
-        self._drop_if_empty(node_id, run.spec)
+        if not run.awaiting:
+            # A parked agent still owns its worktree and will resume in it.
+            self._drop_if_empty(node_id, run.spec)
         run.done.set()
 
     def _drop_if_empty(self, node_id: str, spec: AgentSpec) -> None:
@@ -614,8 +661,15 @@ class Runner:
             "branch": node.branch or None,
             "events": [_compact(e) for e in window],
         }
-        if run and run.supervisor:
+        if run and run.supervisor and node.status in {"running", "pending"}:
+            # Only meaningful for a live process. A parked agent's Run survives
+            # in self.runs, so this would grow forever and read as silence.
             result["quiet_for_seconds"] = round(run.supervisor.quiet_for)
+        if node.status == "awaiting_user":
+            question = next(iter(self.tree.open_questions(agent_id)), None)
+            if question:
+                result["question"] = {k: question[k] for k in
+                                      ("id", "topic", "question", "proposed_default")}
         if node.status in {"done", "merged"} and node.summary:
             result["summary"] = node.summary
         return result
@@ -827,6 +881,19 @@ class Runner:
 
         final = self.tree.get(node_id)
         reply = "\n".join(run.text_parts).strip()
+        if run.awaiting:
+            # The advisor stopped to ask, not to answer. Returning its partial
+            # text would read as a considered reply.
+            return {
+                "agent_id": node_id, "agent": agent_name, "turn": turn,
+                "status": "awaiting_user",
+                "asked": run.awaiting["question"],
+                "topic": run.awaiting["topic"],
+                "proposed_default": run.awaiting["proposed"],
+                "partial_reply": reply[-2000:],
+                "note": "this agent asked a question instead of answering; "
+                        "resolve it with answer_question before relying on this",
+            }
         return {
             "agent_id": node_id,
             "agent": agent_name,
@@ -837,6 +904,47 @@ class Runner:
             "note": "advisory only — you decide whether to act on this",
         }
 
+    async def answer_question(self, question_id: str, answer: str,
+                              answered_by: str = "orchestrator") -> dict[str, Any]:
+        """Answer a parked agent's question and resume it with its context.
+
+        The record is claimed inside the tree's lock before the agent is
+        resumed, so two processes cannot both decide they are the one restarting
+        it.
+        """
+        record = self.tree.get_question(question_id)
+        if record is None:
+            return {"error": f"unknown question {question_id!r}"}
+        if record.get("status") == "answered":
+            return {"error": f"{question_id} was already answered by "
+                             f"{record.get('answered_by') or 'someone'}",
+                    "answer": record.get("answer", "")}
+
+        agent_id = record["agent"]
+        node = self.tree.get(agent_id)
+        if node is None:
+            return {"error": f"question {question_id} refers to unknown agent {agent_id}"}
+        if not node.session_id:
+            return {"error": f"{agent_id} has no resumable session, so it cannot be "
+                             f"answered. Discard it and start a fresh agent with the "
+                             f"decision included in the task."}
+
+        claimed = self.tree.answer_question(question_id, answer, answered_by)
+        if claimed is None or claimed.get("already_answered"):
+            return {"error": f"{question_id} was answered by someone else first"}
+
+        topic = record.get("topic") or "your question"
+        message = (
+            f"Answering your question about {topic}.\n\n"
+            f"You asked: {record['question']}\n"
+            f"The decision is: {answer}\n\n"
+            f"Continue from where you stopped, on that basis."
+        )
+        result = await self.steer(agent_id, message)
+        return {"question_id": question_id, "agent_id": agent_id,
+                "answered_by": answered_by, "resumed": result.get("steered", False),
+                **({"error": result["error"]} if result.get("error") else {})}
+
     async def wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
         """Block until any of the given agents leaves the running state.
 
@@ -844,7 +952,15 @@ class Runner:
         orchestrator can also wait on agents started by a nested server.
         """
         deadline = time.monotonic() + timeout
-        watched = agent_ids or [n.id for n in self.tree.active()]
+        if agent_ids:
+            watched = list(agent_ids)
+        else:
+            # active() deliberately excludes parked agents, so seeding from it
+            # alone would leave an orchestrator waiting 300s on an agent that is
+            # already blocked on a question addressed to it.
+            watched = [n.id for n in self.tree.active()]
+            watched += [q["agent"] for q in self.tree.open_questions()
+                        if q["agent"] not in watched]
         if not watched:
             return {"changed": [], "reason": "no active agents"}
 

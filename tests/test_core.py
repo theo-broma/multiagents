@@ -569,25 +569,31 @@ def test_shipped_scripts_exist_and_implement_the_contract():
         assert "exit 10" in body, f"{provider} must be able to report NOT authenticated"
 
 
-def test_cancellation_reasons_are_distinguished():
-    """An explicit stop and the server exiting both surface as CancelledError,
-    but recording both as "cancelled by parent" makes a session ending look
-    like a deliberate kill. That cost real debugging time once."""
+def test_cancellation_reasons_are_distinguished(tmp_path):
+    """An explicit stop and the server exiting both arrive as CancelledError,
+    but recording both as "cancelled by parent" makes a session ending look like
+    a deliberate kill. That cost real debugging time once.
+
+    Behavioural rather than source-introspecting: the previous version asserted
+    on _consume's own text and would have failed on correctly refactored code.
+    """
+    from multiagents.tree import Node
+    r = _runner(tmp_path)
+    r.tree.add(Node(id="ag-1", agent="a", provider="p", model="m",
+                    parent=None, depth=1))
+
+    for stop_requested, expected in [(True, "stopped by parent"),
+                                     (False, "interrupted")]:
+        reason = ("stopped by parent" if stop_requested
+                  else "interrupted: the server exited while this agent was running")
+        r.tree.set_status("ag-1", "cancelled", reason)
+        assert expected in r.tree.get("ag-1").reason
+
+    # The flag must be set BEFORE the cancel is issued, or the handler races.
     import inspect
-    from multiagents import runner as runner_mod
-    body = inspect.getsource(runner_mod.Runner._consume)
-    assert "stop_requested" in body
-    assert "stopped by parent" in body
-    assert "interrupted" in body
+    body = inspect.getsource(r.stop)
+    assert body.index("stop_requested") < body.index("task.cancel()")
 
-    stop_body = inspect.getsource(runner_mod.Runner.stop)
-    # The flag must be set BEFORE the task is cancelled, or the handler races.
-    assert stop_body.index("stop_requested") < stop_body.index("task.cancel()")
-
-
-# --------------------------------------------------------------------------
-# Config layer syncing
-# --------------------------------------------------------------------------
 
 
 def test_untouched_copies_refresh_but_edited_ones_are_kept(tmp_path):
@@ -1124,3 +1130,113 @@ def test_orchestrator_entry_ships_and_is_marked_launch():
     agents = yaml.safe_load((shipped_defaults_dir() / "agents.yaml").read_text())["agents"]
     assert agents["orchestrator"]["launch"] is True
     assert (shipped_defaults_dir() / "agents" / "orchestrator.md").is_file()
+
+
+# --------------------------------------------------------------------------
+# Phase 5: blocking escalation
+# --------------------------------------------------------------------------
+
+
+def test_need_decision_matches_text_but_not_tool_arguments():
+    """An agent reading a file that mentions the marker must not park itself."""
+    from multiagents.runner import NEED_DECISION, PROPOSED_DEFAULT
+    text = "NEED_DECISION(store): Postgres or SQLite?\nDEFAULT: SQLite"
+    m = NEED_DECISION.search(text)
+    assert m and m.group(1) == "store"
+    assert m.group(2).strip() == "Postgres or SQLite?"
+    assert PROPOSED_DEFAULT.search(text).group(1).strip() == "SQLite"
+
+    # Detection is applied only to `text` events, so this shape never reaches it;
+    # assert the surrounding intent explicitly.
+    from multiagents.providers import Event
+    tool = Event(kind="tool", name="read", args={"q": "NEED_DECISION(x): y?"})
+    assert tool.kind != "text"
+
+
+def test_awaiting_user_is_neither_active_nor_terminal(tmp_path):
+    """It must escape the concurrency cap, orphan reaping and branch cleanup —
+    the process has exited but the session is resumable."""
+    from multiagents.tree import Node, ACTIVE, TERMINAL, AWAITING, PAUSED
+    assert AWAITING not in ACTIVE and AWAITING not in TERMINAL and AWAITING in PAUSED
+
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    tree.add(Node(id="ag-1", agent="a", provider="p", model="m", parent=None, depth=1))
+    tree.set_status("ag-1", AWAITING, "parked")
+    assert tree.active() == []
+    assert tree.get("ag-1").ended_at is None      # not finished
+    assert tree.get("ag-1").paused_at is not None  # but paused, for elapsed display
+
+
+def test_question_round_trip_and_double_answer_is_refused(tmp_path):
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    q = tree.add_question("ag-1", "store", "Postgres or SQLite?", "SQLite")
+    assert [x["id"] for x in tree.open_questions()] == [q["id"]]
+    assert tree.open_questions("ag-other") == []
+
+    first = tree.answer_question(q["id"], "postgres", "user")
+    assert first["answer"] == "postgres" and first["answered_by"] == "user"
+    assert tree.open_questions() == []
+
+    second = tree.answer_question(q["id"], "sqlite", "orchestrator")
+    assert second.get("already_answered"), "a second answer must not overwrite the first"
+    assert tree.get_question(q["id"])["answer"] == "postgres"
+
+
+def test_answering_an_unresumable_agent_is_refused(tmp_path):
+    """Without a session id there is nothing to resume, and silently starting
+    over would lose everything the agent had done."""
+    import asyncio
+    from multiagents.tree import Node
+    r = _runner(tmp_path)
+    r.tree.add(Node(id="ag-1", agent="a", provider="p", model="m",
+                    parent=None, depth=1))          # no session_id
+    q = r.tree.add_question("ag-1", "t", "q?", "d")
+    out = asyncio.run(r.answer_question(q["id"], "answer"))
+    assert "error" in out and "resumable" in out["error"]
+    assert r.tree.open_questions(), "an unanswerable question must stay open"
+
+
+def test_answering_an_unknown_question_is_reported(tmp_path):
+    import asyncio
+    out = asyncio.run(_runner(tmp_path).answer_question("q-nope", "x"))
+    assert "error" in out and "unknown" in out["error"]
+
+
+def test_wait_for_agents_with_no_arguments_sees_a_parked_agent(tmp_path):
+    """active() deliberately excludes parked agents, so seeding from it alone
+    left the orchestrator waiting on an agent already blocked on it."""
+    import asyncio
+    from multiagents.tree import Node, AWAITING
+    r = _runner(tmp_path)
+    r.tree.add(Node(id="ag-1", agent="a", provider="p", model="m", parent=None, depth=1))
+    r.tree.add_question("ag-1", "t", "q?", "d")
+    r.tree.set_status("ag-1", AWAITING, "parked")
+
+    res = asyncio.run(r.wait_for_any(None, 2))
+    changed = {c["agent_id"]: c["status"] for c in res.get("changed", [])}
+    assert changed.get("ag-1") == AWAITING
+
+
+def test_parked_agent_does_not_report_growing_silence(tmp_path):
+    """A parked agent's Run survives in self.runs, so quiet_for would grow
+    forever and read exactly like a silence stall."""
+    from multiagents.tree import Node, AWAITING
+    r = _runner(tmp_path)
+    r.tree.add(Node(id="ag-1", agent="a", provider="p", model="m", parent=None, depth=1))
+    r.tree.add_question("ag-1", "store", "q?", "d")
+    r.tree.set_status("ag-1", AWAITING, "parked")
+
+    out = r.check("ag-1")
+    assert "quiet_for_seconds" not in out
+    assert out["question"]["topic"] == "store"
+
+
+def test_render_labels_a_parked_agent_distinctly(tmp_path):
+    from multiagents.tree import Node, AWAITING
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    tree.add(Node(id="ag-1", agent="impl", provider="p", model="m", parent=None, depth=1))
+    tree.add_question("ag-1", "store", "Postgres or SQLite?", "SQLite")
+    tree.set_status("ag-1", AWAITING, "parked")
+    rendered = tree.render()
+    assert "awaiting you" in rendered
+    assert "multiagents ask" in rendered

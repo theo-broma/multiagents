@@ -227,6 +227,16 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if data.get("deferred"):
         print(f"\n{len(data['deferred'])} task(s) deferred on quota")
 
+    waiting = tree.open_questions()
+    if waiting:
+        # Reported, never a refusal: the first place a question should be
+        # answered is inside the orchestrator, so refusing to launch it would
+        # make the cheaper path unreachable.
+        print(f"\n{len(waiting)} agent(s) waiting on a decision:")
+        for q in waiting[:5]:
+            print(f"  {q['id']}  {q['agent']} · {q['topic']}: {q['question'][:70]}")
+        print("  the orchestrator can answer these, or use `multiagents ask`")
+
     print()
     _report_catalog(load_config(paths))
 
@@ -635,6 +645,60 @@ def cmd_auth(args: argparse.Namespace) -> int:
     return 1 if broken else 0
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Answer questions agents have parked on.
+
+    Deliberately WRITE-ONLY. Resuming an agent means owning the asyncio task
+    that reads its stdout; this process exits immediately afterwards, which
+    would leave the agent running with nobody draining its pipe — it would fill
+    and deadlock. So the answer is recorded here, and the agent is resumed by
+    whichever process owns a live runner: the orchestrator, next time it calls
+    list_questions, answer_question, wait_for_agents or check_agent.
+    """
+    paths = _resolve(args.path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    questions = tree.open_questions(args.agent or None)
+
+    if not questions:
+        print("Nothing is waiting on a decision.")
+        return 0
+
+    if args.list:
+        for q in questions:
+            waited = (time.time() - q["asked_at"]) / 60
+            print(f"  {q['id']}  {q['agent']} · {q['topic']}   asked {waited:.0f}m ago")
+            print(f"      {q['question']}")
+            if q.get("proposed_default"):
+                print(f"      its default: {q['proposed_default']}")
+        return 0
+
+    answered = 0
+    for q in questions:
+        if args.question_id and q["id"] != args.question_id:
+            continue
+        waited = (time.time() - q["asked_at"]) / 60
+        print(f"\n[{q['id']}] {q['agent']} · {q['topic']}   asked {waited:.0f}m ago")
+        print(f"  {q['question']}")
+        if q.get("proposed_default"):
+            print(f"  it would otherwise choose: {q['proposed_default']}")
+        try:
+            reply = input("  your answer (blank to skip, 'default' to accept its own): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not reply:
+            continue
+        if reply == "default" and q.get("proposed_default"):
+            reply = q["proposed_default"]
+        tree.answer_question(q["id"], reply, answered_by="user")
+        answered += 1
+        print(f"  recorded. {q['agent']} resumes when the orchestrator next checks.")
+
+    if answered:
+        print(f"\n{answered} answered. Run `multiagents run` if no orchestrator is live.")
+    return 0
+
+
 def cmd_docker(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     ex = _docker_executor(paths)
@@ -824,6 +888,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("action", nargs="?", default="status", choices=["status", "login"])
     p.add_argument("provider", nargs="?", default="", help="provider to log in")
     p.set_defaults(func=cmd_auth)
+
+    p = sub.add_parser("ask", help="answer questions agents are parked on")
+    p.add_argument("question_id", nargs="?", default="", help="answer just this one")
+    p.add_argument("--agent", default="", help="only this agent's questions")
+    p.add_argument("--list", action="store_true", help="list without answering")
+    p.set_defaults(func=cmd_ask)
 
     p = sub.add_parser("docker", help="manage the project's agent container")
     p.add_argument("action",
