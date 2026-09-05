@@ -23,7 +23,7 @@ from . import catalog as catalog_mod
 from . import gitops
 from .budget import read_all
 from .config import load as load_config
-from .config import seed_global, seed_project
+from .config import seed_global, seed_project, sync_layer
 from .models import refresh_models, validate_agent_models
 from .paths import ProjectPaths, find_project_root, global_config_dir, state_root
 from .providers import load_providers
@@ -500,6 +500,42 @@ def _auth_scope(provider, executor) -> str:
     return "host"
 
 
+def cmd_upgrade_config(args: argparse.Namespace) -> int:
+    """Refresh config copies that were never edited.
+
+    Pinned copies override the shipped defaults for every key, so without this
+    an install silently never receives improvements to files it is not using.
+    Edited files are left alone and reported.
+    """
+    from .paths import shipped_defaults_dir
+    paths = _resolve(args.path) if find_project_root() else None
+    verb = "would " if args.dry_run else ""
+
+    targets = [("global", shipped_defaults_dir(), global_config_dir(), "global")]
+    if paths is not None:
+        targets.append(("project", global_config_dir(), paths.config, "project"))
+
+    stale = 0
+    for label, source, target, scope in targets:
+        report = sync_layer(source, target, force=args.force,
+                            dry_run=args.dry_run, scope=scope)
+        print(f"{label}  {target}")
+        for name in report["added"]:
+            print(f"  {verb}add     {name}")
+        for name in report["updated"]:
+            print(f"  {verb}refresh {name}   (unmodified copy)")
+        for name in report["customised"]:
+            stale += 1
+            print(f"  keep    {name}   (you edited it; shipped version has changed)")
+        if not any(report.values()):
+            print("  up to date")
+    if stale:
+        print(f"\n{stale} customised file(s) left alone. Compare them against")
+        print(f"  {shipped_defaults_dir()}")
+        print("and merge by hand, or pass --force to overwrite.")
+    return 0
+
+
 def cmd_auth(args: argparse.Namespace) -> int:
     paths = _resolve(args.path) if find_project_root() else None
     config = load_config(paths)
@@ -709,6 +745,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tree", action="store_true", help="prune finished nodes that hold no branch")
     p.add_argument("--force", action="store_true", help="delete even with unmerged commits")
     p.set_defaults(func=cmd_clean)
+
+    p = sub.add_parser("upgrade-config",
+                       help="refresh config copies that were never edited")
+    p.add_argument("--dry-run", action="store_true", help="show what would change")
+    p.add_argument("--force", action="store_true", help="overwrite edited files too")
+    p.set_defaults(func=cmd_upgrade_config)
 
     p = sub.add_parser("auth", help="check or repair provider authentication")
     p.add_argument("action", nargs="?", default="status", choices=["status", "login"])

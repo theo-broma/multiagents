@@ -14,6 +14,8 @@ rather than invisible built-ins.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,48 +49,103 @@ def _read_yaml(path: Path) -> dict:
         return yaml.safe_load(handle) or {}
 
 
+
+# Copies of the shipped defaults are pinned in the global and project layers so
+# they can be edited. That has a cost: a pinned copy overrides the newer shipped
+# file for every key, including ones the user never touched, so improvements to
+# the defaults silently never reach an existing install.
+#
+# The fix is to know which copies were edited. A manifest records the hash of
+# each file as written; a copy still matching its hash was never touched and can
+# be refreshed safely, while an edited one is left alone and merely reported.
+
+MANIFEST = ".seeded.json"
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_manifest(target: Path) -> dict:
+    path = target / MANIFEST
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_manifest(target: Path, data: dict) -> None:
+    (target / MANIFEST).write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def layer_files(source: Path, scope: str = "global") -> list[str]:
+    """Relative names a layer should carry.
+
+    The project layer deliberately carries less. Auth scripts and the
+    orchestrator prompt are machine-level, and a stale per-project copy of
+    either would be a liability rather than a convenience; they still resolve
+    through the global layer, and a project may add its own if it wants.
+    """
+    names = [n for n in CONFIG_FILES if (source / n).is_file()]
+    names += [f"agents/{p.name}" for p in sorted((source / "agents").glob("*.md"))]
+    if scope == "global":
+        names += [n for n in STANDALONE_FILES if (source / n).is_file()]
+        names += [f"auth/{p.name}" for p in sorted((source / "auth").glob("*"))
+                  if p.is_file()]
+    return names
+
+
+def sync_layer(source: Path, target: Path, force: bool = False,
+               dry_run: bool = False, scope: str = "global") -> dict[str, list[str]]:
+    """Copy shipped files into a layer, refreshing only untouched copies."""
+    report: dict[str, list[str]] = {"added": [], "updated": [], "customised": []}
+    manifest = _read_manifest(target)
+
+    for name in layer_files(source, scope):
+        src, dst = source / name, target / name
+        shipped = _digest(src)
+        if not dst.is_file():
+            report["added"].append(name)
+            if not dry_run:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                manifest[name] = shipped
+            continue
+        if _digest(dst) == shipped:
+            manifest.setdefault(name, shipped)
+            continue                                  # already current
+        untouched = manifest.get(name) == _digest(dst)
+        if untouched or force:
+            report["updated"].append(name)
+            if not dry_run:
+                shutil.copy2(src, dst)
+                manifest[name] = shipped
+        else:
+            report["customised"].append(name)
+
+    if not dry_run:
+        _write_manifest(target, manifest)
+    return report
+
+
 def seed_global(force: bool = False) -> Path:
     """Copy the package's shipped defaults into the global config dir."""
     target = global_config_dir()
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "agents").mkdir(exist_ok=True)
-    (target / "auth").mkdir(exist_ok=True)
-    source = shipped_defaults_dir()
-
-    for name in CONFIG_FILES:
-        src = source / name
-        if src.is_file() and (force or not (target / name).is_file()):
-            shutil.copy2(src, target / name)
-    for src in sorted((source / "agents").glob("*.md")):
-        dst = target / "agents" / src.name
-        if force or not dst.is_file():
-            shutil.copy2(src, dst)
-    for src in sorted((source / "auth").glob("*")):
-        dst = target / "auth" / src.name
-        if src.is_file() and (force or not dst.is_file()):
-            shutil.copy2(src, dst)
-    for name in STANDALONE_FILES:
-        src = source / name
-        if src.is_file() and (force or not (target / name).is_file()):
-            shutil.copy2(src, target / name)
+    for sub in ("", "agents", "auth"):
+        (target / sub).mkdir(parents=True, exist_ok=True)
+    sync_layer(shipped_defaults_dir(), target, force=force)
     return target
 
 
 def seed_project(paths: ProjectPaths, force: bool = False) -> Path:
     """Copy the global config into a project so it can be edited locally."""
     seed_global()
-    source, target = global_config_dir(), paths.config
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "agents").mkdir(exist_ok=True)
-
-    for name in CONFIG_FILES:
-        src = source / name
-        if src.is_file() and (force or not (target / name).is_file()):
-            shutil.copy2(src, target / name)
-    for src in sorted((source / "agents").glob("*.md")):
-        dst = target / "agents" / src.name
-        if force or not dst.is_file():
-            shutil.copy2(src, dst)
+    target = paths.config
+    for sub in ("", "agents"):
+        (target / sub).mkdir(parents=True, exist_ok=True)
+    sync_layer(global_config_dir(), target, force=force, scope="project")
     return target
 
 
