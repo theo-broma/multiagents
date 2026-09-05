@@ -502,6 +502,8 @@ def cmd_docker(args: argparse.Namespace) -> int:
             print(f"  {container_path}  ->  {host_path}")
         print("Your host credentials are masked and cannot be touched.\n")
         print("Complete the login it offers, then quit the CLI (ctrl-c or /quit).\n")
+        # execvp replaces this process; anything still buffered would be lost.
+        sys.stdout.flush()
         os.execvp("docker", [
             "docker", "exec", "-it",
             "--user", f"{os.getuid()}:{os.getgid()}",
@@ -615,7 +617,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("docker", help="manage the project's agent container")
     p.add_argument("action",
                    choices=["build", "up", "down", "rm", "status", "shell", "check", "login"])
-    p.add_argument("--provider", default="agy", help="provider to log in (for `login`)")
+    p.add_argument("provider", nargs="?", default="agy",
+                   help="provider to act on; only used by `login` (default: agy)")
     p.set_defaults(func=cmd_docker)
 
     p = sub.add_parser("catalog", help="compare the local model catalog against the live one")
