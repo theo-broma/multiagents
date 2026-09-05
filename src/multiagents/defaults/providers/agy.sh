@@ -78,5 +78,30 @@ budget)
     printf '{"known": false, "note": "CLI exposes no quota surface; exhaustion detected from failed runs"}\n'
     exit 0
     ;;
-*)  echo "usage: $0 check|login|budget" >&2; exit 64 ;;
+prepare)
+    # agy's MCP registry is a GLOBAL profile with no per-invocation scope, so
+    # this registration is visible to every agy session on this machine —
+    # including subagents. That is why the mutating MCP tools are gated by
+    # ownership server-side rather than by who can see them.
+    # One entry serves every project: the server resolves the project from cwd.
+    cmd="${MULTIAGENTS_MCP_COMMAND:-uv}"
+    # shellcheck disable=SC2086
+    IFS="$(printf '\037')"; set -- ${MULTIAGENTS_MCP_ARGS:-}; unset IFS
+    "$BIN" mcp add multiagents "$cmd" "$@" >/dev/null 2>&1 \
+        && echo "registered multiagents in agy's MCP profile" \
+        || { echo "could not register the MCP server with agy" >&2; exit 1; }
+    exit 0
+    ;;
+launch)
+    if [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
+        exec "$BIN" --model "${MULTIAGENTS_MODEL:-}" --continue
+    fi
+    prompt=""
+    [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && [ -f "$MULTIAGENTS_PROMPT_FILE" ] \
+        && prompt="$(cat "$MULTIAGENTS_PROMPT_FILE")"
+    # agy has no system-prompt flag; the brief is seeded as the opening message
+    # and the session continues interactively from there.
+    exec "$BIN" --model "${MULTIAGENTS_MODEL:-}" --prompt-interactive "$prompt"
+    ;;
+*)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
 esac

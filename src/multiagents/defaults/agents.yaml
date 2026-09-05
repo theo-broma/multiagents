@@ -18,6 +18,19 @@
 
 agents:
 
+  # The orchestrator. Unlike every other entry this one is LAUNCHED, not
+  # spawned: `multiagents run` starts this CLI as an MCP client and it drives
+  # everything else. Change the provider and model here to orchestrate with a
+  # different CLI — nothing else in the system needs to know.
+  orchestrator:
+    provider: claude
+    model: sonnet
+    instructions: orchestrator.md
+    description: Drives the project. Launched by `multiagents run`.
+    launch: true
+    can_spawn: true
+
+
   researcher:
     provider: opencode
     model: opencode-go/glm-5.3-flash

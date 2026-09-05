@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import auth as auth_mod
 from . import catalog as catalog_mod
+from . import scripts
 from . import gitops
 from .budget import read_all
 from .config import load as load_config
@@ -67,16 +68,38 @@ def _write_mcp_config() -> Path:
 # --------------------------------------------------------------------------
 
 
-def _orchestrator_prompt() -> Path:
-    return global_config_dir() / "orchestrator.md"
+def _orchestrator_spec(config):
+    """The roster entry marked `launch: true`, or None."""
+    launched = [spec for spec in config.agents.values() if spec.launch]
+    if not launched:
+        return None
+    return launched[0]
 
 
-def _alias_line() -> str:
-    return (
-        f"alias mao='claude --model sonnet "
-        f"--mcp-config {_mcp_config_path()} "
-        f"--append-system-prompt-file {_orchestrator_prompt()}'"
-    )
+def _launch_context(paths, config, spec) -> dict[str, str]:
+    """Everything a provider's launch script needs, as environment.
+
+    The orchestrator's brief is a normal agent instruction file, so it resolves
+    through the same three config layers as every other agent's — write it out
+    fresh each run so edits take effect without any copying step.
+    """
+    state = paths.data / "launch"
+    state.mkdir(parents=True, exist_ok=True)
+    prompt_file = state / "orchestrator-prompt.md"
+    prompt_file.write_text(config.instructions_for(spec) or "")
+
+    mcp_path = _write_mcp_config()
+    server = json.loads(mcp_path.read_text())["mcpServers"]["multiagents"]
+    return {
+        "MULTIAGENTS_MODEL": spec.model,
+        "MULTIAGENTS_PROMPT_FILE": str(prompt_file),
+        "MULTIAGENTS_MCP_CONFIG": str(mcp_path),
+        "MULTIAGENTS_MCP_COMMAND": server["command"],
+        # \x1f so an argument containing spaces survives the round trip.
+        "MULTIAGENTS_MCP_ARGS": "\x1f".join(server["args"]),
+        "MULTIAGENTS_LAUNCH_STATE": str(state),
+        "MULTIAGENTS_PROJECT": str(paths.root),
+    }
 
 
 def _report_catalog(config, provider: str = "opencode-go") -> int:
@@ -210,19 +233,41 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if args.no_launch:
         return 0
 
-    mcp_path = _mcp_config_path()
-    if not mcp_path.is_file():
-        _write_mcp_config()
-    argv = ["claude", "--continue", "--model", args.model, "--mcp-config", str(mcp_path)]
-    if _orchestrator_prompt().is_file():
-        argv += ["--append-system-prompt-file", str(_orchestrator_prompt())]
-    print(f"\n$ {' '.join(argv)}\n")
-    try:
-        os.execvp(argv[0], argv)
-    except OSError as exc:
-        print(f"could not launch claude: {exc}", file=sys.stderr)
+    spec = _orchestrator_spec(config)
+    if spec is None:
+        print("No agent in agents.yaml is marked `launch: true`.", file=sys.stderr)
+        return 2
+    providers = load_providers(config.providers)
+    provider = providers.get(spec.provider)
+    if provider is None or not provider.available():
+        print(f"orchestrator provider {spec.provider!r} is unavailable", file=sys.stderr)
+        return 2
+
+    executor = _executor_for(paths, config, providers)(spec.provider)
+    context = _launch_context(paths, config, spec)
+    context["MULTIAGENTS_RESUME"] = "1" if args.resume else "0"
+
+    code, out, err = scripts.run_action(
+        spec.provider, provider, executor, "prepare",
+        global_config_dir(), paths.config, timeout=60, extra_env=context,
+    )
+    if code not in (0, scripts.UNIMPLEMENTED):
+        print(f"prepare failed for {spec.provider}: {(err or out).strip()[:300]}",
+              file=sys.stderr)
         return 1
-    return 0
+    if out.strip():
+        print(f"prepare      {out.strip()}")
+
+    built = scripts.exec_action(spec.provider, provider, executor, "launch",
+                                global_config_dir(), paths.config, extra_env=context)
+    if built is None:
+        print(f"no script for provider {spec.provider!r}", file=sys.stderr)
+        return 2
+    argv, env = built
+    print(f"orchestrator {spec.provider}/{spec.model}"
+          f"{' (resuming)' if args.resume else ''}\n")
+    sys.stdout.flush()
+    os.execvpe(argv[0], argv, env)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -249,8 +294,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, spec in sorted(config.agents.items()):
         provider = providers.get(spec.provider)
         mark = " " if provider and provider.available() else "!"
-        where = spec.executor or config.executor
-        tag = f"[{where}]" + ("*" if spec.executor else "")
+        if spec.launch:
+            tag = "[launched by `multiagents run`]"
+        else:
+            where = spec.executor or config.executor
+            tag = f"[{where}]" + ("*" if spec.executor else "")
         print(f"  {mark} {name:12} {spec.provider}/{spec.model:34} {tag}")
         instructions = config.instructions_for(spec)
         if spec.instructions and not instructions.strip():
@@ -726,10 +774,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true", help="overwrite existing config files")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("resume", help="reconcile state and reopen the orchestrator session")
-    p.add_argument("--model", default="sonnet", help="orchestrator model (default: sonnet)")
-    p.add_argument("--no-launch", action="store_true", help="report state without starting claude")
-    p.set_defaults(func=cmd_resume)
+    for name, helptext in (
+        ("run", "launch the orchestrator (first run and resume are the same)"),
+        ("resume", "alias for `run`"),
+    ):
+        p = sub.add_parser(name, help=helptext)
+        p.add_argument("--no-launch", action="store_true",
+                       help="report project state without launching")
+        p.add_argument("--fresh", dest="resume", action="store_false", default=True,
+                       help="start a new session instead of continuing the last one")
+        p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("doctor", help="check CLIs, agents, models, budget and git")
     p.set_defaults(func=cmd_doctor)

@@ -29,5 +29,19 @@ budget)
     # A new provider without a built-in simply implements this action.
     exit 64
     ;;
-*)  echo "usage: $0 check|login|budget" >&2; exit 64 ;;
+prepare)
+    # Nothing to register: claude takes its MCP config per invocation, so
+    # nothing persists and no other session or subagent inherits it.
+    exit 0
+    ;;
+launch)
+    set -- --model "${MULTIAGENTS_MODEL:-sonnet}"
+    [ -n "${MULTIAGENTS_MCP_CONFIG:-}" ] && \
+        set -- "$@" --mcp-config "$MULTIAGENTS_MCP_CONFIG" --strict-mcp-config
+    [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && \
+        set -- "$@" --append-system-prompt-file "$MULTIAGENTS_PROMPT_FILE"
+    [ "${MULTIAGENTS_RESUME:-0}" = "1" ] && set -- "$@" --continue
+    exec "$BIN" "$@"
+    ;;
+*)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
 esac

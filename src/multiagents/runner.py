@@ -128,6 +128,12 @@ class Runner:
 
     def _preflight(self, spec: AgentSpec) -> None:
         limits = self.config.limits
+        if spec.launch:
+            raise PermissionError(
+                f"Agent {spec.name!r} is the orchestrator: it is launched by "
+                f"`multiagents run`, not spawned as a subagent. Spawning it "
+                f"would give you an orchestrator inside an orchestrator."
+            )
         if not self.can_spawn():
             raise PermissionError(
                 "This agent was not granted permission to spawn subagents "
@@ -170,6 +176,12 @@ class Runner:
             )
         if not provider.available():
             raise FileNotFoundError(f"{provider.bin!r} is not on PATH (needed by agent {spec.name!r})")
+        if not (provider.spawn or {}).get("args"):
+            raise PermissionError(
+                f"Provider {provider.name!r} declares no spawn args, so it cannot run "
+                f"delegates (agent {spec.name!r}). Without this check it would exec the "
+                f"bare binary with no stdin and hang or fail obscurely."
+            )
 
     # ---------------------------------------------------------------- prompt --
 
@@ -747,6 +759,10 @@ class Runner:
         of a series of amnesiac one-shot queries.
         """
         spec = self.config.agent(agent_name)
+        if spec.launch:
+            raise PermissionError(
+                f"Agent {agent_name!r} is the orchestrator and cannot be consulted."
+            )
         if not spec.conversational:
             raise ValueError(
                 f"Agent {agent_name!r} is not conversational. Use start_agent for "
