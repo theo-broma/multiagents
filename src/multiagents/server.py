@@ -330,21 +330,28 @@ def budget_status() -> dict:
 
     `known: false` means spend is tracked but capacity is not — never treat that
     as "plenty left". Claude exposes real subscription state; agy exposes none
-    (exhaustion is detected reactively); opencode is awaiting a subscription.
+    (exhaustion is detected reactively); opencode reports no headroom but does
+    report real per-step dollar cost, which is accumulated here and matches the
+    figures on its web console's usage page.
 
     Use this to route: when your own five-hour bucket is tight, delegating to an
     unrationed provider is the highest-value thing you can do.
     """
     run = runner()
     data = run.tree.read()
-    spend: dict[str, dict[str, int]] = {}
+    spend: dict[str, dict[str, Any]] = {}
     for node in data.get("nodes", {}).values():
         provider = node.get("provider", "")
+        if not provider:
+            continue
         usage = node.get("usage") or {}
+        entry = spend.setdefault(provider, {"tokens": 0, "cost_usd": 0.0})
         total = usage.get("total") or usage.get("total_tokens") or 0
-        if provider and isinstance(total, (int, float)):
-            spend.setdefault(provider, {}).setdefault("tokens", 0)
-            spend[provider]["tokens"] += int(total)
+        if isinstance(total, (int, float)):
+            entry["tokens"] += int(total)
+        cost = usage.get("cost_usd")
+        if isinstance(cost, (int, float)):
+            entry["cost_usd"] = round(entry["cost_usd"] + cost, 6)
 
     budgets = budget_mod.read_all(spend, data.get("cooldowns", {}))
     reserve = float(run.config.project.get("budget", {}).get("reserve_headroom", 0.15))

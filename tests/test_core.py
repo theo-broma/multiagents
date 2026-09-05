@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multiagents.config import deep_merge
 from multiagents.providers import Provider
+from multiagents.runner import _merge_usage
 from multiagents.redact import MASK, register_literal, scrub
 from multiagents.supervisor import Supervisor, looks_like_quota_failure
 from multiagents.tree import Tree
@@ -72,6 +73,57 @@ def test_unmatched_lines_are_kept_not_dropped():
 def test_prompt_braces_cannot_corrupt_argv():
     argv = OPENCODE.build_command(prompt="use {model} literally", model="m1", workdir="/w")
     assert argv[2] == "use {model} literally" and argv[4] == "m1"
+
+
+def test_opencode_step_reports_cost():
+    p = Provider.from_dict("opencode", {
+        "bin": "opencode", "spawn": {},
+        "stream": {"format": "ndjson", "rules": [
+            {"match": {"type": "step_finish"}, "as": "step",
+             "fields": {"tokens": "part.tokens", "cost": "part.cost"}},
+        ]},
+    })
+    e = p.parse_line('{"type":"step_finish","part":{"tokens":{"total":100},"cost":0.00049685}}')
+    assert e.cost == 0.00049685 and e.tokens == {"total": 100}
+
+
+def test_delta_usage_is_summed_cumulative_is_maxed():
+    """Getting this backwards silently corrupts every number above it.
+
+    opencode emits per-step deltas; agy emits running totals. Summing a
+    cumulative reporter inflates it, and maxing a delta reporter undercounts
+    a multi-step run to the size of its largest single step.
+    """
+    steps = [{"total": 100, "cache": {"read": 10}}, {"total": 250, "cache": {"read": 20}}]
+
+    delta = {}
+    for s_ in steps:
+        delta = _merge_usage(delta, s_, "delta")
+    assert delta == {"total": 350, "cache": {"read": 30}}
+
+    cumulative = {}
+    for s_ in steps:
+        cumulative = _merge_usage(cumulative, s_, "cumulative")
+    assert cumulative == {"total": 250, "cache": {"read": 20}}
+
+
+def test_cost_is_never_merged_as_a_token_field():
+    # cost_usd is accumulated by the runner, not folded in by _merge_usage;
+    # letting it through would double-count it.
+    out = _merge_usage({"cost_usd": 0.5}, {"cost_usd": 0.9, "total": 10}, "delta")
+    assert out["cost_usd"] == 0.5 and out["total"] == 10
+
+
+def test_rollup_keeps_cost_fractional(tmp_path):
+    from multiagents.tree import Node
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    for i, cost in enumerate([0.000627, 0.0023]):
+        n = Node(id=f"ag-{i}", agent="a", provider="opencode", model="m", parent=None, depth=1)
+        n.usage = {"total": 1000, "cost_usd": cost}
+        tree.add(n)
+    rolled = tree.rollup_usage()
+    assert rolled["total"] == 2000              # tokens stay whole
+    assert rolled["cost_usd"] == 0.002927       # cost keeps its fraction
 
 
 def test_models_include_filters_by_namespace():

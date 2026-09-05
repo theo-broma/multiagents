@@ -163,10 +163,25 @@ honestly rather than inventing a number:
 - **agy** — has a full quota subsystem internally but exposes none of it. Spend
   only; exhaustion is detected reactively from a failed run.
 - **opencode** — a Go subscription is *detectable* (`auth.json`), but the CLI
-  exposes no quota surface even with one active: no subcommand, no new tables,
-  and `opencode stats` reports `$0.00` because subscription models are not
-  billed per token. Spend-only. What was checked and ruled out is recorded in
-  `budget.probe_opencode`.
+  exposes no headroom surface even with one active: no subcommand, no new
+  tables. It does report **real dollar cost per step** in its event stream,
+  which is accumulated per agent and matches the figures on the web console's
+  usage page — so cost is known exactly, capacity is not. What was checked and
+  ruled out for headroom is recorded in `budget.probe_opencode`.
+
+The web console's usage page (`opencode.ai/workspace/<id>/usage`) is behind
+OpenAuth and cannot be fetched with the stored API key, which is an inference
+credential for `zen/go/v1`. It is not needed: the same numbers arrive in the
+stream, and its Session column is the tail of the `sessionID` already recorded
+on each tree node, so rows can be matched back to individual agents by hand.
+
+Providers declare how their usage accumulates, because getting it wrong
+corrupts every number above it:
+
+| provider | `usage_mode` | meaning |
+|---|---|---|
+| opencode | `delta` | per-step amounts, summed |
+| agy | `cumulative` | running totals, taken at maximum |
 
 `known: false` means spend is tracked but capacity is not. Never read it as
 "plenty left". The purpose is *routing*: when your own five-hour bucket is
