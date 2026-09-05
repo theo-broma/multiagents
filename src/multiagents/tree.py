@@ -187,6 +187,12 @@ class Tree:
                 node["started_at"] = now()
             if status in TERMINAL:
                 node["ended_at"] = now()
+            else:
+                # Leaving a terminal state must clear it. steer() stops an agent
+                # (terminal: cancelled) and relaunches it, and without this the
+                # node's elapsed() stays frozen at the moment of the stop for the
+                # rest of its life. answer_question() uses the same path.
+                node["ended_at"] = None
         self.emit(agent_id, "status", status=status, reason=reason)
 
     def note_event(self, agent_id: str, steps: int | None = None,

@@ -25,7 +25,23 @@ def refresh_models(providers: dict[str, Provider], target: Path) -> dict[str, An
     problems: dict[str, str] = {}
 
     for name, provider in providers.items():
+        if not provider.enabled:
+            problems[name] = "disabled in providers.yaml"
+            continue
+
+        # A static list is the answer for a CLI with no way to enumerate its
+        # models — claude has no `models` subcommand. Previously such providers
+        # were skipped silently, before the PATH check, so claude never appeared
+        # in models.yaml and nothing ever said why.
+        if provider.models_static:
+            models[name] = [
+                m for m in provider.models_static
+                if isinstance(m, dict) and provider.allows_model(m.get("id", ""))
+            ]
+            continue
+
         if not provider.models_cmd:
+            problems[name] = "no models_cmd and no static models: list"
             continue
         if not provider.available():
             problems[name] = f"{provider.bin} not on PATH"

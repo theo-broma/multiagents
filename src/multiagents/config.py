@@ -120,6 +120,13 @@ def sync_layer(source: Path, target: Path, force: bool = False,
         if untouched or force:
             report["updated"].append(name)
             if not dry_run:
+                # Forcing over an EDITED file destroys work the user did by
+                # hand. Keep a copy — the first --force in this codebase silently
+                # reverted a project from the docker executor back to local.
+                if not untouched:
+                    backup = dst.with_suffix(dst.suffix + ".bak")
+                    shutil.copy2(dst, backup)
+                    report.setdefault("backed_up", []).append(str(backup))
                 shutil.copy2(src, dst)
                 manifest[name] = shipped
         else:
