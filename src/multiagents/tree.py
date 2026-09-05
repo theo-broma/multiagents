@@ -204,13 +204,21 @@ class Tree:
         self.emit(agent_id, "status", status=status, reason=reason)
 
     def note_event(self, agent_id: str, steps: int | None = None,
-                   usage: dict | None = None, session_id: str | None = None) -> None:
-        """Cheap hot-path update from the stream reader."""
+                   usage: dict | None = None, session_id: str | None = None,
+                   events: int = 1) -> None:
+        """Flush accumulated stream progress for one agent.
+
+        `events` is a batch count, not a single increment. Every call here
+        flocks, reads and rewrites the whole tree, so calling it per stream line
+        turned a 39-event run into 39 full rewrite cycles — and with several
+        agents streaming at once that is lock contention on the one file every
+        nested server shares. The reader batches; this writes the total.
+        """
         with self.transaction() as data:
             node = data["nodes"].get(agent_id)
             if node is None:
                 return
-            node["events"] = node.get("events", 0) + 1
+            node["events"] = node.get("events", 0) + events
             node["last_event_at"] = now()
             if steps is not None:
                 node["steps"] = steps

@@ -1447,3 +1447,68 @@ def test_docker_executor_can_stop_an_agent_it_did_not_spawn(tmp_path):
     ex = DockerExecutor({"image": "i"}, ProjectPaths(tmp_path), {}, tmp_path)
     assert hasattr(ex, "kill_detached")
     assert ex.kill_detached("ag-missing") is False      # no pid file, no crash
+
+
+# --------------------------------------------------------------------------
+# Write amplification and merge timing
+# --------------------------------------------------------------------------
+
+
+def test_stream_progress_is_batched_not_written_per_event():
+    """Every tree write flocks, reads and rewrites the whole file, which every
+    nested server shares. Writing per stream line made a 39-event run cause 39
+    full rewrite cycles."""
+    from multiagents.runner import _FlushGate
+
+    gate = _FlushGate(interval=2.0, now=0.0)
+    now, writes, accounted = 0.0, 0, 0
+    for _ in range(500):
+        now += 0.01                                  # 500 events over 5s
+        batch = gate.add(now=now)
+        if batch:
+            writes += 1
+            accounted += batch
+    accounted += gate.drain()
+    writes += 1                                      # the final drain
+
+    assert accounted == 500, "no event may be lost to batching"
+    assert writes <= 5, f"expected a handful of writes, got {writes}"
+
+
+def test_a_new_session_id_is_flushed_immediately():
+    """steer() and answer_question() cannot resume an agent without it, so it
+    must not sit in a buffer for up to the flush interval."""
+    from multiagents.runner import _FlushGate
+    gate = _FlushGate(interval=60.0, now=0.0)
+    assert gate.add(now=0.1) == 0                    # ordinary event: held
+    assert gate.add(urgent=True, now=0.2) == 2       # forces the batch out
+
+
+def test_merge_is_deferred_while_the_parent_is_still_working(tmp_path):
+    """Landing commits in a worktree an agent is using silently changes files it
+    has already read. gitops.merge's dirty-tree guard only catches uncommitted
+    work; a parent that happens to be clean gets its workspace altered mid-task."""
+    import asyncio
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path)
+    r.tree.add(Node(id="ag-parent", agent="a", provider="p", model="m",
+                    parent=None, depth=1, worktree=str(tmp_path),
+                    branch="agents/a/parent"))
+    r.tree.add(Node(id="ag-child", agent="b", provider="p", model="m",
+                    parent="ag-parent", depth=2, worktree=str(tmp_path),
+                    branch="agents/b/child"))
+    r.tree.set_status("ag-parent", "running")
+    r.tree.set_status("ag-child", "done")
+
+    merged = []
+    r.tree.emit = lambda aid, kind, **kw: merged.append((aid, kind))
+    asyncio.run(r._maybe_merge_into_parent("ag-child"))
+    assert ("ag-child", "merge_deferred") in merged, "must not merge into a live worktree"
+
+    # Once the parent stops, the deferred merge is picked up.
+    assert hasattr(r, "_merge_pending_children")
+    import inspect
+    body = inspect.getsource(r._consume)
+    assert body.index("_merge_pending_children") < body.index("_maybe_merge_into_parent(node_id)"), \
+        "children must merge before the parent is itself merged upward"
