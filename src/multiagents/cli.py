@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import auth as auth_mod
 from . import catalog as catalog_mod
 from . import gitops
 from .budget import read_all
@@ -256,6 +257,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if any(spec.executor for spec in config.agents.values()):
         print("    * pinned to an executor in agents.yaml, overriding the project default")
 
+    print("\nauth")
+    providers_map = load_providers(config.providers)
+    executor_for = _executor_for(paths, config, providers_map)
+    for name, state in sorted(auth_mod.check_all(
+            providers_map, executor_for, global_config_dir(),
+            paths.config if paths else None).items()):
+        mark = " " if state.ok else "!"
+        print(f"  {mark} {name:10} {state.status:18} {state.detail[:60]}")
+        if not state.ok:
+            problems += 1
+            if state.fix:
+                print(f"      fix: {state.fix}")
+
     print("\nbudget")
     for name, entry in read_all().items():
         data = entry.to_dict()
@@ -450,6 +464,82 @@ def _docker_executor(paths):
     )
 
 
+def _executor_for(paths, config, providers):
+    """An executor per provider, honouring any per-agent pin for that provider.
+
+    Auth differs by where the CLI runs: opencode keeps credentials on the host
+    even under docker, while agy needs a login inside the container.
+    """
+    from .executor import get_executor
+    from .paths import global_config_dir as _gcd
+
+    def build(provider_name: str):
+        kind = config.executor
+        for spec in config.agents.values():
+            if spec.provider == provider_name and spec.executor:
+                kind = spec.executor
+                break
+        return get_executor(
+            kind, config.project.get("executor", {}).get("docker", {}),
+            paths=paths, providers=providers, config_dir=_gcd(),
+        )
+    return build
+
+
+def _auth_scope(provider, executor) -> str:
+    """Where this provider's credentials actually live.
+
+    Not the same as where its agents run: opencode keeps credentials on the
+    host even under docker, because the container mounts its data directory
+    rather than masking it. Only a provider that declares
+    container_private_home authenticates inside the container.
+    """
+    if getattr(executor, "kind", "local") == "docker" and \
+       getattr(provider, "container_private_home", None):
+        return "container"
+    return "host"
+
+
+def cmd_auth(args: argparse.Namespace) -> int:
+    paths = _resolve(args.path) if find_project_root() else None
+    config = load_config(paths)
+    providers = load_providers(config.providers)
+    project_config = paths.config if paths else None
+    executor_for = _executor_for(paths, config, providers)
+
+    if args.action == "login":
+        name = args.provider
+        provider = providers.get(name)
+        if provider is None:
+            print(f"unknown provider {name!r}; known: {sorted(providers)}", file=sys.stderr)
+            return 2
+        built = auth_mod.login_command(
+            name, provider, executor_for(name), global_config_dir(), project_config)
+        if built is None:
+            print(f"no auth script for {name!r}. Add one to "
+                  f"{global_config_dir()}/auth/{name}.sh — see auth/README.md.",
+                  file=sys.stderr)
+            return 2
+        argv, env = built
+        sys.stdout.flush()
+        os.execvpe(argv[0], argv, env)
+
+    states = auth_mod.check_all(providers, executor_for, global_config_dir(), project_config)
+    broken = 0
+    for name, state in sorted(states.items()):
+        where = _auth_scope(providers[name], executor_for(name))
+        mark = "ok " if state.ok else ("!! " if state.status == "not_authenticated" else "?  ")
+        print(f"  {mark}{name:10} [{where:9}] {state.detail}")
+        if not state.ok:
+            broken += 1
+            if state.fix:
+                print(f"      fix: {state.fix}")
+    print()
+    print("all providers authenticated" if not broken
+          else f"{broken} provider(s) need attention")
+    return 1 if broken else 0
+
+
 def cmd_docker(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     ex = _docker_executor(paths)
@@ -619,6 +709,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tree", action="store_true", help="prune finished nodes that hold no branch")
     p.add_argument("--force", action="store_true", help="delete even with unmerged commits")
     p.set_defaults(func=cmd_clean)
+
+    p = sub.add_parser("auth", help="check or repair provider authentication")
+    p.add_argument("action", nargs="?", default="status", choices=["status", "login"])
+    p.add_argument("provider", nargs="?", default="", help="provider to log in")
+    p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("docker", help="manage the project's agent container")
     p.add_argument("action",

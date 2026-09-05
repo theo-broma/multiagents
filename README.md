@@ -108,6 +108,67 @@ Conversational agents sit in an `idle` state between turns — not active (so
 they do not count against the concurrency limit), not terminal (so their
 session stays resumable and their worktree survives).
 
+## Authentication
+
+Every CLI reports "not authenticated" differently and is repaired differently.
+One command covers all of them:
+
+```
+$ multiagents auth
+  ok agy        [container] container token present (…/antigravity-oauth-token)
+  ok claude     [host     ] logged in as you@example.com
+  ok opencode   [host     ] 1 stored credential(s)
+
+all providers authenticated
+```
+
+When something is broken it says so and how to fix it:
+
+```
+  !! agy        [container] no container token; agy has not been logged in inside the container
+      fix: multiagents auth login agy
+```
+
+The scope column matters: it is **where the credentials live**, not where the
+agents run. opencode keeps its credentials on the host even under docker,
+because the container mounts its data directory; only a provider declaring
+`container_private_home` authenticates inside the container.
+
+`multiagents auth login <provider>` hands the terminal to that provider's login
+script, which prints what you need to do before doing it.
+
+### Adding a provider
+
+A provider supplies one script implementing a two-action contract, so nothing
+above it needs to know which CLI it is:
+
+```
+<provider>.sh check     non-interactive, fast
+                        exit 0  = authenticated
+                        exit 10 = NOT authenticated
+                        exit *  = unknown
+                        stdout  = one line of status
+
+<provider>.sh login     may be interactive and take the terminal
+                        print what the user must do BEFORE doing it
+```
+
+Scripts live in `config/auth/`, resolved project-first then global then shipped,
+and receive their situation through the environment (`MULTIAGENTS_EXECUTOR`,
+`MULTIAGENTS_CONTAINER`, `MULTIAGENTS_PRIVATE_BACKING`, …). See
+`auth/README.md`. `check` should not cost money — prefer inspecting stored
+credentials over probing the API.
+
+Authentication is also checked by `multiagents doctor`, exposed to the
+orchestrator as the `auth_status` MCP tool, and — importantly — recognised in
+agent output. An unauthenticated provider returns an empty response that is
+otherwise indistinguishable from a model that simply said nothing, so a run
+that fails that way is marked `unauthenticated` with the fix command in its
+reason rather than being reported as a mysterious empty result.
+
+Repairing auth is deliberately **not** an MCP tool: it may need a human at a
+terminal, so the orchestrator reports the command and you run it.
+
 ## Model catalog drift
 
 `agents.yaml` pins specific model ids, and the ground underneath them moves. A

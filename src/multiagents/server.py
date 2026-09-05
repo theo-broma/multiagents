@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
 
 from . import __version__
+from . import auth as auth_mod
 from . import budget as budget_mod
 from . import catalog as catalog_mod
 from . import gitops
@@ -261,6 +262,35 @@ async def stop_agent(agent_id: str) -> dict:
 # --------------------------------------------------------------------------
 # Model catalog — is the ground under the roster still where we left it?
 # --------------------------------------------------------------------------
+
+
+@mcp.tool()
+def auth_status() -> dict:
+    """Check whether each provider CLI is authenticated.
+
+    Every provider is checked the same way, through its own script, so the
+    answer and the fix have the same shape whichever CLI is broken. An agent
+    run against an unauthenticated provider fails with an empty response that
+    looks like a model saying nothing, so check here before concluding an agent
+    is broken.
+
+    Repairing authentication may need a human at a terminal, so it is not
+    exposed as a tool: report the `fix` command to the user and let them run it.
+    """
+    run = runner()
+    states = auth_mod.check_all(
+        run.providers, lambda name: run.executor(), global_config_dir(),
+        run.paths.config,
+    )
+    out = {name: state.to_dict() for name, state in states.items()}
+    broken = [n for n, s_ in states.items() if not s_.ok]
+    return _ok({
+        "providers": out,
+        "all_authenticated": not broken,
+        "needs_attention": broken,
+        "note": ("run the `fix` command in a terminal; it may require a browser"
+                 if broken else "all providers authenticated"),
+    })
 
 
 @mcp.tool()
