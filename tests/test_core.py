@@ -1240,3 +1240,104 @@ def test_render_labels_a_parked_agent_distinctly(tmp_path):
     rendered = tree.render()
     assert "awaiting you" in rendered
     assert "multiagents ask" in rendered
+
+
+# --------------------------------------------------------------------------
+# Phase 6: lifecycle commands and the initializer
+# --------------------------------------------------------------------------
+
+
+def _shipped_agents():
+    import yaml
+    from multiagents.paths import shipped_defaults_dir
+    return yaml.safe_load((shipped_defaults_dir() / "agents.yaml").read_text())["agents"]
+
+
+def test_both_launched_roles_ship_and_are_distinguishable():
+    """Orchestrator and initializer are both launched rather than spawned, so
+    `launch: true` alone cannot tell the commands which to start."""
+    from multiagents.paths import shipped_defaults_dir
+    agents = _shipped_agents()
+    assert agents["orchestrator"]["role"] == "orchestrator"
+    assert agents["initializer"]["role"] == "initializer"
+    for name in ("orchestrator", "initializer"):
+        assert agents[name]["launch"] is True
+        assert (shipped_defaults_dir() / "agents" / f"{name}.md").is_file()
+
+
+def test_launched_spec_selects_by_role():
+    import multiagents.cli as cli
+    from multiagents.config import Config
+    config = Config(
+        project={}, providers={}, models={}, instruction_dirs=[],
+        agents={
+            "orchestrator": AgentSpec("orchestrator", "claude", "sonnet",
+                                      launch=True, role="orchestrator"),
+            "initializer": AgentSpec("initializer", "claude", "sonnet",
+                                     launch=True, role="initializer"),
+            "researcher": AgentSpec("researcher", "opencode", "m"),
+        },
+    )
+    assert cli._launched_spec(config, "orchestrator").name == "orchestrator"
+    assert cli._launched_spec(config, "initializer").name == "initializer"
+    assert cli._launched_spec(config, "nobody") is None
+
+
+def test_a_roleless_launch_entry_still_orchestrates():
+    """A config written before roles existed must keep working."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+    config = Config(project={}, providers={}, models={}, instruction_dirs=[],
+                    agents={"boss": AgentSpec("boss", "claude", "sonnet", launch=True)})
+    assert cli._launched_spec(config, "orchestrator").name == "boss"
+    assert cli._launched_spec(config, "initializer") is None
+
+
+def test_neither_launched_role_can_be_spawned(tmp_path):
+    """Both are launched as MCP clients; spawning either is nonsense."""
+    import asyncio
+    for role in ("orchestrator", "initializer"):
+        spec = AgentSpec(role, "claude", "sonnet", launch=True, role=role)
+        r = _runner(tmp_path, {role: spec})
+        with pytest.raises(PermissionError):
+            asyncio.run(r.start(role, "go"))
+
+
+def test_gemini_ships_disabled_rather_than_deleted():
+    """deep_merge only adds and overrides, never deletes, so removing the entry
+    would leave it in place for anyone who already has it — and they would see
+    both `gemini` and `advisor`."""
+    agents = _shipped_agents()
+    assert "advisor" in agents
+    assert agents.get("gemini", {}).get("disabled") is True
+
+
+def test_disabled_agents_are_not_loaded(tmp_path):
+    from multiagents.config import load
+    from multiagents.paths import ProjectPaths
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    (paths.config / "agents.yaml").write_text(
+        "agents:\n  live: {provider: p, model: m}\n"
+        "  dead: {provider: p, model: m, disabled: true}\n")
+    config = load(paths)
+    assert "live" in config.agents and "dead" not in config.agents
+
+
+def test_the_initializer_may_not_publish(tmp_path, monkeypatch):
+    """Nothing leaves the machine while the project is still being shaped."""
+    import multiagents.server as srv
+    monkeypatch.setattr(srv, "runner", lambda: _runner(tmp_path))
+    monkeypatch.delenv("MULTIAGENTS_AGENT_ID", raising=False)
+    monkeypatch.setenv("MULTIAGENTS_ROLE", "initializer")
+    denied = srv._root_only("push_branch", initializer_too=True)
+    assert denied and "initialisation" in denied
+    # ...but it is otherwise a root client, so it can manage agents.
+    assert srv._root_only("refresh_model_list") is None
+
+
+def test_agents_are_told_about_the_brief_and_context():
+    """BRIEF.md and context/ only reach an agent if it knows to read them."""
+    from multiagents.runner import PREAMBLE
+    assert "BRIEF.md" in PREAMBLE and "context/" in PREAMBLE
+    assert "do not edit them" in PREAMBLE.lower()
