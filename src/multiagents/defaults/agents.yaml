@@ -20,7 +20,7 @@ agents:
 
   researcher:
     provider: opencode
-    model: deepinfra/zai-org/GLM-4.7-Flash
+    model: opencode-go/glm-5.3-flash
     instructions: researcher.md
     description: Reads the codebase and answers questions. No writes.
     writes: false
@@ -31,7 +31,7 @@ agents:
 
   implementer:
     provider: opencode
-    model: deepinfra/zai-org/GLM-5.3
+    model: opencode-go/kimi-k2.7-code
     instructions: implementer.md
     description: Writes code on its own branch. The workhorse.
     writes: true

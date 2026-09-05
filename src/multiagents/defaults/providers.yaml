@@ -39,6 +39,16 @@ providers:
         variant: ["--variant", "{variant}"]
     models_cmd: ["opencode", "models"]
     models_parse: lines
+    # Which model namespaces `refresh-models` records as available.
+    #   opencode/*     free zen tier, unmetered
+    #   opencode-go/*  the Go subscription
+    # deepinfra/* is deliberately excluded: those bill against a separate
+    # DEEPINFRA_API_KEY rather than the subscription, so listing them would
+    # invite agents onto an account you are not intending to spend from.
+    # Add "deepinfra/*" here if you ever want them back.
+    models_include:
+      - "opencode/*"
+      - "opencode-go/*"
     home_links:
       - ".local/share/opencode"
       - ".config/opencode"

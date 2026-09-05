@@ -74,6 +74,38 @@ def test_prompt_braces_cannot_corrupt_argv():
     assert argv[2] == "use {model} literally" and argv[4] == "m1"
 
 
+def test_models_include_filters_by_namespace():
+    """The generated list must cover the subscription, not a separate account.
+
+    `opencode models` lists deepinfra/* alongside the subscription's own
+    models; those bill against a different key, so an agent routed onto one
+    spends from an account the user did not intend.
+    """
+    p = Provider.from_dict("opencode", {
+        "bin": "opencode", "spawn": {}, "stream": {},
+        "models_include": ["opencode/*", "opencode-go/*"],
+    })
+    out = [m["id"] for m in p.parse_models(
+        "opencode/big-pickle\nopencode-go/glm-5.3-flash\n"
+        "deepinfra/zai-org/GLM-5.3\ndeepinfra/Qwen/Qwen3.8-Max\n"
+    )]
+    assert out == ["opencode/big-pickle", "opencode-go/glm-5.3-flash"]
+
+
+def test_models_exclude_beats_include():
+    p = Provider.from_dict("x", {
+        "bin": "x", "spawn": {}, "stream": {},
+        "models_include": ["a/*"], "models_exclude": ["a/bad-*"],
+    })
+    assert p.allows_model("a/good-1") and not p.allows_model("a/bad-1")
+    assert not p.allows_model("b/other")
+
+
+def test_no_include_list_allows_everything():
+    p = Provider.from_dict("x", {"bin": "x", "spawn": {}, "stream": {}})
+    assert p.allows_model("anything/at-all")
+
+
 def test_doom_loop_detects_identical_repeats():
     sup = Supervisor(loop_repeats=3)
     same = '{"type":"tool_use","part":{"tool":"edit","state":{"input":{"file":"a.py"}}}}'
