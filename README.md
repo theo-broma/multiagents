@@ -196,23 +196,75 @@ Likewise, the local executor gives you git isolation and credential separation,
 but **not process isolation**. An agent running with skip-permissions can reach
 anything your user account can. That is what the docker executor is for.
 
-## Roadmap: the docker executor
+## The docker executor
 
-`executor.kind: docker` is stubbed with its constraints documented in
-`executor/docker.py`. It is one config line away once implemented, because
-everything above the executor is identical either way. The constraints, all
-established by inspecting this machine:
+`executor.kind: docker` runs agents inside one long-lived container per project.
+Build it once, then switch:
 
-- **Never mount the docker socket** — Docker here is rootful and the user is in
-  the `docker` group, so socket access is host root.
-- **Mount paths must match the host exactly** — a linked worktree's `.git` file
-  stores an absolute path to the main repository, and vice versa.
-- **A container protects the host from the agent, not your tokens from the
-  agent.** The control that helps is egress allowlisting through a CONNECT
-  proxy, so a token an agent can read is one it cannot post anywhere.
-- **Mount the CLIs, don't bake them in** — they self-update on the host.
+```bash
+multiagents docker build     # workspace + egress proxy images
+multiagents docker up
+multiagents docker status    # image, container, network, every mount
+multiagents docker check     # proves the egress boundary
+multiagents docker shell     # get in and look around
+```
 
-## Budget
+The local executor gives git isolation and credential separation but **not
+process isolation** — an agent with skip-permissions can reach anything your
+user account can. The container closes that, and adds `--cpus`/`--memory`/
+`--pids-limit`, which are the only hard cap on runaway recursion.
+
+**Verified, not assumed.** An agent running inside reports the container
+hostname, uid 1000, writes files owned `1000:1000` on the host, and commits on
+its own branch. `~/.claude.json` and `~/.ssh` are not visible in the container
+at all — better isolation than local mode, where they are merely not linked.
+
+### Egress
+
+Agents sit on an `--internal` Docker network with **no route off the host** and
+reach the world only through an allowlisting proxy that is also attached to the
+bridge. This is a real boundary, not an environment-variable suggestion:
+
+```
+$ docker exec -e HTTPS_PROXY= <container> curl https://example.com/
+curl: (6) Could not resolve host: example.com
+$ docker exec <container> ip route show default
+(nothing)
+```
+
+Unsetting the proxy variables does not help; there is nowhere to go. `docker
+check` proves both directions — an allowlisted host reaches, a denied one does
+not. Filter patterns are anchored, so `example.com` permits `api.example.com`
+but not `evil-example.com`.
+
+The socket is never mounted. Setting `mount_docker_socket: true` is *refused* by
+preflight rather than honoured: with rootful Docker and a user in the `docker`
+group, that is host root.
+
+### Mixed execution
+
+An agent can pin its own backend with `executor:` in `agents.yaml`, overriding
+the project default:
+
+```yaml
+  reviewer:
+    provider: agy
+    executor: local
+```
+
+This exists because **agy does not currently work under docker**. Its on-disk
+OAuth token (`~/.gemini/oauth_creds.json`) is expired, and whatever it actually
+authenticates with does not survive into a container — it falls back to an
+interactive login and times out. Tested with the host `HOME`, matching
+`machine-id` and hostname, and the D-Bus session bus all mounted; none helped.
+opencode containerises fine, so the shipped roster runs opencode agents in the
+container and agy agents on the host. `multiagents doctor` marks pinned agents
+with `*`.
+
+If you get agy authenticating inside a container, remove the pin — nothing else
+needs to change.
+
+## Budget## Budget
 
 Three providers sit at three tiers of knowability, and the adapter reports that
 honestly rather than inventing a number:

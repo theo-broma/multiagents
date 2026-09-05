@@ -329,3 +329,81 @@ def test_snapshot_round_trips(tmp_path):
     loaded = catalog.load_local(tmp_path, "opencode-go")
     assert loaded["data"] == data and loaded["provider"] == "opencode-go"
     assert catalog.diff(loaded, data) == []
+
+
+# --------------------------------------------------------------------------
+# Docker executor — pure logic, no daemon required
+# --------------------------------------------------------------------------
+
+
+def _docker(tmp_path, **overrides):
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+    config = {"image": "img", "network": "bridge", "cpus": "2",
+              "memory": "4g", "pids_limit": 512, **overrides}
+    return DockerExecutor(config, ProjectPaths(tmp_path), {}, tmp_path)
+
+
+def test_docker_refuses_to_mount_the_socket(tmp_path):
+    """Rootful docker + the docker group means the socket is host root.
+    Setting this must be refused, not honoured."""
+    ex = _docker(tmp_path, mount_docker_socket=True)
+    assert any("socket" in p for p in ex.preflight())
+    assert not any("docker.sock" in str(a) for a in ex.run_args())
+
+
+def test_docker_mounts_every_path_at_its_own_location(tmp_path):
+    """A linked worktree's .git stores an ABSOLUTE path to the repository and
+    the repository stores one back. Remapping either breaks git."""
+    ex = _docker(tmp_path)
+    binds = [a for a in ex.run_args() if ":" in a and a.startswith("/")]
+    assert binds, "expected bind mounts"
+    for bind in binds:
+        parts = bind.split(":")
+        assert parts[0] == parts[1], f"{bind} is remapped; must be host:host"
+
+
+def test_docker_runs_as_the_invoking_user(tmp_path):
+    import os
+    argv = _docker(tmp_path).run_args()
+    assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+
+
+def test_docker_applies_resource_ceilings(tmp_path):
+    argv = _docker(tmp_path).run_args()
+    for flag, value in (("--cpus", "2"), ("--memory", "4g"), ("--pids-limit", "512")):
+        assert argv[argv.index(flag) + 1] == value
+
+
+def test_allowlist_mode_isolates_the_network_and_sets_the_proxy(tmp_path):
+    ex = _docker(tmp_path, network="allowlist")
+    argv = ex.run_args()
+    assert argv[argv.index("--network") + 1] == ex.network
+    assert any(a.startswith("HTTPS_PROXY=") for a in argv)
+
+
+def test_bridge_and_none_modes_set_no_proxy(tmp_path):
+    for mode in ("bridge", "none"):
+        argv = _docker(tmp_path, network=mode).run_args()
+        assert not any("HTTPS_PROXY=" in a for a in argv)
+
+
+def test_proxy_filter_anchors_hosts(tmp_path):
+    """`example.com` must permit api.example.com but not evil-example.com."""
+    import re
+    ex = _docker(tmp_path, network="allowlist", egress_allowlist=["example.com"])
+    ex.write_proxy_config(tmp_path / "proxy")
+    pattern = (tmp_path / "proxy" / "filter").read_text().strip()
+    assert re.search(pattern, "example.com")
+    assert re.search(pattern, "api.example.com")
+    assert not re.search(pattern, "evil-example.com")
+    assert not re.search(pattern, "example.com.attacker.net")
+
+
+def test_per_agent_executor_override():
+    """A CLI whose credentials do not survive containerisation has to run on
+    the host without dragging every other agent back with it."""
+    pinned = AgentSpec("reviewer", "agy", "m", executor="local")
+    default = AgentSpec("researcher", "opencode", "m")
+    assert pinned.executor == "local"
+    assert default.executor == ""      # falls back to the project setting

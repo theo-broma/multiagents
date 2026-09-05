@@ -152,7 +152,8 @@ def build_env(
     return env
 
 
-def prepare_home(home: Path, links: list[str], policy: str = "per-agent") -> Path | None:
+def prepare_home(home: Path, links: list[str], policy: str = "per-agent",
+                 agent: str = "agent") -> Path | None:
     """Build a private HOME containing only this provider's own state.
 
     Each entry in ``links`` is a path relative to the real home which is
@@ -187,4 +188,17 @@ def prepare_home(home: Path, links: list[str], policy: str = "per-agent") -> Pat
 
     for sub in (".config", ".local/share", ".cache"):
         (home / sub).mkdir(parents=True, exist_ok=True)
+
+    # A private HOME means no ~/.gitconfig, and agents are expected to commit.
+    # Without this the first thing every agent does is stop and configure git,
+    # which wastes a turn and produces commits attributed to nobody.
+    gitconfig = home / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text(
+            "[user]\n"
+            f"\tname = {agent} (multiagents)\n"
+            f"\temail = {agent}@multiagents.local\n"
+            "[commit]\n\tgpgsign = false\n"
+            "[advice]\n\tdetachedHead = false\n"
+        )
     return home

@@ -52,6 +52,12 @@ agents:
     can_spawn: false
     timeout: 900
     silence_timeout: 180
+    # Pinned to the host: agy's credentials do not survive containerisation.
+    # Its on-disk OAuth token is stale and whatever it actually authenticates
+    # with is not reachable from inside a container — it falls back to an
+    # interactive login and times out. Verified with the host HOME, matching
+    # machine-id and hostname, and the D-Bus session bus all mounted.
+    executor: local
 
   tester:
     provider: agy
@@ -64,6 +70,12 @@ agents:
     can_spawn: false
     timeout: 1200
     silence_timeout: 180
+    # Pinned to the host: agy's credentials do not survive containerisation.
+    # Its on-disk OAuth token is stale and whatever it actually authenticates
+    # with is not reachable from inside a container — it falls back to an
+    # interactive login and times out. Verified with the host HOME, matching
+    # machine-id and hostname, and the D-Bus session bus all mounted.
+    executor: local
 
   # A standing advisor rather than a task runner. Talked to with consult(),
   # which blocks for a reply and keeps context between calls, so the

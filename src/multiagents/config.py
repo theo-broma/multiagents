@@ -105,6 +105,7 @@ class AgentSpec:
     max_steps: int = 120
     writes: bool = True               # False -> branch dropped if it stays empty
     conversational: bool = False      # talked to via consult(), keeps context
+    executor: str = ""                # "" = project default; else local | docker
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod

@@ -11,29 +11,46 @@ executor:
   kind: local
 
   docker:
-    # Phase 2. Kept here so the shape is visible while `local` is in use.
+    # One long-lived container per project; agents enter it with `docker exec`.
+    # Build with `multiagents docker build`, then switch kind to `docker`.
     image: multiagents/workspace:latest
+    proxy_image: multiagents/proxy:latest
+
+    # Resource ceilings. These are the hard cap on runaway recursion that the
+    # local executor cannot give you.
     cpus: "2"
     memory: "4g"
     pids_limit: 512
-    # Agent CLIs are bind-mounted read-only from the host rather than baked
-    # into the image, so they update on the host as they do today.
+
+    # Agent CLIs and their credential directories are bind-mounted from the
+    # host rather than baked into the image, so they keep self-updating on the
+    # host. The list of credential paths comes from each provider's home_links
+    # in providers.yaml, so it cannot drift from what a per-agent HOME expects.
     mount_cli_from_host: true
-    # The repo and the worktree root MUST be mounted at their exact host paths:
-    # a linked worktree's .git file stores an ABSOLUTE path back to the main
-    # repository, and the main repo stores an absolute path back to it.
-    preserve_host_paths: true
-    # Containers get no direct route out; egress goes through an allowlisting
-    # CONNECT proxy on the host, so a credential an agent can read is still a
-    # credential it cannot post anywhere.
-    proxy: "http://127.0.0.1:3128"
+
+    # Anything else agents need visible. Mounted at the identical host path.
+    extra_mounts: []
+    #  - path: ~/.cache/uv
+    #  - path: /opt/toolchain
+    #    read_only: true
+
+    # allowlist  agents sit on an internal network with NO route out and reach
+    #            the world only through a filtering proxy — so a credential an
+    #            agent can read is one it still cannot post anywhere
+    # bridge     ordinary docker networking, unrestricted egress
+    # none       no network at all
+    network: allowlist
     egress_allowlist:
-      - api.anthropic.com
-      - api.deepinfra.com
+      - opencode.ai
       - api.opencode.ai
-      - cloudcode-pa.googleapis.com
-    # Never mount the docker socket. On rootful Docker that is host root, and
-    # an agent holding it can trivially escape the container.
+      - models.opencode.ai
+      - api.anthropic.com
+      - googleapis.com
+      - google.com
+
+    # Never enabled. Docker here is rootful and the user is in the `docker`
+    # group, so the socket is host root — an agent holding it escapes the
+    # container in one command. Setting this true is refused, not honoured.
     mount_docker_socket: false
 
 # --------------------------------------------------------------------------

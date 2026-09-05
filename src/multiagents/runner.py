@@ -31,7 +31,7 @@ from . import gitops
 from .config import AgentSpec, Config
 from .executor import build_env, get_executor, prepare_home
 from .executor.base import Handle
-from .paths import ProjectPaths
+from .paths import ProjectPaths, global_config_dir
 from .providers import Event, Provider, load_providers
 from .redact import scrub
 from .supervisor import Supervisor, looks_like_quota_failure
@@ -88,6 +88,22 @@ class Runner:
         self.providers = load_providers(config.providers)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.runs: dict[str, Run] = {}
+
+    def executor(self, spec: AgentSpec | None = None):
+        """The execution backend for an agent, with the context docker needs.
+
+        An agent may pin its own executor. That is not a stylistic choice: a CLI
+        whose credentials do not survive containerisation has to run on the
+        host, and forcing the whole project back to `local` for its sake would
+        give up isolation for every other agent.
+        """
+        return get_executor(
+            (spec.executor if spec and spec.executor else self.config.executor),
+            self.config.project.get("executor", {}).get("docker", {}),
+            paths=self.paths,
+            providers=self.providers,
+            config_dir=global_config_dir(),
+        )
 
     # ------------------------------------------------------------- identity --
 
@@ -198,7 +214,8 @@ class Runner:
         """
         home = None
         if self.config.home_policy == "per-agent":
-            home = prepare_home(self.paths.home(node_id), provider.home_links, "per-agent")
+            home = prepare_home(self.paths.home(node_id), provider.home_links,
+                                "per-agent", agent=spec.name)
         env = build_env(
             passthrough=self.config.env_passthrough,
             blocked=self.config.env_block,
@@ -231,10 +248,7 @@ class Runner:
             "permission": spec.permission, "resumed": bool(session_id),
         }), indent=2))
 
-        executor = get_executor(
-            self.config.executor,
-            self.config.project.get("executor", {}).get("docker", {}),
-        )
+        executor = self.executor(spec)
         problems = executor.preflight()
         if problems:
             raise RuntimeError("; ".join(problems))

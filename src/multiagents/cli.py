@@ -243,7 +243,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, spec in sorted(config.agents.items()):
         provider = providers.get(spec.provider)
         mark = " " if provider and provider.available() else "!"
-        print(f"  {mark} {name:12} {spec.provider}/{spec.model}")
+        where = spec.executor or config.executor
+        tag = f"[{where}]" + ("*" if spec.executor else "")
+        print(f"  {mark} {name:12} {spec.provider}/{spec.model:34} {tag}")
         instructions = config.instructions_for(spec)
         if spec.instructions and not instructions.strip():
             print(f"    missing instructions file: {spec.instructions}")
@@ -251,6 +253,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     for warning in validate_agent_models(config):
         print(f"    {warning}")
+    if any(spec.executor for spec in config.agents.values()):
+        print("    * pinned to an executor in agents.yaml, overriding the project default")
 
     print("\nbudget")
     for name, entry in read_all().items():
@@ -420,6 +424,92 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return 0 if _report_catalog(config, args.provider) == 0 else 0
 
 
+def _docker_executor(paths):
+    from .executor.docker import DockerExecutor
+    config = load_config(paths)
+    return DockerExecutor(
+        config.project.get("executor", {}).get("docker", {}),
+        paths,
+        load_providers(config.providers),
+        global_config_dir(),
+    )
+
+
+def cmd_docker(args: argparse.Namespace) -> int:
+    paths = _resolve(args.path)
+    ex = _docker_executor(paths)
+
+    if args.action == "build":
+        source = global_config_dir() / "docker"
+        if not source.is_dir():
+            shutil.copytree(Path(__file__).parent / "defaults" / "docker", source)
+        for dockerfile, tag in (("Dockerfile", ex.image), ("Dockerfile.proxy", ex.proxy_image)):
+            if dockerfile == "Dockerfile.proxy" and ex.network_mode != "allowlist":
+                continue
+            print(f"building {tag} from {source / dockerfile} ...")
+            result = ex.build_image(source / dockerfile, tag)
+            if not result["ok"]:
+                print(result.get("output") or result.get("error"), file=sys.stderr)
+                return 1
+            print(f"  ok  {tag}")
+        return 0
+
+    if args.action == "up":
+        result = ex.ensure_running()
+        print(result if not result.get("ok") else
+              f"{result['container']} running ({ex.network_mode} networking)")
+        return 0 if result.get("ok") else 1
+
+    if args.action in ("down", "rm"):
+        print(ex.stop(remove=args.action == "rm"))
+        return 0
+
+    if args.action == "shell":
+        os.execvp("docker", ["docker", "exec", "-it",
+                             "--user", f"{os.getuid()}:{os.getgid()}",
+                             "--workdir", str(paths.root), ex.container, "bash"])
+
+    if args.action == "status":
+        print(f"image        {ex.image}  {'built' if ex.image_exists(ex.image) else 'MISSING'}")
+        if ex.network_mode == "allowlist":
+            built = 'built' if ex.image_exists(ex.proxy_image) else 'MISSING'
+            print(f"proxy image  {ex.proxy_image}  {built}")
+            print(f"proxy        {ex.proxy_container}  {ex.container_state(ex.proxy_container)}")
+            print(f"network      {ex.network} (internal)")
+        print(f"container    {ex.container}  {ex.container_state(ex.container)}")
+        print(f"networking   {ex.network_mode}")
+        print(f"resources    cpus={ex.config.get('cpus','-')} "
+              f"memory={ex.config.get('memory','-')} pids={ex.config.get('pids_limit','-')}")
+        print("mounts:")
+        for path, read_only in ex.mounts():
+            print(f"  {'ro' if read_only else 'rw'}  {path}")
+        problems = ex.preflight()
+        print("\n" + ("ready" if not problems else "\n".join(problems)))
+        return 1 if problems else 0
+
+    if args.action == "check":
+        # Prove the boundary rather than assuming it: one allowed host should
+        # resolve, one denied host should not.
+        state = ex.ensure_running()
+        if not state.get("ok"):
+            print(state.get("error"), file=sys.stderr)
+            return 1
+        allowed = (ex.config.get("egress_allowlist") or ["opencode.ai"])[0]
+        for host, expect in ((allowed, "allow"), ("example.com", "deny")):
+            probe = subprocess.run(
+                ["docker", "exec", ex.container, "curl", "-sS", "-o", "/dev/null",
+                 "-m", "20", "-w", "%{http_code}", f"https://{host}/"],
+                capture_output=True, text=True, timeout=60,
+            )
+            code = probe.stdout.strip() or "-"
+            reached = probe.returncode == 0 and code not in ("", "-", "000", "403")
+            verdict = "OK" if (reached == (expect == "allow")) else "UNEXPECTED"
+            print(f"  {expect:5} {host:24} http={code:4} reached={reached}  {verdict}")
+        return 0
+
+    return 2
+
+
 def cmd_mcp_config(args: argparse.Namespace) -> int:
     path = _write_mcp_config()
     print(path)
@@ -473,6 +563,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--homes", action="store_true", help="delete per-agent HOME directories")
     p.add_argument("--force", action="store_true", help="delete even with unmerged commits")
     p.set_defaults(func=cmd_clean)
+
+    p = sub.add_parser("docker", help="manage the project's agent container")
+    p.add_argument("action", choices=["build", "up", "down", "rm", "status", "shell", "check"])
+    p.set_defaults(func=cmd_docker)
 
     p = sub.add_parser("catalog", help="compare the local model catalog against the live one")
     p.add_argument("--provider", default="opencode-go")
