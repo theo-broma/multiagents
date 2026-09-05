@@ -504,13 +504,19 @@ def cmd_docker(args: argparse.Namespace) -> int:
         print("Complete the login it offers, then quit the CLI (ctrl-c or /quit).\n")
         # execvp replaces this process; anything still buffered would be lost.
         sys.stdout.flush()
+        # Use the absolute binary path rather than the bare name: the CLIs are
+        # bind-mounted at their host paths, which are not on the container
+        # image's PATH. Forward the host PATH too, so anything the CLI shells
+        # out to during login resolves as it would on the host.
+        binary = provider.available() or provider.bin
         os.execvp("docker", [
             "docker", "exec", "-it",
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--workdir", str(paths.root),
             "--env", f"HOME={Path.home()}",
+            "--env", f"PATH={os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
             "--env", "TERM=xterm-256color",
-            ex.container, provider.bin,
+            ex.container, binary,
         ])
 
     if args.action == "shell":
