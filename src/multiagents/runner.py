@@ -79,6 +79,7 @@ class Run:
     events: list[dict] = field(default_factory=list)
     text_parts: list[str] = field(default_factory=list)
     final_status: str = ""
+    stop_requested: bool = False      # distinguishes an explicit stop from teardown
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -412,7 +413,15 @@ class Runner:
             code = await handle.wait()
         except asyncio.CancelledError:
             await handle.stop()
-            self.tree.set_status(node_id, "cancelled", "cancelled by parent")
+            # Both an explicit stop_agent() and the event loop shutting down
+            # arrive here as a CancelledError, but they mean different things
+            # and only one of them is anybody's decision. Recording both as
+            # "cancelled by parent" makes a session ending look like a
+            # deliberate kill, which is genuinely misleading when reading back
+            # a log later.
+            reason = ("stopped by parent" if run.stop_requested
+                      else "interrupted: the server exited while this agent was running")
+            self.tree.set_status(node_id, "cancelled", reason)
             raise
         except Exception as exc:
             self.tree.set_status(node_id, "failed", f"{type(exc).__name__}: {exc}")
@@ -638,6 +647,8 @@ class Runner:
 
     async def stop(self, agent_id: str) -> dict[str, Any]:
         run = self.runs.get(agent_id)
+        if run is not None:
+            run.stop_requested = True     # recorded before the cancel lands
         if run and run.task and not run.task.done():
             run.task.cancel()
             try:

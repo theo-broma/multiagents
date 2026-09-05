@@ -560,3 +560,19 @@ def test_shipped_scripts_exist_and_implement_the_contract():
         body = script.read_text()
         assert "check)" in body and "login)" in body, provider
         assert "exit 10" in body, f"{provider} must be able to report NOT authenticated"
+
+
+def test_cancellation_reasons_are_distinguished():
+    """An explicit stop and the server exiting both surface as CancelledError,
+    but recording both as "cancelled by parent" makes a session ending look
+    like a deliberate kill. That cost real debugging time once."""
+    import inspect
+    from multiagents import runner as runner_mod
+    body = inspect.getsource(runner_mod.Runner._consume)
+    assert "stop_requested" in body
+    assert "stopped by parent" in body
+    assert "interrupted" in body
+
+    stop_body = inspect.getsource(runner_mod.Runner.stop)
+    # The flag must be set BEFORE the task is cancelled, or the handler races.
+    assert stop_body.index("stop_requested") < stop_body.index("task.cancel()")
