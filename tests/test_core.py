@@ -5,6 +5,7 @@ without tests it would ship unverified. Redaction matters for the same reason �
 it only proves itself on the day something secret reaches a log.
 """
 
+import json
 import sys, time
 from pathlib import Path
 
@@ -647,3 +648,160 @@ def test_dry_run_changes_nothing(tmp_path):
     report = sync_layer(source, target, dry_run=True, scope="global")
     assert report["added"] == ["project.yaml"]
     assert not (target / "project.yaml").exists()
+
+
+# --------------------------------------------------------------------------
+# Phase 1: rule engine, provider schema
+# --------------------------------------------------------------------------
+
+# The real shape captured from `claude -p --output-format stream-json --verbose`.
+CLAUDE_ASSISTANT = {
+    "type": "assistant", "session_id": "e3082172",
+    "message": {"content": [
+        {"type": "thinking", "thinking": "considering"},
+        {"type": "text", "text": "PROBE-OK"},
+    ]},
+}
+
+
+def test_get_path_selects_from_a_list_by_field():
+    """Claude nests its reply in message.content[] as typed blocks. Without a
+    list selector its text cannot be addressed at all, so it could not be a
+    provider."""
+    from multiagents.providers import get_path
+    assert get_path(CLAUDE_ASSISTANT, "message.content[type=text].text") == "PROBE-OK"
+    assert get_path(CLAUDE_ASSISTANT, "message.content[type=thinking].thinking") == "considering"
+    assert get_path(CLAUDE_ASSISTANT, "message.content[type=image].url") is None
+    assert get_path(CLAUDE_ASSISTANT, "session_id") == "e3082172"
+
+
+def test_get_path_supports_numeric_indexes():
+    from multiagents.providers import get_path
+    assert get_path(CLAUDE_ASSISTANT, "message.content.1.text") == "PROBE-OK"
+    assert get_path(CLAUDE_ASSISTANT, "message.content.9.text") is None
+    assert get_path({"a": [1, 2]}, "a.0.b") is None      # scalar, not a dict
+
+
+def test_a_rule_can_now_parse_a_real_claude_event():
+    p = Provider.from_dict("claude", {
+        "bin": "claude", "spawn": {},
+        "stream": {"format": "ndjson", "session_id_paths": ["session_id"], "rules": [
+            {"match": {"type": "assistant"}, "as": "text",
+             "fields": {"text": "message.content[type=text].text"}},
+        ]},
+    })
+    e = p.parse_line(json.dumps(CLAUDE_ASSISTANT))
+    assert e.kind == "text" and e.text == "PROBE-OK" and e.session_id == "e3082172"
+
+
+def test_enabled_is_intent_and_availability_is_detected():
+    """A stored availability flag goes stale and lies; only intent is stored."""
+    off = Provider.from_dict("x", {"bin": "definitely-not-installed", "enabled": False})
+    assert off.enabled is False and off.usable() is False
+    on = Provider.from_dict("y", {"bin": "definitely-not-installed"})
+    assert on.enabled is True                    # default
+    assert on.usable() is False                  # but not available
+
+
+def test_static_model_list_is_used_and_filtered(tmp_path):
+    """claude has no `models` subcommand, so its list must be static — and it
+    was previously skipped SILENTLY, before the PATH check."""
+    from multiagents.models import refresh_models
+    p = Provider.from_dict("claude", {
+        "bin": "claude", "spawn": {}, "stream": {},
+        "models": [{"id": "sonnet"}, {"id": "opus"}, {"id": "internal-x"}],
+        "models_exclude": ["internal-*"],
+    })
+    out = refresh_models({"claude": p}, tmp_path / "models.yaml")
+    assert out["counts"]["claude"] == 2
+    assert "claude" not in out["problems"]
+
+
+def test_a_provider_with_no_way_to_list_models_is_reported_not_swallowed(tmp_path):
+    from multiagents.models import refresh_models
+    p = Provider.from_dict("mute", {"bin": "mute", "spawn": {}, "stream": {}})
+    out = refresh_models({"mute": p}, tmp_path / "models.yaml")
+    assert "mute" in out["problems"]
+
+
+def test_script_name_defaults_and_honours_legacy_auth_block():
+    assert Provider.from_dict("agy", {"bin": "agy"}).script_name == "agy.sh"
+    legacy = Provider.from_dict("agy", {"bin": "agy", "auth": {"script": "custom.sh"}})
+    assert legacy.script_name == "custom.sh"
+
+
+def test_force_upgrade_keeps_a_backup_of_edited_files(tmp_path):
+    """--force over an edited file destroyed real config once: a project
+    silently reverted from the docker executor to local, unrecoverably."""
+    from multiagents.config import sync_layer
+    source, target = tmp_path / "s", tmp_path / "t"
+    (source / "agents").mkdir(parents=True)
+    (source / "project.yaml").write_text("kind: local\n")
+    target.mkdir()
+    sync_layer(source, target, scope="global")
+
+    (target / "project.yaml").write_text("kind: docker\n")     # the user's edit
+    (source / "project.yaml").write_text("kind: local\nnew: 1\n")
+
+    report = sync_layer(source, target, force=True, scope="global")
+    assert report["backed_up"], "forcing over an edit must leave a .bak"
+    assert (target / "project.yaml.bak").read_text() == "kind: docker\n"
+
+
+def test_leaving_a_terminal_state_clears_ended_at(tmp_path):
+    """steer() stops an agent (terminal) then relaunches it. Without clearing
+    ended_at, Node.elapsed() stays frozen at the moment of the stop forever —
+    and answer_question() will use exactly the same path."""
+    from multiagents.tree import Node
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    tree.add(Node(id="ag-1", agent="a", provider="p", model="m", parent=None, depth=1))
+    tree.set_status("ag-1", "running")
+    tree.set_status("ag-1", "cancelled", "stopped by parent")
+    assert tree.get("ag-1").ended_at is not None
+    tree.set_status("ag-1", "running", "steered")
+    assert tree.get("ag-1").ended_at is None
+
+    before = tree.get("ag-1").elapsed()
+    time.sleep(0.3)
+    assert tree.get("ag-1").elapsed() > before, "elapsed must advance again"
+
+
+def test_docker_agent_is_launched_so_it_can_be_stopped(tmp_path):
+    """Killing the `docker exec` CLIENT does not stop the process inside the
+    container — verified against a real container: the command kept running.
+    So the agent must record its container-side pid for stop() to signal."""
+    from multiagents.executor.docker import DockerExecutor, DockerHandle
+    from multiagents.paths import ProjectPaths
+    import asyncio
+
+    ex = DockerExecutor({"image": "img", "network": "bridge"},
+                        ProjectPaths(tmp_path), {}, tmp_path)
+
+    captured = {}
+
+    class _Proc:
+        pid = 1234
+        returncode = 0
+        stdout = stderr = None
+
+    async def fake_exec(*command, **kwargs):
+        captured["command"] = list(command)
+        return _Proc()
+
+    async def run_it():
+        real = asyncio.create_subprocess_exec
+        asyncio.create_subprocess_exec = fake_exec
+        try:
+            ex.ensure_running = lambda: {"ok": True}
+            return await ex.start(["opencode", "run", "hi"], tmp_path,
+                                  {"MULTIAGENTS_AGENT_ID": "ag-9"})
+        finally:
+            asyncio.create_subprocess_exec = real
+
+    handle = asyncio.run(run_it())
+    assert isinstance(handle, DockerHandle)
+    joined = " ".join(captured["command"])
+    assert "container.pid" in joined, "must record the container-side pid"
+    assert 'exec "$@"' in joined, "must exec so the recorded pid IS the agent"
+    assert captured["command"][-3:] == ["opencode", "run", "hi"]
+    assert handle.container == ex.container

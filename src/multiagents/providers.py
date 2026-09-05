@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -24,10 +25,50 @@ from typing import Any, Iterable
 TEXT, TOOL, STEP, RESULT, RAW, ERROR = "text", "tool", "step", "result", "raw", "error"
 
 
+_SELECTOR = re.compile(r"^([A-Za-z0-9_-]+)\[([A-Za-z0-9_-]+)=([^\]]+)\]$")
+
+
 def get_path(obj: Any, path: str) -> Any:
-    """Look up ``a.b.c`` in nested dicts. Missing anywhere yields ``None``."""
+    """Look up a dotted path, with list support. Missing anywhere yields ``None``.
+
+    Three segment forms, because providers nest their payloads differently:
+
+    ``a.b.c``
+        plain dict keys.
+    ``a.items.0.name``
+        a numeric segment indexes a list.
+    ``message.content[type=text].text``
+        picks the first element of a list whose field equals a value. Claude
+        emits ``message.content`` as a list of typed blocks — ``thinking`` and
+        ``text`` interleaved — so without this its reply cannot be addressed at
+        all. First match rather than all matches: each event carries one block
+        of a kind, and successive events accumulate anyway.
+    """
     cursor = obj
     for part in path.split("."):
+        if isinstance(cursor, list):
+            if part.isdigit() and int(part) < len(cursor):
+                cursor = cursor[int(part)]
+                continue
+            return None
+
+        selector = _SELECTOR.match(part)
+        if selector is not None:
+            key, field, wanted = selector.groups()
+            if not isinstance(cursor, dict):
+                return None
+            candidates = cursor.get(key)
+            if not isinstance(candidates, list):
+                return None
+            cursor = next(
+                (c for c in candidates
+                 if isinstance(c, dict) and str(c.get(field)) == wanted),
+                None,
+            )
+            if cursor is None:
+                return None
+            continue
+
         if not isinstance(cursor, dict) or part not in cursor:
             return None
         cursor = cursor[part]
@@ -72,8 +113,15 @@ class Provider:
     usage_mode: str = "cumulative"       # cumulative | delta
     models_include: list[str] = field(default_factory=list)
     models_exclude: list[str] = field(default_factory=list)
+    models_static: list[dict[str, str]] = field(default_factory=list)
     home_links: list[str] = field(default_factory=list)
     container_private_home: list[str] = field(default_factory=list)
+    # One script per provider, carrying every action this CLI needs described
+    # imperatively: check, login, budget, prepare, launch. Defaults to
+    # "<name>.sh". Keeping it to a single file is the point — adding a provider
+    # is a config block plus one script, not a scatter of hooks.
+    script: str = ""
+    enabled: bool = True
     auth: dict[str, Any] = field(default_factory=dict)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -90,8 +138,11 @@ class Provider:
             usage_mode=data.get("usage_mode", "cumulative"),
             models_include=list(data.get("models_include", []) or []),
             models_exclude=list(data.get("models_exclude", []) or []),
+            models_static=list(data.get("models", []) or []),
             home_links=list(data.get("home_links", []) or []),
             container_private_home=list(data.get("container_private_home", []) or []),
+            script=data.get("script", "") or (data.get("auth", {}) or {}).get("script", ""),
+            enabled=bool(data.get("enabled", True)),
             auth=data.get("auth", {}) or {},
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
@@ -100,8 +151,21 @@ class Provider:
     # ------------------------------------------------------------- command --
 
     def available(self) -> str | None:
-        """Absolute path to the binary, or None if it is not on PATH."""
+        """Absolute path to the binary, or None if it is not on PATH.
+
+        Note this is *detected*, never configured. `enabled` records intent;
+        availability is a fact, and a stored fact goes stale and lies.
+        """
         return shutil.which(self.bin)
+
+    @property
+    def script_name(self) -> str:
+        """The provider's script filename."""
+        return self.script or f"{self.name}.sh"
+
+    def usable(self) -> bool:
+        """Enabled by the user AND actually present on this machine."""
+        return self.enabled and self.available() is not None
 
     def build_command(
         self,

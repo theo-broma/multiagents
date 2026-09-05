@@ -43,6 +43,42 @@ from typing import Any
 from ..paths import ProjectPaths, state_root
 from .base import Executor, Handle
 
+
+class DockerHandle(Handle):
+    """A ``docker exec`` client, plus the ability to stop what it started.
+
+    Killing the client does NOT stop the process inside the container — verified:
+    the exec'd command keeps running, keeps spending tokens, and its output goes
+    nowhere. So the agent is launched through a shell that records its own pid to
+    a file on a bind-mounted path, and stopping means signalling that pid from
+    inside the container before killing the local client.
+    """
+
+    def __init__(self, pid: int, proc, container: str, pid_file: Path):
+        super().__init__(pid=pid, _proc=proc)
+        self.container = container
+        self.pid_file = pid_file
+
+    def _container_pid(self) -> str | None:
+        try:
+            value = self.pid_file.read_text().strip()
+        except OSError:
+            return None
+        return value if value.isdigit() else None
+
+    async def stop(self, grace: float = 10.0) -> None:
+        target = self._container_pid()
+        if target:
+            # TERM the agent and its children, then KILL anything left.
+            _run(["docker", "exec", self.container, "sh", "-c",
+                  f"kill -TERM {target} 2>/dev/null; pkill -TERM -P {target} 2>/dev/null; true"],
+                 timeout=30)
+            await asyncio.sleep(min(grace, 5.0))
+            _run(["docker", "exec", self.container, "sh", "-c",
+                  f"kill -KILL {target} 2>/dev/null; pkill -KILL -P {target} 2>/dev/null; true"],
+                 timeout=30)
+        await super().stop(grace=grace)
+
 PROXY_PORT = 8888
 
 
@@ -380,7 +416,13 @@ class DockerExecutor(Executor):
             for key, value in env.items():
                 command += ["--env", f"{key}={value}"]
         command.append(self.container)
-        command += argv
+
+        # Record the agent's container-side pid so it can actually be stopped.
+        # `exec "$@"` replaces the shell, so $$ is the agent's own pid.
+        pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
+                    if self.paths is not None else Path("/tmp")) / "container.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        command += ["sh", "-c", f'echo $$ > "{pid_file}"; exec "$@"', "--", *argv]
 
         proc = await asyncio.create_subprocess_exec(
             *command,
@@ -389,4 +431,4 @@ class DockerExecutor(Executor):
             stdin=asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
-        return Handle(pid=proc.pid, _proc=proc)
+        return DockerHandle(proc.pid, proc, self.container, pid_file)

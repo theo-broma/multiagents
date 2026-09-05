@@ -234,8 +234,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("providers")
     for name, provider in sorted(providers.items()):
         path = provider.available()
+        state = "" if provider.enabled else "  [disabled in providers.yaml]"
         if path:
-            print(f"  {name:12} {path}")
+            print(f"  {name:12} {path}{state}")
+        elif not provider.enabled:
+            # Disabled and absent is not a problem worth flagging — the user
+            # said they do not want it.
+            print(f"  {name:12} not installed{state}")
         else:
             print(f"  {name:12} NOT FOUND ({provider.bin} is not on PATH)")
             problems += 1
@@ -514,6 +519,8 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     targets = [("global", shipped_defaults_dir(), global_config_dir(), "global")]
     if paths is not None:
         targets.append(("project", global_config_dir(), paths.config, "project"))
+    if args.layer != "both":
+        targets = [t for t in targets if t[0] == args.layer]
 
     stale = 0
     for label, source, target, scope in targets:
@@ -527,6 +534,8 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
         for name in report["customised"]:
             stale += 1
             print(f"  keep    {name}   (you edited it; shipped version has changed)")
+        for path in report.get("backed_up", []):
+            print(f"  backup  {path}")
         if not any(report.values()):
             print("  up to date")
     if stale:
@@ -749,7 +758,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("upgrade-config",
                        help="refresh config copies that were never edited")
     p.add_argument("--dry-run", action="store_true", help="show what would change")
-    p.add_argument("--force", action="store_true", help="overwrite edited files too")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite edited files too (a .bak is kept)")
+    p.add_argument("--layer", choices=["global", "project", "both"], default="both",
+                   help="limit to one config layer (default: both)")
     p.set_defaults(func=cmd_upgrade_config)
 
     p = sub.add_parser("auth", help="check or repair provider authentication")

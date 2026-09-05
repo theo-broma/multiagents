@@ -163,6 +163,11 @@ class Runner:
         provider = self.providers.get(spec.provider)
         if provider is None:
             raise KeyError(f"Agent {spec.name!r} names unknown provider {spec.provider!r}")
+        if not provider.enabled:
+            raise PermissionError(
+                f"Provider {provider.name!r} is disabled in providers.yaml "
+                f"(needed by agent {spec.name!r}). Set `enabled: true` to use it."
+            )
         if not provider.available():
             raise FileNotFoundError(f"{provider.bin!r} is not on PATH (needed by agent {spec.name!r})")
 
