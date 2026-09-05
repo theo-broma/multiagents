@@ -23,13 +23,17 @@ you/master  ← explicit merge_agent() gate
 uv sync
 multiagents init         # create the project, copy the global config
 multiagents init-agent   # shape it with the initializer — resumable, takes as long as it takes
-multiagents build        # container environment, if executor.kind is docker
+multiagents build        # container environment, then authenticate every provider
 multiagents run          # launch the orchestrator; first run and resume are the same command
 ```
 
+`run` continues the last session where there is one and starts fresh where there
+is not, so it is the same command either way. `--fresh` forces a new session,
+and `resume` is an alias for `run`. The same applies to `init-agent`.
+
 `init` copies the global defaults into `.multiagents/config/` for editing,
-generates `models.yaml` from the installed CLIs, records a model-catalog
-baseline, and scaffolds `context/`.
+generates `models.yaml` from the installed CLIs, records the first model-catalog
+snapshot, and scaffolds `context/`.
 
 `build` prepares everything agents need: the container images and container if
 you are on the docker executor, then **authentication for every enabled
@@ -38,11 +42,12 @@ after the container deliberately, since a provider whose credentials live inside
 it cannot be checked until it exists.
 
 `init-agent` launches the **initializer**: an agent that shapes the project with
-you before anything is built. It also establishes the model-catalog baseline — a setup concern, done once, rather than something every orchestrator session
-re-checks. It reads the repository, forms a view, puts specific questions rather
-than interrogating you, consults the critic and advisor, and writes `BRIEF.md`
-and `context/`. That stage is expected to take several sessions — re-running the
-command resumes it.
+you before anything is built. It reads the repository, forms a view, puts
+specific questions rather than interrogating you, consults the critic and
+advisor, and writes `BRIEF.md` and `context/`. It also reviews the model catalog
+against that first snapshot, so a roster that has already drifted is caught
+before the project is planned around it. Expect several sessions — re-running
+the command resumes it.
 
 Between `init-agent` and `build`, edit `.multiagents/config/agents.yaml` however
 you like. The initializer leaves roster suggestions as a proposal under
@@ -511,13 +516,41 @@ it.
 "plenty left". The purpose is *routing*: when your own five-hour bucket is
 tight, delegating to an unrationed provider is the highest-value move available.
 
+## Housekeeping
+
+```bash
+multiagents doctor              # CLIs, agents, auth, budget, git — start here when something is off
+multiagents tree                # what ran, what it cost, what is parked
+multiagents watch               # tail every state transition, live
+multiagents clean --branches    # drop finished agents' branches and worktrees
+multiagents clean --tree        # prune finished nodes that hold no branch
+multiagents upgrade-config      # refresh config copies you never edited
+multiagents mcp-config          # print the MCP registration, for adding it elsewhere
+```
+
+`clean` refuses to delete a branch with unmerged commits unless you pass
+`--force`; work an agent actually did should not vanish by accident.
+
+`upgrade-config` deserves a word. Your config is *copied* into the global and
+project layers so you can edit it — but a pinned copy overrides the shipped file
+for every key, so improvements to the defaults would otherwise never reach an
+existing install. A manifest records each file's hash as written, so a copy that
+still matches was demonstrably never touched and is refreshed; one you edited is
+kept and reported. `--force` overwrites edited files too, keeping a `.bak`.
+
+```
+$ multiagents upgrade-config --dry-run
+  would refresh providers.yaml   (unmodified copy)
+  keep    agents.yaml            (you edited it; shipped version has changed)
+```
+
 ## Tests
 
 ```bash
 uv run --with pytest pytest tests/ -q
 ```
 
-94 tests covering the parts live runs do not reliably exercise: doom-loop
+96 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
