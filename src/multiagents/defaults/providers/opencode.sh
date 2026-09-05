@@ -28,5 +28,13 @@ login)
     echo
     exec "$BIN" providers login
     ;;
-*)  echo "usage: $0 check|login" >&2; exit 64 ;;
+budget)
+    # opencode exposes no headroom surface even with an active Go subscription:
+    # no subcommand, no local state, and `stats` reports $0.00 because
+    # subscription models are not billed per token. Spend is tracked from the
+    # event stream instead.
+    printf '{"known": false, "note": "no quota surface; spend tracked from the stream"}\n'
+    exit 0
+    ;;
+*)  echo "usage: $0 check|login|budget" >&2; exit 64 ;;
 esac

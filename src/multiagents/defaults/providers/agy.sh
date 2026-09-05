@@ -70,5 +70,13 @@ login)
     echo
     exec "$BIN"
     ;;
-*)  echo "usage: $0 check|login" >&2; exit 64 ;;
+budget)
+    # agy has a full quota subsystem internally (quota_manager.go,
+    # RetrieveUserQuotaSummary, refreshed every few minutes per its logs) but
+    # exposes none of it — no subcommand, no cached file. Exhaustion is detected
+    # reactively from a failed run.
+    printf '{"known": false, "note": "CLI exposes no quota surface; exhaustion detected from failed runs"}\n'
+    exit 0
+    ;;
+*)  echo "usage: $0 check|login|budget" >&2; exit 64 ;;
 esac

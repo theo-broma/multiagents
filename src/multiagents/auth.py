@@ -10,30 +10,19 @@ classifier — treats them identically.
 Adding a provider therefore stays what it should be: a block in
 ``providers.yaml`` plus a script beside it.
 
-**The contract** — ``auth/<provider>.sh <action>``:
-
-``check``
-    Non-interactive and fast. Exit ``0`` authenticated, ``10`` not
-    authenticated, anything else unknown. One line of human-readable status on
-    stdout.
-
-``login``
-    May be interactive and may take over the terminal. Print what the user has
-    to do before doing it. Exit ``0`` on success.
-
-Both receive the situation through the environment: ``MULTIAGENTS_PROVIDER``,
-``MULTIAGENTS_BIN``, ``MULTIAGENTS_EXECUTOR`` (local or docker),
-``MULTIAGENTS_CONTAINER``, ``MULTIAGENTS_PRIVATE_HOME``, ``MULTIAGENTS_PROJECT``
-and ``MULTIAGENTS_UID`` / ``MULTIAGENTS_GID``.
+This module owns only the auth-specific parts — the ``check`` and ``login``
+actions, the exit-code mapping, and recognising an auth failure in an agent's
+output. The script contract itself, shared with budget and orchestration, lives
+in :mod:`multiagents.scripts`.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import scripts as _scripts
 
 AUTHENTICATED = 0
 NOT_AUTHENTICATED = 10
@@ -61,73 +50,33 @@ class AuthState:
         return out
 
 
-def script_dirs(config_dir: Path, project_config: Path | None) -> list[Path]:
-    """Project scripts win over global ones, which win over the shipped ones."""
-    dirs = [Path(__file__).parent / "defaults" / "auth", config_dir / "auth"]
-    if project_config is not None:
-        dirs.append(project_config / "auth")
-    return dirs
-
-
-def find_script(name: str, config_dir: Path, project_config: Path | None) -> Path | None:
-    for base in reversed(script_dirs(config_dir, project_config)):
-        candidate = base / name
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def build_env(provider_name: str, provider: Any, executor: Any) -> dict[str, str]:
-    env = dict(os.environ)
-    binary = getattr(provider, "available", lambda: None)() or getattr(provider, "bin", "")
-    env.update({
-        "MULTIAGENTS_PROVIDER": provider_name,
-        "MULTIAGENTS_BIN": str(binary or ""),
-        "MULTIAGENTS_EXECUTOR": getattr(executor, "kind", "local"),
-        "MULTIAGENTS_UID": str(os.getuid()),
-        "MULTIAGENTS_GID": str(os.getgid()),
-    })
-    if getattr(executor, "kind", "local") == "docker":
-        env["MULTIAGENTS_CONTAINER"] = executor.container
-        private = executor.private_state()
-        # The path the CLI will see as its home-relative state, and where that
-        # actually lives on the host — a login script needs both.
-        for container_path, host_path in private.items():
-            env["MULTIAGENTS_PRIVATE_HOME"] = str(container_path)
-            env["MULTIAGENTS_PRIVATE_BACKING"] = str(host_path)
-            break
-    return env
+# Plumbing lives in scripts.py; this module keeps only what is auth-specific.
+script_dirs = _scripts.script_dirs
+find_script = _scripts.find_script
+build_env = _scripts.build_env
 
 
 def check(provider_name: str, provider: Any, executor: Any,
           config_dir: Path, project_config: Path | None = None) -> AuthState:
     """Run a provider's `check` action. Never raises."""
-    spec = (getattr(provider, "auth", None) or {})
-    name = spec.get("script") or f"{provider_name}.sh"
-    script = find_script(name, config_dir, project_config)
+    script = _scripts.resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return AuthState(provider_name, "no_script",
-                         detail=f"no auth script {name!r} found", script=name)
+                         detail=f"no script for provider {provider_name!r}",
+                         script=getattr(provider, "script_name", ""))
 
-    try:
-        result = subprocess.run(
-            ["sh", str(script), "check"],
-            capture_output=True, text=True, timeout=CHECK_TIMEOUT,
-            env=build_env(provider_name, provider, executor),
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return AuthState(provider_name, "unknown", detail=f"{type(exc).__name__}: {exc}",
-                         script=str(script))
-
-    detail = (result.stdout.strip() or result.stderr.strip()).splitlines()
+    code, out, err = _scripts.run_action(
+        provider_name, provider, executor, "check", config_dir, project_config,
+        timeout=CHECK_TIMEOUT,
+    )
+    detail = (out.strip() or err.strip()).splitlines()
     line = detail[-1][:300] if detail else ""
     fix = f"multiagents auth login {provider_name}"
-    if result.returncode == AUTHENTICATED:
+    if code == AUTHENTICATED:
         return AuthState(provider_name, "authenticated", line, str(script))
-    if result.returncode == NOT_AUTHENTICATED:
+    if code == NOT_AUTHENTICATED:
         return AuthState(provider_name, "not_authenticated", line, str(script), fix)
-    return AuthState(provider_name, "unknown", line or f"exit {result.returncode}",
-                     str(script), fix)
+    return AuthState(provider_name, "unknown", line or f"exit {code}", str(script), fix)
 
 
 def check_all(providers: dict[str, Any], executor_for: Any,
@@ -143,14 +92,10 @@ def login_command(provider_name: str, provider: Any, executor: Any,
     """(argv, env) for the login action, or None if there is no script.
 
     Returned rather than run, because login may need the terminal and the
-    caller should hand it over with execvp rather than capture it.
+    caller should hand it over with execvpe rather than capture it.
     """
-    spec = (getattr(provider, "auth", None) or {})
-    name = spec.get("script") or f"{provider_name}.sh"
-    script = find_script(name, config_dir, project_config)
-    if script is None:
-        return None
-    return ["sh", str(script), "login"], build_env(provider_name, provider, executor)
+    return _scripts.exec_action(provider_name, provider, executor, "login",
+                                config_dir, project_config)
 
 
 # --------------------------------------------------------------------------

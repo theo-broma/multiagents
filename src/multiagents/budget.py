@@ -253,19 +253,117 @@ def read_agy(spent: dict[str, int] | None = None) -> Budget:
 # --------------------------------------------------------------------------
 
 
-_READERS = {"claude": read_claude, "opencode": read_opencode, "agy": read_agy}
+# Built-in readers, used only when a provider's script does not implement the
+# `budget` action. Claude's quota lives in an undocumented internal cache with
+# several bucket shapes, staleness to account for and an overage block; parsing
+# that defensively in shell would be worse code in two places. A provider with
+# no built-in and no script action is simply reported as unknown — which is the
+# honest answer, and is what a newly added provider gets until it implements it.
+_BUILTIN = {"claude": read_claude, "opencode": read_opencode, "agy": read_agy}
+
+# Budget is consulted on every spawn for routing. Without a cache that means
+# three subprocesses per agent start, on the event loop.
+_CACHE_TTL = 60.0
+_cache: dict[str, tuple[float, Budget]] = {}
 
 
-def read_all(spend_by_provider: dict[str, dict[str, int]] | None = None,
-             cooldowns: dict[str, dict] | None = None) -> dict[str, Budget]:
-    spend_by_provider = spend_by_provider or {}
+def invalidate_cache() -> None:
+    _cache.clear()
+
+
+def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
+                 project_config: Path | None) -> Budget | None:
+    """Ask the provider's script. None means "it did not answer"."""
+    from . import scripts as _scripts
+
+    code, out, err = _scripts.run_action(
+        name, provider, executor, "budget", config_dir, project_config, timeout=10,
+    )
+    if code == _scripts.UNIMPLEMENTED or code == 127:
+        return None                       # unimplemented, or no script at all
+    if code != 0:
+        return Budget(provider=name, known=False, source="script",
+                      note=(err or out).strip()[:200] or f"budget action exit {code}")
+    try:
+        data = json.loads(out.strip() or "{}")
+    except json.JSONDecodeError:
+        return Budget(provider=name, known=False, source="script",
+                      note="budget action did not print valid JSON")
+    if not isinstance(data, dict):
+        return Budget(provider=name, known=False, source="script",
+                      note="budget action printed a non-object")
+    return Budget(
+        provider=name,
+        known=bool(data.get("known", False)),
+        headroom=data.get("headroom"),
+        severity=str(data.get("severity") or ("normal" if data.get("known") else "unknown")),
+        resets_at=data.get("resets_at"),
+        source="script",
+        note=str(data.get("note") or ""),
+    )
+
+
+def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
+                  project_config: Path | None = None,
+                  spent: dict[str, int] | None = None,
+                  use_cache: bool = True) -> Budget:
+    now_ = time.time()
+    if use_cache:
+        cached = _cache.get(name)
+        if cached and now_ - cached[0] < _CACHE_TTL:
+            budget = cached[1]
+            budget.spent = spent or budget.spent
+            return budget
+    try:
+        budget = _from_script(name, provider, executor, config_dir, project_config)
+        if budget is None:
+            builtin = _BUILTIN.get(name)
+            budget = builtin() if builtin is read_claude else (
+                builtin(spent) if builtin else
+                Budget(provider=name, known=False, source="none",
+                       note="no budget action and no built-in reader")
+            )
+    except Exception as exc:              # telemetry must never break a run
+        budget = Budget(provider=name, known=False,
+                        note=f"{type(exc).__name__}: {exc}")
+    if spent:
+        budget.spent = {**budget.spent, **spent}
+    _cache[name] = (now_, budget)
+    return budget
+
+
+def read_all(providers: dict[str, Any] | None = None,
+             executor_for: Any = None,
+             config_dir: Path | None = None,
+             project_config: Path | None = None,
+             spend_by_provider: dict[str, dict[str, int]] | None = None,
+             cooldowns: dict[str, dict] | None = None,
+             use_cache: bool = True) -> dict[str, Budget]:
+    """Read every provider's budget, driven by the loaded providers map.
+
+    Previously a hardcoded three-name table that never consulted the providers
+    at all, so a newly added provider could never appear and a non-claude
+    orchestrator's quota could never be read.
+    """
+    from .paths import global_config_dir
+
     cooldowns = cooldowns or {}
+    spend_by_provider = spend_by_provider or {}
+    config_dir = config_dir or global_config_dir()
+
+    if providers is None:                  # legacy call sites: built-ins only
+        providers = {name: None for name in _BUILTIN}
+
+    class _NullExecutor:
+        kind = "local"
+
     out: dict[str, Budget] = {}
-    for name, reader in _READERS.items():
-        try:
-            budget = reader(spend_by_provider.get(name)) if name != "claude" else reader()
-        except Exception as exc:            # never let telemetry break a run
-            budget = Budget(provider=name, known=False, note=f"{type(exc).__name__}: {exc}")
+    for name, provider in providers.items():
+        if provider is not None and not getattr(provider, "enabled", True):
+            continue
+        executor = executor_for(name) if callable(executor_for) else _NullExecutor()
+        budget = read_provider(name, provider, executor, config_dir, project_config,
+                               spend_by_provider.get(name), use_cache)
         entry = cooldowns.get(name)
         if entry and entry.get("until", 0) > time.time():
             budget.cooldown_until = entry["until"]
