@@ -576,3 +576,74 @@ def test_cancellation_reasons_are_distinguished():
     stop_body = inspect.getsource(runner_mod.Runner.stop)
     # The flag must be set BEFORE the task is cancelled, or the handler races.
     assert stop_body.index("stop_requested") < stop_body.index("task.cancel()")
+
+
+# --------------------------------------------------------------------------
+# Config layer syncing
+# --------------------------------------------------------------------------
+
+
+def test_untouched_copies_refresh_but_edited_ones_are_kept(tmp_path):
+    """A pinned copy overrides the shipped file for every key, so an install
+    silently never receives improvements unless untouched copies are refreshed.
+    Edited copies must survive, or the pinning was pointless."""
+    from multiagents.config import sync_layer
+
+    source, target = tmp_path / "shipped", tmp_path / "layer"
+    (source / "agents").mkdir(parents=True)
+    (source / "auth").mkdir(parents=True)
+    (source / "project.yaml").write_text("v: 1\n")
+    (source / "agents.yaml").write_text("agents: {}\n")
+    (source / "agents" / "a.md").write_text("first\n")
+    (source / "auth" / "x.sh").write_text("#!/bin/sh\nexit 0\n")
+    target.mkdir()
+
+    first = sync_layer(source, target, scope="global")
+    assert "project.yaml" in first["added"] and "auth/x.sh" in first["added"]
+
+    # Ship a new version of both; edit only one of the local copies.
+    (source / "project.yaml").write_text("v: 2\n")
+    (source / "agents.yaml").write_text("agents: {new: {}}\n")
+    (target / "agents.yaml").write_text("agents: {mine: {}}\n")
+
+    second = sync_layer(source, target, scope="global")
+    assert second["updated"] == ["project.yaml"]
+    assert second["customised"] == ["agents.yaml"]
+    assert (target / "project.yaml").read_text() == "v: 2\n"
+    assert (target / "agents.yaml").read_text() == "agents: {mine: {}}\n"
+
+    forced = sync_layer(source, target, force=True, scope="global")
+    assert "agents.yaml" in forced["updated"]
+
+
+def test_project_layer_does_not_pin_machine_level_files(tmp_path):
+    """Auth scripts and the orchestrator prompt are machine-level. A stale
+    per-project copy would be a liability; they resolve globally instead."""
+    from multiagents.config import layer_files
+
+    source = tmp_path / "s"
+    (source / "agents").mkdir(parents=True)
+    (source / "auth").mkdir(parents=True)
+    for name in ("project.yaml", "providers.yaml", "agents.yaml",
+                 "models.yaml", "orchestrator.md"):
+        (source / name).write_text("x")
+    (source / "agents" / "a.md").write_text("x")
+    (source / "auth" / "a.sh").write_text("x")
+
+    glob_names = layer_files(source, "global")
+    proj_names = layer_files(source, "project")
+    assert "auth/a.sh" in glob_names and "orchestrator.md" in glob_names
+    assert not any(n.startswith("auth/") for n in proj_names)
+    assert "orchestrator.md" not in proj_names
+    assert "agents/a.md" in proj_names and "project.yaml" in proj_names
+
+
+def test_dry_run_changes_nothing(tmp_path):
+    from multiagents.config import sync_layer
+    source, target = tmp_path / "s", tmp_path / "t"
+    (source / "agents").mkdir(parents=True)
+    (source / "project.yaml").write_text("v: 1\n")
+    target.mkdir()
+    report = sync_layer(source, target, dry_run=True, scope="global")
+    assert report["added"] == ["project.yaml"]
+    assert not (target / "project.yaml").exists()
