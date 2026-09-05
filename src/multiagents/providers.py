@@ -45,6 +45,7 @@ class Event:
     state: str = ""                      # tool/step outcome, provider-specific
     status: str = ""                     # final run status
     tokens: dict[str, Any] = field(default_factory=dict)
+    cost: float = 0.0                    # dollars for this step, if reported
     step: int | None = None
     session_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
@@ -68,6 +69,7 @@ class Provider:
     stream: dict[str, Any]
     models_cmd: list[str] = field(default_factory=list)
     models_parse: str = "lines"
+    usage_mode: str = "cumulative"       # cumulative | delta
     models_include: list[str] = field(default_factory=list)
     models_exclude: list[str] = field(default_factory=list)
     home_links: list[str] = field(default_factory=list)
@@ -83,6 +85,7 @@ class Provider:
             stream=data.get("stream", {}) or {},
             models_cmd=list(data.get("models_cmd", []) or []),
             models_parse=data.get("models_parse", "lines"),
+            usage_mode=data.get("usage_mode", "cumulative"),
             models_include=list(data.get("models_include", []) or []),
             models_exclude=list(data.get("models_exclude", []) or []),
             home_links=list(data.get("home_links", []) or []),
@@ -187,6 +190,8 @@ class Provider:
                 tokens = extracted.get("tokens")
                 args = extracted.get("args")
                 step = extracted.get("step")
+                raw_cost = extracted.get("cost")
+                cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
                 return Event(
                     kind=rule.get("as", RAW),
                     name=str(extracted.get("name") or ""),
@@ -195,6 +200,7 @@ class Provider:
                     state=str(extracted.get("state") or ""),
                     status=str(extracted.get("status") or ""),
                     tokens=tokens if isinstance(tokens, dict) else {},
+                    cost=cost,
                     step=step if isinstance(step, int) else None,
                     session_id=session_id,
                     raw=payload,

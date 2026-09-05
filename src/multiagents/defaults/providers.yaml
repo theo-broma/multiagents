@@ -37,6 +37,10 @@ providers:
         readonly: ["--auto"]
       optional:
         variant: ["--variant", "{variant}"]
+    # opencode reports PER-STEP deltas: each step_finish carries that step's
+    # tokens and its own dollar cost, so they must be summed. This is the same
+    # figure the web console's usage page shows.
+    usage_mode: delta
     models_cmd: ["opencode", "models"]
     models_parse: lines
     # Which model namespaces `refresh-models` records as available.
@@ -70,6 +74,7 @@ providers:
           as: step
           fields:
             tokens: "part.tokens"
+            cost: "part.cost"
             state: "part.reason"
         - match: {type: "step_start"}
           as: step
@@ -103,6 +108,9 @@ providers:
         readonly: ["--sandbox", "--dangerously-skip-permissions"]
       optional:
         effort: ["--effort", "{effort}"]
+    # agy reports RUNNING TOTALS on every step, so they must be taken at their
+    # maximum rather than added. It reports no cost at all.
+    usage_mode: cumulative
     models_cmd: ["agy", "models"]
     models_parse: tsv
     home_links:

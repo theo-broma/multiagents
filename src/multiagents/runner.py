@@ -316,6 +316,7 @@ class Runner:
         stderr_task = asyncio.create_task(handle.drain_stderr())
         watchdog = asyncio.create_task(self._watch_timers(run))
         usage: dict[str, Any] = {}
+        cost_total = 0.0
         session_id = ""
 
         try:
@@ -336,7 +337,13 @@ class Runner:
                 if event.text:
                     run.text_parts.append(event.text)
                 if event.tokens:
-                    usage = _merge_usage(usage, event.tokens)
+                    usage = _merge_usage(usage, event.tokens, provider.usage_mode)
+                if event.cost:
+                    # Cost is always a per-step amount, whichever way a provider
+                    # reports its token counts. This is the same number the
+                    # opencode web console shows on its usage page.
+                    cost_total += event.cost
+                    usage["cost_usd"] = round(cost_total, 6)
                 if event.session_id and not session_id:
                     session_id = event.session_id
                 if event.status:
@@ -758,21 +765,30 @@ class Runner:
                 "detail": (result.err or result.out)[:500]}
 
 
-def _merge_usage(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+def _merge_usage(current: dict[str, Any], incoming: dict[str, Any],
+                 mode: str = "cumulative") -> dict[str, Any]:
     """Fold a provider's usage report into the running total.
 
-    Providers differ: agy reports cumulative totals per step, opencode reports
-    per-step deltas plus a nested cache block. Taking the max of scalars is
-    correct for cumulative reporters and conservative for delta reporters,
-    which matters more than precision here — this drives routing, not billing.
+    Providers differ, and getting this wrong silently corrupts every number
+    above it. agy reports running totals on each step, so they must be taken at
+    their maximum; opencode reports per-step deltas, so they must be summed.
+    The mode is declared per provider in providers.yaml.
     """
     out = dict(current)
     for key, value in incoming.items():
+        if key == "cost_usd":
+            continue                    # accumulated separately, never merged
         if isinstance(value, dict):
-            out[key] = _merge_usage(out.get(key, {}) if isinstance(out.get(key), dict) else {}, value)
+            nested = out.get(key) if isinstance(out.get(key), dict) else {}
+            out[key] = _merge_usage(nested, value, mode)
         elif isinstance(value, (int, float)):
             previous = out.get(key, 0)
-            out[key] = max(previous, value) if isinstance(previous, (int, float)) else value
+            if not isinstance(previous, (int, float)):
+                out[key] = value
+            elif mode == "delta":
+                out[key] = previous + value
+            else:
+                out[key] = max(previous, value)
     return out
 
 

@@ -230,12 +230,17 @@ class Tree:
                 if current in nodes:
                     selected.append(nodes[current])
                     stack.extend(nodes[current].get("children", []))
-        total: dict[str, int] = {}
+        total: dict[str, float] = {}
         for node in selected:
             for key, value in (node.get("usage") or {}).items():
                 if isinstance(value, (int, float)):
-                    total[key] = int(total.get(key, 0) + value)
-        return total
+                    total[key] = total.get(key, 0) + value
+        # Token counts are whole; cost is dollars and must keep its fraction —
+        # rounding it to int silently reported every run as free.
+        return {
+            k: (round(v, 6) if k.endswith("_usd") else int(v))
+            for k, v in total.items()
+        }
 
     # ------------------------------------------------------------- deferred --
 
@@ -284,11 +289,14 @@ class Tree:
             status = node.get("status", "?")
             usage = node.get("usage") or {}
             tokens = usage.get("total") or usage.get("total_tokens") or 0
+            cost = usage.get("cost_usd") or 0
             bits = [f"{node['id']}", f"{node.get('agent','?')}", f"[{status}]"]
             if node.get("reason"):
                 bits.append(f"({node['reason']})")
             if tokens:
                 bits.append(f"{tokens:,}tok")
+            if cost:
+                bits.append(f"${cost:.4f}")
             if node.get("branch"):
                 bits.append(node["branch"])
             lines.append(indent + branch_glyph + " ".join(bits))
@@ -299,7 +307,12 @@ class Tree:
 
         for root in roots:
             walk(root, "", True, top=True)
+        rollup = self.rollup_usage()
+        total_cost = rollup.get("cost_usd", 0)
+        total_tokens = rollup.get("total", 0) + rollup.get("total_tokens", 0)
+        if total_tokens or total_cost:
+            lines.append(f"\ntotal: {int(total_tokens):,} tokens, ${total_cost:.4f}")
         pending = len(data.get("deferred", []))
         if pending:
-            lines.append(f"\n{pending} deferred task(s) waiting on quota")
+            lines.append(f"{pending} deferred task(s) waiting on quota")
         return "\n".join(lines)
