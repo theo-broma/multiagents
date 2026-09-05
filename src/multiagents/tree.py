@@ -276,8 +276,11 @@ class Tree:
         roots = [n for n in nodes.values() if not n.get("parent") or n["parent"] not in nodes]
         lines: list[str] = []
 
-        def walk(node: dict, indent: str, last: bool) -> None:
-            branch_glyph = "" if not indent and not lines else ("└─ " if last else "├─ ")
+        def walk(node: dict, indent: str, last: bool, top: bool) -> None:
+            # Only non-root nodes get a connector. Keying this off "have we
+            # printed anything yet" made the second root render as a child of
+            # the first.
+            branch_glyph = "" if top else ("└─ " if last else "├─ ")
             status = node.get("status", "?")
             usage = node.get("usage") or {}
             tokens = usage.get("total") or usage.get("total_tokens") or 0
@@ -290,12 +293,12 @@ class Tree:
                 bits.append(node["branch"])
             lines.append(indent + branch_glyph + " ".join(bits))
             kids = [nodes[c] for c in node.get("children", []) if c in nodes]
-            child_indent = indent + ("   " if last else "│  ") if branch_glyph else indent
+            child_indent = indent if top else indent + ("   " if last else "│  ")
             for i, kid in enumerate(kids):
-                walk(kid, child_indent, i == len(kids) - 1)
+                walk(kid, child_indent, i == len(kids) - 1, top=False)
 
-        for i, root in enumerate(roots):
-            walk(root, "", i == len(roots) - 1)
+        for root in roots:
+            walk(root, "", True, top=True)
         pending = len(data.get("deferred", []))
         if pending:
             lines.append(f"\n{pending} deferred task(s) waiting on quota")

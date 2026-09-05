@@ -214,9 +214,17 @@ class Runner:
             provider = self.providers[chosen]
 
         # --- git isolation ---------------------------------------------------
+        # EVERY agent gets a worktree, including read-only ones. `writes: false`
+        # is a statement of intent, not an enforced permission — nothing stops a
+        # model from calling an edit tool. Giving a "read-only" agent the real
+        # project directory would mean trusting that intent with your working
+        # tree. A worktree costs almost nothing and makes the flag irrelevant to
+        # your safety: a non-writing agent that writes anyway is quarantined,
+        # and its branch is dropped afterwards if it turns out to be empty.
         repo = self.paths.root
-        branch, worktree_path = "", Path(workdir).expanduser() if workdir else self.paths.root
-        if spec.writes and gitops.is_repo(repo):
+        branch = ""
+        worktree_path = Path(workdir).expanduser() if workdir else self.paths.root
+        if not workdir and gitops.is_repo(repo):
             base = self.config.base_branch or gitops.current_branch(repo)
             desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
             worktree_path = self.paths.worktree(node_id)
@@ -390,7 +398,31 @@ class Runner:
         if status == "done":
             await self._maybe_merge_into_parent(node_id)
 
+        self._drop_if_empty(node_id, run.spec)
         run.done.set()
+
+    def _drop_if_empty(self, node_id: str, spec: AgentSpec) -> None:
+        """Reclaim a worktree that holds nothing worth keeping.
+
+        Read-only agents get a worktree so that writing anyway is harmless, not
+        because their branch is expected to matter. If one produced no commits
+        there is nothing to lose, so drop it rather than accumulating dead
+        checkouts. A non-writing agent that *did* commit keeps its branch — that
+        is a surprise worth being able to inspect.
+        """
+        node = self.tree.get(node_id)
+        if node is None or not node.branch or spec.writes:
+            return
+        base = self.config.base_branch or gitops.current_branch(self.paths.root)
+        if gitops.commits_on(self.paths.root, node.branch, base) == 0:
+            self._cleanup(node)
+            self.tree.update(node_id, branch="", worktree="")
+        else:
+            self.tree.emit(
+                node_id, "unexpected_commits",
+                branch=node.branch,
+                detail="agent is configured writes:false but committed; branch kept",
+            )
 
     async def _watch_timers(self, run: Run) -> None:
         """Detect the conditions no event will announce: silence and wall clock."""
@@ -618,19 +650,44 @@ class Runner:
         if not watched:
             return {"changed": [], "reason": "no active agents"}
 
+        # Agents that had already finished before this call are reported, but
+        # are NOT what we wait on. Without this split, calling again with the
+        # same id list returns the same finished agent forever and a polling
+        # loop never advances.
+        already: list[dict] = []
+        pending: list[str] = []
+        for agent_id in watched:
+            node = self.tree.get(agent_id)
+            if node is None:
+                continue
+            if node.status in {"pending", "running"}:
+                pending.append(agent_id)
+            else:
+                already.append({
+                    "agent_id": agent_id, "agent": node.agent,
+                    "status": node.status, "reason": node.reason,
+                })
+
+        if not pending:
+            return {"changed": already, "all_finished": True,
+                    "note": "every agent you named had already finished"}
+
         while time.monotonic() < deadline:
             changed = []
-            for agent_id in watched:
+            for agent_id in pending:
                 node = self.tree.get(agent_id)
-                if node is None:
-                    continue
-                if node.status not in {"pending", "running"}:
+                if node is not None and node.status not in {"pending", "running"}:
                     changed.append({
                         "agent_id": agent_id, "agent": node.agent,
                         "status": node.status, "reason": node.reason,
                     })
             if changed:
-                return {"changed": changed, "waited_seconds": round(timeout - (deadline - time.monotonic()))}
+                return {
+                    "changed": changed,
+                    "already_finished": already,
+                    "still_running": [i for i in pending if i not in {c["agent_id"] for c in changed}],
+                    "waited_seconds": round(timeout - (deadline - time.monotonic())),
+                }
             await asyncio.sleep(1.0)
 
         return {

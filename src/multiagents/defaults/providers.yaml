@@ -33,7 +33,8 @@ providers:
       permission:
         full: ["--auto"]
         sandbox: ["--auto"]
-        readonly: []
+        # NOT enforced read-only — see the note on the agy block below.
+        readonly: ["--auto"]
       optional:
         variant: ["--variant", "{variant}"]
     models_cmd: ["opencode", "models"]
@@ -71,15 +72,25 @@ providers:
       editor, not this. Supports a real --sandbox (terminal restrictions) and
       reports per-step usage, so budget roll-up is accurate mid-run.
       Without a permission flag, headless mode AUTO-DENIES every tool and the
-      agent returns an empty response — the `readonly` profile is therefore
-      only usable with allow-rules configured in the CLI's own settings.json.
+      agent returns an empty response after burning its input tokens — which is
+      why no profile here is flagless. Genuine least-privilege would need
+      allow-rules in the CLI's own settings.json; until then, isolation comes
+      from the worktree.
     spawn:
       args: ["-p", "{prompt}", "--model", "{model}", "--output-format", "stream-json", "--add-dir", "{workdir}"]
       resume: ["--conversation", "{session_id}"]
       permission:
         full: ["--dangerously-skip-permissions"]
         sandbox: ["--sandbox", "--dangerously-skip-permissions"]
-        readonly: []
+        # `readonly` is sandboxed, NOT unprivileged. Neither CLI can be made
+        # genuinely read-only from the command line: with no permission flag
+        # agy auto-denies every tool and returns an empty response, so a
+        # "read-only" agent configured that way cannot even read a file.
+        # Read-only is therefore enforced by git isolation instead — the agent
+        # works in its own worktree and its branch is dropped if it turns out
+        # to be empty. `writes: false` states intent and controls cleanup; it
+        # is not a permission boundary.
+        readonly: ["--sandbox", "--dangerously-skip-permissions"]
       optional:
         effort: ["--effort", "{effort}"]
     models_cmd: ["agy", "models"]

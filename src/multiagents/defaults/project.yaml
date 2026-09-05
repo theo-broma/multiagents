@@ -62,10 +62,18 @@ git:
 # What a child process is allowed to see.
 # --------------------------------------------------------------------------
 security:
-  # Environment variables passed through to agents. Empty: every CLI
-  # authenticates with credentials it already stores under its own HOME, so no
-  # secret needs to transit the environment at all.
-  env_passthrough: []
+  # Environment variables passed through to agents.
+  #
+  # The goal is an empty list: every CLI authenticates with credentials it
+  # already stores under its own HOME, so no secret transits the environment.
+  # DEEPINFRA_API_KEY is the one exception today, because opencode's own auth
+  # store is empty and its DeepInfra models are reachable ONLY via this
+  # variable — strip it and every opencode agent fails.
+  #
+  # DELETE THIS LINE once opencode Go is active: the subscription authenticates
+  # through opencode's stored OAuth, and this becomes empty as intended.
+  env_passthrough:
+    - DEEPINFRA_API_KEY
 
   # Never forwarded, and their values are registered as redaction literals so
   # they are masked if they surface in output by another route.
@@ -78,7 +86,6 @@ security:
     - CLAUDE_CODE_MESSAGING_TOKEN
     - ANTHROPIC_API_KEY
     - ANTHROPIC_AUTH_TOKEN
-    - DEEPINFRA_API_KEY
     - GITHUB_TOKEN
     - GH_TOKEN
 
