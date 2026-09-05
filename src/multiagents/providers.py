@@ -73,6 +73,7 @@ class Provider:
     models_include: list[str] = field(default_factory=list)
     models_exclude: list[str] = field(default_factory=list)
     home_links: list[str] = field(default_factory=list)
+    container_private_home: list[str] = field(default_factory=list)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
@@ -89,6 +90,7 @@ class Provider:
             models_include=list(data.get("models_include", []) or []),
             models_exclude=list(data.get("models_exclude", []) or []),
             home_links=list(data.get("home_links", []) or []),
+            container_private_home=list(data.get("container_private_home", []) or []),
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
         )

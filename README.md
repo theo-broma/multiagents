@@ -272,17 +272,36 @@ the project default:
     executor: local
 ```
 
-This exists because **agy does not currently work under docker**. Its on-disk
-OAuth token (`~/.gemini/oauth_creds.json`) is expired, and whatever it actually
-authenticates with does not survive into a container — it falls back to an
-interactive login and times out. Tested with the host `HOME`, matching
-`machine-id` and hostname, and the D-Bus session bus all mounted; none helped.
-opencode containerises fine, so the shipped roster runs opencode agents in the
-container and agy agents on the host. `multiagents doctor` marks pinned agents
-with `*`.
+agy's host credentials do not survive containerisation: its on-disk token in
+`~/.gemini/oauth_creds.json` is expired, and whatever it really authenticates
+with is not reachable from inside a container. Tested with the host `HOME`,
+matching `machine-id` and hostname, the keyring directory, and the D-Bus session
+bus all mounted; none helped.
 
-If you get agy authenticating inside a container, remove the pin — nothing else
-needs to change.
+### Giving a provider its own login inside the container
+
+The fix is for the container to hold a login of its own. A provider can declare
+`container_private_home` in `providers.yaml`; those paths are **not** mounted
+from the host — a private directory is mounted over each one instead, so the
+container keeps separate credentials and can never overwrite or downgrade the
+host's:
+
+```bash
+multiagents docker login agy
+```
+
+This runs the CLI interactively inside the container. It prints a Google OAuth
+URL, you authorise in your browser and paste the code back, and the token lands
+in `~/.multiagents/container-state/<project>/agy/.gemini` — visible to agents
+through their per-agent HOME symlinks, invisible to the host CLI.
+
+Verified: with the host's `~/.gemini` masked, agy in the container reports a
+clean unauthenticated state and offers a working login URL, instead of failing
+on the host's expired token. Your host `~/.gemini` is untouched throughout.
+
+Once that login is done, drop the `executor: local` pin from the agy agents and
+they run in the container like everything else. Until then they run on the host,
+and `multiagents doctor` marks pinned agents with `*`.
 
 ## Budget## Budget
 
