@@ -36,5 +36,43 @@ budget)
     printf '{"known": false, "note": "no quota surface; spend tracked from the stream"}\n'
     exit 0
     ;;
-*)  echo "usage: $0 check|login|budget" >&2; exit 64 ;;
+prepare)
+    # `opencode mcp add` only takes --url, so a stdio server has to come from a
+    # config file. OPENCODE_CONFIG lets us hand it one, which means the user's
+    # own opencode.jsonc is never touched and no subagent inherits the server.
+    state="${MULTIAGENTS_LAUNCH_STATE:?launch state dir not provided}"
+    mkdir -p "$state"
+    python3 - "$state/opencode.json" <<'PYEOF'
+import json, os, sys
+prompt = ""
+pf = os.environ.get("MULTIAGENTS_PROMPT_FILE")
+if pf and os.path.isfile(pf):
+    prompt = open(pf).read()
+command = [os.environ.get("MULTIAGENTS_MCP_COMMAND", "uv")]
+command += (os.environ.get("MULTIAGENTS_MCP_ARGS") or "").split("\x1f")
+config = {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {"multiagents": {"type": "local", "enabled": True,
+                            "command": [c for c in command if c],
+                            "cwd": os.environ.get("MULTIAGENTS_PROJECT", ".")}},
+    "agent": {"orchestrator": {"mode": "primary", "prompt": prompt,
+                               "description": "multiagents orchestrator"}},
+}
+model = os.environ.get("MULTIAGENTS_MODEL")
+if model:
+    config["agent"]["orchestrator"]["model"] = model
+with open(sys.argv[1], "w") as fh:
+    json.dump(config, fh, indent=2)
+PYEOF
+    echo "wrote $state/opencode.json"
+    exit 0
+    ;;
+launch)
+    state="${MULTIAGENTS_LAUNCH_STATE:?launch state dir not provided}"
+    OPENCODE_CONFIG="$state/opencode.json"; export OPENCODE_CONFIG
+    set -- --agent orchestrator
+    [ "${MULTIAGENTS_RESUME:-0}" = "1" ] && set -- "$@" --continue
+    exec "$BIN" "$@"
+    ;;
+*)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
 esac

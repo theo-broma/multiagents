@@ -26,9 +26,9 @@ import yaml
 from .paths import ProjectPaths, global_config_dir, shipped_defaults_dir
 
 CONFIG_FILES = ("project.yaml", "providers.yaml", "agents.yaml", "models.yaml")
-# Not merged like the others — it is the orchestrator's system prompt, copied
-# out so the launcher can point --append-system-prompt-file at it.
-STANDALONE_FILES = ("orchestrator.md",)
+# Kept for installs that still carry a top-level orchestrator.md from before it
+# became a normal agent brief under agents/.
+STANDALONE_FILES = ()
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -175,6 +175,11 @@ class AgentSpec:
     writes: bool = True               # False -> branch dropped if it stays empty
     conversational: bool = False      # talked to via consult(), keeps context
     executor: str = ""                # "" = project default; else local | docker
+    # LAUNCHED as an MCP client rather than spawned as a subagent. The one
+    # asymmetric roster entry: `multiagents run` starts it, nothing spawns it.
+    # A real field rather than an `extra` key, because extras are coerced into
+    # command options and `isinstance(True, int)` is True.
+    launch: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod

@@ -71,7 +71,8 @@ def find_script(name: str, config_dir: Path,
     return None
 
 
-def build_env(provider_name: str, provider: Any, executor: Any) -> dict[str, str]:
+def build_env(provider_name: str, provider: Any, executor: Any,
+              extra: dict[str, str] | None = None) -> dict[str, str]:
     """The situation, handed to the script through the environment."""
     env = dict(os.environ)
     binary = getattr(provider, "available", lambda: None)() or getattr(provider, "bin", "")
@@ -88,6 +89,7 @@ def build_env(provider_name: str, provider: Any, executor: Any) -> dict[str, str
             env["MULTIAGENTS_PRIVATE_HOME"] = str(container_path)
             env["MULTIAGENTS_PRIVATE_BACKING"] = str(host_path)
             break
+    env.update(extra or {})
     return env
 
 
@@ -99,7 +101,8 @@ def resolve(provider_name: str, provider: Any, config_dir: Path,
 
 def run_action(provider_name: str, provider: Any, executor: Any, action: str,
                config_dir: Path, project_config: Path | None = None,
-               timeout: int = CAPTURE_TIMEOUT) -> tuple[int, str, str]:
+               timeout: int = CAPTURE_TIMEOUT,
+               extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
     """Run a captured action. Returns ``(returncode, stdout, stderr)``.
 
     Never raises: a missing script, a timeout or an OS error all come back as a
@@ -113,7 +116,7 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
         result = subprocess.run(
             ["sh", str(script), action],
             capture_output=True, text=True, timeout=timeout,
-            env=build_env(provider_name, provider, executor),
+            env=build_env(provider_name, provider, executor, extra_env),
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         return 124, "", f"{type(exc).__name__}: {exc}"
@@ -121,9 +124,11 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
 
 
 def exec_action(provider_name: str, provider: Any, executor: Any, action: str,
-                config_dir: Path, project_config: Path | None = None):
+                config_dir: Path, project_config: Path | None = None,
+                extra_env: dict[str, str] | None = None):
     """``(argv, env)`` for an action that needs the terminal, or ``None``."""
     script = resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return None
-    return ["sh", str(script), action], build_env(provider_name, provider, executor)
+    return (["sh", str(script), action],
+            build_env(provider_name, provider, executor, extra_env))

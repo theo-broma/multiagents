@@ -7,6 +7,8 @@ it only proves itself on the day something secret reaches a log.
 
 import json
 import sys, time
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -629,17 +631,21 @@ def test_project_layer_does_not_pin_machine_level_files(tmp_path):
     source = tmp_path / "s"
     (source / "agents").mkdir(parents=True)
     (source / "providers").mkdir(parents=True)
-    for name in ("project.yaml", "providers.yaml", "agents.yaml",
-                 "models.yaml", "orchestrator.md"):
+    for name in ("project.yaml", "providers.yaml", "agents.yaml", "models.yaml"):
         (source / name).write_text("x")
     (source / "agents" / "a.md").write_text("x")
+    # The orchestrator's brief is a normal agent instruction file, so it is
+    # pinned per project like every other one and can be tuned there.
+    (source / "agents" / "orchestrator.md").write_text("x")
     (source / "providers" / "a.sh").write_text("x")
 
     glob_names = layer_files(source, "global")
     proj_names = layer_files(source, "project")
-    assert "providers/a.sh" in glob_names and "orchestrator.md" in glob_names
+    # Provider scripts are machine-level: a stale per-project copy would be a
+    # liability, and they resolve through the global layer anyway.
+    assert "providers/a.sh" in glob_names
     assert not any(n.startswith("providers/") for n in proj_names)
-    assert "orchestrator.md" not in proj_names
+    assert "agents/orchestrator.md" in proj_names
     assert "agents/a.md" in proj_names and "project.yaml" in proj_names
 
 
@@ -1021,3 +1027,100 @@ def test_read_all_hands_the_provider_name_to_executor_for(tmp_path):
     invalidate_cache()
     read_all({"p1": p}, executor_for, tmp_path, None)
     assert seen == ["p1"], "must be called with the provider NAME"
+
+
+# --------------------------------------------------------------------------
+# Phase 4: orchestrator as configuration
+# --------------------------------------------------------------------------
+
+
+def _runner(tmp_path, agents=None, providers_yaml=None):
+    """A Runner over a throwaway project, with config injected directly."""
+    from multiagents.config import Config
+    from multiagents.paths import ProjectPaths
+    from multiagents.runner import Runner
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    config = Config(
+        project={}, providers=providers_yaml or {},
+        agents=agents or {}, models={}, instruction_dirs=[],
+    )
+    return Runner(paths, config)
+
+
+def test_the_orchestrator_cannot_be_spawned_or_consulted(tmp_path):
+    """Keyed on the `launch` flag, not the name — renaming the entry must not
+    reopen the hole, and an orchestrator inside an orchestrator is nonsense."""
+    import asyncio
+    spec = AgentSpec("boss", "claude", "sonnet", launch=True, conversational=True)
+    r = _runner(tmp_path, {"boss": spec})
+
+    for coro in (r.start("boss", "go"), r.consult("boss", "hi")):
+        with pytest.raises(PermissionError) as excinfo:
+            asyncio.run(coro)
+        assert "orchestrator" in str(excinfo.value).lower()
+
+
+def test_a_provider_with_no_spawn_args_cannot_run_delegates(tmp_path):
+    """Before this check, start_agent on such a provider exec'd the bare binary
+    with stdin closed and failed obscurely."""
+    import asyncio
+    spec = AgentSpec("x", "authonly", "m")
+    r = _runner(tmp_path, {"x": spec}, {"authonly": {"bin": "sh"}})
+    with pytest.raises(PermissionError) as excinfo:
+        asyncio.run(r.start("x", "go"))
+    assert "spawn args" in str(excinfo.value)
+
+
+def test_ownership_gate_allows_a_parent_to_manage_its_own_children(tmp_path, monkeypatch):
+    """A subagent may act on its descendants — the recursive design makes each
+    agent responsible for its children's branches — but not on a sibling's."""
+    from multiagents.tree import Node
+    import multiagents.server as srv
+
+    r = _runner(tmp_path)
+    tree = r.tree
+    tree.add(Node(id="ag-parent", agent="a", provider="p", model="m", parent=None, depth=1))
+    tree.add(Node(id="ag-child", agent="b", provider="p", model="m", parent="ag-parent", depth=2))
+    tree.add(Node(id="ag-stranger", agent="c", provider="p", model="m", parent=None, depth=1))
+
+    monkeypatch.setattr(srv, "runner", lambda: r)
+    monkeypatch.setenv("MULTIAGENTS_AGENT_ID", "ag-parent")
+
+    assert srv._may_act_on("ag-child") is None          # its own descendant
+    assert srv._may_act_on("ag-parent") is None         # itself
+    denied = srv._may_act_on("ag-stranger")
+    assert denied and "descendants" in denied
+
+    monkeypatch.delenv("MULTIAGENTS_AGENT_ID")
+    assert srv._may_act_on("ag-stranger") is None       # the root owns everything
+
+
+def test_outward_facing_tools_are_root_only(tmp_path, monkeypatch):
+    """opencode and agy have no per-invocation MCP scope, so once `prepare`
+    registers the server every subagent of those providers inherits these tools."""
+    import multiagents.server as srv
+    monkeypatch.setattr(srv, "runner", lambda: _runner(tmp_path))
+    monkeypatch.setenv("MULTIAGENTS_AGENT_ID", "ag-sub")
+    for action in ("push_branch", "refresh_model_list"):
+        denied = srv._root_only(action)
+        assert denied and "subagent" in denied
+    monkeypatch.delenv("MULTIAGENTS_AGENT_ID")
+    assert srv._root_only("push_branch") is None
+
+
+def test_shipped_scripts_implement_prepare_and_launch():
+    from multiagents.paths import shipped_defaults_dir
+    d = shipped_defaults_dir() / "providers"
+    for provider in ("claude", "opencode", "agy"):
+        body = (d / f"{provider}.sh").read_text()
+        assert "prepare)" in body and "launch)" in body, provider
+        assert "MULTIAGENTS_PROMPT_FILE" in body or "MULTIAGENTS_RESUME" in body, provider
+
+
+def test_orchestrator_entry_ships_and_is_marked_launch():
+    import yaml
+    from multiagents.paths import shipped_defaults_dir
+    agents = yaml.safe_load((shipped_defaults_dir() / "agents.yaml").read_text())["agents"]
+    assert agents["orchestrator"]["launch"] is True
+    assert (shipped_defaults_dir() / "agents" / "orchestrator.md").is_file()

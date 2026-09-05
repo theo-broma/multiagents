@@ -75,8 +75,15 @@ def list_agents() -> dict:
     """
     run = runner()
     agents = []
+    launched = []
     for name, spec in sorted(run.config.agents.items()):
         provider = run.providers.get(spec.provider)
+        if spec.launch:
+            # The orchestrator is launched by `multiagents run`, never spawned.
+            # Listing it as delegable invites trying it and getting a refusal.
+            launched.append({"name": name, "provider": spec.provider,
+                             "model": spec.model, "note": "launched, not spawnable"})
+            continue
         agents.append({
             "name": name,
             "description": spec.description,
@@ -90,6 +97,7 @@ def list_agents() -> dict:
         })
     return _ok({
         "agents": agents,
+        "launched_not_spawnable": launched,
         "you_may_spawn": run.can_spawn(),
         "your_depth": run.self_depth(),
         "max_depth": run.config.limits.get("max_depth", 3),
@@ -121,6 +129,9 @@ def refresh_model_list() -> dict:
     Run this after changing a subscription: the available models change with
     the plan, and a stale list will name models the CLI will reject.
     """
+    denied = _root_only("refresh_model_list")
+    if denied:
+        return _ok({"error": denied})
     run = runner()
     result = refresh_models(run.providers, run.paths.config / "models.yaml")
     _reset()
@@ -256,6 +267,9 @@ async def steer_agent(agent_id: str, message: str) -> dict:
 async def stop_agent(agent_id: str) -> dict:
     """Stop an agent and everything it spawned. Its branch and logs survive."""
     run = runner()
+    denied = _may_act_on(agent_id)
+    if denied:
+        return _ok({"error": denied})
     return _ok(await run.stop(agent_id))
 
 
@@ -326,6 +340,9 @@ def update_model_catalog(provider: str = "opencode-go") -> dict:
     Do this once you have looked at what changed. Until you do, every session
     will keep reporting the same diff.
     """
+    denied = _root_only("update_model_catalog")
+    if denied:
+        return _ok({"error": denied})
     return _ok(catalog_mod.apply(global_config_dir(), provider))
 
 
@@ -362,6 +379,39 @@ async def consult(agent: str, message: str, timeout: int = 0) -> dict:
 # --------------------------------------------------------------------------
 
 
+def _may_act_on(agent_id: str) -> str | None:
+    """Is the caller allowed to merge, discard or stop this agent?
+
+    Every stdio MCP server treats a client with no MULTIAGENTS_AGENT_ID as the
+    root orchestrator, so once `prepare` registers the server globally for
+    opencode or agy — which have no per-invocation MCP scope — every SUBAGENT of
+    those providers inherits these tools too. Only start_agent and consult were
+    ever gated, so a subagent could discard a sibling's branch.
+
+    The rule is ownership, not rank: a parent may act on its own descendants,
+    because the recursive design makes each agent responsible for its children's
+    branches. Returns an error string, or None if allowed.
+    """
+    run = runner()
+    caller = run.self_id()
+    if caller is None:
+        return None                       # the root orchestrator owns everything
+    if agent_id == caller:
+        return None
+    if caller in run.tree.ancestry(agent_id):
+        return None
+    return (f"{caller} may only act on its own descendants; {agent_id} is not one. "
+            f"Branch lifecycle belongs to an agent's own parent.")
+
+
+def _root_only(action: str) -> str | None:
+    """Refuse an action that changes state outside any one agent's subtree."""
+    caller = runner().self_id()
+    if caller is None:
+        return None
+    return f"{action} is reserved for the orchestrator; {caller} is a subagent."
+
+
 @mcp.tool()
 def merge_agent(agent_id: str, into: str = "") -> dict:
     """Merge a finished agent's branch, then remove its worktree and branch.
@@ -372,6 +422,9 @@ def merge_agent(agent_id: str, into: str = "") -> dict:
     """
     run = runner()
     try:
+        denied = _may_act_on(agent_id)
+        if denied:
+            return _ok({"error": denied})
         return _ok(run.merge_agent(agent_id, into or None))
     except KeyError as exc:
         return _ok({"error": str(exc)})
@@ -386,6 +439,9 @@ def discard_agent(agent_id: str, force: bool = False) -> dict:
     """
     run = runner()
     try:
+        denied = _may_act_on(agent_id)
+        if denied:
+            return _ok({"error": denied})
         return _ok(run.discard_agent(agent_id, force))
     except KeyError as exc:
         return _ok({"error": str(exc)})
@@ -399,6 +455,9 @@ def push_branch(agent_id: str = "", remote: str = "") -> dict:
     so it is always an explicit call. With no remote configured, nothing in this
     system ever leaves the machine.
     """
+    denied = _root_only("push_branch")
+    if denied:
+        return _ok({"error": denied})
     run = runner()
     return _ok(run.push_branch(agent_id or None, remote or None))
 
