@@ -10,7 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from multiagents.config import deep_merge
+from multiagents import catalog
+from multiagents.config import AgentSpec, deep_merge
 from multiagents.providers import Provider
 from multiagents.runner import _merge_usage
 from multiagents.redact import MASK, register_literal, scrub
@@ -249,3 +250,82 @@ def test_tree_render_keeps_roots_separate(tmp_path):
     lines = tree.render().splitlines()
     assert lines[0].startswith("ag-1") and lines[1].startswith("└─ ag-3")
     assert lines[2].startswith("ag-2")       # second root is NOT a child of the first
+
+
+# --------------------------------------------------------------------------
+# Model catalog drift
+# --------------------------------------------------------------------------
+
+
+def _snapshot(models):
+    return {"provider": "opencode-go", "fetched_at": "t0", "data": {"models": models}}
+
+
+def test_catalog_diff_detects_add_remove_and_field_changes():
+    local = _snapshot({
+        "keep": {"cost": {"input": 1}, "tool_call": True},
+        "gone": {"cost": {"input": 1}},
+        "repriced": {"cost": {"input": 1}, "tool_call": True},
+    })
+    remote = {"models": {
+        "keep": {"cost": {"input": 1}, "tool_call": True},
+        "repriced": {"cost": {"input": 9}, "tool_call": True},
+        "brand-new": {"cost": {"input": 2}},
+    }}
+    kinds = {c.model: c.kind for c in catalog.diff(local, remote)}
+    assert kinds == {"gone": "removed", "brand-new": "added", "repriced": "changed"}
+    assert "keep" not in kinds          # unchanged models produce no noise
+
+
+def test_catalog_ignores_cosmetic_fields():
+    # Descriptions and release notes churn without consequence; diffing them
+    # would bury the changes that actually break an agent.
+    local = _snapshot({"m": {"cost": {"input": 1}, "description": "old"}})
+    remote = {"models": {"m": {"cost": {"input": 1}, "description": "new wording"}}}
+    assert catalog.diff(local, remote) == []
+
+
+def test_assessment_flags_only_models_the_roster_pins():
+    agents = {
+        "researcher": AgentSpec("researcher", "opencode", "opencode-go/pinned"),
+        "reviewer": AgentSpec("reviewer", "agy", "gemini-3.1-pro-high"),
+    }
+    changes = [
+        catalog.Change("pinned", "changed", {"cost": ({"input": 1}, {"input": 9})}),
+        catalog.Change("nobody-uses-this", "removed"),
+    ]
+    out = catalog.assess(changes, "opencode-go", agents)
+    assert out["severity"] == "warning"
+    assert [a["model"] for a in out["affecting_roster"]] == ["pinned"]
+    assert out["affecting_roster"][0]["used_by"] == ["researcher"]
+    assert out["unrelated_changes"] == 1
+
+
+def test_removed_pinned_model_is_critical():
+    agents = {"implementer": AgentSpec("implementer", "opencode", "opencode-go/gone")}
+    out = catalog.assess([catalog.Change("gone", "removed")], "opencode-go", agents)
+    assert out["severity"] == "critical"
+
+
+def test_losing_tool_call_is_critical():
+    """A model without tool_call cannot act as an agent, and the run fails in a
+    confusing way rather than an obvious one."""
+    agents = {"implementer": AgentSpec("implementer", "opencode", "opencode-go/m")}
+    change = catalog.Change("m", "changed", {"tool_call": (True, False)})
+    out = catalog.assess([change], "opencode-go", agents)
+    assert out["severity"] == "critical"
+
+    regained = catalog.Change("m", "changed", {"tool_call": (False, True)})
+    assert catalog.assess([regained], "opencode-go", agents)["severity"] != "critical"
+
+
+def test_no_local_snapshot_yields_no_phantom_changes():
+    assert catalog.diff(None, {"models": {"a": {}}}) == []
+
+
+def test_snapshot_round_trips(tmp_path):
+    data = {"models": {"m": {"cost": {"input": 1}}}, "name": "OpenCode Go"}
+    catalog.save_local(tmp_path, "opencode-go", data)
+    loaded = catalog.load_local(tmp_path, "opencode-go")
+    assert loaded["data"] == data and loaded["provider"] == "opencode-go"
+    assert catalog.diff(loaded, data) == []
