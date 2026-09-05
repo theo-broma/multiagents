@@ -40,7 +40,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..paths import ProjectPaths
+from ..paths import ProjectPaths, state_root
 from .base import Executor, Handle
 
 PROXY_PORT = 8888
@@ -154,10 +154,18 @@ class DockerExecutor(Executor):
         return mounts
 
     def private_state(self) -> dict[Path, Path]:
-        """{path as seen in the container: backing directory on the host}."""
+        """{path as seen in the container: backing directory on the host}.
+
+        Shared across projects by default: the credential is one account, and
+        scoping it per project would mean logging in again for every repository.
+        Set ``credential_scope: project`` if you genuinely want separate
+        accounts per project.
+        """
         if self.paths is None:
             return {}
-        root = self.paths.homes.parent / "container-state" / self.slug
+        base = state_root() / "container-state"
+        root = base / (self.slug if self.config.get("credential_scope") == "project"
+                       else "shared")
         out: dict[Path, Path] = {}
         for name, provider in self.providers.items():
             for relative in getattr(provider, "container_private_home", []) or []:

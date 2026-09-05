@@ -448,3 +448,25 @@ def test_non_private_providers_still_mount_host_to_host(tmp_path):
     ex = DockerExecutor({"image": "img", "network": "bridge"},
                         ProjectPaths(tmp_path), {"opencode": oc}, tmp_path)
     assert ex.private_state() == {}
+
+
+def test_credential_scope_shared_by_default(tmp_path):
+    """One login per machine, not per repository — it is the same account."""
+    from multiagents.providers import Provider
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+    import pathlib
+    agy = Provider.from_dict("agy", {"bin": "agy", "spawn": {}, "stream": {},
+                                     "home_links": [".gemini/x"],
+                                     "container_private_home": [".gemini"]})
+    gemini = pathlib.Path.home() / ".gemini"
+
+    shared = DockerExecutor({}, ProjectPaths(tmp_path / "a"), {"agy": agy}, tmp_path)
+    other = DockerExecutor({}, ProjectPaths(tmp_path / "b"), {"agy": agy}, tmp_path)
+    assert shared.private_state()[gemini] == other.private_state()[gemini]
+
+    scoped_a = DockerExecutor({"credential_scope": "project"},
+                              ProjectPaths(tmp_path / "a"), {"agy": agy}, tmp_path)
+    scoped_b = DockerExecutor({"credential_scope": "project"},
+                              ProjectPaths(tmp_path / "b"), {"agy": agy}, tmp_path)
+    assert scoped_a.private_state()[gemini] != scoped_b.private_state()[gemini]
