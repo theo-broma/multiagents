@@ -272,36 +272,49 @@ the project default:
     executor: local
 ```
 
-agy's host credentials do not survive containerisation: its on-disk token in
-`~/.gemini/oauth_creds.json` is expired, and whatever it really authenticates
-with is not reachable from inside a container. Tested with the host `HOME`,
-matching `machine-id` and hostname, the keyring directory, and the D-Bus session
-bus all mounted; none helped.
+Both providers run containerised. agy needs one extra step first, because its
+host credential is not a file: the host keeps it in the GNOME keyring, so there
+is nothing to bind-mount. (`~/.gemini/oauth_creds.json` exists but is a stale
+legacy artifact — chasing it was a dead end.)
 
 ### Giving a provider its own login inside the container
 
-The fix is for the container to hold a login of its own. A provider can declare
-`container_private_home` in `providers.yaml`; those paths are **not** mounted
-from the host — a private directory is mounted over each one instead, so the
-container keeps separate credentials and can never overwrite or downgrade the
-host's:
+A provider can declare `container_private_home` in `providers.yaml`. Those paths
+are **not** mounted from the host — a private directory is mounted over each
+one, so the container keeps its own credentials and can never overwrite or
+downgrade the host's:
 
 ```bash
 multiagents docker login agy
 ```
 
-This runs the CLI interactively inside the container. It prints a Google OAuth
-URL, you authorise in your browser and paste the code back, and the token lands
-in `~/.multiagents/container-state/<project>/agy/.gemini` — visible to agents
-through their per-agent HOME symlinks, invisible to the host CLI.
+This runs the CLI interactively inside the container. With no keyring present
+agy falls back to a **file-based** token, which lands in
+`~/.multiagents/container-state/shared/agy/.gemini/antigravity-cli/` — shared
+across projects, since it is one account either way. Your host `~/.gemini` is
+masked throughout and stays untouched.
 
-Verified: with the host's `~/.gemini` masked, agy in the container reports a
-clean unauthenticated state and offers a working login URL, instead of failing
-on the host's expired token. Your host `~/.gemini` is untouched throughout.
+Verified afterwards: `agy -p …` inside the container returns SUCCESS, and both
+`reviewer` (agy) and `researcher` (opencode) report the container hostname when
+run concurrently.
 
-Once that login is done, drop the `executor: local` pin from the agy agents and
-they run in the container like everything else. Until then they run on the host,
-and `multiagents doctor` marks pinned agents with `*`.
+One gotcha worth knowing: agy runs an eligibility check on startup that fetches
+your account's profile picture from `googleusercontent.com`. Block it and the
+check fails in a way that reads as an authentication error. It is in the
+shipped allowlist for that reason.
+
+### Mixed execution
+
+An agent can still pin its own backend with `executor:` in `agents.yaml`,
+overriding the project default:
+
+```yaml
+  reviewer:
+    executor: local
+```
+
+Nothing in the shipped roster needs it now, but it is there for a CLI that
+cannot be containerised. `multiagents doctor` marks pinned agents with `*`.
 
 ## Budget## Budget
 

@@ -50,6 +50,8 @@ executor:
       - google.com
       - api.anthropic.com
       - antigravity.google
+      - googleusercontent.com
+      - gstatic.com
 
       # 2. Package registries and docs. Without these an agent cannot install a
       # dependency or look anything up, and will thrash trying — an isolated
