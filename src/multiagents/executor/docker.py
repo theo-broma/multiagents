@@ -130,7 +130,11 @@ class DockerExecutor(Executor):
                 binary = getattr(provider, "available", lambda: None)()
                 if binary:
                     out.append((Path(binary).resolve(), True))
+
+                private = list(getattr(provider, "container_private_home", []) or [])
                 for relative in getattr(provider, "home_links", []) or []:
+                    if any(relative == p or relative.startswith(p + "/") for p in private):
+                        continue        # masked below by a container-private dir
                     # Writable: opencode keeps a sqlite database in its data dir
                     # and agy writes conversation state. Read-only breaks them.
                     out.append((Path.home() / relative, False))
@@ -139,7 +143,26 @@ class DockerExecutor(Executor):
         for path, read_only in out:
             if path.exists() and path not in seen:
                 seen[path] = read_only
-        return sorted(seen.items())
+        mounts = sorted(seen.items())
+
+        # Container-private state is mounted OVER the host path, so a per-agent
+        # HOME's symlinks still resolve while the host's own credentials stay
+        # untouched and unreachable.
+        for host_path, private_path in self.private_state().items():
+            private_path.mkdir(parents=True, exist_ok=True)
+            mounts.append((host_path, False))
+        return mounts
+
+    def private_state(self) -> dict[Path, Path]:
+        """{path as seen in the container: backing directory on the host}."""
+        if self.paths is None:
+            return {}
+        root = self.paths.homes.parent / "container-state" / self.slug
+        out: dict[Path, Path] = {}
+        for name, provider in self.providers.items():
+            for relative in getattr(provider, "container_private_home", []) or []:
+                out[Path.home() / relative] = root / name / relative
+        return out
 
     # ----------------------------------------------------------- lifecycle --
 
@@ -256,8 +279,10 @@ class DockerExecutor(Executor):
             if value:
                 argv += [flag, str(value)]
 
+        private = self.private_state()
         for path, read_only in self.mounts():
-            argv += ["-v", f"{path}:{path}" + (":ro" if read_only else "")]
+            source = private.get(path, path)
+            argv += ["-v", f"{source}:{path}" + (":ro" if read_only else "")]
 
         if self.network_mode == "allowlist":
             proxy = f"http://{self.proxy_container}:{PROXY_PORT}"

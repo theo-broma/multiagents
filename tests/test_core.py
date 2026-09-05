@@ -407,3 +407,44 @@ def test_per_agent_executor_override():
     default = AgentSpec("researcher", "opencode", "m")
     assert pinned.executor == "local"
     assert default.executor == ""      # falls back to the project setting
+
+
+def test_container_private_state_masks_the_host_path(tmp_path):
+    """agy's host credential is expired and does not survive containerisation.
+    The container must get its own ~/.gemini mounted OVER the host path, so a
+    per-agent HOME's symlinks still resolve while the host's real credentials
+    stay unreachable and cannot be overwritten."""
+    from multiagents.providers import Provider
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+    import pathlib
+
+    agy = Provider.from_dict("agy", {
+        "bin": "agy", "spawn": {}, "stream": {},
+        "home_links": [".gemini/antigravity-cli", ".gemini/oauth_creds.json"],
+        "container_private_home": [".gemini"],
+    })
+    ex = DockerExecutor({"image": "img", "network": "bridge"},
+                        ProjectPaths(tmp_path), {"agy": agy}, tmp_path)
+
+    private = ex.private_state()
+    gemini = pathlib.Path.home() / ".gemini"
+    assert gemini in private
+    assert str(private[gemini]).startswith(str(tmp_path)) or "container-state" in str(private[gemini])
+
+    binds = [a for a in ex.run_args() if a.startswith("/") and ":" in a]
+    # The host's own .gemini is never mounted from its real location...
+    assert not any(b.startswith(f"{gemini}:") for b in binds)
+    # ...but something IS mounted at that path inside the container.
+    assert any(b.endswith(f":{gemini}") for b in binds)
+
+
+def test_non_private_providers_still_mount_host_to_host(tmp_path):
+    from multiagents.providers import Provider
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+    oc = Provider.from_dict("opencode", {"bin": "opencode", "spawn": {}, "stream": {},
+                                         "home_links": [".config/opencode"]})
+    ex = DockerExecutor({"image": "img", "network": "bridge"},
+                        ProjectPaths(tmp_path), {"opencode": oc}, tmp_path)
+    assert ex.private_state() == {}

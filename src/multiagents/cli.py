@@ -479,6 +479,38 @@ def cmd_docker(args: argparse.Namespace) -> int:
         print(ex.stop(remove=args.action == "rm"))
         return 0
 
+    if args.action == "login":
+        provider_name = args.provider
+        config = load_config(paths)
+        providers = load_providers(config.providers)
+        provider = providers.get(provider_name)
+        if provider is None:
+            print(f"unknown provider {provider_name!r}; known: {sorted(providers)}", file=sys.stderr)
+            return 2
+        state = ex.ensure_running()
+        if not state.get("ok"):
+            print(state.get("error"), file=sys.stderr)
+            return 1
+        private = ex.private_state()
+        if not private:
+            print(f"{provider_name} has no container_private_home in providers.yaml — "
+                  f"it uses the host's credentials directly and needs no separate login.")
+            return 0
+        print(f"Logging {provider_name} in INSIDE the container.")
+        print("Its credentials are stored in a container-private directory:")
+        for container_path, host_path in private.items():
+            print(f"  {container_path}  ->  {host_path}")
+        print("Your host credentials are masked and cannot be touched.\n")
+        print("Complete the login it offers, then quit the CLI (ctrl-c or /quit).\n")
+        os.execvp("docker", [
+            "docker", "exec", "-it",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--workdir", str(paths.root),
+            "--env", f"HOME={Path.home()}",
+            "--env", "TERM=xterm-256color",
+            ex.container, provider.bin,
+        ])
+
     if args.action == "shell":
         os.execvp("docker", ["docker", "exec", "-it",
                              "--user", f"{os.getuid()}:{os.getgid()}",
@@ -581,7 +613,9 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_clean)
 
     p = sub.add_parser("docker", help="manage the project's agent container")
-    p.add_argument("action", choices=["build", "up", "down", "rm", "status", "shell", "check"])
+    p.add_argument("action",
+                   choices=["build", "up", "down", "rm", "status", "shell", "check", "login"])
+    p.add_argument("--provider", default="agy", help="provider to log in (for `login`)")
     p.set_defaults(func=cmd_docker)
 
     p = sub.add_parser("catalog", help="compare the local model catalog against the live one")

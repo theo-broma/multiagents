@@ -111,6 +111,17 @@ providers:
     # agy reports RUNNING TOTALS on every step, so they must be taken at their
     # maximum rather than added. It reports no cost at all.
     usage_mode: cumulative
+    # Under docker, do NOT mount the host's copy of these paths. A private
+    # directory is mounted over each one instead, so the container keeps its own
+    # credentials and can never overwrite or downgrade the host's.
+    #
+    # agy needs this because its host credential does not survive
+    # containerisation: the on-disk token in ~/.gemini/oauth_creds.json is
+    # expired, and mounting the host's ~/.gemini merely gives the container a
+    # dead credential to fail on. With a private ~/.gemini the container can
+    # hold a login of its own — see `multiagents docker login agy`.
+    container_private_home:
+      - ".gemini"
     models_cmd: ["agy", "models"]
     models_parse: tsv
     home_links:
