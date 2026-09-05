@@ -381,6 +381,27 @@ class DockerExecutor(Executor):
                              else ["docker", "stop", name]).returncode == 0
         return {"ok": True, "acted_on": out}
 
+    def kill_detached(self, agent_id: str) -> bool:
+        """Stop an agent this process did not spawn, from its recorded pid file.
+
+        DockerHandle covers the case where we own the handle; this covers the
+        other one — a nested server, or a restart — where all that survives is
+        the pid the agent wrote inside the container.
+        """
+        if self.paths is None:
+            return False
+        pid_file = self.paths.run_dir(agent_id) / "container.pid"
+        try:
+            target = pid_file.read_text().strip()
+        except OSError:
+            return False
+        if not target.isdigit():
+            return False
+        _run(["docker", "exec", self.container, "sh", "-c",
+              f"kill -TERM {target} 2>/dev/null; pkill -TERM -P {target} 2>/dev/null; true"],
+             timeout=30)
+        return True
+
     # -------------------------------------------------------------- execute --
 
     def preflight(self) -> list[str]:

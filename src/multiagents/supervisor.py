@@ -136,6 +136,15 @@ _QUOTA_MARKERS = (
 )
 
 
-def looks_like_quota_failure(status: str, stderr: str, text: str = "") -> bool:
-    blob = f"{status}\n{stderr}\n{text}".lower()
+def looks_like_quota_failure(status: str, stderr: str) -> bool:
+    """Did the CLI itself report a quota failure?
+
+    Deliberately reads only the run's own failure channels — the provider's
+    status field and stderr — never the agent's output. An advisor asked to
+    review this system wrote the word "quota" in its reply and was recorded as
+    having exhausted its quota: the run was marked failed, its provider put on a
+    cooldown, and the conversation lost. An agent discussing a topic is not
+    evidence about the run that produced it.
+    """
+    blob = f"{status}\n{stderr}".lower()
     return any(marker in blob for marker in _QUOTA_MARKERS)

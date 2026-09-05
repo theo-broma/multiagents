@@ -210,9 +210,9 @@ def test_silence_and_wall_clock_trip():
 
 
 def test_quota_failure_classification():
-    assert looks_like_quota_failure("RESOURCE_EXHAUSTED", "", "")
-    assert looks_like_quota_failure("", "429 Too Many Requests", "")
-    assert not looks_like_quota_failure("SUCCESS", "", "all done")
+    assert looks_like_quota_failure("RESOURCE_EXHAUSTED", "")
+    assert looks_like_quota_failure("", "429 Too Many Requests")
+    assert not looks_like_quota_failure("SUCCESS", "")
 
 
 def test_redaction_masks_shapes_keys_and_literals():
@@ -543,7 +543,7 @@ def test_project_scripts_override_global(tmp_path):
 def test_recognises_each_cli_s_auth_failure():
     """The three CLIs word it completely differently."""
     assert auth_mod.looks_like_auth_failure("", "Error: authentication required. Run 'agy' to log in, then retry.")
-    assert auth_mod.looks_like_auth_failure("", "", "401 Unauthorized")
+    assert auth_mod.looks_like_auth_failure("", "401 Unauthorized")
     assert auth_mod.looks_like_auth_failure("ERROR", "invalid api key")
     assert auth_mod.looks_like_auth_failure("", "no credentials; run opencode providers login")
 
@@ -554,7 +554,7 @@ def test_permission_denial_is_not_an_auth_failure():
     denial = ("jetski: no output produced — a tool required the \"command\" permission "
               "that headless mode cannot prompt for, so it was auto-denied.")
     assert not auth_mod.looks_like_auth_failure("", denial)
-    assert not auth_mod.looks_like_auth_failure("SUCCESS", "", "all done")
+    assert not auth_mod.looks_like_auth_failure("SUCCESS", "")
 
 
 def test_shipped_scripts_exist_and_implement_the_contract():
@@ -1396,3 +1396,54 @@ def test_the_catalog_check_belongs_to_the_initializer():
     assert "check_model_catalog" in orchestrator
     assert "At the start of each session" not in orchestrator
     assert "when something suggests" in orchestrator.lower()
+
+
+def test_an_agent_discussing_quota_or_auth_is_not_a_failure():
+    """Found in production: an advisor reviewing this system wrote the word
+    "quota" in its reply. The run was recorded as quota-exhausted, its provider
+    put on a 15-minute cooldown, and the conversation lost — the next turn
+    started a new session instead of resuming. An agent's own words are not
+    evidence about the health of the run that produced them."""
+    from multiagents.supervisor import looks_like_quota_failure
+    from multiagents.auth import looks_like_auth_failure
+
+    reply = ("The budget fallback chain will break runs when quota is tight, "
+             "and you should check whether authentication is required.")
+    # The reply is not even an argument any more — that is the fix.
+    assert not looks_like_quota_failure("SUCCESS", "")
+    assert not looks_like_auth_failure("SUCCESS", "")
+    # Real failures still classify, from the channels the CLI actually uses.
+    assert looks_like_quota_failure("RESOURCE_EXHAUSTED", "")
+    assert looks_like_auth_failure("", "Error: authentication required. Run 'agy' to log in")
+    assert reply  # the agent's text plays no part
+
+
+def test_a_clean_exit_is_never_reclassified_as_a_failure(tmp_path):
+    """Belt and braces: whatever words appear, a run the CLI reported as
+    successful and which produced output did not fail."""
+    from multiagents.runner import Run
+    r = _runner(tmp_path)
+    run = Run(node_id="ag-1", provider=None, spec=AgentSpec("a", "p", "m"))
+    run.final_status = "SUCCESS"
+    assert r._classify(run, 0, "we ran out of quota, 429, unauthorized", "") == "done"
+
+
+def test_failover_refuses_rather_than_sending_a_foreign_model_id(tmp_path):
+    """Swapping provider while keeping the model would run
+    `agy --model opencode-go/glm-5.3-flash`."""
+    import inspect
+    from multiagents.runner import Runner
+    body = inspect.getsource(Runner.start)
+    assert "names no" in body and "add one under" in body
+    assert "spec.extra.get(\"models\")" in body
+
+
+def test_docker_executor_can_stop_an_agent_it_did_not_spawn(tmp_path):
+    """A nested server or a restart leaves only the pid the agent recorded
+    inside the container; killing the local `docker exec` client leaves it
+    running and spending."""
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+    ex = DockerExecutor({"image": "i"}, ProjectPaths(tmp_path), {}, tmp_path)
+    assert hasattr(ex, "kill_detached")
+    assert ex.kill_detached("ag-missing") is False      # no pid file, no crash

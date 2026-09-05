@@ -115,8 +115,13 @@ _AUTH_MARKERS = (
 _NOT_AUTH = ("permission", "auto-denied", "dangerously-skip")
 
 
-def looks_like_auth_failure(status: str, stderr: str, text: str = "") -> bool:
-    blob = f"{status}\n{stderr}\n{text}".lower()
+def looks_like_auth_failure(status: str, stderr: str) -> bool:
+    """Did the CLI itself report an authentication failure?
+
+    Reads only the run's own failure channels, never the agent's output — an
+    agent writing *about* authentication must not be recorded as unauthenticated.
+    """
+    blob = f"{status}\n{stderr}".lower()
     if not any(marker in blob for marker in _AUTH_MARKERS):
         return False
     # A permission denial mentions neither credentials nor logging in; if the
