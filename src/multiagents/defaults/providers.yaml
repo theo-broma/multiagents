@@ -23,6 +23,9 @@ providers:
 
   opencode:
     bin: opencode
+    # Script implementing the check/login contract; see auth/README.md.
+    auth:
+      script: opencode.sh
     notes: >
       Emits NDJSON events. Tool arguments live at part.state.input, which is
       what doom-loop detection hashes. Has no sandbox mode, so the `sandbox`
@@ -82,6 +85,8 @@ providers:
 
   agy:
     bin: agy
+    auth:
+      script: agy.sh
     notes: >
       Antigravity's headless CLI. Note that /usr/bin/antigravity is the GUI
       editor, not this. Supports a real --sandbox (terminal restrictions) and
@@ -167,6 +172,15 @@ providers:
         - match: {event: "init"}
           as: step
           fields: {}
+
+  # Registered for AUTHENTICATION ONLY. Claude Code is the orchestrator, not a
+  # delegate: there is no spawn or stream configuration here, so an agent that
+  # named this provider would fail preflight with a clear error. It appears in
+  # `multiagents auth status` so that all three CLIs are checked the same way.
+  claude:
+    bin: claude
+    auth:
+      script: claude.sh
 
   # ---------------------------------------------------------------------
   # Template for a new integration. Uncomment, fill in, then verify with

@@ -52,6 +52,7 @@ def seed_global(force: bool = False) -> Path:
     target = global_config_dir()
     target.mkdir(parents=True, exist_ok=True)
     (target / "agents").mkdir(exist_ok=True)
+    (target / "auth").mkdir(exist_ok=True)
     source = shipped_defaults_dir()
 
     for name in CONFIG_FILES:
@@ -61,6 +62,10 @@ def seed_global(force: bool = False) -> Path:
     for src in sorted((source / "agents").glob("*.md")):
         dst = target / "agents" / src.name
         if force or not dst.is_file():
+            shutil.copy2(src, dst)
+    for src in sorted((source / "auth").glob("*")):
+        dst = target / "auth" / src.name
+        if src.is_file() and (force or not dst.is_file()):
             shutil.copy2(src, dst)
     for name in STANDALONE_FILES:
         src = source / name

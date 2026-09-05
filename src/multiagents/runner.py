@@ -34,6 +34,7 @@ from .executor.base import Handle
 from .paths import ProjectPaths, global_config_dir
 from .providers import Event, Provider, load_providers
 from .redact import scrub
+from .auth import looks_like_auth_failure
 from .supervisor import Supervisor, looks_like_quota_failure
 from .tree import Node, Tree, new_id, now
 
@@ -438,7 +439,14 @@ class Runner:
         }), indent=2))
 
         self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
-        if status == "quota":
+        if status == "unauthenticated":
+            self.tree.set_status(
+                node_id, "failed",
+                f"{run.provider.name} is not authenticated — "
+                f"run: multiagents auth login {run.provider.name}",
+            )
+            self.tree.emit(node_id, "unauthenticated", provider=run.provider.name)
+        elif status == "quota":
             cooldown = now() + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
             )
@@ -498,6 +506,11 @@ class Runner:
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:
         if looks_like_quota_failure(run.final_status, stderr, text):
             return "quota"
+        # Checked before the generic failure paths: an unauthenticated provider
+        # produces an empty response that is otherwise indistinguishable from a
+        # model that simply said nothing, and the fix is entirely different.
+        if looks_like_auth_failure(run.final_status, stderr, text):
+            return "unauthenticated"
         if run.final_status and run.final_status.upper() not in {"SUCCESS", "OK", "COMPLETED"}:
             return "failed"
         if code != 0:

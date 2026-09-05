@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from multiagents import auth as auth_mod
 from multiagents import catalog
 from multiagents.config import AgentSpec, deep_merge
 from multiagents.providers import Provider
@@ -470,3 +471,92 @@ def test_credential_scope_shared_by_default(tmp_path):
     scoped_b = DockerExecutor({"credential_scope": "project"},
                               ProjectPaths(tmp_path / "b"), {"agy": agy}, tmp_path)
     assert scoped_a.private_state()[gemini] != scoped_b.private_state()[gemini]
+
+
+# --------------------------------------------------------------------------
+# Authentication
+# --------------------------------------------------------------------------
+
+
+def _auth_script(tmp_path, name, body):
+    d = tmp_path / "auth"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text("#!/bin/sh\n" + body)
+    p.chmod(0o755)
+    return p
+
+
+class _Prov:
+    def __init__(self, auth=None, bin="x"):
+        self.auth, self.bin = auth or {}, bin
+    def available(self):
+        return None
+
+
+class _Exec:
+    kind = "local"
+
+
+def test_auth_check_maps_exit_codes(tmp_path):
+    """0 authenticated, 10 not, anything else unknown — the whole contract."""
+    _auth_script(tmp_path, "ok.sh", 'echo "signed in as a@b"; exit 0')
+    _auth_script(tmp_path, "no.sh", 'echo "no credentials"; exit 10')
+    _auth_script(tmp_path, "huh.sh", 'echo "broken"; exit 3')
+
+    ok = auth_mod.check("p", _Prov({"script": "ok.sh"}), _Exec(), tmp_path)
+    assert ok.status == "authenticated" and ok.ok and ok.detail == "signed in as a@b"
+
+    no = auth_mod.check("p", _Prov({"script": "no.sh"}), _Exec(), tmp_path)
+    assert no.status == "not_authenticated" and not no.ok
+    assert no.fix == "multiagents auth login p"       # every provider, same fix shape
+
+    huh = auth_mod.check("p", _Prov({"script": "huh.sh"}), _Exec(), tmp_path)
+    assert huh.status == "unknown"
+
+
+def test_missing_script_is_reported_not_crashed(tmp_path):
+    state = auth_mod.check("ghost", _Prov({"script": "nope.sh"}), _Exec(), tmp_path)
+    assert state.status == "no_script" and not state.ok
+
+
+def test_auth_script_receives_its_context(tmp_path):
+    _auth_script(tmp_path, "env.sh",
+                 'echo "$MULTIAGENTS_PROVIDER/$MULTIAGENTS_EXECUTOR"; exit 0')
+    state = auth_mod.check("myprov", _Prov({"script": "env.sh"}), _Exec(), tmp_path)
+    assert state.detail == "myprov/local"
+
+
+def test_project_scripts_override_global(tmp_path):
+    globaldir, project = tmp_path / "g", tmp_path / "p"
+    _auth_script(globaldir, "a.sh", 'echo global; exit 0')
+    _auth_script(project, "a.sh", 'echo project; exit 0')
+    state = auth_mod.check("a", _Prov({"script": "a.sh"}), _Exec(), globaldir, project)
+    assert state.detail == "project"
+
+
+def test_recognises_each_cli_s_auth_failure():
+    """The three CLIs word it completely differently."""
+    assert auth_mod.looks_like_auth_failure("", "Error: authentication required. Run 'agy' to log in, then retry.")
+    assert auth_mod.looks_like_auth_failure("", "", "401 Unauthorized")
+    assert auth_mod.looks_like_auth_failure("ERROR", "invalid api key")
+    assert auth_mod.looks_like_auth_failure("", "no credentials; run opencode providers login")
+
+
+def test_permission_denial_is_not_an_auth_failure():
+    """A tool auto-denied inside the agent is a different problem with a
+    different fix; conflating them would send the user to re-login pointlessly."""
+    denial = ("jetski: no output produced — a tool required the \"command\" permission "
+              "that headless mode cannot prompt for, so it was auto-denied.")
+    assert not auth_mod.looks_like_auth_failure("", denial)
+    assert not auth_mod.looks_like_auth_failure("SUCCESS", "", "all done")
+
+
+def test_shipped_scripts_exist_and_implement_the_contract():
+    d = Path(auth_mod.__file__).parent / "defaults" / "auth"
+    for provider in ("claude", "opencode", "agy"):
+        script = d / f"{provider}.sh"
+        assert script.is_file(), provider
+        body = script.read_text()
+        assert "check)" in body and "login)" in body, provider
+        assert "exit 10" in body, f"{provider} must be able to report NOT authenticated"
