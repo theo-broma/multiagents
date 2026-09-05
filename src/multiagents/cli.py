@@ -175,41 +175,115 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
     if waiting:
         print(f"\n{len(waiting)} question(s) still open; answer with `multiagents ask`")
     print()
+    _report_catalog(config)
+    print()
     return _launch_agent(paths, config, "initializer", resume=args.resume)
 
 
+def _ensure_authenticated(paths, config, providers, interactive: bool = True) -> int:
+    """Check every enabled provider and offer to fix what is broken.
+
+    Returns the number still unauthenticated. Login scripts are run as ordinary
+    subprocesses with stdio inherited rather than exec'd, so several can be
+    repaired in one pass — exec would replace this process at the first one.
+    """
+    executor_for = _executor_for(paths, config, providers)
+    project_config = paths.config if paths else None
+    enabled = {n: p for n, p in providers.items() if p.enabled}
+
+    broken = []
+    for name, provider in sorted(enabled.items()):
+        state = auth_mod.check(name, provider, executor_for(name),
+                               global_config_dir(), project_config)
+        mark = "ok " if state.ok else "!! "
+        print(f"  {mark}{name:10} {state.detail[:70]}")
+        if not state.ok:
+            broken.append((name, provider))
+
+    if not broken:
+        return 0
+    if not interactive:
+        for name, _ in broken:
+            print(f"  fix: multiagents auth login {name}")
+        return len(broken)
+
+    still_broken = 0
+    for name, provider in broken:
+        print(f"\n{name} needs authenticating.")
+        try:
+            answer = input(f"  run `auth login {name}` now? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            answer = "n"
+        if answer in ("n", "no"):
+            print(f"  skipped — agents on {name} will fail until you run "
+                  f"`multiagents auth login {name}`")
+            still_broken += 1
+            continue
+
+        built = auth_mod.login_command(name, provider, executor_for(name),
+                                       global_config_dir(), project_config)
+        if built is None:
+            print(f"  no script for {name!r}")
+            still_broken += 1
+            continue
+        argv, env = built
+        sys.stdout.flush()
+        # stdio is inherited, so the script gets the terminal it needs.
+        subprocess.run(argv, env=env)
+
+        recheck = auth_mod.check(name, provider, executor_for(name),
+                                 global_config_dir(), project_config)
+        print(f"  {name}: {recheck.status}")
+        if not recheck.ok:
+            still_broken += 1
+    return still_broken
+
+
 def cmd_build(args: argparse.Namespace) -> int:
-    """Build and start the container environment agents will run in."""
+    """Prepare everything agents need: the container, then authentication."""
     paths = _resolve(args.path)
     config = load_config(paths)
-    if config.executor != "docker":
-        print(f"executor is {config.executor!r}; nothing to build.")
-        print("Set executor.kind: docker in .multiagents/config/project.yaml first.")
-        return 0
+    providers = load_providers(config.providers)
 
-    ex = _docker_executor(paths)
-    source = global_config_dir() / "docker"
-    if not source.is_dir():
-        shutil.copytree(Path(__file__).parent / "defaults" / "docker", source)
-    for dockerfile, tag in (("Dockerfile", ex.image), ("Dockerfile.proxy", ex.proxy_image)):
-        if dockerfile == "Dockerfile.proxy" and ex.network_mode != "allowlist":
-            continue
-        if ex.image_exists(tag) and not args.rebuild:
-            print(f"  have  {tag}")
-            continue
-        print(f"building {tag} ...")
-        result = ex.build_image(source / dockerfile, tag)
-        if not result["ok"]:
-            print(result.get("output") or result.get("error"), file=sys.stderr)
+    if config.executor == "docker":
+        ex = _docker_executor(paths)
+        source = global_config_dir() / "docker"
+        if not source.is_dir():
+            shutil.copytree(Path(__file__).parent / "defaults" / "docker", source)
+        for dockerfile, tag in (("Dockerfile", ex.image),
+                                ("Dockerfile.proxy", ex.proxy_image)):
+            if dockerfile == "Dockerfile.proxy" and ex.network_mode != "allowlist":
+                continue
+            if ex.image_exists(tag) and not args.rebuild:
+                print(f"  have  {tag}")
+                continue
+            print(f"building {tag} ...")
+            result = ex.build_image(source / dockerfile, tag)
+            if not result["ok"]:
+                print(result.get("output") or result.get("error"), file=sys.stderr)
+                return 1
+            print(f"  ok    {tag}")
+
+        state = ex.ensure_running()
+        if not state.get("ok"):
+            print(state.get("error"), file=sys.stderr)
             return 1
-        print(f"  ok    {tag}")
+        print(f"container    {ex.container} running ({ex.network_mode} networking)")
+    else:
+        print(f"executor     {config.executor} — no container to build")
 
-    state = ex.ensure_running()
-    if not state.get("ok"):
-        print(state.get("error"), file=sys.stderr)
-        return 1
-    print(f"\ncontainer    {ex.container} running ({ex.network_mode} networking)")
-    print("next         multiagents run")
+    # Auth comes AFTER the container: a provider whose credentials live inside
+    # it (agy) cannot be checked, let alone repaired, until it exists.
+    print("\nauth")
+    remaining = _ensure_authenticated(paths, config, providers,
+                                      interactive=not args.no_auth)
+
+    if remaining:
+        print(f"\n{remaining} provider(s) still unauthenticated. Agents on them "
+              f"will fail with an empty response.")
+    else:
+        print("\nready        multiagents run")
     return 0
 
 
@@ -364,12 +438,14 @@ def cmd_resume(args: argparse.Namespace) -> int:
         print("  the orchestrator can answer these, or use `multiagents ask`")
 
     config = load_config(paths)
-    print()
-    _report_catalog(config)
 
     if args.no_launch:
         return 0
 
+    # The catalog baseline is the initializer's concern; re-checking it on every
+    # orchestrator launch spends a network round trip on ground that rarely
+    # moves. The orchestrator calls check_model_catalog when something suggests
+    # it has.
     return _launch_agent(paths, config, "orchestrator", resume=args.resume)
 
 
@@ -951,6 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("build", help="build and start the container environment")
     p.add_argument("--rebuild", action="store_true", help="rebuild images that exist")
+    p.add_argument("--no-auth", action="store_true",
+                   help="report authentication problems without offering to fix them")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("doctor", help="check CLIs, agents, models, budget and git")

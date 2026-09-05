@@ -31,11 +31,18 @@ multiagents run          # launch the orchestrator; first run and resume are the
 generates `models.yaml` from the installed CLIs, records a model-catalog
 baseline, and scaffolds `context/`.
 
+`build` prepares everything agents need: the container images and container if
+you are on the docker executor, then **authentication for every enabled
+provider** — checking each and offering to log in what is broken. Auth comes
+after the container deliberately, since a provider whose credentials live inside
+it cannot be checked until it exists.
+
 `init-agent` launches the **initializer**: an agent that shapes the project with
-you before anything is built. It reads the repository, forms a view, puts
-specific questions rather than interrogating you, consults the critic and
-advisor, and writes `BRIEF.md` and `context/`. That stage is expected to take
-several sessions — re-running the command resumes it.
+you before anything is built. It also establishes the model-catalog baseline — a setup concern, done once, rather than something every orchestrator session
+re-checks. It reads the repository, forms a view, puts specific questions rather
+than interrogating you, consults the critic and advisor, and writes `BRIEF.md`
+and `context/`. That stage is expected to take several sessions — re-running the
+command resumes it.
 
 Between `init-agent` and `build`, edit `.multiagents/config/agents.yaml` however
 you like. The initializer leaves roster suggestions as a proposal under
@@ -282,8 +289,12 @@ catalog      3 change(s) since 2026-09-05T18:24:11+0200  [warning]
              -> consult the critic before editing agents.yaml
 ```
 
-It runs automatically on `init` and `resume`, and the orchestrator is instructed
-to call `check_model_catalog` at the start of each session. Cosmetic churn
+It runs on `init` and `init-agent`, where the baseline belongs. The orchestrator
+does **not** re-check it routinely — that would spend a network round trip per
+session on ground that rarely moves. It calls `check_model_catalog` reactively
+instead, when something suggests the ground has shifted: an unknown-model error,
+a provider rejecting a model that used to work, or tool calls not happening from
+an agent that should be making them. Cosmetic churn
 (descriptions, release notes) is ignored; only `cost`, `limit`, `tool_call`,
 `reasoning`, `structured_output` and `modalities` are watched.
 

@@ -928,6 +928,12 @@ def test_docker_mounts_a_symlinked_binary_under_its_path_name(tmp_path):
 
 
 def _budget_script(tmp_path, name, body):
+    """Write a provider script whose BODY is case-statement arms.
+
+    Distinct from _auth_script above, which writes the body verbatim. Passing a
+    case arm to that one produces a shell syntax error, which surfaces as
+    "unknown" rather than anything obviously wrong.
+    """
     d = tmp_path / "providers"
     d.mkdir(parents=True, exist_ok=True)
     (d / name).write_text("#!/bin/sh\ncase \"$1\" in\n" + body + "\nesac\n")
@@ -1341,3 +1347,52 @@ def test_agents_are_told_about_the_brief_and_context():
     from multiagents.runner import PREAMBLE
     assert "BRIEF.md" in PREAMBLE and "context/" in PREAMBLE
     assert "do not edit them" in PREAMBLE.lower()
+
+
+def test_build_reports_every_enabled_provider_and_skips_disabled(tmp_path, capsys, monkeypatch):
+    """Auth is checked at build time so a run does not fail later with an empty
+    response, which is what an unauthenticated provider actually looks like."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    # _budget_script wraps the body in a case statement; _auth_script does not.
+    _budget_script(tmp_path, "good.sh", 'check) echo "signed in"; exit 0 ;;')
+    _budget_script(tmp_path, "bad.sh", 'check) echo "no credentials"; exit 10 ;;')
+    _budget_script(tmp_path, "off.sh", 'check) echo "should not run"; exit 0 ;;')
+    monkeypatch.setattr(cli, "global_config_dir", lambda: tmp_path)
+
+    providers = {
+        "good": Provider.from_dict("good", {"bin": "sh", "script": "good.sh"}),
+        "bad": Provider.from_dict("bad", {"bin": "sh", "script": "bad.sh"}),
+        "off": Provider.from_dict("off", {"bin": "sh", "script": "off.sh",
+                                          "enabled": False}),
+    }
+    config = Config(project={}, providers={}, agents={}, models={},
+                    instruction_dirs=[])
+
+    from multiagents.paths import ProjectPaths
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    remaining = cli._ensure_authenticated(paths, config, providers, interactive=False)
+
+    out = capsys.readouterr().out
+    assert remaining == 1
+    assert "good" in out and "bad" in out
+    assert "off" not in out, "a disabled provider must not be checked"
+    assert "multiagents auth login bad" in out
+
+
+def test_the_catalog_check_belongs_to_the_initializer():
+    """Re-checking on every orchestrator launch spends a network round trip on
+    ground that rarely moves; the orchestrator checks it reactively instead."""
+    from multiagents.paths import shipped_defaults_dir
+    briefs = shipped_defaults_dir() / "agents"
+    initializer = (briefs / "initializer.md").read_text()
+    orchestrator = (briefs / "orchestrator.md").read_text()
+
+    assert "check_model_catalog" in initializer
+    assert "update_model_catalog" in initializer
+    # The orchestrator may still call it, but not as a routine session-start step.
+    assert "check_model_catalog" in orchestrator
+    assert "At the start of each session" not in orchestrator
+    assert "when something suggests" in orchestrator.lower()

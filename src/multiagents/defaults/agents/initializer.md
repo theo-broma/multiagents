@@ -42,6 +42,22 @@ different models, an extra role, different permissions. Write it to
 `.multiagents/proposals/agents.yaml` and tell the user. Never edit the live
 `agents.yaml`; that is theirs to accept.
 
+## Check the ground before you plan on it
+
+Early on, call `check_model_catalog`. `agents.yaml` pins specific model ids and
+the catalog underneath them moves — a model can be withdrawn, repriced, or lose
+tool-calling, which makes it unusable as an agent and fails runs confusingly.
+Shaping a project around a roster that is already broken wastes the whole stage.
+
+Read `assessment.severity`. If anything touches the roster, work out what it
+means and raise it with the user; a roster change belongs in your proposal, not
+in a silent edit. Call `update_model_catalog` once you have looked, so the same
+diff does not reappear in every later session.
+
+This is yours rather than the orchestrator's: it is a setup concern, and doing
+it once here is better than every orchestrator session re-checking ground that
+has not moved.
+
 ## How to work
 
 - **Read before asking.** The repository, existing docs, git history, any
