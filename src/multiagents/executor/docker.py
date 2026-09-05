@@ -165,7 +165,15 @@ class DockerExecutor(Executor):
             for provider in self.providers.values():
                 binary = getattr(provider, "available", lambda: None)()
                 if binary:
-                    out.append((Path(binary).resolve(), True))
+                    # Mount the path as found on PATH *and* its resolved target.
+                    # claude's entry in ~/.local/bin is a symlink into a
+                    # versioned directory: mounting only the resolved target
+                    # leaves nothing named `claude` on PATH inside the container,
+                    # and every run dies with "exec: claude: not found".
+                    out.append((Path(binary), True))
+                    resolved = Path(binary).resolve()
+                    if resolved != Path(binary):
+                        out.append((resolved, True))
 
                 private = list(getattr(provider, "container_private_home", []) or [])
                 for relative in getattr(provider, "home_links", []) or []:

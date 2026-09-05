@@ -115,6 +115,7 @@ class Provider:
     models_exclude: list[str] = field(default_factory=list)
     models_static: list[dict[str, str]] = field(default_factory=list)
     home_links: list[str] = field(default_factory=list)
+    home_copy: list[str] = field(default_factory=list)
     container_private_home: list[str] = field(default_factory=list)
     # One script per provider, carrying every action this CLI needs described
     # imperatively: check, login, budget, prepare, launch. Defaults to
@@ -140,6 +141,7 @@ class Provider:
             models_exclude=list(data.get("models_exclude", []) or []),
             models_static=list(data.get("models", []) or []),
             home_links=list(data.get("home_links", []) or []),
+            home_copy=list(data.get("home_copy", []) or []),
             container_private_home=list(data.get("container_private_home", []) or []),
             script=data.get("script", "") or (data.get("auth", {}) or {}).get("script", ""),
             enabled=bool(data.get("enabled", True)),

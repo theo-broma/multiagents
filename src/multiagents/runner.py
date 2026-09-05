@@ -222,7 +222,8 @@ class Runner:
         home = None
         if self.config.home_policy == "per-agent":
             home = prepare_home(self.paths.home(node_id), provider.home_links,
-                                "per-agent", agent=spec.name)
+                                "per-agent", agent=spec.name,
+                                copies=provider.home_copy)
         env = build_env(
             passthrough=self.config.env_passthrough,
             blocked=self.config.env_block,

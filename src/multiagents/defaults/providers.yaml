@@ -173,14 +173,94 @@ providers:
           as: step
           fields: {}
 
-  # Registered for AUTHENTICATION ONLY. Claude Code is the orchestrator, not a
-  # delegate: there is no spawn or stream configuration here, so an agent that
-  # named this provider would fail preflight with a clear error. It appears in
-  # `multiagents auth status` so that all three CLIs are checked the same way.
+  # Claude Code as a full provider: orchestrator AND delegate.
   claude:
     bin: claude
     auth:
       script: claude.sh
+    notes: >
+      The only one of the three that can be made genuinely read-only:
+      --restricted removes the tools that run commands or code and ignores
+      user/project/local settings files, and --tools names what remains. The
+      others can only be sandboxed.
+      Nests its reply in message.content[] as a list of typed blocks — thinking,
+      tool_use and text interleaved, sometimes several in one event — which is
+      why the rule engine addresses lists.
+    spawn:
+      args: ["-p", "{prompt}", "--model", "{model}",
+             "--output-format", "stream-json", "--verbose",
+             "--strict-mcp-config"]
+      resume: ["--resume", "{session_id}"]
+      permission:
+        full: ["--permission-mode", "bypassPermissions"]
+        # No sandbox concept; bypassPermissions is as close as it gets.
+        sandbox: ["--permission-mode", "bypassPermissions"]
+        # Genuinely enforced, unlike the other two providers.
+        readonly: ["--restricted", "--tools", "Read,Glob,Grep,WebFetch"]
+      optional:
+        max_budget_usd: ["--max-budget-usd", "{max_budget_usd}"]
+    # No `claude models` command exists, so the list is static. Keep it short:
+    # these are aliases the CLI resolves, so they do not go stale on a release.
+    models:
+      - {id: "sonnet", label: "Claude Sonnet (latest)"}
+      - {id: "opus", label: "Claude Opus (latest)"}
+      - {id: "haiku", label: "Claude Haiku (latest)"}
+      - {id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (pinned)"}
+    # One result event carries the run total.
+    usage_mode: cumulative
+    home_links:
+      - ".claude/.credentials.json"
+    # COPIED, not linked. ~/.claude.json is 136K of project history plus the
+    # cachedUsageUtilization the budget adapter reads. Symlinking it would have
+    # every concurrent subagent writing the user's real config. Copying also
+    # means it is never bind-mounted into a container, so it stays invisible
+    # there — an isolation property the README claims and tests check.
+    home_copy:
+      - ".claude.json"
+    stream:
+      format: ndjson
+      session_id_paths: ["session_id"]
+      rules:
+        # Ordered: an assistant event carrying a tool_use block is a tool call
+        # even when a thinking block precedes it in the same content list.
+        - match: {type: "assistant", "message.content[type=tool_use].type": "tool_use"}
+          as: tool
+          fields:
+            name: "message.content[type=tool_use].name"
+            args: "message.content[type=tool_use].input"
+        - match: {type: "assistant", "message.content[type=text].type": "text"}
+          as: text
+          fields:
+            text: "message.content[type=text].text"
+        - match: {type: "result"}
+          as: result
+          fields:
+            status: "subtype"
+            tokens: "usage"
+            cost: "total_cost_usd"
+          # NOTE: deliberately no `text`. Claude emits its answer as an
+          # assistant/text event AND repeats it in result.result; mapping both
+          # makes every reply appear twice. agy maps text here because it has no
+          # separate text event — the difference is exactly what rules are for.
+        # Everything below is progress rather than content, but must still be
+        # classified: an unmatched line becomes a `raw` event, which works but
+        # makes `multiagents probe` unable to tell a missing rule from a
+        # deliberately-ignored one.
+        - match: {type: "assistant"}
+          as: step
+          fields: {}
+        - match: {type: "user"}
+          as: step
+          fields: {}
+        - match: {type: "system"}
+          as: step
+          fields: {}
+        # Claude reports live rate-limit state in-band. Classified now; a future
+        # budget adapter can read rate_limit_info from the raw payload rather
+        # than the cached ~/.claude.json.
+        - match: {type: "rate_limit_event"}
+          as: step
+          fields: {}
 
   # ---------------------------------------------------------------------
   # Template for a new integration. Uncomment, fill in, then verify with

@@ -805,3 +805,102 @@ def test_docker_agent_is_launched_so_it_can_be_stopped(tmp_path):
     assert 'exec "$@"' in joined, "must exec so the recorded pid IS the agent"
     assert captured["command"][-3:] == ["opencode", "run", "hi"]
     assert handle.container == ex.container
+
+
+# --------------------------------------------------------------------------
+# Phase 2: claude as a full provider
+# --------------------------------------------------------------------------
+
+FIXTURE = Path(__file__).parent / "fixtures" / "claude-stream.jsonl"
+
+
+def _claude_provider():
+    """The shipped claude block, loaded from the real defaults."""
+    import yaml
+    from multiagents.paths import shipped_defaults_dir
+    raw = yaml.safe_load((shipped_defaults_dir() / "providers.yaml").read_text())
+    return Provider.from_dict("claude", raw["providers"]["claude"])
+
+
+def test_every_line_of_a_real_claude_run_is_classified():
+    """Golden fixture from an actual `claude -p --output-format stream-json`
+    run that used a tool. Nothing may fall through to `raw` — an unmatched
+    line makes `probe` unable to distinguish a missing rule from an ignored one."""
+    p = _claude_provider()
+    kinds = {}
+    for line in FIXTURE.read_text().splitlines():
+        e = p.parse_line(line)
+        if e is None:
+            continue
+        kinds[e.kind] = kinds.get(e.kind, 0) + 1
+    assert kinds.get("raw", 0) == 0, f"unclassified events: {kinds}"
+    assert kinds["tool"] == 1 and kinds["text"] == 1 and kinds["result"] == 1
+
+
+def test_claude_tool_call_is_read_from_a_content_block():
+    """The assistant event carrying the tool call ALSO carries a thinking block
+    first, so this only works because the selector matches by field."""
+    p = _claude_provider()
+    tools = [e for e in (p.parse_line(l) for l in FIXTURE.read_text().splitlines())
+             if e and e.kind == "tool"]
+    assert tools[0].name == "Read"
+    assert "file_path" in tools[0].args
+
+
+def test_claude_result_does_not_duplicate_the_answer():
+    """Claude emits its answer as assistant/text AND repeats it in
+    result.result. Mapping both made every reply appear twice."""
+    p = _claude_provider()
+    events = [e for e in (p.parse_line(l) for l in FIXTURE.read_text().splitlines()) if e]
+    result = next(e for e in events if e.kind == "result")
+    assert result.text == "", "result must not re-emit the answer"
+    assert result.cost > 0 and result.status == "success"
+
+
+def test_home_copy_copies_rather_than_links(tmp_path, monkeypatch):
+    """~/.claude.json holds project history and the quota cache the budget
+    adapter reads. Symlinking it would have concurrent subagents writing the
+    user's real config."""
+    from multiagents.executor.base import prepare_home
+    fake_home = tmp_path / "real"
+    (fake_home / ".claude").mkdir(parents=True)
+    (fake_home / ".claude" / ".credentials.json").write_text("secret")
+    (fake_home / ".claude.json").write_text('{"projects": {}}')
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    agent_home = tmp_path / "agent"
+    prepare_home(agent_home, [".claude/.credentials.json"], "per-agent",
+                 agent="x", copies=[".claude.json"])
+
+    assert (agent_home / ".claude" / ".credentials.json").is_symlink()
+    copied = agent_home / ".claude.json"
+    assert copied.is_file() and not copied.is_symlink()
+
+    copied.write_text('{"projects": {"mutated": 1}}')
+    assert (fake_home / ".claude.json").read_text() == '{"projects": {}}'
+
+
+def test_docker_mounts_a_symlinked_binary_under_its_path_name(tmp_path):
+    """~/.local/bin/claude is a symlink into a versioned directory. Mounting
+    only the resolved target leaves nothing named `claude` on PATH inside the
+    container, and every run dies with exec: claude: not found."""
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+
+    real = tmp_path / "versions" / "2.1.0"
+    real.parent.mkdir(parents=True)
+    real.write_text("#!/bin/sh\n")
+    link = tmp_path / "bin" / "claude"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+
+    class _P:
+        name, home_links, container_private_home, home_copy = "claude", [], [], []
+        def available(self):
+            return str(link)
+
+    ex = DockerExecutor({"image": "i", "network": "bridge"},
+                        ProjectPaths(tmp_path), {"claude": _P()}, tmp_path)
+    mounted = {p for p, _ in ex.mounts()}
+    assert link in mounted, "the PATH name itself must be mounted"
+    assert real in mounted, "and its resolved target"
