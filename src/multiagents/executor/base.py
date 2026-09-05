@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -153,13 +154,20 @@ def build_env(
 
 
 def prepare_home(home: Path, links: list[str], policy: str = "per-agent",
-                 agent: str = "agent") -> Path | None:
+                 agent: str = "agent", copies: list[str] | None = None) -> Path | None:
     """Build a private HOME containing only this provider's own state.
 
     Each entry in ``links`` is a path relative to the real home which is
     symlinked into the private one. An opencode agent therefore reaches
     opencode's stored credentials and nothing else — it cannot read
     ``~/.claude.json`` or agy's token store, because they are simply not there.
+
+    Entries in ``copies`` are **copied** rather than symlinked. That is for
+    credential stores the CLI also writes to: Claude keeps its whole project
+    history and its quota cache in the single file ``~/.claude.json``, so
+    symlinking it would have every concurrent subagent writing the user's real
+    config — and corrupting the very file the budget adapter reads. A copy also
+    means the file is never mounted into a container.
 
     Returns ``None`` for the ``shared`` policy, meaning "use the real HOME".
     """
@@ -183,6 +191,21 @@ def prepare_home(home: Path, links: list[str], policy: str = "per-agent",
             continue
         try:
             target.symlink_to(source, target_is_directory=source.is_dir())
+        except OSError:
+            pass
+
+    for relative in (copies or []):
+        source = real / relative
+        target = home / relative
+        if not source.exists() or target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source.is_dir():
+                shutil.copytree(source, target, symlinks=True)
+            else:
+                shutil.copy2(source, target)
+                target.chmod(0o600)
         except OSError:
             pass
 
