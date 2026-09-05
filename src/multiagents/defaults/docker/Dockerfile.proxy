@@ -1,0 +1,20 @@
+# Egress proxy.
+#
+# Agent containers sit on an *internal* Docker network with no route off the
+# host. This proxy is the only thing they can reach, and it is also attached to
+# the default bridge, so it is the single door out. Its allowlist is generated
+# from project.yaml and bind-mounted at run time.
+#
+# The point: a container protects the host from the agent, but not your tokens
+# from the agent — anything mounted so a CLI can authenticate can also be read
+# by a model with a shell. Filtering egress means a credential an agent can read
+# is still one it cannot post anywhere.
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tinyproxy ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 8888
+CMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]

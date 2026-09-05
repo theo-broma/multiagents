@@ -1,67 +1,359 @@
-"""Container executor — phase 2, not yet implemented.
+"""Container executor — one long-lived container per project.
 
-This file exists so the target shape is visible while the local backend is in
-use, and so the interface it must satisfy stays honest. The constraints below
-were established by inspecting this machine and are not negotiable details:
+The local executor gives an agent git isolation and credential separation, but
+not process isolation: an agent running with skip-permissions can reach anything
+the user account can. This closes that. Inside the container "full powers" is
+the correct default, because there is nothing left to protect.
+
+Five constraints shape the implementation, each established by inspecting this
+machine rather than assumed:
 
 **Never mount the docker socket.** Docker here is rootful and the user is in the
 ``docker`` group, so socket access is equivalent to host root — an agent holding
-it escapes the container in one command.
+it escapes in one command. There is no config option to enable it.
 
 **Mount paths must match the host exactly.** A linked git worktree's ``.git``
 file stores an absolute path to the main repository, and the repository stores
-an absolute path back to the worktree. Mount either at a different path inside
-the container and git breaks in ways that are tedious to diagnose.
+an absolute path back to the worktree. Mount either elsewhere and git breaks
+confusingly. Every bind mount here uses ``<host path>:<same path>``.
 
-**A container does not protect credentials from the agent.** It protects the
-*host* from the agent. Anything mounted so a CLI can authenticate can also be
-read by a model with a shell. The control that actually helps is egress
-allowlisting: give the container no direct route out and force traffic through a
-CONNECT proxy that permits only the model endpoints, so a token an agent can
-read is a token it cannot post anywhere. That proxy is also the natural place to
-later inject ``Authorization`` headers so tokens never enter the container.
+**The container protects the host from the agent, not the tokens from the
+agent.** The CLIs need their credential directories to authenticate, and a model
+with a shell can read whatever is mounted. The control that helps is egress
+filtering: agents sit on an *internal* Docker network with no route out, and
+reach the world only through an allowlisting proxy. A token an agent can read is
+then still a token it cannot post anywhere.
 
-**Mount the CLIs, do not bake them in.** opencode alone is a 177 MB
-self-updating binary; bind-mounting the host's copies read-only keeps the image
-small and keeps updates working the way they already do.
+**Mount the CLIs, do not bake them in.** They self-update on the host; a copy in
+the image would rot and would add hundreds of megabytes.
 
-**Fix ownership.** Rootful Docker plus a default user means every file the agent
-creates lands as root. Run as the invoking uid/gid with a writable home.
+**Run as the invoking uid:gid.** Rootful Docker otherwise writes every file as
+root, and a matching uid also avoids git's "dubious ownership" refusal.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Any
 
+from ..paths import ProjectPaths
 from .base import Executor, Handle
+
+PROXY_PORT = 8888
+
+
+def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def docker_available() -> str | None:
+    return shutil.which("docker")
 
 
 class DockerExecutor(Executor):
     kind = "docker"
 
-    def __init__(self, config: dict):
-        self.config = config
+    def __init__(
+        self,
+        config: dict[str, Any],
+        paths: ProjectPaths | None = None,
+        providers: dict[str, Any] | None = None,
+        config_dir: Path | None = None,
+    ):
+        self.config = config or {}
+        self.paths = paths
+        self.providers = providers or {}
+        self.config_dir = config_dir
+
+    # ------------------------------------------------------------- naming --
+
+    @property
+    def slug(self) -> str:
+        return self.paths.slug if self.paths else "default"
+
+    @property
+    def container(self) -> str:
+        return self.config.get("container_name") or f"multiagents-{self.slug}"
+
+    @property
+    def proxy_container(self) -> str:
+        return f"multiagents-proxy-{self.slug}"
+
+    @property
+    def network(self) -> str:
+        return f"multiagents-net-{self.slug}"
+
+    @property
+    def image(self) -> str:
+        return self.config.get("image", "multiagents/workspace:latest")
+
+    @property
+    def proxy_image(self) -> str:
+        return self.config.get("proxy_image", "multiagents/proxy:latest")
+
+    @property
+    def network_mode(self) -> str:
+        """``allowlist`` (internal net + proxy), ``bridge`` (open), ``none``."""
+        return self.config.get("network", "allowlist")
+
+    # -------------------------------------------------------------- mounts --
+
+    def mounts(self) -> list[tuple[Path, bool]]:
+        """(host path, read_only) pairs, each mounted at its own path.
+
+        Three groups: the project and its git worktrees (writable, and required
+        at identical paths for git to resolve); the CLI binaries (read-only);
+        and each provider's credential/state directory, taken from the
+        ``home_links`` already declared in providers.yaml so this list cannot
+        drift from what the per-agent HOME expects to find.
+        """
+        if self.paths is None:
+            return []
+        out: list[tuple[Path, bool]] = [
+            (self.paths.root, False),
+            (self.paths.worktrees, False),
+            (self.paths.homes, False),
+        ]
+
+        for entry in self.config.get("extra_mounts", []) or []:
+            if isinstance(entry, str):
+                out.append((Path(entry).expanduser(), False))
+            elif isinstance(entry, dict) and entry.get("path"):
+                out.append((Path(entry["path"]).expanduser(), bool(entry.get("read_only"))))
+
+        if self.config.get("mount_cli_from_host", True):
+            for provider in self.providers.values():
+                binary = getattr(provider, "available", lambda: None)()
+                if binary:
+                    out.append((Path(binary).resolve(), True))
+                for relative in getattr(provider, "home_links", []) or []:
+                    # Writable: opencode keeps a sqlite database in its data dir
+                    # and agy writes conversation state. Read-only breaks them.
+                    out.append((Path.home() / relative, False))
+
+        seen: dict[Path, bool] = {}
+        for path, read_only in out:
+            if path.exists() and path not in seen:
+                seen[path] = read_only
+        return sorted(seen.items())
+
+    # ----------------------------------------------------------- lifecycle --
+
+    def image_exists(self, name: str) -> bool:
+        return _run(["docker", "image", "inspect", name]).returncode == 0
+
+    def container_state(self, name: str) -> str:
+        result = _run(["docker", "inspect", "-f", "{{.State.Status}}", name])
+        return result.stdout.strip() if result.returncode == 0 else "absent"
+
+    def build_image(self, dockerfile: Path, tag: str, timeout: int = 1800) -> dict:
+        if not dockerfile.is_file():
+            return {"ok": False, "error": f"missing {dockerfile}"}
+        result = _run(
+            ["docker", "build", "-t", tag, "-f", str(dockerfile), str(dockerfile.parent)],
+            timeout=timeout,
+        )
+        return {
+            "ok": result.returncode == 0,
+            "tag": tag,
+            "output": (result.stderr or result.stdout)[-1500:],
+        }
+
+    # --- egress proxy ------------------------------------------------------
+
+    def write_proxy_config(self, target: Path) -> Path:
+        """Generate tinyproxy's config and allowlist from project.yaml."""
+        target.mkdir(parents=True, exist_ok=True)
+        allow = list(self.config.get("egress_allowlist", []) or [])
+
+        # FilterExtended uses POSIX extended regex against the destination host.
+        # Anchored, with a leading optional subdomain group, so "example.com"
+        # permits api.example.com but not evil-example.com.
+        patterns = []
+        for host in allow:
+            escaped = host.replace(".", r"\.")
+            patterns.append(f"(^|\\.){escaped}$")
+        (target / "filter").write_text("\n".join(patterns) + "\n")
+
+        (target / "tinyproxy.conf").write_text(
+            "User nobody\n"
+            "Group nogroup\n"
+            f"Port {PROXY_PORT}\n"
+            "Listen 0.0.0.0\n"
+            "Timeout 600\n"
+            "MaxClients 64\n"
+            # Who may use the proxy: only the project's internal network.
+            "Allow 0.0.0.0/0\n"
+            "FilterDefaultDeny Yes\n"
+            'Filter "/etc/tinyproxy/filter"\n'
+            "FilterType ere\n"
+            "FilterCaseSensitive Off\n"
+            "FilterURLs Off\n"
+            "ConnectPort 443\n"
+            "DisableViaHeader Yes\n"
+            "LogLevel Warning\n"
+        )
+        return target
+
+    def ensure_network(self) -> dict:
+        if _run(["docker", "network", "inspect", self.network]).returncode == 0:
+            return {"ok": True, "existed": True}
+        # --internal: no route off the host. This is what forces agent traffic
+        # through the proxy rather than merely suggesting it.
+        result = _run(["docker", "network", "create", "--internal", self.network])
+        return {"ok": result.returncode == 0, "error": result.stderr.strip()[:300]}
+
+    def ensure_proxy(self) -> dict:
+        if self.network_mode != "allowlist":
+            return {"ok": True, "skipped": self.network_mode}
+        if not self.image_exists(self.proxy_image):
+            return {"ok": False, "error": f"proxy image {self.proxy_image} not built"}
+
+        state = self.container_state(self.proxy_container)
+        if state == "running":
+            return {"ok": True, "existed": True}
+        if state != "absent":
+            _run(["docker", "rm", "-f", self.proxy_container])
+
+        config_dir = self.write_proxy_config(
+            (self.config_dir or Path.home() / ".config" / "multiagents") / "proxy" / self.slug
+        )
+        result = _run([
+            "docker", "run", "-d", "--name", self.proxy_container,
+            "--network", self.network,
+            "--restart", "unless-stopped",
+            "-v", f"{config_dir / 'tinyproxy.conf'}:/etc/tinyproxy/tinyproxy.conf:ro",
+            "-v", f"{config_dir / 'filter'}:/etc/tinyproxy/filter:ro",
+            self.proxy_image,
+        ])
+        if result.returncode != 0:
+            return {"ok": False, "error": result.stderr.strip()[:400]}
+        # Give the proxy a route out. The agent container never gets one.
+        _run(["docker", "network", "connect", "bridge", self.proxy_container])
+        return {"ok": True, "created": True}
+
+    # --- workspace container ----------------------------------------------
+
+    def run_args(self) -> list[str]:
+        argv = [
+            "docker", "run", "-d", "--name", self.container,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--workdir", str(self.paths.root) if self.paths else "/workspace",
+            "--restart", "unless-stopped",
+        ]
+        if self.network_mode == "none":
+            argv += ["--network", "none"]
+        elif self.network_mode == "allowlist":
+            argv += ["--network", self.network]
+
+        for key, flag in (("cpus", "--cpus"), ("memory", "--memory"),
+                          ("pids_limit", "--pids-limit")):
+            value = self.config.get(key)
+            if value:
+                argv += [flag, str(value)]
+
+        for path, read_only in self.mounts():
+            argv += ["-v", f"{path}:{path}" + (":ro" if read_only else "")]
+
+        if self.network_mode == "allowlist":
+            proxy = f"http://{self.proxy_container}:{PROXY_PORT}"
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                argv += ["--env", f"{name}={proxy}"]
+            argv += ["--env", "NO_PROXY=localhost,127.0.0.1"]
+
+        return argv + [self.image, "sleep", "infinity"]
+
+    def ensure_running(self) -> dict:
+        if not docker_available():
+            return {"ok": False, "error": "docker is not on PATH"}
+        if not self.image_exists(self.image):
+            return {"ok": False, "error": f"image {self.image} not built — run `multiagents docker build`"}
+
+        if self.network_mode == "allowlist":
+            net = self.ensure_network()
+            if not net.get("ok"):
+                return {"ok": False, "error": f"network: {net.get('error')}"}
+            proxy = self.ensure_proxy()
+            if not proxy.get("ok"):
+                return {"ok": False, "error": f"proxy: {proxy.get('error')}"}
+
+        state = self.container_state(self.container)
+        if state == "running":
+            return {"ok": True, "container": self.container, "existed": True}
+        if state in ("exited", "created", "paused"):
+            result = _run(["docker", "start", self.container])
+            if result.returncode == 0:
+                return {"ok": True, "container": self.container, "started": True}
+            _run(["docker", "rm", "-f", self.container])
+
+        result = _run(self.run_args(), timeout=300)
+        if result.returncode != 0:
+            return {"ok": False, "error": result.stderr.strip()[:600]}
+        return {"ok": True, "container": self.container, "created": True}
+
+    def stop(self, remove: bool = False) -> dict:
+        out = {}
+        for name in (self.container, self.proxy_container):
+            if self.container_state(name) == "absent":
+                continue
+            out[name] = _run(["docker", "rm", "-f", name] if remove
+                             else ["docker", "stop", name]).returncode == 0
+        return {"ok": True, "acted_on": out}
+
+    # -------------------------------------------------------------- execute --
 
     def preflight(self) -> list[str]:
-        return ["the docker executor is not implemented yet; set executor.kind: local"]
-
-    def plan(self, argv: list[str], cwd: Path, env: dict[str, str]) -> list[str]:
-        """The command this executor will eventually run.
-
-        Implemented ahead of ``start`` so the design is inspectable and
-        testable — ``multiagents doctor`` prints it for review.
-        """
-        cfg = self.config
-        container = cfg.get("container_name", "multiagents-<project-slug>")
-        command = ["docker", "exec", "--workdir", str(cwd)]
-        for key, value in env.items():
-            command += ["--env", f"{key}={value}"]
-        command.append(container)
-        return command + argv
+        problems: list[str] = []
+        if not docker_available():
+            return ["docker is not on PATH"]
+        if not self.image_exists(self.image):
+            problems.append(f"image {self.image} not built — run `multiagents docker build`")
+        if self.network_mode == "allowlist" and not self.image_exists(self.proxy_image):
+            problems.append(f"proxy image {self.proxy_image} not built")
+        if self.config.get("mount_docker_socket"):
+            # Refused rather than honoured: with rootful Docker this is host root.
+            problems.append(
+                "mount_docker_socket is set. Refusing: with rootful Docker that "
+                "grants host root and voids the container boundary entirely."
+            )
+        return problems
 
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
-        raise NotImplementedError(
-            "The docker executor is not implemented yet. Set executor.kind to "
-            "'local' in .multiagents/config/project.yaml. See the module "
-            "docstring for the constraints the implementation must satisfy."
+        state = self.ensure_running()
+        if not state.get("ok"):
+            raise RuntimeError(f"docker executor: {state.get('error')}")
+
+        # Environment goes through a file rather than --env flags so that values
+        # never appear in the host process list.
+        env_file = None
+        if self.paths is not None:
+            env_dir = self.paths.data / "env"
+            env_dir.mkdir(parents=True, exist_ok=True)
+            env_file = env_dir / f"{env.get('MULTIAGENTS_AGENT_ID', 'run')}.env"
+            env_file.write_text(
+                "".join(f"{k}={v}\n" for k, v in env.items() if "\n" not in str(v))
+            )
+            env_file.chmod(0o600)
+
+        command = ["docker", "exec", "-i", "--workdir", str(cwd),
+                   "--user", f"{os.getuid()}:{os.getgid()}"]
+        if env_file is not None:
+            command += ["--env-file", str(env_file)]
+        else:
+            for key, value in env.items():
+                command += ["--env", f"{key}={value}"]
+        command.append(self.container)
+        command += argv
+
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
+        return Handle(pid=proc.pid, _proc=proc)

@@ -114,8 +114,18 @@ providers:
     models_cmd: ["agy", "models"]
     models_parse: tsv
     home_links:
+      # State and conversation history.
       - ".gemini/antigravity-cli"
       - ".gemini/antigravity"
+      - ".gemini/config"
+      # Google OAuth credentials, which live at the .gemini ROOT rather than
+      # inside antigravity-cli. Omitting them fails only under docker, where
+      # nothing outside this list is mounted — locally the absolute path still
+      # resolves and hides the mistake.
+      - ".gemini/oauth_creds.json"
+      - ".gemini/google_accounts.json"
+      - ".gemini/settings.json"
+      - ".gemini/installation_id"
     stream:
       format: ndjson
       session_id_paths:
