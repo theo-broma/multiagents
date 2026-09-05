@@ -1,0 +1,119 @@
+# Project-wide policy. Copied into <project>/.multiagents/config/ by
+# `multiagents init`, where you can edit it without touching the global copy.
+
+# --------------------------------------------------------------------------
+# Where agent processes run.
+#   local   subprocess on this machine, isolated by git worktree + per-agent HOME
+#   docker  one container per project, agents get full powers inside it
+# The two backends sit behind the same interface, so switching is this one key.
+# --------------------------------------------------------------------------
+executor:
+  kind: local
+
+  docker:
+    # Phase 2. Kept here so the shape is visible while `local` is in use.
+    image: multiagents/workspace:latest
+    cpus: "2"
+    memory: "4g"
+    pids_limit: 512
+    # Agent CLIs are bind-mounted read-only from the host rather than baked
+    # into the image, so they update on the host as they do today.
+    mount_cli_from_host: true
+    # The repo and the worktree root MUST be mounted at their exact host paths:
+    # a linked worktree's .git file stores an ABSOLUTE path back to the main
+    # repository, and the main repo stores an absolute path back to it.
+    preserve_host_paths: true
+    # Containers get no direct route out; egress goes through an allowlisting
+    # CONNECT proxy on the host, so a credential an agent can read is still a
+    # credential it cannot post anywhere.
+    proxy: "http://127.0.0.1:3128"
+    egress_allowlist:
+      - api.anthropic.com
+      - api.deepinfra.com
+      - api.opencode.ai
+      - cloudcode-pa.googleapis.com
+    # Never mount the docker socket. On rootful Docker that is host root, and
+    # an agent holding it can trivially escape the container.
+    mount_docker_socket: false
+
+# --------------------------------------------------------------------------
+# Git. The parent owns every branch: it creates the worktree, merges the
+# result, and deletes the branch. Subagents commit, and do nothing else.
+# --------------------------------------------------------------------------
+git:
+  # Empty means local commits only — nothing ever leaves this machine.
+  remote: ""
+  # Empty means: branch from whatever HEAD is at spawn time.
+  base_branch: ""
+  branch_prefix: "agents"
+  # Even with a remote set, agent branches are not pushed by default; pushing
+  # is an explicit parent action, not a side effect of finishing.
+  push_agent_branches: false
+
+  merge:
+    # An agent squash-merges its own children without asking: their work is
+    # still quarantined on its branch, so nothing real has changed yet.
+    inside_tree: auto
+    # Landing on your base branch is always an explicit merge_agent() call.
+    into_base: explicit
+    style: squash        # squash | no-ff
+
+# --------------------------------------------------------------------------
+# What a child process is allowed to see.
+# --------------------------------------------------------------------------
+security:
+  # Environment variables passed through to agents. Empty: every CLI
+  # authenticates with credentials it already stores under its own HOME, so no
+  # secret needs to transit the environment at all.
+  env_passthrough: []
+
+  # Never forwarded, and their values are registered as redaction literals so
+  # they are masked if they surface in output by another route.
+  # SSH_AUTH_SOCK matters most: it is the one credential that is not a readable
+  # file, and withholding it genuinely prevents an agent pushing as you.
+  env_block:
+    - SSH_AUTH_SOCK
+    - SSH_AGENT_PID
+    - TAVILY_API_KEY
+    - CLAUDE_CODE_MESSAGING_TOKEN
+    - ANTHROPIC_API_KEY
+    - ANTHROPIC_AUTH_TOKEN
+    - DEEPINFRA_API_KEY
+    - GITHUB_TOKEN
+    - GH_TOKEN
+
+  # per-agent  each agent gets HOME=~/.multiagents/homes/<project>/<id> with
+  #            only its own provider's state linked in, so an opencode agent
+  #            cannot read Claude's or agy's stored tokens
+  # shared     agents use your real HOME; zero compatibility risk, no isolation
+  home_policy: per-agent
+
+# --------------------------------------------------------------------------
+# Ceilings. Recursion makes these mandatory rather than advisory: an agent that
+# can spawn agents that can spawn agents is an exponential with a credit card.
+# --------------------------------------------------------------------------
+limits:
+  max_depth: 3              # root orchestrator is depth 0
+  max_children: 2           # per node, unless the agent overrides it
+  max_concurrent: 4         # running agents across the whole tree
+  default_timeout: 900      # wall-clock seconds per run
+  silence_timeout: 180      # seconds with no stream event before "stuck"
+  max_steps: 120            # steps before a run is considered runaway
+  doom_loop_repeats: 3      # identical tool+args calls before "stuck"
+  budget_tokens: 0          # 0 = unlimited; otherwise tree-wide ceiling
+
+# --------------------------------------------------------------------------
+# Quota awareness. Used to route work away from a rationed provider and toward
+# one with headroom, and to park tasks until a bucket resets.
+# --------------------------------------------------------------------------
+budget:
+  # Never spend the orchestrator's last slice on delegation bookkeeping.
+  reserve_headroom: 0.15
+  # Consulted in order when an agent's provider is exhausted or cooling down.
+  fallback_chain:
+    - opencode
+    - agy
+    - defer
+  # How long to cool a provider down after a quota failure when we cannot read
+  # a real reset time from it.
+  blind_cooldown_seconds: 900

@@ -1,0 +1,66 @@
+# The roster. Each agent is a name bound to a CLI, a model, and an instruction
+# file in agents/. Edit freely — this file is yours once `multiagents init` has
+# copied it into the project.
+#
+# Keys
+#   provider     which block in providers.yaml drives it
+#   model        must exist in models.yaml (refresh with `multiagents refresh-models`)
+#   instructions .md file in agents/, resolved project-first then global
+#   writes       true  -> gets its own git worktree and branch
+#                false -> runs read-only against the project directory
+#   permission   full | sandbox | readonly   (see providers.yaml for caveats)
+#   can_spawn    may this agent delegate to subagents of its own
+#   timeout      wall-clock seconds; silence_timeout is per-stream quiet time
+#
+# Model choices below are a deliberate spread across both CLIs so the whole
+# system is exercised from day one. Retune once your opencode subscription
+# changes what is available.
+
+agents:
+
+  researcher:
+    provider: opencode
+    model: opencode/big-pickle
+    instructions: researcher.md
+    description: Reads the codebase and answers questions. No writes.
+    writes: false
+    permission: readonly
+    can_spawn: false
+    timeout: 600
+    silence_timeout: 120
+
+  implementer:
+    provider: opencode
+    model: deepinfra/zai-org/GLM-5.3
+    instructions: implementer.md
+    description: Writes code on its own branch. The workhorse.
+    writes: true
+    permission: full
+    can_spawn: true
+    max_children: 2
+    timeout: 1800
+    silence_timeout: 240
+
+  reviewer:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: reviewer.md
+    description: Reviews a diff for correctness and reports findings. No writes.
+    writes: false
+    permission: readonly
+    effort: high
+    can_spawn: false
+    timeout: 900
+    silence_timeout: 180
+
+  tester:
+    provider: agy
+    model: gemini-3.8-flash-medium
+    instructions: tester.md
+    description: Writes and runs tests, iterating until green. Fast loop.
+    writes: true
+    permission: sandbox
+    effort: medium
+    can_spawn: false
+    timeout: 1200
+    silence_timeout: 180

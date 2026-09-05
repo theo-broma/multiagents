@@ -1,0 +1,148 @@
+# How to drive each agent CLI. Adding an integration means adding a block here
+# — no Python — provided the CLI can stream line-delimited JSON.
+#
+# Command building
+#   args        argv after the binary. A token that is exactly "{name}" is
+#               replaced whole; text is never format-substituted, so a prompt
+#               containing braces cannot corrupt the command line.
+#   resume      appended when continuing an existing session
+#   permission  extra flags per profile: full | sandbox | readonly
+#   optional    flags added only when the agent config supplies that key
+#
+# Stream parsing
+#   Rules are ordered, first match wins. `match` lists dotted paths that must
+#   all equal the given value; `fields` lifts dotted paths into the normalised
+#   event. Unmatched lines become `raw` events rather than being dropped —
+#   run `multiagents probe <provider>` to see what is not being classified.
+#
+# ALWAYS use the streaming output format, never a single-shot JSON result.
+# Live status, silence detection and doom-loop detection all read this stream;
+# a CLI that only reports at exit is a black box for its whole lifetime.
+
+providers:
+
+  opencode:
+    bin: opencode
+    notes: >
+      Emits NDJSON events. Tool arguments live at part.state.input, which is
+      what doom-loop detection hashes. Has no sandbox mode, so the `sandbox`
+      profile is the same as `full` — noted here rather than silently implied.
+    spawn:
+      args: ["run", "{prompt}", "-m", "{model}", "--format", "json", "--dir", "{workdir}"]
+      resume: ["-s", "{session_id}"]
+      permission:
+        full: ["--auto"]
+        sandbox: ["--auto"]
+        readonly: []
+      optional:
+        variant: ["--variant", "{variant}"]
+    models_cmd: ["opencode", "models"]
+    models_parse: lines
+    home_links:
+      - ".local/share/opencode"
+      - ".config/opencode"
+      - ".cache/opencode"
+    stream:
+      format: ndjson
+      session_id_paths: ["sessionID"]
+      rules:
+        - match: {type: "text"}
+          as: text
+          fields: {text: "part.text"}
+        - match: {type: "tool_use"}
+          as: tool
+          fields:
+            name: "part.tool"
+            args: "part.state.input"
+            state: "part.state.status"
+        - match: {type: "step_finish"}
+          as: step
+          fields:
+            tokens: "part.tokens"
+            state: "part.reason"
+        - match: {type: "step_start"}
+          as: step
+          fields: {}
+
+  agy:
+    bin: agy
+    notes: >
+      Antigravity's headless CLI. Note that /usr/bin/antigravity is the GUI
+      editor, not this. Supports a real --sandbox (terminal restrictions) and
+      reports per-step usage, so budget roll-up is accurate mid-run.
+      Without a permission flag, headless mode AUTO-DENIES every tool and the
+      agent returns an empty response — the `readonly` profile is therefore
+      only usable with allow-rules configured in the CLI's own settings.json.
+    spawn:
+      args: ["-p", "{prompt}", "--model", "{model}", "--output-format", "stream-json", "--add-dir", "{workdir}"]
+      resume: ["--conversation", "{session_id}"]
+      permission:
+        full: ["--dangerously-skip-permissions"]
+        sandbox: ["--sandbox", "--dangerously-skip-permissions"]
+        readonly: []
+      optional:
+        effort: ["--effort", "{effort}"]
+    models_cmd: ["agy", "models"]
+    models_parse: tsv
+    home_links:
+      - ".gemini/antigravity-cli"
+      - ".gemini/antigravity"
+    stream:
+      format: ndjson
+      session_id_paths:
+        - "init.conversation_id"
+        - "step_update.conversation_id"
+        - "result.conversation_id"
+        - "conversation_id"
+      rules:
+        - match: {event: "step_update", "step_update.step_type": "tool"}
+          as: tool
+          fields:
+            name: "step_update.tool_name"
+            args: "step_update.tool_info.parameters"
+            state: "step_update.state"
+            step: "step_update.step_index"
+        - match: {event: "step_update"}
+          as: step
+          fields:
+            step: "step_update.step_index"
+            state: "step_update.state"
+            tokens: "step_update.usage"
+        - match: {event: "result"}
+          as: result
+          fields:
+            status: "result.status"
+            text: "result.response"
+            tokens: "result.usage"
+        - match: {event: "init"}
+          as: step
+          fields: {}
+
+  # ---------------------------------------------------------------------
+  # Template for a new integration. Uncomment, fill in, then verify with
+  #   multiagents probe <name>
+  # which runs a trivial task and reports which rules matched what.
+  # ---------------------------------------------------------------------
+  #
+  # myclie:
+  #   bin: myclie
+  #   spawn:
+  #     args: ["--headless", "{prompt}", "--model", "{model}"]
+  #     resume: ["--session", "{session_id}"]
+  #     permission:
+  #       full: ["--yes"]
+  #       sandbox: []
+  #       readonly: []
+  #   models_cmd: ["myclie", "list-models"]
+  #   models_parse: lines          # lines | tsv
+  #   home_links: [".config/myclie"]
+  #   stream:
+  #     format: ndjson             # ndjson | text
+  #     session_id_paths: ["session"]
+  #     rules:
+  #       - match: {kind: "assistant"}
+  #         as: text
+  #         fields: {text: "message.content"}
+  #       - match: {kind: "tool_call"}
+  #         as: tool
+  #         fields: {name: "tool.name", args: "tool.arguments"}

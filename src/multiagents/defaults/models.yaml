@@ -1,0 +1,12 @@
+# GENERATED FILE — do not hand-edit.
+#
+# Rewritten by `multiagents refresh-models`, which runs each provider's
+# models_cmd and records what that CLI actually offers. Hand-maintaining a list
+# of sixty-odd model ids is a drift trap; this way the list can never disagree
+# with what is installed.
+#
+# Run it again after changing a subscription — the available models change with
+# the plan.
+
+models: {}
+refreshed_at: null
