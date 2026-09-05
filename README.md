@@ -1,45 +1,79 @@
 # multiagents
 
-An MCP server that lets Claude Code delegate work to **other agent CLIs** —
-[opencode](https://opencode.ai) and Antigravity (`agy`) today, anything that
-streams JSON tomorrow — as supervised, git-isolated subagents.
+An MCP server that turns **any agent CLI into a subagent of any other**.
+opencode, Antigravity (`agy`) and Claude Code today; anything that streams JSON
+tomorrow. Whichever one orchestrates is a line of config.
 
 The point is not that other models are better. It is that a subagent burns *its*
-context instead of yours, works on a branch that cannot touch your tree, and can
-be watched, steered and killed while it runs.
+context instead of yours, works on a branch that cannot touch your tree, stops
+rather than guessing when a decision is actually yours, and can be watched,
+steered and killed while it runs.
 
 ```
 you/master  ← explicit merge_agent() gate
-  orchestrator (claude sonnet)
-    ├─ implementer  [running]        38,381tok  $0.0104  agents/implementer/8a5e14
-    ├─ reviewer     [stuck]          doom_loop: edit called 3x with identical arguments
-    └─ critic       [idle · 2 turns] 10,419tok  $0.0006
+  orchestrator (any provider)
+    ├─ implementer  [running]         38,381tok  $0.0104  agents/implementer/8a5e14
+    ├─ reviewer     [awaiting you 6m] store: Postgres or SQLite?
+    └─ critic       [idle · 2 turns]  10,419tok  $0.0006
 ```
 
-## Setup
+## The lifecycle
 
 ```bash
 uv sync
-uv run multiagents init      # in the project you want agents to work on
-uv run multiagents doctor    # CLIs, agents, auth, budget, git
+multiagents init         # create the project, copy the global config
+multiagents init-agent   # shape it with the initializer — resumable, takes as long as it takes
+multiagents build        # container environment, if executor.kind is docker
+multiagents run          # launch the orchestrator; first run and resume are the same command
 ```
 
 `init` copies the global defaults into `.multiagents/config/` for editing,
 generates `models.yaml` from the installed CLIs, records a model-catalog
-baseline, and writes an MCP registration. Add the orchestrator alias it prints:
+baseline, and scaffolds `context/`.
 
-```bash
-alias mao='claude --model sonnet \
-  --mcp-config ~/.config/multiagents/mcp.json \
-  --append-system-prompt-file ~/.config/multiagents/orchestrator.md'
-```
+`init-agent` launches the **initializer**: an agent that shapes the project with
+you before anything is built. It reads the repository, forms a view, puts
+specific questions rather than interrogating you, consults the critic and
+advisor, and writes `BRIEF.md` and `context/`. That stage is expected to take
+several sessions — re-running the command resumes it.
 
-`orchestrator.md` carries the session protocol: check the catalog at start,
-consult the critic before consequential decisions, own every branch. Run
-`multiagents mcp-config` to print the exact line.
+Between `init-agent` and `build`, edit `.multiagents/config/agents.yaml` however
+you like. The initializer leaves roster suggestions as a proposal under
+`.multiagents/proposals/`; it never edits the live config.
 
 The project must be a git repository with at least one commit — agents work on
 branches, and a worktree cannot be branched from nothing.
+
+## Choosing who orchestrates
+
+The orchestrator is a roster entry like any other, except that it is **launched**
+rather than spawned:
+
+```yaml
+  orchestrator:
+    provider: claude       # or opencode, or agy
+    model: sonnet
+    launch: true
+    role: orchestrator
+```
+
+Change those two lines and nothing else in the system needs to know. `run`
+resolves the entry, runs that provider's `prepare`, then execs its `launch`.
+Each CLI absorbs its own differences in its own script:
+
+| | MCP registration | orchestrator prompt |
+|---|---|---|
+| claude | `--mcp-config`, per invocation | `--append-system-prompt-file` |
+| opencode | generated config via `OPENCODE_CONFIG` | `--agent orchestrator` |
+| agy | `agy mcp add`, global profile | `--prompt-interactive` seeds it |
+
+Verified: an opencode orchestrator sees all 21 multiagents tools.
+
+Two consequences worth knowing. opencode's config is handed over through the
+environment, so your own `opencode.jsonc` is never touched. agy has no
+per-invocation MCP scope at all, so its registration is machine-wide and every
+agy subagent inherits these tools — which is why the mutating ones are gated
+server-side by ownership rather than by who can see them.
 
 ## How it works
 
@@ -89,7 +123,7 @@ Task agents are started with `start_agent` and collected when they finish.
 `researcher` and `reviewer` read; `implementer` and `tester` write on their own
 branches.
 
-Two agents are not task runners at all. `critic` and `gemini` are standing
+Two agents are not task runners at all. `critic` and `advisor` are standing
 advisors, reached with `consult()` — which blocks for a reply and **keeps its
 context between calls**, so the orchestrator holds an actual conversation rather
 than firing off amnesiac one-shot questions:
@@ -110,6 +144,44 @@ family as the orchestrator tends to agree with it.
 Conversational agents sit in an `idle` state between turns — not active (so they
 do not count against the concurrency limit), not terminal (so their session
 stays resumable and their worktree survives).
+
+## When an agent needs *you*
+
+Agents are structurally non-blocking: they run with no stdin, explicit
+permission flags, and silence and wall-clock watchdogs. They cannot sit waiting
+on a keystroke that will never come. But that leaves a gap — an agent facing a
+choice only you can make would otherwise guess and build on it.
+
+Two markers, and the distinction matters:
+
+| marker | meaning |
+|---|---|
+| `NEED_INFO(topic): q` | something another agent could answer. Non-blocking: state the assumption and carry on. |
+| `NEED_DECISION(topic): q` | a choice that changes what "correct" means. **Stops immediately**, keeping branch, worktree and session. |
+
+Every `NEED_DECISION` must carry a `DEFAULT:` line — if writing that makes the
+answer obvious, the agent did not need to ask.
+
+A parked agent surfaces to the **orchestrator first**, which answers anything
+within its remit via `answer_question`; the agent resumes exactly where it
+stopped, with its context intact. Only genuinely user-level choices reach you:
+
+```
+$ multiagents ask
+  [q-e2946a] implementer · store   asked 14m ago
+      Postgres or SQLite for the persistence layer?
+      it would otherwise choose: SQLite
+  > postgres, we already run one
+```
+
+`ask` is deliberately write-only. Resuming an agent means owning the asyncio
+task draining its stdout, and that CLI process exits immediately afterwards —
+the agent would be left running with nobody reading its pipe until it filled and
+deadlocked. So `ask` records the answer and a live runner performs the resume.
+
+`awaiting_user` is neither active nor terminal, exactly like `idle`: it does not
+count against the concurrency limit, is not reaped as an orphan, and its
+worktree is not reclaimed.
 
 ## Authentication
 
@@ -152,27 +224,45 @@ unrelated problem.
 Repairing auth is deliberately **not** an MCP tool: it may need a human at a
 terminal and a browser, so the orchestrator reports the command and you run it.
 
-### Adding a provider's auth
+### Adding a provider
 
-One script per provider, implementing a two-action contract, so nothing above it
-needs to know which CLI it is:
+A provider is a block in `providers.yaml` plus **one script**. No Python.
 
 ```
-<provider>.sh check     non-interactive, fast
-                        exit 0  = authenticated
-                        exit 10 = NOT authenticated
-                        exit *  = unknown
-                        stdout  = one line of status
-
-<provider>.sh login     may be interactive and take the terminal
-                        print what the user must do BEFORE doing it
+<provider>.sh check     exit 0 authenticated / 10 not / * unknown; one line of status
+<provider>.sh login     may take the terminal; prints what to do BEFORE doing it
+<provider>.sh budget    prints one JSON object of quota headroom; exit 64 = not implemented
+<provider>.sh prepare   idempotently register the MCP server for this CLI
+<provider>.sh launch    exec this CLI interactively as an orchestrator
 ```
 
-Scripts live in `config/auth/`, resolved project-first then global then shipped,
-and receive their situation through the environment (`MULTIAGENTS_EXECUTOR`,
-`MULTIAGENTS_CONTAINER`, `MULTIAGENTS_PRIVATE_BACKING`, …). See
-`auth/README.md`. `check` should not cost money — prefer inspecting stored
-credentials over probing the API.
+Captured actions (`check`, `budget`) are run and read; handed-over actions
+(`login`, `launch`) return an argv for the caller to exec, because they need the
+terminal. Scripts live in `config/providers/`, resolved project-first then global
+then shipped, and receive their situation through the environment
+(`MULTIAGENTS_EXECUTOR`, `MULTIAGENTS_CONTAINER`, `MULTIAGENTS_PRIVATE_BACKING`,
+`MULTIAGENTS_PROMPT_FILE`, …). See `providers/README.md`.
+
+`check` and `budget` should not cost money — prefer inspecting stored
+credentials over probing the API. `budget` is optional: a script exiting 64
+defers to a built-in reader where one exists, and a provider with neither is
+reported `unknown`, which is the honest answer.
+
+The legacy `auth/` directory is still searched, so an install predating the
+rename keeps working — but it always loses to `providers/` in the same layer.
+
+The other half is the `providers.yaml` block itself: how to build the command
+line, and how to read the CLI's event stream. Rules are ordered and
+first-match-wins, and unmatched lines become `raw` events rather than being
+dropped, so:
+
+```bash
+multiagents probe mycli --model some-model
+```
+
+tells you exactly which lines still need a rule. Paths address lists as well as
+maps (`message.content[type=text].text`), which is what makes a CLI that nests
+its reply in typed blocks addressable at all.
 
 ## Model catalog drift
 
@@ -214,8 +304,15 @@ scalars replace.
 | `providers.yaml` | how to drive each CLI — **the extension point** |
 | `agents.yaml` | the roster: name → provider, model, instructions, permissions |
 | `agents/*.md` | per-agent instructions, prepended to every prompt |
-| `auth/*.sh` | per-provider authentication scripts |
+| `BRIEF.md`, `context/` | **project root, committed** — see below |
+| `providers/*.sh` | one script per provider: check, login, budget, prepare, launch |
 | `models.yaml` | **generated** — `multiagents refresh-models` |
+
+`BRIEF.md` and `context/` are the exception to everything else here: they live
+at the project root and must be committed. Agents work in git worktrees, so
+anything gitignored — all of `.multiagents/` — does not exist for them.
+`enabled: false` on a provider is *intent*; availability stays detected, never
+stored, because a stored fact goes stale and lies.
 
 `models_include` in `providers.yaml` decides which model namespaces get
 recorded. It ships restricted to `opencode/*` (free zen tier) and
@@ -223,19 +320,6 @@ recorded. It ships restricted to `opencode/*` (free zen tier) and
 because those bill against a separate API key rather than the subscription and
 listing them would invite agents onto an account you did not intend to spend
 from.
-
-### Adding a CLI
-
-Add a block to `providers.yaml`. No Python, provided the CLI streams
-line-delimited JSON. Rules are ordered and first-match-wins; unmatched lines
-become `raw` events rather than being dropped, so:
-
-```bash
-multiagents probe mycli --model some-model
-```
-
-tells you exactly which lines still need a rule. Then add an `auth/mycli.sh`
-implementing the contract above, and it is fully integrated.
 
 ## Where agents run
 
@@ -376,6 +460,9 @@ honestly rather than inventing a number:
   bucket, reset times, overage credits. It is a cache, so staleness is reported.
 - **agy** — has a full quota subsystem internally but exposes none of it. Spend
   only; exhaustion is detected reactively from a failed run.
+Budget is read through each provider's own `budget` action, so a newly added
+provider gets an entry with no Python change.
+
 - **opencode** — a Go subscription is *detectable* (`auth.json`), but the CLI
   exposes no headroom surface even with one active. It does report **real dollar
   cost per step** in its event stream, accumulated per agent and matching the
@@ -395,6 +482,19 @@ every number above it:
 |---|---|---|
 | opencode | `delta` | per-step amounts, summed |
 | agy | `cumulative` | running totals, taken at maximum |
+| claude | `cumulative` | one result event carries the run total |
+
+Claude is a full provider — orchestrator *and* delegate — with rules built from
+a captured run rather than guessed. It is also the only one that can be made
+genuinely read-only (`--restricted --tools Read,Glob,Grep`); the others can only
+be sandboxed. Its `~/.claude.json` is **copied** into each agent's HOME rather
+than symlinked, because it holds project history and the quota cache the budget
+adapter reads — symlinking would have concurrent subagents writing your real
+config, and copying also keeps it out of the container.
+
+Worth knowing before putting agents on it: a one-line Claude probe cost $0.0174
+against ~$0.0006 for an opencode-go call. Being available is not a reason to use
+it.
 
 `known: false` means spend is tracked but capacity is not. Never read it as
 "plenty left". The purpose is *routing*: when your own five-hour bucket is
@@ -406,8 +506,14 @@ tight, delegating to an unrationed provider is the highest-value move available.
 uv run --with pytest pytest tests/ -q
 ```
 
-46 tests covering the parts live runs do not reliably exercise: doom-loop
+94 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
-and the auth contract. Provider event fixtures are real shapes captured from
-opencode and agy, not invented.
+the provider script contract, the orchestrator-not-spawnable guards, the
+ownership gate on mutating tools, and `awaiting_user` transitions and their
+non-interaction with the watchdogs.
+
+Provider event fixtures are real shapes captured from the CLIs, not invented —
+`tests/fixtures/claude-stream.jsonl` is an actual run that used a tool, and a
+golden test asserts every line of it classifies with nothing falling through to
+`raw`.
