@@ -54,10 +54,13 @@ clean:  ## remove build and test caches (leaves project state alone)
 	@find . -name __pycache__ -type d -prune -not -path './.venv/*' -exec rm -rf {} +
 	@echo "caches removed"
 
-uninstall:  ## remove this machine's global config and worktree state
-	@echo "This deletes ~/.config/multiagents and ~/.multiagents,"
-	@echo "including any container-private credentials stored there."
-	@printf "Continue? [y/N] " && read ans && [ "$$ans" = "y" ]
-	@rm -rf "$${XDG_CONFIG_HOME:-$$HOME/.config}/multiagents" "$$HOME/.multiagents"
+uninstall:  ## remove this machine's global config and agent state
+	@# Delegated rather than rm -rf'd here: the command checks for uncommitted
+	@# work in agent worktrees first and prunes the stale registrations after,
+	@# neither of which a Makefile recipe should be trying to do. It runs
+	@# before the tool is removed, because removing the tool removes it.
+	@$(UV) run multiagents uninstall $(if $(FORCE),--force,)
 	@-$(UV) tool uninstall multiagents 2>/dev/null || true
-	@echo "removed. Per-project .multiagents/ directories are untouched."
+	@# Single quotes: backticks in a recipe are command substitution, and this
+	@# line previously ran `make install` in the middle of uninstalling.
+	@echo 'the multiagents command is gone too. `make install` puts it back.'

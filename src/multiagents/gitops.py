@@ -155,6 +155,27 @@ def remove_worktree(repo: Path, path: Path, force: bool = False) -> GitResult:
     return result
 
 
+def owning_repo(worktree: Path) -> Path | None:
+    """The repository a linked worktree belongs to, read from its `.git` file.
+
+    A linked worktree stores `gitdir: <repo>/.git/worktrees/<id>`. Reading it
+    is how a teardown can find every repository it is about to leave a stale
+    worktree registration in — the directory has to be inspected *before* it is
+    deleted, because afterwards there is nothing left to ask.
+    """
+    marker = worktree / ".git"
+    if not marker.is_file():
+        return None
+    text = marker.read_text().strip()
+    if not text.startswith("gitdir:"):
+        return None
+    gitdir = Path(text.split(":", 1)[1].strip())
+    # <repo>/.git/worktrees/<id> -> <repo>
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+    return gitdir.parent.parent.parent
+
+
 def prune_worktrees(repo: Path) -> GitResult:
     return run(repo, "worktree", "prune")
 

@@ -910,6 +910,25 @@ tight, delegating to an unrationed provider is the highest-value move available.
 
 ## Housekeeping
 
+`multiagents uninstall` removes this machine's global config
+(`~/.config/multiagents`) and agent state (`~/.multiagents` — worktrees,
+per-agent homes, container credentials). It does **not** touch per-project
+`.multiagents/` directories, your repositories, or the branches agents
+committed to.
+
+Two things it does that an `rm -rf` cannot:
+
+- **Refuses while any worktree holds uncommitted work**, listing which. A
+  commit survives in its repository as a branch; an uncommitted edit exists
+  nowhere else. `--force` overrides, `--dry-run` previews.
+- **Prunes the registrations it orphans.** Deleting a linked worktree's
+  directory does not unregister it — the repository goes on listing worktrees
+  that are not there. The owning repositories are collected from each
+  worktree's `.git` file *before* deletion, since afterwards there is nothing
+  left to ask, and pruned *after*, since git only drops a registration once the
+  directory is actually gone.
+
+
 ```bash
 multiagents doctor              # CLIs, agents, auth, budget, git — start here when something is off
 multiagents tree                # what ran, what it cost, what is parked

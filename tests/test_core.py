@@ -2511,3 +2511,87 @@ def test_the_readme_roster_table_lists_every_shipped_agent():
 
     missing = shipped - mentioned
     assert not missing, f"not listed in the README roster table: {sorted(missing)}"
+
+
+# --------------------------------------------------------------------------
+# Teardown
+#
+# rm -rf with a confirmation prompt was the whole safety story. These cover the
+# two things that prompt cannot tell you: whether anything is about to be lost,
+# and what is left broken afterwards.
+
+
+def test_uninstall_refuses_while_a_worktree_holds_uncommitted_work(tmp_path,
+                                                                   quiet_git,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """A commit survives in its repository as a branch. An uncommitted edit
+    exists nowhere else, and `rm -rf` does not ask twice."""
+    import argparse
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    gitops.init_repo(repo)
+    gitops.initial_commit(repo)
+    state = tmp_path / "state"
+    (state / "worktrees" / "proj-1234").mkdir(parents=True)
+    worktree = state / "worktrees" / "proj-1234" / "ag-1"
+    gitops.create_worktree(repo, worktree, "agents/x/1")
+    (worktree / "unsaved.txt").write_text("work that exists nowhere else\n")
+
+    monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(state))
+    monkeypatch.setattr(cli, "global_config_dir", lambda: tmp_path / "config")
+
+    args = argparse.Namespace(dry_run=False, force=False)
+    assert cli.cmd_uninstall(args) == 1
+    out = capsys.readouterr().out
+    assert "uncommitted work" in out and "unsaved" not in out.split("\n")[0]
+    assert worktree.is_dir(), "nothing may be removed while it refuses"
+
+
+def test_uninstall_prunes_the_registrations_it_orphans(tmp_path, quiet_git,
+                                                       monkeypatch):
+    """Deleting the directories does not unregister them: the repository goes
+    on listing worktrees that are not there until someone prunes."""
+    import argparse
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    gitops.init_repo(repo)
+    gitops.initial_commit(repo)
+    state = tmp_path / "state"
+    (state / "worktrees" / "proj-1234").mkdir(parents=True)
+    gitops.create_worktree(repo, state / "worktrees" / "proj-1234" / "ag-1",
+                           "agents/x/1")
+    assert "ag-1" in gitops.run(repo, "worktree", "list").out
+
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(state))
+    monkeypatch.setattr(cli, "global_config_dir", lambda: config)
+
+    assert cli.cmd_uninstall(argparse.Namespace(dry_run=False, force=True)) == 0
+    assert not state.exists() and not config.exists()
+    assert "ag-1" not in gitops.run(repo, "worktree", "list").out
+    # The branch is not the worktree: committed work is still there.
+    assert gitops.branch_exists(repo, "agents/x/1")
+
+
+def test_uninstall_dry_run_removes_nothing(tmp_path, monkeypatch, capsys):
+    import argparse
+    import multiagents.cli as cli
+
+    state = tmp_path / "state"
+    (state / "worktrees").mkdir(parents=True)
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(state))
+    monkeypatch.setattr(cli, "global_config_dir", lambda: config)
+
+    assert cli.cmd_uninstall(argparse.Namespace(dry_run=True, force=False)) == 0
+    assert state.is_dir() and config.is_dir()
+    assert "would remove" in capsys.readouterr().out
