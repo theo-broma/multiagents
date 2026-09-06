@@ -33,6 +33,11 @@ multiagents run          # launch the orchestrator; first run and resume are the
 is not, so it is the same command either way. `--fresh` forces a new session,
 and `resume` is an alias for `run`. The same applies to `init-agent`.
 
+`run` also checks the orchestrator's own quota before launching, since an
+exhausted CLI reports it as an ordinary error with no reset time in it and that
+reads as a broken install. `run --wait` blocks until the quota is back instead
+of exiting.
+
 `init` copies the global defaults into `.multiagents/config/` for editing,
 generates `models.yaml` from the installed CLIs, records the first model-catalog
 snapshot, and scaffolds `context/`. Run it either in an existing project or with
@@ -105,7 +110,9 @@ Each CLI absorbs its own differences in its own script:
 | opencode | generated config via `OPENCODE_CONFIG` | `--agent orchestrator` |
 | agy | `agy mcp add`, global profile | `--prompt-interactive` seeds it |
 
-Verified: an opencode orchestrator sees all 21 multiagents tools.
+Verified: an opencode orchestrator sees all 24 multiagents tools. (That was 21
+when measured; the ticket tools came later. If you change the tool surface,
+re-measure rather than trusting this line.)
 
 Two consequences worth knowing. opencode's config is handed over through the
 environment, so your own `opencode.jsonc` is never touched. agy has no
@@ -157,9 +164,22 @@ multiagents tree     # snapshot
 
 ## The roster
 
-Task agents are started with `start_agent` and collected when they finish.
-`researcher` and `reviewer` read; `implementer` and `tester` write on their own
-branches.
+Fifteen agents ship by default. They come in three kinds, and the kind decides
+how you reach one:
+
+| | agents | how |
+|---|---|---|
+| **launched** | `orchestrator`, `initializer` | `multiagents run` / `init-agent` — MCP clients, never spawned |
+| **conversational** | `critic`, `advisor`, `security-advisor` | `consult()` — blocks for a reply, keeps context between calls |
+| **task** | `researcher`, `specifier`, `adversary`, `implementer-quick`, `implementer`, `implementer-deep`, `tester`, `reviewer`, `pentester`, `bug-reporter` | `start_agent()` — own branch and worktree, collected when done |
+
+Reading agents (`researcher`, `reviewer`, `pentester`) and writing agents
+(`implementer*`, `tester`, `specifier`, `adversary`) are separated by intent
+rather than by permission: every agent gets a worktree regardless, so `writes:
+false` controls cleanup, not safety.
+
+Delete or replace any of them except the two launched roles — see
+[which agents you can delete](#which-agents-you-can-delete-and-which-you-cannot).
 
 ### Coder tiers
 
@@ -189,10 +209,12 @@ The model pins are a starting point rather than a measured ranking; retune them
 for your own work. What the tiers give you is the routing rule and the
 escalation path, and those survive any repin.
 
-Two agents are not task runners at all. `critic` and `advisor` are standing
-advisors, reached with `consult()` — which blocks for a reply and **keeps its
-context between calls**, so the orchestrator holds an actual conversation rather
-than firing off amnesiac one-shot questions:
+### Standing advisors
+
+Three agents are not task runners at all. `critic`, `advisor` and
+`security-advisor` are reached with `consult()` — which blocks for a reply and
+**keeps its context between calls**, so the orchestrator holds an actual
+conversation rather than firing off amnesiac one-shot questions:
 
 ```
 consult("critic", "The catalog says glm-5.3-flash input price rose 7.5x.
@@ -200,12 +222,14 @@ consult("critic", "The catalog says glm-5.3-flash input price rose 7.5x.
                    alone — is that reasonable?")
 ```
 
-They advise; they decide nothing and gate nothing. The orchestrator is
+`critic` and `advisor` review decisions; `security-advisor` is narrower and is
+described [below](#security-at-both-ends). All three advise; they decide nothing
+and gate nothing. The orchestrator is
 accountable for the outcome, and "the critic said so" is not a reason. Their
 instructions push against both failure modes — rubber-stamping and
 obstructing — and they are told to say "this doesn't need review" when consulted
-about trivia. Both run on deliberately non-Claude models: feedback from the same
-family as the orchestrator tends to agree with it.
+about trivia. None runs on a Claude model, in its primary pin or its fallback:
+feedback from the same family as the orchestrator tends to agree with it.
 
 Conversational agents sit in an `idle` state between turns — not active (so they
 do not count against the concurrency limit), not terminal (so their session
@@ -317,7 +341,7 @@ carries a threshold rather than applying it to everything: behaviour-shaped
 requests, work touching several files, or mistakes that would be expensive to
 unwind. A one-line fix goes straight to `implementer`.
 
-### Security, at both ends
+## Security agents, at both ends
 
 Two agents outside the default path, because running them on everything trains
 you to skim their output:
@@ -737,7 +761,7 @@ profile picture from `googleusercontent.com`. Block it and the check fails in a
 way that reads as an authentication error. It is in the shipped allowlist for
 that reason.
 
-## Security
+## What the isolation protects
 
 - **No secrets in the environment.** Children start from a clean base and get
   only what `env_passthrough` names — empty by default, since every CLI

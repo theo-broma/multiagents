@@ -2492,3 +2492,22 @@ def test_draining_stops_when_the_window_closes_mid_batch(tmp_path):
     assert result["still_deferred"] == 1, "it stopped after the first"
     # Two untouched originals plus the one start() re-queued.
     assert len(r.tree.read()["deferred"]) == 3
+
+
+def test_the_readme_roster_table_lists_every_shipped_agent():
+    """Docs drift silently and the roster has grown four times today. The table
+    is the one place a reader looks to find out what exists, so an agent missing
+    from it is effectively an agent nobody knows they have."""
+    import re
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    shipped = {n for n, spec in yaml.safe_load(
+        (root / "src" / "multiagents" / "defaults" / "agents.yaml").read_text()
+    )["agents"].items() if not spec.get("disabled")}
+
+    readme = (root / "README.md").read_text()
+    table = readme.split("## The roster")[1].split("Reading agents")[0]
+    mentioned = set(re.findall(r"`([a-z][a-z0-9-]*)`", table))
+
+    missing = shipped - mentioned
+    assert not missing, f"not listed in the README roster table: {sorted(missing)}"
