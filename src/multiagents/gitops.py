@@ -49,6 +49,31 @@ def is_repo(path: Path) -> bool:
     return run(path, "rev-parse", "--git-dir").ok
 
 
+def init_repo(path: Path) -> GitResult:
+    """``git init`` in an existing directory."""
+    return run(path, "init")
+
+
+def initial_commit(repo: Path, message: str = "initial commit") -> GitResult:
+    """The first commit, which every agent branch is cut from.
+
+    ``--allow-empty`` so a brand-new project with no files yet still gets a
+    commit: without one there is nothing to branch a worktree from.
+    """
+    run(repo, "add", "-A")
+    return run(repo, "commit", "--allow-empty", "-m", message)
+
+
+def uncommitted_entries(repo: Path) -> list[str]:
+    """Paths ``git status`` reports, directories collapsed to one entry.
+
+    Collapsing matters for the caller: a first commit of a project with
+    ``node_modules`` is one line to show the user, not forty thousand.
+    """
+    result = run(repo, "status", "--porcelain", "-unormal")
+    return [line[3:].strip().strip('"') for line in result.out.splitlines() if line[3:].strip()]
+
+
 def ensure_repo(path: Path) -> None:
     if not is_repo(path):
         raise GitError(

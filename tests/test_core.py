@@ -1573,3 +1573,151 @@ def test_no_command_handler_references_a_missing_name():
                 # module-level helpers, which is where the breakage was.
                 if called.startswith("_") and called not in module_names:
                     raise AssertionError(f"{attr} calls missing helper {called}()")
+
+
+# --------------------------------------------------------------------------
+# init offering to create the repository
+#
+# Without a repository `runner._launch` runs every agent in the project
+# directory itself — no branch, no worktree, nothing to discard. `init` offers
+# to close that, and these pin the offer's two hard requirements: it must never
+# act on its own, and what it commits must exclude runtime state.
+
+
+def _git(repo, *args):
+    import subprocess
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True)
+
+
+def _init_args(path, force=False):
+    import argparse
+    return argparse.Namespace(path=str(path), force=force)
+
+
+@pytest.fixture
+def quiet_git(monkeypatch, tmp_path):
+    """A git identity, so a commit in a sandbox does not depend on the host."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.invalid")
+
+
+def test_confirm_declines_itself_without_a_terminal(monkeypatch):
+    """`make init` and scripted runs have no tty; a prompt there must not hang."""
+    import multiagents.cli as cli
+
+    class _NoTTY:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", _NoTTY())
+    assert cli._confirm("anything?") is False
+    assert cli._confirm("anything?", default=True) is True
+
+
+def test_offer_git_creates_nothing_when_declined(tmp_path, monkeypatch, capsys):
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: False)
+    cli._offer_git(tmp_path)
+
+    assert not (tmp_path / ".git").exists()
+    assert "git -C" in capsys.readouterr().out  # the manual command instead
+
+
+def test_offer_git_initialises_and_commits_when_accepted(tmp_path, quiet_git,
+                                                        monkeypatch):
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli._offer_git(tmp_path)
+
+    assert gitops.is_repo(tmp_path)
+    assert gitops.has_commits(tmp_path)
+    tracked = _git(tmp_path, "ls-files").stdout.split()
+    assert "app.py" in tracked
+
+
+def test_init_commits_the_project_without_its_runtime_state(tmp_path, quiet_git,
+                                                            monkeypatch):
+    """The ordering guarantee: .gitignore and context/ are written before the
+    commit is offered, so the commit has context/ and not .multiagents/."""
+    import multiagents.cli as cli
+
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+
+    tracked = _git(tmp_path, "ls-files").stdout.split()
+    assert "app.py" in tracked
+    assert "context/README.md" in tracked
+    assert ".gitignore" in tracked
+    assert not [p for p in tracked if p.startswith(".multiagents/")], tracked
+
+
+def test_init_leaves_a_non_git_project_alone_when_declined(tmp_path, monkeypatch):
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: False)
+    cli.cmd_init(_init_args(tmp_path))
+
+    assert not (tmp_path / ".git").exists()
+    assert (tmp_path / ".multiagents").is_dir()   # everything else still ran
+
+
+def test_init_names_credential_files_before_committing_them(tmp_path, quiet_git,
+                                                            monkeypatch, capsys):
+    import multiagents.cli as cli
+
+    import multiagents.gitops as gitops
+    gitops.init_repo(tmp_path)          # a repo with no commits yet
+    (tmp_path / ".env").write_text("TOKEN=shhh\n")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "x.js").write_text("//\n")
+    asked = []
+    monkeypatch.setattr(cli, "_confirm",
+                        lambda question, default=False: asked.append(question) or False)
+    cli._offer_git(tmp_path)
+
+    out = capsys.readouterr().out
+    assert ".env" in out and "node_modules/" in out
+    assert "belong in .gitignore" in out
+
+
+def test_init_ignores_credential_files_rather_than_committing_them(tmp_path,
+                                                                   quiet_git,
+                                                                   monkeypatch):
+    """Accepting every prompt must still not commit a .env: the offer to ignore
+    them comes first and defaults to yes."""
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    (tmp_path / ".env").write_text("TOKEN=shhh\n")
+
+    class _TTY:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", _TTY())
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli._offer_git(tmp_path)
+
+    tracked = _git(tmp_path, "ls-files").stdout.split()
+    assert "app.py" in tracked
+    assert ".env" not in tracked
+    assert ".env" in (tmp_path / ".gitignore").read_text()
+
+
+def test_uncommitted_entries_collapses_directories(tmp_path, quiet_git):
+    import multiagents.gitops as gitops
+
+    gitops.init_repo(tmp_path)
+    deep = tmp_path / "node_modules" / "a" / "b"
+    deep.mkdir(parents=True)
+    (deep / "c.js").write_text("//\n")
+    assert gitops.uncommitted_entries(tmp_path) == ["node_modules/"]
