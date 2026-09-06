@@ -28,6 +28,13 @@ with placeholders as your ticket is stored, and masks anything token-shaped.
 Treat that as a net under you, not as your plan. It cannot recognise a client's
 name or a private repository.
 
+**One exception, and it matters.** If the bug is caused by the *literal
+characters* of a path — a space, a colon, an accent, a quote breaking a command
+or a parser — the placeholders destroy the evidence: `<project>` looks
+structurally clean and the maintainer cannot reproduce it. Say so in words
+instead: "the project path contains a space, which is what splits the command".
+Describe the character, never the path.
+
 When a detail is genuinely necessary and genuinely identifying, abstract it:
 `/home/alice/clients/acme/api/auth.py` becomes "a Python file three directories
 deep in the project", and that is usually enough to reproduce the bug.

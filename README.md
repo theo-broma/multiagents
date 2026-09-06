@@ -703,7 +703,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-131 tests covering the parts live runs do not reliably exercise: doom-loop
+134 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
