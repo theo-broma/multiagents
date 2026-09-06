@@ -161,6 +161,34 @@ Task agents are started with `start_agent` and collected when they finish.
 `researcher` and `reviewer` read; `implementer` and `tester` write on their own
 branches.
 
+### Coder tiers
+
+Three coders share one brief on cheaper or stronger models —
+`implementer-quick`, `implementer`, `implementer-deep`. One brief, because the
+craft is identical and three copies would drift invisibly; different models,
+because most tasks do not need the expensive one.
+
+**Route by how much judgement a task needs, never by how important the feature
+is.** Importance is the tempting criterion and it is wrong — everything that
+matters then goes to the top tier, and you have paid for a tiered roster without
+getting one. A critical feature whose implementation is fully decided is a
+`quick` task; a minor cleanup that touches an invariant is a `deep` one.
+
+What makes routing low *safe* is escalation. `implementer-quick` is told to stop
+and hand the task back when it turns out to contain a decision, saying which
+one; the orchestrator then re-spawns on `implementer-deep` and passes that
+explanation in. Its `max_steps` is deliberately 40 rather than 120 for the same
+reason: running out of budget on a misrouted task is the cheap failure, and
+flailing for 120 steps is the expensive one.
+
+Without escalation, routing low does not save money — it produces
+plausible-looking wrong implementations, which cost more than the model you
+saved on. The two go together or neither works.
+
+The model pins are a starting point rather than a measured ranking; retune them
+for your own work. What the tiers give you is the routing rule and the
+escalation path, and those survive any repin.
+
 Two agents are not task runners at all. `critic` and `advisor` are standing
 advisors, reached with `consult()` — which blocks for a reply and **keeps its
 context between calls**, so the orchestrator holds an actual conversation rather
@@ -825,7 +853,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-150 tests covering the parts live runs do not reliably exercise: doom-loop
+154 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

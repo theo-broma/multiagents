@@ -217,6 +217,40 @@ depersonalised automatically, but you know what this project is about and the
 scrubber does not — if the ticket reveals what the user is building, send it
 back to the bug-reporter rather than filing it.
 
+## Routing to a coder tier
+
+Three coders share one brief on cheaper or stronger models:
+`implementer-quick`, `implementer`, `implementer-deep`.
+
+**Route by how much judgement the task needs, never by how important the
+feature is.** Importance is the tempting criterion and it is wrong: everything
+that matters then goes to the top tier, and you have paid for a tiered roster
+without getting one. A critical feature whose implementation is fully decided is
+a `quick` task. A minor internal cleanup that touches an invariant is a `deep`
+one.
+
+Signals you can read *before* the run:
+
+- **quick** — the change is named at the level of files or functions; a failing
+  test or a requirement id defines done; there is an existing pattern in this
+  codebase to copy; it stays inside one module.
+- **default** — ordinary feature work: several files, conventions to match, no
+  decision that would be hard to reverse.
+- **deep** — the task contains a decision, not just work: an invariant, a
+  cross-cutting change, concurrency, a data migration, a performance problem
+  with no obvious cause. Also: anything a lower tier handed back, and anything
+  where a previous attempt produced a wrong result.
+
+**Escalation is the mechanism that makes this safe.** A `quick` agent that finds
+the task needs a decision is instructed to stop and say which one. When that
+happens, re-spawn on `implementer-deep` and **pass its explanation into the
+task** — it was closest to the problem. The cost of routing too low is one cheap
+run; the cost of routing too low *without* escalation is a plausible-looking
+wrong implementation, which is why the two go together.
+
+Do not route back down after a deep agent failed. Two runs at different prices
+on the same misunderstanding is the same mistake twice.
+
 ## Branches
 
 You own every branch an agent works on. Agents commit; they never merge, rebase,
