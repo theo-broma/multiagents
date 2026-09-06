@@ -643,7 +643,7 @@ def test_project_layer_does_not_pin_machine_level_files(tmp_path):
     (source / "agents" / "a.md").write_text("x")
     # The orchestrator's brief is a normal agent instruction file, so it is
     # pinned per project like every other one and can be tuned there.
-    (source / "agents" / "orchestrator.md").write_text("x")
+    (source / "agents" / "_orchestrator.md").write_text("x")
     (source / "providers" / "a.sh").write_text("x")
 
     glob_names = layer_files(source, "global")
@@ -652,7 +652,7 @@ def test_project_layer_does_not_pin_machine_level_files(tmp_path):
     # liability, and they resolve through the global layer anyway.
     assert "providers/a.sh" in glob_names
     assert not any(n.startswith("providers/") for n in proj_names)
-    assert "agents/orchestrator.md" in proj_names
+    assert "agents/_orchestrator.md" in proj_names
     assert "agents/a.md" in proj_names and "project.yaml" in proj_names
 
 
@@ -1148,7 +1148,7 @@ def test_orchestrator_entry_ships_and_is_marked_launch():
     from multiagents.paths import shipped_defaults_dir
     agents = yaml.safe_load((shipped_defaults_dir() / "agents.yaml").read_text())["agents"]
     assert agents["orchestrator"]["launch"] is True
-    assert (shipped_defaults_dir() / "agents" / "orchestrator.md").is_file()
+    assert (shipped_defaults_dir() / "agents" / "_orchestrator.md").is_file()
 
 
 # --------------------------------------------------------------------------
@@ -1281,7 +1281,41 @@ def test_both_launched_roles_ship_and_are_distinguishable():
     assert agents["initializer"]["role"] == "initializer"
     for name in ("orchestrator", "initializer"):
         assert agents[name]["launch"] is True
-        assert (shipped_defaults_dir() / "agents" / f"{name}.md").is_file()
+        brief = agents[name]["instructions"]
+        # The file the config names, not one guessed from the agent's name:
+        # the entry may be renamed, and only `role` is load-bearing.
+        assert (shipped_defaults_dir() / "agents" / brief).is_file()
+        # Leading underscore marks the briefs a project must not delete.
+        assert brief.startswith("_"), brief
+
+
+def test_only_the_mandatory_briefs_are_underscored():
+    """The convention is only useful if it means exactly one thing: deleting
+    this file breaks a command."""
+    from multiagents.paths import shipped_defaults_dir
+    agents = _shipped_agents()
+    underscored = {p.name for p in (shipped_defaults_dir() / "agents").glob("_*.md")}
+    required = {spec["instructions"] for spec in agents.values()
+                if spec.get("launch") and spec.get("instructions")}
+    assert underscored == required, (underscored, required)
+
+
+def test_a_config_naming_the_old_brief_still_resolves(tmp_path):
+    """An install predating the rename keeps its own `orchestrator.md` and an
+    agents.yaml naming it; the rename must not silently empty its prompt."""
+    from multiagents.config import Config
+    briefs = tmp_path / "agents"
+    briefs.mkdir()
+    (briefs / "_orchestrator.md").write_text("the shipped brief")
+    config = Config(project={}, providers={}, agents={}, models={},
+                    instruction_dirs=[briefs])
+
+    old_style = AgentSpec("boss", "p", "m", instructions="orchestrator.md")
+    assert config.instructions_for(old_style) == "the shipped brief"
+
+    # And the exact name wins when both spellings are present.
+    (briefs / "orchestrator.md").write_text("the local one")
+    assert config.instructions_for(old_style) == "the local one"
 
 
 def test_launched_spec_selects_by_role():
@@ -1400,8 +1434,8 @@ def test_the_catalog_check_belongs_to_the_initializer():
     ground that rarely moves; the orchestrator checks it reactively instead."""
     from multiagents.paths import shipped_defaults_dir
     briefs = shipped_defaults_dir() / "agents"
-    initializer = (briefs / "initializer.md").read_text()
-    orchestrator = (briefs / "orchestrator.md").read_text()
+    initializer = (briefs / "_initializer.md").read_text()
+    orchestrator = (briefs / "_orchestrator.md").read_text()
 
     assert "check_model_catalog" in initializer
     assert "update_model_catalog" in initializer

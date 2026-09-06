@@ -254,10 +254,19 @@ class Config:
         candidate = Path(spec.instructions).expanduser()
         if candidate.is_absolute() and candidate.is_file():
             return candidate.read_text()
-        for base in self.instruction_dirs:
-            path = base / spec.instructions
-            if path.is_file():
-                return path.read_text()
+        # The mandatory briefs are named with a leading underscore so they are
+        # visibly not yours to delete. A config written before that convention
+        # names them without it, and an install can carry both files at once
+        # mid-upgrade — so the exact name always wins, and the other spelling
+        # is only a fallback.
+        names = [spec.instructions]
+        stem = spec.instructions
+        names.append(stem[1:] if stem.startswith("_") else "_" + stem)
+        for name in names:
+            for base in self.instruction_dirs:
+                path = base / name
+                if path.is_file():
+                    return path.read_text()
         return ""
 
 
