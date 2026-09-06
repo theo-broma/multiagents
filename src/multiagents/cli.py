@@ -430,8 +430,38 @@ def _offer_git(root: Path) -> None:
     print(f"git          {gitops.current_branch(root)} @ {gitops.head_sha(root)[:12]}")
 
 
+def _refuse_nesting(root: Path, allow_nested: bool) -> str:
+    """Why this directory must not become a project, or "".
+
+    A project is exactly one git repository, rooted at that repository's root.
+    Everything here rests on that: `create_worktree` runs
+    `git -C <project root> worktree add`, and git resolves it to the
+    REPOSITORY. So a project inside another one hands its agents full checkouts
+    of the outer repository and a branch namespace shared with the outer
+    project's agents, while counting concurrency, budget and watchdogs
+    separately. It looks like it works, which is the problem.
+    """
+    if allow_nested:
+        return ""
+    outer = find_project_root(root)
+    if outer is None or outer == root:
+        return ""
+    return (
+        f"{outer} is already a multiagents project.\n"
+        f"Agents branch and merge in one repository, so a second project inside "
+        f"it would share that branch namespace while counting its own limits "
+        f"separately.\n"
+        f"Work on this directory from {outer}, or make it its own git "
+        f"repository first. `--nested` overrides this."
+    )
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     root = Path(args.path or ".").expanduser().resolve()
+    refusal = _refuse_nesting(root, args.nested)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
     root.mkdir(parents=True, exist_ok=True)
     paths = ProjectPaths(root)
     paths.ensure()
@@ -464,6 +494,16 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     # After the two writes above, so a first commit made here picks them up.
     _offer_git(root)
+
+    # Legitimate — a repository whose root is a parent you do not own — but the
+    # user should know that every agent worktree will be a checkout of the
+    # larger repository, and that branches land in its namespace.
+    top = gitops.repo_root(root)
+    if top is not None and top != root:
+        print(f"\nnote         this is not the repository root")
+        print(f"             repository: {top}")
+        print(f"             agent worktrees will be full checkouts of it, and "
+              f"branches\n             will land in its namespace")
 
     providers = load_providers(load_config(paths).providers)
     result = refresh_models(providers, paths.config / "models.yaml")
@@ -1208,6 +1248,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("init", help="set up a project")
     p.add_argument("path", nargs="?", help="project directory (default: cwd)")
     p.add_argument("--force", action="store_true", help="overwrite existing config files")
+    p.add_argument("--nested", action="store_true",
+                   help="allow a project inside another project's directory tree")
     p.set_defaults(func=cmd_init)
 
     for name, helptext in (

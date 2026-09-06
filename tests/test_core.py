@@ -1637,9 +1637,9 @@ def _git(repo, *args):
                           capture_output=True, text=True)
 
 
-def _init_args(path, force=False):
+def _init_args(path, force=False, nested=False):
     import argparse
-    return argparse.Namespace(path=str(path), force=force)
+    return argparse.Namespace(path=str(path), force=force, nested=nested)
 
 
 @pytest.fixture
@@ -2092,3 +2092,91 @@ def test_init_exits_zero_once_the_project_can_actually_run(tmp_path, quiet_git,
 
     monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
     assert cli.cmd_init(_init_args(tmp_path)) == 0
+
+
+# --------------------------------------------------------------------------
+# One project = one repository
+#
+# A project inside another one looks like it works: init succeeds, agents run.
+# What it actually does is hand them checkouts of the OUTER repository and a
+# branch namespace shared with the outer project's agents, while counting
+# concurrency, budget and watchdogs separately. Hence a refusal, not a warning.
+
+
+def test_init_refuses_inside_an_existing_project(tmp_path, quiet_git, monkeypatch):
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    sub = tmp_path / "subproject"
+    sub.mkdir()
+
+    assert cli.cmd_init(_init_args(sub)) == 2
+    assert not (sub / ".multiagents").exists(), "a refusal must leave nothing behind"
+
+
+def test_nested_overrides_the_refusal(tmp_path, quiet_git, monkeypatch):
+    """For the genuinely separate repository the guard cannot recognise."""
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    sub = tmp_path / "subproject"
+    sub.mkdir()
+
+    cli.cmd_init(_init_args(sub, nested=True))
+    assert (sub / ".multiagents").is_dir()
+
+
+def test_init_names_the_repository_when_it_is_not_the_project_root(tmp_path,
+                                                                   quiet_git,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """Worktrees are checkouts of the repository, not of the directory — so a
+    project below the repository root gets more than it asked for."""
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+
+    gitops.init_repo(tmp_path)
+    gitops.initial_commit(tmp_path)
+    sub = tmp_path / "component"
+    sub.mkdir()
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(sub, nested=True))
+    out = capsys.readouterr().out
+
+    assert "not the repository root" in out
+    assert str(tmp_path) in out
+
+
+def test_repo_root_distinguishes_the_top_level_from_being_inside_one(tmp_path,
+                                                                     quiet_git):
+    import multiagents.gitops as gitops
+
+    assert gitops.repo_root(tmp_path) is None
+    gitops.init_repo(tmp_path)
+    deep = tmp_path / "a" / "b"
+    deep.mkdir(parents=True)
+
+    assert gitops.repo_root(deep) == tmp_path
+    assert gitops.is_repo(deep), "is_repo is true anywhere inside — that is the trap"
+
+
+def test_the_state_root_is_not_mistaken_for_a_project(tmp_path, monkeypatch):
+    """`~/.multiagents` holds worktrees and container credentials and wears the
+    same name as a project's directory. Without this, every path under the home
+    directory with no closer project resolved to the home directory itself, and
+    commands read and wrote a phantom project rooted there."""
+    import multiagents.paths as paths_mod
+
+    home = tmp_path / "home"
+    (home / ".multiagents" / "worktrees").mkdir(parents=True)
+    monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(home / ".multiagents"))
+    work = home / "code" / "thing"
+    work.mkdir(parents=True)
+
+    assert paths_mod.find_project_root(work) is None
+
+    (work / ".multiagents").mkdir()
+    assert paths_mod.find_project_root(work) == work
