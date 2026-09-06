@@ -20,7 +20,8 @@ you/master  ← explicit merge_agent() gate
 ## The lifecycle
 
 ```bash
-make install             # dependencies, global config, MCP registration
+make install             # dependencies, the `multiagents` command on PATH,
+                         # global config, MCP registration
 make check               # are the agent CLIs present and authenticated?
 
 multiagents init         # create the project, copy the global config
@@ -37,6 +38,13 @@ and `resume` is an alias for `run`. The same applies to `init-agent`.
 exhausted CLI reports it as an ordinary error with no reset time in it and that
 reads as a broken install. `run --wait` blocks until the quota is back instead
 of exiting.
+
+`make install` runs `uv sync` **and** `uv tool install --editable .`, because
+`uv sync` alone only populates this repository's `.venv` — the command would
+exist nowhere else, which is not much of an install. `--editable` means the
+installed command tracks the source, so a `git pull` is enough to update it, and
+the install prints where the command landed (or says plainly that it is not on
+your PATH and how to fix that, which is `uv tool update-shell`).
 
 `init` copies the global defaults into `.multiagents/config/` for editing,
 generates `models.yaml` from the installed CLIs, records the first model-catalog
