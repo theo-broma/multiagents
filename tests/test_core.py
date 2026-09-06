@@ -1996,3 +1996,64 @@ def test_doctor_names_a_permission_profile_the_provider_does_not_define():
     out = buf.getvalue()
     assert "unknown permission 'paranoid'" in out
     assert "full, readonly, sandbox" in out
+
+
+def test_the_last_ticket_marker_wins_not_the_first(tmp_path):
+    """The agent reasons about a system whose own docs contain the literal
+    string `TICKET(blocking):` — quoting the rule while thinking must not turn
+    the rest of the monologue into the ticket."""
+    r = _runner(tmp_path, {"bug-reporter": AgentSpec("bug-reporter", "p", "m")})
+    text = (
+        "The brief says to end with `TICKET(blocking): one-line summary`, so\n"
+        "TICKET(blocking): a quoted rule, which is not the real ticket\n"
+        "and here is more of my reasoning about what went wrong.\n"
+        "TICKET(minor): merge_agent miscounts commits on an empty branch\n"
+        "## What happened\n\nThe real body.\n"
+    )
+    ticket = r._file_ticket("ag-1", text)
+
+    assert ticket["title"] == "merge_agent miscounts commits on an empty branch"
+    assert ticket["severity"] == "minor"
+    assert "quoted rule" not in ticket["body"]
+    assert "The real body." in ticket["body"]
+
+
+def test_an_agent_whose_brief_is_missing_refuses_to_run(tmp_path):
+    """Silently running on the preamble alone is worse than failing: a capable
+    agent does something adjacent to the task and the cause is invisible."""
+    import asyncio
+    spec = AgentSpec("worker", "p", "m", instructions="deleted.md")
+    r = _runner(tmp_path, {"worker": spec},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        asyncio.run(r.start("worker", "go"))
+    assert "deleted.md" in str(excinfo.value)
+    assert "doctor" in str(excinfo.value)
+
+
+def test_a_conversation_whose_worktree_vanished_is_told_so(tmp_path):
+    """Carrying the session into a fresh checkout leaves the agent remembering
+    files that are not there; the correction belongs in the conversation."""
+    r = _runner(tmp_path, {"advisor": AgentSpec("advisor", "p", "m",
+                                                conversational=True)},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    captured = {}
+
+    async def fake_launch(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop here — the prompt is what is under test")
+
+    r._launch = fake_launch
+    from multiagents.tree import Node
+    r.tree.add(Node(id="ag-old", agent="advisor", provider="p", model="m",
+                    parent=None, depth=1, status="idle", conversation=True,
+                    session_id="s-1", worktree=str(tmp_path / "gone"),
+                    branch="agents/advisor/old"))
+
+    import asyncio
+    asyncio.run(r.consult("advisor", "still there?"))
+
+    assert captured["session_id"] == "s-1", "the session must survive"
+    assert Path(captured["workdir"]).is_dir(), "a fresh worktree must exist"
+    assert "recreated" in captured["prompt"]

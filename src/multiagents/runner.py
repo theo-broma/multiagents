@@ -258,6 +258,17 @@ class Runner:
             )
         if not provider.available():
             raise FileNotFoundError(f"{provider.bin!r} is not on PATH (needed by agent {spec.name!r})")
+        # An agent whose purpose failed to load should not run and guess at it.
+        # The file is resolved across three config layers, so this is a typo or
+        # a deleted brief, and the symptom without it — a capable agent doing
+        # something adjacent to the task — is expensive to diagnose.
+        if spec.instructions and not self.config.instructions_for(spec).strip():
+            raise FileNotFoundError(
+                f"Agent {spec.name!r} names instructions {spec.instructions!r}, "
+                f"which is not in any config layer's agents/ directory. Fix the "
+                f"path in agents.yaml or restore the file; `multiagents doctor` "
+                f"lists every agent whose brief is missing."
+            )
         if not (provider.spawn or {}).get("args"):
             raise PermissionError(
                 f"Provider {provider.name!r} declares no spawn args, so it cannot run "
@@ -333,10 +344,20 @@ class Runner:
         )
 
     def _file_ticket(self, node_id: str, text: str) -> dict | None:
-        """Turn a finished bug-reporter message into a queued ticket."""
-        match = TICKET.search(text or "")
-        if not match:
+        """Turn a finished bug-reporter message into a queued ticket.
+
+        The LAST marker wins, not the first. The agent is reasoning about a
+        system whose own documentation contains the literal string
+        `TICKET(blocking):` — its brief does, and so does the orchestrator's —
+        so a model that quotes the rule while thinking would otherwise turn the
+        rest of its monologue into the ticket. Its instructions say to *end*
+        with the marker, which makes the last occurrence the right one and
+        moves the failure into the rarer direction.
+        """
+        matches = list(TICKET.finditer(text or ""))
+        if not matches:
             return None
+        match = matches[-1]
         severity, title = match.group(1).lower(), match.group(2).strip()
         rest = text[match.end():]
         fix = ""
@@ -1057,6 +1078,33 @@ class Runner:
             worktree_path = Path(node.worktree)
             prompt = message
             session_id = node.session_id
+            # A conversation outlives its worktree: `clean` prunes worktrees,
+            # and a standing advisor keeps its idle node and its session id
+            # across all of that. Resuming into a directory that is gone made
+            # the CLI fail on chdir with an error naming a path, which reads as
+            # a container problem rather than a stale checkout. Cut a fresh
+            # worktree and carry the session — the context lives in the
+            # provider's session, not in the files.
+            if not worktree_path.is_dir() and gitops.is_repo(self.paths.root):
+                base = self.config.base_branch or gitops.current_branch(self.paths.root)
+                worktree_path = self.paths.worktree(node_id)
+                branch = gitops.create_worktree(
+                    self.paths.root, worktree_path,
+                    f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}",
+                    base,
+                )
+                self.tree.update(node_id, worktree=str(worktree_path), branch=branch)
+                node = self.tree.get(node_id) or node
+                # The session remembers files that the new checkout does not
+                # have. Saying so puts the correction IN the conversation;
+                # without it the agent acts on a directory listing from its
+                # memory and then has to invent a reason its work vanished.
+                prompt = (
+                    f"[system] Your working directory was recreated at "
+                    f"{worktree_path} and is empty — the previous checkout was "
+                    f"cleaned up between turns. Anything you wrote there is "
+                    f"gone; what you remember of this conversation is intact.\n\n"
+                ) + prompt
 
         self.tree.update(node_id, turns=turn)
         try:
