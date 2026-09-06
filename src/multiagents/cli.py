@@ -481,6 +481,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("  2. edit .multiagents/config/agents.yaml if you want a different roster")
     print("  3. multiagents build         container environment, if executor is docker")
     print("  4. multiagents run           launch the orchestrator")
+
+    # Everything above ran; this only reports the state it ends in. Without a
+    # repository and a commit no agent can be given a branch, so `run` will
+    # refuse at the first spawn — and a scripted setup that read exit 0 here
+    # would call this project ready. Non-zero is how CI finds out.
+    if not (gitops.is_repo(root) and gitops.has_commits(root)):
+        print("\nnot ready: no git repository with a commit, so no agent can be "
+              "given a branch.\n             set one up and re-run `multiagents init`.")
+        return 1
     return 0
 
 

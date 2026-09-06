@@ -160,6 +160,14 @@ limits:
   doom_loop_repeats: 3      # identical tool+args calls before "stuck"
   budget_tokens: 0          # 0 = unlimited; otherwise tree-wide ceiling
 
+  # `start_agent(workdir=...)` puts an agent in a directory of its choosing
+  # instead of its own worktree — no branch, no isolation from siblings, and
+  # nothing to discard if the run goes wrong. It is an MCP parameter, so the
+  # caller asking for it is a MODEL: a scary flag name deters people, not
+  # samplers. The permission therefore lives here, where a human grants it by
+  # editing a file, and an agent cannot grant it to itself.
+  allow_workdir_override: false
+
 # --------------------------------------------------------------------------
 # Quota awareness. Used to route work away from a rationed provider and toward
 # one with headroom, and to park tasks until a bucket resets.

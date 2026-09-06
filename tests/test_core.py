@@ -1047,7 +1047,7 @@ def test_read_all_hands_the_provider_name_to_executor_for(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _runner(tmp_path, agents=None, providers_yaml=None, git=True):
+def _runner(tmp_path, agents=None, providers_yaml=None, git=True, project=None):
     """A Runner over a throwaway project, with config injected directly.
 
     The project is a real repository by default, because that is what every
@@ -1067,7 +1067,7 @@ def _runner(tmp_path, agents=None, providers_yaml=None, git=True):
             subprocess.run(["git", "-C", str(tmp_path), *args],
                            capture_output=True, env=env)
     config = Config(
-        project={}, providers=providers_yaml or {},
+        project=project or {}, providers=providers_yaml or {},
         agents=agents or {}, models={}, instruction_dirs=[],
     )
     return Runner(paths, config)
@@ -1785,16 +1785,32 @@ def test_spawning_without_a_repository_is_refused_not_silently_unisolated(tmp_pa
         assert "not a git repository" in str(excinfo.value)
 
 
-def test_an_explicit_workdir_still_overrides_the_repository_requirement(tmp_path):
-    """`workdir` is the caller stating they meant it, so it is not blocked —
-    it must fail later, on the provider, rather than on the repository."""
+def test_workdir_override_is_refused_unless_the_project_grants_it(tmp_path):
+    """`workdir` removes the branch isolation everything else rests on, and the
+    caller asking for it is a model, not a person at a shell — so the
+    permission has to come from a file a human edits."""
+    import asyncio
+    spec = AgentSpec("worker", "p", "m")
+    providers = {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}}
+    r = _runner(tmp_path, {"worker": spec}, providers)
+
+    with pytest.raises(PermissionError) as excinfo:
+        asyncio.run(r.start("worker", "go", workdir=str(tmp_path)))
+    assert "allow_workdir_override" in str(excinfo.value)
+
+
+def test_a_granted_workdir_override_also_lifts_the_repository_requirement(tmp_path):
+    """Once a human has granted it, `workdir` is the deliberate escape hatch it
+    was meant to be — including in a directory that is not a repository."""
     import asyncio
     spec = AgentSpec("worker", "nosuch", "m")
-    r = _runner(tmp_path, {"worker": spec}, git=False)
+    r = _runner(tmp_path, {"worker": spec}, git=False,
+                project={"limits": {"allow_workdir_override": True}})
 
     with pytest.raises((RuntimeError, KeyError, FileNotFoundError)) as excinfo:
         asyncio.run(r.start("worker", "go", workdir=str(tmp_path)))
     assert "not a git repository" not in str(excinfo.value)
+    assert "allow_workdir_override" not in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------
@@ -2057,3 +2073,22 @@ def test_a_conversation_whose_worktree_vanished_is_told_so(tmp_path):
     assert captured["session_id"] == "s-1", "the session must survive"
     assert Path(captured["workdir"]).is_dir(), "a fresh worktree must exist"
     assert "recreated" in captured["prompt"]
+
+
+def test_init_exits_non_zero_when_it_leaves_a_project_unspawnable(tmp_path,
+                                                                  monkeypatch):
+    """Exit 0 after leaving a project where no agent can run would let a
+    scripted setup call it ready; `run` then fails at the first spawn."""
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: False)   # decline git
+    assert cli.cmd_init(_init_args(tmp_path)) == 1
+    assert (tmp_path / ".multiagents").is_dir(), "the rest of setup still ran"
+
+
+def test_init_exits_zero_once_the_project_can_actually_run(tmp_path, quiet_git,
+                                                           monkeypatch):
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    assert cli.cmd_init(_init_args(tmp_path)) == 0

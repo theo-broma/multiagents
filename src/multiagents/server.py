@@ -185,7 +185,9 @@ async def start_agent(
     Args:
         agent: Name from list_agents.
         task: What to do. Be specific — the agent cannot ask you questions.
-        workdir: Override the working directory (rarely needed).
+        workdir: Run outside the agent's own worktree. Refused unless the
+            project sets `limits.allow_workdir_override: true` — it removes the
+            branch isolation every other guarantee here rests on.
         timeout: Wall-clock seconds; 0 uses the agent's configured default.
         model: Override the configured model for this run.
     """
