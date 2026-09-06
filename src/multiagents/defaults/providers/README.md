@@ -44,6 +44,15 @@ checked, repaired and measured the same way. Adding a provider means adding a bl
     MULTIAGENTS_PRIVATE_BACKING   host dir behind it    (docker, if private)
     MULTIAGENTS_UID / _GID        uid:gid to run as
 
+`MULTIAGENTS_RESUME` is **advisory, not a promise.** It is set from a marker
+written before the CLI is launched, so it records that a session was started
+here once — not that one ever produced a resumable conversation. A user who
+quits the first session without saying anything leaves the marker behind, and a
+resume flag passed blindly then fails on every later run. Each `launch` must
+therefore check that a conversation actually exists before adding its resume
+flag, and start fresh (saying so on stderr) when none does. `claude.sh` does
+this by looking for a transcript under `~/.claude/projects/<cwd slug>/`.
+
 Additionally for `prepare` and `launch`:
 
     MULTIAGENTS_MODEL             model the roster entry asks for

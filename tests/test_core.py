@@ -2595,3 +2595,44 @@ def test_uninstall_dry_run_removes_nothing(tmp_path, monkeypatch, capsys):
     assert cli.cmd_uninstall(argparse.Namespace(dry_run=True, force=False)) == 0
     assert state.is_dir() and config.is_dir()
     assert "would remove" in capsys.readouterr().out
+
+
+def test_the_claude_launcher_only_resumes_when_a_transcript_exists(tmp_path,
+                                                                   monkeypatch):
+    """`--continue` is fatal with no conversation, and the launch marker is
+    written before the first session runs — so it records that we tried, not
+    that anything resumable came of it. Seen in the wild: a first init-agent
+    the user quit without speaking made every later run fail with
+    "No conversation found to continue"."""
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "claude.sh")
+    workdir = tmp_path / "proj.x" / "some_dir"
+    workdir.mkdir(parents=True)
+    home = tmp_path / "home"
+    slug = str(workdir).replace("/", "-").replace(".", "-").replace("_", "-")
+    sessions = home / ".claude" / "projects" / slug
+    sessions.mkdir(parents=True)
+
+    # A `claude` that prints its own argv instead of running.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "claude").write_text('#!/bin/sh\necho "ARGV: $@"\n')
+    (fake_bin / "claude").chmod(0o755)
+
+    def run():
+        return subprocess.run(
+            ["sh", str(script), "launch"], cwd=workdir, capture_output=True, text=True,
+            env={"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(home),
+                 "MULTIAGENTS_BIN": str(fake_bin / "claude"),
+                 "MULTIAGENTS_RESUME": "1", "MULTIAGENTS_MODEL": "sonnet"},
+        )
+
+    # The directory exists but holds no transcript — the exact false positive
+    # that made the real failure: an old session leaves the directory behind.
+    without = run()
+    assert "--continue" not in without.stdout, without.stdout
+    assert "starting a fresh one" in without.stderr
+
+    (sessions / "abc.jsonl").write_text("{}\n")
+    assert "--continue" in run().stdout
