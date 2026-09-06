@@ -40,7 +40,24 @@ launch)
         set -- "$@" --mcp-config "$MULTIAGENTS_MCP_CONFIG" --strict-mcp-config
     [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && \
         set -- "$@" --append-system-prompt-file "$MULTIAGENTS_PROMPT_FILE"
-    [ "${MULTIAGENTS_RESUME:-0}" = "1" ] && set -- "$@" --continue
+    if [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
+        # `--continue` is FATAL when this directory has no conversation: the
+        # CLI prints "No conversation found to continue" and exits. The launch
+        # marker is written before the first session runs, so it only records
+        # that we tried — a first run the user quit without saying anything
+        # would otherwise make every later run fail that way.
+        #
+        # Claude stores transcripts per working directory, with `/`, `.` and
+        # `_` all folded to `-`. Test for a transcript, not for the directory:
+        # an older session can leave the directory behind holding only
+        # `memory/`, which is exactly the false positive seen in the wild.
+        sessions="$HOME/.claude/projects/$(pwd | sed 's|[/._]|-|g')"
+        if ls "$sessions"/*.jsonl >/dev/null 2>&1; then
+            set -- "$@" --continue
+        else
+            echo "no previous conversation in this directory; starting a fresh one" >&2
+        fi
+    fi
     exec "$BIN" "$@"
     ;;
 *)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
