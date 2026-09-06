@@ -547,6 +547,45 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return _launch_agent(paths, config, "orchestrator", resume=args.resume)
 
 
+def _report_agents(config, providers) -> int:
+    """The `doctor` roster section. Returns the number of problems found.
+
+    Extracted so the checks can be tested without a whole project on disk:
+    every one of them is about a config file the user edits by hand, which is
+    exactly where a silent mistake is most likely.
+    """
+    problems = 0
+    for name, spec in sorted(config.agents.items()):
+        provider = providers.get(spec.provider)
+        mark = " " if provider and provider.available() else "!"
+        if spec.launch:
+            command = "init-agent" if spec.role == "initializer" else "run"
+            tag = f"[launched by `multiagents {command}`]"
+        else:
+            where = spec.executor or config.executor
+            tag = f"[{where}]" + ("*" if spec.executor else "")
+        print(f"  {mark} {name:12} {spec.provider}/{spec.model:34} {tag}")
+        instructions = config.instructions_for(spec)
+        if spec.instructions and not instructions.strip():
+            print(f"    missing instructions file: {spec.instructions}")
+            problems += 1
+        # A permission name the provider does not define adds NO flags at all,
+        # which is not a safe default: agy then auto-denies every tool and
+        # returns an empty answer, so the agent looks broken rather than
+        # misconfigured. Silent until now, hence its own line.
+        profiles = (provider.spawn.get("permission") or {}) if provider else {}
+        if profiles and spec.permission not in profiles:
+            print(f"    unknown permission {spec.permission!r} for {spec.provider} — "
+                  f"choose one of {', '.join(sorted(profiles))}")
+            problems += 1
+
+    for warning in validate_agent_models(config):
+        print(f"    {warning}")
+    if any(spec.executor for spec in config.agents.values()):
+        print("    * pinned to an executor in agents.yaml, overriding the project default")
+    return problems
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     paths = _resolve(args.path) if find_project_root() else None
     config = load_config(paths)
@@ -568,25 +607,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             problems += 1
 
     print("\nagents")
-    for name, spec in sorted(config.agents.items()):
-        provider = providers.get(spec.provider)
-        mark = " " if provider and provider.available() else "!"
-        if spec.launch:
-            command = "init-agent" if spec.role == "initializer" else "run"
-            tag = f"[launched by `multiagents {command}`]"
-        else:
-            where = spec.executor or config.executor
-            tag = f"[{where}]" + ("*" if spec.executor else "")
-        print(f"  {mark} {name:12} {spec.provider}/{spec.model:34} {tag}")
-        instructions = config.instructions_for(spec)
-        if spec.instructions and not instructions.strip():
-            print(f"    missing instructions file: {spec.instructions}")
-            problems += 1
-
-    for warning in validate_agent_models(config):
-        print(f"    {warning}")
-    if any(spec.executor for spec in config.agents.values()):
-        print("    * pinned to an executor in agents.yaml, overriding the project default")
+    problems += _report_agents(config, providers)
 
     print("\nauth")
     providers_map = load_providers(config.providers)

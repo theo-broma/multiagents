@@ -181,6 +181,56 @@ stays resumable and their worktree survives).
 product is a **ticket about multiagents itself** rather than work on your
 project. See below.
 
+### Which agents you can delete, and which you cannot
+
+Only two entries are required, and both are required by a *command* rather than
+by the system as a whole:
+
+| entry | needed by | if it is gone |
+|---|---|---|
+| `launch: true` + `role: orchestrator` | `multiagents run` | `No agent in agents.yaml is marked \`launch: true, role: orchestrator\`` |
+| `launch: true` + `role: initializer` | `multiagents init-agent` | the same message for `initializer` |
+
+The lookup is by **role, not by name** — `_launched_spec` searches for the
+marker — so renaming `orchestrator` to `boss` is fine as long as the two lines
+travel with it. Delete the roles and only those two commands stop; everything
+else keeps working.
+
+Every other agent is yours. `researcher`, `implementer`, `reviewer`, `tester`,
+`critic`, `advisor` and `bug-reporter` are referenced by name only in *prompts*,
+never in code, so removing one costs you whatever that prompt asks for — the
+orchestrator told to delegate to `bug-reporter` will find no such agent — and
+nothing else. Add as many of your own as you like.
+
+Note that removing an entry from your project's `agents.yaml` does **not**
+delete it: the three config layers deep-merge, and a merge can add or override
+but never remove. To drop a shipped agent, give it `disabled: true`.
+
+### Lines within an entry that carry weight
+
+- `launch:` and `role:` — see above. `launch: true` also makes an entry
+  unspawnable as a subagent, which is what stops an orchestrator orchestrating
+  itself.
+- `provider:` must name a provider in `providers.yaml` that is `enabled` and
+  installed; `model:` must be one that provider actually serves. `doctor` warns
+  on both.
+- `permission:` must be one of the profiles the provider defines
+  (`full`, `sandbox`, `readonly`). An unrecognised name adds **no flags at
+  all**, which is not a safe default — agy then auto-denies every tool and
+  returns nothing, so the agent looks broken rather than misconfigured.
+- `conversational: true` is what makes an agent reachable by `consult()` and
+  gives it memory between turns. Remove it from `critic` and consulting it
+  fails.
+- `instructions:` must name a file that exists in one of the config layers'
+  `agents/` directories. A missing file is not an error — the agent runs on the
+  preamble alone, which is worse than failing.
+- `role: bug-reporter` is what earns the generated environment block in the
+  prompt. Without it a ticket carries whatever the model invents about the
+  machine instead.
+
+`multiagents doctor` reports every one of these. Run it after editing the
+roster; it is faster than discovering the mistake through a confused agent.
+
 ## When multiagents is the thing that is broken
 
 An agent that writes bad code is ordinary. A `merge_agent` that reports success
@@ -641,13 +691,13 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-127 tests covering the parts live runs do not reliably exercise: doom-loop
+129 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
 ownership gate on mutating tools, `awaiting_user` transitions and their
 non-interaction with the watchdogs, the refusal to spawn without a repository,
-and what a bug ticket must not contain.
+what a bug ticket must not contain, and the roster checks `doctor` makes.
 
 Provider event fixtures are real shapes captured from the CLIs, not invented —
 `tests/fixtures/claude-stream.jsonl` is an actual run that used a tool, and a
