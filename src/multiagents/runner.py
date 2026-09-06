@@ -184,13 +184,27 @@ class Runner:
 
     # ------------------------------------------------------------- guardrails --
 
-    def _preflight(self, spec: AgentSpec) -> None:
+    def _preflight(self, spec: AgentSpec, workdir: str | None = None) -> None:
         limits = self.config.limits
         if spec.launch:
             raise PermissionError(
                 f"Agent {spec.name!r} is the orchestrator: it is launched by "
                 f"`multiagents run`, not spawned as a subagent. Spawning it "
                 f"would give you an orchestrator inside an orchestrator."
+            )
+        # Isolation is the whole design: every agent gets its own branch in its
+        # own worktree, which a project with no repository cannot provide. This
+        # used to fall through to running each agent in the project directory
+        # itself — concurrently, sharing one working tree, with no branch to
+        # merge and nothing to discard when one went wrong. Failing here is the
+        # only honest answer; an explicit workdir override is the caller saying
+        # they meant it.
+        if not workdir and not gitops.is_repo(self.paths.root):
+            raise RuntimeError(
+                f"{self.paths.root} is not a git repository, so no agent can be "
+                f"given a branch and a worktree of its own. Run `multiagents "
+                f"init` there and accept the offer to create one, or "
+                f"`git init && git add -A && git commit -m 'initial commit'`."
             )
         if not self.can_spawn():
             raise PermissionError(
@@ -361,7 +375,7 @@ class Runner:
         spec = self.config.agent(agent_name)
         if model:
             spec = AgentSpec(**{**spec.__dict__, "model": model})
-        self._preflight(spec)
+        self._preflight(spec, workdir)
         provider = self.providers[spec.provider]
 
         parent = self.self_id()
@@ -417,7 +431,8 @@ class Runner:
         repo = self.paths.root
         branch = ""
         worktree_path = Path(workdir).expanduser() if workdir else self.paths.root
-        if not workdir and gitops.is_repo(repo):
+        if not workdir:
+            # _preflight has already established that this is a repository.
             base = self.config.base_branch or gitops.current_branch(repo)
             desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
             worktree_path = self.paths.worktree(node_id)
@@ -946,15 +961,13 @@ class Runner:
             parent = self.self_id()
             depth = self.self_depth() + 1
             node_id = new_id()
-            worktree_path, branch = self.paths.root, ""
-            if gitops.is_repo(self.paths.root):
-                base = self.config.base_branch or gitops.current_branch(self.paths.root)
-                worktree_path = self.paths.worktree(node_id)
-                branch = gitops.create_worktree(
-                    self.paths.root, worktree_path,
-                    f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}",
-                    base,
-                )
+            base = self.config.base_branch or gitops.current_branch(self.paths.root)
+            worktree_path = self.paths.worktree(node_id)
+            branch = gitops.create_worktree(
+                self.paths.root, worktree_path,
+                f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}",
+                base,
+            )
             node = Node(
                 id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
                 parent=parent, depth=depth, task=message[:500], branch=branch,
