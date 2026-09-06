@@ -770,6 +770,52 @@ anything mounted so a CLI can authenticate can be read by a model with a shell.
 Egress filtering is what makes that survivable — a credential an agent can read
 is one it cannot post anywhere.
 
+## Running out, and coming back
+
+Three layers, because the providers fail differently.
+
+**A fallback model per agent.** Every working agent names a model on the *other*
+provider in `agents.yaml`:
+
+```yaml
+  reviewer:
+    provider: agy
+    model: gemini-3.1-pro-high
+    models:
+      opencode: opencode-go/gpt-5.6-luna
+```
+
+A model id belongs to its provider's namespace, so failing over without one
+would run `agy --model opencode-go/glm-5.3-flash`. Named, a constrained provider
+costs you a model rather than an agent.
+
+The fallbacks are chosen so that a **checking pair never collapses onto one
+model** under a single-provider outage — specifier/adversary,
+security-advisor/pentester, critic/advisor stay on different models whichever
+provider is down. A test asserts it for both outage directions, because this is
+exactly the property that would degrade silently at the moment nobody is
+watching.
+
+**A pause when there is nothing left.** When an agent's provider *and* its
+fallback are both exhausted, the task is deferred and the whole tree is paused;
+`start_agent` refuses until it clears, and the orchestrator's brief tells it not
+to route around the pause — not by switching providers, not by rewriting the
+plan, and above all not by doing the work in its own context.
+
+Pausing rather than degrading is deliberate. A system that keeps spawning
+whatever still runs, while the agents that *check* its work are unreachable,
+writes code it cannot review and nobody notices which half is missing.
+
+**Resume without anyone watching.** The deferred queue drains itself: the next
+`wait_for_agents` restarts everything whose window has passed, re-reading quota
+first. A pause carries the *latest* reset of the providers that caused it, and
+clears itself on read once it elapses.
+
+For the orchestrator's own provider there is no fallback to take — it is the
+process you are talking to. `multiagents run` checks its headroom before
+launching, reports the reset time rather than letting the CLI fail with an
+opaque error, and `run --wait` blocks until the quota is back.
+
 ## Budget
 
 Three providers sit at three tiers of knowability, and the adapter reports that
@@ -853,7 +899,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-154 tests covering the parts live runs do not reliably exercise: doom-loop
+159 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

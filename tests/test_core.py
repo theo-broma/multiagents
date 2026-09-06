@@ -2331,3 +2331,86 @@ def test_the_orchestrator_routes_by_judgement_not_importance():
     flat = " ".join(text.split())
     assert "never by how important" in flat
     assert "implementer-deep" in flat and "implementer-quick" in flat
+
+
+# --------------------------------------------------------------------------
+# Fallback models, pause and resume
+
+
+def test_every_working_agent_names_a_cross_provider_fallback():
+    """Without one an agent cannot fail over — a model id belongs to its own
+    provider's namespace, so `agy --model opencode-go/...` is meaningless."""
+    agents = _shipped_agents()
+    for name, spec in agents.items():
+        if spec.get("disabled") or spec.get("launch"):
+            continue
+        alternatives = spec.get("models") or {}
+        assert alternatives, f"{name} has no fallback and would wait instead"
+        assert spec["provider"] not in alternatives, \
+            f"{name}'s fallback is its own provider"
+
+
+def test_a_checking_pair_never_collapses_onto_one_model():
+    """The pairs are split so a checker does not share the author's blind
+    spots. A fallback that lands both on the same model silently undoes that,
+    at exactly the moment nobody is watching."""
+    agents = _shipped_agents()
+    pairs = [("specifier", "adversary"), ("security-advisor", "pentester"),
+             ("critic", "advisor")]
+
+    def resolve(spec, down):
+        if spec["provider"] != down:
+            return spec["model"]
+        return next((m for p, m in (spec.get("models") or {}).items() if p != down),
+                    None)
+
+    for down in ("agy", "opencode"):
+        for left, right in pairs:
+            a, b = resolve(agents[left], down), resolve(agents[right], down)
+            assert a and b, f"{left}/{right} cannot run with {down} down"
+            assert a != b, f"with {down} down, {left} and {right} both use {a}"
+
+
+def test_pause_keeps_the_later_reset_and_expires_itself(tmp_path):
+    """Two providers exhausted at different times: work can only resume when
+    the last one is back. And a pause nobody lifts is a stop."""
+    import time as _t
+    tree = _tree(tmp_path)
+    assert tree.pause_state() == {}
+
+    tree.pause(_t.time() + 300, "opencode cooling down")
+    tree.pause(_t.time() + 60, "agy cooling down")     # earlier: must not win
+    assert tree.pause_state()["until"] > _t.time() + 200
+
+    tree.resume("back")
+    assert tree.pause_state() == {}
+
+    tree.pause(_t.time() - 1, "already over")
+    assert tree.pause_state() == {}, "an elapsed pause clears itself on read"
+
+
+def test_spawning_is_refused_while_the_tree_is_paused(tmp_path):
+    """The point of pausing is that nothing else gets started — including by an
+    orchestrator that would rather route around it."""
+    import asyncio, time as _t
+    spec = AgentSpec("worker", "p", "m")
+    r = _runner(tmp_path, {"worker": spec},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    r.tree.pause(_t.time() + 300, "no provider has headroom")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(r.start("worker", "go"))
+    assert "paused" in str(excinfo.value)
+    assert "restart by themselves" in str(excinfo.value)
+
+
+def test_resume_deferred_reports_tasks_whose_agent_is_gone(tmp_path):
+    """Dropping them silently loses work the orchestrator believes is queued."""
+    import asyncio, time as _t
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    r.tree.defer({"agent": "deleted-agent", "task": "something"}, _t.time() - 1, "quota")
+
+    result = asyncio.run(r.resume_deferred())
+    assert result["restarted"] == []
+    assert result["dropped"][0]["agent"] == "deleted-agent"

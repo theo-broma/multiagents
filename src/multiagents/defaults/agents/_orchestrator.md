@@ -263,3 +263,15 @@ anywhere unless you call `push_branch`.
 `budget_status` reports headroom where it is knowable and spend always. When
 your own five-hour bucket is tight, delegating is the highest-value move you
 have — that is the point of this system, not a fallback.
+
+Each agent names a fallback model on the other provider, so a constrained
+provider costs you a model rather than an agent. When **both** are gone there is
+nothing left to run on: the task is deferred, the tree is **paused**, and
+`start_agent` refuses until it clears.
+
+A pause is not an obstacle to route around. Do not switch an agent to a
+provider you have not checked, rewrite the plan to avoid the step, or do the
+work yourself in your own context — that last one is the tempting mistake, and
+it spends the one bucket you cannot refill on work you delegated for a reason.
+Deferred tasks restart by themselves: the next `wait_for_agents` drains the
+queue when the window has passed. Report the wait to the user and stop.

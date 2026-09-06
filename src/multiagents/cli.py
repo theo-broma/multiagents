@@ -533,6 +533,49 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _orchestrator_hold(paths, config) -> tuple[str, float | None] | None:
+    """Is the orchestrator's own provider out of headroom? `(why, until)`.
+
+    Checked before launching rather than after failing, because a CLI that has
+    run out of quota reports it as an ordinary error with no reset time in it,
+    and the user is left guessing whether the install is broken.
+    """
+    spec = _launched_spec(config, "orchestrator")
+    if spec is None:
+        return None
+    providers = load_providers(config.providers)
+    provider = providers.get(spec.provider)
+    if provider is None:
+        return None
+    executor_for = _executor_for(paths, config, providers)
+    budgets = read_all({spec.provider: provider}, executor_for,
+                       global_config_dir(), paths.config, {}, {}, use_cache=False)
+    budget = budgets.get(spec.provider)
+    if budget is None or budget.usable:
+        return None
+    when = f", resets {budget.resets_at}" if budget.resets_at else ""
+    return (f"paused       {spec.provider} has no headroom for the "
+            f"orchestrator{when}", budget.cooldown_until)
+
+
+def _wait_for_reset(paths, config, until: float | None, poll: int = 120) -> bool:
+    """Block until the orchestrator's provider has headroom again."""
+    print("             waiting — Ctrl-C to stop\n")
+    while True:
+        try:
+            time.sleep(poll)
+        except KeyboardInterrupt:
+            print("\nstopped waiting.")
+            return False
+        from .budget import invalidate_cache
+        invalidate_cache()
+        if _orchestrator_hold(paths, config) is None:
+            print("headroom is back; launching.\n")
+            return True
+        stamp = time.strftime("%H:%M:%S")
+        print(f"  {stamp}  still no headroom")
+
+
 def cmd_resume(args: argparse.Namespace) -> int:
     """Reconcile state after a crash or restart, then reopen the session."""
     paths = _resolve(args.path)
@@ -584,10 +627,30 @@ def cmd_resume(args: argparse.Namespace) -> int:
             print(f"  {q['id']}  {q['agent']} · {q['topic']}: {q['question'][:70]}")
         print("  the orchestrator can answer these, or use `multiagents ask`")
 
+    pause = tree.pause_state()
+    if pause:
+        waiting = max(0, int(pause["until"] - time.time()))
+        print(f"\npaused       {pause.get('reason', 'no provider available')}")
+        print(f"             clears in about {waiting // 60}m; deferred work "
+              f"restarts by itself")
+
     config = load_config(paths)
 
     if args.no_launch:
         return 0
+
+    # The orchestrator spends the same bucket the user's own session does when
+    # it is pinned to `claude`. Launching into an exhausted one produces a CLI
+    # error with no reset time in it, which reads as a broken install.
+    held = _orchestrator_hold(paths, config)
+    if held is not None:
+        detail, resets_at = held
+        print(f"\n{detail}")
+        if not args.wait:
+            print("             `multiagents run --wait` blocks until it resets")
+            return 3
+        if not _wait_for_reset(paths, config, resets_at):
+            return 3
 
     # The catalog baseline is the initializer's concern; re-checking it on every
     # orchestrator launch spends a network round trip on ground that rarely
@@ -1261,6 +1324,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="report project state without launching")
         p.add_argument("--fresh", dest="resume", action="store_false", default=True,
                        help="start a new session instead of continuing the last one")
+        p.add_argument("--wait", action="store_true",
+                       help="if the orchestrator's provider is exhausted, block "
+                            "until its quota resets instead of exiting")
         p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("init-agent",

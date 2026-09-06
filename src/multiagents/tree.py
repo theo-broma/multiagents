@@ -91,6 +91,7 @@ class Tree:
 
     def _empty(self) -> dict:
         return {"version": 1, "nodes": {}, "deferred": [], "cooldowns": {},
+                "pause": {},
                 "questions": [], "tickets": []}
 
     def _read_unlocked(self) -> dict:
@@ -106,6 +107,7 @@ class Tree:
             return self._empty()
         data.setdefault("nodes", {})
         data.setdefault("deferred", [])
+        data.setdefault("pause", {})
         data.setdefault("cooldowns", {})
         data.setdefault("questions", [])
         data.setdefault("tickets", [])
@@ -390,6 +392,47 @@ class Tree:
                   status=status, url=url)
         return result
 
+    # ---------------------------------------------------------------- pause --
+    #
+    # A whole-tree stop, used when there is no provider left to run anything on.
+    # Deliberately NOT a per-agent state: the failure it represents is global,
+    # and a system that keeps spawning what it can while its checking agents are
+    # unreachable is worse than one that stops — it writes code it cannot review
+    # and nobody notices which half is missing.
+    #
+    # It lives in the tree rather than in memory because every nested agent runs
+    # its own server process, and a pause only one of them knows about is not a
+    # pause.
+
+    def pause(self, until: float, reason: str) -> dict:
+        record = {"until": until, "reason": reason, "since": now()}
+        with self.transaction() as data:
+            existing = data.get("pause") or {}
+            # Keep the later reset: whichever provider frees up last is when
+            # work can actually resume.
+            if existing.get("until", 0) > until:
+                return dict(existing)
+            data["pause"] = record
+        self.emit("system", "paused", reason=reason, until=until)
+        return record
+
+    def pause_state(self) -> dict:
+        """The active pause, or {} — expired pauses clear themselves on read."""
+        record = self.read().get("pause") or {}
+        if not record:
+            return {}
+        if record.get("until", 0) <= now():
+            self.resume("the window it was waiting for has passed")
+            return {}
+        return record
+
+    def resume(self, reason: str = "") -> None:
+        with self.transaction() as data:
+            if not data.get("pause"):
+                return
+            data["pause"] = {}
+        self.emit("system", "resumed", reason=reason)
+
     # ------------------------------------------------------------- deferred --
 
     def defer(self, spec: dict, retry_after: float, reason: str) -> None:
@@ -479,6 +522,14 @@ class Tree:
                 mark = "!" if t.get("severity") == "blocking" else "·"
                 lines.append(f"  {mark} bug {t['id']}: {t['title'][:66]}")
             lines.append(f"  review with `multiagents tickets`  ({len(tickets)} open)")
+
+        pause = data.get("pause") or {}
+        if pause and pause.get("until", 0) > now():
+            waiting = int(pause["until"] - now())
+            lines.append("")
+            lines.append(f"  || PAUSED  {pause.get('reason', '')[:60]}")
+            lines.append(f"     clears in ~{waiting // 60}m; deferred work "
+                         f"restarts by itself")
 
         rollup = self.rollup_usage()
         total_cost = rollup.get("cost_usd", 0)
