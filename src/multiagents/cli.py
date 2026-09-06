@@ -857,6 +857,86 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _machine_state() -> list[Path]:
+    """The two directories a teardown removes: config layer and state root."""
+    return [global_config_dir(), state_root()]
+
+
+def _worktree_survey() -> tuple[list[dict], set[Path]]:
+    """`(worktrees with uncommitted work, repositories that register them)`.
+
+    Both have to be collected before anything is deleted. The dirty check is
+    the only thing standing between `rm -rf` and work that exists nowhere else
+    — a commit survives in its repository as a branch, an uncommitted edit does
+    not. The repository set is needed afterwards, and cannot be recovered once
+    the `.git` files that name it are gone.
+    """
+    root = state_root() / "worktrees"
+    dirty, repos = [], set()
+    if not root.is_dir():
+        return dirty, repos
+    for worktree in sorted(root.glob("*/*")):
+        if not worktree.is_dir():
+            continue
+        owner = gitops.owning_repo(worktree)
+        if owner is not None:
+            repos.add(owner)
+        changed = gitops.run(worktree, "status", "--porcelain")
+        if changed.ok and changed.out.strip():
+            dirty.append({"path": worktree,
+                          "files": len(changed.out.strip().splitlines()),
+                          "repo": owner})
+    return dirty, repos
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Remove this machine's global config and agent state.
+
+    Per-project `.multiagents/` directories, your repositories and the branches
+    agents committed to are all left alone — only machine-level state goes.
+    """
+    targets = [p for p in _machine_state() if p.exists()]
+    dirty, repos = _worktree_survey()
+
+    for path in targets:
+        print(f"would remove  {path}")
+    if not targets:
+        print("nothing to remove; this machine has no multiagents state.")
+        return 0
+    print(f"registered in {len(repos)} repository(ies), which will be pruned")
+
+    if dirty:
+        print(f"\n{len(dirty)} worktree(s) hold uncommitted work:")
+        for entry in dirty:
+            print(f"  {entry['files']:3} file(s)  {entry['path']}")
+        print("\nCommitted work survives — it lives in its repository as a branch.")
+        print("These changes do not. Commit or copy them, or pass --force.")
+        if not args.force:
+            return 1
+
+    if args.dry_run:
+        print("\ndry run; nothing was removed.")
+        return 0
+    if not args.force and not _confirm("\nremove them?"):
+        print("cancelled.")
+        return 0
+
+    for path in targets:
+        shutil.rmtree(path, ignore_errors=True)
+        print(f"removed  {path}")
+    # After deletion, not before: git only drops a registration once the
+    # directory is actually gone, so pruning first would be a no-op and leave
+    # every repository listing worktrees that no longer exist.
+    pruned = 0
+    for repo in sorted(repos):
+        if gitops.is_repo(repo):
+            gitops.prune_worktrees(repo)
+            pruned += 1
+    print(f"pruned   stale worktree registrations in {pruned} repository(ies)")
+    print("\nPer-project .multiagents/ directories are untouched.")
+    return 0
+
+
 def cmd_clean(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     tree = Tree(paths.tree_file, paths.events_file)
@@ -1386,6 +1466,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--agent", default="", help="only this agent's questions")
     p.add_argument("--list", action="store_true", help="list without answering")
     p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser("uninstall",
+                       help="remove this machine's global config and agent state")
+    p.add_argument("--dry-run", action="store_true", help="show what would go")
+    p.add_argument("--force", action="store_true",
+                   help="remove even when a worktree holds uncommitted work")
+    p.set_defaults(func=cmd_uninstall)
 
     p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")
     p.add_argument("action", nargs="?", default="list",
