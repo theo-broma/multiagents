@@ -104,3 +104,63 @@ def scrub(value: Any, _depth: int = 0) -> Any:
     if isinstance(value, tuple):
         return tuple(scrub(item, _depth + 1) for item in value)
     return value
+
+
+# --------------------------------------------------------------------------
+# Depersonalisation
+#
+# scrub() removes secrets. This removes *identity*, which is a different
+# problem with a different destination: a bug ticket is published, so the
+# absence of a token is not enough — a home directory names the person, and a
+# project path can name their employer or their client.
+#
+# Applied to tickets rather than to everything, because it is lossy in a way
+# scrub is not: `/home/alice/x` and `~/x` are the same path to a reader but not
+# to a debugger, and log output would become harder to follow for no gain.
+
+def _identity_map(project_root: str | Path | None = None) -> list[tuple[str, str]]:
+    """Longest-first, so `/home/x/proj` is replaced before `/home/x`."""
+    import getpass
+    import socket
+    from pathlib import Path as _Path
+
+    pairs: list[tuple[str, str]] = []
+    if project_root:
+        pairs.append((str(_Path(project_root)), "<project>"))
+    try:
+        pairs.append((str(_Path.home()), "~"))
+    except (RuntimeError, KeyError):
+        pass
+    for getter in (getpass.getuser, socket.gethostname):
+        try:
+            value = getter()
+        except Exception:                      # no passwd entry, no hostname
+            continue
+        # A two-character username would match inside ordinary words and turn
+        # the ticket into nonsense; leaving it is the lesser harm.
+        if value and len(value) >= 3:
+            pairs.append((value, "<user>" if getter is getpass.getuser else "<host>"))
+    return sorted(pairs, key=lambda pair: len(pair[0]), reverse=True)
+
+
+def depersonalise(value: Any, project_root: str | Path | None = None,
+                  _pairs: list[tuple[str, str]] | None = None,
+                  _depth: int = 0) -> Any:
+    """Replace this machine's identity with placeholders, recursively.
+
+    Home directory, project path, username and hostname. Run *after* scrub, on
+    anything that will leave the machine.
+    """
+    pairs = _identity_map(project_root) if _pairs is None else _pairs
+    if _depth > 24:
+        return value
+    if isinstance(value, str):
+        for needle, replacement in pairs:
+            if needle in value:
+                value = value.replace(needle, replacement)
+        return value
+    if isinstance(value, dict):
+        return {k: depersonalise(v, None, pairs, _depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [depersonalise(v, None, pairs, _depth + 1) for v in value]
+    return value

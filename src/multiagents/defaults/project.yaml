@@ -175,3 +175,22 @@ budget:
   # How long to cool a provider down after a quota failure when we cannot read
   # a real reset time from it.
   blind_cooldown_seconds: 900
+
+# --------------------------------------------------------------------------
+# Reporting bugs in multiagents itself.
+#
+# When an agent hits a defect in the tooling, the orchestrator delegates to the
+# `bug-reporter` agent, which writes a ticket. Tickets are depersonalised as
+# they are stored — home directory, project path, username and hostname are
+# replaced — so what you review is exactly what would be published.
+#
+# `automatic: false` means nothing leaves this machine without you: the ticket
+# is queued and you submit it with `multiagents tickets submit <id>`. Set it to
+# true only if you are content for issue text to be posted unread.
+# --------------------------------------------------------------------------
+bug_reporting:
+  enabled: true
+  automatic: false
+  # e.g. theodieu/multiagents — empty means tickets are written and kept local.
+  repo: ""
+  labels: []

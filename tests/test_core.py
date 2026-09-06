@@ -1761,3 +1761,162 @@ def test_an_explicit_workdir_still_overrides_the_repository_requirement(tmp_path
     with pytest.raises((RuntimeError, KeyError, FileNotFoundError)) as excinfo:
         asyncio.run(r.start("worker", "go", workdir=str(tmp_path)))
     assert "not a git repository" not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# Bug tickets
+#
+# A ticket is written to be published, so the tests that matter are about what
+# does NOT reach it, and about nothing leaving the machine unasked.
+
+
+def _tree(tmp_path):
+    from multiagents.paths import ProjectPaths
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    return Tree(paths.tree_file, paths.events_file)
+
+
+def test_a_ticket_is_depersonalised_as_it_is_stored():
+    """Stored, not submitted: the orchestrator and the user must review the same
+    text that would be posted, or the review is of something else."""
+    from multiagents.redact import depersonalise
+    import getpass
+
+    body = (f"failed opening {Path.home()}/work/acme/api.py while user "
+            f"{getpass.getuser()} ran it")
+    cleaned = depersonalise(body, Path.home() / "work" / "acme")
+
+    assert str(Path.home()) not in cleaned
+    assert getpass.getuser() not in cleaned
+    assert "<project>/api.py" in cleaned
+
+
+def test_depersonalise_replaces_the_longest_match_first(tmp_path):
+    """The project lives under the home directory, so replacing `~` first would
+    leave `~/work/acme` — the client's name — in a published ticket."""
+    from multiagents.redact import depersonalise
+
+    project = Path.home() / "work" / "acme"
+    assert depersonalise(str(project / "x.py"), project) == "<project>/x.py"
+
+
+def test_a_short_username_is_left_alone(monkeypatch):
+    """Replacing a two-letter name would corrupt every word containing it."""
+    import getpass
+
+    from multiagents import redact
+
+    monkeypatch.setattr(getpass, "getuser", lambda: "ab")
+    assert redact.depersonalise("a stable abstraction") == "a stable abstraction"
+
+
+def test_the_ticket_marker_splits_body_from_proposed_fix(tmp_path):
+    r = _runner(tmp_path, {"bug-reporter": AgentSpec("bug-reporter", "p", "m")})
+    text = (
+        "Here is my reasoning, which is not part of the ticket.\n"
+        "TICKET(blocking): merge_agent reports success on an empty branch\n"
+        "## What happened\n\nIt returned merged with no commits.\n"
+        "PROPOSED_FIX:\n"
+        "Check commits_on() before reporting merged.\n"
+    )
+    ticket = r._file_ticket("ag-1", text)
+
+    assert ticket["severity"] == "blocking"
+    assert ticket["title"] == "merge_agent reports success on an empty branch"
+    assert "What happened" in ticket["body"]
+    assert "not part of the ticket" not in ticket["body"]
+    assert ticket["proposed_fix"].startswith("Check commits_on()")
+
+
+def test_text_without_the_marker_files_nothing(tmp_path):
+    r = _runner(tmp_path, {"bug-reporter": AgentSpec("bug-reporter", "p", "m")})
+    assert r._file_ticket("ag-1", "I looked and found no bug.") is None
+    assert r.tree.read()["tickets"] == []
+
+
+def test_an_unknown_severity_is_not_accepted_as_blocking(tmp_path):
+    """`blocking` decides whether the orchestrator stops work, so it may only
+    come from the marker's own vocabulary."""
+    r = _runner(tmp_path, {"bug-reporter": AgentSpec("bug-reporter", "p", "m")})
+    assert r._file_ticket("ag-1", "TICKET(catastrophic): everything is on fire") is None
+    assert r.tree.add_ticket("ag-1", "t", "b", "catastrophic")["severity"] == "minor"
+
+
+def test_tickets_are_never_submitted_without_configuration(tmp_path):
+    from multiagents import bugs
+    from multiagents.config import Config
+
+    config = Config(project={"bug_reporting": {"automatic": True}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    ok, why = bugs.can_submit(config)
+    assert not ok and "repo" in why
+
+
+def test_automatic_reporting_is_off_by_default():
+    """A bug report is public writing about the user's machine. Consent for one
+    is not consent for the next."""
+    from multiagents import bugs
+    from multiagents.config import Config
+    import yaml
+
+    empty = Config(project={}, providers={}, agents={}, models={}, instruction_dirs=[])
+    assert bugs.settings(empty)["automatic"] is False
+
+    shipped = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "src" / "multiagents" /
+         "defaults" / "project.yaml").read_text())
+    assert shipped["bug_reporting"]["automatic"] is False
+    assert shipped["bug_reporting"]["repo"] == ""
+
+
+def test_open_tickets_include_the_ones_parked_for_the_user(tmp_path):
+    """awaiting_user is not resolved: the orchestrator must keep seeing it, or a
+    ticket the user never sent silently disappears from the queue."""
+    tree = _tree(tmp_path)
+    t = tree.add_ticket("ag-1", "title", "body", "minor")
+    tree.set_ticket_status(t["id"], "awaiting_user", "automatic reporting is off")
+
+    assert [x["id"] for x in tree.open_tickets()] == [t["id"]]
+    tree.set_ticket_status(t["id"], "reported", "", "https://example.invalid/1")
+    assert tree.open_tickets() == []
+    assert tree.get_ticket(t["id"])["url"] == "https://example.invalid/1"
+
+
+def test_the_bug_reporter_agent_is_shipped_and_read_only():
+    import yaml
+    root = Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+    agents = yaml.safe_load((root / "agents.yaml").read_text())["agents"]
+    spec = agents["bug-reporter"]
+
+    assert spec["role"] == "bug-reporter"
+    assert spec["writes"] is False and spec["can_spawn"] is False
+    assert not spec.get("launch"), "it is spawned, never launched"
+    assert (root / "agents" / spec["instructions"]).is_file()
+
+
+def test_the_generated_environment_block_carries_no_identity(tmp_path):
+    """The agent is told to include this verbatim, so it is the one part of a
+    ticket the model does not write — and the one that could leak a home path."""
+    import getpass
+    r = _runner(tmp_path)
+    block = r._bug_context()
+
+    verbatim = block.split("The multiagents source is at")[0]
+    assert "commit:" in verbatim and "providers available:" in verbatim
+    assert str(Path.home()) not in verbatim
+    assert getpass.getuser() not in verbatim
+    # The path itself is still given, outside the part that gets copied.
+    assert "The multiagents source is at" in block
+
+
+def test_the_tree_still_shows_a_queued_ticket_with_no_agents(tmp_path):
+    """`(no agents)` used to be an early return, which hid every queued ticket
+    and parked question in exactly the state where you go looking for them."""
+    tree = _tree(tmp_path)
+    tree.add_ticket("ag-1", "something is wrong", "body", "blocking")
+    rendered = tree.render()
+
+    assert "(no agents)" in rendered
+    assert "something is wrong" in rendered
+    assert "multiagents tickets" in rendered

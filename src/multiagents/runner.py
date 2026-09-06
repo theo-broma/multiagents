@@ -51,6 +51,11 @@ TREE_FLUSH_SECONDS = 2.0
 # a file that mentions the marker must not park itself.
 NEED_DECISION = re.compile(r"NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
 PROPOSED_DEFAULT = re.compile(r"(?im)^\s*DEFAULT\s*:\s*(.+)$")
+# A bug in multiagents itself, written up for publication. Parsed from the
+# finished message rather than mid-stream like NEED_DECISION: a ticket is the
+# agent's product, so there is nothing to interrupt.
+TICKET = re.compile(r"(?im)^[ \t]*TICKET\((blocking|minor)\)[ \t]*:[ \t]*(.+)$")
+PROPOSED_FIX = re.compile(r"(?im)^[ \t]*PROPOSED_FIX[ \t]*:[ \t]*$")
 
 
 PREAMBLE = """\
@@ -82,6 +87,10 @@ How this works:
   is the agreed statement of what this project is and what done looks like.
   `context/` holds the reference material it points at. Both are reference —
   read them, and do not edit them unless your task explicitly says to.
+- If the multiagents tooling itself misbehaves — a tool contradicting its own
+  description, state that disagrees with itself — say so plainly in your final
+  message rather than working around it silently. Your parent decides whether it
+  gets written up.
 - Work only inside your working directory.
 - Do not merge, rebase, push, or switch branches. Your parent owns that.
 
@@ -138,6 +147,7 @@ class Run:
     final_status: str = ""
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
+    ticket: dict | None = None        # a TICKET filed from the final message
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -278,10 +288,65 @@ class Runner:
         )
         instructions = self.config.instructions_for(spec)
         parts = [preamble]
+        if spec.role == "bug-reporter":
+            parts.append(self._bug_context())
         if instructions.strip():
             parts.append(instructions.strip() + "\n\n---\n")
         parts.append(f"## Task\n\n{task.strip()}\n")
         return "\n".join(parts)
+
+    def _bug_context(self) -> str:
+        """Facts a ticket needs, gathered here rather than asked of the agent.
+
+        Two reasons. The agent cannot see most of this — it runs in a worktree
+        of *your* project, not of multiagents. And a ticket is published, so
+        what goes in it should be chosen by code that can be reviewed, not by a
+        model improvising about its own environment.
+        """
+        import platform
+
+        source = Path(__file__).resolve().parent
+        commit = ""
+        if gitops.is_repo(source):
+            commit = gitops.head_sha(source)[:12]
+            if gitops.is_dirty(source):
+                commit += " (modified)"
+        providers = ", ".join(sorted(
+            n for n, p in self.providers.items() if p.enabled and p.available()
+        ))
+        # The source path is deliberately OUTSIDE the verbatim block: it
+        # contains a home directory, which names the user, and the agent is
+        # instructed to copy that block into a ticket unchanged. It still needs
+        # the path to read the code, so it is given separately and excluded in
+        # words. depersonalise() catches it anyway if the model ignores that.
+        return (
+            "## Environment (generated — include it verbatim, add nothing to it)\n\n"
+            f"- multiagents commit: {commit or 'unknown (not a checkout)'}\n"
+            f"- python: {platform.python_version()} on {platform.system()} "
+            f"{platform.release().split('-')[0]}\n"
+            f"- executor: {self.config.project.get('executor', {}).get('kind', 'local')}\n"
+            f"- providers available: {providers or 'none'}\n\n"
+            f"The multiagents source is at `{source}`. Read it to locate the "
+            "defect — that path names this machine, so it belongs in your work, "
+            "not in the ticket. Do not modify anything there: you have no branch "
+            "on it.\n\n---\n"
+        )
+
+    def _file_ticket(self, node_id: str, text: str) -> dict | None:
+        """Turn a finished bug-reporter message into a queued ticket."""
+        match = TICKET.search(text or "")
+        if not match:
+            return None
+        severity, title = match.group(1).lower(), match.group(2).strip()
+        rest = text[match.end():]
+        fix = ""
+        split = PROPOSED_FIX.search(rest)
+        if split:
+            fix = rest[split.end():].strip()
+            rest = rest[:split.start()]
+        return self.tree.add_ticket(
+            node_id, title, rest.strip(), severity, fix, project_root=self.paths.root,
+        )
 
     async def _launch(
         self,
@@ -596,6 +661,11 @@ class Runner:
         }), indent=2))
 
         self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
+        # Filed even when the run failed: a partial write-up of a real defect is
+        # worth more than a lost one, and the orchestrator can see the status.
+        ticket = self._file_ticket(node_id, text) if not run.awaiting else None
+        if ticket:
+            run.ticket = {k: ticket[k] for k in ("id", "severity", "title", "status")}
         if run.awaiting:
             question = self.tree.add_question(
                 node_id, run.awaiting["topic"], run.awaiting["question"],
@@ -789,6 +859,11 @@ class Runner:
                                       ("id", "topic", "question", "proposed_default")}
         if node.status in {"done", "merged"} and node.summary:
             result["summary"] = node.summary
+        filed = [t for t in self.tree.read().get("tickets", [])
+                 if t.get("agent") == agent_id and t.get("status") != "declined"]
+        if filed:
+            result["tickets"] = [{k: t[k] for k in ("id", "severity", "title", "status")}
+                                 for t in filed]
         return result
 
     def _read_stream(self, agent_id: str) -> list[dict]:
@@ -1027,6 +1102,7 @@ class Runner:
             "reply": reply[-MAX_SUMMARY_CHARS:],
             "usage": final.usage if final else {},
             "note": "advisory only — you decide whether to act on this",
+            **({"ticket": run.ticket} if run.ticket else {}),
         }
 
     async def answer_question(self, question_id: str, answer: str,

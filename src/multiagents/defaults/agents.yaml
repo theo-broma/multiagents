@@ -127,6 +127,24 @@ agents:
     timeout: 420
     silence_timeout: 180
 
+  # Writes up defects in multiagents ITSELF — not bugs in your project, which
+  # are ordinary work for the implementer. Read-only and cheap: its product is
+  # one ticket, and the runner gives it the environment block so it does not
+  # have to discover (or invent) facts about the machine it runs on.
+  bug-reporter:
+    provider: opencode
+    model: opencode-go/glm-5.3-flash
+    role: bug-reporter
+    instructions: bug-reporter.md
+    description: >-
+      Writes a publishable ticket for a bug in multiagents itself, with no
+      personal or sensitive information in it. Can propose a fix.
+    writes: false
+    permission: readonly
+    can_spawn: false
+    timeout: 420
+    silence_timeout: 180
+
   # Renamed to `advisor` so it is not bound to one model family. deep_merge can
   # only add and override, never delete, so an install that already carries a
   # `gemini` entry keeps it unless it is shipped explicitly disabled.

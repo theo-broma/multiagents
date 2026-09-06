@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from .redact import scrub
+from .redact import depersonalise, scrub
 
 # Terminal states never transition again.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned"}
@@ -91,7 +91,7 @@ class Tree:
 
     def _empty(self) -> dict:
         return {"version": 1, "nodes": {}, "deferred": [], "cooldowns": {},
-                "questions": []}
+                "questions": [], "tickets": []}
 
     def _read_unlocked(self) -> dict:
         if not self.path.is_file():
@@ -108,6 +108,7 @@ class Tree:
         data.setdefault("deferred", [])
         data.setdefault("cooldowns", {})
         data.setdefault("questions", [])
+        data.setdefault("tickets", [])
         return data
 
     def _write_unlocked(self, data: dict) -> None:
@@ -326,6 +327,69 @@ class Tree:
                   answered_by=answered_by, answer=answer[:300])
         return result
 
+    # -------------------------------------------------------------- tickets --
+    #
+    # Bugs in multiagents *itself*, written up by the bug-reporter agent and
+    # queued for the orchestrator. They live beside questions for the same
+    # reasons — one lock, one scrub, read-modify-write on status — but they
+    # differ in a way that matters: a question stays on this machine, and a
+    # ticket is written to be published. Everything stored here has been
+    # depersonalised on the way in, so what the orchestrator reads is already
+    # what would be posted.
+
+    TICKET_SEVERITIES = ("blocking", "minor")
+
+    def add_ticket(self, agent_id: str, title: str, body: str,
+                   severity: str = "minor", proposed_fix: str = "",
+                   project_root=None) -> dict:
+        record = {
+            "id": "bug-" + uuid.uuid4().hex[:6],
+            "agent": agent_id,
+            "title": title[:200],
+            "body": body,
+            "proposed_fix": proposed_fix,
+            "severity": severity if severity in self.TICKET_SEVERITIES else "minor",
+            "filed_at": now(),
+            # open -> reported (submitted upstream) | fixed (handled locally)
+            # | declined (the user said no) | awaiting_user (needs a decision)
+            "status": "open",
+            "url": "",
+            "note": "",
+            "resolved_at": None,
+        }
+        record = depersonalise(record, project_root)
+        with self.transaction() as data:
+            data["tickets"].append(record)
+        self.emit(agent_id, "ticket", ticket_id=record["id"],
+                  severity=record["severity"], title=record["title"])
+        return record
+
+    def open_tickets(self, severity: str | None = None) -> list[dict]:
+        return [
+            t for t in self.read()["tickets"]
+            if t.get("status") in ("open", "awaiting_user")
+            and (severity is None or t.get("severity") == severity)
+        ]
+
+    def get_ticket(self, ticket_id: str) -> dict | None:
+        return next((t for t in self.read()["tickets"] if t["id"] == ticket_id), None)
+
+    def set_ticket_status(self, ticket_id: str, status: str, note: str = "",
+                          url: str = "") -> dict | None:
+        with self.transaction() as data:
+            record = next((t for t in data["tickets"] if t["id"] == ticket_id), None)
+            if record is None:
+                return None
+            record.update({"status": status, "note": note or record.get("note", "")})
+            if url:
+                record["url"] = url
+            if status in ("reported", "fixed", "declined"):
+                record["resolved_at"] = now()
+            result = dict(record)
+        self.emit(result["agent"], "ticket_status", ticket_id=ticket_id,
+                  status=status, url=url)
+        return result
+
     # ------------------------------------------------------------- deferred --
 
     def defer(self, spec: dict, retry_after: float, reason: str) -> None:
@@ -360,10 +424,11 @@ class Tree:
         ``tree://project`` MCP resource."""
         data = self.read()
         nodes = data["nodes"]
-        if not nodes:
-            return "(no agents)"
         roots = [n for n in nodes.values() if not n.get("parent") or n["parent"] not in nodes]
-        lines: list[str] = []
+        # Not an early return: a project with no live agents can still have a
+        # question parked or a bug ticket queued, and those are exactly what
+        # someone runs this to find.
+        lines: list[str] = [] if nodes else ["(no agents)"]
 
         def walk(node: dict, indent: str, last: bool, top: bool) -> None:
             # Only non-root nodes get a connector. Keying this off "have we
@@ -405,6 +470,15 @@ class Tree:
             for q in pending[:6]:
                 lines.append(f"  ? {q['agent']} asks about {q['topic']}: {q['question'][:70]}")
             lines.append(f"  answer with `multiagents ask`  ({len(pending)} open)")
+
+        tickets = [t for t in data.get("tickets", [])
+                   if t.get("status") in ("open", "awaiting_user")]
+        if tickets:
+            lines.append("")
+            for t in tickets[:6]:
+                mark = "!" if t.get("severity") == "blocking" else "·"
+                lines.append(f"  {mark} bug {t['id']}: {t['title'][:66]}")
+            lines.append(f"  review with `multiagents tickets`  ({len(tickets)} open)")
 
         rollup = self.rollup_usage()
         total_cost = rollup.get("cost_usd", 0)
