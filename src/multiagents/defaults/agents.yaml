@@ -25,7 +25,7 @@ agents:
   initializer:
     provider: claude
     model: sonnet
-    instructions: initializer.md
+    instructions: _initializer.md
     description: Shapes the project with you. Launched by `multiagents init-agent`.
     launch: true
     role: initializer
@@ -38,7 +38,7 @@ agents:
   orchestrator:
     provider: claude
     model: sonnet
-    instructions: orchestrator.md
+    instructions: _orchestrator.md
     description: Drives the project. Launched by `multiagents run`.
     launch: true
     role: orchestrator

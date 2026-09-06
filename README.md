@@ -196,6 +196,17 @@ marker — so renaming `orchestrator` to `boss` is fine as long as the two lines
 travel with it. Delete the roles and only those two commands stop; everything
 else keeps working.
 
+Their briefs are named with a **leading underscore** — `_orchestrator.md` and
+`_initializer.md` — so the two files a project must not delete are visible at a
+glance in `agents/`. That is the whole meaning of the prefix: no other file
+carries it, and a test asserts that the underscored set is exactly the set of
+briefs belonging to launched agents. You can still edit them freely; the
+convention marks what not to *remove*.
+
+A config written before the rename that still says `instructions: orchestrator.md`
+keeps working — the loader falls back to the other spelling — but the exact name
+always wins, so a local `orchestrator.md` you wrote yourself is never shadowed.
+
 Every other agent is yours. `researcher`, `implementer`, `reviewer`, `tester`,
 `critic`, `advisor` and `bug-reporter` are referenced by name only in *prompts*,
 never in code, so removing one costs you whatever that prompt asks for — the
@@ -223,7 +234,8 @@ but never remove. To drop a shipped agent, give it `disabled: true`.
   fails.
 - `instructions:` must name a file that exists in one of the config layers'
   `agents/` directories. A missing file is not an error — the agent runs on the
-  preamble alone, which is worse than failing.
+  preamble alone, which is worse than failing. The underscore-prefixed briefs
+  are the mandatory ones.
 - `role: bug-reporter` is what earns the generated environment block in the
   prompt. Without it a ticket carries whatever the model invents about the
   machine instead.
@@ -691,7 +703,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-129 tests covering the parts live runs do not reliably exercise: doom-loop
+131 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
