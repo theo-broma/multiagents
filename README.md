@@ -177,6 +177,73 @@ Conversational agents sit in an `idle` state between turns — not active (so th
 do not count against the concurrency limit), not terminal (so their session
 stays resumable and their worktree survives).
 
+`bug-reporter` is a third kind again: it is spawned like a task agent, but its
+product is a **ticket about multiagents itself** rather than work on your
+project. See below.
+
+## When multiagents is the thing that is broken
+
+An agent that writes bad code is ordinary. A `merge_agent` that reports success
+and merges nothing is a defect in the tooling, and nobody upstream hears about
+it unless somebody writes it down. `bug-reporter` is the agent that writes it
+down.
+
+The orchestrator delegates to it with the evidence it already has — agent ids,
+the call it made, what came back. The ticket is filed into a queue the
+orchestrator reads at every natural stopping point:
+
+```
+$ multiagents tickets
+   bug-c24cc3  open           filed 4m ago  merge_agent reports `merged` for an empty branch
+
+1 ticket(s). `tickets show <id>` to read one, `tickets submit <id>` to file it.
+```
+
+**Timing follows consequence, not irritation.** A ticket marked `minor` waits
+for a natural stop: a task finished, a merge done. A `blocking` one is handled
+immediately, because finishing work on top of corrupted state wastes everything
+built after the corruption. The severity comes from the marker's own vocabulary,
+so an inventive model cannot escalate itself by writing something else.
+
+The orchestrator may also fix the bug locally. If it does, the ticket is still
+written and still reported: the fix is local, and the defect is upstream where
+everyone else still has it. That is when the ticket carries a proposed fix.
+
+### Nothing leaves the machine unasked
+
+`bug_reporting.automatic` is **false** by default. Tickets are queued, and you
+send them:
+
+```yaml
+bug_reporting:
+  enabled: true
+  automatic: false        # true files issues without asking
+  repo: ""                # e.g. you/multiagents; empty keeps tickets local
+  labels: []
+```
+
+A bug report is public writing about your machine, and consent for one is not
+consent for the next. With `automatic: false` the orchestrator's `submit_ticket`
+parks the ticket and says so — that is policy working, and its instructions tell
+it not to look for another route.
+
+Three layers keep the ticket publishable:
+
+1. **The agent is instructed** to describe the tool and stay silent about the
+   person — no home paths, no usernames, and nothing about *what you are
+   building*.
+2. **The environment block is generated**, not written by the model, so the one
+   part of the ticket that describes your machine is chosen by code you can
+   read. The source path is deliberately outside it: the agent needs the path to
+   read the code, and it names your home directory.
+3. **Storage depersonalises**, replacing home directory, project path, username
+   and hostname with placeholders — and it happens on the way *in*, so what the
+   orchestrator and you review is exactly what would be posted.
+
+None of that recognises a client's name or a private repository, which is why
+the last step is a human reading it. `tickets show <id>` prints the rendered
+issue, and `tickets submit <id>` asks before sending.
+
 ## When an agent needs *you*
 
 Agents are structurally non-blocking: they run with no stdin, explicit
@@ -570,12 +637,13 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-105 tests covering the parts live runs do not reliably exercise: doom-loop
+127 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
-ownership gate on mutating tools, and `awaiting_user` transitions and their
-non-interaction with the watchdogs.
+ownership gate on mutating tools, `awaiting_user` transitions and their
+non-interaction with the watchdogs, the refusal to spawn without a repository,
+and what a bug ticket must not contain.
 
 Provider event fixtures are real shapes captured from the CLIs, not invented —
 `tests/fixtures/claude-stream.jsonl` is an actual run that used a tool, and a

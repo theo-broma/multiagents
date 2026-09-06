@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from . import auth as auth_mod
+from . import bugs
 from . import catalog as catalog_mod
 from . import scripts
 from . import gitops
@@ -966,6 +967,78 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tickets(args: argparse.Namespace) -> int:
+    """Review and submit bug tickets the agents filed against multiagents.
+
+    Submitting is deliberately a user action by default. The ticket is public
+    writing about this machine, and `list`/`show` exist so that the decision is
+    made after reading it rather than before.
+    """
+    paths = _resolve(args.path)
+    config = load_config(paths)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tickets = tree.read().get("tickets", [])
+
+    if args.action == "show":
+        ticket = tree.get_ticket(args.ticket_id) if args.ticket_id else None
+        if ticket is None:
+            print(f"unknown ticket {args.ticket_id!r}", file=sys.stderr)
+            return 2
+        print(f"{ticket['id']}  [{ticket['severity']}]  {ticket['status']}")
+        print(f"{ticket['title']}\n")
+        print(bugs.render(ticket))
+        return 0
+
+    if args.action == "submit":
+        ticket = tree.get_ticket(args.ticket_id) if args.ticket_id else None
+        if ticket is None:
+            print(f"unknown ticket {args.ticket_id!r}", file=sys.stderr)
+            return 2
+        ok, why = bugs.can_submit(config)
+        if not ok:
+            print(f"cannot submit: {why}")
+            print(f"\nthe ticket is readable with `multiagents tickets show {ticket['id']}`")
+            return 1
+        print(bugs.render(ticket))
+        print(f"-> {bugs.settings(config)['repo']}")
+        if not _confirm("file this as an issue?"):
+            print("not submitted.")
+            return 0
+        sent, result = bugs.submit(config, ticket)
+        if not sent:
+            print(f"failed: {result}", file=sys.stderr)
+            return 1
+        tree.set_ticket_status(ticket["id"], "reported", "submitted by the user", result)
+        print(f"reported: {result}")
+        return 0
+
+    if args.action == "discard":
+        if tree.set_ticket_status(args.ticket_id, "declined", "discarded by the user") is None:
+            print(f"unknown ticket {args.ticket_id!r}", file=sys.stderr)
+            return 2
+        print(f"{args.ticket_id} discarded.")
+        return 0
+
+    shown = [t for t in tickets
+             if args.all or t.get("status") in ("open", "awaiting_user")]
+    if not shown:
+        print("No open tickets." if tickets else "No tickets have been filed.")
+        return 0
+    for ticket in shown:
+        mark = "!" if ticket["severity"] == "blocking" else " "
+        age = (time.time() - ticket["filed_at"]) / 60
+        print(f" {mark} {ticket['id']}  {ticket['status']:14} filed {age:.0f}m ago"
+              f"  {ticket['title'][:60]}")
+        if ticket.get("url"):
+            print(f"     {ticket['url']}")
+    ok, why = bugs.can_submit(config)
+    print(f"\n{len(shown)} ticket(s). `tickets show <id>` to read one, "
+          f"`tickets submit <id>` to file it.")
+    if not ok:
+        print(f"note: {why}")
+    return 0
+
+
 def cmd_docker(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     ex = _docker_executor(paths)
@@ -1175,6 +1248,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--agent", default="", help="only this agent's questions")
     p.add_argument("--list", action="store_true", help="list without answering")
     p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "submit", "discard"])
+    p.add_argument("ticket_id", nargs="?", default="")
+    p.add_argument("--all", action="store_true", help="include resolved tickets")
+    p.set_defaults(func=cmd_tickets)
 
     p = sub.add_parser("docker", help="manage the project's agent container")
     p.add_argument("action",

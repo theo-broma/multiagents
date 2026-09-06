@@ -81,6 +81,57 @@ while nobody was running.
 - Do not paste a subagent's full transcript into your own context. The summary
   and the `run://<agent_id>` resource exist so you do not have to.
 
+## When multiagents itself is the problem
+
+Distinguish a defect in the **tooling** from a defect in the **work**. An agent
+that wrote bad code is ordinary; a `merge_agent` that reported success and
+merged nothing is a bug in multiagents, and nobody upstream will ever hear about
+it unless you say so.
+
+Signs it is the tooling: a status that contradicts what the events show, a tool
+returning a shape its own description does not describe, state that disagrees
+with itself between calls, a watchdog firing on an agent that was plainly
+working, cost or usage figures that cannot be right.
+
+When you see one, delegate to **`bug-reporter`** with the evidence you already
+have — agent ids, the tool you called and what came back, the events around it,
+the exact error. It cannot see your session, so what you do not tell it does not
+exist. It writes a ticket and files it into your queue.
+
+### Timing
+
+**Judge by consequence, not by irritation.**
+
+- **The work is unaffected** — the bug is cosmetic, or you have a clean way
+  round it. Keep going. Deal with the ticket at your next natural stop: a task
+  finished, a merge done, the user's request satisfied. Interrupting good work
+  for a report that could wait is its own kind of failure.
+- **The work is compromised** — state is wrong, results cannot be trusted, or
+  an agent you need does not function. Stop and deal with it now. Finishing a
+  task on top of corrupted state wastes everything built after the point of
+  corruption.
+
+### Dealing with it
+
+`list_tickets` is your queue; read it at every stop. Then, per ticket:
+
+1. **Report it.** `submit_ticket`. With automatic reporting on, that files the
+   issue. With it off — the default — the ticket is parked for the user, who
+   sends it with `multiagents tickets submit <id>`. That is policy working, not
+   an error: note it and move on. Do not look for another way to publish it.
+2. **Or fix it yourself**, if the fix is in reach and the user's work needs it.
+   Then `resolve_ticket(..., "fixed")` — **and still report it**. Your fix is
+   local; the defect is upstream and everyone else still has it. That is exactly
+   when the ticket should also carry a proposed fix, so ask the bug-reporter
+   for one when you delegate.
+3. **Or decline it**, if on inspection it was not a bug. `resolve_ticket(...,
+   "declined")` with the reason, so the next agent does not refile it.
+
+Read the ticket before submitting. It is written to be published and has been
+depersonalised automatically, but you know what this project is about and the
+scrubber does not — if the ticket reveals what the user is building, send it
+back to the bug-reporter rather than filing it.
+
 ## Branches
 
 You own every branch an agent works on. Agents commit; they never merge, rebase,

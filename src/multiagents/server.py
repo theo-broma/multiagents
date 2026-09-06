@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - mcp 1.x
 from . import __version__
 from . import auth as auth_mod
 from . import budget as budget_mod
+from . import bugs
 from . import catalog as catalog_mod
 from . import gitops
 from .config import load as load_config
@@ -447,6 +448,97 @@ async def answer_question(question_id: str, answer: str) -> dict:
     """
     run = runner()
     return _ok(await run.answer_question(question_id, answer, answered_by="orchestrator"))
+
+
+@mcp.tool()
+def list_tickets(status: str = "open") -> dict:
+    """Bug tickets the bug-reporter has filed against multiagents itself.
+
+    This is your queue for defects in the tooling, separate from your work.
+    Read it whenever an agent's result mentions a ticket, and again at every
+    natural stopping point — a `minor` ticket is meant to wait for one of those,
+    while a `blocking` one is why you stopped.
+
+    The stored text is already depersonalised: what you read is what would be
+    published. Check it anyway before submitting — you know what this project is
+    about and the scrubber does not.
+    """
+    run = runner()
+    tickets = run.tree.read().get("tickets", [])
+    if status and status != "all":
+        wanted = {"open": ("open", "awaiting_user")}.get(status, (status,))
+        tickets = [t for t in tickets if t.get("status") in wanted]
+    conf = bugs.settings(run.config)
+    ok, why = bugs.can_submit(run.config)
+    return _ok({
+        "tickets": tickets,
+        "count": len(tickets),
+        "blocking": [t["id"] for t in tickets if t.get("severity") == "blocking"],
+        "automatic_reporting": conf["automatic"],
+        "can_submit": ok,
+        "note": why or ("submit_ticket files these upstream" if conf["automatic"]
+                        else "automatic reporting is off: submit_ticket parks the "
+                             "ticket for the user to send with `multiagents tickets "
+                             "submit <id>`"),
+    })
+
+
+@mcp.tool()
+def submit_ticket(ticket_id: str) -> dict:
+    """Report a filed bug upstream, or hand it to the user to send.
+
+    With `bug_reporting.automatic: true` this creates the issue. With it false —
+    the default — nothing leaves the machine: the ticket is parked for the user.
+    That is not a failure and you should not work around it; say so and carry
+    on.
+    """
+    run = runner()
+    ticket = run.tree.get_ticket(ticket_id)
+    if ticket is None:
+        return _ok({"error": f"unknown ticket {ticket_id!r}"})
+    if ticket.get("status") in ("reported", "declined"):
+        return _ok({"ticket_id": ticket_id, "status": ticket["status"],
+                    "url": ticket.get("url", ""), "note": "already resolved"})
+
+    conf = bugs.settings(run.config)
+    if not conf["automatic"]:
+        run.tree.set_ticket_status(ticket_id, "awaiting_user",
+                                   "automatic reporting is off")
+        return _ok({
+            "ticket_id": ticket_id, "status": "awaiting_user", "submitted": False,
+            "user_action": f"multiagents tickets submit {ticket_id}",
+            "note": "parked for the user by policy, not by error",
+        })
+
+    ok, result = bugs.submit(run.config, ticket)
+    if not ok:
+        run.tree.set_ticket_status(ticket_id, "awaiting_user", result)
+        return _ok({"ticket_id": ticket_id, "status": "awaiting_user",
+                    "submitted": False, "error": result,
+                    "user_action": f"multiagents tickets submit {ticket_id}"})
+    run.tree.set_ticket_status(ticket_id, "reported", "submitted automatically", result)
+    return _ok({"ticket_id": ticket_id, "status": "reported", "submitted": True,
+                "url": result})
+
+
+@mcp.tool()
+def resolve_ticket(ticket_id: str, outcome: str, note: str = "") -> dict:
+    """Close a ticket you have dealt with locally.
+
+    `fixed` when you changed the project so the bug no longer bites — the ticket
+    still describes a real upstream defect, so report it too rather than
+    treating your workaround as the end of it. `declined` when it turned out not
+    to be a bug; say why in the note, because the next agent will hit the same
+    thing.
+    """
+    if outcome not in ("fixed", "declined"):
+        return _ok({"error": "outcome must be 'fixed' or 'declined'"})
+    run = runner()
+    record = run.tree.set_ticket_status(ticket_id, outcome, note)
+    if record is None:
+        return _ok({"error": f"unknown ticket {ticket_id!r}"})
+    return _ok({"ticket_id": ticket_id, "status": outcome,
+                "note": "still worth reporting upstream" if outcome == "fixed" else ""})
 
 
 @mcp.tool()
