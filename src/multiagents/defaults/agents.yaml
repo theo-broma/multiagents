@@ -114,6 +114,26 @@ agents:
     timeout: 900
     silence_timeout: 180
 
+  # Attacks written code from an attacker's position. Not the reviewer, which
+  # asks whether the code is correct; this asks what someone gets when they try
+  # to break it. On a different provider from security-advisor on purpose: the
+  # audit should not be done by whoever blessed the design. The specific model
+  # is a strong-reasoning pick and yours to change — the family difference is
+  # the part that matters.
+  pentester:
+    provider: opencode
+    model: opencode-go/deepseek-v4-pro
+    instructions: pentester.md
+    description: >-
+      Attacks existing code for exploitable paths and reports position, path and
+      outcome. May commit a failing test that proves a finding.
+    writes: true
+    permission: sandbox
+    effort: high
+    can_spawn: false
+    timeout: 1500
+    silence_timeout: 240
+
   tester:
     provider: agy
     model: gemini-3.8-flash-medium
@@ -144,6 +164,24 @@ agents:
     can_spawn: false
     timeout: 300
     silence_timeout: 120
+
+  # Consulted while something is still being designed, when a boundary can
+  # still be moved for free. Conversational for the same reason the critic is:
+  # a threat model is built through follow-ups, not one-shot questions.
+  security-advisor:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: security-advisor.md
+    description: >-
+      Design-time security advice, phrased as candidate requirements the
+      specifier can absorb. Advises; decides nothing.
+    conversational: true
+    writes: false
+    permission: readonly
+    effort: high
+    can_spawn: false
+    timeout: 420
+    silence_timeout: 180
 
   # A second standing advisor, on Gemini rather than the critic's GPT model.
   # Useful when you want a genuinely different perspective on the same

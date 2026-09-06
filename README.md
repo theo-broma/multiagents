@@ -289,6 +289,36 @@ carries a threshold rather than applying it to everything: behaviour-shaped
 requests, work touching several files, or mistakes that would be expensive to
 unwind. A one-line fix goes straight to `implementer`.
 
+### Security, at both ends
+
+Two agents outside the default path, because running them on everything trains
+you to skim their output:
+
+- **`security-advisor`** — consulted with `consult()` *while a thing is still
+  being designed*, when a boundary can still be moved for free. It answers what
+  an attacker controls, what is worth taking, and where the check happens, and
+  phrases findings as **candidate requirements** so `specifier` can turn them
+  into numbered requirements and then tests. A security concern that never
+  becomes a requirement is one that gets forgotten at implementation time.
+- **`pentester`** — run with `start_agent` on code that already exists. Every
+  finding must carry the attacker's position, the concrete path, and what the
+  attacker gets; anything without those three is a hunch. It may commit a test
+  that fails now and passes once fixed.
+
+They run on different providers deliberately: the audit should not be performed
+by whoever approved the design.
+
+The pentester's brief bounds it — this repository only, no live targets, never
+use or print a secret it discovers, and a reproducing test rather than a
+working exploit. Its container has no route out in any case. Neither agent holds
+a veto, but a finding with a position, a path and an outcome is a defect rather
+than an opinion; declining to act on one is a decision to record, not to leave
+implicit.
+
+`_orchestrator.md` carries the trigger list — untrusted input, authorisation,
+credentials, money, injection sinks, cryptography, anything reachable without a
+session — and the matching list of cases that do not warrant a pass.
+
 ## When multiagents is the thing that is broken
 
 An agent that writes bad code is ordinary. A `merge_agent` that reports success
@@ -795,7 +825,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-146 tests covering the parts live runs do not reliably exercise: doom-loop
+150 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

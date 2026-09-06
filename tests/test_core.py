@@ -2232,3 +2232,53 @@ def test_the_orchestrator_is_told_when_not_to_use_the_spec_path():
              / "defaults" / "agents" / "_orchestrator.md").read_text())
     assert "threshold" in text.lower()
     assert "straight to `implementer`" in text
+
+
+# --------------------------------------------------------------------------
+# Security roster
+
+
+def test_the_security_pair_ships_at_both_ends_of_the_work():
+    """One is consulted while a boundary can still be moved for free; the other
+    attacks what was actually built."""
+    root = Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+    agents = _shipped_agents()
+
+    advisor = agents["security-advisor"]
+    assert advisor["conversational"] is True, "a threat model is built by follow-ups"
+    assert advisor["writes"] is False
+
+    pentester = agents["pentester"]
+    assert not pentester.get("conversational"), "it is given a target, not a chat"
+    assert pentester["writes"] is True, "it commits a test that proves a finding"
+
+    for name in ("security-advisor", "pentester"):
+        assert agents[name]["can_spawn"] is False
+        assert (root / "agents" / agents[name]["instructions"]).is_file()
+
+
+def test_the_pentester_does_not_audit_the_design_it_was_given():
+    """Different provider from the security advisor on purpose."""
+    agents = _shipped_agents()
+    assert agents["pentester"]["provider"] != agents["security-advisor"]["provider"]
+
+
+def test_the_pentester_brief_bounds_it_to_this_repository():
+    """A dual-use role needs its limits in the brief, not in the caller's head:
+    no live targets, no using a discovered secret, proof rather than weapon."""
+    raw = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
+            / "defaults" / "agents" / "pentester.md").read_text().lower())
+    # Reflowed prose puts line breaks mid-sentence; the rule is the content.
+    text = " ".join(raw.split())
+    assert "no live systems" in text
+    assert "never print its value" in text
+    assert "not a weapon" in text
+
+
+def test_the_orchestrator_is_told_when_security_agents_are_not_needed():
+    """Running them on everything trains the reader to skim them."""
+    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "_orchestrator.md").read_text())
+    assert "When not to." in text
+    assert "neither of these" in " ".join(text.split())
+    assert "holds a veto" in text

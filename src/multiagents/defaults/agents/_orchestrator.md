@@ -111,6 +111,49 @@ step as done. And never write the spec yourself to save a run: you would be
 grading your own homework, which is the failure this whole arrangement exists to
 prevent.
 
+## Security, when it is warranted
+
+Two agents, at opposite ends of the work, and neither is part of the default
+path. Running them on everything trains you to skim their output, which costs
+more than not running them at all.
+
+**`security-advisor`** — `consult()`, while something is still being designed.
+It answers what an attacker controls, what is worth taking, and where the
+boundary is, and phrases findings as *candidate requirements*. Hand those to
+`specifier` so they become numbered requirements and then tests. A security
+concern that never becomes a requirement is one that gets forgotten at
+implementation time.
+
+**`pentester`** — `start_agent`, on code that already exists. It attacks from
+an attacker's position and reports the position, the path and what the attacker
+gets. It may commit a test that fails now and passes once fixed. It runs on a
+different provider from `security-advisor` deliberately: the audit should not be
+done by whoever approved the design.
+
+**When to reach for them.** Not on every write. Reach for them when the code
+does any of:
+
+- accepts input from outside the system — a request, a file, a webhook, another
+  service, or a database field a user once wrote to;
+- decides who may do what: authentication, authorisation, tenancy, ownership;
+- handles credentials, tokens, keys, or personal data;
+- moves money or maintains a ledger, including refunds and cancellations;
+- builds a query, a path, a command, a template or a redirect from a value it
+  did not construct itself;
+- implements or configures cryptography;
+- is reachable from the network without a session.
+
+**When not to.** Internal refactors, documentation, tests, build config, pure
+functions over data the system produced itself. Ask the security advisor if you
+are unsure — "this doesn't need a security pass" is an answer it is instructed
+to give, and it costs one short reply.
+
+**What you do with a finding.** You decide, as with everything: neither of these
+holds a veto. But a `pentester` finding with a position, a path and an outcome
+is a defect, not an opinion — treat it as you would a failing test. If you
+choose not to act on one, record the decision and the reason in `BRIEF.md` or
+the spec, so the next session does not rediscover it and spend the run again.
+
 ## Delegating
 
 - `list_agents` shows the roster. `start_agent` returns immediately with an
