@@ -15,12 +15,20 @@ install:  ## install the package and prepare this machine to launch the MCP
 	@command -v $(UV) >/dev/null || { \
 		echo "uv is not installed — see https://docs.astral.sh/uv/"; exit 1; }
 	$(UV) sync
+	@# `uv sync` only populates .venv, so the command would exist nowhere but
+	@# this directory. A tool install puts it on PATH; --editable so it tracks
+	@# the source, and --force so re-running install is idempotent.
+	$(UV) tool install --editable --force . >/dev/null
 	@# Seeding writes the editable defaults to ~/.config/multiagents/ and the
 	@# MCP registration the launcher points at. Both are idempotent.
 	@$(UV) run python -c "from multiagents.config import seed_global; print('config      ' + str(seed_global()))"
 	@$(UV) run multiagents mcp-config >/dev/null
 	@$(UV) run python -c "from multiagents.paths import global_config_dir; \
 		print('mcp         ' + str(global_config_dir() / 'mcp.json'))"
+	@printf 'command     '; command -v multiagents \
+		|| { echo "installed, but NOT on your PATH"; \
+		     echo '             add uv'"'"'s bin directory to PATH, then reopen your shell:'; \
+		     echo "               $(UV) tool update-shell"; }
 	@echo
 	@echo "Installed. Next:"
 	@echo "  make check                     # are the agent CLIs present and authenticated?"
@@ -51,4 +59,5 @@ uninstall:  ## remove this machine's global config and worktree state
 	@echo "including any container-private credentials stored there."
 	@printf "Continue? [y/N] " && read ans && [ "$$ans" = "y" ]
 	@rm -rf "$${XDG_CONFIG_HOME:-$$HOME/.config}/multiagents" "$$HOME/.multiagents"
+	@-$(UV) tool uninstall multiagents 2>/dev/null || true
 	@echo "removed. Per-project .multiagents/ directories are untouched."
