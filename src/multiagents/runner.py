@@ -209,6 +209,14 @@ class Runner:
         # merge and nothing to discard when one went wrong. Failing here is the
         # only honest answer; an explicit workdir override is the caller saying
         # they meant it.
+        if workdir and not limits.get("allow_workdir_override", False):
+            raise PermissionError(
+                "workdir= is not permitted in this project. It would run the "
+                "agent outside its worktree: no branch, no isolation from the "
+                "other agents, and nothing to discard if the run goes wrong. "
+                "A human can allow it with `limits.allow_workdir_override: "
+                "true` in project.yaml."
+            )
         if not workdir and not gitops.is_repo(self.paths.root):
             raise RuntimeError(
                 f"{self.paths.root} is not a git repository, so no agent can be "

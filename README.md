@@ -52,8 +52,14 @@ unattended run never creates or commits anything.
 
 Spawning without a repository is refused rather than degraded: an agent with no
 branch of its own would run in the project directory alongside every other one.
-An explicit `workdir` on `start_agent` is still honoured — that is the caller
-saying they meant it.
+`init` exits non-zero when it leaves a project in that state, so a scripted
+setup finds out rather than reading exit 0 as ready.
+
+`start_agent`'s `workdir` parameter — which runs an agent outside its worktree —
+is refused unless the project sets `limits.allow_workdir_override: true`. The
+caller asking for it is a **model**, so a discouraging name or a warning in a
+docstring deters nobody; the permission has to be granted by a human editing a
+file, where an agent cannot grant it to itself.
 
 `build` prepares everything agents need: the container images and container if
 you are on the docker executor, then **authentication for every enabled
@@ -703,7 +709,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-134 tests covering the parts live runs do not reliably exercise: doom-loop
+137 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
