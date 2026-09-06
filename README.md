@@ -973,3 +973,7 @@ Provider event fixtures are real shapes captured from the CLIs, not invented —
 `tests/fixtures/claude-stream.jsonl` is an actual run that used a tool, and a
 golden test asserts every line of it classifies with nothing falling through to
 `raw`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
