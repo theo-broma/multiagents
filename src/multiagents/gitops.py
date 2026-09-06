@@ -74,6 +74,17 @@ def uncommitted_entries(repo: Path) -> list[str]:
     return [line[3:].strip().strip('"') for line in result.out.splitlines() if line[3:].strip()]
 
 
+def repo_root(path: Path) -> Path | None:
+    """The top level of the repository containing `path`, or None.
+
+    Distinct from :func:`is_repo`, which answers "is there a repository above
+    me" — inside a monorepo that is true of every subdirectory, and a project
+    rooted at one would get worktrees of the whole repository without saying so.
+    """
+    result = run(path, "rev-parse", "--show-toplevel")
+    return Path(result.out) if result.ok and result.out else None
+
+
 def ensure_repo(path: Path) -> None:
     if not is_repo(path):
         raise GitError(

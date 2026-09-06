@@ -50,10 +50,18 @@ def shipped_defaults_dir() -> Path:
 
 
 def find_project_root(start: Path | None = None) -> Path | None:
-    """Walk up from `start` looking for an initialised project."""
+    """Walk up from `start` looking for an initialised project.
+
+    The machine-wide state root is `~/.multiagents`, which wears the same name
+    as a project's directory — so without the guard below, EVERY path under the
+    home directory with no closer project resolves to the home directory
+    itself, and commands read and write a phantom project rooted there.
+    """
+    state = state_root().resolve()
     cur = (start or Path.cwd()).resolve()
     for candidate in [cur, *cur.parents]:
-        if (candidate / PROJECT_DIR_NAME).is_dir():
+        marker = candidate / PROJECT_DIR_NAME
+        if marker.is_dir() and marker.resolve() != state:
             return candidate
     return None
 

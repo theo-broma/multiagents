@@ -496,6 +496,52 @@ because those bill against a separate API key rather than the subscription and
 listing them would invite agents onto an account you did not intend to spend
 from.
 
+## One project, one repository
+
+A multiagents project is **exactly one git repository, rooted at that
+repository's root**. Everything else rests on it: `create_worktree` runs
+`git -C <project root> worktree add`, and git resolves that to the
+*repository*, not the directory you named.
+
+So a project initialised inside another repository hands its agents full
+checkouts of the outer repository, and branches in the outer repository's
+namespace — while counting concurrency, budget and watchdogs separately, in its
+own `tree.json`. It looks like it works, which is what makes it worth refusing.
+`init` refuses, `--nested` overrides, and initialising below a repository root
+prints what you are actually getting.
+
+### A repository with subprojects inside it
+
+One project at the repository root. Subprojects are directories; an agent gets a
+worktree of the whole repository and works inside the subproject within it. This
+is the normal case, and it needs nothing special:
+
+```
+voila/                     <- multiagents init here
+├── .multiagents/
+├── BRIEF.md               <- what the whole thing is
+├── context/               <- shared reference material, read by every agent
+├── stock_management/
+└── billing/
+```
+
+If a subproject is big enough to deserve its own delegated tree, that is an
+agent with `can_spawn: true`, not a second project: it stays inside the tree,
+the budget and the supervision.
+
+### Several independent repositories
+
+One project per repository, each with its own orchestrator, worktrees and
+container. There is no channel between them, by design — orchestrators are
+launched rather than spawned, and `_preflight` refuses to spawn or consult a
+`launch: true` agent so that an orchestrator cannot end up inside an
+orchestrator. Share context through committed files, not conversation.
+
+The known limit: an agent in one repository cannot read another repository's
+`context/`. A worktree contains only its own repository, and the container
+mounts only the project. If several repositories need the same reference
+material, commit it to each or mount it with `executor.docker.extra_mounts`.
+
 ## Where agents run
 
 `executor.kind` selects the backend, and an agent may pin its own with
@@ -709,7 +755,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-137 tests covering the parts live runs do not reliably exercise: doom-loop
+142 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
