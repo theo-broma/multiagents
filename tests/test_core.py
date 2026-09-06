@@ -1867,7 +1867,8 @@ def test_automatic_reporting_is_off_by_default():
         (Path(__file__).resolve().parents[1] / "src" / "multiagents" /
          "defaults" / "project.yaml").read_text())
     assert shipped["bug_reporting"]["automatic"] is False
-    assert shipped["bug_reporting"]["repo"] == ""
+    # The repo is set; `automatic: false` is what keeps tickets on the machine.
+    assert shipped["bug_reporting"]["repo"] == "theo-broma/multiagents"
 
 
 def test_open_tickets_include_the_ones_parked_for_the_user(tmp_path):

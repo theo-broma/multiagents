@@ -191,6 +191,6 @@ budget:
 bug_reporting:
   enabled: true
   automatic: false
-  # e.g. theodieu/multiagents — empty means tickets are written and kept local.
-  repo: ""
+  # Empty means tickets are written and kept local.
+  repo: "theo-broma/multiagents"
   labels: []
