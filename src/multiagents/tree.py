@@ -404,13 +404,19 @@ class Tree:
     # its own server process, and a pause only one of them knows about is not a
     # pause.
 
-    def pause(self, until: float, reason: str) -> dict:
-        record = {"until": until, "reason": reason, "since": now()}
+    def pause(self, until: float, reason: str, providers: list[str] | None = None) -> dict:
+        """Record that there is nothing to run `providers` work on until `until`.
+
+        Keeps the EARLIEST reset of any active pause, not the latest. Waking
+        early costs one wasted check and an immediate re-pause; waking late
+        blocks tasks whose provider came back ten minutes ago, and nothing
+        would notice.
+        """
+        record = {"until": until, "reason": reason, "since": now(),
+                  "providers": sorted(providers or [])}
         with self.transaction() as data:
             existing = data.get("pause") or {}
-            # Keep the later reset: whichever provider frees up last is when
-            # work can actually resume.
-            if existing.get("until", 0) > until:
+            if existing.get("until", 0) and existing["until"] <= until:
                 return dict(existing)
             data["pause"] = record
         self.emit("system", "paused", reason=reason, until=until)
@@ -435,19 +441,31 @@ class Tree:
 
     # ------------------------------------------------------------- deferred --
 
-    def defer(self, spec: dict, retry_after: float, reason: str) -> None:
+    def defer(self, spec: dict, retry_after: float, reason: str) -> dict:
+        record = {"id": "df-" + uuid.uuid4().hex[:6], "spec": spec,
+                  "retry_after": retry_after, "reason": reason, "queued_at": now()}
         with self.transaction() as data:
-            data["deferred"].append(
-                {"spec": spec, "retry_after": retry_after, "reason": reason, "queued_at": now()}
-            )
+            data["deferred"].append(record)
         self.emit(spec.get("agent", "?"), "deferred", reason=reason, retry_after=retry_after)
+        return record
 
     def due_deferred(self) -> list[dict]:
+        """Entries whose window has passed. **Does not remove them.**
+
+        It used to pop, which made any exception between the pop and the
+        restart delete the whole remaining batch permanently. The caller drops
+        each entry with drop_deferred once it has actually dealt with it, so a
+        crash leaves work queued rather than losing it.
+        """
         current = now()
+        return [d for d in self.read()["deferred"] if d["retry_after"] <= current]
+
+    def drop_deferred(self, deferred_id: str) -> bool:
         with self.transaction() as data:
-            due = [d for d in data["deferred"] if d["retry_after"] <= current]
-            data["deferred"] = [d for d in data["deferred"] if d["retry_after"] > current]
-        return due
+            before = len(data["deferred"])
+            data["deferred"] = [d for d in data["deferred"]
+                                if d.get("id") != deferred_id]
+            return len(data["deferred"]) < before
 
     def set_cooldown(self, provider: str, until: float, reason: str) -> None:
         with self.transaction() as data:

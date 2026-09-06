@@ -797,19 +797,30 @@ exactly the property that would degrade silently at the moment nobody is
 watching.
 
 **A pause when there is nothing left.** When an agent's provider *and* its
-fallback are both exhausted, the task is deferred and the whole tree is paused;
-`start_agent` refuses until it clears, and the orchestrator's brief tells it not
-to route around the pause — not by switching providers, not by rewriting the
-plan, and above all not by doing the work in its own context.
+fallback are both exhausted, the task is deferred and a pause is recorded,
+naming the providers that ran out. `start_agent` then refuses **the agents that
+pause actually covers** — one whose provider is healthy, or whose fallback lies
+outside the pause, still runs. Freezing everything because one provider is out
+would be over-applying it; what protects unreviewed work is the orchestrator's
+rule about merging, not stopping agents that can still work.
 
-Pausing rather than degrading is deliberate. A system that keeps spawning
-whatever still runs, while the agents that *check* its work are unreachable,
-writes code it cannot review and nobody notices which half is missing.
+The orchestrator's brief tells it not to route around a pause that does cover an
+agent — not by switching providers, not by rewriting the plan, and above all not
+by doing the work in its own context, which spends the one bucket that cannot be
+refilled.
 
 **Resume without anyone watching.** The deferred queue drains itself: the next
 `wait_for_agents` restarts everything whose window has passed, re-reading quota
-first. A pause carries the *latest* reset of the providers that caused it, and
-clears itself on read once it elapses.
+first. A pause keeps the **earliest** reset of the providers that caused it —
+waking early costs one wasted check and an immediate re-pause, while waking late
+blocks tasks whose provider came back ten minutes ago and nothing would notice.
+It clears itself on read once it elapses.
+
+Draining never loses work. `due_deferred()` does not remove what it returns; an
+entry is dropped only once it has actually been restarted, so an exception
+mid-drain leaves the queue intact rather than deleting the remaining batch. If
+the window closes again partway through, the drain stops there instead of
+grinding the rest of the queue into the same wall.
 
 For the orchestrator's own provider there is no fallback to take — it is the
 process you are talking to. `multiagents run` checks its headroom before
@@ -899,7 +910,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-159 tests covering the parts live runs do not reliably exercise: doom-loop
+163 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
