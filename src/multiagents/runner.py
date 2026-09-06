@@ -209,6 +209,16 @@ class Runner:
         # merge and nothing to discard when one went wrong. Failing here is the
         # only honest answer; an explicit workdir override is the caller saying
         # they meant it.
+        paused = self.tree.pause_state()
+        if paused:
+            waiting = max(0, int(paused.get("until", 0) - now()))
+            raise RuntimeError(
+                f"The tree is paused: {paused.get('reason', 'no provider available')}. "
+                f"It clears in about {waiting // 60}m{waiting % 60:02d}s, and the "
+                f"tasks deferred behind it restart by themselves. Do not work "
+                f"around this by spawning something else — there is nothing left "
+                f"to run it on."
+            )
         if workdir and not limits.get("allow_workdir_override", False):
             raise PermissionError(
                 "workdir= is not permitted in this project. It would run the "
@@ -495,17 +505,28 @@ class Runner:
             float(self.config.project.get("budget", {}).get("reserve_headroom", 0.15)),
         )
         if chosen is None:
-            retry_at = now() + float(
+            # Prefer a real reset time over the blind cooldown: a provider that
+            # told us when it comes back should not be waited on for longer.
+            resets = [b.cooldown_until for b in budgets.values() if b.cooldown_until]
+            retry_at = min(resets) if resets else now() + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
             )
-            self.tree.defer({"agent": agent_name, "task": task}, retry_at, why)
-            return {"deferred": True, "reason": why, "retry_after": retry_at}
+            self.tree.defer({"agent": agent_name, "task": task, "timeout": timeout,
+                             "model": model, "workdir": workdir}, retry_at, why)
+            # Nothing can run, so nothing should keep being started. Pausing is
+            # the difference between a system that stops and one that carries on
+            # writing code while the agents that check it are unreachable.
+            self.tree.pause(retry_at, why)
+            return {"deferred": True, "reason": why, "retry_after": retry_at,
+                    "paused": True,
+                    "note": "the tree is paused until this clears; deferred tasks "
+                            "restart by themselves when it does"}
         if chosen != spec.provider:
             # The model id belongs to the original provider's namespace, so it
             # is meaningless to the new one — failing over without remapping
             # would run `agy --model opencode-go/glm-5.3-flash`. Only fail over
             # if this agent names a model for the fallback provider too.
-            alternative = (spec.extra.get("models") or {}).get(chosen)
+            alternative = (spec.models or spec.extra.get("models") or {}).get(chosen)
             if not alternative:
                 why = (f"{spec.provider} is constrained, but {spec.name!r} names no "
                        f"model for {chosen}; add one under `models:` to allow failover")
@@ -1202,12 +1223,68 @@ class Runner:
                 "answered_by": answered_by, "resumed": result.get("steered", False),
                 **({"error": result["error"]} if result.get("error") else {})}
 
+    async def resume_deferred(self) -> dict[str, Any]:
+        """Restart tasks whose quota window has passed. Safe to call often.
+
+        The deferred queue existed and nothing ever drained it, so a task
+        deferred on quota stayed deferred forever — the system waited for a
+        reset it would never notice. This is the other half of pausing: a pause
+        nobody lifts is a stop.
+        """
+        paused = self.tree.pause_state()          # clears itself when expired
+        if paused:
+            return {"paused": True, "reason": paused.get("reason", ""),
+                    "until": paused.get("until"), "restarted": []}
+
+        due = self.tree.due_deferred()
+        if not due:
+            return {"paused": False, "restarted": []}
+
+        budget_mod.invalidate_cache()             # the window moved; re-read it
+        restarted, still_waiting, orphaned = [], 0, []
+        for entry in due:
+            task_spec = entry.get("spec") or {}
+            agent = task_spec.get("agent")
+            if not agent or agent not in self.config.agents:
+                # The roster changed while this waited. Reporting it matters:
+                # dropping it silently loses a task the orchestrator believes
+                # is still queued.
+                orphaned.append({"agent": agent, "task": task_spec.get("task", "")[:120]})
+                continue
+            result = await self.start(
+                agent, task_spec.get("task", ""),
+                workdir=task_spec.get("workdir"), timeout=task_spec.get("timeout"),
+                model=task_spec.get("model"),
+            )
+            if result.get("deferred"):
+                still_waiting += 1                # start() re-queued it
+            else:
+                restarted.append({"agent": agent, "agent_id": result.get("agent_id")})
+        result = {"paused": False, "restarted": restarted,
+                  "still_deferred": still_waiting}
+        if orphaned:
+            result["dropped"] = orphaned
+            result["note"] = ("these were deferred for an agent that is no longer "
+                              "in agents.yaml; re-issue them if they still matter")
+        return result
+
     async def wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
         """Block until any of the given agents leaves the running state.
 
         Polls the shared tree rather than only in-process events, so an
         orchestrator can also wait on agents started by a nested server.
         """
+        # Drain the deferred queue first. A task waiting on a quota reset is
+        # invisible to active(), so without this an orchestrator polling for
+        # work is told there is none while tasks sit ready to restart.
+        revived = await self.resume_deferred()
+        if revived.get("paused"):
+            waiting = max(0, int((revived.get("until") or 0) - now()))
+            return {"changed": [], "paused": True, "reason": revived["reason"],
+                    "retry_after_seconds": waiting,
+                    "note": "no provider has headroom; deferred work restarts by "
+                            "itself when this clears. Wait rather than re-planning."}
+
         deadline = time.monotonic() + timeout
         if agent_ids:
             watched = list(agent_ids)
@@ -1218,6 +1295,8 @@ class Runner:
             watched = [n.id for n in self.tree.active()]
             watched += [q["agent"] for q in self.tree.open_questions()
                         if q["agent"] not in watched]
+        watched += [r["agent_id"] for r in revived.get("restarted", [])
+                    if r.get("agent_id") and r["agent_id"] not in watched]
         if not watched:
             return {"changed": [], "reason": "no active agents"}
 

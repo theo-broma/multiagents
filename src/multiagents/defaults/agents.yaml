@@ -49,6 +49,8 @@ agents:
     provider: opencode
     model: opencode-go/glm-5.3-flash
     instructions: researcher.md
+    models:
+      agy: gemini-3.8-flash-medium
     description: Reads the codebase and answers questions. No writes.
     writes: false
     permission: readonly
@@ -63,6 +65,8 @@ agents:
     provider: agy
     model: gemini-3.1-pro-high
     instructions: specifier.md
+    models:
+      opencode: opencode-go/deepseek-v4-pro
     description: >-
       Turns an intention into numbered, individually testable requirements in
       context/specs/<feature>.md. Writes no code.
@@ -80,6 +84,8 @@ agents:
     provider: opencode
     model: opencode-go/gpt-5.6-luna
     instructions: adversary.md
+    models:
+      agy: claude-sonnet-4-6
     description: >-
       Attacks a spec with concrete failure scenarios before implementation.
       Appends them to the spec file; proposes no fixes.
@@ -108,6 +114,8 @@ agents:
     provider: opencode
     model: opencode-go/glm-5.3-flash
     instructions: implementer.md
+    models:
+      agy: gemini-3.8-flash-medium
     description: >-
       Cheap coder for well-specified mechanical changes. Escalates rather than
       guessing when a task needs a design decision.
@@ -122,6 +130,8 @@ agents:
     provider: opencode
     model: opencode-go/kimi-k2.7-code
     instructions: implementer.md
+    models:
+      agy: gemini-3.1-pro-high
     description: Writes code on its own branch. The workhorse, and the default.
     writes: true
     permission: full
@@ -138,6 +148,8 @@ agents:
     provider: opencode
     model: opencode-go/kimi-k3
     instructions: implementer.md
+    models:
+      agy: claude-opus-4-6-thinking
     description: >-
       Strong coder for work that needs design judgement, or that a lower tier
       escalated. Expensive; used deliberately.
@@ -153,6 +165,8 @@ agents:
     provider: agy
     model: gemini-3.1-pro-high
     instructions: reviewer.md
+    models:
+      opencode: opencode-go/gpt-5.6-luna
     description: Reviews a diff for correctness and reports findings. No writes.
     writes: false
     permission: readonly
@@ -171,6 +185,8 @@ agents:
     provider: opencode
     model: opencode-go/deepseek-v4-pro
     instructions: pentester.md
+    models:
+      agy: claude-opus-4-6-thinking
     description: >-
       Attacks existing code for exploitable paths and reports position, path and
       outcome. May commit a failing test that proves a finding.
@@ -185,6 +201,8 @@ agents:
     provider: agy
     model: gemini-3.8-flash-medium
     instructions: tester.md
+    models:
+      opencode: opencode-go/glm-5.3-flash
     description: Writes and runs tests, iterating until green. Fast loop.
     writes: true
     permission: sandbox
@@ -204,6 +222,8 @@ agents:
     provider: opencode
     model: opencode-go/gpt-5.6-luna
     instructions: critic.md
+    models:
+      agy: gemini-3.8-flash-high
     description: Critical thinker. Advises the orchestrator; decides nothing.
     conversational: true
     writes: false
@@ -219,6 +239,8 @@ agents:
     provider: agy
     model: gemini-3.1-pro-high
     instructions: security-advisor.md
+    models:
+      opencode: opencode-go/gpt-5.6-luna
     description: >-
       Design-time security advice, phrased as candidate requirements the
       specifier can absorb. Advises; decides nothing.
@@ -237,6 +259,8 @@ agents:
     provider: agy
     model: gemini-3.1-pro-high
     instructions: critic.md
+    models:
+      opencode: opencode-go/deepseek-v4-pro
     description: Conversational advisor on Gemini 3.1 Pro. Advises; decides nothing.
     conversational: true
     writes: false
@@ -255,6 +279,8 @@ agents:
     model: opencode-go/glm-5.3-flash
     role: bug-reporter
     instructions: bug-reporter.md
+    models:
+      agy: gemini-3.8-flash-medium
     description: >-
       Writes a publishable ticket for a bug in multiagents itself, with no
       personal or sensitive information in it. Can propose a fix.

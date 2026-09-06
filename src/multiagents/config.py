@@ -178,6 +178,11 @@ class AgentSpec:
     # LAUNCHED as an MCP client rather than spawned as a subagent. Real fields
     # rather than `extra` keys, because extras are coerced into command options
     # and `isinstance(True, int)` is True.
+    # Per-provider fallback models: {provider: model_id}. A model id belongs to
+    # its provider's namespace, so failing over without one would run
+    # `agy --model opencode-go/glm-5.3-flash`. Named here, an agent can move to
+    # another provider when its own is exhausted; without one it waits instead.
+    models: dict[str, str] = field(default_factory=dict)
     launch: bool = False
     # Which command launches it: "orchestrator" for `run`, "initializer" for
     # `init-agent`. Both are launch: true; the role says which door they use.
