@@ -1921,3 +1921,20 @@ def test_the_tree_still_shows_a_queued_ticket_with_no_agents(tmp_path):
     assert "(no agents)" in rendered
     assert "something is wrong" in rendered
     assert "multiagents tickets" in rendered
+
+
+def test_an_unauthenticated_gh_is_reported_as_such_not_as_ready(monkeypatch):
+    """Installed is not logged in. Saying `can_submit` here would tell the
+    orchestrator to file, and hand it an auth error it cannot act on."""
+    from multiagents import bugs
+    from multiagents.config import Config
+
+    config = Config(project={"bug_reporting": {"repo": "someone/multiagents"}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    monkeypatch.setattr(bugs.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(bugs, "authenticated", lambda: False)
+    ok, why = bugs.can_submit(config)
+    assert not ok and "gh auth login" in why
+
+    monkeypatch.setattr(bugs, "authenticated", lambda: True)
+    assert bugs.can_submit(config) == (True, "")

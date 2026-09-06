@@ -59,7 +59,24 @@ def can_submit(config: Any) -> tuple[bool, str]:
                        "project.yaml to file issues")
     if not shutil.which("gh"):
         return False, "the `gh` CLI is not installed, so an issue cannot be created"
+    if not authenticated():
+        return False, "`gh` is installed but not logged in — run `gh auth login`"
     return True, ""
+
+
+def authenticated() -> bool:
+    """Whether gh holds a token, without spending a round trip to check it.
+
+    `gh auth token` reads the local store and exits non-zero when empty, where
+    `gh auth status` calls the API — which would put a network request on the
+    path of every `list_tickets`, and report a network outage as a login
+    problem.
+    """
+    try:
+        return subprocess.run(["gh", "auth", "token"], capture_output=True,
+                              timeout=10).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def submit(config: Any, ticket: dict) -> tuple[bool, str]:
