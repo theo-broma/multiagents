@@ -1938,3 +1938,27 @@ def test_an_unauthenticated_gh_is_reported_as_such_not_as_ready(monkeypatch):
 
     monkeypatch.setattr(bugs, "authenticated", lambda: True)
     assert bugs.can_submit(config) == (True, "")
+
+
+def test_doctor_names_a_permission_profile_the_provider_does_not_define():
+    """An unknown profile adds no flags, and an agent with no permission flag
+    is not safely restricted — agy auto-denies everything and answers nothing.
+    It has to be reported, not defaulted."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    provider = Provider.from_dict("p", {
+        "bin": "sh",
+        "spawn": {"args": ["{prompt}"], "permission": {"full": ["--auto"],
+                                                       "sandbox": [], "readonly": []}},
+    })
+    config = Config(project={}, providers={}, models={}, instruction_dirs=[],
+                    agents={"a": AgentSpec("a", "p", "m", permission="paranoid")})
+
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cli._report_agents(config, {"p": provider})
+    out = buf.getvalue()
+    assert "unknown permission 'paranoid'" in out
+    assert "full, readonly, sandbox" in out
