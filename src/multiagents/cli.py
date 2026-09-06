@@ -318,6 +318,117 @@ def _report_catalog(config, provider: str = "opencode-go") -> int:
     return len(affecting)
 
 
+# Entries that should almost never enter a first commit: credentials, and the
+# generated directories that make a repository unusable. Matched against the
+# top-level paths `git status` reports, so `node_modules/` is one entry rather
+# than forty thousand.
+UNSAFE_FIRST_COMMIT = (
+    ".env", ".envrc", ".npmrc", ".netrc", "node_modules/", "venv/", ".venv/",
+    "__pycache__/", "dist/", "build/", "target/", ".DS_Store", "secrets/",
+    "credentials.json", "id_rsa", ".ssh/", ".aws/", ".gnupg/",
+)
+
+
+def _gitignore_add(root: Path, lines: list[str], header: str = "") -> list[str]:
+    """Append the lines not already listed. Returns what it actually wrote."""
+    path = root / ".gitignore"
+    existing = path.read_text() if path.is_file() else ""
+    present = set(existing.split())
+    missing = [line for line in lines if line not in present]
+    if not missing:
+        return []
+    with path.open("a") as handle:
+        handle.write(("" if not existing or existing.endswith("\n") else "\n")
+                     + (f"\n{header}\n" if header else "\n")
+                     + "\n".join(missing) + "\n")
+    return missing
+
+
+def _confirm(question: str, default: bool = False) -> bool:
+    """Ask a yes/no question, returning `default` when nobody can answer.
+
+    `init` is run by hand, but also by `make init` and by scripts. A prompt that
+    blocked on a closed stdin would hang a headless setup, so with no terminal
+    every offer declines itself and the manual command is printed instead —
+    exactly what this command did before it asked anything.
+    """
+    if not sys.stdin.isatty():
+        return default
+    try:
+        answer = input(f"{question} {'[Y/n]' if default else '[y/N]'} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    return default if not answer else answer in ("y", "yes")
+
+
+def _offer_git(root: Path) -> None:
+    """Ensure the project is a repository with a commit to branch from.
+
+    This is not a convenience. Without a repository ``runner._launch`` silently
+    falls back to running every agent in the project directory itself — no
+    branch, no worktree, no isolation between concurrent agents and no way to
+    discard a bad run. Printing the command and hoping left that arrangement
+    reachable by doing nothing, so init offers to close it.
+
+    Called *after* ``.gitignore`` and ``context/`` are written, so a first commit
+    made here excludes ``.multiagents/`` and includes the context directory.
+    """
+    if not gitops.is_repo(root):
+        print("\ngit          not a repository")
+        print("             agents work on their own branches, so this project needs one")
+        if not _confirm("             run `git init` here now?"):
+            print(f"             later: git -C {root} init && "
+                  f"git -C {root} add -A && git -C {root} commit -m 'initial commit'")
+            return
+        result = gitops.init_repo(root)
+        if not result.ok:
+            print(f"             git init failed: {(result.err or result.out)[:200]}")
+            return
+        print(f"git          initialised {root}")
+
+    if gitops.has_commits(root):
+        print(f"git          {gitops.current_branch(root)} @ {gitops.head_sha(root)[:12]}")
+        return
+
+    # A worktree cannot be cut from nothing. An *empty* first commit satisfies
+    # that and is still wrong for a project that already has files: agents check
+    # out their branch and find none of them. So the first commit is the project.
+    print("\ngit          repository has no commits")
+    entries = gitops.uncommitted_entries(root)
+    unsafe = [e for e in entries if e in UNSAFE_FIRST_COMMIT]
+    if entries:
+        print(f"             agents see only committed files; "
+              f"{len(entries)} path(s) are uncommitted")
+    if unsafe:
+        print("             these look like they belong in .gitignore first:")
+        for entry in unsafe:
+            print(f"               {entry}")
+        # Default yes, and asked before the commit: committing a .env because a
+        # warning scrolled past is precisely the accident this exists to stop.
+        # The isatty guard keeps a headless run from silently editing
+        # .gitignore — it declines the commit below anyway.
+        if sys.stdin.isatty() and _confirm("             add them to .gitignore now?",
+                                           default=True):
+            _gitignore_add(root, unsafe, "# added by multiagents init")
+            print(f"             added to .gitignore: {', '.join(unsafe)}")
+            entries = gitops.uncommitted_entries(root)
+
+    question = ("             make an empty initial commit?" if not entries else
+                "             commit them all as the initial commit?")
+    if not _confirm(question):
+        print(f"             later: git -C {root} add -A && "
+              f"git -C {root} commit -m 'initial commit'")
+        return
+    result = gitops.initial_commit(root)
+    if not result.ok:
+        # Usually an unconfigured user.email, whose own message explains itself.
+        for line in (result.err or result.out).splitlines()[:4]:
+            print(f"             {line}")
+        return
+    print(f"git          {gitops.current_branch(root)} @ {gitops.head_sha(root)[:12]}")
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     root = Path(args.path or ".").expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -331,18 +442,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"data         {paths.data}")
     print(f"config       {paths.config}")
     print(f"worktrees    {paths.worktrees}")
-
-    # Git is required: agents work on branches.
-    if not gitops.is_repo(root):
-        print("\ngit          not a repository")
-        print("             agents work on their own branches, so this project needs one:")
-        print(f"               git -C {root} init && git -C {root} commit --allow-empty -m init")
-    elif not gitops.has_commits(root):
-        print("\ngit          repository has no commits")
-        print("             a worktree cannot be branched from nothing:")
-        print(f"               git -C {root} commit --allow-empty -m init")
-    else:
-        print(f"git          {gitops.current_branch(root)} @ {gitops.head_sha(root)[:12]}")
 
     context_dir = root / "context"
     if not context_dir.exists():
@@ -359,13 +458,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
         print(f"context      {context_dir}  (created)")
 
-    gitignore = root / ".gitignore"
-    existing = gitignore.read_text() if gitignore.is_file() else ""
-    if GITIGNORE_LINE not in existing:
-        with gitignore.open("a") as handle:
-            handle.write(("" if existing.endswith("\n") or not existing else "\n")
-                         + f"\n# multiagents runtime state\n{GITIGNORE_LINE}\n")
+    if _gitignore_add(root, [GITIGNORE_LINE], "# multiagents runtime state"):
         print(f"gitignore    added {GITIGNORE_LINE}")
+
+    # After the two writes above, so a first commit made here picks them up.
+    _offer_git(root)
 
     providers = load_providers(load_config(paths).providers)
     result = refresh_models(providers, paths.config / "models.yaml")

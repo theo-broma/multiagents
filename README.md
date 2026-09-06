@@ -35,7 +35,20 @@ and `resume` is an alias for `run`. The same applies to `init-agent`.
 
 `init` copies the global defaults into `.multiagents/config/` for editing,
 generates `models.yaml` from the installed CLIs, records the first model-catalog
-snapshot, and scaffolds `context/`.
+snapshot, and scaffolds `context/`. Run it either in an existing project or with
+a path — `multiagents init ~/code/thing` creates the directory if it is missing.
+On an existing project it is additive: `.multiagents/`, one `.gitignore` line,
+and `context/` if absent. Nothing else is touched, and re-running it is a no-op.
+
+**It also makes sure the project is a git repository with a commit in it**,
+offering `git init` and a first commit rather than only printing the commands.
+That is not politeness: agents get their own branch and worktree, and with no
+repository to branch from they would all run directly in your project directory
+instead — concurrently, with nothing to discard if one goes wrong. Files that
+look like credentials or build output (`.env`, `node_modules/`, …) are offered
+to `.gitignore` before the commit is made. With no terminal — `make init`, or a
+script — every prompt declines itself and prints the command instead, so an
+unattended run never creates or commits anything.
 
 `build` prepares everything agents need: the container images and container if
 you are on the docker executor, then **authentication for every enabled
