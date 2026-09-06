@@ -56,6 +56,40 @@ agents:
     timeout: 600
     silence_timeout: 120
 
+  # Writes the numbered requirements a feature is built against. No code.
+  # A broad prompt gets the median implementation because "build the checkout"
+  # does not say what better means; this is what makes better sayable.
+  specifier:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: specifier.md
+    description: >-
+      Turns an intention into numbered, individually testable requirements in
+      context/specs/<feature>.md. Writes no code.
+    writes: true
+    permission: sandbox
+    effort: high
+    can_spawn: false
+    timeout: 1200
+    silence_timeout: 240
+
+  # Attacks a specification before anything is built. Deliberately on a
+  # DIFFERENT model family from the specifier: an adversary that shares the
+  # author's blind spots agrees with it, which is the one thing it must not do.
+  adversary:
+    provider: opencode
+    model: opencode-go/gpt-5.6-luna
+    instructions: adversary.md
+    description: >-
+      Attacks a spec with concrete failure scenarios before implementation.
+      Appends them to the spec file; proposes no fixes.
+    writes: true
+    permission: sandbox
+    effort: high
+    can_spawn: false
+    timeout: 1200
+    silence_timeout: 240
+
   implementer:
     provider: opencode
     model: opencode-go/kimi-k2.7-code

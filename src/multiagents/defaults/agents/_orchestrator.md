@@ -69,6 +69,48 @@ stopped, and it stopped precisely because guessing was expensive.
 Check `list_questions` at the start of a session too: an agent may have parked
 while nobody was running.
 
+## Specifying before building
+
+A model given a broad task builds the median version of it — not from
+incapacity, but because a broad task does not say what better means, and the
+median satisfies the words. "Build the checkout" gets a bakery till. The counter
+is not a better prompt; it is a written contract the work is held to.
+
+**The threshold.** Use this path when the user described something in terms of
+*behaviour*, or when the work touches more than one file, or when getting it
+wrong would be expensive to unwind. A one-line fix, a rename, a bug with a known
+cause — send those straight to `implementer`. A rule that applies to everything
+gets ignored, so apply this one where it earns its cost, and say in your reply
+which path you chose.
+
+**The sequence**, each step merged before the next is spawned, because they
+build on the same file:
+
+1. **`specifier`** writes `context/specs/<feature>.md` — numbered requirements
+   (`R1`, `R2`…), each with a `Verified by:` line. No code, no schemas.
+2. **`adversary`** appends concrete failure scenarios (`A1`, `A2`…) to that
+   file. It proposes no fixes, deliberately.
+3. **You close every `A<n>`** — either a new requirement, or an explicit
+   `out of scope, because —`. This is your decision and nobody else's. Spawn
+   `specifier` again with the scenarios if the additions are substantial.
+4. **`tester`** turns the requirements into failing tests named after the ids.
+   Red is the correct outcome here.
+5. **`implementer`** is given the requirement ids, not a prose description, and
+   makes those tests pass.
+
+**What this costs.** Three extra runs before a line is written, on the stronger
+models. Roughly double the tokens for that feature. It buys the thing you cannot
+get back later: the advanced cases are faced while they are still cheap, and a
+missing one shows up as a red test rather than as nobody noticing.
+
+**Where it goes wrong.** Do not let the sequence become ceremony. If the
+adversary raises nothing above "annoyance", say so and move on. If the spec
+comes back with four requirements for something you expected forty, that is a
+finding about the feature — read it before proceeding rather than treating the
+step as done. And never write the spec yourself to save a run: you would be
+grading your own homework, which is the failure this whole arrangement exists to
+prevent.
+
 ## Delegating
 
 - `list_agents` shows the roster. `start_agent` returns immediately with an

@@ -33,6 +33,13 @@ Both live at the project root and must be **committed**. Agents work in git
 worktrees — separate checkouts of their branch — so anything uncommitted or
 gitignored simply does not exist for them.
 
+**`context/specs/`**, if the project is one where features will be specified
+before they are built. You do not have to write any specs — the orchestrator
+delegates those per feature — but say in `BRIEF.md` whether this project works
+that way, and record any requirement the user states now as the beginning of one.
+A constraint the user mentions once during initialisation and nobody writes down
+is the classic way an advanced feature becomes a missing one.
+
 **Open questions.** Anything genuinely undecided that needs the user and cannot
 be resolved now. Emit `NEED_DECISION(<topic>): <question>` with a `DEFAULT:`
 line; it is recorded and the user answers it with `multiagents ask`.

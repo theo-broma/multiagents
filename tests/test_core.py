@@ -2180,3 +2180,55 @@ def test_the_state_root_is_not_mistaken_for_a_project(tmp_path, monkeypatch):
 
     (work / ".multiagents").mkdir()
     assert paths_mod.find_project_root(work) == work
+
+
+# --------------------------------------------------------------------------
+# Spec-first delegation
+#
+# The failure being designed against: a broad task gets the median
+# implementation. These pin the structural properties that counter it, not the
+# prose — the prose is free to be rewritten, the structure is not.
+
+
+def test_the_spec_first_roster_ships_and_writes():
+    """specifier and adversary both produce committed artifacts, so `writes`
+    must be true or their branch is dropped as empty and the work vanishes."""
+    root = Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+    agents = _shipped_agents()
+
+    for name in ("specifier", "adversary"):
+        spec = agents[name]
+        assert spec["writes"] is True, f"{name} commits a file"
+        assert spec["can_spawn"] is False
+        assert not spec.get("launch")
+        assert (root / "agents" / spec["instructions"]).is_file()
+
+
+def test_the_adversary_is_not_the_specifier_s_model_family():
+    """An adversary sharing the author's blind spots agrees with it, which is
+    the one thing it must not do."""
+    agents = _shipped_agents()
+    assert agents["adversary"]["provider"] != agents["specifier"]["provider"]
+    assert agents["adversary"]["model"] != agents["specifier"]["model"]
+
+
+def test_the_briefs_agree_on_where_specs_live_and_how_ids_look():
+    """specifier, adversary, tester, implementer and the orchestrator all refer
+    to the same path and the same id convention; a drift between them silently
+    breaks the hand-off, since nothing in code enforces it."""
+    briefs = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "agents")
+    for name in ("specifier", "adversary", "tester", "implementer",
+                 "_orchestrator"):
+        text = (briefs / f"{name}.md").read_text()
+        assert "context/specs/" in text, name
+        assert "R7" in text or "R1" in text or "R<n>" in text, name
+
+
+def test_the_orchestrator_is_told_when_not_to_use_the_spec_path():
+    """A rule that applies to everything gets ignored. The threshold is the
+    part that makes it followable."""
+    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "_orchestrator.md").read_text())
+    assert "threshold" in text.lower()
+    assert "straight to `implementer`" in text

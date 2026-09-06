@@ -249,6 +249,46 @@ but never remove. To drop a shipped agent, give it `disabled: true`.
 `multiagents doctor` reports every one of these. Run it after editing the
 roster; it is faster than discovering the mistake through a confused agent.
 
+## Specifying before building
+
+A model given a broad task builds the median version of it. Not from
+incapacity — a broad task does not say what *better* means, and the median
+satisfies the words. "Build the checkout" gets a bakery till.
+
+The counter is not a better prompt. It is a written contract the work is held
+to, produced by agents that do not write the code:
+
+```
+specifier   →  context/specs/<feature>.md, numbered requirements R1…Rn,
+               each with a `Verified by:` line
+adversary   →  concrete failure scenarios A1…An appended to that file,
+               with no proposed fixes
+orchestrator→  closes every A: a new requirement, or "out of scope, because —"
+tester      →  failing tests named after the ids. Red is correct here.
+implementer →  given the ids, not a prose description. Makes them pass.
+```
+
+Three properties make this more than ceremony:
+
+- **The adversary runs on a different model family from the specifier.** One
+  that shares the author's blind spots agrees with it, which is the one thing it
+  must not do.
+- **The adversary proposes no fixes.** Naming the fix collapses the search —
+  the specifier writes down the suggestion instead of thinking about the
+  scenario.
+- **Requirements become failing tests before implementation.** This is the part
+  that does not rely on anyone's diligence: a missing advanced case shows up as
+  a red test rather than as nobody noticing.
+
+Nobody holds a veto. Advisors advise and the orchestrator decides — the gate is
+an *artifact*, not an authority: no implementation task until the spec exists
+and has been attacked. You can check that by reading a committed file.
+
+It costs roughly double the tokens for that feature, so the orchestrator's brief
+carries a threshold rather than applying it to everything: behaviour-shaped
+requests, work touching several files, or mistakes that would be expensive to
+unwind. A one-line fix goes straight to `implementer`.
+
 ## When multiagents is the thing that is broken
 
 An agent that writes bad code is ordinary. A `merge_agent` that reports success
@@ -755,7 +795,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-142 tests covering the parts live runs do not reliably exercise: doom-loop
+146 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

@@ -14,6 +14,26 @@ How to work:
   access where relevant. Skip the ones that only restate the type signature.
 - When a test fails, read the failure before changing anything. Fix the cause.
 
+## When your task names requirement ids
+
+You may be run BEFORE the implementation exists, to turn
+`context/specs/<feature>.md` into executable form. Then the job inverts: the
+tests must **fail**, and a run that ends red is a successful one.
+
+- One test per requirement where you can, named so the id is visible —
+  `test_r7_rejects_a_retry_inside_the_window`. The id is how anyone later
+  checks which requirements are actually covered.
+- Read the adversarial review at the bottom of the spec. Each scenario there is
+  a test worth writing, and they are the ones a plausible implementation fails.
+- Assert the requirement, not your guess at the implementation. A test that
+  pins an internal function name will be deleted by the first refactor and
+  proves nothing about `R7`.
+- If a requirement cannot be expressed as a test, say so and why. That is
+  information about the requirement — usually that it is not yet testable and
+  needs sharpening — not a failure on your part.
+- Report the final state plainly: which ids are covered, which are red (they all
+  should be), and which you could not express.
+
 If a test fails because the *code* is wrong rather than the test, stop. Do not
 weaken the test, add a skip, or adjust the assertion to match the broken output.
 Report the defect instead — that is a successful run, not a failed one.
