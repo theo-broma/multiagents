@@ -2371,16 +2371,17 @@ def test_a_checking_pair_never_collapses_onto_one_model():
             assert a != b, f"with {down} down, {left} and {right} both use {a}"
 
 
-def test_pause_keeps_the_later_reset_and_expires_itself(tmp_path):
-    """Two providers exhausted at different times: work can only resume when
-    the last one is back. And a pause nobody lifts is a stop."""
+def test_pause_keeps_the_earliest_reset_and_expires_itself(tmp_path):
+    """Wake at the FIRST reset, not the last. Waking early costs one wasted
+    check and an immediate re-pause; waking late blocks tasks whose provider
+    came back ten minutes ago, and nothing would notice."""
     import time as _t
     tree = _tree(tmp_path)
     assert tree.pause_state() == {}
 
-    tree.pause(_t.time() + 300, "opencode cooling down")
-    tree.pause(_t.time() + 60, "agy cooling down")     # earlier: must not win
-    assert tree.pause_state()["until"] > _t.time() + 200
+    tree.pause(_t.time() + 900, "opencode cooling down", ["opencode"])
+    tree.pause(_t.time() + 60, "agy cooling down", ["agy"])
+    assert tree.pause_state()["until"] < _t.time() + 200
 
     tree.resume("back")
     assert tree.pause_state() == {}
@@ -2389,19 +2390,40 @@ def test_pause_keeps_the_later_reset_and_expires_itself(tmp_path):
     assert tree.pause_state() == {}, "an elapsed pause clears itself on read"
 
 
-def test_spawning_is_refused_while_the_tree_is_paused(tmp_path):
-    """The point of pausing is that nothing else gets started — including by an
-    orchestrator that would rather route around it."""
+def test_a_pause_refuses_only_the_agents_it_actually_covers(tmp_path):
+    """Freezing an agent whose provider is healthy because a different one is
+    exhausted is over-applying the invariant — the protection against
+    unreviewed work is the merge rule, not stopping everything that can run."""
     import asyncio, time as _t
-    spec = AgentSpec("worker", "p", "m")
-    r = _runner(tmp_path, {"worker": spec},
-                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
-    r.tree.pause(_t.time() + 300, "no provider has headroom")
+    providers = {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}},
+                 "q": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}}
+    r = _runner(tmp_path, {
+        "stuck-agent": AgentSpec("stuck-agent", "p", "m"),
+        "free-agent": AgentSpec("free-agent", "q", "m"),
+    }, providers)
+    r.tree.pause(_t.time() + 300, "no headroom on p", ["p"])
 
     with pytest.raises(RuntimeError) as excinfo:
-        asyncio.run(r.start("worker", "go"))
-    assert "paused" in str(excinfo.value)
+        asyncio.run(r.start("stuck-agent", "go"))
+    assert "Paused" in str(excinfo.value)
     assert "restart by themselves" in str(excinfo.value)
+
+    # The other agent's provider is untouched, so it must not be blocked.
+    result = asyncio.run(r.start("free-agent", "go"))
+    assert result.get("agent_id"), result
+    assert not result.get("deferred")
+
+
+def test_an_agent_with_a_fallback_outside_the_pause_still_runs(tmp_path):
+    import asyncio, time as _t
+    providers = {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}},
+                 "q": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}}
+    spec = AgentSpec("worker", "p", "m", models={"q": "m2"})
+    r = _runner(tmp_path, {"worker": spec}, providers)
+    r.tree.pause(_t.time() + 300, "no headroom on p", ["p"])
+
+    result = asyncio.run(r.start("worker", "go"))
+    assert result.get("agent_id"), "q is still available to it"
 
 
 def test_resume_deferred_reports_tasks_whose_agent_is_gone(tmp_path):
@@ -2414,3 +2436,59 @@ def test_resume_deferred_reports_tasks_whose_agent_is_gone(tmp_path):
     result = asyncio.run(r.resume_deferred())
     assert result["restarted"] == []
     assert result["dropped"][0]["agent"] == "deleted-agent"
+
+
+def test_a_failed_restart_leaves_the_rest_of_the_queue_intact(tmp_path):
+    """due_deferred used to POP. Any exception between the pop and the restart
+    then deleted the whole remaining batch permanently — the worst class of bug
+    in a component whose entire job is not losing work."""
+    import asyncio, time as _t
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    for n in range(3):
+        r.tree.defer({"agent": "worker", "task": f"task {n}"}, _t.time() - 1, "quota")
+
+    async def boom(*a, **k):
+        raise RuntimeError("the window closed again")
+
+    r.start = boom
+    result = asyncio.run(r.resume_deferred())
+
+    assert "stopped_on" in result
+    assert len(r.tree.read()["deferred"]) == 3, "nothing may be lost"
+
+
+def test_a_restarted_task_is_dropped_from_the_queue(tmp_path):
+    """The other half: an entry that WAS dealt with must go, or the queue grows
+    every time it is drained."""
+    import asyncio, time as _t
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    r.tree.defer({"agent": "worker", "task": "one"}, _t.time() - 1, "quota")
+
+    result = asyncio.run(r.resume_deferred())
+    assert len(result["restarted"]) == 1
+    assert r.tree.read()["deferred"] == []
+
+
+def test_draining_stops_when_the_window_closes_mid_batch(tmp_path):
+    """start() re-defers and re-pauses; carrying on would hit the pause guard
+    and raise, turning one closed window into a crashed drain."""
+    import asyncio, time as _t
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    for n in range(3):
+        r.tree.defer({"agent": "worker", "task": f"task {n}"}, _t.time() - 1, "quota")
+
+    async def redefer(agent, task, **k):
+        r.tree.defer({"agent": agent, "task": task}, _t.time() + 600, "still out")
+        r.tree.pause(_t.time() + 600, "still out", ["p"])
+        return {"deferred": True, "reason": "still out"}
+
+    r.start = redefer
+    result = asyncio.run(r.resume_deferred())
+
+    assert result["restarted"] == []
+    assert result["still_deferred"] == 1, "it stopped after the first"
+    # Two untouched originals plus the one start() re-queued.
+    assert len(r.tree.read()["deferred"]) == 3

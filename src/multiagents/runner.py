@@ -211,14 +211,21 @@ class Runner:
         # they meant it.
         paused = self.tree.pause_state()
         if paused:
-            waiting = max(0, int(paused.get("until", 0) - now()))
-            raise RuntimeError(
-                f"The tree is paused: {paused.get('reason', 'no provider available')}. "
-                f"It clears in about {waiting // 60}m{waiting % 60:02d}s, and the "
-                f"tasks deferred behind it restart by themselves. Do not work "
-                f"around this by spawning something else — there is nothing left "
-                f"to run it on."
-            )
+            # A pause names the providers that were exhausted. Refusing an agent
+            # that still has a usable provider would be over-applying it: the
+            # protection against unreviewed work is the orchestrator's own rule
+            # about merging, not freezing agents that can still run.
+            out = set(paused.get("providers") or [])
+            options = {spec.provider, *(spec.models or {})}
+            if out and not options - out:
+                waiting = max(0, int(paused.get("until", 0) - now()))
+                raise RuntimeError(
+                    f"Paused: {paused.get('reason', 'no provider available')}. "
+                    f"Every provider {spec.name!r} can use ({', '.join(sorted(options))}) "
+                    f"is exhausted. It clears in about {waiting // 60}m{waiting % 60:02d}s "
+                    f"and the tasks deferred behind it restart by themselves. Do not "
+                    f"work around this — there is nothing left to run it on."
+                )
         if workdir and not limits.get("allow_workdir_override", False):
             raise PermissionError(
                 "workdir= is not permitted in this project. It would run the "
@@ -516,7 +523,8 @@ class Runner:
             # Nothing can run, so nothing should keep being started. Pausing is
             # the difference between a system that stops and one that carries on
             # writing code while the agents that check it are unreachable.
-            self.tree.pause(retry_at, why)
+            self.tree.pause(retry_at, why,
+                            providers=sorted({spec.provider, *(spec.models or {})}))
             return {"deferred": True, "reason": why, "retry_after": retry_at,
                     "paused": True,
                     "note": "the tree is paused until this clears; deferred tasks "
@@ -1246,20 +1254,33 @@ class Runner:
             task_spec = entry.get("spec") or {}
             agent = task_spec.get("agent")
             if not agent or agent not in self.config.agents:
-                # The roster changed while this waited. Reporting it matters:
-                # dropping it silently loses a task the orchestrator believes
-                # is still queued.
+                # The roster changed while this waited. Reported rather than
+                # dropped silently: the orchestrator believes it is still queued.
                 orphaned.append({"agent": agent, "task": task_spec.get("task", "")[:120]})
+                self.tree.drop_deferred(entry["id"])
                 continue
-            result = await self.start(
-                agent, task_spec.get("task", ""),
-                workdir=task_spec.get("workdir"), timeout=task_spec.get("timeout"),
-                model=task_spec.get("model"),
-            )
+            try:
+                result = await self.start(
+                    agent, task_spec.get("task", ""),
+                    workdir=task_spec.get("workdir"), timeout=task_spec.get("timeout"),
+                    model=task_spec.get("model"),
+                )
+            except Exception as exc:
+                # Leave this entry queued — it has not been dealt with — and
+                # stop. One failure here is almost always systemic (the window
+                # closed again mid-drain), and grinding through the rest turns
+                # one problem into a batch of them.
+                still_waiting = len(due) - len(restarted) - len(orphaned)
+                return {"paused": False, "restarted": restarted,
+                        "still_deferred": still_waiting,
+                        "stopped_on": f"{type(exc).__name__}: {exc}"[:300]}
+            # Dealt with either way: a re-deferral from start() is a NEW entry,
+            # so dropping the old one here is what stops the queue growing.
+            self.tree.drop_deferred(entry["id"])
             if result.get("deferred"):
-                still_waiting += 1                # start() re-queued it
-            else:
-                restarted.append({"agent": agent, "agent_id": result.get("agent_id")})
+                still_waiting += 1
+                break                             # the window closed again
+            restarted.append({"agent": agent, "agent_id": result.get("agent_id")})
         result = {"paused": False, "restarted": restarted,
                   "still_deferred": still_waiting}
         if orphaned:
