@@ -613,7 +613,7 @@ def _report_agents(config, providers) -> int:
         else:
             where = spec.executor or config.executor
             tag = f"[{where}]" + ("*" if spec.executor else "")
-        print(f"  {mark} {name:12} {spec.provider}/{spec.model:34} {tag}")
+        print(f"  {mark} {name:18} {spec.provider}/{spec.model:30} {tag}")
         instructions = config.instructions_for(spec)
         if spec.instructions and not instructions.strip():
             print(f"    missing instructions file: {spec.instructions}")

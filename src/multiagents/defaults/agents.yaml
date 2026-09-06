@@ -90,17 +90,64 @@ agents:
     timeout: 1200
     silence_timeout: 240
 
+  # Three coder tiers sharing one brief. They differ in what they cost and how
+  # much judgement the task needs — NOT in how important the feature is, which
+  # is the tempting and wrong way to route (it sends everything to the top
+  # tier). The routing rule and the escalation path live in the orchestrator's
+  # brief; without them a tiered roster just becomes an expensive one.
+  #
+  # The model pins are a starting point, not a ranking anyone has measured
+  # here. Retune them for your own work: what the tiers give you is the
+  # routing and the escalation, and those survive any repin.
+
+  # Mechanical work that is already decided: a named change, an existing
+  # pattern to follow, or a failing test that defines done. Short leash — a
+  # low max_steps so a task that turns out to need thinking stops cheaply
+  # instead of flailing at 120 steps.
+  implementer-quick:
+    provider: opencode
+    model: opencode-go/glm-5.3-flash
+    instructions: implementer.md
+    description: >-
+      Cheap coder for well-specified mechanical changes. Escalates rather than
+      guessing when a task needs a design decision.
+    writes: true
+    permission: full
+    can_spawn: false
+    timeout: 900
+    silence_timeout: 180
+    max_steps: 40
+
   implementer:
     provider: opencode
     model: opencode-go/kimi-k2.7-code
     instructions: implementer.md
-    description: Writes code on its own branch. The workhorse.
+    description: Writes code on its own branch. The workhorse, and the default.
     writes: true
     permission: full
     can_spawn: true
     max_children: 2
     timeout: 1800
     silence_timeout: 240
+
+  # Work where the difficulty is in deciding, not typing: an invariant, a
+  # cross-cutting change, concurrency, a data migration, or a task a lower tier
+  # handed back. Expensive per run, so the orchestrator is told to spend it on
+  # judgement rather than on importance.
+  implementer-deep:
+    provider: opencode
+    model: opencode-go/kimi-k3
+    instructions: implementer.md
+    description: >-
+      Strong coder for work that needs design judgement, or that a lower tier
+      escalated. Expensive; used deliberately.
+    writes: true
+    permission: full
+    effort: high
+    can_spawn: true
+    max_children: 2
+    timeout: 2700
+    silence_timeout: 300
 
   reviewer:
     provider: agy

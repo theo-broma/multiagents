@@ -2282,3 +2282,52 @@ def test_the_orchestrator_is_told_when_security_agents_are_not_needed():
     assert "When not to." in text
     assert "neither of these" in " ".join(text.split())
     assert "holds a veto" in text
+
+
+# --------------------------------------------------------------------------
+# Coder tiers
+
+
+def test_the_coder_tiers_share_one_brief_on_different_models():
+    """The craft is identical; only cost and the escalation behaviour differ.
+    Three copies of the brief would drift, and the drift would be invisible."""
+    agents = _shipped_agents()
+    tiers = ["implementer-quick", "implementer", "implementer-deep"]
+
+    briefs = {agents[t]["instructions"] for t in tiers}
+    assert briefs == {"implementer.md"}, briefs
+    models = [agents[t]["model"] for t in tiers]
+    assert len(set(models)) == 3, models
+    for t in tiers:
+        assert agents[t]["writes"] is True
+
+
+def test_the_cheap_tier_is_on_a_short_leash():
+    """Running out of steps on a misrouted task is the cheap failure this
+    tiering wants; 120 steps of flailing is the expensive one."""
+    agents = _shipped_agents()
+    quick, deep = agents["implementer-quick"], agents["implementer-deep"]
+
+    assert quick["max_steps"] < 120, "the default budget defeats the point"
+    assert quick["timeout"] < agents["implementer"]["timeout"] < deep["timeout"]
+    assert quick["can_spawn"] is False, "a cheap tier must not fan out"
+
+
+def test_the_brief_tells_the_cheap_tier_to_hand_work_back():
+    """Escalation is what makes routing low safe; without it, routing low just
+    produces plausible wrong implementations."""
+    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "implementer.md").read_text())
+    flat = " ".join(text.split())
+    assert "stop and hand it back" in flat
+    assert "Handing back is not failure" in flat
+
+
+def test_the_orchestrator_routes_by_judgement_not_importance():
+    """The tempting criterion sends everything that matters to the top tier,
+    which buys a tiered roster and none of its benefit."""
+    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "_orchestrator.md").read_text())
+    flat = " ".join(text.split())
+    assert "never by how important" in flat
+    assert "implementer-deep" in flat and "implementer-quick" in flat
