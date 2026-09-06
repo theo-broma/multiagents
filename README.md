@@ -50,6 +50,11 @@ to `.gitignore` before the commit is made. With no terminal — `make init`, or 
 script — every prompt declines itself and prints the command instead, so an
 unattended run never creates or commits anything.
 
+Spawning without a repository is refused rather than degraded: an agent with no
+branch of its own would run in the project directory alongside every other one.
+An explicit `workdir` on `start_agent` is still honoured — that is the caller
+saying they meant it.
+
 `build` prepares everything agents need: the container images and container if
 you are on the docker executor, then **authentication for every enabled
 provider** — checking each and offering to log in what is broken. Auth comes

@@ -6,6 +6,7 @@ it only proves itself on the day something secret reaches a log.
 """
 
 import json
+import os
 import sys, time
 
 import pytest
@@ -1046,13 +1047,25 @@ def test_read_all_hands_the_provider_name_to_executor_for(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _runner(tmp_path, agents=None, providers_yaml=None):
-    """A Runner over a throwaway project, with config injected directly."""
+def _runner(tmp_path, agents=None, providers_yaml=None, git=True):
+    """A Runner over a throwaway project, with config injected directly.
+
+    The project is a real repository by default, because that is what every
+    agent needs: `_preflight` refuses to spawn where there is no branch to be
+    had. Pass `git=False` to test that refusal itself.
+    """
     from multiagents.config import Config
     from multiagents.paths import ProjectPaths
     from multiagents.runner import Runner
     paths = ProjectPaths(tmp_path)
     paths.ensure()
+    if git:
+        import subprocess
+        env = {**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+               "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@e.invalid"}
+        for args in (["init"], ["commit", "--allow-empty", "-m", "init"]):
+            subprocess.run(["git", "-C", str(tmp_path), *args],
+                           capture_output=True, env=env)
     config = Config(
         project={}, providers=providers_yaml or {},
         agents=agents or {}, models={}, instruction_dirs=[],
@@ -1721,3 +1734,30 @@ def test_uncommitted_entries_collapses_directories(tmp_path, quiet_git):
     deep.mkdir(parents=True)
     (deep / "c.js").write_text("//\n")
     assert gitops.uncommitted_entries(tmp_path) == ["node_modules/"]
+
+
+def test_spawning_without_a_repository_is_refused_not_silently_unisolated(tmp_path):
+    """The fallback this replaced ran every agent in the project directory
+    itself: one shared working tree, no branch to merge, nothing to discard."""
+    import asyncio
+    spec = AgentSpec("worker", "p", "m", conversational=True)
+    # A provider that resolves, so the repository is the only thing wrong.
+    r = _runner(tmp_path, {"worker": spec},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}}, git=False)
+
+    for coro in (r.start("worker", "go"), r.consult("worker", "hi")):
+        with pytest.raises(RuntimeError) as excinfo:
+            asyncio.run(coro)
+        assert "not a git repository" in str(excinfo.value)
+
+
+def test_an_explicit_workdir_still_overrides_the_repository_requirement(tmp_path):
+    """`workdir` is the caller stating they meant it, so it is not blocked —
+    it must fail later, on the provider, rather than on the repository."""
+    import asyncio
+    spec = AgentSpec("worker", "nosuch", "m")
+    r = _runner(tmp_path, {"worker": spec}, git=False)
+
+    with pytest.raises((RuntimeError, KeyError, FileNotFoundError)) as excinfo:
+        asyncio.run(r.start("worker", "go", workdir=str(tmp_path)))
+    assert "not a git repository" not in str(excinfo.value)
