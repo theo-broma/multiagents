@@ -244,6 +244,10 @@ None of that recognises a client's name or a private repository, which is why
 the last step is a human reading it. `tickets show <id>` prints the rendered
 issue, and `tickets submit <id>` asks before sending.
 
+Submitting needs the `gh` CLI installed and logged in (`gh auth login`). Without
+it tickets are still written and queued — `multiagents tickets` says which piece
+is missing.
+
 ## When an agent needs *you*
 
 Agents are structurally non-blocking: they run with no stdin, explicit
