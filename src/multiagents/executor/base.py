@@ -32,10 +32,32 @@ class Handle:
     _stderr: list[str] = field(default_factory=list)
 
     async def lines(self) -> AsyncIterator[str]:
-        """Yield stdout lines as they arrive."""
+        """Yield stdout lines as they arrive.
+
+        A line longer than the reader's limit raises rather than truncating,
+        and an unhandled raise here ends the run. The limit is generous (see
+        STREAM_LIMIT) but it is still a limit, so the over-long line is
+        salvaged instead: read what is buffered, hand it on marked as
+        truncated, and carry on. Losing the tail of one event is a far smaller
+        loss than losing the agent.
+        """
         assert self._proc.stdout is not None
+        stdout = self._proc.stdout
         while True:
-            raw = await self._proc.stdout.readline()
+            try:
+                raw = await stdout.readline()
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                # ValueError is what StreamReader.readline raises when the
+                # separator is past the limit; the partial data stays in its
+                # buffer, so drain it rather than leaving it to desynchronise
+                # every line that follows.
+                salvaged = bytes(stdout._buffer)          # noqa: SLF001
+                stdout._buffer.clear()                    # noqa: SLF001
+                self._stderr.append(f"[stream] over-long line dropped: {exc}")
+                del self._stderr[:-200]
+                if salvaged:
+                    yield salvaged.decode("utf-8", errors="replace").rstrip("\n")
+                continue
             if not raw:
                 break
             yield raw.decode("utf-8", errors="replace").rstrip("\n")

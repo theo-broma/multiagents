@@ -156,7 +156,13 @@ limits:
   max_concurrent: 4         # running agents across the whole tree
   default_timeout: 900      # wall-clock seconds per run
   silence_timeout: 180      # seconds with no stream event before "stuck"
-  max_steps: 120            # steps before a run is considered runaway
+  # Steps before a run is called runaway. An agent may override it; 120 was
+  # calibrated on short test runs and fired 27 times in one real session, on
+  # work that was finishing correctly. Measured there: specifier and adversary
+  # peak under 30, tester at 86, reviewer and critic under 80, a conversational
+  # advisor at 101 — while coders reached 768. So the ceiling belongs above the
+  # reviewers and the coders carry their own.
+  max_steps: 250
   doom_loop_repeats: 3      # identical tool+args calls before "stuck"
   budget_tokens: 0          # 0 = unlimited; otherwise tree-wide ceiling
 

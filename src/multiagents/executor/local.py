@@ -18,6 +18,14 @@ from pathlib import Path
 from .base import Executor, Handle
 
 
+# One stdout line can carry a whole file: a CLI reports a tool result as a single
+# JSON object, and reading a 60 KB source file makes a 60 KB line. asyncio's
+# default StreamReader limit is 64 KiB, and exceeding it raises ValueError from
+# readline() and kills the run — which is what stopped the bug-reporter every
+# time, its brief being to read this project's own source.
+STREAM_LIMIT = 16 * 1024 * 1024
+
+
 class LocalExecutor(Executor):
     kind = "local"
 
@@ -25,6 +33,7 @@ class LocalExecutor(Executor):
         cwd.mkdir(parents=True, exist_ok=True)
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            limit=STREAM_LIMIT,
             cwd=str(cwd),
             env=env,
             stdout=asyncio.subprocess.PIPE,

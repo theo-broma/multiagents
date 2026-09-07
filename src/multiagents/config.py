@@ -171,7 +171,7 @@ class AgentSpec:
     max_children: int = 2
     timeout: int = 900                # wall-clock seconds
     silence_timeout: int = 180        # seconds with no stream event
-    max_steps: int = 120
+    max_steps: int = 0                # 0 = use limits.max_steps
     writes: bool = True               # False -> branch dropped if it stays empty
     conversational: bool = False      # talked to via consult(), keeps context
     executor: str = ""                # "" = project default; else local | docker

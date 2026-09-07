@@ -802,6 +802,47 @@ anything mounted so a CLI can authenticate can be read by a model with a shell.
 Egress filtering is what makes that survivable — a credential an agent can read
 is one it cannot post anywhere.
 
+## Watchdogs, and why they need ground truth
+
+Four trips mark a run `stuck`: silence, wall clock, runaway steps, and the doom
+loop. A trip never kills the process — the orchestrator decides whether to
+steer, extend or stop.
+
+The doom loop asks two questions, and it needs both:
+
+```
+identical tool signatures   AND   the working tree stood still
+```
+
+The signature alone is not enough, and a real session showed why. A CLI reports
+a write as `write_to_file:{"TargetFile": "…/test_x.py"}` with **no content**, so
+three different edits to one file hash identically — and `edit → test → edit →
+test` is an A,B,A,B alternation, which is the correct behaviour of a test agent
+rather than a loop. Judged on signatures alone, 23 trips fired in one session on
+work that went on to merge.
+
+The second question is ground truth: every agent works in a worktree we created,
+so `git status --porcelain` says whether anything actually happened, whatever
+the CLI reported and whatever the agent narrated. A reader re-opening one file
+changes nothing and trips correctly; a coder editing and re-testing moves the
+tree every pass and is left alone. No `writes: false` special case is needed —
+the check measures the environment's reaction, not the agent's intent.
+
+Sampling is debounced and runs in a thread. A blocking `git` call inside the
+loop that consumes the process's stdout would stop draining the pipe, which is a
+deadlock rather than a slowdown.
+
+Replaying that session's 59 recorded streams: **125 trips under the old rule, 20
+under this one**, with the remainder concentrated in agents that genuinely
+repeat reads.
+
+`max_steps` came from the same session. 120 was calibrated on short test runs
+and fired 27 times on work that was finishing; measured there, reviewers peak
+under 100 while coders reach 768. The default is now 250, `implementer` and
+`implementer-deep` carry 1000, and `implementer-quick` keeps its deliberate 40.
+`limits.max_steps` in `project.yaml` is now actually read — it was documented
+and ignored, with only the built-in default applying.
+
 ## Running out, and coming back
 
 Three layers, because the providers fail differently.
@@ -961,7 +1002,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-163 tests covering the parts live runs do not reliably exercise: doom-loop
+176 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
