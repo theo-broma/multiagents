@@ -90,6 +90,23 @@ def docker_available() -> str | None:
     return shutil.which("docker")
 
 
+def docker_state() -> tuple[str, str]:
+    """`(state, detail)` where state is ok | no-binary | no-daemon.
+
+    The binary being on PATH is not the same as being able to use it — a
+    stopped daemon and a user outside the `docker` group both look like a
+    working install until the first command fails.
+    """
+    if not shutil.which("docker"):
+        return "no-binary", "docker is not installed"
+    probe = _run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=15)
+    if probe.returncode == 0:
+        return "ok", (probe.stdout.strip() or "running")
+    detail = (probe.stderr or probe.stdout).strip().splitlines()
+    reason = detail[-1][:160] if detail else "daemon unreachable"
+    return "no-daemon", reason
+
+
 # One stdout line can carry a whole file: a CLI reports a tool result as a single
 # JSON object, and reading a 60 KB source file makes a 60 KB line. asyncio's
 # default StreamReader limit is 64 KiB, and exceeding it raises ValueError from
