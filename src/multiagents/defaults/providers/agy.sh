@@ -101,7 +101,11 @@ launch)
         exec "$BIN" "$@" -p "${MULTIAGENTS_NUDGE:-continue}"
     fi
     if [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
-        exec "$BIN" --model "${MULTIAGENTS_MODEL:-}" --continue
+        set -- --model "${MULTIAGENTS_MODEL:-}" --continue
+        # agy seeds an interactive session through --prompt-interactive.
+        [ -n "${MULTIAGENTS_RESUME_PROMPT:-}" ] && \
+            set -- "$@" --prompt-interactive "$MULTIAGENTS_RESUME_PROMPT"
+        exec "$BIN" "$@"
     fi
     prompt=""
     [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && [ -f "$MULTIAGENTS_PROMPT_FILE" ] \

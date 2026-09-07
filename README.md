@@ -996,17 +996,34 @@ learn that a pid went away, and `/exit` and a dropped connection look identical.
 | `SIGHUP` / 129 | **the terminal was lost** — a closed window, a dropped connection |
 | anything else | **it crashed** |
 
-The first three end quietly. **Only a lost terminal hands over** to the
-unattended loop, which waits out a quota reset, retries with backoff and stops
-when two turns change nothing. Headless deliberately: if the terminal is gone,
-an interactive relaunch has nowhere to run. `--no-supervise` restores the old
-exec behaviour.
+The first three end quietly. For the last two, `run` waits and **starts the
+orchestrator again, interactively**, with an opening message asking it to take
+stock:
 
-**A crash is a hard stop.** A non-zero exit means an unhandled error and
-therefore unknown state, and carrying on unattended — with agents that hold
-bypass permissions — turns one controlled failure into an unsupervised sequence
-of them. A lost terminal is different in kind: the process was healthy and its
-window went away.
+> Your previous session ended unexpectedly. Take stock before doing anything:
+> check the tree for agents that were interrupted, read any open questions and
+> tickets, and look for branches holding work committed as WIP by the recovery —
+> that work may be mid-edit and is not a finished result.
+
+Interactive is the point. `claude [options] [prompt]` opens a session *with* a
+first user turn rather than waiting for one to be typed, so the restart starts
+working — but on a terminal you can see, and stop. That is what makes retrying
+an unknown state reasonable: a crashed orchestrator resumed where nobody is
+watching is the case the advisor rightly called an automated rampage; the same
+resume in front of you is a session you can Ctrl-C.
+
+Five attempts a minute apart by default (`limits.restart_attempts`,
+`limits.restart_delay_seconds`), waiting out a quota reset if one is in the way,
+and stopping the moment an attempt ends deliberately.
+
+**With no terminal left**, retrying interactively has nowhere to run, and it
+falls through to the headless loop — subject to the check that somebody had
+actually given the session work to do. A crash with no terminal is a hard stop.
+
+For the parent to be there to decide any of this it has to outlive the terminal,
+so it takes a do-nothing handler for **SIGHUP** as well. The child still gets
+the default disposition, because a handler is reset on exec while `SIG_IGN`
+would be inherited.
 
 Before any session starts, `run` reconciles what a previous one left. Agents are
 spawned in their own session so that stopping one also stops the shells and test
@@ -1414,7 +1431,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-229 tests covering the parts live runs do not reliably exercise: doom-loop
+232 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
