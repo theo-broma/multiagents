@@ -333,6 +333,31 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
         print(f"\n{len(waiting)} question(s) still open; answer with `multiagents ask`")
     print()
     _report_catalog(config)
+
+    # The same two checks `run` makes, for the same reason. The initializer is
+    # told to consult the critic and the advisor, and a consult spawns an agent
+    # — so on a docker project with no images it fails partway through a
+    # conversation with the user, which is a confusing place to learn that
+    # `build` has not been run.
+    problems = _executor_problems(paths, config)
+    for problem in problems:
+        print(f"\nexecutor     {problem}")
+    if problems:
+        print("\nnot ready: the initializer consults other agents, and they run "
+              "in a container\n           this project cannot build yet. Run "
+              "`multiagents build` first.")
+        return 4
+
+    held = _orchestrator_hold(paths, config)
+    if held is not None:
+        detail, resets_at = held
+        print(f"\n{detail}")
+        if not getattr(args, "wait", False):
+            print("             `multiagents init-agent --wait` blocks until it resets")
+            return 3
+        if not _wait_for_reset(paths, config, resets_at):
+            return 3
+
     print()
     return _launch_agent(paths, config, "initializer", resume=args.resume)
 
@@ -1939,6 +1964,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="shape the project with the initializer (resumable)")
     p.add_argument("--fresh", dest="resume", action="store_false", default=True,
                    help="start a new session instead of continuing the last one")
+    p.add_argument("--wait", action="store_true",
+                   help="if the provider is exhausted, block until its quota resets")
     p.set_defaults(func=cmd_init_agent)
 
     p = sub.add_parser("build", help="build and start the container environment")

@@ -3321,3 +3321,18 @@ def test_the_check_never_blocks_a_launch_on_itself(tmp_path, monkeypatch):
                     agents={}, models={}, instruction_dirs=[])
     problems = cli._executor_problems(None, docker)
     assert len(problems) == 1 and "could not check" in problems[0]
+
+
+def test_init_agent_makes_the_same_checks_as_run(tmp_path, quiet_git, monkeypatch):
+    """The initializer is told to consult the critic and the advisor, and a
+    consult spawns an agent — so it needs the container just as much as the
+    orchestrator does, and finding that out mid-conversation is worse."""
+    import argparse
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    monkeypatch.setattr(cli, "_executor_problems", lambda *a: ["image not built"])
+
+    args = argparse.Namespace(path=str(tmp_path), resume=True, wait=False)
+    assert cli.cmd_init_agent(args) == 4
