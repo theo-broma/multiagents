@@ -2844,3 +2844,79 @@ def test_the_orchestrator_brief_says_when_parallel_is_safe_and_when_not():
     assert "budget to spend, not a ceiling" in flat
     assert "Different files, different specs" in flat
     assert "Two agents on the same files" in flat, "the limits matter as much"
+
+
+# --------------------------------------------------------------------------
+# opencode quota, and per-model accounting
+
+
+def test_usage_by_model_joins_spend_to_the_agents_that_spent_it(tmp_path):
+    """No provider reports this: opencode serves three whole-account windows
+    and agy nothing at all. We parse every stream, so it is ours to compute."""
+    from multiagents.tree import Node
+    tree = _tree(tmp_path)
+    for i, (agent, provider, model, tokens, cost) in enumerate([
+        ("implementer", "opencode", "kimi-k3", 1000, 2.5),
+        ("tester", "agy", "gemini", 400, 0.0),
+        ("reviewer", "agy", "gemini", 600, 0.0),
+    ]):
+        tree.add(Node(id=f"ag-{i}", agent=agent, provider=provider, model=model,
+                      parent=None, depth=1, status="done",
+                      usage={"total": tokens, "cost_usd": cost}))
+
+    rows = tree.usage_by_model()
+    assert [r["model"] for r in rows] == ["kimi-k3", "gemini"], "costliest first"
+    gemini = rows[1]
+    assert gemini["runs"] == 2 and gemini["tokens"] == 1000
+    assert gemini["agents"] == ["reviewer", "tester"]
+
+
+def test_the_opencode_budget_script_reports_the_worst_window(tmp_path,
+                                                             monkeypatch):
+    """headroom must come from the fullest bucket: the one closest to full is
+    what actually stops a run, and reporting the roomiest routes work at a
+    wall."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "opencode.sh")
+
+    home = tmp_path / "home"
+    auth = home / ".local/share/opencode"
+    auth.mkdir(parents=True)
+    (auth / "auth.json").write_text(json.dumps(
+        {"opencode-go": {"type": "api", "key": "x" * 40}}))
+
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        '#!/bin/sh\ncat >/dev/null\n'                    # swallow --config stdin
+        'echo \'{"usage":{"rolling":{"percent":91,"resetsAt":"SOON"},'
+        '"weekly":{"percent":10,"resetsAt":"LATER"}}}\'\n')
+    (fake / "curl").chmod(0o755)
+
+    out = subprocess.run(
+        ["sh", str(script), "budget"], capture_output=True, text=True,
+        env={"PATH": f"{fake}:/usr/bin:/bin", "HOME": str(home)},
+    )
+    data = json.loads(out.stdout)
+    assert data["known"] is True
+    assert data["headroom"] == 0.09, "1 - 91%, the worst window"
+    assert data["resets_at"] == "SOON", "and its reset, not the roomy one's"
+    assert "rolling" in data["note"]
+    assert set(data["windows"]) == {"rolling", "weekly"}
+
+
+def test_the_opencode_budget_script_is_quiet_without_a_key(tmp_path):
+    """The free tier has no quota surface; that is not an error."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "opencode.sh")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    out = subprocess.run(["sh", str(script), "budget"], capture_output=True,
+                         text=True, env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
+    assert out.returncode == 0
+    assert json.loads(out.stdout)["known"] is False

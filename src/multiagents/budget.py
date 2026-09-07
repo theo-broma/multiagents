@@ -49,6 +49,12 @@ class Budget:
     spent: dict[str, int] = field(default_factory=dict)
     cooldown_until: float | None = None
     note: str = ""
+    # Per-window detail where a provider reports more than one bucket — opencode
+    # serves rolling/weekly/monthly. headroom is the worst of them, because the
+    # fullest bucket is the one that will actually stop a run, but which bucket
+    # it is changes what to do about it: a rolling window clears in hours, a
+    # monthly one does not.
+    windows: dict[str, Any] = field(default_factory=dict)
 
     @property
     def usable(self) -> bool:
@@ -69,6 +75,8 @@ class Budget:
         if self.headroom is not None:
             data["headroom"] = round(self.headroom, 3)
             data["used_percent"] = round((1 - self.headroom) * 100, 1)
+        if self.windows:
+            data["windows"] = self.windows
         if self.resets_at:
             data["resets_at"] = self.resets_at
         if self.stale_seconds is not None:
@@ -298,8 +306,9 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
         headroom=data.get("headroom"),
         severity=str(data.get("severity") or ("normal" if data.get("known") else "unknown")),
         resets_at=data.get("resets_at"),
-        source="script",
+        source=str(data.get("source") or "script"),
         note=str(data.get("note") or ""),
+        windows=data.get("windows") if isinstance(data.get("windows"), dict) else {},
     )
 
 
