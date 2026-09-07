@@ -111,8 +111,24 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
     }
 
 
-def _launch_agent(paths, config, role: str, resume: bool) -> int:
-    """Launch a roster entry as an interactive MCP client. Does not return."""
+NUDGE = (
+    "Continue where you left off. Before anything else: read list_tickets and "
+    "list_questions, answer what is within your remit, and check whether any "
+    "agent finished while you were away. Keep the tree busy — start every piece "
+    "of independent work you can before you wait. If the brief is genuinely "
+    "complete and nothing is left to start, say so plainly and stop."
+)
+
+
+def _launch_agent(paths, config, role: str, resume: bool,
+                  unattended: int = 0) -> int:
+    """Launch a roster entry as an interactive MCP client.
+
+    Normally execs, so the CLI owns the terminal and this process is gone.
+    Under `unattended` it spawns instead and supervises: a turn that ends —
+    crash, quota, or the model simply stopping — is followed by another, which
+    is the whole point of leaving it running overnight.
+    """
     spec = _launched_spec(config, role)
     if spec is None:
         print(f"No agent in agents.yaml is marked `launch: true, role: {role}`.",
@@ -154,10 +170,104 @@ def _launch_agent(paths, config, role: str, resume: bool) -> int:
         return 2
     argv, env = built
     print(f"{role:12} {spec.provider}/{spec.model}"
-          f"{'' if context['MULTIAGENTS_RESUME'] == '0' else ' (resuming)'}\n")
+          f"{'' if context['MULTIAGENTS_RESUME'] == '0' else ' (resuming)'}"
+          f"{f' · unattended, up to {unattended} turns' if unattended else ''}\n")
     sys.stdout.flush()
+    if unattended:
+        return _supervise(paths, config, role, spec, provider, executor,
+                          context, unattended)
     os.execvpe(argv[0], argv, env)
     return 0
+
+
+def _supervise(paths, config, role, spec, provider, executor,
+               context: dict, max_turns: int) -> int:
+    """Run the orchestrator turn after turn until there is nothing left to do.
+
+    Each turn is a headless invocation of the same session: the provider's
+    launch script adds its own non-interactive flag and the nudge below. This
+    is deliberately NOT `exec` in a shell `until` loop — that construction stops
+    when the command *succeeds*, so a turn that worked would end the run, and a
+    turn that crashed would be retried forever.
+    """
+    tree = Tree(paths.tree_file, paths.events_file)
+    idle_turns = 0
+    failures = 0
+
+    for turn in range(1, max_turns + 1):
+        held = _orchestrator_hold(paths, config)
+        if held is not None:
+            detail, resets_at = held
+            print(f"\n{detail}")
+            if not _wait_for_reset(paths, config, resets_at):
+                return 3
+
+        before = _activity_fingerprint(tree)
+        turn_env = {**context, "MULTIAGENTS_UNATTENDED": "1",
+                    "MULTIAGENTS_NUDGE": NUDGE,
+                    # After the first turn there is certainly a session to
+                    # resume, whatever the launch marker said going in.
+                    "MULTIAGENTS_RESUME": "1" if turn > 1 else context["MULTIAGENTS_RESUME"]}
+        built = scripts.exec_action(spec.provider, provider, executor, "launch",
+                                    global_config_dir(), paths.config,
+                                    extra_env=turn_env)
+        argv, env = built
+        print(f"\n─── turn {turn}/{max_turns} "
+              f"{time.strftime('%H:%M:%S')} " + "─" * 30)
+        sys.stdout.flush()
+        try:
+            code = subprocess.run(argv, env=env).returncode
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            return 0
+
+        # Failure first. A turn that crashed says nothing about whether work
+        # remains, so counting it as "idle" would stop the run with the
+        # reassuring message that everything was finished.
+        if code != 0:
+            failures += 1
+            # Backoff, because a turn that fails instantly and is retried
+            # instantly is a busy loop that spends quota on nothing.
+            if failures >= 3:
+                print(f"\nthree turns in a row failed (last exit {code}); stopping.")
+                return 1
+            delay = 30 * failures
+            print(f"\nturn exited {code}; retrying in {delay}s "
+                  f"({failures}/3 before giving up)")
+            try:
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                print("\nstopped.")
+                return 0
+            continue
+
+        failures = 0
+        if _activity_fingerprint(tree) == before:
+            idle_turns += 1
+            print(f"\n(turn {turn} changed nothing in the tree"
+                  f"{' — second in a row' if idle_turns > 1 else ''})")
+            if idle_turns >= 2:
+                print("nothing left to do; stopping.")
+                return 0
+        else:
+            idle_turns = 0
+
+    print(f"\nreached the {max_turns}-turn limit; stopping.")
+    return 0
+
+
+def _activity_fingerprint(tree) -> tuple:
+    """Enough of the tree's state to tell whether a turn did anything.
+
+    Event count moves on any agent activity; the node and merge counts catch a
+    turn whose only product was starting or finishing work.
+    """
+    data = tree.read()
+    nodes = data.get("nodes", {})
+    events = tree.events_path.stat().st_size if tree.events_path.is_file() else 0
+    return (events, len(nodes),
+            sum(1 for n in nodes.values() if n.get("status") == "merged"),
+            len(data.get("tickets", [])), len(data.get("questions", [])))
 
 
 def cmd_init_agent(args: argparse.Namespace) -> int:
@@ -799,7 +909,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     # orchestrator launch spends a network round trip on ground that rarely
     # moves. The orchestrator calls check_model_catalog when something suggests
     # it has.
-    return _launch_agent(paths, config, "orchestrator", resume=args.resume)
+    return _launch_agent(paths, config, "orchestrator", resume=args.resume,
+                         unattended=getattr(args, "unattended", 0))
 
 
 def _report_agents(config, providers) -> int:
@@ -1590,6 +1701,12 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--wait", action="store_true",
                        help="if the orchestrator's provider is exhausted, block "
                             "until its quota resets instead of exiting")
+        p.add_argument("--unattended", nargs="?", type=int, const=50, default=0,
+                       metavar="TURNS",
+                       help="run headless, turn after turn, without a terminal: "
+                            "waits out quota resets, retries a crashed turn with "
+                            "backoff, and stops when two turns change nothing "
+                            "(default 50 turns)")
         p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("init-agent",

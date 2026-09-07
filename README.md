@@ -918,6 +918,47 @@ under 100 while coders reach 768. The default is now 250, `implementer` and
 `limits.max_steps` in `project.yaml` is now actually read — it was documented
 and ignored, with only the built-in default applying.
 
+## Running unattended
+
+```bash
+multiagents run --unattended        # up to 50 turns
+multiagents run --unattended 200
+```
+
+Each turn is one headless invocation of the same orchestrator session, with its
+MCP tools and its brief intact, carrying a nudge to pick up where it left off —
+read the tickets and questions, collect whatever finished while it was away,
+and start every piece of independent work before waiting again.
+
+Between turns the supervisor does the things a person would:
+
+- **Waits out a quota reset** rather than burning turns against a wall, using
+  the same headroom check `run --wait` uses.
+- **Retries a crashed turn with growing backoff** — 30s, then 60s — and gives
+  up after three consecutive failures. A turn that fails instantly and is
+  retried instantly is a busy loop that spends quota on nothing.
+- **Stops when two consecutive turns change nothing** in the tree: no new
+  events, no new agents, no merges, no tickets or questions. Otherwise an
+  unattended run keeps paying long after the work is finished.
+
+A failed turn is never counted as an idle one. It tells you nothing about
+whether work remains, and treating it as idle would end the run with the
+reassuring message that everything was done.
+
+### Why not a shell loop
+
+The obvious `until multiagents run; do sleep 60; done` is wrong in both
+directions: `until` stops when the command *succeeds*, so a turn that worked
+ends the run, while a turn that crashes is retried forever with no backoff and
+no limit. And `-p` — the flag that makes a turn headless — must not reach the
+interactive path, where it would silently turn `multiagents run` into a
+one-shot. It is set by the supervisor, per turn, and only there.
+
+**Consider the executor before leaving this running.** Unattended is precisely
+when nobody is watching agents that hold your user account on the local
+executor. `init` offers docker for exactly this reason; this is the case that
+makes the offer worth accepting.
+
 ## Running out, and coming back
 
 Three layers, because the providers fail differently.
@@ -1105,7 +1146,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-188 tests covering the parts live runs do not reliably exercise: doom-loop
+192 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

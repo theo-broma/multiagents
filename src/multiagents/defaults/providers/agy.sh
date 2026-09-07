@@ -93,6 +93,13 @@ prepare)
     exit 0
     ;;
 launch)
+    if [ "${MULTIAGENTS_UNATTENDED:-0}" = "1" ]; then
+        # Headless turn. -p prints and exits, which is what the supervisor
+        # wants; --prompt-interactive would sit waiting for a person.
+        set -- --model "${MULTIAGENTS_MODEL:-}"
+        [ "${MULTIAGENTS_RESUME:-0}" = "1" ] && set -- "$@" --continue
+        exec "$BIN" "$@" -p "${MULTIAGENTS_NUDGE:-continue}"
+    fi
     if [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
         exec "$BIN" --model "${MULTIAGENTS_MODEL:-}" --continue
     fi
