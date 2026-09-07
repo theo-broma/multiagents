@@ -947,17 +947,45 @@ honestly rather than inventing a number:
 Budget is read through each provider's own `budget` action, so a newly added
 provider gets an entry with no Python change.
 
-- **opencode** — a Go subscription is *detectable* (`auth.json`), but the CLI
-  exposes no headroom surface even with one active. It does report **real dollar
-  cost per step** in its event stream, accumulated per agent and matching the
-  web console's usage page — so cost is known exactly, capacity is not. What was
-  checked and ruled out for headroom is recorded in `budget.probe_opencode`.
+- **opencode** — a Go subscription serves real headroom over HTTP:
+  `GET opencode.ai/zen/go/v1/usage`, bearer token from opencode's own
+  `auth.json`, returning percent-used and a reset for three windows — rolling,
+  weekly and monthly. `headroom` is the **worst** of the three, because the
+  fullest bucket is what actually stops a run, but all three are carried
+  through as `windows`: a rolling window clears in hours and a monthly one does
+  not, and that difference changes what to do about it. Per-step dollar cost
+  still comes from the event stream, so cost and capacity are both known.
 
-The web console's usage page (`opencode.ai/workspace/<id>/usage`) is behind
-OpenAuth and cannot be fetched with the stored API key, which is an inference
-credential for `zen/go/v1`. It is not needed: the same numbers arrive in the
-stream, and its Session column is the tail of the `sessionID` already recorded
-on each tree node, so rows match back to individual agents.
+  The key reaches curl through `--config` on stdin, so it stays out of the
+  process list, and it is never printed. `doctor` shows the breakdown:
+
+```
+  opencode     27.0% used, resets 2026-10-05T13:11:17
+                 monthly   27.0%  resets 2026-10-05T13:11:17
+                 rolling   25.0%  resets 2026-09-07T11:29:26
+                 weekly    10.0%  resets 2026-09-14T00:00:00
+```
+
+### Where the money went
+
+No provider offers a per-model breakdown — opencode's `/usage/{models,detail,
+breakdown,history}` are all 404 and `/v1/models` is a plain catalogue. So
+`multiagents usage` computes it from our own stream accounting, joined to the
+agents that spent it, which is the level at which a model pin is a decision:
+
+```
+provider/model                     runs       tokens      cost  share
+claude/opus                           4            0 $  5.9733    48% ############
+claude/sonnet                         5            0 $  3.1041    25% ######
+opencode/opencode-go/kimi-k3          1    4,016,666 $  2.5612    21% #####
+agy/gemini-3.1-pro-high              15    1,264,799 $  0.0000     0%
+```
+
+That is a real session, and it says something the per-provider total could not:
+73% of the spend went to the `claude` provider — the rationed bucket the user's
+own interactive sessions draw from. A `$0.00` row is a subscription rather than
+a free lunch, so the command names which providers those are: their tokens are
+real and their dollars are not comparable.
 
 Providers declare how their usage accumulates, because getting it wrong corrupts
 every number above it:
