@@ -3107,3 +3107,55 @@ def _paths(tmp_path):
 def _config():
     from multiagents.config import Config
     return Config(project={}, providers={}, agents={}, models={}, instruction_dirs=[])
+
+
+# --------------------------------------------------------------------------
+# Cross-project container view
+
+
+def test_the_registry_turns_a_slug_back_into_a_path(tmp_path, monkeypatch):
+    """A slug embeds a hash of the path and a hash does not invert, so without
+    the registry a machine-wide listing can only show opaque ids."""
+    import multiagents.paths as paths_mod
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    project = tmp_path / "work" / "thing"
+    project.mkdir(parents=True)
+
+    paths_mod.register_project(project)
+    known = paths_mod.known_projects()
+    assert known[paths_mod.project_slug(project)]["path"] == str(project)
+
+
+def test_registering_is_never_fatal(tmp_path, monkeypatch):
+    """It is bookkeeping for a listing. A read-only config directory must cost
+    the listing, not the run."""
+    import multiagents.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_registry_file",
+                        lambda: tmp_path / "nope" / "cannot" / "projects.json")
+    (tmp_path / "nope").write_text("a file where a directory would go")
+    paths_mod.register_project(tmp_path)          # must not raise
+    assert paths_mod.known_projects() == {}
+
+
+def test_container_names_are_split_into_slug_and_role(monkeypatch):
+    """`multiagents-proxy-<slug>` and `multiagents-<slug>` differ only by an
+    infix, so a naive strip pairs the proxy with a project called `proxy-…`."""
+    import multiagents.executor.docker as docker_mod
+
+    class _Result:
+        returncode = 0
+        stdout = ("multiagents-voila-346f8a7b\tUp 3 minutes\tworkspace:latest\t3 minutes\n"
+                  "multiagents-proxy-voila-346f8a7b\tUp 3 minutes\tproxy:latest\t3 minutes\n"
+                  "multiagents-old-1234abcd\tExited (0) 2 days ago\tworkspace:latest\t2 days\n")
+
+    monkeypatch.setattr(docker_mod, "_run", lambda *a, **k: _Result())
+    rows = docker_mod.list_containers()
+    by_name = {r["name"]: r for r in rows}
+
+    assert by_name["multiagents-voila-346f8a7b"]["slug"] == "voila-346f8a7b"
+    assert by_name["multiagents-voila-346f8a7b"]["proxy"] is False
+    assert by_name["multiagents-proxy-voila-346f8a7b"]["slug"] == "voila-346f8a7b"
+    assert by_name["multiagents-proxy-voila-346f8a7b"]["proxy"] is True
+    assert by_name["multiagents-old-1234abcd"]["status"].startswith("Exited")

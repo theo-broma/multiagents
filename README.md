@@ -726,6 +726,29 @@ skip-permissions can reach anything your user account can.
 
 ### docker
 
+`multiagents docker status` reports one project: images, network mode, resource
+ceilings and every mount. `--all` reports the machine:
+
+```
+$ multiagents docker status --all
+project                                      workspace        proxy
+~/Documents/projects/multiagents             running          running
+~/Documents/projects/voila                   running          running
+
+2 project(s), 4 container(s) running.
+```
+
+Two containers per project — the workspace and its filtering proxy — and each
+running project holds its resource ceiling whether or not agents are working,
+so `docker down` in a project you have finished with is worth remembering.
+
+The slug in a container name is a hash of the project path and does not invert,
+so the paths come from a small registry under `~/.config/multiagents/`, written
+whenever a command names a project. A container with no entry is listed as
+`(path unknown)` rather than as a bare hash, and a project whose directory has
+since been deleted is marked `(gone)`.
+
+
 One long-lived container per project. Build once, then switch `executor.kind`:
 
 ```bash
@@ -1149,7 +1172,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-192 tests covering the parts live runs do not reliably exercise: doom-loop
+195 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
