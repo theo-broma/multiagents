@@ -2920,3 +2920,98 @@ def test_the_opencode_budget_script_is_quiet_without_a_key(tmp_path):
                          text=True, env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
     assert out.returncode == 0
     assert json.loads(out.stdout)["known"] is False
+
+
+# --------------------------------------------------------------------------
+# Executor default, and the offer that sets it
+
+
+def test_the_executor_default_is_not_duplicated_out_of_step():
+    """The shipped project.yaml wins over the code fallback, so the two saying
+    different things means the code's value never applies — exactly how
+    doom_loop_repeats was raised in code and left stale in config."""
+    import yaml
+    from multiagents.config import Config
+
+    shipped = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+         / "project.yaml").read_text())
+    empty = Config(project={}, providers={}, agents={}, models={}, instruction_dirs=[])
+
+    assert shipped["executor"]["kind"] == empty.executor, (
+        "the shipped default and the code fallback disagree; whichever the file "
+        "names is what every project actually gets")
+
+
+def test_setting_the_executor_keeps_the_comments(tmp_path):
+    """project.yaml is mostly comments explaining the choices; a YAML round
+    trip would silently throw all of them away."""
+    import multiagents.cli as cli
+    from multiagents.paths import ProjectPaths
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True)
+    (paths.config / "project.yaml").write_text(
+        "# a comment that must survive\n"
+        "executor:\n"
+        "  # why this key exists\n"
+        "  kind: local\n\n"
+        "limits:\n  max_steps: 250\n")
+
+    assert cli._set_executor(paths, "docker") is True
+    text = (paths.config / "project.yaml").read_text()
+    assert "kind: docker" in text
+    assert "# a comment that must survive" in text
+    assert "# why this key exists" in text
+    assert "max_steps: 250" in text
+
+
+def test_the_docker_offer_is_declined_without_a_terminal(tmp_path, monkeypatch,
+                                                         capsys):
+    """`make init` and scripted runs must not hang on it, and must not silently
+    switch a project's execution backend either."""
+    import multiagents.cli as cli
+    from multiagents.paths import ProjectPaths
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True)
+    (paths.config / "project.yaml").write_text("executor:\n  kind: local\n")
+
+    class _NoTTY:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", _NoTTY())
+    assert cli._offer_docker(paths) == ""
+    assert "kind: local" in (paths.config / "project.yaml").read_text()
+    assert "user account" in capsys.readouterr().out, "the risk is still stated"
+
+
+def test_declining_to_continue_without_docker_returns_a_reason(tmp_path,
+                                                               monkeypatch):
+    import multiagents.cli as cli
+    from multiagents.paths import ProjectPaths
+    import multiagents.executor.docker as docker_mod
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True)
+    (paths.config / "project.yaml").write_text("executor:\n  kind: local\n")
+
+    class _TTY:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", _TTY())
+    monkeypatch.setattr(docker_mod, "docker_state",
+                        lambda: ("no-binary", "docker is not installed"))
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: False)
+    assert cli._offer_docker(paths) == "docker is not installed"
+
+
+def test_the_install_hint_names_this_system_and_the_official_page():
+    import multiagents.cli as cli
+    hints = cli._docker_install_hint()
+    assert cli.DOCKER_DOCS.startswith("https://docs.docker.com")
+    # A guess can be wrong, so the hint is best-effort and the docs link is not.
+    if hints:
+        assert any("docker" in line for line in hints)

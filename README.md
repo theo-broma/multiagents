@@ -677,6 +677,46 @@ material, commit it to each or mount it with `executor.docker.extra_mounts`.
 `executor.kind` selects the backend, and an agent may pin its own with
 `executor:` in `agents.yaml`. `multiagents doctor` marks pinned agents with `*`.
 
+`init` asks which one this project should use, once, when you set it up. That
+is a security question rather than a preference: agents run with the flags that
+turn approval off — `--auto`, `--dangerously-skip-permissions`,
+`bypassPermissions` — so on the local executor they have your user account,
+your files and your keys.
+
+```
+executor     local
+             agents run with approval turned off — `--auto`,
+             `--dangerously-skip-permissions`. On the local executor
+             that is your user account, your files and your keys.
+             docker confines them to a container with no route out.
+             docker is available here (server 29.5.1)
+             use the docker executor for this project? [Y/n]
+```
+
+Where docker is not usable — not installed, or a daemon you cannot reach — it
+says which, and offers to stop rather than to proceed quietly. Choosing to wait
+prints install steps for the detected system plus the official page, and exits
+non-zero:
+
+```
+not ready: you chose to wait for docker (docker is not installed).
+
+On this system:
+  curl -fsSL https://get.docker.com | sh      # official convenience script
+  sudo usermod -aG docker $USER               # then log out and back in
+
+Official instructions: https://docs.docker.com/engine/install/
+```
+
+Nothing is lost by waiting — the project is already set up, and re-running
+`init` offers again. With no terminal the question is not asked at all and the
+project stays local: `make init` must not switch a project's execution backend
+with nobody deciding.
+
+The shipped default stays `local`, so the tool works on a machine without
+docker. A test asserts the shipped default and the code fallback agree, because
+the config file wins and a disagreement means the code's value never applies.
+
 ### local
 
 Git isolation via worktrees, credential separation via a per-agent `HOME` with
@@ -1065,7 +1105,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-183 tests covering the parts live runs do not reliably exercise: doom-loop
+188 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

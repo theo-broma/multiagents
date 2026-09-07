@@ -430,6 +430,135 @@ def _offer_git(root: Path) -> None:
     print(f"git          {gitops.current_branch(root)} @ {gitops.head_sha(root)[:12]}")
 
 
+DOCKER_DOCS = "https://docs.docker.com/engine/install/"
+DOCKER_DESKTOP_DOCS = "https://docs.docker.com/desktop/"
+
+
+def _docker_install_hint() -> list[str]:
+    """How to install docker on *this* machine, best effort.
+
+    Detected rather than generic: "see the docs" is what someone reads when
+    they have already given up. The official page is given regardless, because
+    a distro guess can be wrong and the hint has to be checkable.
+    """
+    import platform
+
+    system = platform.system()
+    if system == "Darwin":
+        return [f"  brew install --cask docker      # or {DOCKER_DESKTOP_DOCS}"]
+    if system == "Windows":
+        return [f"  winget install Docker.DockerDesktop    # {DOCKER_DESKTOP_DOCS}"]
+
+    distro = ""
+    release = Path("/etc/os-release")
+    if release.is_file():
+        fields = {}
+        for line in release.read_text().splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                fields[key] = value.strip().strip('"')
+        distro = (fields.get("ID", "") + " " + fields.get("ID_LIKE", "")).lower()
+
+    if any(name in distro for name in ("ubuntu", "debian", "mint", "pop")):
+        return [
+            "  curl -fsSL https://get.docker.com | sh      # official convenience script",
+            "  sudo usermod -aG docker $USER               # then log out and back in",
+        ]
+    if any(name in distro for name in ("fedora", "rhel", "centos", "rocky", "alma")):
+        return [
+            "  sudo dnf install docker-ce docker-ce-cli containerd.io",
+            "  sudo systemctl enable --now docker",
+            "  sudo usermod -aG docker $USER               # then log out and back in",
+        ]
+    if "arch" in distro or "manjaro" in distro:
+        return [
+            "  sudo pacman -S docker",
+            "  sudo systemctl enable --now docker",
+            "  sudo usermod -aG docker $USER               # then log out and back in",
+        ]
+    if "suse" in distro:
+        return ["  sudo zypper install docker",
+                "  sudo systemctl enable --now docker"]
+    return []
+
+
+def _set_executor(paths, kind: str) -> bool:
+    """Rewrite `executor.kind` in the project's own config, comments intact.
+
+    A line edit rather than a YAML round trip: the shipped file is mostly
+    comments explaining the choices, and dumping it back through a parser would
+    throw all of them away.
+    """
+    import re
+
+    config = paths.config / "project.yaml"
+    if not config.is_file():
+        return False
+    text = config.read_text()
+    updated, count = re.subn(r"(?m)^(executor:\n(?:[ \t]*(?:#[^\n]*)?\n)*[ \t]+kind:[ \t]*)\w+",
+                             lambda m: m.group(1) + kind, text, count=1)
+    if not count:
+        return False
+    config.write_text(updated)
+    return True
+
+
+def _offer_docker(paths) -> str:
+    """Offer the container executor. Returns "" or a reason to come back later.
+
+    Agents run with the permission flags that turn approval off — `--auto`,
+    `--dangerously-skip-permissions`, `bypassPermissions`. On the local
+    executor that is this user account, so which backend a project uses is a
+    security decision and belongs to the person, asked once, at the point they
+    are setting the project up.
+    """
+    from .executor.docker import docker_state
+
+    current = load_config(paths).executor
+    if current == "docker":
+        print("executor     docker (already set)")
+        return ""
+
+    state, detail = docker_state()
+    print("\nexecutor     local")
+    print("             agents run with approval turned off — `--auto`,")
+    print("             `--dangerously-skip-permissions`. On the local executor")
+    print("             that is your user account, your files and your keys.")
+    print("             docker confines them to a container with no route out.")
+
+    if state == "ok":
+        print(f"             docker is available here (server {detail})")
+        # Asked only when someone is there to answer. `default=True` on a
+        # closed stdin would let `make init` switch a project's execution
+        # backend with nobody deciding — the opposite of the point, which is
+        # that this choice belongs to a person.
+        if sys.stdin.isatty() and _confirm(
+                "             use the docker executor for this project?", default=True):
+            if _set_executor(paths, "docker"):
+                print("executor     docker   (run `multiagents build` before `run`)")
+            else:
+                print("             could not edit project.yaml; set executor.kind by hand")
+            return ""
+        print("             staying local — set executor.kind: docker in")
+        print("             .multiagents/config/project.yaml to change your mind")
+        return ""
+
+
+    print("             docker is NOT usable here: " + detail)
+    if state == "no-daemon":
+        print("             the binary is installed but the daemon is unreachable —")
+        print("             starting it, or adding yourself to the `docker` group,")
+        print("             is usually all that is needed.")
+    if not sys.stdin.isatty():
+        print("             continuing on the local executor (nobody to ask).")
+        return ""
+    if _confirm("             continue without docker for now?", default=True):
+        print("             continuing on the local executor. Agents will have the")
+        print("             access you do; treat their tasks accordingly.")
+        return ""
+    return detail
+
+
 def _refuse_nesting(root: Path, allow_nested: bool) -> str:
     """Why this directory must not become a project, or "".
 
@@ -505,6 +634,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"             agent worktrees will be full checkouts of it, and "
               f"branches\n             will land in its namespace")
 
+    deferred = _offer_docker(paths)
+
     providers = load_providers(load_config(paths).providers)
     result = refresh_models(providers, paths.config / "models.yaml")
     for name, count in result["counts"].items():
@@ -526,6 +657,18 @@ def cmd_init(args: argparse.Namespace) -> int:
     # repository and a commit no agent can be given a branch, so `run` will
     # refuse at the first spawn — and a scripted setup that read exit 0 here
     # would call this project ready. Non-zero is how CI finds out.
+    if deferred:
+        print(f"\nnot ready: you chose to wait for docker ({deferred}).")
+        hints = _docker_install_hint()
+        if hints:
+            print("\nOn this system:")
+            for line in hints:
+                print(line)
+        print(f"\nOfficial instructions: {DOCKER_DOCS}")
+        print("\nThe project is set up and nothing is lost — re-run "
+              "`multiagents init` once\ndocker works and it will offer again.")
+        return 3
+
     if not (gitops.is_repo(root) and gitops.has_commits(root)):
         print("\nnot ready: no git repository with a commit, so no agent can be "
               "given a branch.\n             set one up and re-run `multiagents init`.")
