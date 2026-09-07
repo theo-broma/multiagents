@@ -3061,9 +3061,13 @@ def test_two_turns_that_change_nothing_end_the_run(tmp_path, monkeypatch, capsys
     calls = []
 
     class _Done:
-        returncode = 0
+        pid = 1234
 
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: calls.append(a) or _Done())
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(cli.subprocess, "Popen",
+                        lambda *a, **k: calls.append(a) or _Done())
     monkeypatch.setattr(cli.scripts, "exec_action", lambda *a, **k: (["true"], {}))
     monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
 
@@ -3081,10 +3085,13 @@ def test_three_failed_turns_stop_rather_than_spin(tmp_path, monkeypatch, capsys)
     import multiagents.cli as cli
 
     class _Fail:
-        returncode = 1
+        pid = 1234
+
+        def wait(self):
+            return 1
 
     slept = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Fail())
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _Fail())
     monkeypatch.setattr(cli.scripts, "exec_action", lambda *a, **k: (["false"], {}))
     monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
