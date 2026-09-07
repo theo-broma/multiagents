@@ -123,6 +123,10 @@ class Provider:
     # is a config block plus one script, not a scatter of hooks.
     script: str = ""
     enabled: bool = True
+    # Where this CLI records the session it is running, for the supervisor to
+    # watch from outside. Optional: a provider that keeps sessions in a database
+    # or an opaque directory simply omits it.
+    transcript: dict = field(default_factory=dict)
     auth: dict[str, Any] = field(default_factory=dict)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -145,6 +149,7 @@ class Provider:
             container_private_home=list(data.get("container_private_home", []) or []),
             script=data.get("script", "") or (data.get("auth", {}) or {}).get("script", ""),
             enabled=bool(data.get("enabled", True)),
+            transcript=dict(data.get("transcript", {}) or {}),
             auth=data.get("auth", {}) or {},
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),

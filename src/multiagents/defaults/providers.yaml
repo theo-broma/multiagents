@@ -186,6 +186,17 @@ providers:
       Nests its reply in message.content[] as a list of typed blocks — thinking,
       tool_use and text interleaved, sometimes several in one event — which is
       why the rule engine addresses lists.
+    # Where this CLI records the session it is running, so a supervisor can see
+    # whether the orchestrator is doing anything without reading a word of the
+    # conversation. `{slug}` is the working directory with `/`, `.` and `_`
+    # folded to `-`, which is claude's own encoding.
+    #
+    # opencode keeps sessions in a sqlite database and agy in an opaque brain
+    # directory; neither declares one, and a supervisor without this falls back
+    # to process liveness and tree activity.
+    transcript:
+      dir: "~/.claude/projects/{slug}"
+      glob: "*.jsonl"
     spawn:
       args: ["-p", "{prompt}", "--model", "{model}",
              "--output-format", "stream-json", "--verbose",

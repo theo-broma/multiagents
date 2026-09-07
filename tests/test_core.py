@@ -3489,3 +3489,92 @@ def test_the_write_is_flushed_before_the_rename(tmp_path, monkeypatch):
     tree.add(Node(id="ag-x", agent="a", provider="p", model="m",
                   parent=None, depth=1, status="running"))
     assert len(synced) >= 1, "the temp file must be fsynced before os.replace"
+
+
+# --------------------------------------------------------------------------
+# Watching the orchestrator from outside it
+#
+# `run` execs into the CLI, so the orchestrator IS that process and there is
+# nobody inside to report on it. The supervisor samples what can be seen from
+# outside — and deliberately never reads the conversation: the transcript has
+# no structured signal for "quota reached", and inferring state from content is
+# the mistake that once cooled a provider down for fifteen minutes because an
+# advisor used the word "quota".
+
+
+def _verdict(**kw):
+    from multiagents.watchdog import verdict
+    kw.setdefault("running", True)
+    kw.setdefault("quiet_for", 1.0)
+    kw.setdefault("quota_known", True)
+    kw.setdefault("quota_left", 0.8)
+    kw.setdefault("active_agents", 0)
+    return verdict(**kw)[0]
+
+
+def test_quota_is_what_separates_running_out_from_crashing():
+    """The transcript cannot tell these apart, and they need different
+    responses: one waits for a reset, the other is a bug."""
+    assert _verdict(running=False, quiet_for=None, quota_left=0.0) == "out_of_quota"
+    assert _verdict(running=False, quiet_for=None, quota_left=0.5) == "stopped"
+
+
+def test_a_silent_session_is_read_by_what_else_is_true():
+    assert _verdict(quiet_for=5) == "working"
+    assert _verdict(quiet_for=900, active_agents=2) == "waiting"
+    assert _verdict(quiet_for=900, active_agents=0) == "idle"
+    assert _verdict(quiet_for=900, quota_left=0.0) == "stalled"
+
+
+def test_an_unwatchable_provider_is_not_reported_as_broken():
+    """opencode keeps sessions in a database and agy in an opaque directory.
+    Neither can be watched this way, and neither is a fault."""
+    from multiagents.watchdog import verdict
+    state, detail = verdict(running=True, quiet_for=None, quota_known=False,
+                            quota_left=None, active_agents=1, supported=False)
+    assert state == "working"
+    assert "publishes no session log" in detail
+
+    _, missing = verdict(running=True, quiet_for=None, quota_known=False,
+                         quota_left=None, active_agents=0, supported=True)
+    assert "not started" not in missing and "yet" in missing
+
+
+def test_only_claude_declares_where_its_session_log_lives():
+    import yaml
+    shipped = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+         / "providers.yaml").read_text())["providers"]
+    assert shipped["claude"]["transcript"]["dir"].endswith("{slug}")
+    assert "transcript" not in shipped["opencode"]
+    assert "transcript" not in shipped["agy"]
+
+
+def test_the_slug_matches_the_encoding_claude_actually_uses(tmp_path):
+    """`/`, `.` and `_` all fold to `-`; getting this wrong finds no file and
+    reports a working session as unwatchable."""
+    from multiagents.providers import Provider
+    from multiagents.watchdog import transcript_source
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "transcript": {"dir": "/logs/{slug}", "glob": "*.jsonl"}})
+    directory, pattern = transcript_source(provider, Path("/home/u/my_proj.v2/app"))
+    assert directory == Path("/logs/-home-u-my-proj-v2-app")
+    assert pattern == "*.jsonl"
+
+
+def test_the_supervisor_stops_when_what_it_watches_does(tmp_path, quiet_git,
+                                                        monkeypatch):
+    """It exits by itself, so nothing has to remember to clean it up."""
+    import multiagents.watchdog as watchdog
+    from multiagents.config import Config
+
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(watchdog, "alive", lambda pid: False)
+    config = Config(project={}, providers={}, agents={}, models={},
+                    instruction_dirs=[])
+
+    assert watchdog.supervise(paths, config, "orchestrator", 999, interval=0.01) == 0
+    record = watchdog.read_status(paths)
+    assert record["running"] is False
+    assert record["verdict"] in ("stopped", "out_of_quota")

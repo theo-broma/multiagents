@@ -131,6 +131,24 @@ NUDGE = (
 )
 
 
+def _start_supervisor(paths, role: str, pid: int) -> None:
+    """Launch the watcher beside the orchestrator, detached.
+
+    It has to be its own process: the next thing this one does is exec, and
+    there would be nothing of ours left running. It exits by itself when the pid
+    it watches disappears, so nothing needs to remember to stop it.
+    """
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "multiagents.cli", "--path", str(paths.root),
+             "supervise", "--role", role, "--pid", str(pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as exc:                # observation must never block a launch
+        print(f"supervisor   not started: {exc}", file=sys.stderr)
+
+
 def _launch_agent(paths, config, role: str, resume: bool,
                   unattended: int = 0) -> int:
     """Launch a roster entry as an interactive MCP client.
@@ -189,6 +207,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # Without it `stop` can end the agents and leave the thing that starts more
     # of them running.
     _write_pid(paths, role, os.getpid())
+    _start_supervisor(paths, role, os.getpid())
     try:
         if unattended:
             return _supervise(paths, config, role, spec, provider, executor,
@@ -1703,6 +1722,41 @@ def _docker_status_all() -> int:
     return 0
 
 
+def cmd_supervise(args: argparse.Namespace) -> int:
+    """Watch a launched agent from outside it. Started by `run`; rarely typed."""
+    from . import watchdog
+
+    paths = _resolve(args.path)
+    return watchdog.supervise(paths, load_config(paths), args.role, args.pid,
+                              interval=args.interval, max_seconds=args.max_seconds)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """What the orchestrator is doing, from outside it."""
+    from . import watchdog
+
+    paths = _resolve(args.path)
+    record = watchdog.read_status(paths)
+    if record is None:
+        print("No supervisor has reported yet. `multiagents run` starts one.")
+        return 0
+
+    age = time.time() - record.get("at", 0)
+    stale = "  (stale)" if age > 120 else ""
+    print(f"{record['verdict']:14} {record['detail']}")
+    print(f"{'':14} observed {age:.0f}s ago{stale}")
+    transcript = record.get("transcript") or {}
+    if transcript:
+        print(f"{'':14} transcript quiet for {transcript.get('quiet_for', '?')}s")
+    print(f"{'':14} {record.get('active_agents', 0)} agent(s) running")
+    provider = record.get("provider") or {}
+    if provider.get("known") and provider.get("headroom") is not None:
+        print(f"{'':14} {provider['name']} headroom "
+              f"{provider['headroom'] * 100:.0f}%"
+              f"{', resets ' + str(provider['resets_at'])[:19] if provider.get('resets_at') else ''}")
+    return 0
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
     """Bring everything to a halt without losing any of it.
 
@@ -2026,6 +2080,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true",
                    help="remove even when a worktree holds uncommitted work")
     p.set_defaults(func=cmd_uninstall)
+
+    p = sub.add_parser("status", help="what the orchestrator is doing")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("supervise", help="(internal) watch a launched agent")
+    p.add_argument("--role", default="orchestrator")
+    p.add_argument("--pid", type=int, required=True)
+    p.add_argument("--interval", type=float, default=20.0)
+    p.add_argument("--max-seconds", dest="max_seconds", type=float, default=0.0)
+    p.set_defaults(func=cmd_supervise)
 
     p = sub.add_parser("stop", help="stop everything for this project, resumably")
     p.add_argument("--keep-containers", action="store_true",

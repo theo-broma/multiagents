@@ -961,6 +961,54 @@ under 100 while coders reach 768. The default is now 250, `implementer` and
 `limits.max_steps` in `project.yaml` is now actually read — it was documented
 and ignored, with only the built-in default applying.
 
+## Watching the orchestrator
+
+`run` execs into the provider's CLI, so the orchestrator *is* that process and
+there is nobody inside it to report on itself. `run` therefore starts a small
+supervisor beside it, detached, which exits on its own when the pid it watches
+disappears.
+
+```
+$ multiagents status
+working        producing output 6s ago
+               observed 0s ago
+               transcript quiet for 6.1s
+               0 agent(s) running
+               claude headroom 85%, resets 2026-09-07T13:59:59
+```
+
+It samples four things and never reads a word of the conversation: whether the
+process exists, whether the session log has grown, how many agents are running,
+and what the provider says about headroom.
+
+| | verdict |
+|---|---|
+| gone, no headroom | `out_of_quota` — it ran out |
+| gone, headroom fine | `stopped` — it exited or crashed |
+| alive, log moving | `working` |
+| alive, silent, agents running | `waiting` — probably on them |
+| alive, silent, nothing running | `idle` — probably on you |
+| alive, silent, no headroom | `stalled` |
+
+**The quota reading is what makes the first two distinguishable**, and they need
+opposite responses: one waits for a reset, the other is a bug.
+
+### Why not read the transcript's contents
+
+Because there is nothing structured in it to read. Searching a real 11 MB
+transcript for a rate-limit event returned eighteen apparent hits, and every one
+was the session's own prose *about* quotas. A supervisor matching on content
+would have fired on the conversation that designed it.
+
+That is not hypothetical here: an earlier classifier in this project scanned
+agent output for the same words, and an advisor writing "quota" cooled a
+provider down for fifteen minutes and lost the conversation. Structure only.
+
+`providers.yaml` says where a CLI keeps its session log — only claude declares
+one, since opencode uses a sqlite database and agy an opaque directory. A
+provider without one still gets process liveness, agent activity and quota, and
+says which it is rather than reporting a fault.
+
 ## Surviving a crash or a power cut
 
 What is on disk when the power goes:
@@ -1281,7 +1329,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-211 tests covering the parts live runs do not reliably exercise: doom-loop
+217 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
