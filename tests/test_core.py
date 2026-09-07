@@ -3257,3 +3257,67 @@ def test_stop_ends_the_thing_that_starts_more_agents(tmp_path, quiet_git,
     assert (4242, cli.signal.SIGTERM) in signalled
     assert not cli._pid_file(paths, "orchestrator").exists(), "stale pid removed"
     assert "orchestrator (pid 4242)" in capsys.readouterr().out
+
+
+def test_run_refuses_when_the_container_could_not_be_built(tmp_path, quiet_git,
+                                                           monkeypatch, capsys):
+    """The orchestrator runs on the host, so nothing about docker is exercised
+    until it delegates — which meant a missing image surfaced as a failed spawn
+    minutes into a session rather than as a refusal to start."""
+    import argparse
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    monkeypatch.setattr(cli, "_executor_problems",
+                        lambda *a: ["image multiagents/workspace:latest not built"])
+
+    args = argparse.Namespace(path=str(tmp_path), no_launch=False, resume=True,
+                              wait=False, unattended=0)
+    assert cli.cmd_resume(args) == 4
+    out = capsys.readouterr().out
+    assert "not built" in out
+    assert "fail\n           at its first delegation" in out
+
+
+def test_reporting_state_is_not_refusing_to_start(tmp_path, quiet_git,
+                                                  monkeypatch):
+    """`--no-launch` exists to inspect a project, including a broken one."""
+    import argparse
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    monkeypatch.setattr(cli, "_executor_problems", lambda *a: ["image not built"])
+
+    args = argparse.Namespace(path=str(tmp_path), no_launch=True, resume=True,
+                              wait=False, unattended=0)
+    assert cli.cmd_resume(args) == 0
+
+
+def test_a_local_project_never_asks_docker_anything(tmp_path, monkeypatch):
+    """The check must not make docker a soft dependency of the local executor."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    called = []
+    monkeypatch.setattr(cli, "_docker_executor", lambda p: called.append(p))
+    local = Config(project={"executor": {"kind": "local"}}, providers={},
+                   agents={}, models={}, instruction_dirs=[])
+    assert cli._executor_problems(None, local) == []
+    assert called == []
+
+
+def test_the_check_never_blocks_a_launch_on_itself(tmp_path, monkeypatch):
+    """A broken probe should report, not become the thing that stops you."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    def boom(_paths):
+        raise OSError("docker socket vanished")
+
+    monkeypatch.setattr(cli, "_docker_executor", boom)
+    docker = Config(project={"executor": {"kind": "docker"}}, providers={},
+                    agents={}, models={}, instruction_dirs=[])
+    problems = cli._executor_problems(None, docker)
+    assert len(problems) == 1 and "could not check" in problems[0]
