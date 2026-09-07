@@ -1000,10 +1000,18 @@ The first three end quietly. For the last two, `run` waits and **starts the
 orchestrator again, interactively**, with an opening message asking it to take
 stock:
 
-> Your previous session ended unexpectedly. Take stock before doing anything:
-> check the tree for agents that were interrupted, read any open questions and
-> tickets, and look for branches holding work committed as WIP by the recovery —
-> that work may be mid-edit and is not a finished result.
+> Your previous session ended unexpectedly. This is a restart, not a new task,
+> and not a decision point. Take stock first: agents left interrupted in the
+> tree, open questions and tickets, and any branch holding a WIP commit made by
+> the recovery — that work may be mid-edit and is not a finished result. Say
+> briefly what you found, then carry straight on with the work. Do not propose a
+> plan and wait for it to be approved, and do not ask whether to proceed; nobody
+> may be reading. Stop for the user only where you would have stopped in any
+> other session — a choice that is genuinely theirs to make.
+
+The last three sentences are load-bearing. A restart that comes back, proposes
+a plan and waits has turned one interruption into two, and the restart may well
+have happened because nobody was there.
 
 Interactive is the point. `claude [options] [prompt]` opens a session *with* a
 first user turn rather than waiting for one to be typed, so the restart starts
@@ -1431,7 +1439,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-232 tests covering the parts live runs do not reliably exercise: doom-loop
+233 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
