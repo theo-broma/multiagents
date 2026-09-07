@@ -203,3 +203,41 @@ def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
         if max_seconds and time.time() - started > max_seconds:
             return 0
         time.sleep(interval)
+
+
+def has_human_turn(provider: Any, cwd: Path) -> bool | None:
+    """Did anyone actually say anything in this session? None if unknowable.
+
+    The headless handover replays the session with a nudge as its user turn, so
+    a session that dropped *before* anyone typed would be handed "continue where
+    you left off" with nowhere to continue from — and would invent work from
+    BRIEF.md, unattended, with agents that hold bypass permissions.
+
+    A typed message is a `user` record whose content is a plain string; a tool
+    result is a `user` record whose content is a list of tool_result blocks.
+    Structure again, not content: this reads the shape and never the words.
+    """
+    path = newest_transcript(provider, cwd)
+    if path is None:
+        return None
+    try:
+        with path.open() as handle:
+            for line in handle:
+                if '"user"' not in line:
+                    continue                      # cheap reject before parsing
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("type") != "user":
+                    continue
+                content = (record.get("message") or {}).get("content")
+                if isinstance(content, str) and content.strip():
+                    return True
+                if isinstance(content, list) and any(
+                        isinstance(block, dict) and block.get("type") == "text"
+                        for block in content):
+                    return True
+    except OSError:
+        return None
+    return False
