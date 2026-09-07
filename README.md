@@ -1173,6 +1173,26 @@ multiagents run --unattended        # up to 50 turns
 multiagents run --unattended 200
 ```
 
+### What makes a headless turn start at all
+
+Interactively, the orchestrator's brief arrives as a **system prompt**
+(`--append-system-prompt-file`), so the CLI opens and waits: it has its
+instructions but no task. A headless turn passes the nudge as `-p`, which is the
+**user message** you would otherwise type. That is the whole difference, and it
+is why the same session that sits idle in a terminal starts working immediately
+without one.
+
+Which creates a case worth refusing. If a session dropped *before* anyone typed
+anything, "continue where you left off" has nowhere to continue from, and the
+nudge would have it invent work from `BRIEF.md` — unattended, with agents
+holding bypass permissions. So the handover checks the transcript for a human
+turn first, and stops if there was none.
+
+A `user` record is not enough to go on: in a real session 992 of them were tool
+results against 102 typed messages. A typed message is the one whose content is
+a plain string rather than a list of `tool_result` blocks — shape again, never
+words.
+
 Each turn is one headless invocation of the same orchestrator session, with its
 MCP tools and its brief intact, carrying a nudge to pick up where it left off —
 read the tickets and questions, collect whatever finished while it was away,
@@ -1394,7 +1414,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-227 tests covering the parts live runs do not reliably exercise: doom-loop
+229 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

@@ -3740,3 +3740,58 @@ def test_a_live_session_elsewhere_is_not_reaped(tmp_path, quiet_git, monkeypatch
                                       supervise=True))
     assert stopped == []
     assert tree.get("ag-1").status == "running", "left alone for its owner"
+
+
+def test_a_session_nobody_spoke_to_is_not_continued(tmp_path, monkeypatch, capsys):
+    """A headless turn supplies the user message the TUI waits for you to type.
+    With nothing said, "continue where you left off" has nowhere to continue
+    from — and the nudge would have it invent work from BRIEF.md, unattended,
+    with agents holding bypass permissions."""
+    import multiagents.cli as cli
+    import multiagents.watchdog as watchdog
+
+    handed_over = []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed_over.append(1) or 0)
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
+    paths = _paths(tmp_path)
+
+    monkeypatch.setattr(watchdog, "has_human_turn", lambda *a: False)
+    assert cli._run_supervised(paths, _config(), "orchestrator", None, None,
+                               None, {}, [], {}) == 1
+    assert handed_over == []
+    assert "nothing was asked of it" in capsys.readouterr().out
+
+    monkeypatch.setattr(watchdog, "has_human_turn", lambda *a: True)
+    cli._run_supervised(paths, _config(), "orchestrator", None, None, None,
+                        {}, [], {})
+    assert handed_over == [1], "a session with real work does continue"
+
+
+def test_a_tool_result_is_not_mistaken_for_someone_talking(tmp_path):
+    """`user` records carry tool results too — 992 of them against 102 typed
+    messages in a real session. Counting records would read as 'someone spoke'
+    for a session where nobody did."""
+    import json
+    from multiagents.providers import Provider
+    from multiagents.watchdog import has_human_turn
+
+    logs = tmp_path / "-logs"
+    logs.mkdir()
+    provider = Provider.from_dict("claude", {
+        "bin": "claude",
+        "transcript": {"dir": str(tmp_path) + "/{slug}", "glob": "*.jsonl"}})
+
+    session = logs / "s.jsonl"
+    session.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "system", "subtype": "init"},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text"}]}},
+    ]) + "\n")
+    assert has_human_turn(provider, Path("/logs")) is False
+
+    with session.open("a") as handle:
+        handle.write(json.dumps(
+            {"type": "user", "message": {"content": "do the thing"}}) + "\n")
+    assert has_human_turn(provider, Path("/logs")) is True

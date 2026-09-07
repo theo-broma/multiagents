@@ -343,6 +343,18 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
               f"run` starts again when you have looked.")
         return 1
 
+    # A headless turn supplies the user message the TUI waits for you to type.
+    # If nobody ever typed one, there is no work to continue and the nudge would
+    # have it invent some from BRIEF.md, unsupervised.
+    spoke = watchdog.has_human_turn(provider, paths.root)
+    if spoke is False:
+        print(f"\n{role} ended unexpectedly: {why}. Not continuing: nothing was "
+              f"asked of it\nbefore the session ended, so there is no work to "
+              f"carry on. `multiagents run`\nstarts a fresh one.")
+        return 1
+    if spoke is None:
+        print("\n(could not check whether this session had been given any work)")
+
     print(f"\n{role} ended unexpectedly: {why}.")
     print("Carrying on headlessly — the terminal is gone, so an interactive")
     print("relaunch would have nowhere to run. `multiagents stop` ends it;")
