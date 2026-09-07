@@ -127,11 +127,15 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
 # blunter than the headless nudge: a person is watching this one, and the first
 # thing it needs to establish is what survived.
 RESUME_PROMPT = (
-    "Your previous session ended unexpectedly. Take stock before doing anything: "
-    "check the tree for agents that were interrupted, read any open questions "
-    "and tickets, and look for branches holding work committed as WIP by the "
-    "recovery — that work may be mid-edit and is not a finished result. Then "
-    "say what you found and what you propose to do."
+    "Your previous session ended unexpectedly. This is a restart, not a new "
+    "task, and not a decision point. Take stock first: agents left interrupted "
+    "in the tree, open questions and tickets, and any branch holding a WIP "
+    "commit made by the recovery — that work may be mid-edit and is not a "
+    "finished result. Say briefly what you found, then carry straight on with "
+    "the work. Do not propose a plan and wait for it to be approved, and do not "
+    "ask whether to proceed; nobody may be reading. Stop for the user only "
+    "where you would have stopped in any other session — a choice that is "
+    "genuinely theirs to make."
 )
 
 NUDGE = (

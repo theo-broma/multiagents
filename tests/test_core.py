@@ -3861,3 +3861,17 @@ def test_the_parent_ignores_the_signal_that_takes_the_terminal(tmp_path):
     # The prose explains why SIG_IGN is wrong; what matters is that it is not
     # what gets installed.
     assert "signal.signal(sig, signal.SIG_IGN)" not in source
+
+
+def test_the_restart_prompt_does_not_ask_for_permission_to_continue():
+    """A restart is not a decision point. An orchestrator that comes back,
+    proposes a plan and waits has turned an interruption into a second one —
+    and nobody may be reading."""
+    import multiagents.cli as cli
+    prompt = " ".join(cli.RESUME_PROMPT.split())
+
+    assert "carry straight on with the work" in prompt
+    assert "Do not propose a plan and wait" in prompt
+    assert "do not ask whether to proceed" in prompt
+    # The exception, which is the norm everywhere else in this system.
+    assert "genuinely theirs to make" in prompt
