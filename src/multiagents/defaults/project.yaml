@@ -163,7 +163,10 @@ limits:
   # advisor at 101 — while coders reached 768. So the ceiling belongs above the
   # reviewers and the coders carry their own.
   max_steps: 250
-  doom_loop_repeats: 3      # identical tool+args calls before "stuck"
+  # Identical tool+args calls before "stuck". Raised from 3: the check also
+  # requires the working tree to have stood still, so a higher bar costs little
+  # and 3 was firing on ordinary iteration.
+  doom_loop_repeats: 5
   budget_tokens: 0          # 0 = unlimited; otherwise tree-wide ceiling
 
   # `start_agent(workdir=...)` puts an agent in a directory of its choosing
