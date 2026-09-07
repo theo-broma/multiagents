@@ -3795,3 +3795,69 @@ def test_a_tool_result_is_not_mistaken_for_someone_talking(tmp_path):
         handle.write(json.dumps(
             {"type": "user", "message": {"content": "do the thing"}}) + "\n")
     assert has_human_turn(provider, Path("/logs")) is True
+
+
+def test_an_unexpected_end_is_retried_interactively_before_anything_headless(
+        tmp_path, monkeypatch, capsys):
+    """The requested behaviour: wait, then start it again with an opening
+    message, while a person can still see it."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    launches, slept = [], []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
+
+    codes = iter([3, 3, 0])          # crash, crash, then the user quits
+    def attached(argv, env):
+        launches.append(env.get("MULTIAGENTS_RESUME_PROMPT"))
+        return next(codes)
+    monkeypatch.setattr(cli, "_run_attached", attached)
+
+    config = Config(project={"limits": {"restart_attempts": 5,
+                                        "restart_delay_seconds": 30}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    result = cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+                                 None, None, {}, [], {})
+
+    assert result == 0, "a clean quit on a retry ends the loop"
+    assert launches[0] is None, "the first launch is the ordinary one"
+    assert all("ended unexpectedly" in p for p in launches[1:]), launches
+    assert slept == [30, 30], "waits between attempts"
+
+
+def test_retrying_gives_up_rather_than_looping_forever(tmp_path, monkeypatch):
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: 3)
+    handed = []
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
+
+    config = Config(project={"limits": {"restart_attempts": 2,
+                                        "restart_delay_seconds": 0}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+                               None, None, {}, [], {}) == 1
+    assert handed == [], "a crash never falls through to unattended"
+
+
+def test_the_parent_ignores_the_signal_that_takes_the_terminal(tmp_path):
+    """SIGHUP reaches the whole foreground group. A parent that dies with the
+    terminal can do none of the deciding it exists to do — and the child still
+    gets the default, because a handler is reset on exec while SIG_IGN is not."""
+    import inspect
+    import multiagents.cli as cli
+
+    source = inspect.getsource(cli._run_attached)
+    assert "signal.SIGHUP" in source
+    # The prose explains why SIG_IGN is wrong; what matters is that it is not
+    # what gets installed.
+    assert "signal.signal(sig, signal.SIG_IGN)" not in source

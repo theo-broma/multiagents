@@ -58,6 +58,14 @@ launch)
             echo "no previous conversation in this directory; starting a fresh one" >&2
         fi
     fi
+    # A restarted interactive session opens with a message instead of waiting
+    # for one to be typed. `claude [options] [prompt]` is interactive WITH a
+    # first user turn; `-p` is the non-interactive form and belongs only to the
+    # unattended path below.
+    if [ "${MULTIAGENTS_UNATTENDED:-0}" != "1" ] && [ -n "${MULTIAGENTS_RESUME_PROMPT:-}" ]; then
+        set -- "$@" "$MULTIAGENTS_RESUME_PROMPT"
+    fi
+
     # Unattended: one non-interactive turn, so the supervisor above can decide
     # whether to run another. `-p` IS headless — it prints and exits — which is
     # exactly right here and exactly wrong for the interactive path, where it

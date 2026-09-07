@@ -177,6 +177,15 @@ limits:
   # editing a file, and an agent cannot grant it to itself.
   allow_workdir_override: false
 
+  # When the orchestrator ends for a reason that was not you — a crash, or a
+  # terminal that went away — `run` waits and starts it again, interactively,
+  # with an opening message asking it to take stock. Interactive on purpose:
+  # a session you can see is one you can stop, which is what makes retrying an
+  # unknown state reasonable at all. With no terminal left to write to it falls
+  # through to the headless loop instead.
+  restart_attempts: 5
+  restart_delay_seconds: 60
+
 # --------------------------------------------------------------------------
 # Quota awareness. Used to route work away from a rationed provider and toward
 # one with headroom, and to park tasks until a bucket resets.

@@ -123,6 +123,17 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
     }
 
 
+# Sent as the opening message of a RESTARTED interactive session. Shorter and
+# blunter than the headless nudge: a person is watching this one, and the first
+# thing it needs to establish is what survived.
+RESUME_PROMPT = (
+    "Your previous session ended unexpectedly. Take stock before doing anything: "
+    "check the tree for agents that were interrupted, read any open questions "
+    "and tickets, and look for branches holding work committed as WIP by the "
+    "recovery — that work may be mid-edit and is not a finished result. Then "
+    "say what you found and what you propose to do."
+)
+
 NUDGE = (
     "Continue where you left off. Before anything else: read list_tickets and "
     "list_questions, answer what is within your remit, and check whether any "
@@ -164,7 +175,8 @@ def _run_attached(argv, env) -> int:
     * stdio is inherited and **no new session** is created, so the child stays
       in the terminal's foreground process group. A new session would leave it
       unable to read stdin — its first read would raise SIGTTIN and stop it.
-    * SIGINT and SIGQUIT get a do-nothing *handler* here rather than SIG_IGN.
+    * SIGINT, SIGQUIT and SIGHUP get a do-nothing *handler* here rather than
+      SIG_IGN.
       The distinction is the whole thing: SIG_IGN is inherited across exec, so
       ignoring them here made the child ignore them too and Ctrl-C stopped
       reaching the orchestrator entirely. A handler is reset to the default on
@@ -175,7 +187,11 @@ def _run_attached(argv, env) -> int:
     """
     saved = _terminal_state()
     previous = {}
-    for sig in (signal.SIGINT, signal.SIGQUIT):
+    # SIGHUP included: when the terminal goes away it reaches the whole
+    # foreground group, and a parent that dies with it can do none of the
+    # deciding it exists to do. The child still gets the default disposition,
+    # because a handler — unlike SIG_IGN — is reset on exec.
+    for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGHUP):
         try:
             previous[sig] = signal.signal(sig, lambda *_: None)
         except (ValueError, OSError):
@@ -330,6 +346,36 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     if deliberate:
         print(f"\n{why}.")
         return 0 if code == 0 else 1
+
+    # A terminal we can still write to means a person can watch this and stop
+    # it, which is what makes retrying an unknown state acceptable at all.
+    attempts = int(config.limits.get("restart_attempts", 5))
+    delay = float(config.limits.get("restart_delay_seconds", 60))
+    for attempt in range(1, attempts + 1):
+        if not sys.stdin.isatty():
+            break
+        print(f"\n{role} {why}. Retrying in {delay:.0f}s "
+              f"({attempt}/{attempts}) — Ctrl-C to stop.")
+        try:
+            time.sleep(delay)
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            return 0
+
+        held = _orchestrator_hold(paths, config)
+        if held is not None:
+            detail, resets_at = held
+            print(f"\n{detail}")
+            if not _wait_for_reset(paths, config, resets_at):
+                return 3
+
+        retry_env = {**env, "MULTIAGENTS_RESUME": "1",
+                     "MULTIAGENTS_RESUME_PROMPT": RESUME_PROMPT}
+        code = _run_attached(argv, retry_env)
+        deliberate, why = _exit_was_deliberate(code)
+        if deliberate:
+            print(f"\n{why}.")
+            return 0 if code == 0 else 1
 
     if code not in (-signal.SIGHUP, 129):
         # A crash is a hard stop. A non-zero exit means an unhandled error and
