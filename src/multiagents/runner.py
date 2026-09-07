@@ -19,6 +19,8 @@ Two rules shape the interface:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import signal
 import hashlib
 import json
 import os
@@ -717,18 +719,14 @@ class Runner:
             # a log later.
             reason = ("stopped by parent" if run.stop_requested
                       else "interrupted: the server exited while this agent was running")
-            # Commit here as well as on the normal path. The commit below is
-            # past this re-raise, so an agent killed with the server — which is
-            # what happens to every in-flight agent when the orchestrator's own
-            # quota ends its session — used to leave its work uncommitted in a
-            # worktree nobody opens again. Synchronous on purpose: the event
-            # loop may already be shutting down, so there is nothing left to
-            # await with.
-            node = self.tree.get(node_id)
-            if node and node.branch and Path(node.worktree).is_dir():
-                gitops.commit_all(Path(node.worktree),
-                                  f"{node.agent}: work in progress when {reason.split(':')[0]}"
-                                  f" ({node_id})")
+            # Deliberately NOT committing here. gitops shells out with a
+            # two-minute timeout, and a git call in a teardown running on a
+            # closing event loop can hang the shutdown it is part of. The work
+            # is preserved instead by whoever cleans up afterwards — `run`
+            # reconciles interrupted agents and `multiagents stop` commits
+            # before it ends them — both with time, a live loop, and enough
+            # information to label the commit as an interruption rather than a
+            # result.
             self.tree.set_status(node_id, "cancelled", reason)
             raise
         except Exception as exc:
@@ -1027,6 +1025,28 @@ class Runner:
         return payload
 
     # ---------------------------------------------------------------- control --
+
+    def stop_detached(self, node) -> bool:
+        """Kill an agent this process never started, synchronously.
+
+        Agents run in their own session so that stopping one also stops the
+        shells and test runners beneath it. The same property means they
+        outlive a server that died without cleaning up, and a recovery has to
+        reach them from outside — through the container for a docker agent,
+        because killing the `docker exec` client would leave the agent inside
+        running.
+        """
+        executor = self.executor(self.config.agents.get(node.agent))
+        if getattr(executor, "kind", "local") == "docker":
+            with contextlib.suppress(Exception):
+                if executor.kill_detached(node.id):
+                    return True
+        if not node.pid:
+            return False
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(node.pid), signal.SIGTERM)
+            return True
+        return False
 
     async def stop(self, agent_id: str) -> dict[str, Any]:
         run = self.runs.get(agent_id)

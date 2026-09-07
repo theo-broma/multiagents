@@ -331,8 +331,20 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         print(f"\n{why}.")
         return 0 if code == 0 else 1
 
+    if code not in (-signal.SIGHUP, 129):
+        # A crash is a hard stop. A non-zero exit means an unhandled error and
+        # therefore unknown state; carrying on unattended, with agents that hold
+        # bypass permissions, turns one controlled failure into an unsupervised
+        # sequence of them. A lost terminal is different in kind — the process
+        # was healthy and its window went away.
+        print(f"\n{role} {why}. Not continuing: a crash leaves the state "
+              f"unknown,\nand carrying on unattended would build on it. "
+              f"`multiagents status` has\nthe last observation; `multiagents "
+              f"run` starts again when you have looked.")
+        return 1
+
     print(f"\n{role} ended unexpectedly: {why}.")
-    print("Carrying on headlessly — the terminal may be gone, so an interactive")
+    print("Carrying on headlessly — the terminal is gone, so an interactive")
     print("relaunch would have nowhere to run. `multiagents stop` ends it;")
     print("`multiagents status` says what it is doing.")
     # The unattended loop already waits out a quota reset, backs off on repeated
@@ -1059,14 +1071,63 @@ def _wait_for_reset(paths, config, until: float | None, poll: int = 120) -> bool
         print(f"  {stamp}  still no headroom")
 
 
+def _reaper(paths):
+    """A Runner used only to reach detached processes. Built once, lazily."""
+    if not hasattr(_reaper, "_cache") or _reaper._cache[0] != paths.root:
+        _reaper._cache = (paths.root, Runner(paths, load_config(paths)))
+    return _reaper._cache[1]
+
+
+def _alive_pid(paths, role: str) -> bool:
+    path = _pid_file(paths, role)
+    try:
+        return _alive(int(path.read_text().strip()))
+    except (OSError, ValueError):
+        return False
+
+
+INTERRUPTED_COMMIT = (
+    "WIP: {agent} interrupted before it finished ({agent_id})\n\n"
+    "Committed by multiagents so the work is not lost, NOT by the agent. The "
+    "tree may be mid-edit and syntactically broken through no fault of the "
+    "agent — treat it as a checkpoint to inspect, never as a finished result."
+)
+
+
+def _save_interrupted(node) -> bool:
+    """Commit an interrupted agent's worktree, marked as what it is.
+
+    A cancelled node is TERMINAL, and `clean --branches` removes worktrees for
+    terminal nodes — so "leave it dirty, worktrees are disposable" would mean
+    the next routine cleanup deletes it with no record it existed.
+
+    The message matters as much as the commit. Without it the orchestrator can
+    pick the branch up later, run tests against half-written files, and spend
+    tokens debugging syntax errors caused entirely by the termination.
+    """
+    worktree = Path(node.worktree) if node.worktree else None
+    if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree):
+        return False
+    if not gitops.is_dirty(worktree):
+        return False
+    result = gitops.commit_all(worktree, INTERRUPTED_COMMIT.format(
+        agent=node.agent, agent_id=node.id))
+    return bool(result.ok)
+
+
 def cmd_resume(args: argparse.Namespace) -> int:
     """Reconcile state after a crash or restart, then reopen the session."""
     paths = _resolve(args.path)
     tree = Tree(paths.tree_file, paths.events_file)
 
-    # A local agent dies with the server that spawned it (own process group), so
-    # anything still marked running after a restart is gone, not working.
-    reclaimed = 0
+    # Agents are started with start_new_session=True, so that stopping one also
+    # stops the shells and test runners beneath it — which means they are in
+    # their OWN session and do NOT die with the server. On a clean teardown the
+    # cancellation handler kills each group; after a crash nothing runs, and
+    # they keep going with their output going nowhere. So this reconciles two
+    # different states: processes that are gone, and processes that should be.
+    orchestrator_live = _alive_pid(paths, "orchestrator")
+    reclaimed, reaped, saved = 0, 0, 0
     for node in tree.active():
         alive = False
         if node.pid:
@@ -1075,13 +1136,34 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 alive = True
             except (ProcessLookupError, PermissionError):
                 alive = False
-        if not alive:
-            tree.set_status(node.id, "orphaned", "process gone; server restarted")
-            reclaimed += 1
+        if alive and not orchestrator_live:
+            # An orphan: nobody is reading its stream, so it is spending tokens
+            # into a closed pipe. Leaving it running would also let it mutate a
+            # worktree the next session is about to work in.
+            try:
+                _reaper(paths).stop_detached(node)
+                reaped += 1
+            except Exception as exc:
+                print(f"  could not stop {node.id}: {exc}", file=sys.stderr)
+        elif alive:
+            continue                        # another session owns it
+        tree.set_status(node.id, "orphaned",
+                        "reaped: left running by a server that is gone" if alive
+                        else "process gone; server restarted")
+        reclaimed += 1
+        # Committed HERE rather than in the cancellation handler: this runs with
+        # time, a live loop and full information, where a teardown has none of
+        # those and a git call in it can hang for its whole timeout.
+        if _save_interrupted(node):
+            saved += 1
 
     print(tree.render())
     if reclaimed:
         print(f"\nreclaimed    {reclaimed} agent(s) whose process no longer exists")
+    if reaped:
+        print(f"reaped       {reaped} orphaned agent process(es) still running")
+    if saved:
+        print(f"committed    interrupted work in {saved} worktree(s)")
 
     data = tree.read()
     stale = [

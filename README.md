@@ -996,10 +996,40 @@ learn that a pid went away, and `/exit` and a dropped connection look identical.
 | `SIGHUP` / 129 | **the terminal was lost** — a closed window, a dropped connection |
 | anything else | **it crashed** |
 
-The first three end quietly. The last two hand over to the unattended loop,
-which waits out a quota reset, retries with backoff and stops when two turns
-change nothing. Headless deliberately: if the terminal is gone, an interactive
-relaunch has nowhere to run. `--no-supervise` restores the old exec behaviour.
+The first three end quietly. **Only a lost terminal hands over** to the
+unattended loop, which waits out a quota reset, retries with backoff and stops
+when two turns change nothing. Headless deliberately: if the terminal is gone,
+an interactive relaunch has nowhere to run. `--no-supervise` restores the old
+exec behaviour.
+
+**A crash is a hard stop.** A non-zero exit means an unhandled error and
+therefore unknown state, and carrying on unattended — with agents that hold
+bypass permissions — turns one controlled failure into an unsupervised sequence
+of them. A lost terminal is different in kind: the process was healthy and its
+window went away.
+
+Before any session starts, `run` reconciles what a previous one left. Agents are
+spawned in their own session so that stopping one also stops the shells and test
+runners beneath it — which means they **outlive a server that crashed**. Those
+orphans are reaped (through the container for a docker agent, since killing the
+`docker exec` client would leave the agent inside running), unless another
+session is live, in which case they are left to their owner.
+
+Their work is committed at that point, not during teardown: `gitops` shells out
+with a two-minute timeout and a git call on a closing event loop can hang the
+shutdown it is part of. The commit is labelled for what it is —
+
+```
+WIP: implementer interrupted before it finished (ag-1)
+
+Committed by multiagents so the work is not lost, NOT by the agent. The tree
+may be mid-edit and syntactically broken through no fault of the agent — treat
+it as a checkpoint to inspect, never as a finished result.
+```
+
+— because an orchestrator that picks the branch up later must not run tests
+against half-written files and spend tokens debugging syntax errors the
+termination caused.
 
 Four details make a spawned child behave like the exec it replaces, and the
 third is the one that bit:
@@ -1364,7 +1394,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-222 tests covering the parts live runs do not reliably exercise: doom-loop
+227 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
