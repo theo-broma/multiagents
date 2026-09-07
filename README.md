@@ -817,7 +817,10 @@ that reason.
   which matters: it is the one credential that is not a readable file, so
   withholding it genuinely prevents an agent authenticating or pushing as you.
 - **Per-agent `HOME`** with only that provider's state linked in, so an opencode
-  agent cannot read Claude's or agy's stored tokens.
+  agent does not *pick up* Claude's or agy's tokens by accident. It is not a
+  boundary: on the local executor the agent is you, and in a container the
+  credential mounts sit at their host paths, so a model with a shell can read
+  them deliberately. See "What is *not* protected".
 - **Redaction is structural** — every byte written to disk or returned through a
   tool passes through `scrub()`, which masks secret-shaped strings, secret-named
   keys, and any literal registered as sensitive. It lives in the writer, so no
