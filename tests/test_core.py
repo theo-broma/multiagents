@@ -3159,3 +3159,94 @@ def test_container_names_are_split_into_slug_and_role(monkeypatch):
     assert by_name["multiagents-proxy-voila-346f8a7b"]["slug"] == "voila-346f8a7b"
     assert by_name["multiagents-proxy-voila-346f8a7b"]["proxy"] is True
     assert by_name["multiagents-old-1234abcd"]["status"].startswith("Exited")
+
+
+# --------------------------------------------------------------------------
+# stop
+#
+# The counterpart to run. Resumable is the requirement: processes end, state
+# does not.
+
+
+def test_stop_commits_what_a_killed_agent_left_behind(tmp_path, quiet_git,
+                                                      monkeypatch, capsys):
+    """A killed agent never reaches the commit its own run would have made, so
+    its edits sit uncommitted in a worktree nobody looks at again. The branch
+    is what makes the work resumable, so the work has to be on it."""
+    import argparse
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+    from multiagents.tree import Node
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+
+    paths = cli._resolve(str(tmp_path))
+    worktree = tmp_path / ".." / "wt-stop"
+    gitops.create_worktree(tmp_path, worktree.resolve(), "agents/napper/1")
+    (worktree.resolve() / "half-finished.txt").write_text("in progress\n")
+
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-1", agent="napper", provider="p", model="m",
+                  parent=None, depth=1, status="running", pid=0,
+                  branch="agents/napper/1", worktree=str(worktree.resolve())))
+
+    monkeypatch.setattr(cli.Runner, "stop", _noop_stop)
+    cli.cmd_stop(argparse.Namespace(path=str(tmp_path), keep_containers=True))
+
+    assert "committed" in capsys.readouterr().out
+    log = gitops.run(tmp_path, "log", "--oneline", "agents/napper/1").out
+    assert "when stopped" in log, log
+
+
+async def _noop_stop(self, agent_id):
+    self.tree.set_status(agent_id, "cancelled", "stopped by parent")
+    return {"agent_id": agent_id, "status": "cancelled"}
+
+
+def test_stop_leaves_the_state_that_makes_a_resume_possible(tmp_path, quiet_git,
+                                                            monkeypatch):
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Node
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-1", agent="napper", provider="p", model="m",
+                  parent=None, depth=1, status="running",
+                  session_id="ses-keep-me", branch="agents/napper/1"))
+    tree.add_question("ag-1", "topic", "a question nobody answered")
+    tree.defer({"agent": "napper", "task": "later"}, 0, "quota")
+
+    monkeypatch.setattr(cli.Runner, "stop", _noop_stop)
+    cli.cmd_stop(argparse.Namespace(path=str(tmp_path), keep_containers=True))
+
+    node = tree.get("ag-1")
+    assert node.session_id == "ses-keep-me", "without it nothing can resume"
+    assert node.branch == "agents/napper/1"
+    assert len(tree.open_questions()) == 1
+    assert len(tree.read()["deferred"]) == 1
+
+
+def test_stop_ends_the_thing_that_starts_more_agents(tmp_path, quiet_git,
+                                                     monkeypatch, capsys):
+    """Stopping the agents and leaving the orchestrator running would have it
+    start replacements within the minute."""
+    import argparse
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+
+    signalled = []
+    cli._write_pid(paths, "orchestrator", 4242)
+    monkeypatch.setattr(cli, "_alive", lambda pid: True)
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: signalled.append((pid, sig)))
+
+    cli.cmd_stop(argparse.Namespace(path=str(tmp_path), keep_containers=True))
+    assert (4242, cli.signal.SIGTERM) in signalled
+    assert not cli._pid_file(paths, "orchestrator").exists(), "stale pid removed"
+    assert "orchestrator (pid 4242)" in capsys.readouterr().out
