@@ -248,6 +248,37 @@ class Tree:
             cursor = nodes[cursor].get("parent")
         return list(reversed(chain))
 
+    def usage_by_model(self) -> list[dict[str, Any]]:
+        """Spend and tokens per provider/model, from our own stream accounting.
+
+        The providers do not offer this: opencode's usage endpoint reports three
+        whole-account windows and no breakdown, and agy reports nothing at all.
+        We already parse per-run usage out of every stream, so the finer figure
+        is ours to compute — and it is more useful than a vendor's would be,
+        because it is joined to the agent that spent it.
+        """
+        rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for node in self.read()["nodes"].values():
+            usage = node.get("usage") or {}
+            if not usage:
+                continue
+            key = (node.get("provider") or "?", node.get("model") or "?")
+            row = rows.setdefault(key, {
+                "provider": key[0], "model": key[1], "runs": 0,
+                "tokens": 0, "cost_usd": 0.0, "agents": set(),
+            })
+            row["runs"] += 1
+            row["agents"].add(node.get("agent") or "?")
+            row["tokens"] += int(usage.get("total") or usage.get("total_tokens") or 0)
+            row["cost_usd"] += float(usage.get("cost_usd") or 0)
+        out = []
+        for row in rows.values():
+            row["agents"] = sorted(row["agents"])
+            row["cost_usd"] = round(row["cost_usd"], 6)
+            out.append(row)
+        out.sort(key=lambda r: (-r["cost_usd"], -r["tokens"]))
+        return out
+
     def rollup_usage(self, agent_id: str | None = None) -> dict[str, int]:
         """Total token usage for the whole tree, or one subtree."""
         nodes = self.read()["nodes"]

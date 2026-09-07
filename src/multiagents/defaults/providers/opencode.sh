@@ -29,11 +29,79 @@ login)
     exec "$BIN" providers login
     ;;
 budget)
-    # opencode exposes no headroom surface even with an active Go subscription:
-    # no subcommand, no local state, and `stats` reports $0.00 because
-    # subscription models are not billed per token. Spend is tracked from the
-    # event stream instead.
-    printf '{"known": false, "note": "no quota surface; spend tracked from the stream"}\n'
+    # The Go subscription serves real headroom over HTTP:
+    #   GET https://opencode.ai/zen/go/v1/usage   Authorization: Bearer <key>
+    # returning percent-used and a reset time for three windows (rolling,
+    # weekly, monthly). No browser, no cookies, no HTML.
+    #
+    # There is no per-model breakdown — /zen/go/v1/usage/{models,detail,
+    # breakdown,history} are all 404 and /zen/go/v1/models is an
+    # OpenAI-style catalogue with no usage in it. Per-model figures come from
+    # our own stream accounting instead, which is finer-grained anyway.
+    #
+    # The key is read from opencode's own auth store and passed in a header. It
+    # is never printed, and curl gets it via --config so it cannot appear in
+    # the process list either.
+    auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+    [ -f "$auth" ] || {
+        printf '{"known": false, "note": "no opencode auth store; run `opencode auth login`"}\n'
+        exit 0; }
+    key=$(python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit
+for name in ('opencode-go', 'opencode'):
+    entry = data.get(name) or {}
+    if entry.get('key'):
+        print(entry['key']); break
+" "$auth" 2>/dev/null)
+    [ -n "$key" ] || {
+        printf '{"known": false, "note": "no opencode-go key; free tier has no quota surface"}\n'
+        exit 0; }
+
+    body=$(printf 'header = "Authorization: Bearer %s"\n' "$key" \
+        | curl -sS --max-time 12 --config - https://opencode.ai/zen/go/v1/usage 2>/dev/null)
+    [ -n "$body" ] || {
+        printf '{"known": false, "note": "usage endpoint unreachable"}\n'
+        exit 0; }
+
+    printf '%s' "$body" | python3 -c "
+import json, sys
+
+try:
+    windows = (json.load(sys.stdin).get('usage') or {})
+except Exception:
+    print(json.dumps({'known': False, 'note': 'usage endpoint returned no json'}))
+    raise SystemExit
+
+# Headroom is the WORST window: whichever bucket is closest to full is the one
+# that will actually stop a run, and reporting the roomiest would route work
+# at a wall.
+worst, best_pct = None, -1.0
+detail = {}
+for name, w in windows.items():
+    if not isinstance(w, dict) or w.get('percent') is None:
+        continue
+    pct = float(w['percent'])
+    detail[name] = {'percent': pct, 'resets_at': w.get('resetsAt')}
+    if pct > best_pct:
+        worst, best_pct = name, pct
+
+if worst is None:
+    print(json.dumps({'known': False, 'note': 'usage endpoint reported no windows'}))
+    raise SystemExit
+
+print(json.dumps({
+    'known': True,
+    'headroom': round(max(0.0, 1.0 - best_pct / 100.0), 4),
+    'resets_at': detail[worst]['resets_at'],
+    'source': 'opencode.ai/zen/go/v1/usage',
+    'note': '%s window is the constraint at %.0f%% used' % (worst, best_pct),
+    'windows': detail,
+}))
+"
     exit 0
     ;;
 prepare)

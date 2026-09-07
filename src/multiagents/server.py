@@ -629,10 +629,17 @@ def budget_status() -> dict:
     """Report quota headroom and spend per provider, and what it implies.
 
     `known: false` means spend is tracked but capacity is not — never treat that
-    as "plenty left". Claude exposes real subscription state; agy exposes none
-    (exhaustion is detected reactively); opencode reports no headroom but does
-    report real per-step dollar cost, which is accumulated here and matches the
-    figures on its web console's usage page.
+    as "plenty left". Claude and opencode expose real subscription state; agy
+    exposes none, so its exhaustion is only detected reactively.
+
+    opencode reports three windows — rolling, weekly, monthly — under
+    `windows`. `headroom` is the worst of them, because the fullest bucket is
+    what will actually stop a run, but which one it is changes what to do: a
+    rolling window clears in hours, a monthly one does not.
+
+    `by_model` breaks spend down per provider/model from our own stream
+    accounting, joined to the agents that spent it. No provider offers that, and
+    it is what tells you whether an expensive pin is earning its cost.
 
     Use this to route: when your own five-hour bucket is tight, delegating to an
     unrationed provider is the highest-value thing you can do.
@@ -667,6 +674,7 @@ def budget_status() -> dict:
     return _ok({
         "providers": {k: v.to_dict() for k, v in budgets.items()},
         "tree_usage": run.tree.rollup_usage(),
+        "by_model": run.tree.usage_by_model(),
         "deferred_tasks": len(data.get("deferred", [])),
         "advice": advice or ["all providers have headroom"],
     })

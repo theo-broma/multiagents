@@ -741,6 +741,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         data = entry.to_dict()
         if data.get("known"):
             print(f"  {name:12} {data['used_percent']}% used, resets {data.get('resets_at','?')}")
+            # Which bucket is the constraint changes what to do about it: a
+            # rolling window clears in hours, a monthly one does not.
+            for window, detail in sorted((data.get("windows") or {}).items()):
+                print(f"  {'':12}   {window:8} {detail.get('percent', '?'):>5}%  "
+                      f"resets {str(detail.get('resets_at', '?'))[:19]}")
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
 
@@ -1180,6 +1185,41 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_usage(args: argparse.Namespace) -> int:
+    """Where this project's tokens and dollars actually went.
+
+    Per provider/model rather than per provider, because that is the level at
+    which a pin is a decision: no provider reports it, but we parse every
+    stream, so it is ours to compute.
+    """
+    paths = _resolve(args.path)
+    rows = Tree(paths.tree_file, paths.events_file).usage_by_model()
+    if not rows:
+        print("No usage recorded yet.")
+        return 0
+
+    total_cost = sum(r["cost_usd"] for r in rows)
+    total_tokens = sum(r["tokens"] for r in rows)
+    print(f"{'provider/model':42} {'runs':>4} {'tokens':>12} {'cost':>9}  share")
+    for r in rows:
+        share = (100 * r["cost_usd"] / total_cost) if total_cost else 0
+        bar = "#" * int(share / 4)
+        print(f"{r['provider'] + '/' + r['model']:42} {r['runs']:>4} "
+              f"{r['tokens']:>12,} ${r['cost_usd']:>8.4f}  {share:4.0f}% {bar}")
+        if args.agents:
+            print(f"{'':42}      {', '.join(r['agents'])}")
+    print(f"\n{'total':42} {sum(r['runs'] for r in rows):>4} "
+          f"{total_tokens:>12,} ${total_cost:>8.4f}")
+
+    # A provider that bills per token and one that does not are not comparable,
+    # so say which is which rather than letting a $0.00 row read as free.
+    free = [r["provider"] for r in rows if r["cost_usd"] == 0]
+    if free:
+        print(f"\n{', '.join(sorted(set(free)))} report no per-token cost "
+              f"(subscription); their tokens are real but their dollars are not.")
+    return 0
+
+
 def cmd_tickets(args: argparse.Namespace) -> int:
     """Review and submit bug tickets the agents filed against multiagents.
 
@@ -1473,6 +1513,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true",
                    help="remove even when a worktree holds uncommitted work")
     p.set_defaults(func=cmd_uninstall)
+
+    p = sub.add_parser("usage", help="tokens and cost per provider/model")
+    p.add_argument("--agents", action="store_true", help="name the agents behind each row")
+    p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")
     p.add_argument("action", nargs="?", default="list",
