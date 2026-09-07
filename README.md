@@ -24,12 +24,17 @@ make install             # dependencies, the `multiagents` command on PATH,
                          # global config, MCP registration
 make check               # are the agent CLIs present and authenticated?
 
-multiagents init         # create the project, copy the global config
+multiagents init         # create the project, copy the global config, choose the executor
+multiagents build        # container images if this project uses docker, then authenticate
 multiagents init-agent   # shape it with the initializer — resumable, takes as long as it takes
-multiagents build        # container environment, then authenticate every provider
 multiagents run          # launch the orchestrator; first run and resume are the same command
 multiagents stop         # halt everything for this project, resumably
 ```
+
+`build` comes before `init-agent`, not after: the initializer is told to
+consult the critic and the advisor, and a consult spawns an agent, so on a
+docker project it needs the images too. Both commands check for them and refuse
+with the fix named rather than failing partway through a conversation.
 
 `run` continues the last session where there is one and starts fresh where there
 is not, so it is the same command either way. `--fresh` forces a new session,
@@ -1213,7 +1218,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-202 tests covering the parts live runs do not reliably exercise: doom-loop
+203 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
