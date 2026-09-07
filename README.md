@@ -961,6 +961,32 @@ under 100 while coders reach 768. The default is now 250, `implementer` and
 `limits.max_steps` in `project.yaml` is now actually read — it was documented
 and ignored, with only the built-in default applying.
 
+## When the orchestrator itself runs out
+
+Two different moments, and only one of them was handled.
+
+**Before launching**, `run` reads the orchestrator provider's headroom and
+refuses with the reset time rather than letting the CLI fail with an opaque
+error. `run --wait` blocks until the quota is back.
+
+**Mid-session** nothing in multiagents notices, and this is structural rather
+than an oversight: the orchestrator *is* the process — `run` execs into it — so
+there is no supervisor left to watch it. What follows depends on the CLI. If it
+merely refuses further turns, the session sits idle and the agents already
+running carry on, since they are separate processes on their own providers. If
+it exits, the MCP server it hosts exits with it, and every in-flight agent is
+cancelled and recorded as `interrupted: the server exited while this agent was
+running`.
+
+That last case used to lose work. The commit an agent's run makes sits after
+the re-raise in the cancellation handler, so an agent killed with the server
+left its edits uncommitted in a worktree nobody opens again. It now commits on
+that path too, synchronously, because the event loop may already be shutting
+down and there is nothing left to await with.
+
+So an orchestrator that runs out mid-session costs you the session and not the
+work: branches carry what each agent had done, and `multiagents run` resumes.
+
 ## Stopping
 
 ```bash
@@ -1218,7 +1244,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-203 tests covering the parts live runs do not reliably exercise: doom-loop
+204 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

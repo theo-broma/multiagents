@@ -717,6 +717,18 @@ class Runner:
             # a log later.
             reason = ("stopped by parent" if run.stop_requested
                       else "interrupted: the server exited while this agent was running")
+            # Commit here as well as on the normal path. The commit below is
+            # past this re-raise, so an agent killed with the server — which is
+            # what happens to every in-flight agent when the orchestrator's own
+            # quota ends its session — used to leave its work uncommitted in a
+            # worktree nobody opens again. Synchronous on purpose: the event
+            # loop may already be shutting down, so there is nothing left to
+            # await with.
+            node = self.tree.get(node_id)
+            if node and node.branch and Path(node.worktree).is_dir():
+                gitops.commit_all(Path(node.worktree),
+                                  f"{node.agent}: work in progress when {reason.split(':')[0]}"
+                                  f" ({node_id})")
             self.tree.set_status(node_id, "cancelled", reason)
             raise
         except Exception as exc:

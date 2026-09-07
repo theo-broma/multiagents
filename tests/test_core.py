@@ -3336,3 +3336,40 @@ def test_init_agent_makes_the_same_checks_as_run(tmp_path, quiet_git, monkeypatc
 
     args = argparse.Namespace(path=str(tmp_path), resume=True, wait=False)
     assert cli.cmd_init_agent(args) == 4
+
+
+def test_an_agent_killed_with_the_server_keeps_its_work(tmp_path, quiet_git):
+    """The root of what happens when the orchestrator's quota ends a session.
+
+    The orchestrator IS the process the MCP server runs under, so its death
+    takes every in-flight agent with it. The commit on the normal path sits
+    past the re-raise in the cancellation handler, so that work used to be
+    left uncommitted in a worktree nobody opens again.
+    """
+    import asyncio
+    import multiagents.gitops as gitops
+
+    r = _runner(tmp_path, {"napper": AgentSpec("napper", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "sleep 30"]}}})
+
+    async def scenario():
+        started = await r.start("napper", "nap")
+        await asyncio.sleep(0.5)               # let _consume reach its try block
+        node = r.tree.get(started["agent_id"])
+        # what an agent would have written before the session ended
+        (Path(node.worktree) / "in-progress.py").write_text("half a change\n")
+        run = r.runs[node.id]
+        run.task.cancel()                      # the server going away
+        try:
+            await run.task
+        except asyncio.CancelledError:
+            pass
+        return node
+
+    node = asyncio.run(scenario())
+
+    assert r.tree.get(node.id).status == "cancelled"
+    assert "interrupted" in r.tree.get(node.id).reason
+    log = gitops.run(tmp_path, "log", "--oneline", node.branch).out
+    assert "work in progress" in log, f"work was lost: {log}"
+    assert not gitops.is_dirty(Path(node.worktree)), "nothing left uncommitted"
