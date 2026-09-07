@@ -18,6 +18,8 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -85,6 +87,7 @@ class Tree:
     def __init__(self, tree_file: Path, events_file: Path):
         self.path = tree_file
         self.events_path = events_file
+        self.backup_path = tree_file.with_name(tree_file.name + ".bak")
         self.lock_path = tree_file.with_suffix(".lock")
 
     # ------------------------------------------------------------------ io --
@@ -101,9 +104,8 @@ class Tree:
             with self.path.open() as handle:
                 data = json.load(handle)
         except (json.JSONDecodeError, OSError):
-            # A truncated tree is recoverable: the runs/ directory and
-            # events.jsonl hold the real history, so start clean rather than
-            # wedging every future call.
+            data = self._recover()
+        if data is None:
             return self._empty()
         data.setdefault("nodes", {})
         data.setdefault("deferred", [])
@@ -113,12 +115,82 @@ class Tree:
         data.setdefault("tickets", [])
         return data
 
+    def _recover(self) -> dict | None:
+        """Fall back to the previous copy after a corrupt read, loudly.
+
+        Emptying the tree silently was the old behaviour, and it is the worst
+        possible one: every session id, open question, queued ticket and
+        deferred task disappears, and the next command reports a clean project
+        as though nothing had been lost. The damaged file is kept, because the
+        first thing anyone will want is to see what was in it.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        kept = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        try:
+            shutil.copy2(self.path, kept)
+        except OSError:
+            kept = None
+
+        restored = None
+        if self.backup_path.is_file():
+            try:
+                with self.backup_path.open() as handle:
+                    restored = json.load(handle)
+            except (json.JSONDecodeError, OSError):
+                restored = None
+
+        where = f" kept at {kept.name}" if kept else ""
+        if restored is not None:
+            # Heal it. Without writing the recovery back, every later read
+            # re-recovers and re-warns — and the project stays one bad read away
+            # from the empty case for as long as the damaged file sits there.
+            # Safe here: _read_unlocked only ever runs while the lock is held.
+            try:
+                self._write_unlocked(restored)
+            except OSError:
+                pass
+            print(f"multiagents: {self.path} was unreadable{where}; recovered "
+                  f"{len(restored.get('nodes', {}))} agent(s) from "
+                  f"{self.backup_path.name}", file=sys.stderr)
+        else:
+            print(f"multiagents: {self.path} was unreadable and no usable backup "
+                  f"exists{where}. Starting from an empty tree — sessions, open "
+                  f"questions and deferred work from before this point are lost. "
+                  f"events.jsonl still holds the history.", file=sys.stderr)
+        return restored
+
     def _write_unlocked(self, data: dict) -> None:
+        """Replace the tree, durably, keeping the previous copy.
+
+        `os.replace` is atomic, so no reader ever sees half a file — but atomic
+        is not durable. Without the fsync below, a power cut can land the rename
+        while the temp file's *contents* are still in the page cache, leaving a
+        zero-length tree. The directory is synced too, or the rename itself can
+        be lost.
+
+        The `.bak` is the second half: fsync narrows the window and cannot close
+        it, so there has to be something to fall back to.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.is_file() and self.path.stat().st_size > 0:
+            try:
+                shutil.copy2(self.path, self.backup_path)
+            except OSError:
+                pass                      # a missing backup must not stop a write
         tmp = self.path.with_suffix(".tmp")
         with tmp.open("w") as handle:
             json.dump(scrub(data), handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, self.path)
+        try:
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass                          # not all filesystems allow it
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[Any]:
@@ -217,6 +289,7 @@ class Tree:
         agents streaming at once that is lock contention on the one file every
         nested server shares. The reader batches; this writes the total.
         """
+        learned = ""
         with self.transaction() as data:
             node = data["nodes"].get(agent_id)
             if node is None:
@@ -229,6 +302,12 @@ class Tree:
                 node["usage"] = usage
             if session_id and not node.get("session_id"):
                 node["session_id"] = session_id
+                learned = session_id
+        if learned:
+            # The one field that cannot be reconstructed from anywhere else. A
+            # tree lost to a corrupt write takes every session with it unless
+            # the id also reached the append-only log.
+            self.emit(agent_id, "session", session_id=learned)
 
     def children_of(self, agent_id: str) -> list[Node]:
         data = self.read()

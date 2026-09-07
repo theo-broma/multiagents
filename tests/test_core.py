@@ -3373,3 +3373,119 @@ def test_an_agent_killed_with_the_server_keeps_its_work(tmp_path, quiet_git):
     log = gitops.run(tmp_path, "log", "--oneline", node.branch).out
     assert "work in progress" in log, f"work was lost: {log}"
     assert not gitops.is_dirty(Path(node.worktree)), "nothing left uncommitted"
+
+
+# --------------------------------------------------------------------------
+# Surviving a power cut
+#
+# `os.replace` is atomic, so no reader sees half a file — but atomic is not
+# durable, and a rename can land while the temp file's contents are still in
+# the page cache. The old behaviour on the resulting zero-length tree was to
+# return an empty one, silently: every session id, question, ticket and
+# deferred task gone, and the next command reporting a clean project.
+
+
+def _tree_with_state(tmp_path):
+    from multiagents.tree import Node
+    tree = _tree(tmp_path)
+    tree.add(Node(id="ag-1", agent="implementer", provider="p", model="m",
+                  parent=None, depth=1, status="running"))
+    tree.note_event("ag-1", session_id="ses-KEEP")
+    tree.add_question("ag-1", "schema", "postgres or sqlite?")
+    tree.update("ag-1", steps=3)      # a later write, so the backup holds the question
+    return tree
+
+
+def test_a_truncated_tree_recovers_from_the_backup(tmp_path, capsys):
+    tree = _tree_with_state(tmp_path)
+    tree.path.write_text("")                       # the power cut
+
+    from multiagents.tree import Tree
+    reopened = Tree(tree.path, tree.events_path)
+    data = reopened.read()
+
+    assert len(data["nodes"]) == 1, "state must survive"
+    assert reopened.get("ag-1").session_id == "ses-KEEP", "without it nothing resumes"
+    assert len(data["questions"]) == 1
+    assert "recovered 1 agent(s)" in capsys.readouterr().err
+
+
+def test_recovery_costs_exactly_the_last_write(tmp_path):
+    """The honest limit of one generation of backup. fsync is what makes that
+    rare; the backup is for when fsync is not enough."""
+    tree = _tree_with_state(tmp_path)
+    tree.defer({"agent": "tester", "task": "the newest thing"}, 0, "quota")
+    tree.path.write_text("")                       # corrupt right after that write
+
+    from multiagents.tree import Tree
+    data = Tree(tree.path, tree.events_path).read()
+    assert len(data["nodes"]) == 1, "everything before the last write survives"
+    assert data["deferred"] == [], "and the last write is what is lost"
+
+
+def test_the_damaged_file_is_kept_not_discarded(tmp_path):
+    tree = _tree_with_state(tmp_path)
+    tree.path.write_text("{ this is not json")
+
+    from multiagents.tree import Tree
+    Tree(tree.path, tree.events_path).read()
+    kept = list(tree.path.parent.glob("tree.json.corrupt-*"))
+    assert len(kept) == 1, "the first thing anyone wants is to see what was in it"
+    assert kept[0].read_text() == "{ this is not json"
+
+
+def test_recovery_heals_rather_than_repeating_itself(tmp_path, capsys):
+    """Without writing the recovery back, every later read re-recovers and
+    re-warns, and the project stays one bad read from the empty case."""
+    tree = _tree_with_state(tmp_path)
+    tree.path.write_text("")
+
+    from multiagents.tree import Tree
+    reopened = Tree(tree.path, tree.events_path)
+    reopened.read()
+    capsys.readouterr()
+
+    for _ in range(3):
+        assert len(reopened.read()["nodes"]) == 1
+    assert capsys.readouterr().err == "", "warned once, not on every read"
+    assert len(list(tree.path.parent.glob("tree.json.corrupt-*"))) == 1
+
+
+def test_losing_both_copies_says_so_instead_of_looking_clean(tmp_path, capsys):
+    tree = _tree_with_state(tmp_path)
+    tree.path.write_text("")
+    tree.backup_path.write_text("")
+
+    from multiagents.tree import Tree
+    assert Tree(tree.path, tree.events_path).read()["nodes"] == {}
+    err = capsys.readouterr().err
+    assert "no usable backup" in err
+    assert "are lost" in err, "silence here reads as a clean project"
+
+
+def test_the_session_id_reaches_the_append_only_log(tmp_path):
+    """The one field reconstructible from nowhere else. A tree lost to a bad
+    write takes every session with it unless the id also reached events.jsonl."""
+    import json
+    tree = _tree_with_state(tmp_path)
+    kinds = [json.loads(line) for line in tree.events_path.read_text().splitlines()]
+    sessions = [e for e in kinds if e["kind"] == "session"]
+
+    assert [e["session_id"] for e in sessions] == ["ses-KEEP"]
+    tree.note_event("ag-1", session_id="ses-KEEP")
+    again = [json.loads(l) for l in tree.events_path.read_text().splitlines()]
+    assert len([e for e in again if e["kind"] == "session"]) == 1, "emitted once"
+
+
+def test_the_write_is_flushed_before_the_rename(tmp_path, monkeypatch):
+    """fsync is what makes the atomic rename durable; without it the rename can
+    land while the contents are still in the page cache."""
+    import os as os_mod
+    tree = _tree(tmp_path)
+    synced = []
+    monkeypatch.setattr(os_mod, "fsync", lambda fd: synced.append(fd))
+
+    from multiagents.tree import Node
+    tree.add(Node(id="ag-x", agent="a", provider="p", model="m",
+                  parent=None, depth=1, status="running"))
+    assert len(synced) >= 1, "the temp file must be fsynced before os.replace"
