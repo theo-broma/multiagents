@@ -185,6 +185,15 @@ limits:
   # through to the headless loop instead.
   restart_attempts: 5
   restart_delay_seconds: 60
+  # A lost terminal is always retried; a CRASH is not, unless you say so. By
+  # the time an error reaches the process boundary the CLI has exhausted its own
+  # retries, so whatever produced it is still there and a restart reads it
+  # again. "Only retry if it ran a while first" does not save you either: a
+  # context-length overrun takes minutes to arrive and then repeats exactly.
+  restart_on_crash: false
+  # Applies only when the above is on: even then, a failure faster than this is
+  # the same fault being read again.
+  restart_min_runtime_seconds: 60
 
 # --------------------------------------------------------------------------
 # Quota awareness. Used to route work away from a rationed provider and toward

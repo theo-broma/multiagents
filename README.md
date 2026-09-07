@@ -996,9 +996,9 @@ learn that a pid went away, and `/exit` and a dropped connection look identical.
 | `SIGHUP` / 129 | **the terminal was lost** — a closed window, a dropped connection |
 | anything else | **it crashed** |
 
-The first three end quietly. For the last two, `run` waits and **starts the
-orchestrator again, interactively**, with an opening message asking it to take
-stock:
+The first three end quietly. **A lost terminal** — the case this exists for —
+makes `run` wait and **start the orchestrator again, interactively**, with an
+opening message asking it to take stock:
 
 > Your previous session ended unexpectedly. This is a restart, not a new task,
 > and not a decision point. Take stock first: agents left interrupted in the
@@ -1024,9 +1024,22 @@ Five attempts a minute apart by default (`limits.restart_attempts`,
 `limits.restart_delay_seconds`), waiting out a quota reset if one is in the way,
 and stopping the moment an attempt ends deliberately.
 
+**A crash is not retried**, and that is a deliberate reversal of the obvious
+behaviour. By the time an error reaches the process boundary the CLI has already
+exhausted whatever internal retry it has, so whatever produced it is still there
+and a restart reads it again — five times, spending tokens to arrive back where
+it started.
+
+The tempting defence, "only retry if it survived a while first", does not hold
+either: a context-length overrun or an OOM parsing a huge payload takes minutes
+to arrive and then repeats exactly. `limits.restart_on_crash` turns retrying on
+for anyone who wants it, and even then a failure inside
+`restart_min_runtime_seconds` stops immediately as the same fault being read
+again.
+
 **With no terminal left**, retrying interactively has nowhere to run, and it
 falls through to the headless loop — subject to the check that somebody had
-actually given the session work to do. A crash with no terminal is a hard stop.
+actually given the session work to do.
 
 For the parent to be there to decide any of this it has to outlive the terminal,
 so it takes a do-nothing handler for **SIGHUP** as well. The child still gets
@@ -1439,7 +1452,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-233 tests covering the parts live runs do not reliably exercise: doom-loop
+238 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

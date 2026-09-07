@@ -3658,30 +3658,20 @@ def test_a_child_is_not_put_in_its_own_session(tmp_path):
     assert "start_new_session" not in source or "NOT start_new_session" in source
 
 
-def test_a_crash_is_a_hard_stop_and_a_lost_terminal_is_not(tmp_path, monkeypatch,
-                                                           capsys):
-    """A non-zero exit means an unhandled error and unknown state. Carrying on
-    unattended, with agents holding bypass permissions, turns one controlled
-    failure into an unsupervised sequence of them. A lost terminal is different
-    in kind: the process was healthy and its window went away."""
+def test_a_lost_terminal_with_no_tty_left_goes_headless(tmp_path, monkeypatch):
+    """Retrying interactively needs a terminal to retry into. Without one the
+    handover to the headless loop is the only thing left."""
     import multiagents.cli as cli
 
-    handed_over = []
+    handed = []
     monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_supervise",
-                        lambda *a, **k: handed_over.append(True) or 0)
-    paths = _paths(tmp_path)
-
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: 3)          # crash
-    assert cli._run_supervised(paths, _config(), "orchestrator", None, None,
-                               None, {}, [], {}) == 1
-    assert handed_over == [], "a crash must not continue unattended"
-    assert "state unknown" in capsys.readouterr().out
-
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
     monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
-    cli._run_supervised(paths, _config(), "orchestrator", None, None, None,
-                        {}, [], {})
-    assert handed_over == [True], "a lost terminal hands over"
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: False})())
+
+    cli._run_supervised(_paths(tmp_path), _config(), "orchestrator", None, None,
+                        None, {}, [], {})
+    assert handed == [1]
 
 
 def test_orphaned_agents_are_reaped_before_a_new_session(tmp_path, quiet_git,
@@ -3811,7 +3801,7 @@ def test_an_unexpected_end_is_retried_interactively_before_anything_headless(
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
 
-    codes = iter([3, 3, 0])          # crash, crash, then the user quits
+    codes = iter([-cli.signal.SIGHUP, -cli.signal.SIGHUP, 0])   # lost, lost, quit
     def attached(argv, env):
         launches.append(env.get("MULTIAGENTS_RESUME_PROMPT"))
         return next(codes)
@@ -3837,16 +3827,17 @@ def test_retrying_gives_up_rather_than_looping_forever(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: 3)
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
     handed = []
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
 
     config = Config(project={"limits": {"restart_attempts": 2,
                                         "restart_delay_seconds": 0}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
-    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
-                               None, None, {}, [], {}) == 1
-    assert handed == [], "a crash never falls through to unattended"
+    result = cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+                                 None, None, {}, [], {})
+    assert handed == [1], "out of attempts with no terminal left -> headless"
+    assert result == 0
 
 
 def test_the_parent_ignores_the_signal_that_takes_the_terminal(tmp_path):
@@ -3875,3 +3866,114 @@ def test_the_restart_prompt_does_not_ask_for_permission_to_continue():
     assert "do not ask whether to proceed" in prompt
     # The exception, which is the norm everywhere else in this system.
     assert "genuinely theirs to make" in prompt
+
+
+def test_a_session_that_dies_immediately_is_not_retried(tmp_path, monkeypatch,
+                                                        capsys):
+    """The advisor's objection, taken with a discriminator rather than a
+    blanket rule: a CLI that dies within seconds of starting is reading the
+    same state and hitting the same fault. Retrying that is a loop that spends
+    tokens to arrive back where it started."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: 3)     # instant crash
+    handed = []
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
+
+    config = Config(project={"limits": {"restart_attempts": 5, "restart_on_crash": True,
+                                        "restart_min_runtime_seconds": 60}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+                               None, None, {}, [], {}) == 1
+    out = capsys.readouterr().out
+    assert "the same fault being read again" in out
+    assert handed == []
+
+
+def test_a_session_that_ran_a_while_before_failing_is_retried(tmp_path,
+                                                              monkeypatch):
+    """The other side: a session that worked for an hour and then died hit
+    something passing, and that is exactly what a retry is for."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    clock = iter([0.0, 4000.0, 4000.0, 8000.0])      # each run lasts ~an hour
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
+
+    codes = iter([3, 0])
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: next(codes))
+
+    config = Config(project={"limits": {"restart_attempts": 5, "restart_on_crash": True,
+                                        "restart_min_runtime_seconds": 60}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+                               None, None, {}, [], {}) == 0
+
+
+def test_the_parent_survives_a_hangup_and_the_child_does_not(tmp_path):
+    """Terminal loss, without depending on pty semantics: the child signals its
+    own parent, which is exactly what the kernel does to a foreground group."""
+    import os
+    import multiagents.cli as cli
+
+    script = ("import os, signal, time\n"
+              "os.kill(os.getppid(), signal.SIGHUP)\n"   # as the terminal would
+              "time.sleep(0.2)\n"
+              "os.kill(os.getpid(), signal.SIGHUP)\n")   # and the child dies of it
+    code = cli._run_attached(["python3", "-c", script], dict(os.environ))
+
+    assert code == -cli.signal.SIGHUP, "the child must still die on SIGHUP"
+    deliberate, why = cli._exit_was_deliberate(code)
+    assert deliberate is False and "terminal was lost" in why
+
+
+def test_a_crash_is_not_retried_by_default(tmp_path, monkeypatch, capsys):
+    """The advisor's argument, taken: by the time an error reaches the process
+    boundary the CLI has exhausted its own retries, so whatever produced it is
+    still there and a restart reads it again. And the obvious defence — only
+    retry if it ran a while — does not hold: a context-length overrun takes
+    minutes to arrive and then repeats exactly."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    retried = []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
+    monkeypatch.setattr(cli, "_run_attached",
+                        lambda *a: retried.append(1) or 3)
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
+
+    assert cli._run_supervised(_paths(tmp_path), _config(), "orchestrator", None,
+                               None, None, {}, [], {}) == 1
+    assert len(retried) == 1, "the first run only; no retry"
+    assert "still there and a restart would meet it again" in capsys.readouterr().out
+
+
+def test_a_lost_terminal_is_always_retried(tmp_path, monkeypatch):
+    """Different event, different terms: a closed laptop leaves a healthy
+    process killed by its environment, not a fault to be read again."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    runs = []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
+    codes = iter([-cli.signal.SIGHUP, 0])
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: runs.append(1) or next(codes))
+
+    config = Config(project={"limits": {"restart_delay_seconds": 0}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+                               None, None, {}, [], {}) == 0
+    assert len(runs) == 2, "retried without needing restart_on_crash"
