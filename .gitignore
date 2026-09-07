@@ -5,3 +5,6 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+
+# Scratch notes and agent-written suggestions kept locally, not shipped.
+suggestions.md
