@@ -833,6 +833,22 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _executor_problems(paths, config) -> list[str]:
+    """What would stop the FIRST delegation, checked before launching.
+
+    The orchestrator itself runs on the host, so nothing about docker is
+    exercised until it delegates — which meant a missing image surfaced as a
+    failed spawn several minutes into a session, after the briefing, rather
+    than as a refusal to start. `preflight` already knew; nobody asked it.
+    """
+    if config.executor != "docker":
+        return []
+    try:
+        return _docker_executor(paths).preflight()
+    except Exception as exc:                 # never block a launch on the check
+        return [f"could not check the docker executor: {type(exc).__name__}: {exc}"]
+
+
 def _orchestrator_hold(paths, config) -> tuple[str, float | None] | None:
     """Is the orchestrator's own provider out of headroom? `(why, until)`.
 
@@ -936,8 +952,19 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
     config = load_config(paths)
 
+    problems = _executor_problems(paths, config)
+    for problem in problems:
+        print(f"\nexecutor     {problem}")
+
     if args.no_launch:
         return 0
+
+    if problems:
+        print("\nnot ready: this project runs agents in a container and the "
+              "container cannot be\n           built from what is here. The "
+              "orchestrator would start fine and fail\n           at its first "
+              "delegation.")
+        return 4
 
     # The orchestrator spends the same bucket the user's own session does when
     # it is pinned to `claude`. Launching into an exhausted one produces a CLI

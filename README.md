@@ -35,10 +35,21 @@ multiagents stop         # halt everything for this project, resumably
 is not, so it is the same command either way. `--fresh` forces a new session,
 and `resume` is an alias for `run`. The same applies to `init-agent`.
 
-`run` also checks the orchestrator's own quota before launching, since an
-exhausted CLI reports it as an ordinary error with no reset time in it and that
-reads as a broken install. `run --wait` blocks until the quota is back instead
-of exiting.
+`run` also checks two things before launching, because both otherwise fail
+after you have already briefed the orchestrator:
+
+- **the orchestrator's own quota** — an exhausted CLI reports it as an ordinary
+  error with no reset time in it, which reads as a broken install.
+  `run --wait` blocks until the quota is back instead of exiting.
+- **the container images**, on a docker project. The orchestrator runs on the
+  host, so nothing about docker is exercised until it delegates; a missing
+  image would otherwise surface as a failed spawn several minutes in. Note that
+  the *container* does not need starting — the first agent brings up the
+  network, the proxy and the workspace in about a second — but images are built
+  by `multiagents build` and never lazily.
+
+`run --no-launch` reports both without refusing, because inspecting a broken
+project is what it is for.
 
 `make install` runs `uv sync` **and** `uv tool install --editable .`, because
 `uv sync` alone only populates this repository's `.venv` — the command would
@@ -1202,7 +1213,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-198 tests covering the parts live runs do not reliably exercise: doom-loop
+202 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
