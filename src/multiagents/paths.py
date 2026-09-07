@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 
 PROJECT_DIR_NAME = ".multiagents"
@@ -64,6 +65,46 @@ def find_project_root(start: Path | None = None) -> Path | None:
         if marker.is_dir() and marker.resolve() != state:
             return candidate
     return None
+
+
+def _registry_file() -> Path:
+    return global_config_dir() / "projects.json"
+
+
+def register_project(root: Path) -> None:
+    """Remember slug -> path, so a container name can be read back as a project.
+
+    The slug embeds a hash of the absolute path and a hash does not invert, so
+    without this a cross-project view can only show opaque ids. Written
+    opportunistically and never required: an entry missing here degrades the
+    listing, not the run.
+    """
+    import json
+
+    root = root.resolve()
+    slug = project_slug(root)
+    path = _registry_file()
+    try:
+        known = json.loads(path.read_text()) if path.is_file() else {}
+        if not isinstance(known, dict):
+            known = {}
+        if known.get(slug, {}).get("path") == str(root):
+            return                                   # already current
+        known[slug] = {"path": str(root), "seen": time.time()}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(known, indent=2, sort_keys=True) + "\n")
+    except (OSError, ValueError):
+        pass                                         # bookkeeping, never fatal
+
+
+def known_projects() -> dict[str, dict]:
+    import json
+
+    try:
+        known = json.loads(_registry_file().read_text())
+        return known if isinstance(known, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def project_slug(project_root: Path) -> str:

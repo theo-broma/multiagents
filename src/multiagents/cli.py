@@ -27,7 +27,8 @@ from .budget import read_all
 from .config import load as load_config
 from .config import seed_global, seed_project, sync_layer
 from .models import refresh_models, validate_agent_models
-from .paths import ProjectPaths, find_project_root, global_config_dir, state_root
+from .paths import (ProjectPaths, find_project_root, global_config_dir,
+                    known_projects, register_project, state_root)
 from .providers import load_providers
 from .tree import Tree
 
@@ -36,12 +37,19 @@ GITIGNORE_LINE = ".multiagents/"
 
 def _resolve(explicit: str | None = None) -> ProjectPaths:
     if explicit:
-        return ProjectPaths(Path(explicit).expanduser().resolve())
-    root = find_project_root()
-    if root is None:
-        print("No .multiagents/ found here or above. Run `multiagents init` first.", file=sys.stderr)
-        raise SystemExit(2)
-    return ProjectPaths(root)
+        paths = ProjectPaths(Path(explicit).expanduser().resolve())
+    else:
+        root = find_project_root()
+        if root is None:
+            print("No .multiagents/ found here or above. Run `multiagents init` first.",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        paths = ProjectPaths(root)
+    # Refreshed on every command that names a project rather than only at init,
+    # so `docker status --all` can resolve projects created before the registry
+    # existed. A no-op once the entry is current.
+    register_project(paths.root)
+    return paths
 
 
 def _mcp_config_path() -> Path:
@@ -704,6 +712,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     root.mkdir(parents=True, exist_ok=True)
     paths = ProjectPaths(root)
     paths.ensure()
+    register_project(root)
 
     seed_global()
     seed_project(paths, force=args.force)
@@ -1546,7 +1555,67 @@ def cmd_tickets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _docker_status_all() -> int:
+    """Every project's containers, with the slugs resolved back to paths.
+
+    Project-scoped commands cannot answer "what is running on this machine",
+    and `docker ps` answers it in slugs, which are hashes and do not invert.
+    The registry written at init is what turns them back into paths.
+    """
+    from .executor.docker import docker_state, list_containers
+
+    state, detail = docker_state()
+    if state != "ok":
+        print(f"docker is not usable: {detail}", file=sys.stderr)
+        return 1
+
+    rows = list_containers()
+    if not rows:
+        print("No multiagents containers on this machine.")
+        return 0
+
+    known = known_projects()
+    by_slug: dict[str, dict] = {}
+    for row in rows:
+        entry = by_slug.setdefault(row["slug"], {"workspace": None, "proxy": None})
+        entry["proxy" if row["proxy"] else "workspace"] = row
+
+    print(f"{'project':44} {'workspace':16} {'proxy':16}")
+    running = 0
+    for slug in sorted(by_slug):
+        entry = by_slug[slug]
+        record = known.get(slug)
+        if record:
+            path = Path(record["path"])
+            label = str(path)
+            if not path.is_dir():
+                label += "  (gone)"
+        else:
+            # Registered only from `init` onwards, so a container made before
+            # that has no path. Say so rather than printing a bare hash.
+            label = f"{slug}  (path unknown)"
+        home = str(Path.home())
+        if label.startswith(home):
+            label = "~" + label[len(home):]
+
+        def short(row):
+            if row is None:
+                return "-"
+            return "running" if row["status"].startswith("Up") else "stopped"
+
+        print(f"{label[:44]:44} {short(entry['workspace']):16} {short(entry['proxy']):16}")
+        running += sum(1 for r in entry.values()
+                       if r and r["status"].startswith("Up"))
+
+    print(f"\n{len(by_slug)} project(s), {running} container(s) running.")
+    print("Each running project holds its resource ceiling whether or not agents "
+          "are working:\nstop one with `multiagents --path <project> docker down`.")
+    return 0
+
+
 def cmd_docker(args: argparse.Namespace) -> int:
+    if args.action == "status" and getattr(args, "all", False):
+        return _docker_status_all()
     paths = _resolve(args.path)
     ex = _docker_executor(paths)
 
@@ -1790,6 +1859,8 @@ def main(argv: list[str] | None = None) -> int:
                    choices=["build", "up", "down", "rm", "status", "shell", "check", "login"])
     p.add_argument("provider", nargs="?", default="agy",
                    help="provider to act on; only used by `login` (default: agy)")
+    p.add_argument("--all", action="store_true",
+                   help="with `status`: every project's containers on this machine")
     p.set_defaults(func=cmd_docker)
 
     p = sub.add_parser("catalog", help="compare the local model catalog against the live one")

@@ -90,6 +90,34 @@ def docker_available() -> str | None:
     return shutil.which("docker")
 
 
+def list_containers(include_stopped: bool = True) -> list[dict]:
+    """Every multiagents container on this machine, whatever project made it.
+
+    Each project has two — the workspace and its filtering proxy — and the name
+    carries the project slug, which is what lets a cross-project view exist at
+    all.
+    """
+    argv = ["docker", "ps", "--filter", "name=multiagents-",
+            "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.RunningFor}}"]
+    if include_stopped:
+        argv.insert(2, "-a")
+    result = _run(argv, timeout=20)
+    if result.returncode != 0:
+        return []
+    rows = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name = parts[0]
+        proxy = name.startswith("multiagents-proxy-")
+        slug = name[len("multiagents-proxy-"):] if proxy else name[len("multiagents-"):]
+        rows.append({"name": name, "slug": slug, "proxy": proxy,
+                     "status": parts[1], "image": parts[2],
+                     "age": parts[3] if len(parts) > 3 else ""})
+    return rows
+
+
 def docker_state() -> tuple[str, str]:
     """`(state, detail)` where state is ok | no-binary | no-daemon.
 
