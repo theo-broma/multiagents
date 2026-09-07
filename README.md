@@ -981,6 +981,41 @@ It samples four things and never reads a word of the conversation: whether the
 process exists, whether the session log has grown, how many agents are running,
 and what the provider says about headroom.
 
+### And acting on it
+
+`run` no longer execs. It spawns the CLI as a child that owns the terminal and
+stays alive as its parent — which buys exactly one thing, and it is the thing a
+detached watcher could never have: **the exit code**. From outside you only
+learn that a pid went away, and `/exit` and a dropped connection look identical.
+
+| exit | reading |
+|---|---|
+| `0` | the session ended normally |
+| `SIGINT` / 130 | interrupted from the keyboard |
+| `SIGTERM` / 143 | `multiagents stop`, or something else asked it to end |
+| `SIGHUP` / 129 | **the terminal was lost** — a closed window, a dropped connection |
+| anything else | **it crashed** |
+
+The first three end quietly. The last two hand over to the unattended loop,
+which waits out a quota reset, retries with backoff and stops when two turns
+change nothing. Headless deliberately: if the terminal is gone, an interactive
+relaunch has nowhere to run. `--no-supervise` restores the old exec behaviour.
+
+Four details make a spawned child behave like the exec it replaces, and the
+third is the one that bit:
+
+* stdio is inherited and **no new session is created**, so the child stays in
+  the terminal's foreground process group. A new session would leave it unable
+  to read stdin at all — the first read raises `SIGTTIN` and it stops.
+* the terminal mode is saved and restored, since a child dying in raw mode would
+  otherwise leave an unusable shell; with `exec` the shell cleaned that up.
+* SIGINT and SIGQUIT get a **do-nothing handler here, not `SIG_IGN`**.
+  `SIG_IGN` is inherited across exec and a handler is not — so ignoring them in
+  the parent made the child ignore them too, and Ctrl-C stopped reaching the
+  orchestrator entirely. Found by running it; reading the code would not have
+  shown it.
+* nothing in this process reads stdin, or it would steal the child's keys.
+
 | | verdict |
 |---|---|
 | gone, no headroom | `out_of_quota` — it ran out |
@@ -1329,7 +1364,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-217 tests covering the parts live runs do not reliably exercise: doom-loop
+222 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

@@ -9,6 +9,7 @@ with no way to diagnose the system when the MCP layer itself is what is broken.
 
 from __future__ import annotations
 
+import contextlib
 import signal
 import asyncio
 import argparse
@@ -131,6 +132,89 @@ NUDGE = (
 )
 
 
+def _terminal_state():
+    """Save the terminal's mode so an abnormal child exit cannot wedge it.
+
+    With `exec` the shell cleans this up. Once we stay alive as the parent, a
+    child that dies in raw mode leaves the terminal that way and the user gets
+    an unusable shell.
+    """
+    import termios
+    try:
+        return termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        return None
+
+
+def _restore_terminal(saved) -> None:
+    import termios
+    if saved is None:
+        return
+    try:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
+    except Exception:
+        pass
+
+
+def _run_attached(argv, env) -> int:
+    """Run the CLI as a child that owns the terminal, and return its exit code.
+
+    Four things make this behave like the `exec` it replaces:
+
+    * stdio is inherited and **no new session** is created, so the child stays
+      in the terminal's foreground process group. A new session would leave it
+      unable to read stdin — its first read would raise SIGTTIN and stop it.
+    * SIGINT and SIGQUIT get a do-nothing *handler* here rather than SIG_IGN.
+      The distinction is the whole thing: SIG_IGN is inherited across exec, so
+      ignoring them here made the child ignore them too and Ctrl-C stopped
+      reaching the orchestrator entirely. A handler is reset to the default on
+      exec, so the child gets normal behaviour while this process keeps waiting
+      instead of dying first and orphaning it.
+    * the terminal mode is saved and restored around the run.
+    * nothing in this process reads stdin, or it would steal the child's keys.
+    """
+    saved = _terminal_state()
+    previous = {}
+    for sig in (signal.SIGINT, signal.SIGQUIT):
+        try:
+            previous[sig] = signal.signal(sig, lambda *_: None)
+        except (ValueError, OSError):
+            pass
+    try:
+        child = subprocess.Popen(argv, env=env)          # NOT start_new_session
+        while True:
+            try:
+                return child.wait()
+            except KeyboardInterrupt:                    # belt and braces
+                continue
+    finally:
+        for sig, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, handler)
+        _restore_terminal(saved)
+
+
+def _exit_was_deliberate(code: int) -> tuple[bool, str]:
+    """Did a person end this, or did it end on its own?
+
+    This is the whole reason `run` stops exec'ing: as a sibling process you only
+    ever learn that the pid went away, and from outside `/exit` and a crash are
+    identical. As the parent you get the code, and the three deliberate endings
+    are exactly identifiable.
+    """
+    if code == 0:
+        return True, "the session ended normally"
+    if code in (-signal.SIGINT, 130):
+        return True, "interrupted from the keyboard"
+    if code in (-signal.SIGTERM, 143):
+        return True, "terminated — `multiagents stop`, or something else asked it to end"
+    if code in (-signal.SIGHUP, 129):
+        # The terminal went away: a closed window, or a dropped connection.
+        # Not deliberate, and the reason a relaunch has to be headless.
+        return False, "the terminal was lost"
+    return False, f"exited {code}"
+
+
 def _start_supervisor(paths, role: str, pid: int) -> None:
     """Launch the watcher beside the orchestrator, detached.
 
@@ -150,7 +234,7 @@ def _start_supervisor(paths, role: str, pid: int) -> None:
 
 
 def _launch_agent(paths, config, role: str, resume: bool,
-                  unattended: int = 0) -> int:
+                  unattended: int = 0, supervise: bool = True) -> int:
     """Launch a roster entry as an interactive MCP client.
 
     Normally execs, so the CLI owns the terminal and this process is gone.
@@ -207,15 +291,54 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # Without it `stop` can end the agents and leave the thing that starts more
     # of them running.
     _write_pid(paths, role, os.getpid())
-    _start_supervisor(paths, role, os.getpid())
     try:
         if unattended:
             return _supervise(paths, config, role, spec, provider, executor,
                               context, unattended)
-        os.execvpe(argv[0], argv, env)
+        if not supervise:
+            # Exec: this process is replaced, so a separate watcher is the only
+            # way anything can report on the session.
+            _start_supervisor(paths, role, os.getpid())
+            os.execvpe(argv[0], argv, env)
+        return _run_supervised(paths, config, role, spec, provider, executor,
+                               context, argv, env)
     finally:
         _clear_pid(paths, role)
     return 0
+
+
+def _run_supervised(paths, config, role, spec, provider, executor, context,
+                    argv, env) -> int:
+    """Hold the terminal for the CLI, and decide what to do when it ends.
+
+    Staying alive as the parent buys exactly one thing, and it is the thing the
+    detached watcher could not have: the exit code. A person quitting and a
+    dropped connection look identical from outside and are unambiguous from
+    here.
+    """
+    from . import watchdog
+
+    _start_supervisor(paths, role, os.getpid())
+    code = _run_attached(argv, env)
+    deliberate, why = _exit_was_deliberate(code)
+    watchdog.write_status(paths, {
+        "at": time.time(), "role": role, "pid": None, "running": False,
+        "verdict": "stopped" if deliberate else "dropped", "detail": why,
+        "transcript": None, "active_agents": 0, "provider": {},
+    })
+
+    if deliberate:
+        print(f"\n{why}.")
+        return 0 if code == 0 else 1
+
+    print(f"\n{role} ended unexpectedly: {why}.")
+    print("Carrying on headlessly — the terminal may be gone, so an interactive")
+    print("relaunch would have nowhere to run. `multiagents stop` ends it;")
+    print("`multiagents status` says what it is doing.")
+    # The unattended loop already waits out a quota reset, backs off on repeated
+    # failure, and stops when two turns change nothing.
+    return _supervise(paths, config, role, spec, provider, executor, context,
+                      max_turns=int(config.limits.get("supervised_turns", 50)))
 
 
 def _pid_file(paths, role: str) -> Path:
@@ -1028,7 +1151,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     # moves. The orchestrator calls check_model_catalog when something suggests
     # it has.
     return _launch_agent(paths, config, "orchestrator", resume=args.resume,
-                         unattended=getattr(args, "unattended", 0))
+                         unattended=getattr(args, "unattended", 0),
+                         supervise=getattr(args, "supervise", True))
 
 
 def _report_agents(config, providers) -> int:
@@ -2006,6 +2130,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--wait", action="store_true",
                        help="if the orchestrator's provider is exhausted, block "
                             "until its quota resets instead of exiting")
+        p.add_argument("--no-supervise", dest="supervise", action="store_false",
+                       default=True,
+                       help="hand the terminal over and exit; nothing carries on "
+                            "if the session drops")
         p.add_argument("--unattended", nargs="?", type=int, const=50, default=0,
                        metavar="TURNS",
                        help="run headless, turn after turn, without a terminal: "

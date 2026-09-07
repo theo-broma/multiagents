@@ -3578,3 +3578,60 @@ def test_the_supervisor_stops_when_what_it_watches_does(tmp_path, quiet_git,
     record = watchdog.read_status(paths)
     assert record["running"] is False
     assert record["verdict"] in ("stopped", "out_of_quota")
+
+
+# --------------------------------------------------------------------------
+# Supervised run
+#
+# `run` stops exec'ing so it can see the child's exit code. From outside, a
+# person typing /exit and a dropped connection are identical; from the parent
+# they are not, and that distinction is the whole reason for the change.
+
+
+def test_the_three_deliberate_endings_are_identified(monkeypatch):
+    import multiagents.cli as cli
+    for code in (0, -cli.signal.SIGINT, 130, -cli.signal.SIGTERM, 143):
+        assert cli._exit_was_deliberate(code)[0] is True, code
+
+
+def test_a_lost_terminal_or_a_crash_is_not_deliberate():
+    import multiagents.cli as cli
+    lost, why = cli._exit_was_deliberate(-cli.signal.SIGHUP)
+    assert lost is False and "terminal was lost" in why
+    assert cli._exit_was_deliberate(3)[0] is False
+
+
+def test_ctrl_c_still_reaches_the_child(tmp_path):
+    """SIG_IGN is inherited across exec and a handler is not. Ignoring SIGINT in
+    the parent therefore made the CHILD ignore it too, so Ctrl-C stopped
+    reaching the orchestrator at all — found by running it, not by reading it."""
+    import os
+    import multiagents.cli as cli
+
+    code = cli._run_attached(
+        ["python3", "-c", "import os,signal; os.kill(os.getpid(), signal.SIGINT)"],
+        dict(os.environ))
+    assert code == -cli.signal.SIGINT, (
+        f"the child exited {code}; SIG_IGN in the parent would give 0")
+
+
+def test_the_parent_outlives_a_signalled_child_and_restores_the_terminal(tmp_path):
+    import os
+    import multiagents.cli as cli
+
+    saved = cli._terminal_state()          # None when the suite has no tty
+    for script in ("import os,signal; os.kill(os.getpid(), signal.SIGINT)",
+                   "raise SystemExit(3)"):
+        cli._run_attached(["python3", "-c", script], dict(os.environ))
+    assert cli._terminal_state() == saved, "the terminal must come back as it was"
+
+
+def test_a_child_is_not_put_in_its_own_session(tmp_path):
+    """A new session leaves the child outside the terminal's foreground group,
+    so its first read of stdin raises SIGTTIN and it stops dead. The detached
+    watcher does pass that flag, correctly, which makes it easy to copy here."""
+    import inspect
+    import multiagents.cli as cli
+
+    source = inspect.getsource(cli._run_attached)
+    assert "start_new_session" not in source or "NOT start_new_session" in source
