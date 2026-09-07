@@ -3338,41 +3338,62 @@ def test_init_agent_makes_the_same_checks_as_run(tmp_path, quiet_git, monkeypatc
     assert cli.cmd_init_agent(args) == 4
 
 
-def test_an_agent_killed_with_the_server_keeps_its_work(tmp_path, quiet_git):
-    """The root of what happens when the orchestrator's quota ends a session.
+def test_an_interrupted_agent_is_recorded_but_not_committed_in_teardown():
+    """The commit deliberately does NOT happen in the cancellation handler.
 
-    The orchestrator IS the process the MCP server runs under, so its death
-    takes every in-flight agent with it. The commit on the normal path sits
-    past the re-raise in the cancellation handler, so that work used to be
-    left uncommitted in a worktree nobody opens again.
+    gitops shells out with a two-minute timeout, and a git call in a teardown
+    running on a closing event loop can hang the shutdown it is part of. The
+    work is preserved by whoever cleans up afterwards — `run` reconciling
+    interrupted agents, or `multiagents stop` — where there is time, a live
+    loop, and enough information to label it an interruption rather than a
+    result.
     """
-    import asyncio
+    import inspect
+    from multiagents.runner import Runner
+
+    source = inspect.getsource(Runner._consume)
+    handler = source.split("except asyncio.CancelledError:")[1].split("except Exception")[0]
+    assert "commit_all" not in handler, "a git call in the teardown can hang it"
+    assert "cancelled" in handler, "but the state must still be recorded"
+
+
+def test_interrupted_work_is_committed_as_a_checkpoint_not_a_result(tmp_path,
+                                                                    quiet_git):
+    """Marked for what it is: an orchestrator that picks the branch up later
+    must not run tests against half-written files and spend tokens debugging
+    syntax errors the termination caused."""
+    import multiagents.cli as cli
     import multiagents.gitops as gitops
+    from multiagents.tree import Node
 
-    r = _runner(tmp_path, {"napper": AgentSpec("napper", "p", "m")},
-                {"p": {"bin": "sh", "spawn": {"args": ["-c", "sleep 30"]}}})
+    gitops.init_repo(tmp_path)
+    gitops.initial_commit(tmp_path)
+    worktree = tmp_path.parent / f"wt-{tmp_path.name}"
+    gitops.create_worktree(tmp_path, worktree, "agents/impl/1")
+    (worktree / "half.py").write_text("def broken(\n")
 
-    async def scenario():
-        started = await r.start("napper", "nap")
-        await asyncio.sleep(0.5)               # let _consume reach its try block
-        node = r.tree.get(started["agent_id"])
-        # what an agent would have written before the session ended
-        (Path(node.worktree) / "in-progress.py").write_text("half a change\n")
-        run = r.runs[node.id]
-        run.task.cancel()                      # the server going away
-        try:
-            await run.task
-        except asyncio.CancelledError:
-            pass
-        return node
+    node = Node(id="ag-1", agent="implementer", provider="p", model="m",
+                parent=None, depth=1, status="cancelled",
+                branch="agents/impl/1", worktree=str(worktree))
+    assert cli._save_interrupted(node) is True
 
-    node = asyncio.run(scenario())
+    message = gitops.run(tmp_path, "log", "-1", "--format=%B", "agents/impl/1").out
+    assert message.startswith("WIP:")
+    assert "interrupted before it finished" in message
+    assert "never as a finished result" in message
+    assert not gitops.is_dirty(worktree)
 
-    assert r.tree.get(node.id).status == "cancelled"
-    assert "interrupted" in r.tree.get(node.id).reason
-    log = gitops.run(tmp_path, "log", "--oneline", node.branch).out
-    assert "work in progress" in log, f"work was lost: {log}"
-    assert not gitops.is_dirty(Path(node.worktree)), "nothing left uncommitted"
+
+def test_a_clean_worktree_is_not_committed(tmp_path, quiet_git):
+    import multiagents.cli as cli
+    import multiagents.gitops as gitops
+    from multiagents.tree import Node
+
+    gitops.init_repo(tmp_path)
+    gitops.initial_commit(tmp_path)
+    node = Node(id="ag-1", agent="a", provider="p", model="m", parent=None,
+                depth=1, status="cancelled", branch="b", worktree=str(tmp_path))
+    assert cli._save_interrupted(node) is False
 
 
 # --------------------------------------------------------------------------
@@ -3635,3 +3656,87 @@ def test_a_child_is_not_put_in_its_own_session(tmp_path):
 
     source = inspect.getsource(cli._run_attached)
     assert "start_new_session" not in source or "NOT start_new_session" in source
+
+
+def test_a_crash_is_a_hard_stop_and_a_lost_terminal_is_not(tmp_path, monkeypatch,
+                                                           capsys):
+    """A non-zero exit means an unhandled error and unknown state. Carrying on
+    unattended, with agents holding bypass permissions, turns one controlled
+    failure into an unsupervised sequence of them. A lost terminal is different
+    in kind: the process was healthy and its window went away."""
+    import multiagents.cli as cli
+
+    handed_over = []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_supervise",
+                        lambda *a, **k: handed_over.append(True) or 0)
+    paths = _paths(tmp_path)
+
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: 3)          # crash
+    assert cli._run_supervised(paths, _config(), "orchestrator", None, None,
+                               None, {}, [], {}) == 1
+    assert handed_over == [], "a crash must not continue unattended"
+    assert "state unknown" in capsys.readouterr().out
+
+    monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
+    cli._run_supervised(paths, _config(), "orchestrator", None, None, None,
+                        {}, [], {})
+    assert handed_over == [True], "a lost terminal hands over"
+
+
+def test_orphaned_agents_are_reaped_before_a_new_session(tmp_path, quiet_git,
+                                                         monkeypatch, capsys):
+    """Agents run in their own session so stopping one stops the tools beneath
+    it — which also means they outlive a server that crashed, and keep mutating
+    the worktrees the next session is about to use."""
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Node
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-1", agent="implementer", provider="p", model="m",
+                  parent=None, depth=1, status="running", pid=4242))
+
+    stopped = []
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig=0: None)      # "alive"
+    monkeypatch.setattr(cli, "_reaper", lambda p: type(
+        "R", (), {"stop_detached": lambda self, node: stopped.append(node.id) or True})())
+    monkeypatch.setattr(cli, "_alive_pid", lambda p, role: False)     # no live session
+
+    args = argparse.Namespace(path=str(tmp_path), no_launch=True, resume=True,
+                              wait=False, unattended=0, supervise=True)
+    cli.cmd_resume(args)
+
+    assert stopped == ["ag-1"]
+    assert tree.get("ag-1").status == "orphaned"
+    assert "reaped" in capsys.readouterr().out
+
+
+def test_a_live_session_elsewhere_is_not_reaped(tmp_path, quiet_git, monkeypatch):
+    """Another terminal running the same project must not have its agents
+    killed by this one starting up."""
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Node
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-1", agent="implementer", provider="p", model="m",
+                  parent=None, depth=1, status="running", pid=4242))
+
+    stopped = []
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig=0: None)
+    monkeypatch.setattr(cli, "_reaper", lambda p: type(
+        "R", (), {"stop_detached": lambda self, node: stopped.append(node.id)})())
+    monkeypatch.setattr(cli, "_alive_pid", lambda p, role: True)      # live session
+
+    cli.cmd_resume(argparse.Namespace(path=str(tmp_path), no_launch=True,
+                                      resume=True, wait=False, unattended=0,
+                                      supervise=True))
+    assert stopped == []
+    assert tree.get("ag-1").status == "running", "left alone for its owner"
