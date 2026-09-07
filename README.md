@@ -28,6 +28,7 @@ multiagents init         # create the project, copy the global config
 multiagents init-agent   # shape it with the initializer — resumable, takes as long as it takes
 multiagents build        # container environment, then authenticate every provider
 multiagents run          # launch the orchestrator; first run and resume are the same command
+multiagents stop         # halt everything for this project, resumably
 ```
 
 `run` continues the last session where there is one and starts fresh where there
@@ -944,6 +945,35 @@ under 100 while coders reach 768. The default is now 250, `implementer` and
 `limits.max_steps` in `project.yaml` is now actually read — it was documented
 and ignored, with only the built-in default applying.
 
+## Stopping
+
+```bash
+multiagents stop                    # everything for this project
+multiagents stop --keep-containers  # leave the container up
+```
+
+The counterpart to `run`, and the requirement is that it be resumable. It ends
+processes and keeps state:
+
+1. **Whatever is driving the project** — the orchestrator or initializer, and
+   under `--unattended` the supervisor *and* its current turn. Stopping the
+   agents while leaving the orchestrator running would have it start
+   replacements within the minute, so this goes first.
+2. **Every active agent**, through the same path the MCP tool uses, which
+   reaches into the container for an agent this process did not spawn rather
+   than killing the `docker exec` client and leaving the agent inside spending
+   tokens.
+3. **Work in progress.** A killed agent never reaches the commit its own run
+   would have made, so its edits sit uncommitted in a worktree nobody will look
+   at again. Each dirty worktree is committed to its own branch — the branch is
+   what makes the work resumable, so the work has to be on it.
+4. **The container**, last, because the agents were inside it. Stopped, not
+   removed.
+
+Branches, worktrees, session ids, open questions, queued tickets and the
+deferred queue all survive. `multiagents run` picks up where it left off, and a
+stopped agent resumes through `steer_agent` with its session intact.
+
 ## Running unattended
 
 ```bash
@@ -1172,7 +1202,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-195 tests covering the parts live runs do not reliably exercise: doom-loop
+198 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

@@ -9,6 +9,8 @@ with no way to diagnose the system when the MCP layer itself is what is broken.
 
 from __future__ import annotations
 
+import signal
+import asyncio
 import argparse
 import json
 import os
@@ -30,6 +32,7 @@ from .models import refresh_models, validate_agent_models
 from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
 from .providers import load_providers
+from .runner import Runner
 from .tree import Tree
 
 GITIGNORE_LINE = ".multiagents/"
@@ -181,11 +184,43 @@ def _launch_agent(paths, config, role: str, resume: bool,
           f"{'' if context['MULTIAGENTS_RESUME'] == '0' else ' (resuming)'}"
           f"{f' · unattended, up to {unattended} turns' if unattended else ''}\n")
     sys.stdout.flush()
-    if unattended:
-        return _supervise(paths, config, role, spec, provider, executor,
-                          context, unattended)
-    os.execvpe(argv[0], argv, env)
+    # Recorded before either path: a pid survives exec, so this file names the
+    # CLI that replaces us, and under supervision it names the supervisor.
+    # Without it `stop` can end the agents and leave the thing that starts more
+    # of them running.
+    _write_pid(paths, role, os.getpid())
+    try:
+        if unattended:
+            return _supervise(paths, config, role, spec, provider, executor,
+                              context, unattended)
+        os.execvpe(argv[0], argv, env)
+    finally:
+        _clear_pid(paths, role)
     return 0
+
+
+def _pid_file(paths, role: str) -> Path:
+    return paths.data / "launch" / f"{role}.pid"
+
+
+def _write_pid(paths, role: str, pid: int) -> None:
+    path = _pid_file(paths, role)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(pid))
+
+
+def _clear_pid(paths, role: str) -> None:
+    _pid_file(paths, role).unlink(missing_ok=True)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True                      # exists, owned by someone else
+    return True
 
 
 def _supervise(paths, config, role, spec, provider, executor,
@@ -224,7 +259,10 @@ def _supervise(paths, config, role, spec, provider, executor,
               f"{time.strftime('%H:%M:%S')} " + "─" * 30)
         sys.stdout.flush()
         try:
-            code = subprocess.run(argv, env=env).returncode
+            child = subprocess.Popen(argv, env=env)
+            _write_pid(paths, f"{role}-turn", child.pid)
+            code = child.wait()
+            _clear_pid(paths, f"{role}-turn")
         except KeyboardInterrupt:
             print("\nstopped.")
             return 0
@@ -1613,6 +1651,98 @@ def _docker_status_all() -> int:
     return 0
 
 
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Bring everything to a halt without losing any of it.
+
+    The counterpart to `run`. Resumable is the requirement, so this stops
+    processes and leaves state: branches, worktrees, sessions, the deferred
+    queue, open questions and tickets all survive, and an agent that was
+    working keeps a session id that `steer_agent` can pick up.
+    """
+    paths = _resolve(args.path)
+    config = load_config(paths)
+    tree = Tree(paths.tree_file, paths.events_file)
+
+    # --- whatever is driving the project -----------------------------------
+    stopped_drivers = []
+    for role in ("orchestrator", "orchestrator-turn", "initializer",
+                 "initializer-turn"):
+        path = _pid_file(paths, role)
+        if not path.is_file():
+            continue
+        try:
+            pid = int(path.read_text().strip())
+        except (OSError, ValueError):
+            path.unlink(missing_ok=True)
+            continue
+        if not _alive(pid):
+            path.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped_drivers.append(f"{role} (pid {pid})")
+        except OSError as exc:
+            print(f"  could not signal {role} pid {pid}: {exc}", file=sys.stderr)
+        path.unlink(missing_ok=True)
+
+    # --- the agents --------------------------------------------------------
+    active = tree.active()
+    stopped_agents = []
+    if active:
+        runner = Runner(paths, config)
+        for node in active:
+            try:
+                asyncio.run(runner.stop(node.id))
+                stopped_agents.append(node)
+            except Exception as exc:                  # never leave the rest unstopped
+                print(f"  {node.id} ({node.agent}): {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+
+    # --- nothing an agent wrote may be lost --------------------------------
+    # A killed agent never reaches the commit its own run would have made, so
+    # its edits sit uncommitted in a worktree nobody will look at again. The
+    # branch is what makes the work resumable, so the work has to be on it.
+    saved = 0
+    for node in stopped_agents:
+        worktree = Path(node.worktree) if node.worktree else None
+        if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree):
+            continue
+        if not gitops.is_dirty(worktree):
+            continue
+        result = gitops.commit_all(worktree, f"{node.agent}: work in progress "
+                                             f"when stopped ({node.id})")
+        if result.ok:
+            saved += 1
+
+    # --- the container, last: the agents were inside it --------------------
+    container = ""
+    if config.executor == "docker" and not args.keep_containers:
+        from .executor.docker import docker_available
+        if docker_available():
+            container = _docker_executor(paths).stop(remove=False)
+
+    for line in stopped_drivers:
+        print(f"stopped      {line}")
+    for node in stopped_agents:
+        print(f"stopped      {node.id} {node.agent}")
+    if saved:
+        print(f"committed    work in progress in {saved} worktree(s)")
+    if container:
+        print(f"container    {container}")
+    if not (stopped_drivers or stopped_agents or container):
+        print("Nothing was running.")
+
+    waiting = len(tree.open_questions())
+    deferred = len(tree.read().get("deferred", []))
+    if waiting or deferred:
+        print(f"\nkept         {waiting} open question(s), "
+              f"{deferred} deferred task(s)")
+    print("\nBranches, worktrees and sessions are untouched. `multiagents run` "
+          "picks up\nwhere this left off; a stopped agent resumes with "
+          "`steer_agent`.")
+    return 0
+
+
 def cmd_docker(args: argparse.Namespace) -> int:
     if args.action == "status" and getattr(args, "all", False):
         return _docker_status_all()
@@ -1842,6 +1972,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true",
                    help="remove even when a worktree holds uncommitted work")
     p.set_defaults(func=cmd_uninstall)
+
+    p = sub.add_parser("stop", help="stop everything for this project, resumably")
+    p.add_argument("--keep-containers", action="store_true",
+                   help="leave the container running")
+    p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("usage", help="tokens and cost per provider/model")
     p.add_argument("--agents", action="store_true", help="name the agents behind each row")
