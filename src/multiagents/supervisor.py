@@ -38,13 +38,19 @@ class Supervisor:
     silence_timeout: float = 180.0
     wall_timeout: float = 900.0
     max_steps: int = 120
-    loop_repeats: int = 3
-    loop_window: int = 12
+    loop_repeats: int = 5
+    loop_window: int = 20
 
     started: float = field(default_factory=time.monotonic)
     last_event: float = field(default_factory=time.monotonic)
     steps: int = 0
-    signatures: deque[str] = field(default_factory=lambda: deque(maxlen=12))
+    # (tool signature, worktree state) pairs. The second half is what makes the
+    # first usable: a CLI often reports a write as {"TargetFile": "..."} with no
+    # content, so three different edits to one file hash identically, and
+    # edit -> test -> edit -> test is an A,B,A,B alternation — the correct
+    # behaviour of a test agent, which this used to call a doom loop.
+    signatures: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=20))
+    current_progress: str = ""
     tripped: Trip | None = None
 
     def __post_init__(self) -> None:
@@ -63,7 +69,7 @@ class Supervisor:
         signature = event.loop_signature()
         if signature:
             digest = hashlib.sha1(signature.encode()).hexdigest()[:12]
-            self.signatures.append(digest)
+            self.signatures.append((digest, self.current_progress))
             trip = self._check_loop(event)
             if trip:
                 return self._trip(trip)
@@ -72,26 +78,57 @@ class Supervisor:
             return self._trip(Trip("runaway_steps", f"{self.steps} steps exceeds max_steps={self.max_steps}"))
         return None
 
+    def note_progress(self, state: str) -> None:
+        """Record the agent's working tree as it is right now.
+
+        Sampled by the caller — this class stays synchronous and free of I/O,
+        because it runs inside the loop that has to keep the process's pipe
+        drained, and a blocking `git` call there is a deadlock waiting to
+        happen.
+        """
+        self.current_progress = state
+
+    def _stalled(self, window: list[tuple[str, str]]) -> bool:
+        """Did the working tree stand still across this window?
+
+        With no sampler wired the value is "" throughout, which reads as
+        stalled — so the detector behaves exactly as it did before, rather than
+        silently switching itself off where progress cannot be observed.
+        """
+        return len({progress for _, progress in window}) == 1
+
     def _check_loop(self, event: Event) -> Trip | None:
-        """Identical repeats, and simple alternating cycles."""
+        """Identical repeats, and simple alternating cycles.
+
+        Both now require the working tree to have stood still as well. That is
+        the invariant that separates the two cases the signature alone cannot:
+        an agent re-reading one file changes nothing on disk and is stuck; an
+        agent editing and re-testing changes the tree every pass and is
+        working, however identical its reported arguments look.
+        """
         if len(self.signatures) < self.loop_repeats:
             return None
         recent = list(self.signatures)
 
         tail = recent[-self.loop_repeats:]
-        if len(set(tail)) == 1:
+        if len({digest for digest, _ in tail}) == 1 and self._stalled(tail):
             return Trip(
                 "doom_loop",
-                f"{event.name} called {self.loop_repeats}x with identical arguments",
+                f"{event.name} called {self.loop_repeats}x with identical arguments "
+                f"and nothing changed on disk",
             )
 
         # A -> B -> A -> B ... repeated often enough to be a cycle, not a retry.
         span = self.loop_repeats * 2
         if len(recent) >= span:
             window = recent[-span:]
-            if len(set(window)) == 2 and window[::2].count(window[0]) == len(window[::2]) \
-               and window[1::2].count(window[1]) == len(window[1::2]):
-                return Trip("doom_loop", f"two-step cycle repeated {self.loop_repeats}x (last: {event.name})")
+            digests = [digest for digest, _ in window]
+            if len(set(digests)) == 2 and digests[::2].count(digests[0]) == len(digests[::2]) \
+               and digests[1::2].count(digests[1]) == len(digests[1::2]) \
+               and self._stalled(window):
+                return Trip("doom_loop",
+                            f"two-step cycle repeated {self.loop_repeats}x with nothing "
+                            f"changing on disk (last: {event.name})")
         return None
 
     # --------------------------------------------------------------- polling --

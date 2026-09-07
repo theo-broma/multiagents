@@ -90,6 +90,14 @@ def docker_available() -> str | None:
     return shutil.which("docker")
 
 
+# One stdout line can carry a whole file: a CLI reports a tool result as a single
+# JSON object, and reading a 60 KB source file makes a 60 KB line. asyncio's
+# default StreamReader limit is 64 KiB, and exceeding it raises ValueError from
+# readline() and kills the run — which is what stopped the bug-reporter every
+# time, its brief being to read this project's own source.
+STREAM_LIMIT = 16 * 1024 * 1024
+
+
 class DockerExecutor(Executor):
     kind = "docker"
 
@@ -455,6 +463,7 @@ class DockerExecutor(Executor):
 
         proc = await asyncio.create_subprocess_exec(
             *command,
+            limit=STREAM_LIMIT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,

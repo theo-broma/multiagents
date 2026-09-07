@@ -2636,3 +2636,146 @@ def test_the_claude_launcher_only_resumes_when_a_transcript_exists(tmp_path,
 
     (sessions / "abc.jsonl").write_text("{}\n")
     assert "--continue" in run().stdout
+
+
+# --------------------------------------------------------------------------
+# Stream limits
+#
+# From a real run: the bug-reporter died with "ValueError: Separator is found,
+# but chunk is longer than limit" every time, because its brief tells it to read
+# this project's source and a CLI reports a file's contents as ONE json line.
+
+
+def test_a_line_larger_than_asyncios_default_does_not_kill_the_run(tmp_path):
+    """64 KiB is asyncio's default StreamReader limit. Source files here are
+    5-60 KB, so a single tool result carrying one is enough to exceed it."""
+    import asyncio
+    from multiagents.executor.local import LocalExecutor
+
+    big = "x" * (200 * 1024)
+    script = tmp_path / "emit.sh"
+    script.write_text(f'#!/bin/sh\necho "before"\necho "{big}"\necho "after"\n')
+    script.chmod(0o755)
+
+    async def run():
+        handle = await LocalExecutor().start(["sh", str(script)], tmp_path, {})
+        return [line async for line in handle.lines()]
+
+    lines = asyncio.run(run())
+    assert lines[0] == "before"
+    assert len(lines[1]) == 200 * 1024, "the long line must arrive whole"
+    assert lines[-1] == "after", "and the stream must continue past it"
+
+
+def test_an_over_long_line_is_salvaged_rather_than_fatal(tmp_path):
+    """The limit is generous but still a limit. Past it, losing the tail of one
+    event has to beat losing the agent — and the lines after it must still
+    parse, which means draining the buffer rather than leaving it."""
+    import asyncio
+    from multiagents.executor import base, local
+
+    script = tmp_path / "emit.sh"
+    script.write_text('#!/bin/sh\necho "before"\nhead -c 5000 /dev/zero | tr "\\0" "y"\n'
+                      'echo\necho "after"\n')
+    script.chmod(0o755)
+
+    async def run():
+        proc = await asyncio.create_subprocess_exec(
+            "sh", str(script), cwd=str(tmp_path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=1024,                      # force the failure deterministically
+        )
+        handle = base.Handle(pid=proc.pid, _proc=proc)
+        return [line async for line in handle.lines()], handle
+
+    lines, handle = asyncio.run(run())
+    assert lines[0] == "before"
+    assert "after" in lines, f"the stream must recover: {lines}"
+    assert "over-long line dropped" in handle.stderr_tail
+
+
+# --------------------------------------------------------------------------
+# Doom loop, after a real session produced 23 trips on work that was finishing
+# correctly. Two compounding causes: a CLI reports a write as
+# {"TargetFile": "..."} with no content, so three different edits hash the
+# same; and edit -> test -> edit -> test is an A,B,A,B alternation, which is
+# the correct behaviour of a test agent.
+
+
+def _tool(name, **args):
+    from multiagents.providers import Event
+    return Event(kind="tool", name=name, args=args)
+
+
+def _sup(**kw):
+    from multiagents.supervisor import Supervisor
+    kw.setdefault("silence_timeout", 1e9)
+    kw.setdefault("wall_timeout", 1e9)
+    kw.setdefault("max_steps", 10 ** 9)
+    return Supervisor(**kw)
+
+
+def test_editing_and_retesting_is_not_a_doom_loop(tmp_path):
+    """The exact false positive: identical signatures, because the content is
+    not in the event, while the tree moves every pass."""
+    sup = _sup()
+    for n in range(8):
+        sup.note_progress(f"tree-{n}")          # the edit landed
+        assert sup.observe(_tool("write_to_file", TargetFile="/x/test_a.py")) is None
+        assert sup.observe(_tool("run_command", CommandLine="pytest -q")) is None
+
+
+def test_rewriting_one_file_with_nothing_changing_still_trips():
+    """The other side: if the tree never moves, identical calls are a loop
+    whatever the agent narrates between them."""
+    sup = _sup()
+    sup.note_progress("frozen")
+    trips = [sup.observe(_tool("write_to_file", TargetFile="/x/a.py")) for _ in range(6)]
+    assert any(t and t.reason == "doom_loop" for t in trips)
+    assert "nothing changed on disk" in next(t for t in trips if t).detail
+
+
+def test_a_reader_repeating_itself_trips_without_any_worktree_signal():
+    """A read-only agent never moves the tree, so the progress gate must not
+    switch the detector off for it — re-reading one file is the case this was
+    built for."""
+    sup = _sup()
+    trips = [sup.observe(_tool("view_file", AbsolutePath="/x/README")) for _ in range(6)]
+    assert any(t and t.reason == "doom_loop" for t in trips)
+
+
+def test_an_unwired_progress_signal_leaves_the_old_behaviour(tmp_path):
+    """With no sampler the value is "" throughout, which reads as stalled —
+    the detector must degrade to signatures alone rather than silently turning
+    itself off where progress cannot be observed."""
+    sup = _sup(loop_repeats=3)
+    trips = [sup.observe(_tool("grep", pattern="x")) for _ in range(4)]
+    assert any(t and t.reason == "doom_loop" for t in trips)
+
+
+def test_the_two_step_cycle_also_needs_a_frozen_tree():
+    sup = _sup(loop_repeats=3)
+    sup.note_progress("frozen")
+    seen = [sup.observe(_tool("a" if i % 2 == 0 else "b", k=1)) for i in range(8)]
+    assert any(t and "two-step cycle" in t.detail for t in seen)
+
+    moving = _sup(loop_repeats=3)
+    for i in range(12):
+        moving.note_progress(f"tree-{i}")
+        assert moving.observe(_tool("a" if i % 2 == 0 else "b", k=1)) is None
+
+
+def test_max_steps_falls_back_to_the_project_limit():
+    """`limits.max_steps` was documented in project.yaml and never read: only
+    the AgentSpec default applied, so the knob did nothing."""
+    import yaml
+    spec = AgentSpec("x", "p", "m")
+    assert spec.max_steps == 0, "0 means 'use the project limit'"
+
+    shipped = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+         / "project.yaml").read_text())
+    assert shipped["limits"]["max_steps"] >= 250, "120 fired on work that was fine"
+    agents = _shipped_agents()
+    assert agents["implementer-deep"]["max_steps"] >= 800, "measured runs reach ~768"
+    assert agents["implementer-quick"]["max_steps"] == 40, "the short leash stays"

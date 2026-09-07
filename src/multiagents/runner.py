@@ -19,6 +19,7 @@ Two rules shape the interface:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,24 @@ MAX_SUMMARY_CHARS = 6000
 # affecting supervision; it only delays what another process sees in
 # check_agent by at most this long.
 TREE_FLUSH_SECONDS = 2.0
+# How often the worktree is sampled for the doom-loop check. Debounced by time
+# rather than by tool count so a chatty agent cannot turn this into a `git`
+# call per event on a large repository.
+PROGRESS_SAMPLE_SECONDS = 3.0
+
+
+def _worktree_state(worktree: Path) -> str:
+    """A cheap hash of what the agent has actually changed on disk.
+
+    This is the ground truth the tool stream cannot give: a CLI that reports a
+    write as {"TargetFile": "..."} with no content makes three different edits
+    indistinguishable, while the tree itself is never ambiguous about whether
+    anything happened.
+    """
+    result = gitops.run(worktree, "status", "--porcelain")
+    if not result.ok:
+        return ""
+    return hashlib.sha1(result.out.encode()).hexdigest()[:12]
 
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
 # a file that mentions the marker must not park itself.
@@ -462,8 +481,9 @@ class Runner:
             supervisor=Supervisor(
                 silence_timeout=spec.silence_timeout,
                 wall_timeout=timeout or spec.timeout,
-                max_steps=spec.max_steps,
-                loop_repeats=int(self.config.limits.get("doom_loop_repeats", 3)),
+                max_steps=spec.max_steps or int(
+                    self.config.limits.get("max_steps", 250)),
+                loop_repeats=int(self.config.limits.get("doom_loop_repeats", 5)),
             ),
         )
         self.runs[node_id] = run
@@ -606,6 +626,13 @@ class Runner:
         cost_total = 0.0
         session_id = ""
         flush = _FlushGate()
+        # Only worth sampling where the agent has a worktree of its own; with
+        # no repository the state is always "" and the detector falls back to
+        # signatures alone, which is what it did before.
+        node = self.tree.get(node_id)
+        progress_dir = (Path(node.worktree) if node and node.worktree
+                        and gitops.is_repo(Path(node.worktree)) else None)
+        last_progress = 0.0
 
         try:
             async for line in handle.lines():
@@ -662,6 +689,17 @@ class Runner:
                         }
                         await handle.stop()
                         break
+
+                # Sampled before observe(), so the signature this event adds is
+                # paired with the state of the tree as it stands now. Threaded:
+                # a blocking `git` call in this loop would stop draining the
+                # process's pipe, which is a deadlock rather than a slowdown.
+                if event.kind == "tool" and progress_dir is not None \
+                        and time.monotonic() - last_progress >= PROGRESS_SAMPLE_SECONDS:
+                    last_progress = time.monotonic()
+                    run.supervisor.note_progress(
+                        await asyncio.to_thread(_worktree_state, progress_dir)
+                    )
 
                 trip = run.supervisor.observe(event)
                 if trip:

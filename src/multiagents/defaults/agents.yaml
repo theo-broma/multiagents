@@ -139,6 +139,8 @@ agents:
     max_children: 2
     timeout: 1800
     silence_timeout: 240
+    # Measured: real runs of this reach 700-800 steps.
+    max_steps: 1000
 
   # Work where the difficulty is in deciding, not typing: an invariant, a
   # cross-cutting change, concurrency, a data migration, or a task a lower tier
@@ -160,6 +162,8 @@ agents:
     max_children: 2
     timeout: 2700
     silence_timeout: 300
+    # Measured: real runs of this reach 700-800 steps.
+    max_steps: 1000
 
   reviewer:
     provider: agy
