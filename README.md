@@ -961,6 +961,43 @@ under 100 while coders reach 768. The default is now 250, `implementer` and
 `limits.max_steps` in `project.yaml` is now actually read — it was documented
 and ignored, with only the built-in default applying.
 
+## Surviving a crash or a power cut
+
+What is on disk when the power goes:
+
+| | survives | why |
+|---|---|---|
+| committed agent work | yes | git branches, and git fsyncs its own objects |
+| uncommitted worktree edits | usually | ordinary files, subject to the filesystem |
+| `events.jsonl`, `runs/*` | yes | append-only; a partial last line is skipped |
+| `tree.json` | yes, minus at most the last write | see below |
+
+`tree.json` is written to a temp file and `os.replace`d, so no reader ever sees
+half of one. But **atomic is not durable**: without a flush, the rename can land
+while the file's contents are still in the page cache, and what survives is a
+zero-length tree. So the temp file is fsynced before the rename and the
+directory after it.
+
+fsync narrows that window and cannot close it, so the previous copy is kept as
+`tree.json.bak`. A corrupt read falls back to it, **heals the file** by writing
+the recovery back — otherwise every later read re-recovers and the project stays
+one bad read from the empty case — and keeps the damaged original as
+`tree.json.corrupt-<timestamp>`, because the first thing anyone wants is to see
+what was in it.
+
+The cost of recovery is exactly one write: the backup is a generation behind, so
+the newest question, ticket or deferred task may be gone. Everything older is
+intact, including the session ids without which nothing resumes.
+
+When both copies are unreadable it says so, loudly, naming what was lost.
+Emptying the tree silently was the old behaviour and it is the worst one — every
+session, question and queued task disappears while the next command reports a
+clean project as though the work had never happened.
+
+Session ids are also emitted to `events.jsonl` when first seen. They are the one
+field reconstructible from nowhere else, so the append-only log carries them
+even if the tree does not.
+
 ## When the orchestrator itself runs out
 
 Two different moments, and only one of them was handled.
@@ -1244,7 +1281,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-204 tests covering the parts live runs do not reliably exercise: doom-loop
+211 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
