@@ -176,6 +176,10 @@ async def start_agent(
 ) -> dict:
     """Start a subagent on a task. Returns immediately with an agent_id.
 
+    Returning immediately is the point: call this again for the next piece of
+    independent work before you wait on this one. Several agents on different
+    files is the normal state of a healthy tree, not an optimisation.
+
     A writing agent gets its own git worktree and branch, so it cannot touch
     your working tree or another agent's work. You own that branch: merge it
     with merge_agent when you are satisfied, or discard_agent to throw it away.
@@ -222,6 +226,11 @@ def check_agent(agent_id: str, since: int = 0) -> dict:
 @mcp.tool()
 async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300) -> dict:
     """Block until any of these agents finishes or gets stuck.
+
+    Call this when there is nothing else to start — not as the reflex after
+    starting one agent. It returns `capacity`, and if slots are idle it says so:
+    waiting with three of four slots free does not make the work smaller, it
+    makes it take four times as long.
 
     Far better than polling in a loop: returns the moment something changes, and
     costs one tool call rather than one per check. With no ids, waits on every

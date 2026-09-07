@@ -1269,6 +1269,37 @@ class Runner:
                 "answered_by": answered_by, "resumed": result.get("steered", False),
                 **({"error": result["error"]} if result.get("error") else {})}
 
+    def _idle_capacity_note(self) -> dict[str, Any]:
+        """Capacity, plus a nudge when slots are sitting idle.
+
+        Put in front of the orchestrator at the moment it waits, because that
+        is when the decision is actually made. In one real session 74% of the
+        wall clock had exactly ONE agent running out of four allowed — the work
+        was not smaller, it took four times as long.
+        """
+        capacity = self.capacity()
+        if capacity["free_slots"] and capacity["running"]:
+            capacity["note"] = (
+                f"{capacity['free_slots']} of {capacity['max_concurrent']} slots are "
+                f"idle. Waiting is only free when there is nothing else to start — "
+                f"if any independent work exists (a different spec, a different set "
+                f"of files), start it before you wait again."
+            )
+        return {"capacity": capacity}
+
+    def capacity(self) -> dict[str, Any]:
+        """Slots in use and slots free.
+
+        Reported back on every wait, because that is the moment the decision is
+        made: a session that spends its time with one agent running and three
+        slots free is not doing less work, it is taking four times as long to
+        do it.
+        """
+        running = len(self.tree.active())
+        limit = int(self.config.limits.get("max_concurrent", 4))
+        return {"running": running, "max_concurrent": limit,
+                "free_slots": max(0, limit - running)}
+
     async def resume_deferred(self) -> dict[str, Any]:
         """Restart tasks whose quota window has passed. Safe to call often.
 
@@ -1357,7 +1388,8 @@ class Runner:
         watched += [r["agent_id"] for r in revived.get("restarted", [])
                     if r.get("agent_id") and r["agent_id"] not in watched]
         if not watched:
-            return {"changed": [], "reason": "no active agents"}
+            return {"changed": [], "reason": "no active agents",
+                    "capacity": self.capacity()}
 
         # Agents that had already finished before this call are reported, but
         # are NOT what we wait on. Without this split, calling again with the
@@ -1379,6 +1411,7 @@ class Runner:
 
         if not pending:
             return {"changed": already, "all_finished": True,
+                    "capacity": self.capacity(),
                     "note": "every agent you named had already finished"}
 
         while time.monotonic() < deadline:
@@ -1396,12 +1429,14 @@ class Runner:
                     "already_finished": already,
                     "still_running": [i for i in pending if i not in {c["agent_id"] for c in changed}],
                     "waited_seconds": round(timeout - (deadline - time.monotonic())),
+                    **self._idle_capacity_note(),
                 }
             await asyncio.sleep(1.0)
 
         return {
             "changed": [],
             "timed_out": True,
+            **self._idle_capacity_note(),
             "still_running": [
                 {"agent_id": n.id, "agent": n.agent, "status": n.status,
                  "elapsed_seconds": round(n.elapsed())}
