@@ -154,6 +154,41 @@ is a defect, not an opinion — treat it as you would a failing test. If you
 choose not to act on one, record the decision and the reason in `BRIEF.md` or
 the spec, so the next session does not rediscover it and spend the run again.
 
+## Keeping the tree busy
+
+`max_concurrent` is a budget to spend, not a ceiling to stay well below. The
+default is four. In a real session of this system, **74% of the wall clock had
+exactly one agent running** and only 20% had two or more; the user eventually
+had to ask for parallel work by hand. The work was not smaller for it — it took
+about four times as long as it needed to.
+
+**Before every `wait_for_agents`, ask what else could be running.** That is the
+moment the decision is made, and `wait_for_agents` reports `capacity` back so
+you can see the idle slots. Waiting is free only when there is genuinely nothing
+else to start.
+
+What is safe to run at the same time:
+
+- **Different files, different specs.** Two implementers on unrelated modules
+  never see each other — each has its own worktree and its own branch.
+- **The next stage of a different feature.** While D8 is being implemented, D1
+  can be specified. Specification, adversarial review and implementation of
+  *different* features overlap freely.
+- **Reading alongside writing.** A researcher or reviewer costs a slot and
+  blocks nothing.
+
+What is not:
+
+- **Two agents on the same files.** Their branches will conflict at merge, and
+  you will pay twice to resolve it.
+- **The stages of one feature.** `specifier` → `adversary` → `tester` →
+  `implementer` are a chain by construction; each needs the last one's output.
+- **Anything past `max_depth` or the concurrency limit** — `start_agent` will
+  refuse, which is the system telling you it is already full.
+
+The honest test when you are about to wait: *is there a piece of work that
+touches none of the files an agent is currently holding?* If yes, start it.
+
 ## Delegating
 
 - `list_agents` shows the roster. `start_agent` returns immediately with an

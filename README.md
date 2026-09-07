@@ -802,6 +802,41 @@ anything mounted so a CLI can authenticate can be read by a model with a shell.
 Egress filtering is what makes that survivable — a credential an agent can read
 is one it cannot post anywhere.
 
+## Keeping the tree busy
+
+`max_concurrent` is a budget to spend, not a ceiling to stay under. Measured
+across one real 13-hour session:
+
+| agents running | share of wall clock |
+|---|---|
+| 1 | **74%** |
+| 2 | 12% |
+| 3 | 7% |
+| 4 | 2% |
+
+Four were allowed throughout. The work was not smaller for being serialised —
+it took about four times as long as it needed to, and the user eventually had to
+ask for parallel work by hand.
+
+Two causes, both in what the orchestrator was told. Its brief said nothing at
+all about running work in parallel, and `wait_for_agents` described blocking as
+the virtuous choice ("far better than polling") with no hint that waiting on an
+idle tree is waste.
+
+Now `wait_for_agents` returns `capacity` and, when slots sit idle, says so at
+the moment the decision is being made:
+
+```
+"capacity": {"running": 1, "max_concurrent": 4, "free_slots": 3,
+             "note": "3 of 4 slots are idle. Waiting is only free when there is
+                      nothing else to start…"}
+```
+
+and the orchestrator's brief carries the test to apply before waiting: *is there
+a piece of work that touches none of the files an agent is currently holding?*
+It also says what is **not** safe to overlap — two agents on the same files, or
+the stages of one feature, which are a chain by construction.
+
 ## Watchdogs, and why they need ground truth
 
 Four trips mark a run `stuck`: silence, wall clock, runaway steps, and the doom
@@ -1002,7 +1037,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-176 tests covering the parts live runs do not reliably exercise: doom-loop
+180 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

@@ -2798,3 +2798,49 @@ def test_the_shipped_limits_match_the_code_defaults():
 
     assert shipped["doom_loop_repeats"] == defaults["loop_repeats"], \
         "the shipped config would override the code default"
+
+
+# --------------------------------------------------------------------------
+# Concurrency
+#
+# Measured in a real session: 74% of the wall clock had exactly one agent
+# running out of four allowed, and the user had to ask for parallel work by
+# hand. The orchestrator's brief said nothing about it, and wait_for_agents
+# described blocking as the virtuous choice.
+
+
+def test_capacity_is_reported_where_the_waiting_decision_is_made(tmp_path):
+    import asyncio
+    r = _runner(tmp_path, project={"limits": {"max_concurrent": 4}})
+
+    result = asyncio.run(r.wait_for_any(None, 0.1))
+    assert result["capacity"]["max_concurrent"] == 4
+    assert result["capacity"]["free_slots"] == 4
+
+
+def test_idle_slots_are_called_out_while_something_is_running(tmp_path):
+    """A bare number is easy to skim past; the nudge has to name the cost."""
+    from multiagents.tree import Node
+    r = _runner(tmp_path, project={"limits": {"max_concurrent": 4}})
+    r.tree.add(Node(id="ag-1", agent="implementer", provider="p", model="m",
+                    parent=None, depth=1, status="running"))
+
+    note = r._idle_capacity_note()["capacity"]
+    assert note["running"] == 1 and note["free_slots"] == 3
+    assert "3 of 4 slots are idle" in note["note"]
+
+    for n in range(2, 5):
+        r.tree.add(Node(id=f"ag-{n}", agent="implementer", provider="p", model="m",
+                        parent=None, depth=1, status="running"))
+    full = r._idle_capacity_note()["capacity"]
+    assert full["free_slots"] == 0
+    assert "note" not in full, "a full tree must not be nagged"
+
+
+def test_the_orchestrator_brief_says_when_parallel_is_safe_and_when_not():
+    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "_orchestrator.md").read_text())
+    flat = " ".join(text.split())
+    assert "budget to spend, not a ceiling" in flat
+    assert "Different files, different specs" in flat
+    assert "Two agents on the same files" in flat, "the limits matter as much"
