@@ -2779,3 +2779,22 @@ def test_max_steps_falls_back_to_the_project_limit():
     agents = _shipped_agents()
     assert agents["implementer-deep"]["max_steps"] >= 800, "measured runs reach ~768"
     assert agents["implementer-quick"]["max_steps"] == 40, "the short leash stays"
+
+
+def test_the_shipped_limits_match_the_code_defaults():
+    """project.yaml is read in preference to the built-in default, so a stale
+    value there silently overrides a fix made in code — which is exactly what
+    happened when doom_loop_repeats was raised in the Supervisor and left at 3
+    in the shipped config."""
+    import inspect
+    import yaml
+    from multiagents.supervisor import Supervisor
+
+    shipped = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+         / "project.yaml").read_text())["limits"]
+    defaults = {f.name: f.default for f in
+                inspect.signature(Supervisor).parameters.values()}
+
+    assert shipped["doom_loop_repeats"] == defaults["loop_repeats"], \
+        "the shipped config would override the code default"
