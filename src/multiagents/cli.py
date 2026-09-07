@@ -339,7 +339,9 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     from . import watchdog
 
     _start_supervisor(paths, role, os.getpid())
+    began = time.monotonic()
     code = _run_attached(argv, env)
+    ran_for = time.monotonic() - began
     deliberate, why = _exit_was_deliberate(code)
     watchdog.write_status(paths, {
         "at": time.time(), "role": role, "pid": None, "running": False,
@@ -351,13 +353,43 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         print(f"\n{why}.")
         return 0 if code == 0 else 1
 
-    # A terminal we can still write to means a person can watch this and stop
-    # it, which is what makes retrying an unknown state acceptable at all.
+    # Terminal loss and a crash are not the same event and are not retried on
+    # the same terms.
+    #
+    # A lost terminal — a closed laptop, a dropped connection — leaves a healthy
+    # process that was killed by its environment. Restarting that is just
+    # picking the session back up, and it is the case this exists for.
+    #
+    # A non-zero exit is an unhandled error inside the CLI. The advisor's
+    # argument, which I take: by the time an error reaches the process boundary
+    # the CLI has already exhausted whatever internal retry it has, so the
+    # state that produced it is still there and a restart reads it again. Worse,
+    # the obvious defence — "only retry if it survived a while" — does not hold:
+    # a context-length overrun or an OOM parsing a huge payload takes minutes to
+    # arrive and then repeats exactly. So crashes do not retry by default, and
+    # the knob to change that is off.
+    crash = code not in (-signal.SIGHUP, 129)
+    if crash and not bool(config.limits.get("restart_on_crash", False)):
+        print(f"\n{role} {why}. Not retrying: a non-zero exit is an error the "
+              f"CLI could not\nhandle, so its cause is still there and a "
+              f"restart would meet it again.\n`multiagents status` has the last "
+              f"observation. Set limits.restart_on_crash\nto true if you want "
+              f"it retried anyway.")
+        return 1
+
     attempts = int(config.limits.get("restart_attempts", 5))
     delay = float(config.limits.get("restart_delay_seconds", 60))
+    survived = float(config.limits.get("restart_min_runtime_seconds", 60))
     for attempt in range(1, attempts + 1):
         if not sys.stdin.isatty():
             break
+        if crash and ran_for is not None and ran_for < survived:
+            # Only reachable with restart_on_crash on. Even then, a failure this
+            # fast is the same fault being read again.
+            print(f"\n{role} {why} after only {ran_for:.0f}s. Stopping: a "
+                  f"failure that fast is\nthe same fault being read again, not "
+                  f"a passing one.")
+            return 1
         print(f"\n{role} {why}. Retrying in {delay:.0f}s "
               f"({attempt}/{attempts}) — Ctrl-C to stop.")
         try:
@@ -375,18 +407,15 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
 
         retry_env = {**env, "MULTIAGENTS_RESUME": "1",
                      "MULTIAGENTS_RESUME_PROMPT": RESUME_PROMPT}
+        began = time.monotonic()
         code = _run_attached(argv, retry_env)
+        ran_for = time.monotonic() - began
         deliberate, why = _exit_was_deliberate(code)
         if deliberate:
             print(f"\n{why}.")
             return 0 if code == 0 else 1
 
-    if code not in (-signal.SIGHUP, 129):
-        # A crash is a hard stop. A non-zero exit means an unhandled error and
-        # therefore unknown state; carrying on unattended, with agents that hold
-        # bypass permissions, turns one controlled failure into an unsupervised
-        # sequence of them. A lost terminal is different in kind — the process
-        # was healthy and its window went away.
+    if crash:
         print(f"\n{role} {why}. Not continuing: a crash leaves the state "
               f"unknown,\nand carrying on unattended would build on it. "
               f"`multiagents status` has\nthe last observation; `multiagents "
