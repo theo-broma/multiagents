@@ -58,6 +58,13 @@ launch)
             echo "no previous conversation in this directory; starting a fresh one" >&2
         fi
     fi
+    # Unattended: one non-interactive turn, so the supervisor above can decide
+    # whether to run another. `-p` IS headless — it prints and exits — which is
+    # exactly right here and exactly wrong for the interactive path, where it
+    # would turn `multiagents run` into a one-shot.
+    if [ "${MULTIAGENTS_UNATTENDED:-0}" = "1" ]; then
+        set -- "$@" --permission-mode bypassPermissions -p "${MULTIAGENTS_NUDGE:-continue}"
+    fi
     exec "$BIN" "$@"
     ;;
 *)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;

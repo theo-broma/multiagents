@@ -3015,3 +3015,95 @@ def test_the_install_hint_names_this_system_and_the_official_page():
     # A guess can be wrong, so the hint is best-effort and the docs link is not.
     if hints:
         assert any("docker" in line for line in hints)
+
+
+# --------------------------------------------------------------------------
+# Unattended mode
+#
+# The shape a shell `until multiagents run; do ...; done` gets wrong: that loop
+# stops when the command SUCCEEDS, so a turn that worked ends the run and a turn
+# that crashed is retried forever.
+
+
+def _launch_argv(provider, **env):
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / f"{provider}.sh")
+    base = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
+            "MULTIAGENTS_BIN": "/bin/echo", "MULTIAGENTS_MODEL": "m",
+            "MULTIAGENTS_LAUNCH_STATE": "/tmp"}      # opencode writes its config there
+    out = subprocess.run(["sh", str(script), "launch"], capture_output=True,
+                         text=True, env={**base, **env})
+    return out.stdout.strip()
+
+
+def test_headless_flags_appear_only_in_unattended_mode():
+    """`-p` is print-and-exit. Right for a supervised turn, and fatal for the
+    interactive path — it would turn `multiagents run` into a one-shot."""
+    for provider in ("claude", "agy"):
+        assert " -p " not in " " + _launch_argv(provider) + " ", provider
+        unattended = _launch_argv(provider, MULTIAGENTS_UNATTENDED="1",
+                                  MULTIAGENTS_NUDGE="keep going")
+        assert "-p keep going" in unattended, f"{provider}: {unattended}"
+
+
+def test_opencode_uses_its_non_interactive_entry_point():
+    plain = _launch_argv("opencode")
+    assert not plain.startswith("run "), plain
+    assert _launch_argv("opencode", MULTIAGENTS_UNATTENDED="1",
+                        MULTIAGENTS_NUDGE="go").startswith("run go")
+
+
+def test_two_turns_that_change_nothing_end_the_run(tmp_path, monkeypatch, capsys):
+    """The stop condition. Without it an unattended run keeps paying for turns
+    long after the work is finished."""
+    import multiagents.cli as cli
+    calls = []
+
+    class _Done:
+        returncode = 0
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: calls.append(a) or _Done())
+    monkeypatch.setattr(cli.scripts, "exec_action", lambda *a, **k: (["true"], {}))
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+
+    paths = _paths(tmp_path)
+    code = cli._supervise(paths, _config(), "orchestrator", AgentSpec("o", "p", "m"),
+                          object(), object(), {"MULTIAGENTS_RESUME": "0"}, 20)
+    assert code == 0
+    assert len(calls) == 2, "stops after the second idle turn, not the twentieth"
+    assert "nothing left to do" in capsys.readouterr().out
+
+
+def test_three_failed_turns_stop_rather_than_spin(tmp_path, monkeypatch, capsys):
+    """A turn that fails instantly and is retried instantly is a busy loop that
+    spends quota on nothing."""
+    import multiagents.cli as cli
+
+    class _Fail:
+        returncode = 1
+
+    slept = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Fail())
+    monkeypatch.setattr(cli.scripts, "exec_action", lambda *a, **k: (["false"], {}))
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+
+    paths = _paths(tmp_path)
+    code = cli._supervise(paths, _config(), "orchestrator", AgentSpec("o", "p", "m"),
+                          object(), object(), {"MULTIAGENTS_RESUME": "0"}, 20)
+    assert code == 1
+    assert slept == [30, 60], "backoff grows rather than hammering"
+    assert "three turns in a row failed" in capsys.readouterr().out
+
+
+def _paths(tmp_path):
+    from multiagents.paths import ProjectPaths
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    return paths
+
+
+def _config():
+    from multiagents.config import Config
+    return Config(project={}, providers={}, agents={}, models={}, instruction_dirs=[])

@@ -140,6 +140,11 @@ launch)
     OPENCODE_CONFIG="$state/opencode.json"; export OPENCODE_CONFIG
     set -- --agent orchestrator
     [ "${MULTIAGENTS_RESUME:-0}" = "1" ] && set -- "$@" --continue
+    if [ "${MULTIAGENTS_UNATTENDED:-0}" = "1" ]; then
+        # `run` is opencode's non-interactive entry point; the nudge is its
+        # message, and it exits when the turn is done.
+        set -- run "${MULTIAGENTS_NUDGE:-continue}" "$@"
+    fi
     exec "$BIN" "$@"
     ;;
 *)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
