@@ -3977,3 +3977,33 @@ def test_a_lost_terminal_is_always_retried(tmp_path, monkeypatch):
     assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
                                None, None, {}, [], {}) == 0
     assert len(runs) == 2, "retried without needing restart_on_crash"
+
+
+def test_the_initializer_knows_it_may_be_shaping_a_second_phase():
+    """Its opening frames a greenfield — "before any implementation starts",
+    "nothing is built during this stage". Coming back to a project with merged
+    work and existing specs is a different job, and reading a half-built repo
+    through greenfield instructions produces a brief that plans what already
+    exists."""
+    brief = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "_initializer.md").read_text()
+    flat = " ".join(brief.split())
+
+    assert "Returning after work has been done" in brief
+    assert "Read what was actually built, not what was planned" in flat
+    assert "Extend the brief; do not rewrite it" in flat
+    assert "cannot tell finished work from planned work will redo it" in flat
+
+
+def test_the_orchestrator_hands_back_rather_than_inventing_a_next_phase():
+    """It executes the brief; it does not decide what the project is. An idle
+    tree with budget left is exactly when a system like this starts spending a
+    subscription on work nobody asked for."""
+    brief = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "_orchestrator.md").read_text()
+    flat = " ".join(brief.split())
+
+    assert "When the brief is done" in brief
+    assert "do not invent a next phase" in flat
+    assert "multiagents init-agent" in flat
+    assert "merge or discard the branches you own" in flat
