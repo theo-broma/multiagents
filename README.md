@@ -1291,6 +1291,50 @@ when nobody is watching agents that hold your user account on the local
 executor. `init` offers docker for exactly this reason; this is the case that
 makes the offer worth accepting.
 
+## When a provider is simply broken
+
+A live session lost its claude OAuth token to a server-side revocation. Thirteen
+agents then failed one after another, each producing exactly this and nothing
+else, until the user noticed:
+
+```
+Failed to authenticate. API Error: 401 OAuth access token has been revoked.
+```
+
+Two things let that run on. `claude auth status --json` reports `loggedIn: true`
+from **local state** — it never asks the server, so `doctor` cheerfully said the
+provider was authenticated throughout. And the failure carried no structured
+signal to key on: the CLI's own result event said `status: success` while the
+only output was the error, and the exit code was the sole honest bit in it.
+
+The obvious fix is to match that text. This project has already been burned by
+exactly that: a classifier reading agent output cooled a provider down for
+fifteen minutes because an advisor used the word "quota" in a sentence, and
+classifiers have read only exit status and stderr ever since. Narrowing the rule
+to failed runs is not enough either — an agent debugging a test whose output
+contains an auth error will quote it, and then fail for some other reason.
+
+So nothing reads the text. **A provider whose last three runs all failed is
+broken whatever the reason**, and that is knowable from exit statuses alone. The
+breaker trips, sets a cooldown, and `choose_provider` routes around it or defers
+— the machinery that already exists for a constrained provider. `doctor` marks
+it:
+
+```
+  !! claude    stopped after 3 consecutive failures: failed: API Error: 401 …
+```
+
+A single success resets the count, because two failures and a success is a bad
+afternoon rather than a broken provider. `limits.provider_failure_threshold`
+and `limits.provider_down_cooldown_seconds` tune it.
+
+The same session also produced `claude --model opencode-go/kimi-k2.7-code` and
+`claude --model deep` — model overrides from another provider's namespace,
+rejected by the CLI after a spawn had already been paid for. A `model` override
+is now checked against what that provider actually serves before anything is
+started, unless `models.yaml` is empty, where refusing would be worse than the
+mistake it prevents.
+
 ## Running out, and coming back
 
 Three layers, because the providers fail differently.
@@ -1478,7 +1522,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-243 tests covering the parts live runs do not reliably exercise: doom-loop
+248 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

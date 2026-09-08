@@ -507,6 +507,20 @@ class Runner:
     ) -> dict[str, Any]:
         spec = self.config.agent(agent_name)
         if model:
+            # A model id belongs to one provider's namespace. In a real session
+            # the orchestrator sent `claude --model opencode-go/kimi-k2.7-code`
+            # and `claude --model deep`, both of which the CLI rejected after a
+            # spawn had already been paid for. Refusing here costs nothing and
+            # says what the choices are.
+            known = {m.get("id") for m in (self.config.models.get(spec.provider) or [])
+                     if isinstance(m, dict)}
+            if known and model not in known:
+                raise ValueError(
+                    f"{spec.provider} does not serve a model called {model!r}. "
+                    f"A model id belongs to its provider's namespace — to run "
+                    f"{agent_name!r} elsewhere, name a model under `models:` in "
+                    f"its agents.yaml entry instead of overriding it here."
+                )
             spec = AgentSpec(**{**spec.__dict__, "model": model})
         self._preflight(spec, workdir)
         provider = self.providers[spec.provider]
@@ -750,6 +764,29 @@ class Runner:
         # silence trip in the window before exit would otherwise leave the node
         # `stuck` with the question invisible.
         status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
+
+        # Cause-agnostic circuit breaker. A provider whose last few runs all
+        # failed is broken whatever the reason, and that is knowable without
+        # reading a word of what the agent said — which is the part this
+        # project has already got wrong once.
+        if status not in ("awaiting_user",):
+            trip = self.tree.note_run_outcome(
+                run.provider.name, ok=status in ("done", "merged"),
+                threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
+                reason=f"{status}: {(stderr or text or '').strip()[:120]}",
+            )
+            if trip:
+                # A cooldown rather than a permanent mark: the cause may be
+                # transient, and `budget_status` and choose_provider already
+                # route around a cooling provider and defer when none is left.
+                self.tree.set_cooldown(
+                    run.provider.name,
+                    now() + float(self.config.limits.get(
+                        "provider_down_cooldown_seconds", 1800)),
+                    f"{trip['failures']} runs in a row failed — check "
+                    f"`multiagents auth login {run.provider.name}` and "
+                    f"`multiagents doctor`",
+                )
 
         # Commit anything the agent left uncommitted so no work is stranded on
         # an unreferenced worktree. Skipped while parked on a question: the

@@ -94,7 +94,7 @@ class Tree:
 
     def _empty(self) -> dict:
         return {"version": 1, "nodes": {}, "deferred": [], "cooldowns": {},
-                "pause": {},
+                "pause": {}, "provider_health": {},
                 "questions": [], "tickets": []}
 
     def _read_unlocked(self) -> dict:
@@ -110,6 +110,7 @@ class Tree:
         data.setdefault("nodes", {})
         data.setdefault("deferred", [])
         data.setdefault("pause", {})
+        data.setdefault("provider_health", {})
         data.setdefault("cooldowns", {})
         data.setdefault("questions", [])
         data.setdefault("tickets", [])
@@ -501,6 +502,48 @@ class Tree:
         self.emit(result["agent"], "ticket_status", ticket_id=ticket_id,
                   status=status, url=url)
         return result
+
+    # ------------------------------------------------------- provider health --
+    #
+    # A circuit breaker, and deliberately cause-agnostic. When a provider's
+    # credentials were revoked mid-session, thirteen agents failed identically
+    # before anyone noticed — and the only evidence was prose in the agents' own
+    # output, which this project already learned not to classify on: a
+    # classifier reading agent text once cooled a provider down because an
+    # advisor used the word "quota" in a sentence.
+    #
+    # Counting consecutive failures needs none of that. A provider whose last
+    # three runs all failed is broken whatever the reason, and continuing to
+    # spawn into it is the failure worth preventing.
+
+    def note_run_outcome(self, provider: str, ok: bool, threshold: int = 3,
+                         reason: str = "") -> dict | None:
+        """Record how a run ended. Returns trip details when the breaker opens."""
+        if not provider:
+            return None
+        with self.transaction() as data:
+            health = data["provider_health"].setdefault(
+                provider, {"consecutive_failures": 0, "last_reason": ""})
+            if ok:
+                health["consecutive_failures"] = 0
+                health["last_reason"] = ""
+                return None
+            health["consecutive_failures"] += 1
+            health["last_reason"] = reason[:200]
+            count = health["consecutive_failures"]
+            if count < threshold or health.get("tripped"):
+                return None
+            health["tripped"] = now()
+            trip = {"provider": provider, "failures": count, "reason": reason[:200]}
+        self.emit("system", "provider_down", **trip)
+        return trip
+
+    def provider_health(self) -> dict:
+        return self.read().get("provider_health", {})
+
+    def clear_provider_health(self, provider: str) -> None:
+        with self.transaction() as data:
+            data["provider_health"].pop(provider, None)
 
     # ---------------------------------------------------------------- pause --
     #

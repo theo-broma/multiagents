@@ -4068,3 +4068,87 @@ def test_the_launcher_resumes_by_id_only_when_that_session_exists(tmp_path):
     (sessions / f"{uuid}.jsonl").write_text("{}\n")
     assert f"--resume {uuid}" in launch("1"), "it exists -> resume that one"
     assert f"--session-id {uuid}" in launch("0"), "--fresh never resumes"
+
+
+# --------------------------------------------------------------------------
+# Circuit breaker
+#
+# From a real session: an OAuth token was revoked server-side, and thirteen
+# agents failed identically before anyone noticed. The evidence was prose in
+# the agents' own output — `claude auth status` still reported "loggedIn: true"
+# and the CLI's own result event said `status: success` while the only output
+# was "API Error: 401 OAuth access token has been revoked".
+
+
+def test_a_provider_trips_after_consecutive_failures(tmp_path):
+    """Cause-agnostic on purpose. Classifying the reason would mean reading
+    agent text, which once cooled a provider down because an advisor used the
+    word "quota" in a sentence."""
+    tree = _tree(tmp_path)
+
+    assert tree.note_run_outcome("claude", ok=False, threshold=3) is None
+    assert tree.note_run_outcome("claude", ok=False, threshold=3) is None
+    trip = tree.note_run_outcome("claude", ok=False, threshold=3)
+
+    assert trip is not None and trip["failures"] == 3
+    assert tree.note_run_outcome("claude", ok=False, threshold=3) is None, "trips once"
+
+
+def test_a_success_clears_the_count(tmp_path):
+    """Two failures and a success is a bad afternoon, not a broken provider."""
+    tree = _tree(tmp_path)
+    tree.note_run_outcome("agy", ok=False, threshold=3)
+    tree.note_run_outcome("agy", ok=False, threshold=3)
+    tree.note_run_outcome("agy", ok=True, threshold=3)
+
+    assert tree.provider_health()["agy"]["consecutive_failures"] == 0
+    assert tree.note_run_outcome("agy", ok=False, threshold=3) is None
+
+
+def test_providers_are_counted_separately(tmp_path):
+    tree = _tree(tmp_path)
+    for _ in range(3):
+        tree.note_run_outcome("claude", ok=False, threshold=3)
+    assert tree.note_run_outcome("opencode", ok=False, threshold=3) is None
+    assert tree.provider_health()["opencode"]["consecutive_failures"] == 1
+
+
+def test_a_model_override_from_another_provider_is_refused(tmp_path):
+    """Seen in the wild: `claude --model opencode-go/kimi-k2.7-code`, and
+    `claude --model deep`. Both cost a spawn before the CLI rejected them."""
+    import asyncio
+    from multiagents.config import Config
+    from multiagents.paths import ProjectPaths
+    from multiagents.runner import Runner
+
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    config = Config(
+        project={}, providers={"claude": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}},
+        agents={"impl": AgentSpec("impl", "claude", "sonnet")},
+        models={"claude": [{"id": "sonnet"}, {"id": "opus"}]}, instruction_dirs=[])
+    runner = Runner(paths, config)
+
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(runner.start("impl", "go", model="opencode-go/kimi-k2.7-code"))
+    assert "does not serve a model called" in str(excinfo.value)
+    assert "belongs to its provider's namespace" in str(excinfo.value)
+
+
+def test_an_unknown_model_list_does_not_block_an_override(tmp_path):
+    """models.yaml can be stale or empty; refusing on that basis would be worse
+    than the mistake it prevents."""
+    import asyncio
+    from multiagents.config import Config
+    from multiagents.paths import ProjectPaths
+    from multiagents.runner import Runner
+
+    paths = ProjectPaths(tmp_path)
+    paths.ensure()
+    config = Config(
+        project={}, providers={"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}},
+        agents={"impl": AgentSpec("impl", "p", "m")}, models={}, instruction_dirs=[])
+
+    with pytest.raises(RuntimeError) as excinfo:      # fails later, on the repo
+        asyncio.run(Runner(paths, config).start("impl", "go", model="anything"))
+    assert "does not serve a model" not in str(excinfo.value)
