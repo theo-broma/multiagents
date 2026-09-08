@@ -4007,3 +4007,64 @@ def test_the_orchestrator_hands_back_rather_than_inventing_a_next_phase():
     assert "do not invent a next phase" in flat
     assert "multiagents init-agent" in flat
     assert "merge or discard the branches you own" in flat
+
+
+# --------------------------------------------------------------------------
+# One session per role
+#
+# `--continue` resumes the most recent conversation IN THE DIRECTORY, and both
+# launched roles share the project root — so `init-agent` after `run` reopened
+# the orchestrator's conversation. Reported from a real session.
+
+
+def test_each_launched_role_owns_a_stable_session_id(tmp_path):
+    import multiagents.cli as cli
+    paths = _paths(tmp_path)
+
+    orchestrator = cli._role_session_id(paths, "orchestrator")
+    initializer = cli._role_session_id(paths, "initializer")
+
+    assert orchestrator != initializer, "sharing one is the bug this fixes"
+    assert cli._role_session_id(paths, "orchestrator") == orchestrator, "stable"
+    assert len(orchestrator.split("-")) == 5, "claude requires a uuid"
+
+
+def test_fresh_rotates_the_id_rather_than_colliding(tmp_path):
+    """`--fresh` means a new conversation. Reusing an id that already names a
+    transcript would collide with the session it points at."""
+    import multiagents.cli as cli
+    paths = _paths(tmp_path)
+
+    first = cli._role_session_id(paths, "orchestrator")
+    rotated = cli._role_session_id(paths, "orchestrator", rotate=True)
+    assert rotated != first
+    assert cli._role_session_id(paths, "orchestrator") == rotated, "and it sticks"
+
+
+def test_the_launcher_resumes_by_id_only_when_that_session_exists(tmp_path):
+    """Resuming an id with no transcript is what `--session-id` is for; the two
+    are not interchangeable."""
+    import os
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "claude.sh")
+    home = tmp_path / "home"
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    slug = str(workdir).replace("/", "-").replace(".", "-").replace("_", "-")
+    sessions = home / ".claude" / "projects" / slug
+    sessions.mkdir(parents=True)
+    uuid = "11111111-2222-4333-8444-555555555555"
+
+    def launch(resume):
+        out = subprocess.run(
+            ["sh", str(script), "launch"], cwd=workdir, capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(home),
+                 "MULTIAGENTS_BIN": "/bin/echo", "MULTIAGENTS_MODEL": "m",
+                 "MULTIAGENTS_SESSION_ID": uuid, "MULTIAGENTS_RESUME": resume})
+        return out.stdout.strip()
+
+    assert f"--session-id {uuid}" in launch("1"), "no transcript yet -> create it"
+    (sessions / f"{uuid}.jsonl").write_text("{}\n")
+    assert f"--resume {uuid}" in launch("1"), "it exists -> resume that one"
+    assert f"--session-id {uuid}" in launch("0"), "--fresh never resumes"

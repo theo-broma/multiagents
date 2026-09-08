@@ -282,6 +282,10 @@ def _launch_agent(paths, config, role: str, resume: bool,
     first_time = not marker.is_file()
     context["MULTIAGENTS_RESUME"] = "0" if (first_time or not resume) else "1"
     context["MULTIAGENTS_ROLE"] = role
+    # `--fresh` means a new conversation, so it needs a new id: reusing one
+    # that already has a transcript would collide with the session it names.
+    context["MULTIAGENTS_SESSION_ID"] = _role_session_id(
+        paths, role, rotate=not resume)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(time.time()))
 
@@ -442,6 +446,30 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     # failure, and stops when two turns change nothing.
     return _supervise(paths, config, role, spec, provider, executor, context,
                       max_turns=int(config.limits.get("supervised_turns", 50)))
+
+
+def _role_session_id(paths, role: str, rotate: bool = False) -> str:
+    """A stable session id for this role, created once and kept.
+
+    `--continue` resumes the most recent conversation *in the directory*, and
+    both launched roles share the project root — so `init-agent` after `run`
+    resumed the orchestrator's conversation. Naming the session removes the
+    ambiguity entirely: each role owns one id for the life of the project.
+    """
+    import uuid as _uuid
+
+    path = paths.data / "launch" / f"{role}.session"
+    if not rotate:
+        try:
+            existing = path.read_text().strip()
+            if existing:
+                return existing
+        except OSError:
+            pass
+    fresh = str(_uuid.uuid4())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(fresh)
+    return fresh
 
 
 def _pid_file(paths, role: str) -> Path:

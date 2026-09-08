@@ -299,6 +299,19 @@ carries it, and a test asserts that the underscored set is exactly the set of
 briefs belonging to launched agents. You can still edit them freely; the
 convention marks what not to *remove*.
 
+### One session per launched role
+
+`claude --continue` resumes *the most recent conversation in the directory*, and
+both launched roles run in the project root — so `init-agent` started after
+`run` reopened the **orchestrator's** conversation. Reported from a real
+session.
+
+Each role now owns a session id, generated once and kept in
+`.multiagents/launch/<role>.session`. The launcher resumes it by id when a
+transcript for that id exists, creates it under that id when one does not, and
+rotates to a new id for `--fresh` — reusing one that already names a transcript
+would collide with the session it points at.
+
 A config written before the rename that still says `instructions: orchestrator.md`
 keeps working — the loader falls back to the other spelling — but the exact name
 always wins, so a local `orchestrator.md` you wrote yourself is never shadowed.
@@ -1465,7 +1478,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-240 tests covering the parts live runs do not reliably exercise: doom-loop
+243 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
