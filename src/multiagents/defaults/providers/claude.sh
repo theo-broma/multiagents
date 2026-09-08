@@ -40,17 +40,22 @@ launch)
         set -- "$@" --mcp-config "$MULTIAGENTS_MCP_CONFIG" --strict-mcp-config
     [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && \
         set -- "$@" --append-system-prompt-file "$MULTIAGENTS_PROMPT_FILE"
-    if [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
-        # `--continue` is FATAL when this directory has no conversation: the
-        # CLI prints "No conversation found to continue" and exits. The launch
-        # marker is written before the first session runs, so it only records
-        # that we tried — a first run the user quit without saying anything
-        # would otherwise make every later run fail that way.
-        #
-        # Claude stores transcripts per working directory, with `/`, `.` and
-        # `_` all folded to `-`. Test for a transcript, not for the directory:
-        # an older session can leave the directory behind holding only
-        # `memory/`, which is exactly the false positive seen in the wild.
+    # Each launched role owns a session id, because `--continue` resumes the
+    # most recent conversation IN THE DIRECTORY and both roles share the project
+    # root — so `init-agent` after `run` would reopen the orchestrator's
+    # conversation. Naming the session removes the ambiguity: resume it if it
+    # exists, create it under that id if it does not.
+    if [ -n "${MULTIAGENTS_SESSION_ID:-}" ]; then
+        sessions="$HOME/.claude/projects/$(pwd | sed 's|[/._]|-|g')"
+        if [ "${MULTIAGENTS_RESUME:-0}" = "1" ] \
+           && [ -f "$sessions/$MULTIAGENTS_SESSION_ID.jsonl" ]; then
+            set -- "$@" --resume "$MULTIAGENTS_SESSION_ID"
+        else
+            set -- "$@" --session-id "$MULTIAGENTS_SESSION_ID"
+        fi
+    elif [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
+        # No id: an install predating this. Fall back to the old behaviour,
+        # which is still better than passing --continue into nothing.
         sessions="$HOME/.claude/projects/$(pwd | sed 's|[/._]|-|g')"
         if ls "$sessions"/*.jsonl >/dev/null 2>&1; then
             set -- "$@" --continue
@@ -58,6 +63,7 @@ launch)
             echo "no previous conversation in this directory; starting a fresh one" >&2
         fi
     fi
+
     # A restarted interactive session opens with a message instead of waiting
     # for one to be typed. `claude [options] [prompt]` is interactive WITH a
     # first user turn; `-p` is the non-interactive form and belongs only to the
