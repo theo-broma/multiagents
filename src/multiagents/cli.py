@@ -692,6 +692,8 @@ def _ensure_authenticated(paths, config, providers, interactive: bool = True) ->
         print(f"  {name}: {recheck.status}")
         if not recheck.ok:
             still_broken += 1
+        elif paths is not None:
+            _refresh_container_after_login(paths, config, name)
     return still_broken
 
 
@@ -1356,6 +1358,90 @@ def cmd_resume(args: argparse.Namespace) -> int:
                          supervise=getattr(args, "supervise", True))
 
 
+def _refresh_container_after_login(paths, config, provider_name: str) -> None:
+    """Restart the container so agents stop using the credential just replaced.
+
+    Writing a new token to disk is not enough for a CLI that caches it in a
+    running process — `claude` keeps a daemon, and a container started before a
+    re-login goes on serving the revoked one. Idle: restarted without asking,
+    since it costs nothing but a few seconds. Busy: asked, because a restart
+    kills every agent in there, including ones on providers that are perfectly
+    fine.
+    """
+    if config.executor != "docker":
+        return
+    try:
+        executor = _docker_executor(paths)
+        if executor.container_state(executor.container) != "running":
+            return
+    except Exception:
+        return
+
+    active = Tree(paths.tree_file, paths.events_file).active()
+    if active:
+        print(f"    {len(active)} agent(s) are running in the container and may "
+              f"cache the old\n    {provider_name} credential until it restarts "
+              f"— restarting kills them.")
+        if not _confirm("    restart the container now?", default=False):
+            print(f"    left running. Agents will keep using the old credential; "
+                  f"`multiagents docker down && up` when you are ready.")
+            return
+    try:
+        executor.stop(remove=False)
+        executor.ensure_running()
+        print(f"    container restarted, so agents pick up the new "
+              f"{provider_name} credential")
+    except Exception as exc:
+        print(f"    could not restart the container: {exc}. Agents will keep "
+              f"using the old credential until you do.", file=sys.stderr)
+
+
+def _stale_container_warnings(paths, config, providers) -> list[str]:
+    """Credentials written after the container started.
+
+    A CLI that caches its credential in a long-lived process keeps serving the
+    old one after you re-authenticate — `claude` runs a background daemon, and a
+    container started before a re-login had thirteen agents fail with
+    "401 OAuth access token has been revoked" while the file on disk, shared by
+    symlink, was correct the whole time. `auth status` cannot see that: it reads
+    the same correct file.
+
+    Comparing timestamps costs nothing and points straight at it.
+    """
+    if config.executor != "docker":
+        return []
+    try:
+        executor = _docker_executor(paths)
+        if executor.container_state(executor.container) != "running":
+            return []
+        started = executor.started_at()
+    except Exception:
+        return []
+    if not started:
+        return []
+
+    home = Path.home()
+    warnings = []
+    for name, provider in sorted(providers.items()):
+        if not provider.enabled:
+            continue
+        newest = 0.0
+        for relative in list(provider.home_links) + list(provider.home_copy):
+            candidate = home / relative
+            try:
+                newest = max(newest, candidate.stat().st_mtime)
+            except OSError:
+                continue
+        if newest > started:
+            warnings.append(
+                f"{name}: credentials changed {(newest - started) / 60:.0f} min "
+                f"after the container started — a CLI that caches them in a "
+                f"running process is still serving the old ones. "
+                f"`multiagents docker down && multiagents docker up`"
+            )
+    return warnings
+
+
 def _report_agents(config, providers) -> int:
     """The `doctor` roster section. Returns the number of problems found.
 
@@ -1445,6 +1531,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                       f"resets {str(detail.get('resets_at', '?'))[:19]}")
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
+    for warning in (_stale_container_warnings(paths, config, providers_map)
+                    if paths else []):
+        print(f"  !! {warning}")
+        problems += 1
     health = Tree(paths.tree_file, paths.events_file).provider_health() if paths else {}
     for name, record in sorted(health.items()):
         if record.get("tripped"):
