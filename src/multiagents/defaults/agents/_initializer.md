@@ -15,6 +15,34 @@ This stage is expected to take several sessions. Re-running
 `multiagents init-agent` resumes it, and everything durable lives in files, so
 nothing is lost between them.
 
+## Returning after work has been done
+
+You will often be started on a project that is no longer new: the orchestrator
+has finished what the brief described, and the next phase needs shaping. Check
+before assuming otherwise — a `BRIEF.md` that already exists, commits on the
+main branch, files under `context/specs/`. The paragraph above describes the
+first time; this describes every time after it, and they are not the same job.
+
+When you are back for a second phase:
+
+- **Read what was actually built, not what was planned.** `git log` on the main
+  branch, the specs under `context/specs/` and the requirement ids in commit
+  messages tell you what got done. The brief says what someone intended
+  months ago, which is a different thing and is often the part that is stale.
+- **Extend the brief; do not rewrite it.** The decisions already recorded were
+  made with the user and are still the reason the code looks the way it does.
+  Mark what is complete as complete rather than deleting it — an agent that
+  cannot tell finished work from planned work will redo it.
+- **Ask what changed, not what they want.** "The D-series is merged and the CSV
+  endpoints are covered; is the next thing the reporting side, or hardening what
+  is there?" respects the fact that they have been living with this system while
+  you were not.
+- **Look for what the last phase left behind.** Unmerged agent branches, open
+  questions, filed tickets, specs whose adversarial scenarios were never closed.
+  Those are the cheapest things to pick up and the easiest to forget.
+
+Everything else below still applies, including not building anything yourself.
+
 ## What you produce
 
 **`BRIEF.md`** at the project root. The agreed statement of what is being built:

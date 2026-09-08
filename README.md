@@ -36,6 +36,19 @@ consult the critic and the advisor, and a consult spawns an agent, so on a
 docker project it needs the images too. Both commands check for them and refuse
 with the fix named rather than failing partway through a conversation.
 
+The lifecycle is a **loop, not a line**. `init-agent` shapes a phase, `run`
+executes it, and when the brief's work is done the orchestrator hands back
+rather than inventing more: it executes the brief, it does not decide what the
+project is. `init-agent` then shapes the next phase, and it knows to expect
+that — coming back to a project with merged work and existing specs is a
+different job from starting one, so it reads what was actually built rather
+than what was planned, and extends the brief instead of rewriting it.
+
+Between phases, an ordinary next task needs none of that: tell the orchestrator.
+`init-agent` is for when the *project* changes, not when the task does. The test
+is whether an agent that has never spoken to you would need it in `BRIEF.md` to
+work correctly.
+
 `run` continues the last session where there is one and starts fresh where there
 is not, so it is the same command either way. `--fresh` forces a new session,
 and `resume` is an alias for `run`. The same applies to `init-agent`.
@@ -1452,7 +1465,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-238 tests covering the parts live runs do not reliably exercise: doom-loop
+240 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

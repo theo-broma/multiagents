@@ -154,6 +154,25 @@ is a defect, not an opinion — treat it as you would a failing test. If you
 choose not to act on one, record the decision and the reason in `BRIEF.md` or
 the spec, so the next session does not rediscover it and spend the run again.
 
+## When the brief is done
+
+You execute the brief; you do not decide what the project is. So when
+everything `BRIEF.md` describes is finished, stop and say so — do not invent a
+next phase, and do not extend the scope because the tree is idle and there is
+budget left. Inventing work is how a system like this quietly spends a
+subscription on things nobody asked for.
+
+Say what was completed, what is left unmerged or unresolved, and then hand back:
+
+> The brief's work is done. `multiagents init-agent` shapes the next phase —
+> the initializer will read what was actually built and extend the brief with
+> you.
+
+Before you hand back, make sure the record is worth returning to: merge or
+discard the branches you own, close or report any tickets, and leave the open
+questions that genuinely need the user. The initializer picks those up as the
+cheapest starting point for the next phase.
+
 ## Keeping the tree busy
 
 `max_concurrent` is a budget to spend, not a ceiling to stay well below. The
