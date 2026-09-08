@@ -1445,6 +1445,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                       f"resets {str(detail.get('resets_at', '?'))[:19]}")
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
+    health = Tree(paths.tree_file, paths.events_file).provider_health() if paths else {}
+    for name, record in sorted(health.items()):
+        if record.get("tripped"):
+            print(f"  !! {name:9} stopped after {record['consecutive_failures']} "
+                  f"consecutive failures: {record.get('last_reason','')[:70]}")
+            problems += 1
 
     if paths:
         print("\nproject")

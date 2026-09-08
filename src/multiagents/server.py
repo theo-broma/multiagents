@@ -203,7 +203,8 @@ async def start_agent(
             timeout=timeout or None,
             model=model or None,
         ))
-    except (PermissionError, RuntimeError, KeyError, FileNotFoundError) as exc:
+    except (PermissionError, RuntimeError, ValueError, KeyError,
+            FileNotFoundError) as exc:
         return _ok({"error": f"{type(exc).__name__}: {exc}"})
 
 

@@ -195,6 +195,14 @@ limits:
   # the same fault being read again.
   restart_min_runtime_seconds: 60
 
+  # Circuit breaker. A provider whose last few runs ALL failed is broken
+  # whatever the reason, and that is knowable without reading what the agents
+  # said — which is the signal this project learned not to classify on. Set
+  # from a real incident: a revoked token let thirteen agents fail identically
+  # before anyone noticed, and every one of them cost a spawn.
+  provider_failure_threshold: 3
+  provider_down_cooldown_seconds: 1800
+
 # --------------------------------------------------------------------------
 # Quota awareness. Used to route work away from a rationed provider and toward
 # one with headroom, and to park tasks until a bucket resets.
