@@ -274,6 +274,27 @@ class DockerExecutor(Executor):
     def image_exists(self, name: str) -> bool:
         return _run(["docker", "image", "inspect", name]).returncode == 0
 
+    def started_at(self, name: str = "") -> float | None:
+        """When the container started, as a unix time. None if it is not up."""
+        import datetime
+
+        result = _run(["docker", "inspect", "-f", "{{.State.StartedAt}}",
+                       name or self.container])
+        if result.returncode != 0:
+            return None
+        stamp = result.stdout.strip()
+        try:
+            # Docker returns RFC3339 with nanoseconds, which fromisoformat
+            # rejects before 3.11 and dislikes with a Z suffix.
+            stamp = stamp.replace("Z", "+00:00")
+            head, _, rest = stamp.partition(".")
+            if rest:
+                frac, _, tz = rest.partition("+")
+                stamp = f"{head}.{frac[:6]}+{tz}" if tz else f"{head}.{frac[:6]}"
+            return datetime.datetime.fromisoformat(stamp).timestamp()
+        except ValueError:
+            return None
+
     def container_state(self, name: str) -> str:
         result = _run(["docker", "inspect", "-f", "{{.State.Status}}", name])
         return result.stdout.strip() if result.returncode == 0 else "absent"

@@ -1291,6 +1291,49 @@ when nobody is watching agents that hold your user account on the local
 executor. `init` offers docker for exactly this reason; this is the case that
 makes the offer worth accepting.
 
+## Credentials cached in a running process
+
+Re-authenticating writes a new token to a file the container reads through a
+symlink, so it ought to be enough. It is not, for a CLI that keeps the
+credential in a **running process**.
+
+A real session found this the hard way. The token was revoked, the user
+re-authenticated successfully, the host worked — and agents kept failing with
+`401 OAuth access token has been revoked`. Every obvious explanation was
+eliminated in turn: the credential file was a live symlink, byte-identical and
+unexpired; the copied `.claude.json` matched down to `machineID`; the egress
+allowlist was not blocking anything. Cross-testing isolated it:
+
+```
+container + host's HOME   -> 401 revoked
+host      + agent's HOME  -> works
+```
+
+`claude` runs a background daemon. The container had been up for hours, started
+before the re-login, and its daemon was serving the revoked token from memory
+while the file on disk was correct throughout. Restarting the container fixed
+it. `auth status` could never have caught this — it reads the same correct file.
+
+Two things now close it:
+
+- **`auth login` refreshes the container.** Idle, it restarts without asking,
+  which costs a few seconds. Busy, it asks first — a restart kills every agent
+  in there, including ones on providers that are perfectly fine.
+- **`doctor` compares timestamps.** A container that started before a
+  provider's credentials were last written is flagged, because that is exactly
+  the shape of this failure and costs nothing to check:
+
+```
+  !! claude: credentials changed 17 min after the container started — a CLI
+     that caches them in a running process is still serving the old ones.
+```
+
+The general principle, worth remembering when adding a provider: **a credential
+change invalidates any process that may already have read it.** A long-lived
+shared container is the thing that makes that observable; per-agent ephemeral
+containers would not have the problem at all, which is a fair argument against
+the current design and not one this handles.
+
 ## When a provider is simply broken
 
 A live session lost its claude OAuth token to a server-side revocation. Thirteen
@@ -1522,7 +1565,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-248 tests covering the parts live runs do not reliably exercise: doom-loop
+253 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
