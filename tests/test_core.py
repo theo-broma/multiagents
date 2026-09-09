@@ -4497,3 +4497,97 @@ def test_resolving_an_unknown_ticket_is_an_error(tmp_path, quiet_git, monkeypatc
     monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
     cli.cmd_init(_init_args(tmp_path))
     assert cli.cmd_tickets(_ticket_args(tmp_path, "bug-nope")) == 2
+
+
+# --------------------------------------------------------------------------
+# A day of real use: 41 agents, 19 failures, and what we could not learn
+
+
+def test_an_unparsed_line_is_kept_not_discarded(tmp_path):
+    """The whole point of a `raw` event is to show what did not parse, and the
+    payload was dropped on the way to disk. A run that died right after an
+    unrecognised line recorded {"kind": "raw", "text": ""} and threw the
+    explanation away — seen in a real 996-second failure."""
+    import asyncio
+    import json as json_mod
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh",
+                       "spawn": {"args": ["-c",
+                                          'echo \'{"unexpected":"shape","detail":"boom"}\''
+                                          ]},
+                       "stream": {"format": "ndjson",
+                                  "rules": [{"match": {"type": "text"}, "as": "text",
+                                             "fields": {"text": "text"}}]}}})
+
+    async def scenario():
+        started = await r.start("worker", "go")
+        for _ in range(40):
+            node = r.tree.get(started["agent_id"])
+            if node.status not in ("pending", "running"):
+                return started["agent_id"]
+            await asyncio.sleep(0.1)
+        return started["agent_id"]
+
+    agent_id = asyncio.run(scenario())
+    lines = (r.paths.run_dir(agent_id) / "stream.jsonl").read_text().splitlines()
+    raws = [json_mod.loads(l) for l in lines if json_mod.loads(l)["kind"] == "raw"]
+
+    assert raws, "the unparsed line must be recorded at all"
+    assert "unexpected" in raws[0]["raw"], f"and its content kept: {raws[0]}"
+    assert "boom" in raws[0]["raw"]
+
+
+def test_a_silent_failure_reports_its_mechanics(tmp_path):
+    """Four real runs failed after minutes of work with an empty result and no
+    reason, so the orchestrator could not steer, retry or report on them."""
+    import asyncio
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "exit 3"]}}})
+
+    async def scenario():
+        started = await r.start("worker", "go")
+        for _ in range(40):
+            node = r.tree.get(started["agent_id"])
+            if node.status not in ("pending", "running"):
+                return started["agent_id"]
+            await asyncio.sleep(0.1)
+        return started["agent_id"]
+
+    agent_id = asyncio.run(scenario())
+    result = json.loads((r.paths.run_dir(agent_id) / "result.json").read_text())
+
+    assert "[no output]" in result["text"]
+    assert "exit 3" in result["text"]
+    assert "having said nothing" in result["text"]
+
+
+def test_one_failure_does_not_make_a_provider_suspect(tmp_path, monkeypatch):
+    """Agents fail all the time — a watchdog trip, a timeout, a bad task. The
+    first version of this warned on a single failure and had the orchestrator
+    reporting providers as unreachable all day."""
+    import multiagents.server as server_mod
+    from multiagents.config import Config
+
+    tree = _tree(tmp_path)
+
+    class _Run:
+        providers = {}
+        paths = _paths(tmp_path)
+        config = Config(project={"limits": {"provider_failure_threshold": 3}},
+                        providers={}, agents={}, models={}, instruction_dirs=[])
+    _Run.tree = tree
+    monkeypatch.setattr(server_mod, "runner", lambda: _Run())
+    monkeypatch.setattr(server_mod.auth_mod, "check_all", lambda *a, **k: {
+        "agy": type("S", (), {"ok": True, "to_dict": lambda self: {
+            "provider": "agy", "authenticated": True}})()})
+
+    tree.note_run_outcome("agy", ok=False, threshold=3, reason="a bad task")
+    out = server_mod.auth_status()
+    assert out["degraded"] == [], "one stumble is not a broken provider"
+    assert "warning" not in out["providers"]["agy"]
+    assert out["providers"]["agy"]["last_run"] == "failed", "still reported honestly"
+
+    tree.note_run_outcome("agy", ok=False, threshold=3, reason="and another")
+    assert server_mod.auth_status()["degraded"] == ["agy"], "a pattern is"

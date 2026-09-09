@@ -1372,6 +1372,41 @@ shared container is the thing that makes that observable; per-agent ephemeral
 containers would not have the problem at all, which is a fair argument against
 the current design and not one this handles.
 
+## Diagnosability
+
+A day of real use produced 41 agents and 19 failures, and three of the four
+things that made those failures hard to read were ours.
+
+**An unparsed line was discarded.** A stream line matching no rule becomes a
+`raw` event so that nothing is silently lost — but the record written to
+`stream.jsonl` omitted the payload, so what landed on disk was
+`{"kind": "raw", "text": ""}`. One 996-second failure had exactly one raw event
+three seconds before it died, and it was empty: the line that would have
+explained it was parsed, found not to match, and thrown away. `multiagents
+probe` exists to find lines falling through to `raw` and could not show them
+either. The payload is now kept, bounded and scrubbed.
+
+**A run that says nothing now reports its mechanics.** Four runs failed after
+minutes of work with an empty result and no reason, leaving the orchestrator
+unable to steer, retry sensibly or report upward. They now record what is
+knowable:
+
+```
+[no output] the run ended with exit 1 after 996s and 125 step(s), having said
+nothing. Last activity: bash({'command': 'ls -la /tmp/opencode/pub-cache/…'})
+```
+
+Facts, and deliberately not a story about why. Inventing intent from a failed
+run is the mistake that once cooled a provider down over the word "quota".
+
+**And a single failure no longer makes a provider suspect.** The fix that made
+`auth_status` report evidence alongside a stored credential warned on
+`failures >= 1`, so any ordinary stumble — a watchdog trip, a timeout, a bad
+task — had the orchestrator announcing that a provider was in trouble. A field
+that under-reported was replaced by one that over-reported, in the same day. It
+now warns at the circuit breaker's threshold, where the evidence is a pattern
+rather than an event.
+
 ## When a provider is simply broken
 
 A live session lost its claude OAuth token to a server-side revocation. Thirteen
@@ -1603,7 +1638,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-263 tests covering the parts live runs do not reliably exercise: doom-loop
+266 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

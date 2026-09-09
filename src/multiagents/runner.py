@@ -665,6 +665,15 @@ class Runner:
                     "args": event.args, "state": event.state, "status": event.status,
                     "step": event.step, "text": event.text[:2000],
                 })
+                if event.kind == "raw" and event.raw:
+                    # The whole point of a `raw` event is to show what did not
+                    # parse, and the payload was being dropped on the way to
+                    # disk — so a run that died right after an unrecognised
+                    # line recorded `{"kind": "raw", "text": ""}` and threw the
+                    # explanation away. Bounded and scrubbed: this file is not
+                    # otherwise redacted, and an unparsed line is exactly where
+                    # something unexpected would be.
+                    record["raw"] = scrub(json.dumps(event.raw, default=str)[:4000])
                 stream_log.write(json.dumps(record) + "\n")
                 stream_log.flush()
                 run.events.append(record)
@@ -800,6 +809,25 @@ class Runner:
         node = self.tree.get(node_id)
         if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
             gitops.commit_all(Path(node.worktree), f"{node.agent}: work in progress ({node_id})")
+
+        # A run that ends with nothing to say still ended for a reason, and the
+        # mechanics are knowable: exit code, elapsed, the last thing it did.
+        # Deliberately NOT a story about why — inventing intent from a failed
+        # run is the mistake that once cooled a provider down over the word
+        # "quota". These are facts, labelled as facts.
+        if status not in ("done", "merged", "awaiting_user") and not text.strip():
+            tail = [e for e in run.events if e.get("kind") in ("tool", "raw")][-3:]
+            trace = "; ".join(
+                (f"raw: {str(e.get('raw'))[:160]}" if e.get("kind") == "raw"
+                 else f"{e.get('name')}({str(e.get('args'))[:80]})")
+                for e in tail
+            )
+            node_now = self.tree.get(node_id)
+            elapsed = round(node_now.elapsed()) if node_now else 0
+            text = (f"[no output] the run ended with exit {code} after {elapsed}s "
+                    f"and {run.supervisor.steps if run.supervisor else 0} step(s), "
+                    f"having said nothing."
+                    + (f" Last activity: {trace}" if trace else ""))
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
         (run_dir / "result.json").write_text(json.dumps(scrub({
