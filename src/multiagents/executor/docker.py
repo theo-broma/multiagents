@@ -250,6 +250,55 @@ class DockerExecutor(Executor):
             mounts.append((host_path, False))
         return mounts
 
+    def credential_drift(self) -> list[dict]:
+        """Bind-mounted credential files the container no longer shares with us.
+
+        Docker binds a FILE by its inode. Every CLI here writes a credential the
+        safe way — new file, then rename over the old path — which produces a
+        NEW inode, so the host path moves on and the container keeps the old
+        one, now unlinked, forever. The two stop being the same file and nobody
+        is told.
+
+        Measured cost of not noticing: a container bound at 00:25 kept serving a
+        token from the night before. The host refreshed at 15:51, the old
+        refresh token was rotated away and therefore revoked, and from then on
+        every agent in that container failed with "401 OAuth access token has
+        been revoked" while `auth status` on the host read the correct file and
+        said everything was fine. A whole day of runs.
+
+        Comparing inodes settles it in one `docker exec`, and a restart — not a
+        rebuild — re-resolves the bind.
+        """
+        if self.container_state(self.container) != "running":
+            return []
+        private = {str(path) for path in self.private_state()}
+        wanted: list[Path] = []
+        for provider in self.providers.values():
+            for relative in getattr(provider, "home_links", []) or []:
+                candidate = Path.home() / relative
+                if candidate.is_file() and not any(
+                        str(candidate).startswith(prefix) for prefix in private):
+                    wanted.append(candidate)
+        if not wanted:
+            return []
+
+        script = "; ".join(f'stat -c "%i" {path} 2>/dev/null || echo -' 
+                           for path in wanted)
+        result = _run(["docker", "exec", self.container, "sh", "-c", script])
+        if result.returncode != 0:
+            return []
+        inside = result.stdout.split()
+        out = []
+        for path, seen in zip(wanted, inside):
+            try:
+                host = str(path.stat().st_ino)
+            except OSError:
+                continue
+            if seen not in ("-", host):
+                out.append({"path": str(path), "host_inode": host,
+                            "container_inode": seen})
+        return out
+
     def private_state(self) -> dict[Path, Path]:
         """{path as seen in the container: backing directory on the host}.
 

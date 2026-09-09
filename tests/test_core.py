@@ -4180,74 +4180,81 @@ def test_an_unknown_model_list_does_not_block_an_override(tmp_path):
 # time. `auth status` cannot see that, because it reads the same correct file.
 
 
-def test_a_container_older_than_the_credentials_is_flagged(tmp_path, monkeypatch):
-    import multiagents.cli as cli
-    from multiagents.config import Config
+def test_a_container_reading_an_old_credential_file_is_caught(tmp_path, monkeypatch):
+    """Docker binds a FILE by inode, and every CLI here replaces its credential
+    by rename — so the moment a token refreshes, the container is reading a file
+    the host no longer has, and presents a token the refresh rotated away.
+
+    Measured before this check existed: a container bound overnight served a
+    token from the previous day for eleven hours. Every agent in it failed with
+    "401 OAuth access token has been revoked" while `auth status` on the host
+    read the correct file and said everything was fine."""
+    from multiagents.executor.docker import DockerExecutor
     from multiagents.paths import ProjectPaths
     from multiagents.providers import Provider
+    import multiagents.executor.docker as docker_mod
 
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     credential = home / ".claude" / ".credentials.json"
     credential.write_text("{}")
-    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "home_links": [".claude/.credentials.json"]})
+    executor = DockerExecutor({"image": "i"}, ProjectPaths(tmp_path),
+                              {"claude": provider}, tmp_path)
+    monkeypatch.setattr(executor, "container_state", lambda name: "running")
+
+    class _Result:
+        returncode = 0
+        stdout = "999999\n"                    # the container's inode
+
+    monkeypatch.setattr(docker_mod, "_run", lambda *a, **k: _Result())
+    drift = executor.credential_drift()
+    assert len(drift) == 1
+    assert drift[0]["container_inode"] == "999999"
+    assert drift[0]["host_inode"] == str(credential.stat().st_ino)
+
+    # Same inode: the mount is live and there is nothing to report.
+    _Result.stdout = f"{credential.stat().st_ino}\n"
+    assert executor.credential_drift() == []
+
+
+def test_a_drifted_credential_is_repaired_when_nothing_is_running(tmp_path, monkeypatch):
+    """A restart re-resolves the bind — measured against docker, not assumed.
+    Idle that is a few seconds; busy it would kill agents on providers that are
+    working perfectly well, so it is reported instead."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    config = Config(project={"executor": {"kind": "docker"}}, providers={},
+                    agents={}, models={}, instruction_dirs=[])
+    calls = []
 
     class _Executor:
         container = "c"
-        def container_state(self, name): return "running"
-        def started_at(self): return credential.stat().st_mtime - 3600   # an hour older
+        def credential_drift(self):
+            return [{"path": "/home/u/.claude/.credentials.json",
+                     "host_inode": "1", "container_inode": "2"}]
+        def stop(self, remove=False): calls.append("stop")
+        def ensure_running(self): calls.append("start")
 
     monkeypatch.setattr(cli, "_docker_executor", lambda p: _Executor())
-    config = Config(project={"executor": {"kind": "docker"}}, providers={},
-                    agents={}, models={}, instruction_dirs=[])
-    provider = Provider.from_dict("claude", {
-        "bin": "claude", "home_links": [".claude/.credentials.json"]})
+    notes = cli._repair_credential_drift(paths, config)
+    assert calls == ["stop", "start"]
+    assert "restarted the container" in notes[0]
 
-    warnings = cli._stale_container_warnings(ProjectPaths(tmp_path), config,
-                                             {"claude": provider})
-    assert len(warnings) == 1
-    assert "still serving the old ones" in warnings[0]
-    assert "docker down" in warnings[0]
-
-
-def test_a_container_newer_than_the_credentials_is_not(tmp_path, monkeypatch):
-    import multiagents.cli as cli
-    from multiagents.config import Config
-    from multiagents.paths import ProjectPaths
-    from multiagents.providers import Provider
-
-    home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    credential = home / ".claude" / ".credentials.json"
-    credential.write_text("{}")
-    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
-
-    class _Executor:
-        container = "c"
-        def container_state(self, name): return "running"
-        def started_at(self): return credential.stat().st_mtime + 60
-
-    monkeypatch.setattr(cli, "_docker_executor", lambda p: _Executor())
-    config = Config(project={"executor": {"kind": "docker"}}, providers={},
-                    agents={}, models={}, instruction_dirs=[])
-    provider = Provider.from_dict("claude", {
-        "bin": "claude", "home_links": [".claude/.credentials.json"]})
-
-    assert cli._stale_container_warnings(ProjectPaths(tmp_path), config,
-                                         {"claude": provider}) == []
-
-
-def test_a_local_project_is_never_asked_about_containers(tmp_path, monkeypatch):
-    import multiagents.cli as cli
-    from multiagents.config import Config
-    from multiagents.paths import ProjectPaths
-
-    called = []
-    monkeypatch.setattr(cli, "_docker_executor", lambda p: called.append(p))
-    local = Config(project={"executor": {"kind": "local"}}, providers={},
-                   agents={}, models={}, instruction_dirs=[])
-    assert cli._stale_container_warnings(ProjectPaths(tmp_path), local, {}) == []
-    assert called == []
+    # With an agent running, work wins: it reports and leaves it alone.
+    calls.clear()
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-1", agent="implementer", provider="agy", model="m",
+                  parent=None, depth=0, status="running"))
+    notes = cli._repair_credential_drift(paths, config)
+    assert calls == []
+    assert "1 agent(s) are running" in notes[0]
 
 
 def test_a_busy_container_is_not_restarted_without_asking(tmp_path, quiet_git,
@@ -6311,3 +6318,17 @@ def test_a_deferred_task_wakes_for_a_provider_it_can_actually_use(tmp_path):
 
     body = inspect.getsource(Runner.start)
     assert "if b.cooldown_until and name in options" in body
+
+
+def test_a_local_project_is_never_asked_about_containers(tmp_path, monkeypatch):
+    """There is no container to compare against, and building an executor to
+    find that out would fail on a machine with no docker at all."""
+    import multiagents.cli as cli
+    from multiagents.config import Config
+
+    called = []
+    monkeypatch.setattr(cli, "_docker_executor", lambda p: called.append(p))
+    local = Config(project={"executor": {"kind": "local"}}, providers={},
+                   agents={}, models={}, instruction_dirs=[])
+    assert cli._repair_credential_drift(_paths(tmp_path), local) == []
+    assert called == []

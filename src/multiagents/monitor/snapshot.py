@@ -467,6 +467,19 @@ def deep_checks(paths: ProjectPaths, config: Config) -> list[dict]:
     out = []
     for problem in _executor_problems(paths, config):
         out.append({"level": "error", "kind": "executor", "text": problem})
+    if config.executor == "docker":
+        try:
+            from ..cli import _docker_executor
+            for entry in _docker_executor(paths).credential_drift():
+                out.append({
+                    "level": "error", "kind": "credentials",
+                    "text": f"the container is reading an old "
+                            f"{Path(entry['path']).name} — agents there will "
+                            f"fail as if the credential were revoked",
+                    "detail": "`multiagents docker down && up`, or `run`, "
+                              "which repairs it when nothing is busy"})
+        except Exception:
+            pass
     try:
         providers = load_providers(config.providers)
         states = auth.check_all(providers, _executor_for(paths, config, providers),
