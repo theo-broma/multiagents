@@ -551,7 +551,14 @@ class Tree:
             health["consecutive_failures"] += 1
             health["last_reason"] = reason[:200]
             count = health["consecutive_failures"]
-            if count < threshold or health.get("tripped"):
+            # Latching on `tripped` alone meant the breaker opened once and
+            # never again: after its cooldown lapsed, every further failure was
+            # free, so a provider with a revoked token was retried all evening.
+            # Past the threshold, what suppresses a trip is an ACTIVE cooldown
+            # — which is the half-open state, one trial at a time.
+            cooling = ((data.get("cooldowns") or {}).get(provider) or {}
+                       ).get("until", 0) > now()
+            if count < threshold or cooling:
                 return None
             health["tripped"] = now()
             trip = {"provider": provider, "failures": count, "reason": reason[:200]}

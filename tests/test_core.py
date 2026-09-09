@@ -1477,12 +1477,20 @@ def test_a_clean_exit_is_never_reclassified_as_a_failure(tmp_path):
 
 def test_failover_refuses_rather_than_sending_a_foreign_model_id(tmp_path):
     """Swapping provider while keeping the model would run
-    `agy --model opencode-go/glm-5.3-flash`."""
+    `agy --model opencode-go/glm-5.3-flash`.
+
+    Enforced by construction now rather than checked afterwards: the chooser is
+    told which providers this agent named a model for and offers no other. The
+    afterwards version reverted to the provider it had just ruled out, which is
+    how an agent ran five times into a revoked token — see
+    test_a_fallback_further_down_the_chain_is_still_reached."""
     import inspect
     from multiagents.runner import Runner
+
     body = inspect.getsource(Runner.start)
-    assert "names no" in body and "add one under" in body
+    assert "allowed={spec.provider, *(spec.models" in body
     assert "spec.extra.get(\"models\")" in body
+    assert "chosen = spec.provider" not in body, "no reverting onto a ruled-out provider"
 
 
 def test_docker_executor_can_stop_an_agent_it_did_not_spawn(tmp_path):
@@ -4097,7 +4105,10 @@ def test_a_provider_trips_after_consecutive_failures(tmp_path):
     trip = tree.note_run_outcome("claude", ok=False, threshold=3)
 
     assert trip is not None and trip["failures"] == 3
-    assert tree.note_run_outcome("claude", ok=False, threshold=3) is None, "trips once"
+    # While a cooldown is running, further failures are the same fault.
+    tree.set_cooldown("claude", time.time() + 1800, "3 runs in a row failed")
+    assert tree.note_run_outcome("claude", ok=False, threshold=3) is None, \
+        "no second trip while it is already cooling down"
 
 
 def test_a_success_clears_the_count(tmp_path):
@@ -6131,3 +6142,75 @@ def test_the_shipped_budget_switches_match_the_code_defaults():
     assert shipped["reserve"] is False
     assert shipped["reserve_orchestrator"] is True
     assert reserved_providers({"budget": shipped}, {"a", "b"}, "a") == {"a"}
+
+
+def test_a_fallback_further_down_the_chain_is_still_reached(tmp_path):
+    """Reported by a running orchestrator, and it cost five runs into a revoked
+    token: claude was cooling down, the chain was [opencode, agy], and the agent
+    named a model for agy only. The first usable chain entry was opencode, the
+    caller found no model for it, and gave up — back onto claude."""
+    from multiagents.budget import Budget, choose_provider
+
+    budgets = {
+        "claude": Budget("claude", known=True, headroom=0.43,
+                         cooldown_until=time.time() + 1800),
+        "opencode": Budget("opencode", known=True, headroom=0.60),
+        "agy": Budget("agy", known=False),
+    }
+    chain = ["opencode", "agy", "defer"]
+
+    chosen, why = choose_provider("claude", budgets, chain, 0.15,
+                                  reserved={"claude"}, allowed={"claude", "agy"})
+    assert chosen == "agy", "it walked past the entry it could not use"
+
+    # With no alternative at all, the answer is to wait — not to run into the
+    # wall we just identified.
+    chosen, why = choose_provider("claude", budgets, chain, 0.15,
+                                  reserved={"claude"}, allowed={"claude"})
+    assert chosen is None
+    assert "no model named for opencode, agy" in why, \
+        "and it says exactly what to add to fix it"
+
+
+def test_the_breaker_trips_again_once_its_cooldown_has_lapsed(tmp_path):
+    """It latched: after the first trip, `tripped` stayed set, so every later
+    failure was free. A provider with a revoked token was retried all evening."""
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+
+    assert tree.note_run_outcome("claude", ok=False, reason="401") is None
+    assert tree.note_run_outcome("claude", ok=False, reason="401") is None
+    trip = tree.note_run_outcome("claude", ok=False, reason="401")
+    assert trip and trip["failures"] == 3
+    tree.set_cooldown("claude", time.time() + 1800, "3 runs in a row failed")
+
+    # While it is cooling down, more failures are the same fault; no new trip.
+    assert tree.note_run_outcome("claude", ok=False, reason="401") is None
+
+    # Once the window lapses, the next failure must open it again.
+    tree.set_cooldown("claude", time.time() - 1, "expired")
+    trip = tree.note_run_outcome("claude", ok=False, reason="401")
+    assert trip is not None, "the breaker latched open and never closed again"
+    assert trip["failures"] == 5
+
+    # A success clears the count and the trip together.
+    assert tree.note_run_outcome("claude", ok=True) is None
+    assert tree.provider_health()["claude"]["consecutive_failures"] == 0
+    assert "tripped" not in tree.provider_health()["claude"]
+
+
+def test_an_agent_is_never_sent_to_a_provider_it_has_no_model_for(tmp_path):
+    """The model id belongs to its provider's namespace, so `agy --model
+    opencode-go/glm` is not a fallback, it is a failure with extra steps."""
+    from multiagents.budget import Budget, choose_provider
+
+    budgets = {"a": Budget("a", known=True, headroom=0.0),
+               "b": Budget("b", known=True, headroom=0.9)}
+    chosen, _ = choose_provider("a", budgets, ["b", "defer"], 0.15,
+                                reserved=set(), allowed={"a"})
+    assert chosen is None
+    chosen, _ = choose_provider("a", budgets, ["b", "defer"], 0.15,
+                                reserved=set(), allowed={"a", "b"})
+    assert chosen == "b"
