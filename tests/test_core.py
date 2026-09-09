@@ -5385,3 +5385,579 @@ def test_a_cold_start_waits_for_the_writer_instead_of_giving_up(tmp_path, monkey
     finally:
         thread.join()
         held.close()
+
+
+# --------------------------------------------------------------------------
+# The monitor: one snapshot, two front ends
+
+
+def _tree_with_agents(tmp_path):
+    """A project whose tree holds a small family of finished agents."""
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    parent = tree.add(Node(id="ag-parent", agent="implementer", provider="claude",
+                           model="sonnet", parent=None, depth=0, status="merged",
+                           task="build it", branch="agents/implementer/parent"))
+    tree.update(parent.id, usage={"total": 12000, "cost_usd": 0.42},
+                started_at=time.time() - 600, ended_at=time.time() - 300)
+    child = tree.add(Node(id="ag-child", agent="tester", provider="opencode",
+                          model="opencode-go/glm", parent="ag-parent", depth=1,
+                          status="done", task="test it"))
+    tree.update(child.id, usage={"total": 3000, "cost_usd": 0.01},
+                started_at=time.time() - 500, ended_at=time.time() - 400)
+    return paths, tree
+
+
+def test_the_history_is_a_forest_built_from_parents(tmp_path):
+    """From `parent`, not from each node's `children` list: a write interrupted
+    between the two leaves one of them stale, and a tree drawn from the stale
+    one loses agents or shows them twice."""
+    from multiagents.monitor import snapshot as snap
+
+    paths, tree = _tree_with_agents(tmp_path)
+    tree.update("ag-parent", children=[])          # as a half-finished write left it
+    roots = snap.agent_tree(tree.read()["nodes"], time.time())
+    assert [r["id"] for r in roots] == ["ag-parent"]
+    assert [k["id"] for k in roots[0]["kids"]] == ["ag-child"]
+
+
+def test_an_agent_whose_process_is_gone_stops_counting_up(tmp_path):
+    """"running 95h" is a lie told confidently. With the process gone, the last
+    thing it said is the last thing that happened."""
+    from multiagents.monitor import snapshot as snap
+
+    paths, tree = _tree_with_agents(tmp_path)
+    tree.update("ag-parent", status="running", ended_at=None, pid=999999,
+                last_event_at=time.time() - 400)
+    view = snap._node_view(tree.read()["nodes"]["ag-parent"], time.time())
+    assert view["stale"] is True
+    assert 190 <= view["elapsed"] <= 210, "measured to its last event, not to now"
+
+
+def test_a_dead_agent_marked_running_is_an_alert(tmp_path):
+    from multiagents.monitor import snapshot as snap
+
+    paths, tree = _tree_with_agents(tmp_path)
+    tree.update("ag-parent", status="running", ended_at=None, pid=999999)
+    found = snap.alerts(paths, _config(), tree, [])
+    assert any(a["kind"] == "orphan" for a in found)
+
+
+def test_totals_answer_the_three_questions_separately(tmp_path):
+    """"What did last night cost" is a different question from "which agent is
+    expensive" and from "which model is expensive"."""
+    from multiagents.monitor import snapshot as snap
+
+    paths, tree = _tree_with_agents(tmp_path)
+    totals = snap.totals(tree.read()["nodes"])
+    assert totals["grand"] == {"tokens": 15000, "cost_usd": 0.43, "runs": 2}
+    assert totals["by_agent"]["implementer"]["cost_usd"] == 0.42
+    assert "claude/sonnet" in totals["by_model"]
+    assert len(totals["by_day"]) == 1
+
+
+def test_a_provider_may_render_its_own_usage(tmp_path, monkeypatch):
+    """Quotas have genuinely different shapes — two rolling windows and a credit
+    pool here, three windows there, nothing at all somewhere else. Flattening
+    them into one bar invents precision for two of the three."""
+    from multiagents.monitor import snapshot as snap
+
+    import multiagents.scripts as scripts_mod
+
+    seen = {}
+
+    def fake_action(name, provider, executor, action, *a, **k):
+        seen["action"] = action
+        seen["budget"] = json.loads(k["extra_env"]["MULTIAGENTS_BUDGET"])
+        return 0, "weekly   86%\nrolling   0%\n", ""
+
+    monkeypatch.setattr(scripts_mod, "run_action", fake_action)
+
+    lines, source = snap._usage_lines("opencode", None, None,
+                                      {"known": True, "used_percent": 86.0},
+                                      _paths(tmp_path))
+    assert source == "script" and lines == ["weekly   86%", "rolling   0%"]
+    assert seen["action"] == "usage"
+    assert seen["budget"]["used_percent"] == 86.0, "it formats, it does not re-fetch"
+
+
+def test_a_provider_that_says_nothing_gets_the_generic_view(tmp_path, monkeypatch):
+    from multiagents.monitor import snapshot as snap
+    import multiagents.scripts as scripts_mod
+
+    monkeypatch.setattr(scripts_mod, "run_action",
+                        lambda *a, **k: (64, "", ""))       # unimplemented
+    lines, source = snap._usage_lines("agy", None, None,
+                                      {"known": False, "note": "no quota surface"},
+                                      _paths(tmp_path))
+    assert source == "built-in" and lines == ["no quota surface"]
+
+
+def test_a_script_that_reports_headroom_but_no_severity_still_warns():
+    """A provider 86% through its weekly window read as calm as an untouched
+    one, and the alert banner keys on exactly this field."""
+    from multiagents import budget as budget_mod
+
+    class _Provider:
+        script_name = "x.sh"
+
+    import multiagents.scripts as scripts_mod
+    original = scripts_mod.run_action
+    scripts_mod.run_action = lambda *a, **k: (
+        0, json.dumps({"known": True, "headroom": 0.14}), "")
+    try:
+        out = budget_mod._from_script("x", _Provider(), None, Path("/tmp"), None)
+    finally:
+        scripts_mod.run_action = original
+    assert out.severity == "warning"
+
+
+def test_editing_a_setting_keeps_every_comment(tmp_path):
+    """These files are mostly comments, and the comments are the documentation.
+    A round-trip through safe_load/safe_dump would delete all of it: the config
+    would still work and would stop teaching anybody anything."""
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text(
+        "# what this file is\n"
+        "executor:\n"
+        "  # local or docker\n"
+        "  kind: local\n"
+        "\n"
+        "limits:\n"
+        "  max_concurrent: 4   # across the whole tree\n"
+        "  restart_on_crash: false\n"
+    )
+    document = YamlFile(path)
+    document.set(["executor", "kind"], "docker")
+    document.set(["limits", "max_concurrent"], 8)
+    document.set(["limits", "restart_on_crash"], True)
+    document.save()
+
+    written = path.read_text()
+    assert "# what this file is" in written
+    assert "# local or docker" in written
+    assert "max_concurrent: 8   # across the whole tree" in written, \
+        "the inline comment survived the value change"
+    assert "kind: docker" in written and "restart_on_crash: true" in written
+
+
+def test_a_new_key_lands_inside_its_block_not_under_the_next_heading(tmp_path):
+    """Inserting above the comment paragraph that introduces the NEXT section
+    is valid YAML that reads as though the key belonged to something else."""
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text(
+        "limits:\n"
+        "  max_concurrent: 4\n"
+        "\n"
+        "# ----------------------------------------\n"
+        "# Budget. A section about something else.\n"
+        "# ----------------------------------------\n"
+        "budget:\n"
+        "  reserve_headroom: 0.15\n"
+    )
+    document = YamlFile(path)
+    document.set(["limits", "limit_max_waits"], 12)
+    document.save()
+
+    import yaml
+
+    lines = path.read_text().splitlines()
+    assert lines[2].strip() == "limit_max_waits: 12"
+    assert yaml.safe_load(path.read_text())["limits"]["limit_max_waits"] == 12
+
+
+def test_a_setting_carries_the_comment_that_explains_it(tmp_path):
+    """The help text under each widget is the config's own comment. That is the
+    whole reason the writer is surgical rather than a dump."""
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text(
+        "# Where agent processes run.\n"
+        "# local is a subprocess; docker is a container.\n"
+        "executor:\n"
+        "  kind: local\n"
+        "limits:\n"
+        "  max_steps: 250   # before a run is called runaway\n"
+    )
+    document = YamlFile(path)
+    assert "docker is a container" in document.help_for(["executor", "kind"]), \
+        "a key with no comment of its own inherits its block's"
+    assert document.help_for(["limits", "max_steps"]) == "before a run is called runaway"
+
+
+def test_a_block_is_never_overwritten_by_a_scalar(tmp_path):
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text("limits:\n  max_steps: 250\n")
+    with pytest.raises(ValueError, match="block"):
+        YamlFile(path).set(["limits"], "oops")
+
+
+def test_a_write_that_would_not_parse_is_never_saved(tmp_path):
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text("limits:\n  note: fine\n")
+    document = YamlFile(path)
+    document.lines.append("  : : broken")
+    with pytest.raises(Exception):
+        document.save()
+    assert path.read_text() == "limits:\n  note: fine\n", "the file on disk is untouched"
+
+
+def test_settings_are_written_to_the_project_layer(tmp_path, monkeypatch):
+    """Never the global or shipped one: those belong to every other project on
+    the machine."""
+    from multiagents.monitor import settings as settings_mod
+
+    paths = _paths(tmp_path)
+    (paths.config).mkdir(parents=True, exist_ok=True)
+    (paths.config / "project.yaml").write_text("executor:\n  kind: local\n")
+    out = settings_mod.write(paths, "project.yaml", ["executor", "kind"], "docker")
+    assert out["ok"] and str(paths.config) in out["file"]
+    assert "kind: docker" in (paths.config / "project.yaml").read_text()
+
+    with pytest.raises(ValueError):
+        settings_mod.write(paths, "models.yaml", ["models"], {})
+
+
+def test_form_values_arrive_as_strings_and_are_coerced(tmp_path):
+    from multiagents.monitor.settings import coerce
+
+    assert coerce("true", "bool") is True and coerce("", "bool") is False
+    assert coerce("12", "int") == 12
+    assert coerce("0.15", "float") == 0.15
+    assert coerce("A, B ,C", "list") == ["A", "B", "C"]
+
+
+def test_an_action_returns_a_message_rather_than_raising(tmp_path):
+    """An action that blew up is a message in a UI, never a traceback in a
+    server log nobody is reading."""
+    from multiagents.monitor import actions
+
+    paths = _paths(tmp_path)
+    assert actions.perform(paths, "nope", {})["ok"] is False
+    assert actions.perform(paths, "stop_agent", {"agent_id": "ag-nothere"})["ok"] is False
+    assert actions.perform(paths, "answer_question",
+                           {"question_id": "q1", "answer": "  "})["ok"] is False
+    assert actions.perform(paths, "set_ticket", {"ticket_id": "nope"})["ok"] is False
+
+
+def test_only_pids_the_tree_owns_can_be_signalled(tmp_path):
+    """The monitor may not be a way to send signals to arbitrary processes."""
+    from multiagents.monitor import actions
+
+    paths, _ = _tree_with_agents(tmp_path)
+    out = actions.perform(paths, "signal_process", {"pid": 1})
+    assert out["ok"] is False and "not an agent" in out["message"]
+
+
+def test_destructive_actions_are_declared_so_a_front_end_can_confirm(tmp_path):
+    from multiagents.monitor import actions
+
+    assert {"discard_agent", "stop_all", "merge_agent"} <= actions.DESTRUCTIVE
+    assert set(actions.DESTRUCTIVE) <= set(actions.ACTIONS)
+    assert set(actions.COSTS_MONEY) <= set(actions.ACTIONS)
+
+
+def test_a_merge_conflict_is_not_reported_as_a_success(tmp_path, monkeypatch):
+    """The runner reports a merge as a status, not a boolean; reading a missing
+    "ok" as True would agree cheerfully with the one outcome that must not be."""
+    from multiagents.monitor import actions
+
+    class _Runner:
+        def merge_agent(self, agent_id, into):
+            return {"result": "conflict", "detail": "both modified README"}
+
+    monkeypatch.setattr(actions, "_runner", lambda paths: _Runner())
+    out = actions.merge_agent(_paths(tmp_path), agent_id="ag-1")
+    assert out["ok"] is False and "conflict" in out["message"]
+
+
+def test_the_api_refuses_a_caller_without_the_token(tmp_path):
+    """Bound to localhost so the network cannot reach it, and token-checked so
+    another program on this machine cannot drive it either."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from multiagents.monitor import server
+
+    server.Handler.paths = _paths(tmp_path)
+    server.Handler.token = "right-token"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_port}"
+
+    def get(path, token=None):
+        request = urllib.request.Request(base + path)
+        if token:
+            request.add_header("X-Monitor-Token", token)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode()
+
+    try:
+        assert get("/api/state")[0] == 403
+        assert get("/api/state", "wrong-token")[0] == 403
+        code, body = get("/api/state", "right-token")
+        assert code == 200 and "project" in json.loads(body)
+
+        # The page carries the token, so opening the URL is enough to use it.
+        code, page = get("/")
+        assert code == 200 and "right-token" in page
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_the_tui_draws_every_page_without_a_terminal(tmp_path, monkeypatch):
+    """A drawing bug on the costs page should not be discovered at the moment
+    somebody needs the costs page."""
+    import multiagents.monitor.tui as tui_mod
+
+    paths, _ = _tree_with_agents(tmp_path)
+
+    class _Stdscr:
+        def getmaxyx(self):
+            return 40, 120
+
+        def addnstr(self, *a):
+            painted.append(a)
+
+        def erase(self):
+            pass
+
+        def refresh(self):
+            pass
+
+    painted = []
+    monkeypatch.setattr(tui_mod.curses, "color_pair", lambda n: 0)
+    monkeypatch.setattr(tui_mod.curses, "A_BOLD", 0, raising=False)
+    monkeypatch.setattr(tui_mod.curses, "A_REVERSE", 0, raising=False)
+
+    screen = tui_mod.Screen(_Stdscr(), paths)
+    screen.state = __import__("multiagents.monitor.snapshot", fromlist=["x"]).snapshot(
+        paths, _config(), with_scripts=False)
+    screen.settings = [{"key": "limits.max_steps", "value": 250, "kind": "int",
+                        "choices": [], "help": "before a run is called runaway",
+                        "file": "project.yaml", "path": ["limits", "max_steps"]}]
+    for tab in tui_mod.TABS:
+        screen.tab = tab
+        painted.clear()
+        screen.draw()
+        assert painted, f"the {tab} page drew nothing"
+        assert not any("draw failed" in str(a[2]) for a in painted), \
+            f"the {tab} page raised while drawing"
+
+
+def test_the_tui_and_the_page_reach_the_same_actions():
+    """Two front ends, one set of capabilities: the moment they diverge, one of
+    them is quietly missing something the other can do."""
+    from pathlib import Path as _Path
+    from multiagents.monitor import actions
+
+    page = (_Path("src/multiagents/monitor/page.html")).read_text()
+    tui = (_Path("src/multiagents/monitor/tui.py")).read_text()
+    for name in ("stop_agent", "steer_agent", "merge_agent", "discard_agent",
+                 "answer_question", "set_setting"):
+        assert f'"{name}"' in page, f"the web page cannot {name}"
+        assert f'"{name}"' in tui, f"the TUI cannot {name}"
+        assert name in actions.ACTIONS
+
+
+def test_the_page_renders_every_view_against_real_data(tmp_path, monkeypatch):
+    """The page is JavaScript, so nothing else in this suite would notice a
+    typo in it until a panel came up blank at the wrong moment. A minimal DOM
+    under node runs each view against a real snapshot."""
+    import shutil
+    import subprocess
+    from pathlib import Path as _Path
+    from multiagents.monitor import settings as settings_mod
+    from multiagents.monitor import snapshot as snap
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+
+    paths, _ = _tree_with_agents(tmp_path)
+    config = _config()
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps({
+        "state": snap.snapshot(paths, config, with_scripts=False),
+        "settings": settings_mod.describe(paths, config),
+    }, default=str))
+
+    root = _Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [node, str(root / "tests/support/render_page.js"),
+         str(root / "src/multiagents/monitor/page.html"), str(fixture)],
+        capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-2000:]
+    painted = json.loads(result.stdout.split("rendered:", 1)[1])
+    for view in ("live", "config", "history", "costs", "transcript", "expanded"):
+        assert painted[view] > 100, f"the {view} view rendered almost nothing"
+
+
+def test_the_poll_does_not_fork_a_subprocess_per_tick(tmp_path, monkeypatch):
+    """The snapshot is polled every two seconds by both front ends. A usage
+    script per provider per tick is an idle monitor with a fan."""
+    from multiagents.monitor import snapshot as snap
+    import multiagents.scripts as scripts_mod
+
+    calls = []
+    monkeypatch.setattr(scripts_mod, "run_action",
+                        lambda *a, **k: (calls.append(1), (0, "50%\n", ""))[1])
+    monkeypatch.setattr(snap, "_LINE_CACHE", {})
+    paths = _paths(tmp_path)
+    budget = {"known": True, "used_percent": 50.0}
+
+    for _ in range(5):
+        lines, source = snap._usage_lines("p", None, None, budget, paths)
+    assert calls == [1], "four of the five ticks were served from the cache"
+    assert source == "script" and lines == ["50%"]
+
+    # A changed budget is a changed answer, so that one does ask again.
+    snap._usage_lines("p", None, None, {"known": True, "used_percent": 91.0}, paths)
+    assert len(calls) == 2
+
+
+def test_the_page_is_not_served_to_a_rebound_hostname(tmp_path):
+    """A site can point local.evil.com at 127.0.0.1; the browser then believes
+    it is same-origin and sends the request with no preflight. `GET /` is the
+    route that hands out the token, so it is the route that matters most."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from multiagents.monitor import server
+
+    server.Handler.paths = _paths(tmp_path)
+    server.Handler.token = "right-token"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_port
+
+    def get(path, host):
+        request = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+        request.add_header("Host", host)
+        request.add_header("X-Monitor-Token", "right-token")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    try:
+        assert get("/", f"127.0.0.1:{port}") == 200
+        assert get("/", f"localhost:{port}") == 200
+        assert get("/", f"local.evil.com:{port}") == 403, "token would have leaked"
+        assert get("/api/state", "attacker.example") == 403
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_a_transcript_is_read_from_the_end_not_loaded_whole(tmp_path):
+    """These are agent streams — this project has seen an 11 MB one — and the
+    button that opens it is the one pressed when something has gone wrong."""
+    from multiagents.monitor import snapshot as snap
+
+    path = tmp_path / "stream.jsonl"
+    with path.open("w") as handle:
+        for index in range(50000):
+            handle.write(json.dumps({"kind": "text", "text": f"line {index}"}) + "\n")
+    assert path.stat().st_size > 1_000_000
+
+    lines = snap.tail_lines(path, 10)
+    assert len(lines) == 10
+    assert json.loads(lines[-1])["text"] == "line 49999"
+    assert json.loads(lines[0])["text"] == "line 49990"
+
+    # A file shorter than one chunk still comes back whole, and a missing one
+    # is empty rather than an exception.
+    short = tmp_path / "short.jsonl"
+    short.write_text("a\nb\n")
+    assert snap.tail_lines(short, 10) == ["a", "b"]
+    assert snap.tail_lines(tmp_path / "nope", 10) == []
+
+
+def test_a_block_scalar_body_is_not_mistaken_for_settings(tmp_path):
+    """`description: >-` is followed by prose, and prose contains lines like
+    "Use it when: ...". Indexing one would offer it as a setting and let an
+    edit write a value into the middle of an agent's brief."""
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "agents.yaml"
+    path.write_text(
+        "agents:\n"
+        "  tester:\n"
+        "    model: sonnet\n"
+        "    description: >-\n"
+        "      Runs the tests.\n"
+        "      Use it when: something needs verifying.\n"
+        "      note: this line is prose, not a key.\n"
+        "    timeout: 900\n"
+    )
+    document = YamlFile(path)
+    keys = {key for _, _, key in document._key_lines()}
+    assert "note" not in keys and "Use it when" not in keys
+    assert {"agents", "tester", "model", "description", "timeout"} <= keys
+    assert document.find(["agents", "tester", "timeout"]) == 7
+
+
+def test_an_inline_comment_after_a_quoted_value_survives(tmp_path):
+    """The first version guarded against `key: "#fff"` with a regex that also
+    matched the ordinary case, and silently deleted the comment."""
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text('git:\n  remote: "origin"  # where push goes\n  colour: "#fff"\n')
+    document = YamlFile(path)
+    document.set(["git", "remote"], "upstream")
+    document.set(["git", "colour"], "#000")
+    document.save()
+
+    written = path.read_text()
+    assert "# where push goes" in written, "the comment was kept"
+    assert "upstream" in written
+    assert "'#000'" in written or '"#000"' in written
+
+
+def test_a_file_indented_with_four_spaces_stays_that_way(tmp_path):
+    """Two spaces is the convention, not the rule; a new key at the wrong depth
+    is a different key."""
+    from multiagents.monitor.settings import YamlFile
+
+    path = tmp_path / "project.yaml"
+    path.write_text("limits:\n    max_steps: 250\n")
+    document = YamlFile(path)
+    assert document.indent_step() == 4
+    document.set(["limits", "max_concurrent"], 4)
+    document.save()
+    assert "    max_concurrent: 4" in path.read_text()
+    import yaml
+    assert yaml.safe_load(path.read_text())["limits"]["max_concurrent"] == 4
+
+
+def test_the_page_keeps_what_the_poll_would_have_thrown_away():
+    """The poll replaces the active view every two seconds. A half-typed answer
+    and a just-opened panel must survive that, and the config form must not be
+    redrawn under a cursor at all."""
+    from pathlib import Path as _Path
+
+    page = (_Path("src/multiagents/monitor/page.html")).read_text()
+    assert "DRAFTS[q.id]" in page, "a half-typed answer is kept outside the DOM"
+    assert "OPEN_DETAILS" in page, "an opened panel is kept outside the DOM"
+    assert "fromPoll && TAB === \"config\"" in page, \
+        "the config form is not redrawn by the poll"

@@ -29,6 +29,37 @@ budget)
     # A new provider without a built-in simply implements this action.
     exit 64
     ;;
+usage)
+    # How this provider's usage is shown in `multiagents monitor`. The budget
+    # is already parsed and arrives in MULTIAGENTS_BUDGET, so this formats and
+    # never re-fetches — one request per five minutes per machine is the whole
+    # budget for asking the account anything.
+    #
+    # Claude's shape is two rolling windows plus a credit pool, and the pool is
+    # worth naming: when it is spent, a full window stops work dead and the CLI
+    # announces that as "you've hit your monthly spend limit". Somebody reading
+    # this panel at that moment should not have to know that story.
+    python3 -c "
+import json, os, sys
+b = json.loads(os.environ.get('MULTIAGENTS_BUDGET') or '{}')
+if not b.get('known'):
+    print(b.get('note') or 'no usage reading'); raise SystemExit
+used = b.get('used_percent') or 0
+bar = '#' * int(round(used / 10)) + '.' * (10 - int(round(used / 10)))
+print(f\"{bar}  {used:.0f}% of the tightest window\")
+if b.get('resets_at'):
+    print(f\"resets {str(b['resets_at'])[:16].replace('T', ' ')}\")
+spent = b.get('spent') or {}
+u, limit = spent.get('extra_credits_used'), spent.get('extra_credits_limit')
+if u is not None and limit:
+    print(f\"credits {u / 100:.2f} of {limit / 100:.2f} — {'spent' if u >= limit else 'available'}\")
+    if u >= limit:
+        print('nothing carries a session past a full window')
+note = b.get('note') or ''
+if note and 'credits' not in note:
+    print(note[:120])
+" 2>/dev/null || exit 64
+    ;;
 prepare)
     # Nothing to register: claude takes its MCP config per invocation, so
     # nothing persists and no other session or subagent inherits it.
@@ -81,5 +112,5 @@ launch)
     fi
     exec "$BIN" "$@"
     ;;
-*)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
+*)  echo "usage: $0 check|login|budget|usage|prepare|launch" >&2; exit 64 ;;
 esac

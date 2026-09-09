@@ -545,11 +545,22 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
     if not isinstance(data, dict):
         return Budget(provider=name, known=False, source="script",
                       note="budget action printed a non-object")
+    # A script that reports headroom but no severity was being read as
+    # "normal" at any level, so a provider 86% through its weekly window looked
+    # as calm as an untouched one — and the monitor's alert banner keys on
+    # exactly this field. Derived from the number, on the same thresholds the
+    # built-in reader uses, unless the script says otherwise itself.
+    headroom = data.get("headroom")
+    severity = data.get("severity")
+    if not severity and data.get("known") and isinstance(headroom, (int, float)):
+        used = (1 - float(headroom)) * 100
+        severity = "critical" if used >= 90 else "warning" if used >= 75 else "normal"
+
     return Budget(
         provider=name,
         known=bool(data.get("known", False)),
-        headroom=data.get("headroom"),
-        severity=str(data.get("severity") or ("normal" if data.get("known") else "unknown")),
+        headroom=headroom,
+        severity=str(severity or ("normal" if data.get("known") else "unknown")),
         resets_at=data.get("resets_at"),
         source=str(data.get("source") or "script"),
         note=str(data.get("note") or ""),

@@ -104,6 +104,30 @@ print(json.dumps({
 "
     exit 0
     ;;
+usage)
+    # opencode serves three windows — rolling, weekly, monthly — and which one
+    # is full changes what to do about it: a rolling window clears in hours, a
+    # monthly one does not. So all three are shown rather than only the worst,
+    # which is the number the generic renderer would pick.
+    python3 -c "
+import json, os
+b = json.loads(os.environ.get('MULTIAGENTS_BUDGET') or '{}')
+if not b.get('known'):
+    print(b.get('note') or 'free tier: no quota surface, spend-only'); raise SystemExit
+windows = b.get('windows') or {}
+for name, w in windows.items():
+    used = (w or {}).get('used_percent', (w or {}).get('percent'))
+    if used is None: continue
+    bar = '#' * int(round(used / 10)) + '.' * (10 - int(round(used / 10)))
+    resets = str((w or {}).get('resets_at') or '')[:16].replace('T', ' ')
+    print(f\"{name:<8} {bar} {used:>3.0f}%  {resets}\")
+if not windows:
+    print(f\"{b.get('used_percent', 0):.0f}% used\")
+spent = b.get('spent') or {}
+if spent.get('total'):
+    print(f\"{spent['total'] / 1000:.1f}k tokens spent in this project\")
+" 2>/dev/null || exit 64
+    ;;
 prepare)
     # `opencode mcp add` only takes --url, so a stdio server has to come from a
     # config file. OPENCODE_CONFIG lets us hand it one, which means the user's
@@ -147,5 +171,5 @@ launch)
     fi
     exec "$BIN" "$@"
     ;;
-*)  echo "usage: $0 check|login|budget|prepare|launch" >&2; exit 64 ;;
+*)  echo "usage: $0 check|login|budget|usage|prepare|launch" >&2; exit 64 ;;
 esac

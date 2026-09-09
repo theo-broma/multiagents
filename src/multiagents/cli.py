@@ -1836,6 +1836,22 @@ def cmd_watch(args: argparse.Namespace) -> int:
             return 0
 
 
+def cmd_monitor(args: argparse.Namespace) -> int:
+    """Watch and steer the project, in a browser or in this terminal.
+
+    Two front ends over one snapshot. The web page is the richer view — a tree
+    with a transcript beside it, and config forms that know what each setting
+    is — and the TUI is the one that works where there is no browser, which
+    over ssh is most of the time.
+    """
+    paths = _resolve(args.path)
+    if args.tui:
+        from .monitor import tui
+        return tui.run(paths)
+    from .monitor import server
+    return server.serve(paths, port=args.port, open_browser=args.browser)
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     """Run a trivial task through a provider and report how its stream parsed.
 
@@ -2772,6 +2788,16 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("watch", help="tail the global event log")
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("monitor",
+                       help="live view of the project: agents, usage, config, history")
+    p.add_argument("--tui", action="store_true",
+                   help="draw it in this terminal instead of serving a page")
+    p.add_argument("--port", type=int, default=8787,
+                   help="port for the local page (default 8787)")
+    p.add_argument("--no-browser", dest="browser", action="store_false", default=True,
+                   help="print the URL instead of opening it")
+    p.set_defaults(func=cmd_monitor)
 
     p = sub.add_parser("probe", help="verify a provider's stream parsing rules")
     p.add_argument("provider")

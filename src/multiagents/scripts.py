@@ -16,6 +16,13 @@ Actions
              do *before* doing it.
 ``budget``   non-interactive. Prints one JSON object describing quota headroom.
              Optional — a provider with no readable quota simply omits it.
+``usage``    non-interactive. Prints the human-readable lines the monitor shows
+             for this provider, receiving the parsed budget as
+             ``MULTIAGENTS_BUDGET`` so it formats rather than re-fetches.
+             Optional: quotas have genuinely different shapes — two rolling
+             windows and a credit pool here, three windows there, nothing at
+             all somewhere else — and a provider that has something particular
+             to say should say it rather than be flattened into one bar.
 ``prepare``  idempotently register the MCP server for this CLI. (Phase 4)
 ``launch``   exec the CLI interactively as an orchestrator. (Phase 4)
 
