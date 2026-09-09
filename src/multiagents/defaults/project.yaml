@@ -200,6 +200,14 @@ limits:
   # said — which is the signal this project learned not to classify on. Set
   # from a real incident: a revoked token let thirteen agents fail identically
   # before anyone noticed, and every one of them cost a spawn.
+  # A run that dies with nothing to say, before it has done any work, is a
+  # transient glitch far more often than a real fault — so it gets one silent
+  # retry rather than making the orchestrator reason about infrastructure.
+  # Bounded by cost: a run that died after twenty minutes had spent millions of
+  # tokens, and spending them again is not absorbing a glitch. Set to 0 to
+  # never retry.
+  retry_silent_failure_under_seconds: 60
+
   provider_failure_threshold: 3
   provider_down_cooldown_seconds: 1800
 

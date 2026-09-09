@@ -44,3 +44,9 @@ iterations over one long speculative rewrite.
 Finish with a section headed `## Result` covering: which tests you added and
 where, the command to run them, the final pass/fail state, and any defect you
 found in the code under test.
+
+When you were checking someone else's work rather than writing tests from a
+spec, end with the verdict on its own line — `VERDICT(approved): tests pass` or
+`VERDICT(rejected, 2): two tests fail against this branch`. One line, machine-
+read, and the only way work that passed review and needed redoing anyway
+becomes countable.

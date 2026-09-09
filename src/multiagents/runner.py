@@ -80,6 +80,12 @@ PROPOSED_DEFAULT = re.compile(r"(?im)^\s*DEFAULT\s*:\s*(.+)$")
 # finished message rather than mid-stream like NEED_DECISION: a ticket is the
 # agent's product, so there is nothing to interrupt.
 TICKET = re.compile(r"(?im)^[ \t]*TICKET\((blocking|minor)\)[ \t]*:[ \t]*(.+)$")
+# A verifier's own verdict on the work it was asked to check. Structured
+# because the alternative is reading its prose, and this project does not
+# classify on agent text. Declared by the agent hired to make exactly this
+# judgement, which is the judgement the whole arrangement already relies on.
+VERDICT = re.compile(
+    r"(?im)^[ \t]*VERDICT\((approved|rejected)(?:[ \t]*,[ \t]*(\d+))?\)[ \t]*:[ \t]*(.*)$")
 PROPOSED_FIX = re.compile(r"(?im)^[ \t]*PROPOSED_FIX[ \t]*:[ \t]*$")
 
 
@@ -173,6 +179,7 @@ class Run:
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     ticket: dict | None = None        # a TICKET filed from the final message
+
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -823,7 +830,8 @@ class Runner:
         # Deliberately NOT a story about why — inventing intent from a failed
         # run is the mistake that once cooled a provider down over the word
         # "quota". These are facts, labelled as facts.
-        if status not in ("done", "merged", "awaiting_user") and not text.strip():
+        said_nothing = not text.strip()
+        if status not in ("done", "merged", "awaiting_user") and said_nothing:
             tail = [e for e in run.events if e.get("kind") in ("tool", "raw")][-3:]
             trace = "; ".join(
                 (f"raw: {str(e.get('raw'))[:160]}" if e.get("kind") == "raw"
@@ -846,6 +854,17 @@ class Runner:
         self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
         # Filed even when the run failed: a partial write-up of a real defect is
         # worth more than a lost one, and the orchestrator can see the status.
+        # The last verdict wins, for the same reason the last TICKET does: a
+        # verifier reasoning about the format may quote it before giving one.
+        verdicts = list(VERDICT.finditer(text or ""))
+        if verdicts and not run.awaiting:
+            found = verdicts[-1]
+            self.tree.update(
+                node_id,
+                verdict=found.group(1).lower(),
+                defects=int(found.group(2)) if found.group(2) else 0,
+            )
+
         ticket = self._file_ticket(node_id, text) if not run.awaiting else None
         if ticket:
             run.ticket = {k: ticket[k] for k in ("id", "severity", "title", "status")}
@@ -879,7 +898,40 @@ class Runner:
             # idle so the session stays resumable for the next question.
             self.tree.set_status(node_id, "idle")
         else:
-            # Say why, when the provider told us. Three real failures ended with
+                # One free retry for a cheap, unexplained death — a crash with
+            # nothing to say, gone before it did any work. That shape is a
+            # transient glitch far more often than a real fault, and making
+            # the orchestrator handle it means a model reasoning about
+            # infrastructure.
+            #
+            # Bounded by cost, which is where I part company with the advice to
+            # retry any such failure: a run that died at 996 seconds had spent
+            # 5.5M tokens, and silently spending that again is not absorbing a
+            # glitch. Past the threshold it is reported and handed back.
+            fresh = self.tree.get(node_id)
+            if (status == "failed" and said_nothing
+                    and fresh and not fresh.retries
+                    and fresh.elapsed() < float(self.config.limits.get(
+                        "retry_silent_failure_under_seconds", 60))):
+                self.tree.emit(node_id, "retrying",
+                               reason=f"died in {fresh.elapsed():.0f}s with no output")
+                # Counted on the NODE, not on the Run: _launch replaces the Run,
+                # so a flag kept there resets on every retry and one free retry
+                # becomes an unbounded loop. Found by running it.
+                self.tree.update(node_id, retries=fresh.retries + 1)
+                with contextlib.suppress(Exception):
+                    await self._launch(
+                        node_id=node_id, spec=run.spec, provider=run.provider,
+                        prompt=(run_dir / "prompt.md").read_text(),
+                        workdir=Path(fresh.worktree), branch=fresh.branch,
+                        parent=fresh.parent, depth=fresh.depth,
+                        session_id=session_id or None,
+                    )
+                    self.tree.set_status(node_id, "running", "retried once after "
+                                         "an unexplained early exit")
+                    return
+
+        # Say why, when the provider told us. Three real failures ended with
             # agy emitting {"kind": "result", "status": "ERROR"} — a structured
             # verdict, which _classify read to decide "failed" and then dropped,
             # leaving the orchestrator a node marked failed with an empty

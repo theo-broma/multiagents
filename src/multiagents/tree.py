@@ -72,7 +72,14 @@ class Node:
     # it. Declared rather than inferred: branch-and-timing guesses break the
     # moment two checks run at once or a branch is reused, and the orchestrator
     # already knows the answer at the point of asking.
-    verifies: str = ""        # a standing dialogue, resumed each turn
+    verifies: str = ""
+    # A verifier's declared outcome: "approved" | "rejected" | "" (none given).
+    verdict: str = ""
+    defects: int = 0
+    # Survives a relaunch, which the in-process Run does not: _launch builds a
+    # fresh Run, so a "have I retried?" flag kept there resets on every retry
+    # and the guard becomes an infinite loop.
+    retries: int = 0        # a standing dialogue, resumed each turn
     turns: int = 0
     paused_at: float | None = None    # entered idle / awaiting_user at
     created_at: float = field(default_factory=now)

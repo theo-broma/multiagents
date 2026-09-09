@@ -4643,3 +4643,151 @@ def test_the_checks_report_shows_the_graph_not_a_score(tmp_path, quiet_git,
     assert "ag-work implementer" in out
     assert "ag-r1 reviewer" in out and "ag-r2 reviewer" in out
     assert "1 needed more than one" in out
+
+
+# --------------------------------------------------------------------------
+# The verifier's own verdict, and one free retry
+
+
+def test_a_verifier_declares_its_verdict_structurally(tmp_path):
+    """Reading whether a review found something out of its prose is the mistake
+    this project keeps not making. The agent hired to make that judgement
+    declares it instead — which is the judgement the whole arrangement already
+    relies on."""
+    import asyncio
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"reviewer": AgentSpec("reviewer", "p", "m")},
+                {"p": {"bin": "sh",
+                       "spawn": {"args": ["-c",
+                                          'echo \'{"type":"text","text":"looked at it.\\nVERDICT'
+                                          '(rejected, 3): three defects"}\''
+                                          ]},
+                       "stream": {"format": "ndjson",
+                                  "rules": [{"match": {"type": "text"}, "as": "text",
+                                             "fields": {"text": "text"}}]}}})
+    r.tree.add(Node(id="ag-work", agent="implementer", provider="p", model="m",
+                    parent=None, depth=1, status="merged"))
+
+    async def scenario():
+        out = await r.start("reviewer", "check it", verifies="ag-work")
+        for _ in range(40):
+            node = r.tree.get(out["agent_id"])
+            if node.status not in ("pending", "running"):
+                return node
+            await asyncio.sleep(0.1)
+        return r.tree.get(out["agent_id"])
+
+    node = asyncio.run(scenario())
+    assert node.verdict == "rejected"
+    assert node.defects == 3
+    assert node.verifies == "ag-work"
+
+
+def test_the_rework_rate_counts_only_what_was_judged(tmp_path, quiet_git,
+                                                     monkeypatch, capsys):
+    """Counting unjudged runs as approved would flatter the number."""
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Node
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    for n in ("ag-w1", "ag-w2", "ag-w3"):
+        tree.add(Node(id=n, agent="implementer", provider="p", model="m",
+                      parent=None, depth=1, status="merged"))
+    tree.add(Node(id="ag-r1", agent="reviewer", provider="p", model="m", parent=None,
+                  depth=1, status="done", verifies="ag-w1", verdict="rejected", defects=3))
+    tree.add(Node(id="ag-r2", agent="reviewer", provider="p", model="m", parent=None,
+                  depth=1, status="done", verifies="ag-w2", verdict="approved"))
+    tree.add(Node(id="ag-r3", agent="reviewer", provider="p", model="m", parent=None,
+                  depth=1, status="done", verifies="ag-w3"))          # no verdict
+
+    cli.cmd_usage(argparse.Namespace(path=str(tmp_path), agents=False, checks=True))
+    out = capsys.readouterr().out
+    assert "1 of 2 judged run(s) were rejected (50% rework)" in out
+    assert "1 checked run(s) got no verdict" in out
+    assert "rejected (3 defect(s))" in out
+
+
+def test_a_cheap_silent_death_is_retried_once(tmp_path):
+    """A crash with nothing to say, gone before it did any work, is a transient
+    glitch far more often than a real fault — and making the orchestrator handle
+    that means a model reasoning about infrastructure."""
+    import asyncio
+    import json as json_mod
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "exit 1"],
+                                              "resume": ["-c", "exit 1"]}}})
+
+    async def scenario():
+        out = await r.start("worker", "go")
+        for _ in range(60):
+            node = r.tree.get(out["agent_id"])
+            if node.status == "failed" and node.retries:
+                return out["agent_id"]
+            await asyncio.sleep(0.1)
+        return out["agent_id"]
+
+    agent_id = asyncio.run(scenario())
+    events = [json_mod.loads(l) for l in
+              (r.paths.events_file).read_text().splitlines()]
+    retries = [e for e in events if e["kind"] == "retrying" and e["agent"] == agent_id]
+    assert len(retries) == 1, "exactly one free retry, never a loop"
+    assert "no output" in retries[0]["reason"]
+    assert r.tree.get(agent_id).status == "failed", "and it stays failed after"
+
+
+def test_an_expensive_silent_death_is_not_retried(tmp_path, monkeypatch):
+    """A run that died after twenty minutes had spent millions of tokens.
+    Spending them again is not absorbing a glitch."""
+    import asyncio
+    import json as json_mod
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "exit 1"]}}},
+                project={"limits": {"retry_silent_failure_under_seconds": 0}})
+
+    async def scenario():
+        out = await r.start("worker", "go")
+        for _ in range(40):
+            if r.tree.get(out["agent_id"]).status == "failed":
+                break
+            await asyncio.sleep(0.1)
+        return out["agent_id"]
+
+    agent_id = asyncio.run(scenario())
+    events = [json_mod.loads(l) for l in r.paths.events_file.read_text().splitlines()]
+    assert not [e for e in events if e["kind"] == "retrying"]
+
+
+def test_the_retry_guard_survives_the_relaunch_it_guards(tmp_path):
+    """The first version kept the flag on the Run, and `_launch` builds a fresh
+    Run — so one free retry became an unbounded loop that only the provider
+    circuit breaker stopped. The count lives on the node, which persists."""
+    import asyncio
+    import json as json_mod
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "exit 1"],
+                                              "resume": ["-c", "exit 1"]}}})
+
+    async def scenario():
+        out = await r.start("worker", "go")
+        for _ in range(80):
+            node = r.tree.get(out["agent_id"])
+            if node.status == "failed" and node.retries:
+                await asyncio.sleep(0.4)          # give a loop room to run away
+                return out["agent_id"]
+            await asyncio.sleep(0.1)
+        return out["agent_id"]
+
+    agent_id = asyncio.run(scenario())
+    events = [json_mod.loads(l) for l in r.paths.events_file.read_text().splitlines()]
+    retries = [e for e in events if e["kind"] == "retrying"]
+    assert len(retries) == 1, f"one retry, not {len(retries)}"
+    assert r.tree.get(agent_id).retries == 1
