@@ -197,6 +197,37 @@ providers:
     transcript:
       dir: "~/.claude/projects/{slug}"
       glob: "*.jsonl"
+      # Strings this CLI's own error handler writes into the chat log when it
+      # stops being able to work. Matching these is not classifying model
+      # prose: they are hardcoded by the CLI, in a known position, and the only
+      # reason they need matching at all is that the CLI chose the chat log as
+      # its error channel instead of stderr or an exit code.
+      #
+      # `resets` says whether waiting fixes it, and NOTHING HERE MAY GUESS AT
+      # IT FROM THE WORDING. Measured 2026-09-09 against GET /api/oauth/usage:
+      # this CLI prints "You've hit your monthly spend limit" when the FIVE-HOUR
+      # window fills while the extra-usage credit pool — the thing that would
+      # otherwise carry the session past it — happens to be spent. It names the
+      # pool, not the wall, and then contradicts itself in its own second
+      # clause: "your session limit resets 1pm". Waiting does fix it.
+      #
+      # So the wording does not identify the limit, and the two mistakes are
+      # not equal: treating a window as a wall costs an afternoon of doing
+      # nothing, while treating a wall as a window costs one wasted relaunch
+      # per wait. Everything shipped is therefore `resets: true`. `false` stays
+      # supported for a string that is one day *known* to mean a dead account —
+      # and the honest signal for that is `extra_usage.spend_limit_reached` in
+      # the usage payload, which is a boolean, not a sentence.
+      limit_markers:
+        - match: "hit your monthly spend limit"
+          resets: true
+          detail: "usage limit (the CLI words this as a spend limit; it is the rolling window)"
+        - match: "hit your usage limit"
+          resets: true
+          detail: "usage limit; it resets on its own"
+        - match: "session limit reached"
+          resets: true
+          detail: "session limit; it resets on its own"
     spawn:
       args: ["-p", "{prompt}", "--model", "{model}",
              "--output-format", "stream-json", "--verbose",
