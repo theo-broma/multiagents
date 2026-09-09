@@ -293,7 +293,14 @@ async def stop_agent(agent_id: str) -> dict:
 
 @mcp.tool()
 def auth_status() -> dict:
-    """Check whether each provider CLI is authenticated.
+    """Check whether each provider CLI has a usable credential.
+
+    **This reads local state, not the provider.** `claude auth status` never
+    asks the server, so a revoked token still reports as authenticated — that
+    happened, and it misled an hour of diagnosis while every subagent on that
+    provider failed with a 401. `stored_login` is what the check knows;
+    `verified_working` and `recent_failures` come from how runs actually ended,
+    and are the stronger evidence when they disagree.
 
     Every provider is checked the same way, through its own script, so the
     answer and the fix have the same shape whichever CLI is broken. An agent
@@ -310,13 +317,51 @@ def auth_status() -> dict:
         run.paths.config,
     )
     out = {name: state.to_dict() for name, state in states.items()}
+
+    # A stored credential is not a working one. Every provider's check reads
+    # local state — `claude auth status` never asks the server — so this said
+    # "authenticated" through an hour in which every claude subagent failed with
+    # a 401, and actively misled the diagnosis. Reported as bug-cee638.
+    #
+    # The honest signal costs nothing: we already record how each provider's
+    # runs ended. Presence and evidence are reported separately rather than
+    # blended into one word.
+    health = run.tree.provider_health()
+    for name, entry in out.items():
+        record = health.get(name, {})
+        failures = record.get("consecutive_failures", 0)
+        # NOT named `credential_*`: redact.py drops any key matching that
+        # word wholesale, so the field masked itself to "[redacted]".
+        entry["stored_login"] = entry.pop("authenticated", entry.get("ok", False))
+        entry["recent_failures"] = failures
+        entry["last_success"] = record.get("last_success")
+        entry["verified_working"] = bool(record.get("last_success")) and failures == 0
+        if failures:
+            entry["warning"] = (
+                f"{failures} run(s) in a row failed on this provider "
+                f"({record.get('last_reason', '')[:90]}). A stored credential is "
+                f"not a working one — this check reads local state only."
+            )
     broken = [n for n, s_ in states.items() if not s_.ok]
+    degraded = [n for n, e in out.items() if e.get("recent_failures")]
+    if broken:
+        note = "run the `fix` command in a terminal; it may require a browser"
+    elif degraded:
+        note = (f"credentials are present for every provider, but runs on "
+                f"{', '.join(degraded)} are failing. This check reads local "
+                f"state and cannot see a revoked or cached-stale token — treat "
+                f"repeated failures as the stronger evidence.")
+    else:
+        note = "all providers authenticated"
     return _ok({
         "providers": out,
+        # Named for what it measures. `all_authenticated` read as "everything
+        # works", which is exactly the claim this check cannot make.
+        "all_stored_logins_ok": not broken,
         "all_authenticated": not broken,
+        "degraded": degraded,
         "needs_attention": broken,
-        "note": ("run the `fix` command in a terminal; it may require a browser"
-                 if broken else "all providers authenticated"),
+        "note": note,
     })
 
 

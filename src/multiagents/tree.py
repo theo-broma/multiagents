@@ -527,6 +527,8 @@ class Tree:
             if ok:
                 health["consecutive_failures"] = 0
                 health["last_reason"] = ""
+                health["last_success"] = now()
+                health.pop("tripped", None)
                 return None
             health["consecutive_failures"] += 1
             health["last_reason"] = reason[:200]
