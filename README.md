@@ -489,6 +489,25 @@ Submitting needs the `gh` CLI installed and logged in (`gh auth login`). Without
 it tickets are still written and queued — `multiagents tickets` says which piece
 is missing.
 
+```
+multiagents tickets                         # the queue
+multiagents tickets show <id>               # the issue exactly as it would post
+multiagents tickets submit <id>             # prints it, asks, then gh issue create
+multiagents tickets resolve <id> --note …   # you fixed it
+multiagents tickets resolve <id> --declined # it was not a bug
+multiagents tickets discard <id>
+```
+
+`resolve` closes the loop the others open. Marking a ticket fixed used to exist
+only as an MCP tool — reachable by the orchestrator and not by the person who
+did the fixing — so a ticket you reported and then fixed stayed `reported` for
+ever unless somebody edited `tree.json` by hand.
+
+It says the thing that is easy to forget in each direction, too: resolving one
+that was filed upstream reminds you the issue is still open for everyone else,
+and resolving one that was never filed points out the defect is still there for
+anyone who has not fixed it locally.
+
 ## When an agent needs *you*
 
 Agents are structurally non-blocking: they run with no stdin, explicit
