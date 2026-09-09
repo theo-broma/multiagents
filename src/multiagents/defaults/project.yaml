@@ -241,6 +241,13 @@ limits:
   # Short, because it is what decides how quickly logging back in takes effect.
   provider_probe_seconds: 120
 
+  # How long the OTHER accounts on a CLI are paused when two of them fail at
+  # once. Short on purpose: that is an inference about the vendor drawn from a
+  # coincidence, not an observed penalty like a quota wall, and inheriting the
+  # observed duration would turn one account's fifty-hour limit plus another's
+  # transient error into a multi-day lockout of a vendor that was never down.
+  provider_family_cooldown_seconds: 300
+
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents
   # said — which is the signal this project learned not to classify on. Set
@@ -278,6 +285,11 @@ budget:
   # room to read the results, and an orchestrator that cannot finish a turn
   # stops the whole tree rather than one agent.
   reserve_orchestrator: true
+  # When every account on an agent's own CLI is full but one of them comes back
+  # within this long, the work WAITS instead of moving. Moving it means either
+  # another vendor's model or — worse — the account being kept for the
+  # orchestrator, and neither is worth doing to avoid a twenty-minute wait.
+  wait_for_reset_seconds: 1800
   # Consulted in order when an agent's provider is exhausted or cooling down.
   fallback_chain:
     - opencode

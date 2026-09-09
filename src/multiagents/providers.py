@@ -134,6 +134,23 @@ class Provider:
     auth: dict[str, Any] = field(default_factory=dict)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
+    # --- more than one account on the same CLI ---------------------------
+    #
+    # A second subscription is a second PROVIDER: same binary, same script,
+    # same parsing, different credentials. `extends` copies the integration so
+    # that is four lines rather than a duplicated block; `family` says the two
+    # share a MODEL NAMESPACE, which makes failover between them free — `opus`
+    # means the same thing on both accounts, so no per-agent `models:` mapping
+    # is needed to move work from one to the other.
+    #
+    # `env` is what actually separates them: CLAUDE_CONFIG_DIR relocates
+    # claude's entire state, XDG_DATA_HOME does the same for opencode. It is
+    # applied to every invocation — the script actions AND the agent runs —
+    # because an instance that authenticates as B but runs as A is worse than
+    # no second instance at all.
+    extends: str = ""
+    family: str = ""
+    env: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -159,6 +176,11 @@ class Provider:
             auth=data.get("auth", {}) or {},
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
+            extends=data.get("extends", "") or "",
+            # An instance with no family stated belongs to the one it extends,
+            # and a provider that extends nothing is its own family of one.
+            family=data.get("family") or data.get("extends") or name,
+            env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
         )
 
     # ------------------------------------------------------------- command --
@@ -325,5 +347,63 @@ class Provider:
         return models
 
 
+def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:
+    """Fold `extends:` so an instance is a few lines, not a copied integration.
+
+    Shallow-merged one level deep, the same way the config layers are: an
+    instance overrides the keys it names and inherits the rest. A missing base
+    is left alone rather than raised on — a provider that names a base which is
+    disabled or absent should degrade to "unavailable", not stop the CLI from
+    starting.
+    """
+    from .config import deep_merge
+
+    out: dict[str, Any] = {}
+    for name, data in raw.items():
+        data = dict(data or {})
+        base_name = data.get("extends")
+        seen = set()
+        while base_name and base_name in raw and base_name not in seen:
+            seen.add(base_name)
+            base = dict(raw[base_name] or {})
+            base.pop("extends", None)
+            data = deep_merge(base, data)
+            base_name = (raw[base_name] or {}).get("extends")
+        out[name] = data
+    return out
+
+
+def _instance_conflicts(providers: dict[str, Provider]) -> list[str]:
+    """Instances of one family that would fight over the same state.
+
+    Two claude profiles both claiming `~/.claude` inside a container would be
+    two mounts at one destination, and both would authenticate as whichever won.
+    Inheriting the parent's private home is the natural way to write that by
+    accident, so it is checked rather than documented.
+    """
+    problems = []
+    claimed: dict[str, str] = {}
+    for name, provider in sorted(providers.items()):
+        for relative in provider.container_private_home:
+            owner = claimed.get(relative)
+            if owner:
+                problems.append(
+                    f"{name} and {owner} both claim ~/{relative} as their "
+                    f"container profile; give {name} its own path and an `env:` "
+                    f"entry pointing its CLI at it")
+            claimed[relative] = name
+    return problems
+
+
 def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:
-    return {name: Provider.from_dict(name, data or {}) for name, data in raw.items()}
+    resolved = resolve_inheritance(raw)
+    return {name: Provider.from_dict(name, data or {})
+            for name, data in resolved.items()}
+
+
+def families(providers: dict[str, Provider]) -> dict[str, list[str]]:
+    """{family: [provider names]} — who can take whose work without remapping."""
+    out: dict[str, list[str]] = {}
+    for name, provider in providers.items():
+        out.setdefault(provider.family or name, []).append(name)
+    return {family: sorted(names) for family, names in out.items()}

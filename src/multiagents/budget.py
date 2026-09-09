@@ -31,6 +31,7 @@ valuable, which makes this the thing that earns the system its keep.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -105,7 +106,7 @@ STALE_AFTER = 900.0                        # 15 min; the cache only refreshes on
 FETCH_TIMEOUT = 8.0
 
 
-def _claude_token() -> str | None:
+def _claude_token(config_dir: Path | None = None) -> str | None:
     """The CLI's OAuth access token, registered as a secret on the way out.
 
     Read at the moment of use and never held, never printed, never passed to a
@@ -113,8 +114,9 @@ def _claude_token() -> str | None:
     into output by some route nobody thought of, it is masked before that
     output reaches disk.
     """
+    path = (config_dir / ".credentials.json") if config_dir else CLAUDE_CREDENTIALS
     try:
-        with CLAUDE_CREDENTIALS.open() as handle:
+        with path.open() as handle:
             oauth = (json.load(handle) or {}).get("claudeAiOauth") or {}
     except (OSError, json.JSONDecodeError):
         return None
@@ -146,7 +148,7 @@ def _error_reason(exc: Any) -> str:
     return f": {scrub(reason)[:160]}" if reason else ""
 
 
-def fetch_claude_usage() -> tuple[dict | None, str]:
+def fetch_claude_usage(config_dir: Path | None = None) -> tuple[dict | None, str]:
     """Ask the account what is left. Returns ``(payload, note)``.
 
     The same request Claude Code makes for its own display, and the source the
@@ -163,7 +165,7 @@ def fetch_claude_usage() -> tuple[dict | None, str]:
     import urllib.error
     import urllib.request
 
-    token = _claude_token()
+    token = _claude_token(config_dir)
     if token is None:
         return None, ("claude credentials are missing or expired — run `claude` "
                       "once to refresh them")
@@ -214,9 +216,15 @@ RETRY_AFTER_MAX = 3600.0
 COLD_START_WAIT = 3.0
 
 
-def _shared_cache_file() -> Path:
+def _shared_cache_file(config_dir: Path | None = None) -> Path:
     from .paths import state_root
-    return state_root() / "usage-claude.json"
+
+    if config_dir is None:
+        return state_root() / "usage-claude.json"
+    # One file per profile. Sharing it across accounts would answer for
+    # whichever asked first, which is the failure this parameter exists to stop.
+    digest = hashlib.sha256(str(config_dir).encode()).hexdigest()[:12]
+    return state_root() / f"usage-claude-{digest}.json"
 
 
 def _fetching_allowed() -> bool:
@@ -266,12 +274,12 @@ def _refused_for(note: str) -> float:
     return 0.0
 
 
-def _shared_usage() -> tuple[dict | None, str]:
+def _shared_usage(config_dir: Path | None = None) -> tuple[dict | None, str]:
     """The machine's shared copy of the usage payload, refreshed by one caller."""
     import fcntl
     import random
 
-    path = _shared_cache_file()
+    path = _shared_cache_file(config_dir)
     record = None
     try:
         record = json.loads(path.read_text())
@@ -288,12 +296,13 @@ def _shared_usage() -> tuple[dict | None, str]:
     if not _fetching_allowed():
         return None, ("asking the provider for usage is off "
                       "(limits.ask_provider_for_usage)")
+    fetch = lambda: fetch_claude_usage(config_dir)          # noqa: E731
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         handle = path.with_suffix(".lock").open("a+")
     except OSError:
-        return fetch_claude_usage()        # no lock available; correctness first
+        return fetch()                     # no lock available; correctness first
     with handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -314,7 +323,7 @@ def _shared_usage() -> tuple[dict | None, str]:
                 except (OSError, ValueError):
                     continue
             return None, "another process is refreshing the usage reading"
-        payload, note = fetch_claude_usage()
+        payload, note = fetch()
         refused = _refused_for(note)
         if refused:
             note += f"; not asking again for {refused / 3600:.0f}h"
@@ -327,8 +336,13 @@ def _shared_usage() -> tuple[dict | None, str]:
         return payload, note
 
 
-def read_claude(fetch: bool = True) -> Budget:
-    """What is left on the claude account.
+def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Budget:
+    """What is left on the claude account — WHICH account depends on where.
+
+    `config_dir` is the instance's CLAUDE_CONFIG_DIR. With two subscriptions on
+    one machine, reading the default profile for both would report one
+    account's headroom while the work spends the other's: the numbers would
+    look right and mean nothing.
 
     Prefers the CLI's own cache — free, and no request against somebody's rate
     limit — and asks the account directly when that cache is missing or stale.
@@ -336,12 +350,18 @@ def read_claude(fetch: bool = True) -> Budget:
     ``known=False`` rather than raise.
     """
     budget = Budget(provider="claude", known=False, source="cachedUsageUtilization")
+    profile = Path(config_dir).expanduser() if config_dir else None
+    # With CLAUDE_CONFIG_DIR set the CLI keeps both files inside it; without,
+    # the config sits beside the home directory and the credential inside
+    # ~/.claude. Measured, not assumed — an empty profile dir grew a
+    # .claude.json of its own the moment the CLI ran against it.
+    state_file = (profile / ".claude.json") if profile else CLAUDE_STATE
     data = {}
     try:
-        with CLAUDE_STATE.open() as handle:
+        with state_file.open() as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        budget.note = f"{CLAUDE_STATE} unreadable"
+        budget.note = f"{state_file} unreadable"
 
     cached = data.get("cachedUsageUtilization") or {}
     utilization = cached.get("utilization") or {}
@@ -350,7 +370,7 @@ def read_claude(fetch: bool = True) -> Budget:
         budget.stale_seconds = max(0.0, time.time() - fetched_ms / 1000.0)
 
     if fetch and (not utilization or (budget.stale_seconds or 0) > STALE_AFTER):
-        fresh, note = _shared_usage()
+        fresh, note = _shared_usage(profile)
         if fresh:
             utilization, budget.stale_seconds = fresh, 0.0
             budget.source = "api/oauth/usage"
@@ -671,6 +691,56 @@ def _has_room(candidate: Budget | None, reserve: float, reserved: bool) -> bool:
     return True
 
 
+def resets_soon(candidate: Budget | None, within: float) -> bool:
+    """Will this come back on its own shortly?
+
+    The difference between a five-hour window filling and a monthly cap being
+    reached, and it decides whether work should WAIT or move. Moving a swarm of
+    workers onto the orchestrator's account to avoid a twenty-minute wait is how
+    the orchestrator starves — an advisor's point, and the reason this exists.
+    """
+    if candidate is None or candidate.usable:
+        return False
+    when = candidate.cooldown_until
+    if not when and candidate.resets_at:
+        try:
+            from datetime import datetime
+            when = datetime.fromisoformat(str(candidate.resets_at)).timestamp()
+        except (ValueError, TypeError):
+            when = None
+    if not when:
+        return False
+    return 0 < (when - time.time()) <= within
+
+
+def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
+                  reserved: set[str], load: dict[str, int] | None = None,
+                  last_used: dict[str, float] | None = None) -> str | None:
+    """Which of several interchangeable accounts should take this work.
+
+    NOT the one with the most headroom. Headroom is a percentage refreshed at
+    most every few minutes and shared by every concurrent agent, so sorting on
+    it pins ten spawns to whichever instance was ahead at the last reading and
+    annihilates it before the next — an advisor's objection, and correct.
+    Headroom is a filter here, never a ranking.
+
+    The ranking is load: fewest agents running on it, then longest since it was
+    last used. Both are read from the tree, so every MCP server process on the
+    machine ranks them the same way.
+    """
+    load = load or {}
+    last_used = last_used or {}
+    free = [name for name in names
+            if _has_room(budgets.get(name), reserve, name in reserved)]
+    if not free:
+        return None
+    # Prefer instances not held for the orchestrator; fall back to those only
+    # when nothing else can take it, and even then only above the reserve.
+    workers = [name for name in free if name not in reserved]
+    return min(workers or free,
+               key=lambda name: (load.get(name, 0), last_used.get(name, 0.0), name))
+
+
 def choose_provider(
     preferred: str,
     budgets: dict[str, Budget],
@@ -678,6 +748,10 @@ def choose_provider(
     reserve: float = 0.15,
     reserved: Any = None,
     allowed: Any = None,
+    family: Any = None,
+    load: dict[str, int] | None = None,
+    last_used: dict[str, float] | None = None,
+    wait_for_reset_within: float = 0.0,
 ) -> tuple[str | None, str]:
     """Pick a provider to run on. Returns ``(provider, reason)``.
 
@@ -705,8 +779,33 @@ def choose_provider(
     """
     reserved = set(budgets) if reserved is None else set(reserved)
     allowed = None if allowed is None else set(allowed)
+    siblings = [name for name in (family or []) if name != preferred]
 
-    if _has_room(budgets.get(preferred), reserve, preferred in reserved):
+    # With more than one account on this CLI, the agent's pin chooses the
+    # FAMILY and the router chooses the instance. That is the point of a second
+    # subscription: an agent pinned to the account the orchestrator is using
+    # should run on the other one while it can, so the orchestrator keeps a
+    # window to read the results in — and it should do that while the
+    # orchestrator's account still looks healthy, not once it is already in
+    # trouble.
+    if siblings:
+        chosen = pick_instance([preferred, *siblings], budgets, reserve,
+                               reserved, load, last_used)
+        if chosen == preferred:
+            return preferred, "preferred provider has headroom"
+        if chosen:
+            spare = "held for the orchestrator" if preferred in reserved else "constrained"
+            return chosen, f"{preferred} is {spare}; using {chosen}"
+        # Nothing in the family can take it. If one of them is merely waiting
+        # out a short window, waiting is cheaper than moving the work to
+        # another vendor's model — and far cheaper than spending the
+        # orchestrator's account on it.
+        if wait_for_reset_within and any(
+                resets_soon(budgets.get(name), wait_for_reset_within)
+                for name in [preferred, *siblings]):
+            return None, (f"{preferred} and its other accounts are full, and one "
+                          f"resets shortly — waiting rather than moving the work")
+    elif _has_room(budgets.get(preferred), reserve, preferred in reserved):
         return preferred, "preferred provider has headroom"
 
     skipped = []

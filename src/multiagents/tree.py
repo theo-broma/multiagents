@@ -286,6 +286,10 @@ class Tree:
                 node["reason"] = reason
             if status == "running" and not node.get("started_at"):
                 node["started_at"] = now()
+                # The claim made when this agent was routed has done its job:
+                # the node counts for itself now, and leaving both would have
+                # the instance look twice as busy as it is.
+                self._spend_claim(data, node.get("provider") or "")
             node["paused_at"] = now() if status in PAUSED else None
             if status in TERMINAL:
                 node["ended_at"] = now()
@@ -296,6 +300,12 @@ class Tree:
                 # rest of its life. answer_question() uses the same path.
                 node["ended_at"] = None
         self.emit(agent_id, "status", status=status, reason=reason)
+
+    def _spend_claim(self, data: dict, provider: str) -> None:
+        """Drop one claim: the node it stood in for is now visible as running."""
+        claims = (data.get("claims") or {}).get(provider)
+        if claims:
+            claims.pop(0)
 
     def note_event(self, agent_id: str, steps: int | None = None,
                    usage: dict | None = None, session_id: str | None = None,
@@ -685,6 +695,27 @@ class Tree:
         if entry and entry.get("until", 0) > now():
             return entry
         return None
+
+    def claim_instance(self, provider: str, window: float = 120.0) -> None:
+        """Record that work has just been sent to this account.
+
+        Routing counts running agents, and a node is not running — not even
+        recorded — until after the choice is made. So five spawns in the same
+        instant all read the same counts and all pick the same account, which
+        is precisely the pile-up the counting was meant to prevent. A claim is
+        written under the tree's own lock, and counts toward the load until the
+        node it belongs to shows up as running.
+        """
+        with self.transaction() as data:
+            claims = data.setdefault("claims", {})
+            recent = [t for t in claims.get(provider, []) if now() - t < window]
+            recent.append(now())
+            claims[provider] = recent[-64:]
+
+    def recent_claims(self, window: float = 120.0) -> dict[str, int]:
+        current = now()
+        return {name: len([t for t in stamps if current - t < window])
+                for name, stamps in (self.read().get("claims") or {}).items()}
 
     def claim_trial(self, provider: str, window: float = 120.0) -> bool:
         """Take the single retry allowed when a cooldown has just lapsed.
