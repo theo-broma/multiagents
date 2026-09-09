@@ -219,6 +219,79 @@ class Runner:
         except ValueError:
             return 0
 
+    def _auth_ok(self, name: str) -> bool | None:
+        """Ask the provider's own `check` action. None = it would not say.
+
+        Structured, not prose: `check` is part of the script contract and
+        answers with an exit code (0 authenticated, 10 not). Reading it is the
+        opposite of the thing this project refuses to do — it is asking the CLI
+        rather than guessing from what a model wrote.
+        """
+        from . import auth, scripts as scripts_mod
+
+        provider = self.providers.get(name)
+        if provider is None:
+            return None
+        code, out, err = scripts_mod.run_action(
+            name, provider, self.executor(), "check", global_config_dir(),
+            self.paths.config, timeout=20)
+        if code == auth.AUTHENTICATED:
+            return True
+        if code == auth.NOT_AUTHENTICATED:
+            return False
+        return None
+
+    def _half_open(self, budgets: dict, cooldowns: dict) -> None:
+        """When a tripped provider's cooldown lapses, allow exactly one trial.
+
+        Two faults are fixed here. The first is a barrage: every task deferred
+        behind a cooldown wakes the moment it lapses, and without a claim they
+        all try the same broken provider at once and all fail before any of them
+        can set a new cooldown.
+
+        The second is that some faults do not heal. A revoked token will fail
+        the trial every time, forever, and each trial costs a real agent run. So
+        where the trip was recorded as an authentication failure, the trial is
+        the provider's `check` — one subprocess, no tokens — and a pass clears
+        the cooldown immediately, so logging back in takes effect at once
+        instead of at the end of a timer.
+        """
+        health = self.tree.provider_health()
+        auth_window = float(self.config.limits.get(
+            "provider_auth_cooldown_seconds", 6 * 3600))
+        probe_every = float(self.config.limits.get("provider_probe_seconds", 120))
+        for name, budget in budgets.items():
+            state = health.get(name) or {}
+            entry = cooldowns.get(name) or {}
+            if not state.get("tripped"):
+                continue                                  # healthy
+            cooling = entry.get("until", 0) > now()
+            # A cooling provider is already routed around and needs no trial —
+            # unless the trial is free. For an authentication failure it is, and
+            # a long cooldown must not mean a long wait AFTER somebody logs in:
+            # the probe runs on its own short interval and the cooldown only
+            # keeps the provider out of routing between probes.
+            if cooling and not entry.get("needs_login"):
+                continue
+            if not self.tree.claim_trial(name, window=probe_every):
+                if not cooling:
+                    budget.cooldown_until = now() + 60     # somebody else is trying
+                continue
+            if not entry.get("needs_login"):
+                continue                      # a real run is the trial; let it
+            ok = self._auth_ok(name)
+            if ok:
+                self.tree.clear_cooldown(name)
+                self.tree.clear_provider_health(name)
+                budget.cooldown_until = None
+            else:
+                reason = (f"{name} is not authenticated — run "
+                          f"`multiagents auth login {name}`")
+                self.tree.set_cooldown(name, now() + auth_window, reason,
+                                       needs_login=True)
+                budget.cooldown_until = now() + auth_window
+                budget.note = reason
+
     def _orchestrator_provider(self) -> str:
         """Whose quota the orchestrator itself is spending."""
         for spec in self.config.agents.values():
@@ -561,6 +634,7 @@ class Runner:
             lambda _provider_name: self.executor(),
             global_config_dir(), self.paths.config, None, cooldowns,
         )
+        self._half_open(budgets, cooldowns)
         routed_from, routed_why = "", ""
         chosen, why = budget_mod.choose_provider(
             spec.provider, budgets,
@@ -576,7 +650,11 @@ class Runner:
         if chosen is None:
             # Prefer a real reset time over the blind cooldown: a provider that
             # told us when it comes back should not be waited on for longer.
-            resets = [b.cooldown_until for b in budgets.values() if b.cooldown_until]
+            # Only from providers THIS agent could use — waking for one it
+            # cannot run on finds nothing changed and defers again, forever.
+            options = {spec.provider, *(spec.models or spec.extra.get("models") or {})}
+            resets = [b.cooldown_until for name, b in budgets.items()
+                      if b.cooldown_until and name in options]
             retry_at = min(resets) if resets else now() + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
             )
@@ -585,8 +663,14 @@ class Runner:
             # Nothing can run, so nothing should keep being started. Pausing is
             # the difference between a system that stops and one that carries on
             # writing code while the agents that check it are unreachable.
-            self.tree.pause(retry_at, why,
-                            providers=sorted({spec.provider, *(spec.models or {})}))
+            #
+            # Named by what is actually UNAVAILABLE, not by everything this
+            # agent could have used: a pause listing a healthy provider would
+            # refuse other agents that only need that one, turning one agent's
+            # problem into everybody's.
+            unavailable = sorted(name for name in options
+                                 if name in budgets and not budgets[name].usable)
+            self.tree.pause(retry_at, why, providers=unavailable or sorted(options))
             return {"deferred": True, "reason": why, "retry_after": retry_at,
                     "paused": True,
                     "note": "the tree is paused until this clears; deferred tasks "
@@ -831,14 +915,27 @@ class Runner:
                 # A cooldown rather than a permanent mark: the cause may be
                 # transient, and `budget_status` and choose_provider already
                 # route around a cooling provider and defer when none is left.
-                self.tree.set_cooldown(
-                    run.provider.name,
-                    now() + float(self.config.limits.get(
-                        "provider_down_cooldown_seconds", 1800)),
-                    f"{trip['failures']} runs in a row failed — check "
-                    f"`multiagents auth login {run.provider.name}` and "
-                    f"`multiagents doctor`",
-                )
+                #
+                # How long depends on one structured question, asked of the CLI
+                # rather than inferred from what any agent said: is it still
+                # authenticated? A rate limit heals by waiting. A revoked token
+                # does not, and cycling half-hourly against it wastes runs and
+                # hides the fact that only a person can fix it.
+                name = run.provider.name
+                authenticated = await asyncio.to_thread(self._auth_ok, name)
+                if authenticated is False:
+                    seconds = float(self.config.limits.get(
+                        "provider_auth_cooldown_seconds", 6 * 3600))
+                    reason = (f"{name} is not authenticated — run "
+                              f"`multiagents auth login {name}`")
+                else:
+                    seconds = float(self.config.limits.get(
+                        "provider_down_cooldown_seconds", 1800))
+                    reason = (f"{trip['failures']} runs in a row failed — check "
+                              f"`multiagents auth login {name}` and "
+                              f"`multiagents doctor`")
+                self.tree.set_cooldown(name, now() + seconds, reason,
+                                       needs_login=authenticated is False)
 
         # Commit anything the agent left uncommitted so no work is stranded on
         # an unreferenced worktree. Skipped while parked on a question: the

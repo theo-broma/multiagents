@@ -1949,8 +1949,42 @@ add one under `models:` to allow failover there."*
 The breaker had a matching fault. It latched: once `tripped` was set it never
 tripped again, so when its cooldown lapsed every subsequent failure was free and
 a dead provider was retried all evening. Past the threshold, what suppresses a
-trip is now an **active cooldown** — one trial at a time, and a failure in that
-trial cools it down again.
+trip is now an **active cooldown**.
+
+### One trial, and a trial that costs nothing when it can
+
+"One trial at a time" was a comment rather than a fact. Every task deferred
+behind a cooldown wakes the moment it lapses, so without a claim they all try
+the same broken provider at once and all fail before any of them can set a new
+cooldown — a synchronised barrage, not a half-open breaker. `claim_trial()`
+hands the retry to exactly one caller, under the lock the tree is already
+written with.
+
+And some faults do not heal. A revoked token fails every trial, forever, and
+each trial costs a real agent run. So when the breaker trips, the provider's own
+**`check` action** is asked whether it is still authenticated — structured, part
+of the script contract, an exit code rather than anybody's prose, which is the
+opposite of the thing this project refuses to do. If the answer is *no*, the
+cooldown is long (`limits.provider_auth_cooldown_seconds`, 6h) and marked
+`needs_login`, because only a person can fix it.
+
+A long cooldown must not mean a long wait *after* that person logs in, so
+recovery does not wait for the timer: while a `needs_login` cooldown stands, the
+probe re-runs at `limits.provider_probe_seconds` (2 min) and a pass clears the
+cooldown at once. One subprocess, no tokens, and logging back in takes effect
+within a couple of minutes.
+
+Three smaller faults, all found in the same review:
+
+- A **pause named every provider the agent wanted**, including healthy ones, so
+  one agent's problem refused every other agent that needed only the healthy
+  one. It now names what is actually unavailable.
+- A **deferred task woke on the reset of a provider it could not use**, found
+  nothing changed, and deferred again — a spin on somebody else's timer. The
+  wake time now comes only from providers that agent can run on.
+- A **success cleared the breaker's health record but not the cooldown**, and
+  the cooldown is what routing reads. A provider that had demonstrably recovered
+  stayed locked out for the rest of its penalty box.
 
 **And the routing now says so.** The decision computed a reason and threw it
 away, so an implementer on the wrong model could only be explained by reading

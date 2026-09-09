@@ -6214,3 +6214,100 @@ def test_an_agent_is_never_sent_to_a_provider_it_has_no_model_for(tmp_path):
     chosen, _ = choose_provider("a", budgets, ["b", "defer"], 0.15,
                                 reserved=set(), allowed={"a", "b"})
     assert chosen == "b"
+
+
+def test_only_one_task_tries_a_provider_whose_cooldown_just_lapsed(tmp_path):
+    """"One trial at a time" was a comment, not a fact: every task deferred
+    behind the cooldown wakes the moment it lapses, and without a claim they all
+    try the same broken provider and all fail before any can set a new
+    cooldown — a synchronised barrage, not a half-open breaker."""
+    from multiagents.tree import Tree
+
+    tree = Tree(_paths(tmp_path).tree_file, _paths(tmp_path).events_file)
+    assert tree.claim_trial("claude") is True
+    assert tree.claim_trial("claude") is False, "the second waker was let through"
+    assert tree.claim_trial("agy") is True, "a different provider is unrelated"
+
+    # The claim ages out, so a provider is never permanently unclaimable.
+    assert tree.claim_trial("claude", window=0.0) is True
+
+
+def test_a_success_lets_the_provider_back_in_immediately(tmp_path):
+    """The health record is not what routing reads. Leaving the cooldown behind
+    kept a working provider out of the pool for the rest of its penalty box."""
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    for _ in range(3):
+        tree.note_run_outcome("claude", ok=False, reason="401")
+    tree.set_cooldown("claude", time.time() + 1800, "3 in a row")
+    assert tree.cooldown("claude") is not None
+
+    tree.note_run_outcome("claude", ok=True)
+    assert tree.cooldown("claude") is None, "fixed, and still locked out"
+    assert tree.provider_health()["claude"]["consecutive_failures"] == 0
+
+
+def test_a_revoked_token_is_probed_with_check_not_with_an_agent_run(tmp_path, monkeypatch):
+    """A rate limit heals by waiting; a revoked token never does. Cycling a
+    half-open retry against it every thirty minutes spends real agent runs
+    proving something already known — and the provider's own `check` action
+    answers it for the cost of one subprocess."""
+    from multiagents.budget import Budget
+    from multiagents.runner import Runner
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    runner = Runner.__new__(Runner)          # no spawning, just the routing path
+    runner.paths, runner.tree = paths, tree
+    runner.config = _config()
+    runner.providers = {"claude": object()}
+
+    for _ in range(3):
+        tree.note_run_outcome("claude", ok=False, reason="401 revoked")
+    tree.set_cooldown("claude", time.time() - 1, "expired", needs_login=True)
+
+    checks = []
+    monkeypatch.setattr(Runner, "_auth_ok",
+                        lambda self, name: checks.append(name) or False)
+    budgets = {"claude": Budget("claude", known=True, headroom=0.9)}
+    runner._half_open(budgets, tree.read()["cooldowns"])
+
+    assert checks == ["claude"], "it asked the CLI instead of spending a run"
+    assert budgets["claude"].usable is False
+    assert tree.cooldown("claude")["needs_login"] is True
+
+    # Once somebody logs in, the next probe frees it — no waiting out the six
+    # hours. The probe interval is what decides how quickly that happens.
+    from multiagents.config import Config
+
+    runner.config = Config(project={"limits": {"provider_probe_seconds": 0}},
+                           providers={}, agents={}, models={}, instruction_dirs=[])
+    monkeypatch.setattr(Runner, "_auth_ok", lambda self, name: True)
+    budgets = {"claude": Budget("claude", known=True, headroom=0.9)}
+    runner._half_open(budgets, tree.read()["cooldowns"])
+    assert tree.cooldown("claude") is None and budgets["claude"].usable
+
+
+def test_a_pause_names_what_is_unavailable_not_what_was_wanted(tmp_path):
+    """A pause listing a healthy provider refuses other agents that only need
+    that one, which turns one agent's problem into everybody's."""
+    import inspect
+    from multiagents.runner import Runner
+
+    body = inspect.getsource(Runner.start)
+    assert "unavailable = sorted(name for name in options" in body
+    assert "not budgets[name].usable" in body
+    assert "providers=unavailable or sorted(options)" in body
+
+
+def test_a_deferred_task_wakes_for_a_provider_it_can_actually_use(tmp_path):
+    """Waking on the reset of a provider this agent cannot run on finds nothing
+    changed and defers again — a spin, on somebody else's timer."""
+    import inspect
+    from multiagents.runner import Runner
+
+    body = inspect.getsource(Runner.start)
+    assert "if b.cooldown_until and name in options" in body
