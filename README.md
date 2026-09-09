@@ -198,6 +198,7 @@ can follow a run without touching the MCP layer:
 ```bash
 multiagents watch    # tail every state transition, live
 multiagents tree     # snapshot
+multiagents monitor  # all of it, in a browser or (--tui) in this terminal
 ```
 
 ## The roster
@@ -587,7 +588,7 @@ unrelated problem.
 Repairing auth is deliberately **not** an MCP tool: it may need a human at a
 terminal and a browser, so the orchestrator reports the command and you run it.
 
-### Adding a provider
+### The provider script contract
 
 A provider is a block in `providers.yaml` plus **one script**. No Python.
 
@@ -595,11 +596,13 @@ A provider is a block in `providers.yaml` plus **one script**. No Python.
 <provider>.sh check     exit 0 authenticated / 10 not / * unknown; one line of status
 <provider>.sh login     may take the terminal; prints what to do BEFORE doing it
 <provider>.sh budget    prints one JSON object of quota headroom; exit 64 = not implemented
+<provider>.sh usage     prints the lines the monitor shows for this provider,
+                        given the parsed budget in MULTIAGENTS_BUDGET; 64 = generic view
 <provider>.sh prepare   idempotently register the MCP server for this CLI
 <provider>.sh launch    exec this CLI interactively as an orchestrator
 ```
 
-Captured actions (`check`, `budget`) are run and read; handed-over actions
+Captured actions (`check`, `budget`, `usage`) are run and read; handed-over actions
 (`login`, `launch`) return an argv for the caller to exec, because they need the
 terminal. Scripts live in `config/providers/`, resolved project-first then global
 then shipped, and receive their situation through the environment
@@ -672,7 +675,7 @@ scalars replace.
 | `agents.yaml` | the roster: name → provider, model, instructions, permissions |
 | `agents/*.md` | per-agent instructions, prepended to every prompt |
 | `BRIEF.md`, `context/` | **project root, committed** — see below |
-| `providers/*.sh` | one script per provider: check, login, budget, prepare, launch |
+| `providers/*.sh` | one script per provider: check, login, budget, usage, prepare, launch |
 | `models.yaml` | **generated** — `multiagents refresh-models` |
 
 `BRIEF.md` and `context/` are the exception to everything else here: they live
@@ -1005,6 +1008,121 @@ under 100 while coders reach 768. The default is now 250, `implementer` and
 `implementer-deep` carry 1000, and `implementer-quick` keeps its deliberate 40.
 `limits.max_steps` in `project.yaml` is now actually read — it was documented
 and ignored, with only the built-in default applying.
+
+## The monitor
+
+`multiagents status` answers one question in one line. When what you want is
+*what is this project doing*, there is a monitor:
+
+```
+multiagents monitor          # a local page, opened in your browser
+multiagents monitor --tui    # the same thing drawn in this terminal
+```
+
+Both front ends are thin. Everything they show comes from one `snapshot()` and
+everything they do goes through one `actions.perform()`, so they cannot drift
+into disagreeing about what is true, or into one of them quietly growing a
+capability the other lacks — there is a test that fails if they do.
+
+The poll is two seconds and has to stay cheap, so it reads files and nothing
+else: git and the auth scripts are separate endpoints, asked for on demand, and
+each provider's `usage` script output is cached against the budget that produced
+it — a subprocess per provider per tick is an idle monitor with a fan. Agent
+transcripts and the event log are read **backwards from the end**; this project
+has seen an 11 MB stream, and the button that opens one is the button you press
+when something has already gone wrong.
+
+**Live** is the page you leave open. Running agents with their tokens, cost,
+steps, elapsed time and token rate; each provider's usage; anything an agent is
+blocked on, answerable in place; and an alert banner at the top for the things
+that silently cost you a morning — a limited or stalled orchestrator with its
+reset time, a provider with no headroom, a tripped circuit breaker, an agent
+marked running whose process is gone.
+
+**Config** lists every setting in the merged configuration with the right
+control for its type: a dropdown for an agent's provider and for the models that
+provider actually serves, a toggle for a switch, a number field for a limit. The
+schema is *derived* rather than maintained beside the config — types from the
+values already there, choices from the config itself, and **the help text under
+each setting is that setting's own comment**. Edits go to the project layer and
+are written surgically: the line changes, every comment in the file stays. These
+files are mostly comments and the comments are the documentation; a round-trip
+through a YAML dumper would leave a config that still worked and taught nobody
+anything.
+
+Surgery on YAML by hand earns three specific defences, each of which was a real
+bug first: a block scalar's body is skipped entirely, because `description: >-`
+is followed by prose and prose contains lines like *"Use it when: …"* that look
+exactly like keys; an inline comment is found by scanning for a `#` outside
+quotes rather than by pattern, because the pattern that protected `key: "#fff"`
+also deleted the comment on `key: "value"  # note`; and the indent step is
+measured from the file rather than assumed to be two, since a new key at the
+wrong depth is a different key. Structural edits are refused outright and a file
+that would not parse is never saved.
+
+**History** is the tree, parents holding their children, collapsible, with the
+transcript in a side column when you click an agent — prompt, stream, summary,
+result — plus the branch view: which agent branches exist, which are merged,
+which still hold unmerged work, and how much.
+
+**Costs** rolls the same usage up three ways, because *what did last night
+cost*, *which agent is expensive* and *which model is expensive* are three
+different questions.
+
+### Each provider shows its own usage
+
+A quota's shape differs per provider and there is no honest common denominator:
+claude has two rolling windows and a credit pool, opencode serves three windows,
+agy exposes nothing at all. Flattening those into one bar would invent precision
+for two of the three.
+
+So `usage` is an optional action in the [script contract](#the-provider-script-contract):
+it receives the already-parsed budget in `MULTIAGENTS_BUDGET` — it formats, it
+never re-fetches — and prints whatever its numbers deserve. Exit 64 falls back to
+a generic rendering.
+
+```
+claude     ████████░░  78% of the tightest window
+           resets 2026-09-09 16:50
+           credits 86.03 of 85.00 — spent
+           nothing carries a session past a full window
+
+opencode   rolling  ░░░░░░░░░░   0%  2026-09-09 19:57
+           weekly   ████████░░  86%  2026-09-14 00:00
+           monthly  ██████░░░░  65%  2026-10-05 13:11
+```
+
+Claude's panel names the credit pool because that is the story: when it is
+spent, a full window stops work dead and the CLI announces it as *"you've hit
+your monthly spend limit"*. Somebody reading the panel at that moment should not
+have to already know that.
+
+### Full control, and what guards it
+
+The monitor can stop an agent, steer it, merge or discard its branch, push it,
+answer a question, move a ticket along, lift a pause, and start the orchestrator
+headless. It cannot *spawn* an agent: that is the orchestrator's job through
+MCP, with its depth, concurrency and budget checks, and a button that bypassed
+all of it would be a second, worse scheduler.
+
+Three things guard the API, and it takes all three:
+
+- **It binds 127.0.0.1 only.** Nothing on the network can reach a page that
+  stops agents and rewrites config.
+- **Every call carries a token**, minted per run and embedded in the page it
+  serves. Localhost is reachable by *other programs on this machine*, a hostile
+  browser tab included.
+- **The `Host` header must be a loopback name**, checked on every route
+  including `/`. This is the one that is easy to miss: a site can point
+  `local.evil.com` at 127.0.0.1, at which point the *browser* believes it is
+  same-origin and sends the request with no preflight, the connection arrives
+  on loopback looking ordinary, and `GET /` hands back the page with the token
+  in it. DNS rebinding defeats bind-plus-token on its own; an advisor caught
+  this and was right.
+
+Destructive actions declare themselves in `actions.DESTRUCTIVE` and both front
+ends confirm them in the same words. `signal_process` will only signal a pid the
+tree says is ours.
 
 ## Watching the orchestrator
 

@@ -1,0 +1,686 @@
+<title>multiagents monitor</title>
+<style>
+:root {
+  --bg: #fbfaf8; --panel: #ffffff; --line: #e4e0d8; --ink: #1c1a17;
+  --dim: #6d675e; --accent: #7a5a2e; --ok: #2f6b3a; --warn: #8a6212;
+  --err: #9a3320; --chip: #f2efe9;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14130f; --panel: #1c1a16; --line: #2f2b24; --ink: #e9e4da;
+    --dim: #9a9287; --accent: #d0a86a; --ok: #7fbf8a; --warn: #d9b25e;
+    --err: #e08167; --chip: #262219;
+  }
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.5 var(--mono); }
+a { color: var(--accent); }
+h1, h2, h3 { font-weight: 600; margin: 0; }
+button {
+  font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.danger:hover { border-color: var(--err); color: var(--err); }
+button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+input, select, textarea {
+  font: inherit; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; width: 100%;
+}
+textarea { resize: vertical; }
+
+header {
+  position: sticky; top: 0; z-index: 5; background: var(--panel);
+  border-bottom: 1px solid var(--line); padding: 10px 16px;
+  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+}
+header .name { font-weight: 600; }
+header .path { color: var(--dim); font-size: 12px; }
+nav { display: flex; gap: 4px; margin-left: auto; }
+nav button.on { background: var(--chip); border-color: var(--accent); }
+.spacer { flex: 1; }
+
+main { padding: 16px; max-width: 1500px; margin: 0 auto; }
+.grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 14px;
+}
+.panel > h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--dim); margin-bottom: 10px;
+}
+.muted { color: var(--dim); }
+.right { margin-left: auto; }
+.row { display: flex; gap: 8px; align-items: center; }
+.wrap { flex-wrap: wrap; }
+.pre { white-space: pre-wrap; word-break: break-word; }
+
+.alert {
+  display: flex; gap: 10px; align-items: baseline; padding: 7px 10px;
+  border-left: 3px solid var(--dim); background: var(--chip);
+  border-radius: 0 5px 5px 0; margin-bottom: 6px;
+}
+.alert.error { border-color: var(--err); }
+.alert.warn { border-color: var(--warn); }
+.alert .detail { color: var(--dim); font-size: 12px; }
+
+.agent {
+  border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px;
+  margin-bottom: 8px; background: var(--bg);
+}
+.agent.sel { border-color: var(--accent); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.running { background: var(--ok); animation: pulse 1.6s infinite; }
+.dot.idle { background: var(--warn); }
+.dot.done, .dot.merged { background: var(--dim); }
+.dot.failed, .dot.orphaned, .dot.cancelled, .dot.discarded { background: var(--err); }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.bar { height: 6px; border-radius: 3px; background: var(--chip); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+.bar > i.warn { background: var(--warn); }
+.bar > i.critical { background: var(--err); }
+
+.tree ul { list-style: none; margin: 0; padding-left: 16px; border-left: 1px solid var(--line); }
+.tree li { margin: 2px 0; }
+.node {
+  display: flex; gap: 8px; align-items: center; padding: 3px 6px;
+  border-radius: 5px; cursor: pointer;
+}
+.node:hover { background: var(--chip); }
+.node.sel { background: var(--chip); outline: 1px solid var(--accent); }
+.twist { width: 12px; color: var(--dim); }
+
+summary { cursor: pointer; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--dim); }
+details[open] > summary { margin-bottom: 8px; }
+.setting { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.setting:last-child { border-bottom: 0; }
+.setting .key { font-weight: 600; }
+.setting .help { color: var(--dim); font-size: 12px; white-space: pre-wrap; margin: 3px 0 6px; }
+.setting .ctl { display: flex; gap: 8px; align-items: center; }
+.setting .ctl > :first-child { max-width: 380px; }
+.saved { color: var(--ok); }
+.failed { color: var(--err); }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--dim); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+#side { position: sticky; top: 62px; max-height: calc(100vh - 80px); overflow: auto; }
+.entry { border-bottom: 1px solid var(--line); padding: 6px 0; }
+.entry .kind { color: var(--dim); font-size: 11px; text-transform: uppercase; }
+#toast {
+  position: fixed; right: 16px; bottom: 16px; background: var(--panel);
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 6px; padding: 9px 12px; max-width: 460px; box-shadow: 0 6px 18px #0003;
+}
+</style>
+
+<header>
+  <span class="dot" id="pulse"></span>
+  <span class="name" id="pname">…</span>
+  <span class="path muted" id="ppath"></span>
+  <span id="verdict" class="muted"></span>
+  <nav>
+    <button data-tab="live" class="on">Live</button>
+    <button data-tab="config">Config</button>
+    <button data-tab="history">History</button>
+    <button data-tab="costs">Costs</button>
+  </nav>
+</header>
+
+<main>
+  <section id="live"></section>
+  <section id="config" hidden></section>
+  <section id="history" hidden></section>
+  <section id="costs" hidden></section>
+</main>
+<div id="toast" hidden></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "html") node.innerHTML = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+};
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "X-Monitor-Token": TOKEN, "Content-Type": "application/json" },
+  });
+  return res.json();
+};
+const act = async (action, payload = {}) => {
+  const out = await api("/api/action", {
+    method: "POST", body: JSON.stringify({ action, ...payload }),
+  });
+  toast(out.message || (out.ok ? "done" : "failed"), out.ok);
+  refresh();
+  return out;
+};
+let toastTimer;
+function toast(text, ok = true) {
+  const box = $("#toast");
+  box.textContent = text;
+  box.style.borderLeftColor = ok ? "var(--ok)" : "var(--err)";
+  box.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (box.hidden = true), 6000);
+}
+
+const fmtAge = (s) => {
+  if (s === null || s === undefined) return "—";
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d`;
+};
+const fmtNum = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0));
+const fmtCost = (c) => (c ? `$${Number(c).toFixed(c < 0.01 ? 4 : 2)}` : "—");
+const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "—");
+
+let STATE = null;
+let TAB = "live";
+// The poll replaces the active view wholesale every two seconds, which throws
+// away anything the DOM was holding: a <details> somebody just opened, and —
+// worse — half a typed answer. Both are kept out here so a redraw restores
+// them instead of fighting the person using the page.
+let OPEN_DETAILS = new Set();
+let DRAFTS = {};
+let SELECTED = null;         // agent id whose transcript is open
+let OPEN = new Set();        // expanded history nodes
+
+/* ---------------------------------------------------------------- live */
+
+function details(name, summaryText, ...kids) {
+  const box = el("details", {
+    class: "panel",
+    open: OPEN_DETAILS.has(name) ? "open" : false,
+    ontoggle: (e) => {
+      e.target.open ? OPEN_DETAILS.add(name) : OPEN_DETAILS.delete(name);
+      if (e.target.open && name === "activity") loadEvents();
+    },
+  }, el("summary", {}, summaryText), ...kids);
+  return box;
+}
+
+function agentCard(a, opts = {}) {
+  const rate = a.elapsed > 0 ? Math.round(a.tokens / Math.max(a.elapsed / 60, 0.1)) : 0;
+  return el("div", { class: "agent" + (SELECTED === a.id ? " sel" : "") },
+    el("div", { class: "row wrap" },
+      el("span", { class: "dot " + a.status }),
+      el("strong", {}, a.agent),
+      el("span", { class: "muted" }, a.id),
+      el("span", { class: "muted" }, `${a.provider}/${a.model}`),
+      el("span", { class: "right muted" }, a.status),
+    ),
+    a.task && el("div", { class: "muted pre", style: "margin:4px 0" }, a.task.slice(0, 220)),
+    el("div", { class: "row wrap muted", style: "margin-top:4px" },
+      el("span", {}, `${fmtNum(a.tokens)} tok`),
+      el("span", {}, fmtCost(a.cost_usd)),
+      el("span", {}, `${a.steps} steps`),
+      el("span", {}, `running ${fmtAge(a.elapsed)}`),
+      a.quiet_for !== null && el("span", {}, `quiet ${fmtAge(a.quiet_for)}`),
+      rate > 0 && el("span", {}, `${fmtNum(rate)} tok/min`),
+      a.stale && el("span", { class: "failed" }, "process gone"),
+    ),
+    el("div", { class: "row wrap", style: "margin-top:7px" },
+      el("button", { onclick: () => openTranscript(a.id) }, "transcript"),
+      opts.live && el("button", { onclick: () => steer(a.id) }, "steer"),
+      opts.live && el("button", { class: "danger", onclick: () => act("stop_agent", { agent_id: a.id }) }, "stop"),
+      !opts.live && a.branch && el("button", {
+        onclick: () => confirm(`Merge ${a.branch}?`) && act("merge_agent", { agent_id: a.id }),
+      }, "merge"),
+      !opts.live && a.branch && el("button", {
+        class: "danger",
+        onclick: () => confirm(`Discard ${a.branch}? Unmerged work is lost.`)
+          && act("discard_agent", { agent_id: a.id, force: true }),
+      }, "discard"),
+      a.branch && el("span", { class: "right muted" }, a.branch),
+    ),
+  );
+}
+
+function steer(id) {
+  const message = prompt(`Message to ${id} — it stops the current turn and resumes the same session with this text:`);
+  if (message) act("steer_agent", { agent_id: id, message });
+}
+
+function providerPanel(p) {
+  const b = p.budget || {};
+  const used = b.used_percent;
+  return el("div", { class: "panel" },
+    el("div", { class: "row" },
+      el("strong", {}, p.name),
+      !p.available && el("span", { class: "failed" }, "not installed"),
+      el("span", { class: "right muted" }, b.source || ""),
+    ),
+    used !== undefined && el("div", { class: "bar", style: "margin:7px 0" },
+      el("i", { class: b.severity || "", style: `width:${Math.min(100, used)}%` })),
+    el("div", { class: "pre muted", style: "margin-top:4px" }, (p.lines || []).join("\n")),
+    p.consecutive_failures >= 1 && el("div", { class: "failed", style: "margin-top:5px" },
+      `${p.consecutive_failures} run(s) failed in a row`),
+    p.lines_from === "script" && el("div", { class: "muted", style: "font-size:11px;margin-top:5px" },
+      "shown by the provider's own usage script"),
+  );
+}
+
+function renderLive() {
+  const s = STATE;
+  const left = el("div", {});
+  const right = el("div", {});
+
+  if (s.alerts.length) {
+    left.append(el("div", { class: "panel" },
+      el("h2", {}, `attention — ${s.alerts.length}`),
+      s.alerts.map((a) => el("div", { class: "alert " + a.level },
+        el("span", {}, a.text),
+        a.detail && el("span", { class: "detail right" }, a.detail),
+      )),
+      s.pause && s.pause.until
+        ? el("div", { style: "margin-top:8px" },
+            el("button", { onclick: () => act("resume_pause") }, "lift the pause"))
+        : null,
+    ));
+  }
+
+  left.append(el("div", { class: "panel" },
+    el("h2", {}, `running — ${s.running.length}`),
+    s.running.length
+      ? s.running.map((a) => agentCard(a, { live: true }))
+      : el("div", { class: "muted" }, "nothing running"),
+  ));
+
+  const openQ = s.questions.filter((q) => !q.answered_at);
+  if (openQ.length) {
+    left.append(el("div", { class: "panel" },
+      el("h2", {}, `waiting on you — ${openQ.length}`),
+      openQ.map((q) => {
+        const box = el("textarea", {
+          rows: 2, placeholder: "your answer…",
+          oninput: (e) => { DRAFTS[q.id] = e.target.value; },
+        });
+        box.value = DRAFTS[q.id] || "";
+        return el("div", { style: "margin-bottom:10px" },
+          el("div", { class: "row" }, el("strong", {}, q.agent || q.agent_id || "agent"),
+            el("span", { class: "muted right" }, q.topic || "")),
+          el("div", { class: "pre", style: "margin:3px 0" }, q.question),
+          box,
+          el("div", { class: "row", style: "margin-top:5px" },
+            el("button", {
+              class: "primary",
+              onclick: () => {
+                const answer = box.value;
+                delete DRAFTS[q.id];
+                act("answer_question", { question_id: q.id, answer });
+              },
+            }, "answer")),
+        );
+      }),
+    ));
+  }
+
+  const openT = s.tickets.filter((t) => t.status === "open");
+  if (openT.length) {
+    left.append(el("div", { class: "panel" },
+      el("h2", {}, `tickets — ${openT.length} open`),
+      openT.map((t) => el("div", { style: "margin-bottom:8px" },
+        el("div", { class: "row" },
+          el("strong", {}, t.title || t.id),
+          el("span", { class: "muted right" }, `${t.severity || ""} · ${t.id}`)),
+        t.body && el("div", { class: "muted pre" }, String(t.body).slice(0, 300)),
+        el("div", { class: "row", style: "margin-top:4px" },
+          ["acknowledged", "fixed", "closed", "wontfix"].map((status) =>
+            el("button", { onclick: () => act("set_ticket", { ticket_id: t.id, status }) }, status)),
+        ),
+      )),
+    ));
+  }
+
+  right.append(el("div", { class: "panel" },
+    el("h2", {}, "orchestrator"),
+    el("div", { class: "row" },
+      el("span", { class: "dot " + (s.orchestrator.running ? "running" : "done") }),
+      el("strong", {}, s.orchestrator.verdict || "not started")),
+    el("div", { class: "muted pre", style: "margin:5px 0" }, s.orchestrator.detail || ""),
+    s.orchestrator.limit && el("div", { class: "muted pre" }, s.orchestrator.limit.said || ""),
+    el("div", { class: "row wrap", style: "margin-top:8px" },
+      el("button", { onclick: () => confirm("Start the orchestrator headless, in the background?") && act("launch_orchestrator") }, "run headless"),
+      el("button", { class: "danger", onclick: () => confirm("Stop everything? Work is kept.") && act("stop_all") }, "stop all"),
+    ),
+    el("div", { class: "muted", style: "margin-top:6px;font-size:11px" },
+      `observed ${fmtAge(s.orchestrator.observed_ago)} ago`),
+  ));
+
+  right.append(...s.providers.map(providerPanel));
+
+  right.append(details("activity", "activity",
+    el("div", { id: "events" }, el("span", { class: "muted" }, "the event log, tailed"))));
+  if (OPEN_DETAILS.has("activity")) loadEvents();
+
+  if (s.deferred.length) {
+    right.append(el("div", { class: "panel" },
+      el("h2", {}, `deferred — ${s.deferred.length}`),
+      s.deferred.map((d) => el("div", { class: "muted" },
+        `${(d.spec || {}).agent || "?"} · ${d.reason || ""}`)),
+    ));
+  }
+
+  return el("div", { class: "grid" }, left, right);
+}
+
+/* ------------------------------------------------------------- history */
+
+function treeNode(a) {
+  const kids = a.kids || [];
+  const open = OPEN.has(a.id);
+  return el("li", {},
+    el("div", {
+      class: "node" + (SELECTED === a.id ? " sel" : ""),
+      onclick: () => { openTranscript(a.id); },
+    },
+      el("span", {
+        class: "twist",
+        onclick: (e) => { e.stopPropagation(); open ? OPEN.delete(a.id) : OPEN.add(a.id); render(); },
+      }, kids.length ? (open ? "▾" : "▸") : "·"),
+      el("span", { class: "dot " + a.status }),
+      el("strong", {}, a.agent),
+      el("span", { class: "muted" }, a.id),
+      el("span", { class: "muted" }, a.model || ""),
+      el("span", { class: "muted right" },
+        `${fmtNum(a.tokens)} tok · ${fmtAge(a.elapsed)} · ${a.status}`),
+    ),
+    kids.length && open ? el("ul", {}, kids.map(treeNode)) : null,
+  );
+}
+
+function renderHistory() {
+  const left = el("div", {},
+    el("div", { class: "panel" },
+      el("div", { class: "row" },
+        el("h2", { style: "margin:0" }, `agents — ${STATE.counts.nodes}`),
+        el("button", {
+          class: "right",
+          onclick: () => {
+            const all = [];
+            const walk = (n) => { all.push(n.id); (n.kids || []).forEach(walk); };
+            STATE.history.forEach(walk);
+            if (OPEN.size) OPEN.clear(); else all.forEach((id) => OPEN.add(id));
+            render();
+          },
+        }, OPEN.size ? "collapse all" : "expand all"),
+      ),
+      el("div", { class: "tree" }, el("ul", { style: "border:0;padding-left:0" },
+        STATE.history.map(treeNode))),
+    ),
+    el("div", { class: "panel" },
+      el("div", { class: "row" }, el("h2", { style: "margin:0" }, "branches"),
+        el("button", { class: "right", onclick: loadBranches }, "load")),
+      el("div", { id: "branches" }, el("span", { class: "muted" },
+        "git calls, so asked for rather than polled")),
+    ),
+  );
+  return el("div", { class: "grid" }, left, el("div", { id: "side" }, transcriptPanel()));
+}
+
+async function loadEvents() {
+  const box = $("#events");
+  if (!box) return;
+  const out = await api("/api/events");
+  box.replaceChildren(...(out.events || []).slice(-40).reverse().map((e) => {
+    const extra = Object.entries(e)
+      .filter(([k, v]) => !["t", "agent", "kind"].includes(k) && v !== "" && v !== null)
+      .map(([k, v]) => `${k}=${String(v).slice(0, 40)}`).join(" ");
+    return el("div", { class: "muted" },
+      `${new Date((e.t || 0) * 1000).toLocaleTimeString()} ${e.agent || "-"} ${e.kind || ""} ${extra}`);
+  }));
+}
+
+async function loadBranches() {
+  const box = $("#branches");
+  box.textContent = "…";
+  const out = await api("/api/branches");
+  box.replaceChildren(el("table", {},
+    el("tr", {}, el("th", {}, "branch"), el("th", {}, "agent"),
+      el("th", { class: "num" }, "commits"), el("th", {}, "state"), el("th", {}, "")),
+    (out.branches || []).map((b) => el("tr", {},
+      el("td", {}, b.branch),
+      el("td", { class: "muted" }, `${b.agent || "?"} ${b.agent_id || ""}`),
+      el("td", { class: "num" }, b.commits),
+      el("td", { class: b.merged ? "muted" : "" }, b.merged ? "merged" : "unmerged"),
+      el("td", {},
+        !b.merged && b.agent_id && el("button", {
+          onclick: () => confirm(`Merge ${b.branch}?`) && act("merge_agent", { agent_id: b.agent_id }),
+        }, "merge")),
+    )),
+  ));
+}
+
+let TRANSCRIPT = null;
+async function openTranscript(id) {
+  SELECTED = id;
+  TRANSCRIPT = null;
+  if (TAB !== "history") { TAB = "history"; syncTabs(); }
+  render();
+  TRANSCRIPT = await api(`/api/transcript?id=${encodeURIComponent(id)}`);
+  render();
+}
+
+function transcriptPanel() {
+  if (!SELECTED) {
+    return el("div", { class: "panel" }, el("h2", {}, "transcript"),
+      el("span", { class: "muted" }, "pick an agent"));
+  }
+  if (!TRANSCRIPT) {
+    return el("div", { class: "panel" }, el("h2", {}, SELECTED),
+      el("span", { class: "muted" }, "loading…"));
+  }
+  const t = TRANSCRIPT;
+  const node = findNode(SELECTED);
+  return el("div", { class: "panel" },
+    el("div", { class: "row" }, el("h2", { style: "margin:0" }, SELECTED),
+      el("button", { class: "right", onclick: () => { SELECTED = null; render(); } }, "close")),
+    node && el("div", { class: "muted", style: "margin-bottom:6px" },
+      `${node.agent} · ${node.provider}/${node.model} · ${node.status} · ${when(node.started_at)}`),
+    node && node.summary && details("summary", "summary",
+      el("div", { class: "pre" }, node.summary)),
+    t.prompt && details("prompt", "prompt",
+      el("div", { class: "pre muted" }, t.prompt)),
+    el("div", { style: "margin-top:8px" },
+      (t.entries || []).length
+        ? t.entries.map((e) => el("div", { class: "entry" },
+            el("div", { class: "kind" }, [e.kind, e.tool].filter(Boolean).join(" · ")),
+            el("div", { class: "pre" }, e.text)))
+        : el("span", { class: "muted" }, "no recorded stream for this agent")),
+  );
+}
+
+function findNode(id, list = STATE.history) {
+  for (const n of list) {
+    if (n.id === id) return n;
+    const hit = findNode(id, n.kids || []);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/* -------------------------------------------------------------- costs */
+
+function costTable(title, rows, keyName) {
+  const entries = Object.entries(rows).sort((a, b) => b[1].cost_usd - a[1].cost_usd);
+  return el("div", { class: "panel" },
+    el("h2", {}, title),
+    el("table", {},
+      el("tr", {}, el("th", {}, keyName), el("th", { class: "num" }, "runs"),
+        el("th", { class: "num" }, "tokens"), el("th", { class: "num" }, "cost")),
+      entries.map(([key, row]) => el("tr", {},
+        el("td", {}, key),
+        el("td", { class: "num" }, row.runs),
+        el("td", { class: "num" }, fmtNum(row.tokens)),
+        el("td", { class: "num" }, fmtCost(row.cost_usd)))),
+    ));
+}
+
+function renderCosts() {
+  const t = STATE.totals;
+  return el("div", {},
+    el("div", { class: "panel" },
+      el("h2", {}, "all time, this project"),
+      el("div", { class: "row wrap" },
+        el("strong", {}, `${t.grand.runs} runs`),
+        el("strong", {}, `${fmtNum(t.grand.tokens)} tokens`),
+        el("strong", {}, fmtCost(t.grand.cost_usd)),
+        el("span", { class: "muted" },
+          "counted from each agent's own stream, not from the provider"),
+      )),
+    el("div", { class: "grid" },
+      el("div", {}, costTable("by day", t.by_day, "day"),
+        costTable("by model", t.by_model, "model")),
+      el("div", {}, costTable("by agent", t.by_agent, "agent")),
+    ));
+}
+
+/* ------------------------------------------------------------- config */
+
+let SETTINGS = null;
+let FILTER = "";
+
+function widget(s) {
+  const commit = async (value) => {
+    const out = await act("set_setting",
+      { file: s.file, path: s.path, value, kind: s.kind });
+    if (out.ok) { s.value = value; loadSettings(); }
+  };
+  if (s.kind === "bool") {
+    const box = el("input", { type: "checkbox", style: "width:auto",
+      onchange: (e) => commit(e.target.checked) });
+    box.checked = !!s.value;
+    return box;
+  }
+  if (s.choices && s.choices.length) {
+    const sel = el("select", { onchange: (e) => commit(e.target.value) },
+      s.choices.map((c) => el("option", { value: c }, c || "(project default)")),
+      s.choices.includes(String(s.value)) ? null
+        : el("option", { value: String(s.value) }, `${s.value} (current)`));
+    sel.value = String(s.value);
+    return sel;
+  }
+  const kinds = { int: "number", float: "number" };
+  const input = el("input", {
+    type: kinds[s.kind] || "text",
+    step: s.kind === "float" ? "0.01" : "1",
+    value: s.kind === "list" ? (s.value || []).join(", ") : String(s.value ?? ""),
+    onchange: (e) => commit(e.target.value),
+  });
+  return input;
+}
+
+function renderConfig() {
+  if (!SETTINGS) { loadSettings(); return el("div", { class: "muted" }, "loading…"); }
+  const shown = SETTINGS.filter((s) =>
+    !FILTER || s.key.toLowerCase().includes(FILTER) ||
+    (s.help || "").toLowerCase().includes(FILTER));
+  const groups = {};
+  for (const s of shown) (groups[`${s.file} · ${s.group}`] ||= []).push(s);
+
+  return el("div", {},
+    el("div", { class: "panel" },
+      el("div", { class: "row" },
+        el("input", {
+          placeholder: "filter settings…", value: FILTER,
+          oninput: (e) => { FILTER = e.target.value.toLowerCase(); render(); },
+        }),
+        el("span", { class: "muted", style: "white-space:nowrap" },
+          `${shown.length}/${SETTINGS.length}`)),
+      el("div", { class: "muted", style: "margin-top:6px" },
+        "Edits are written to this project's config layer with every comment kept. "
+        + "The help under each setting is that comment."),
+    ),
+    // One <details> per group, shut by default: there are a few hundred
+    // settings and a page that opens on all of them is a page nobody reads.
+    // Filtering opens what it matched, which is the only time you want them all.
+    Object.entries(groups).map(([name, list]) => el("details",
+      { class: "panel", open: FILTER || OPEN_DETAILS.has(name) ? "open" : false,
+        ontoggle: (e) => e.target.open
+          ? OPEN_DETAILS.add(name) : OPEN_DETAILS.delete(name) },
+      el("summary", {}, name, el("span", { class: "muted" }, ` — ${list.length}`)),
+      list.map((s) => el("div", { class: "setting" },
+        el("div", { class: "key" }, s.path[s.path.length - 1]),
+        s.help && el("div", { class: "help" }, s.help),
+        el("div", { class: "ctl" }, widget(s),
+          el("span", { class: "muted" }, s.kind)),
+      )),
+    )),
+  );
+}
+
+async function loadSettings() {
+  const out = await api("/api/settings");
+  SETTINGS = out.settings || [];
+  if (TAB === "config") render();
+}
+
+/* --------------------------------------------------------------- shell */
+
+function syncTabs() {
+  document.querySelectorAll("nav button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.tab === TAB));
+  for (const id of ["live", "config", "history", "costs"]) $("#" + id).hidden = id !== TAB;
+}
+
+function render(fromPoll = false) {
+  if (!STATE) return;
+  // Config is not live data, and redrawing it under a cursor would eat the
+  // value being typed. The poll updates the header and leaves the form alone.
+  const redraw = !(fromPoll && TAB === "config");
+  $("#pname").textContent = STATE.project.name;
+  $("#ppath").textContent = `${STATE.project.root} · ${STATE.project.executor}`;
+  const worst = (STATE.alerts[0] || {}).level;
+  $("#pulse").className = "dot " + (worst === "error" ? "failed"
+    : STATE.counts.running ? "running" : "idle");
+  $("#verdict").textContent =
+    `${STATE.counts.running} running · ${STATE.counts.open_questions} question(s) · `
+    + `${STATE.counts.open_tickets} ticket(s)`;
+
+  if (redraw) {
+    const view = { live: renderLive, config: renderConfig,
+                   history: renderHistory, costs: renderCosts }[TAB];
+    $("#" + TAB).replaceChildren(view());
+  }
+  syncTabs();
+}
+
+document.querySelectorAll("nav button").forEach((b) =>
+  b.addEventListener("click", () => { TAB = b.dataset.tab; render(); }));
+
+async function refresh() {
+  try {
+    const next = await api("/api/state");
+    if (next.error) return toast(next.error, false);
+    STATE = next;
+    render(true);
+  } catch (e) { /* the server went away; the next tick will say so */ }
+}
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+</script>
