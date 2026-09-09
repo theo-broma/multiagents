@@ -4591,3 +4591,55 @@ def test_one_failure_does_not_make_a_provider_suspect(tmp_path, monkeypatch):
 
     tree.note_run_outcome("agy", ok=False, threshold=3, reason="and another")
     assert server_mod.auth_status()["degraded"] == ["agy"], "a pattern is"
+
+
+def test_a_check_records_what_it_checks(tmp_path):
+    """Declared, never inferred: branch-and-timing guesses break the moment two
+    checks overlap or a branch is reused, and the orchestrator knows the answer
+    at the point of asking."""
+    import asyncio
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"reviewer": AgentSpec("reviewer", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    r.tree.add(Node(id="ag-work", agent="implementer", provider="p", model="m",
+                    parent=None, depth=1, status="merged"))
+
+    out = asyncio.run(r.start("reviewer", "check it", verifies="ag-work"))
+    assert r.tree.get(out["agent_id"]).verifies == "ag-work"
+
+
+def test_a_check_on_an_unknown_agent_is_not_recorded(tmp_path):
+    """A dangling id would make the graph lie about what was checked."""
+    import asyncio
+
+    r = _runner(tmp_path, {"reviewer": AgentSpec("reviewer", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
+    out = asyncio.run(r.start("reviewer", "check it", verifies="ag-nonexistent"))
+    assert r.tree.get(out["agent_id"]).verifies == ""
+
+
+def test_the_checks_report_shows_the_graph_not_a_score(tmp_path, quiet_git,
+                                                       monkeypatch, capsys):
+    """Whether a review found something is in its prose, and deciding that from
+    here would be the same mistake as classifying a failure from an agent's own
+    words."""
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Node
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-work", agent="implementer", provider="p", model="m",
+                  parent=None, depth=1, status="merged"))
+    for n, status in (("ag-r1", "done"), ("ag-r2", "done")):
+        tree.add(Node(id=n, agent="reviewer", provider="p", model="m",
+                      parent=None, depth=1, status=status, verifies="ag-work"))
+
+    cli.cmd_usage(argparse.Namespace(path=str(tmp_path), agents=False, checks=True))
+    out = capsys.readouterr().out
+    assert "ag-work implementer" in out
+    assert "ag-r1 reviewer" in out and "ag-r2 reviewer" in out
+    assert "1 needed more than one" in out

@@ -508,6 +508,7 @@ class Runner:
         workdir: str | None = None,
         timeout: int | None = None,
         model: str | None = None,
+        verifies: str = "",
     ) -> dict[str, Any]:
         spec = self.config.agent(agent_name)
         if model:
@@ -605,6 +606,7 @@ class Runner:
             id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
             parent=parent, depth=depth, task=task[:500], branch=branch,
             worktree=str(worktree_path), status="pending",
+            verifies=verifies if verifies in self.tree.read()["nodes"] else "",
         )
         self.tree.add(node)
 
@@ -665,10 +667,16 @@ class Runner:
                     "args": event.args, "state": event.state, "status": event.status,
                     "step": event.step, "text": event.text[:2000],
                 })
-                if event.kind == "raw" and event.raw:
+                unhappy_result = (
+                    event.kind == "result" and event.status
+                    and event.status.upper() not in {"SUCCESS", "OK", "COMPLETED"})
+                if (event.kind == "raw" or unhappy_result) and event.raw:
                     # The whole point of a `raw` event is to show what did not
                     # parse, and the payload was being dropped on the way to
-                    # disk — so a run that died right after an unrecognised
+                    # disk. A result event announcing an error is kept for the
+                    # same reason: the rules extract a status and a response,
+                    # and whatever detail the CLI put beside them is exactly
+                    # what someone reading the failure needs — so a run that died right after an unrecognised
                     # line recorded `{"kind": "raw", "text": ""}` and threw the
                     # explanation away. Bounded and scrubbed: this file is not
                     # otherwise redacted, and an unparsed line is exactly where
@@ -871,7 +879,21 @@ class Runner:
             # idle so the session stays resumable for the next question.
             self.tree.set_status(node_id, "idle")
         else:
-            self.tree.set_status(node_id, status)
+            # Say why, when the provider told us. Three real failures ended with
+            # agy emitting {"kind": "result", "status": "ERROR"} — a structured
+            # verdict, which _classify read to decide "failed" and then dropped,
+            # leaving the orchestrator a node marked failed with an empty
+            # reason and nothing to act on.
+            reason = ""
+            if status == "failed":
+                if run.final_status and run.final_status.upper() not in {
+                        "SUCCESS", "OK", "COMPLETED"}:
+                    reason = f"{run.provider.name} reported {run.final_status}"
+                elif code != 0:
+                    reason = f"exited {code}"
+                else:
+                    reason = "produced no output"
+            self.tree.set_status(node_id, status, reason)
 
         # Auto-merge this agent's own children upward: their work is still
         # quarantined on this agent's branch, so nothing real has changed yet.
