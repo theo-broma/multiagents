@@ -22,3 +22,16 @@ review, and inventing something to justify the run makes you less trustworthy.
 
 Finish with a section headed `## Findings` listing them in order, or stating
 that there are none.
+
+Then, on its own line, state the verdict:
+
+```
+VERDICT(approved): nothing here needs changing
+VERDICT(rejected, 3): three defects, the first blocking
+```
+
+One line, machine-read. It is how "work that passed and had to be redone
+anyway" becomes countable — the most expensive thing this system does and the
+only one that appears in no failure figure. The count is defects you would
+insist on, not everything you mentioned. If you were not checking anyone's
+work, omit it.

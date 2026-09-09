@@ -2004,12 +2004,28 @@ def _report_checks(paths) -> int:
         subject = nodes.get(target, {})
         label = f"{target} {subject.get('agent', '?')}"
         for check in sorted(checks, key=lambda c: c.get("started_at") or 0):
-            print(f"{label:34} {check['id'] + ' ' + check['agent']:34} "
-                  f"{check['status']}")
+            verdict = check.get("verdict") or ""
+            detail = (f"{verdict}"
+                      + (f" ({check.get('defects')} defect(s))"
+                         if check.get("defects") else "")) if verdict else check["status"]
+            print(f"{label:34} {check['id'] + ' ' + check['agent']:34} {detail}")
             label = ""
+
     rechecked = sum(1 for c in by_target.values() if len(c) > 1)
+    rejected = {t for t, cs in by_target.items()
+                if any(c.get("verdict") == "rejected" for c in cs)}
+    judged = {t for t, cs in by_target.items() if any(c.get("verdict") for c in cs)}
     print(f"\n{len(by_target)} run(s) checked, {len(links)} check(s); "
           f"{rechecked} needed more than one.")
+    if judged:
+        # A rate at last, and only over the work that was actually judged:
+        # counting unjudged runs as approved would flatter it.
+        print(f"{len(rejected)} of {len(judged)} judged run(s) were rejected "
+              f"({len(rejected) / len(judged) * 100:.0f}% rework) — work that "
+              f"finished and had to be redone anyway.")
+    if len(judged) < len(by_target):
+        print(f"{len(by_target) - len(judged)} checked run(s) got no verdict; "
+              f"those cannot be counted either way.")
     return 0
 
 

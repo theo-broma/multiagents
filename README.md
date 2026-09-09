@@ -1426,9 +1426,42 @@ ag-8a5e14 implementer       ag-bd31b1 reviewer             done
                             ag-4f2a91 tester               failed
 ```
 
-The graph and not a rate: whether a review *found* something is in its prose,
-and deciding that from here would be the same mistake as classifying a failure
-from an agent's own words.
+Whether a review *found* something is in its prose, and deciding that from here
+would be the same mistake as classifying a failure from an agent's own words. So
+the verifier says it, on one line, in a form a machine can read:
+
+```
+VERDICT(approved): nothing here needs changing
+VERDICT(rejected, 3): three defects, the first blocking
+```
+
+That is not circular. The whole arrangement already trusts a reviewer's
+judgement over an implementer's code; this only asks it to state that judgement
+where it can be counted. `reviewer`, `tester` and `pentester` are told to end
+with one, and the report becomes a rate over the work that was actually judged —
+counting unjudged runs as approved would flatter it:
+
+```
+2 run(s) checked, 3 check(s); 1 needed more than one.
+1 of 2 judged run(s) were rejected (50% rework) — work that finished and had
+to be redone anyway.
+```
+
+### One free retry
+
+A run that dies with nothing to say, before it has done any work, is a transient
+glitch far more often than a real fault — so it is retried once rather than
+making the orchestrator reason about infrastructure.
+
+Bounded by cost, which is where this departs from the advice that produced it: a
+run that died at 996 seconds had spent 5.5M tokens, and silently spending that
+again is not absorbing a glitch. Past `retry_silent_failure_under_seconds` it is
+reported and handed back.
+
+The first version kept "have I retried?" on the in-process `Run`, and `_launch`
+builds a fresh one — so the flag reset on every retry and one free retry became
+an unbounded loop, which only the provider circuit breaker stopped. The count
+lives on the node now, where it survives the relaunch it guards.
 
 ## Diagnosability
 
@@ -1696,7 +1729,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-269 tests covering the parts live runs do not reliably exercise: doom-loop
+274 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
