@@ -1148,6 +1148,25 @@ class Runner:
             self.tree.set_status(agent_id, "failed", str(exc))
             return {"agent_id": agent_id, "steered": False, "error": str(exc)}
         self.tree.set_status(agent_id, "running", "steered")
+
+        # `_launch` returns when the process has STARTED, which is not the same
+        # as it being alive. A run that dies immediately — an unauthenticated
+        # provider answers in well under a second — was reported as
+        # `{"steered": true, "status": "running"}` against a process already
+        # gone, and the caller then waited for progress that could not come.
+        # Reported by the bug-reporter as bug-cee638.
+        run = self.runs.get(agent_id)
+        if run is not None:
+            with contextlib.suppress(asyncio.TimeoutError, TimeoutError):
+                await asyncio.wait_for(run.done.wait(), timeout=1.5)
+        node = self.tree.get(agent_id)
+        if node is not None and node.status not in ("running", "pending"):
+            return {
+                "agent_id": agent_id, "steered": False, "status": node.status,
+                "error": f"the steer was delivered but the run ended immediately "
+                         f"({node.status}: {node.reason or 'no reason recorded'}). "
+                         f"The message was not acted on.",
+            }
         self.tree.emit(agent_id, "steered", message=message[:400])
         return {"agent_id": agent_id, "steered": True, "status": "running"}
 

@@ -1314,7 +1314,22 @@ before the re-login, and its daemon was serving the revoked token from memory
 while the file on disk was correct throughout. Restarting the container fixed
 it. `auth status` could never have caught this — it reads the same correct file.
 
-Two things now close it:
+The bug-reporter filed this itself, as `bug-cee638`, and found a second thing
+with it: `steer_agent` returned `{"steered": true, "status": "running"}` against
+a process that had already exited. `_launch` returns when a process has
+*started*, and an unauthenticated provider answers in well under a second — so
+the caller waited for progress that could not come. A steer now waits briefly
+and reports what actually happened.
+
+`auth_status` reports the two things separately rather than blending them:
+
+```
+stored_login     true     the credential really is on disk
+verified_working false    and nothing says it works
+recent_failures  2        401 revoked
+```
+
+Three things now close it:
 
 - **`auth login` refreshes the container.** Idle, it restarts without asking,
   which costs a few seconds. Busy, it asks first — a restart kills every agent
@@ -1565,7 +1580,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-253 tests covering the parts live runs do not reliably exercise: doom-loop
+256 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

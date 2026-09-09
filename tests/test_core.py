@@ -4283,3 +4283,72 @@ def test_an_idle_container_is_restarted_without_asking(tmp_path, quiet_git,
 
     cli._refresh_container_after_login(_paths(tmp_path), config, "claude")
     assert actions == ["stop", "up"]
+
+
+# --------------------------------------------------------------------------
+# bug-cee638, filed by the bug-reporter against a real session
+#
+# Two findings: auth_status reported "authenticated: true" through an hour in
+# which every claude subagent failed with a 401, and steer_agent reported
+# `{"steered": true, "status": "running"}` against a process already exiting.
+
+
+def test_a_stored_login_is_reported_apart_from_evidence_that_it_works(tmp_path,
+                                                                      monkeypatch):
+    """The check reads local state and cannot see a revoked token. Blending
+    that into one word is what misled an hour of diagnosis."""
+    import multiagents.server as server_mod
+    from multiagents.config import Config
+
+    tree = _tree(tmp_path)
+    for _ in range(2):
+        tree.note_run_outcome("claude", ok=False, threshold=99, reason="401 revoked")
+
+    class _Run:
+        providers = {}
+        paths = _paths(tmp_path)
+        config = Config(project={}, providers={}, agents={}, models={},
+                        instruction_dirs=[])
+    _Run.tree = tree
+    monkeypatch.setattr(server_mod, "runner", lambda: _Run())
+    monkeypatch.setattr(server_mod.auth_mod, "check_all", lambda *a, **k: {
+        "claude": type("S", (), {
+            "ok": True,
+            "to_dict": lambda self: {"provider": "claude", "status": "authenticated",
+                                     "authenticated": True}})()})
+
+    out = server_mod.auth_status()
+    claude = out["providers"]["claude"]
+    assert claude["stored_login"] is True, "the credential really is on disk"
+    assert claude["verified_working"] is False, "and nothing says it works"
+    assert claude["recent_failures"] == 2
+    assert "not a working one" in claude["warning"]
+    assert out["degraded"] == ["claude"]
+
+
+def test_the_evidence_field_survives_redaction():
+    """`credential_present` masked itself: redact.py drops any key matching
+    that word wholesale, which is correct for secrets and useless for a flag."""
+    from multiagents.redact import scrub
+    assert scrub({"stored_login": True})["stored_login"] is True
+    assert scrub({"credential_present": True})["credential_present"] == "[redacted]"
+
+
+def test_steer_does_not_report_running_against_a_dead_run(tmp_path):
+    """`_launch` returns when the process has STARTED, which is not the same as
+    it being alive — an unauthenticated provider answers in well under a
+    second."""
+    import asyncio
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "exit 1"],
+                                              "resume": ["-c", "exit 1"]}}})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
+                    parent=None, depth=1, status="running", session_id="s-1",
+                    worktree=str(tmp_path)))
+
+    result = asyncio.run(r.steer("ag-1", "change course"))
+    assert result["steered"] is False, result
+    assert "ended immediately" in result["error"]
+    assert result["status"] != "running"
