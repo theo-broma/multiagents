@@ -677,30 +677,53 @@ def choose_provider(
     chain: list[str],
     reserve: float = 0.15,
     reserved: Any = None,
+    allowed: Any = None,
 ) -> tuple[str | None, str]:
     """Pick a provider to run on. Returns ``(provider, reason)``.
 
-    ``None`` means every candidate is exhausted or cooling down and the task
-    should be deferred until something resets.
+    ``None`` means no candidate can take the work and it should be deferred
+    until something resets.
 
     ``reserved`` names the providers the headroom reserve applies to — see
-    :func:`reserved_providers`. ``None`` means every provider, which is what
-    every caller used to get whether it wanted it or not.
+    :func:`reserved_providers`.
+
+    ``allowed`` names the providers THIS agent can actually run on: its own,
+    plus every provider it names a model for. It matters because a model id
+    belongs to its provider's namespace, so an agent cannot simply be moved.
+
+    That argument exists because of a live failure. The chain was
+    `[opencode, agy]`, claude was cooling down after a revoked token, and the
+    agent named a model for agy only. This returned the FIRST usable chain
+    entry — opencode — the caller found no model for it, and instead of asking
+    for the next candidate the caller gave up and ran on claude anyway: five
+    more runs into an authentication wall, with the agent's configured fallback
+    sitting one place further down the chain, unused. Filtering here means the
+    answer is always one the caller can act on.
     """
     reserved = set(budgets) if reserved is None else set(reserved)
+    allowed = None if allowed is None else set(allowed)
 
     if _has_room(budgets.get(preferred), reserve, preferred in reserved):
         return preferred, "preferred provider has headroom"
 
+    skipped = []
     for name in chain:
         if name == "defer":
             break
         if name == preferred:
             continue
+        if allowed is not None and name not in allowed:
+            skipped.append(name)
+            continue                    # no model for it; not a candidate
         # The reserve applies to a fallback too. Otherwise work diverted off a
         # constrained provider lands on the orchestrator's own and eats exactly
         # the slice the reserve exists to keep.
-        if _has_room(budgets.get(name), reserve, name in reserved) \
-                and budgets.get(name) is not None:
+        if budgets.get(name) is not None \
+                and _has_room(budgets.get(name), reserve, name in reserved):
             return name, f"{preferred} is constrained; falling back to {name}"
-    return None, f"{preferred} and all fallbacks are exhausted or cooling down"
+
+    why = f"{preferred} and all fallbacks are exhausted or cooling down"
+    if skipped:
+        why += (f" (no model named for {', '.join(skipped)} — add one under "
+                f"`models:` to allow failover there)")
+    return None, why

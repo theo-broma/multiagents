@@ -568,6 +568,10 @@ class Runner:
             float(self.config.project.get("budget", {}).get("reserve_headroom", 0.15)),
             reserved=budget_mod.reserved_providers(
                 self.config.project, self.providers, self._orchestrator_provider()),
+            # Only the providers this agent has a model to run on. A candidate
+            # it cannot use is not a candidate, and discovering that afterwards
+            # is how a run ended up back on the provider just ruled out.
+            allowed={spec.provider, *(spec.models or spec.extra.get("models") or {})},
         )
         if chosen is None:
             # Prefer a real reset time over the blind cooldown: a provider that
@@ -590,17 +594,18 @@ class Runner:
         if chosen != spec.provider:
             # The model id belongs to the original provider's namespace, so it
             # is meaningless to the new one — failing over without remapping
-            # would run `agy --model opencode-go/glm-5.3-flash`. Only fail over
-            # if this agent names a model for the fallback provider too.
-            alternative = (spec.models or spec.extra.get("models") or {}).get(chosen)
-            if not alternative:
-                why = (f"{spec.provider} is constrained, but {spec.name!r} names no "
-                       f"model for {chosen}; add one under `models:` to allow failover")
-                chosen = spec.provider
-            else:
-                provider = self.providers[chosen]
-                routed_from, routed_why = spec.provider, why
-                spec = AgentSpec(**{**spec.__dict__, "model": alternative})
+            # would run `agy --model opencode-go/glm-5.3-flash`. choose_provider
+            # is told which providers this agent named a model for and offers no
+            # other, so there is always one to use here.
+            #
+            # It used to discover the missing model at this point and respond by
+            # reverting to the provider it had just ruled out. Measured cost of
+            # that: an agent whose configured fallback sat one place further
+            # down the chain ran five times into a revoked token instead.
+            alternative = (spec.models or spec.extra.get("models") or {})[chosen]
+            provider = self.providers[chosen]
+            routed_from, routed_why = spec.provider, why
+            spec = AgentSpec(**{**spec.__dict__, "model": alternative})
 
         # --- git isolation ---------------------------------------------------
         # EVERY agent gets a worktree, including read-only ones. `writes: false`

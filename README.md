@@ -1925,6 +1925,33 @@ Off, a worker uses what you are paying for until it genuinely runs out.
 `known: false` is still never treated as empty: the reserve cannot be applied
 to a number nobody has.
 
+### Failing over past a provider the agent cannot use
+
+The chain is a list of providers, but an agent can only move to one it names a
+model for: a model id belongs to its provider's namespace, so `agy --model
+opencode-go/glm-5.3-flash` is not a fallback, it is a failure with extra steps.
+
+That check used to happen *after* the choice. The chooser returned the first
+usable entry in the chain, the caller looked for a model for it, found none —
+and **reverted to the provider it had just ruled out**. Measured, in a real
+session: claude's token was revoked, the breaker cooled it down, the chain was
+`[opencode, agy]`, and `flutter-tester` named a model for agy only. Every spawn
+picked opencode, failed the model check, and ran on cooling-down claude anyway.
+Five runs into an authentication wall with a working fallback one place further
+down the list.
+
+So the chooser is now told which providers the agent can use and offers no
+other. When none of them can take the work, the answer is to **defer** — the
+task waits and the tree pauses — rather than to run into the wall we just
+identified. The reason names what to add: *"no model named for opencode, agy —
+add one under `models:` to allow failover there."*
+
+The breaker had a matching fault. It latched: once `tripped` was set it never
+tripped again, so when its cooldown lapsed every subsequent failure was free and
+a dead provider was retried all evening. Past the threshold, what suppresses a
+trip is now an **active cooldown** — one trial at a time, and a failure in that
+trial cools it down again.
+
 **And the routing now says so.** The decision computed a reason and threw it
 away, so an implementer on the wrong model could only be explained by reading
 `choose_provider`. The node records `routed_from` and `routed_why`, a `routed`
