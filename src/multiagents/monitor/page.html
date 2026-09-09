@@ -30,6 +30,9 @@ input, select, textarea {
   border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; width: 100%;
 }
 textarea { resize: vertical; }
+/* Any panel that can grow past the screen scrolls inside itself rather than
+   pushing the page around underneath the reader. */
+[data-scroll] { overflow: auto; }
 
 header {
   position: sticky; top: 0; z-index: 5; background: var(--panel);
@@ -103,8 +106,12 @@ details[open] > summary { margin-bottom: 8px; }
 .setting:last-child { border-bottom: 0; }
 .setting .key { font-weight: 600; }
 .setting .help { color: var(--dim); font-size: 12px; white-space: pre-wrap; margin: 3px 0 6px; }
-.setting .ctl { display: flex; gap: 8px; align-items: center; }
-.setting .ctl > :first-child { max-width: 380px; }
+.setting .ctl { display: flex; gap: 8px; align-items: flex-start; }
+.setting .ctl > :first-child { max-width: 720px; }
+.setting .ctl > select, .setting .ctl > input { max-width: 420px; }
+/* Drag-resizable in both directions: a long value is one you have to read
+   before you can change it, and the box that shows it should be yours. */
+textarea.grow { resize: both; min-height: 2.6em; font-size: 12px; line-height: 1.45; }
 .saved { color: var(--ok); }
 .failed { color: var(--err); }
 
@@ -206,21 +213,56 @@ let TAB = "live";
 // them instead of fighting the person using the page.
 let OPEN_DETAILS = new Set();
 let DRAFTS = {};
+let EVENTS = [];             // the activity log, held so a redraw does not refetch
+let SIGNATURE = "";          // what the last render was drawn from
+
+// What is worth redrawing for. Deliberately not the whole state: `at` and every
+// elapsed time change on every tick, so comparing the raw payload would call
+// everything a change and rebuild the page twice a second — which is what threw
+// away your scroll position.
+function signature(s) {
+  return JSON.stringify([
+    s.counts,
+    (s.alerts || []).map((a) => a.text),
+    (s.providers || []).map((p) => [p.name, p.budget.used_percent, p.lines]),
+    (s.running || []).map((a) => [a.id, a.status, a.tokens, a.steps]),
+    (s.history || []).length,
+    (s.questions || []).map((q) => [q.id, !!q.answered_at]),
+    (s.tickets || []).map((t) => [t.id, t.status]),
+    (s.deferred || []).length,
+    s.orchestrator.verdict,
+    SELECTED, TAB, FILTER,
+  ]);
+}
+
+// Replace a view's contents without moving anything the reader was looking at.
+// Detaching a node resets its scrollTop, so the positions are read off first and
+// put back after — including the window's own, since a rebuilt view is briefly
+// shorter than the one it replaces.
+function keepingScroll(root, rebuild) {
+  const saved = new Map();
+  root.querySelectorAll("[data-scroll]").forEach((n) => saved.set(n.dataset.scroll, n.scrollTop));
+  const pageY = window.scrollY;
+  rebuild();
+  root.querySelectorAll("[data-scroll]").forEach((n) => {
+    if (saved.has(n.dataset.scroll)) n.scrollTop = saved.get(n.dataset.scroll);
+  });
+  window.scrollTo(0, pageY);
+}
 let SELECTED = null;         // agent id whose transcript is open
 let OPEN = new Set();        // expanded history nodes
 
 /* ---------------------------------------------------------------- live */
 
 function details(name, summaryText, ...kids) {
-  const box = el("details", {
+  return el("details", {
     class: "panel",
     open: OPEN_DETAILS.has(name) ? "open" : false,
     ontoggle: (e) => {
       e.target.open ? OPEN_DETAILS.add(name) : OPEN_DETAILS.delete(name);
-      if (e.target.open && name === "activity") loadEvents();
+      if (e.target.open && name === "activity" && !EVENTS.length) loadEvents();
     },
   }, el("summary", {}, summaryText), ...kids);
-  return box;
 }
 
 function agentCard(a, opts = {}) {
@@ -373,9 +415,16 @@ function renderLive() {
 
   right.append(...s.providers.map(providerPanel));
 
-  right.append(details("activity", "activity",
-    el("div", { id: "events" }, el("span", { class: "muted" }, "the event log, tailed"))));
-  if (OPEN_DETAILS.has("activity")) loadEvents();
+  right.append(details("activity",
+    el("span", {}, "activity",
+      el("button", {
+        style: "margin-left:8px",
+        onclick: (e) => { e.preventDefault(); e.stopPropagation(); loadEvents(); },
+      }, "reload")),
+    el("div", { id: "events", "data-scroll": "events",
+                style: "max-height:320px;overflow:auto" },
+      EVENTS.length ? EVENTS.map(eventLine)
+        : el("span", { class: "muted" }, "the event log, tailed"))));
 
   if (s.deferred.length) {
     right.append(el("div", { class: "panel" },
@@ -439,20 +488,24 @@ function renderHistory() {
         "git calls, so asked for rather than polled")),
     ),
   );
-  return el("div", { class: "grid" }, left, el("div", { id: "side" }, transcriptPanel()));
+  return el("div", { class: "grid" }, left,
+    el("div", { id: "side", "data-scroll": "side" }, transcriptPanel()));
+}
+
+function eventLine(e) {
+  const extra = Object.entries(e)
+    .filter(([k, v]) => !["t", "agent", "kind"].includes(k) && v !== "" && v !== null)
+    .map(([k, v]) => `${k}=${String(v).slice(0, 40)}`).join(" ");
+  return el("div", { class: "muted" },
+    `${new Date((e.t || 0) * 1000).toLocaleTimeString()} ${e.agent || "-"} `
+    + `${e.kind || ""} ${extra}`);
 }
 
 async function loadEvents() {
-  const box = $("#events");
-  if (!box) return;
   const out = await api("/api/events");
-  box.replaceChildren(...(out.events || []).slice(-40).reverse().map((e) => {
-    const extra = Object.entries(e)
-      .filter(([k, v]) => !["t", "agent", "kind"].includes(k) && v !== "" && v !== null)
-      .map(([k, v]) => `${k}=${String(v).slice(0, 40)}`).join(" ");
-    return el("div", { class: "muted" },
-      `${new Date((e.t || 0) * 1000).toLocaleTimeString()} ${e.agent || "-"} ${e.kind || ""} ${extra}`);
-  }));
+  EVENTS = (out.events || []).slice(-60).reverse();
+  const box = $("#events");
+  if (box) box.replaceChildren(...EVENTS.map(eventLine));
 }
 
 async function loadBranches() {
@@ -584,14 +637,26 @@ function widget(s) {
     sel.value = String(s.value);
     return sel;
   }
+  const text = s.kind === "list"
+    ? (s.value || []).join(", ") : String(s.value ?? "");
+  // Anything long enough to be uncomfortable in a one-line box gets a real one
+  // you can drag: agent descriptions, prompts, passthrough lists and command
+  // templates are all settings you need to READ before you can change them.
+  if (s.kind !== "int" && s.kind !== "float" && (text.length > 48 || text.includes("\n"))) {
+    const area = el("textarea", {
+      class: "grow", rows: Math.min(12, Math.ceil(text.length / 70) + 1),
+      onchange: (e) => commit(e.target.value),
+    });
+    area.value = text;
+    return area;
+  }
   const kinds = { int: "number", float: "number" };
-  const input = el("input", {
+  return el("input", {
     type: kinds[s.kind] || "text",
     step: s.kind === "float" ? "0.01" : "1",
-    value: s.kind === "list" ? (s.value || []).join(", ") : String(s.value ?? ""),
+    value: text,
     onchange: (e) => commit(e.target.value),
   });
-  return input;
 }
 
 function renderConfig() {
@@ -664,8 +729,10 @@ function render(fromPoll = false) {
   if (redraw) {
     const view = { live: renderLive, config: renderConfig,
                    history: renderHistory, costs: renderCosts }[TAB];
-    $("#" + TAB).replaceChildren(view());
+    const host = $("#" + TAB);
+    keepingScroll(host, () => host.replaceChildren(view()));
   }
+  SIGNATURE = signature(STATE);   // whatever drew this, the poll is now level
   syncTabs();
 }
 
@@ -677,6 +744,11 @@ async function refresh() {
     const next = await api("/api/state");
     if (next.error) return toast(next.error, false);
     STATE = next;
+    // Nothing worth showing changed, so nothing is rebuilt. A page that
+    // redraws itself twice a second is a page you cannot read a long list in.
+    const now = signature(next);
+    if (now === SIGNATURE) return;
+    SIGNATURE = now;
     render(true);
   } catch (e) { /* the server went away; the next tick will say so */ }
 }

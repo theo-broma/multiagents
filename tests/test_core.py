@@ -5809,6 +5809,52 @@ def test_the_page_renders_every_view_against_real_data(tmp_path, monkeypatch):
         assert painted[view] > 100, f"the {view} view rendered almost nothing"
 
 
+def test_the_poll_does_not_scroll_the_page_out_from_under_the_reader(tmp_path):
+    """Reported from use: scrolling the activity log on Live, or the transcript
+    on History, snapped back to the top. The poll rebuilt the whole view every
+    two seconds, and detaching a node resets its scrollTop.
+
+    So: an unchanged state rebuilds nothing at all, and a changed one puts the
+    scroll positions back — the page's own and each panel's."""
+    import shutil
+    import subprocess
+    from pathlib import Path as _Path
+    from multiagents.monitor import snapshot as snap
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+
+    paths, _ = _tree_with_agents(tmp_path)
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps(
+        {"state": snap.snapshot(paths, _config(), with_scripts=False)}, default=str))
+
+    root = _Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [node, str(root / "tests/support/render_page.js"),
+         str(root / "src/multiagents/monitor/page.html"), str(fixture), "--scroll"],
+        capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-2000:]
+    out = json.loads(result.stdout.split("scroll:", 1)[1])
+
+    assert out["idleRebuilds"] == 0, "a poll that changed nothing rebuilt the view"
+    assert out["changedRebuilds"] == 1, "a real change still redraws"
+    assert out["scrollKept"] == 240, "the activity log went back to the top"
+    assert out["pageScrollKept"] == 900, "the page itself jumped"
+    assert out["eventsRendered"] == 2, "the log is drawn from cache, not refetched"
+
+
+def test_a_long_setting_gets_a_box_you_can_drag(tmp_path):
+    """A value you have to read before you can change it does not belong in a
+    one-line field."""
+    from pathlib import Path as _Path
+
+    page = (_Path("src/multiagents/monitor/page.html")).read_text()
+    assert 'class: "grow"' in page and "text.length > 48" in page
+    assert "textarea.grow { resize: both;" in page
+
+
 def test_the_poll_does_not_fork_a_subprocess_per_tick(tmp_path, monkeypatch):
     """The snapshot is polled every two seconds by both front ends. A usage
     script per provider per tick is an idle monitor with a fan."""
