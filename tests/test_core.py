@@ -4420,3 +4420,80 @@ def test_the_bug_reporter_is_told_where_to_stop_guessing():
 
     assert "Do not guess at systems you cannot verify" in flat
     assert "say exactly where the trail goes cold" in flat
+
+
+# --------------------------------------------------------------------------
+# Closing a ticket from the CLI
+#
+# `submit` and `discard` could open a ticket's life and end it unread, but
+# marking one fixed existed only as an MCP tool — reachable by the orchestrator
+# and not by the person who fixed it. A ticket you reported and then fixed
+# stayed `reported` for ever unless someone edited the tree by hand.
+
+
+def _ticket_args(path, ticket_id, note="", declined=False, action="resolve"):
+    import argparse
+    return argparse.Namespace(path=str(path), action=action, ticket_id=ticket_id,
+                              all=False, note=note, declined=declined)
+
+
+def test_resolving_a_reported_ticket_says_it_is_still_open_upstream(tmp_path,
+                                                                    quiet_git,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """Fixing it here does not close it for anyone else."""
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    ticket = tree.add_ticket("ag-1", "a real defect", "body", "minor")
+    tree.set_ticket_status(ticket["id"], "reported", "", "https://example.invalid/9")
+
+    assert cli.cmd_tickets(_ticket_args(tmp_path, ticket["id"], "fixed in abc123")) == 0
+    out = capsys.readouterr().out
+    assert "marked fixed: fixed in abc123" in out
+    assert "close it there too" in out
+    assert tree.get_ticket(ticket["id"])["status"] == "fixed"
+
+
+def test_resolving_an_unfiled_ticket_offers_to_file_it(tmp_path, quiet_git,
+                                                       monkeypatch, capsys):
+    """A local fix leaves the defect in place for everyone who has not got it."""
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    ticket = tree.add_ticket("ag-1", "never filed", "body", "minor")
+
+    cli.cmd_tickets(_ticket_args(tmp_path, ticket["id"]))
+    out = capsys.readouterr().out
+    assert "not reported upstream" in out
+    assert f"tickets submit {ticket['id']}" in out
+
+
+def test_declining_is_distinct_from_fixing(tmp_path, quiet_git, monkeypatch):
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+    tree = Tree(paths.tree_file, paths.events_file)
+    ticket = tree.add_ticket("ag-1", "not actually a bug", "body", "minor")
+
+    cli.cmd_tickets(_ticket_args(tmp_path, ticket["id"], "misread the spec",
+                                 declined=True))
+    record = tree.get_ticket(ticket["id"])
+    assert record["status"] == "declined"
+    assert record["note"] == "misread the spec"
+
+
+def test_resolving_an_unknown_ticket_is_an_error(tmp_path, quiet_git, monkeypatch):
+    import multiagents.cli as cli
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    assert cli.cmd_tickets(_ticket_args(tmp_path, "bug-nope")) == 2
