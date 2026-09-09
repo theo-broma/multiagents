@@ -92,7 +92,14 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     })
     if getattr(executor, "kind", "local") == "docker":
         env["MULTIAGENTS_CONTAINER"] = executor.container
-        for container_path, host_path in (executor.private_state() or {}).items():
+        # THIS provider's private home, not whichever one the executor happened
+        # to list first. With one provider using it the difference never showed;
+        # with two, a script would have been handed the other one's directory.
+        try:
+            private = executor.private_state(provider_name) or {}
+        except TypeError:                     # an executor from before the filter
+            private = executor.private_state() or {}
+        for container_path, host_path in private.items():
             env["MULTIAGENTS_PRIVATE_HOME"] = str(container_path)
             env["MULTIAGENTS_PRIVATE_BACKING"] = str(host_path)
             break
