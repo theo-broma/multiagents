@@ -2065,6 +2065,30 @@ def cmd_tickets(args: argparse.Namespace) -> int:
         print(f"{args.ticket_id} discarded.")
         return 0
 
+    if args.action == "resolve":
+        # `submit` and `discard` could open a ticket's life and end it
+        # unread, and nothing could close one you fixed: marking a ticket
+        # `fixed` existed only as an MCP tool, which the orchestrator can reach
+        # and you cannot. So a ticket you reported and then fixed stayed
+        # `reported` for ever unless somebody edited the tree by hand.
+        ticket = tree.get_ticket(args.ticket_id) if args.ticket_id else None
+        if ticket is None:
+            print(f"unknown ticket {args.ticket_id!r}", file=sys.stderr)
+            return 2
+        outcome = "declined" if args.declined else "fixed"
+        record = tree.set_ticket_status(args.ticket_id, outcome, args.note)
+        print(f"{args.ticket_id} marked {outcome}"
+              f"{f': {args.note}' if args.note else ''}")
+        if outcome == "fixed" and record.get("url"):
+            # It was filed upstream, so somebody there is still looking at it.
+            print(f"             this was reported at {record['url']} — close it "
+                  f"there too, or it stays open for everyone else")
+        elif outcome == "fixed" and record.get("status") != "reported":
+            print("             not reported upstream; the defect is still there "
+                  "for everyone else.\n             `tickets submit "
+                  f"{args.ticket_id}` if it is worth filing")
+        return 0
+
     shown = [t for t in tickets
              if args.all or t.get("status") in ("open", "awaiting_user")]
     if not shown:
@@ -2527,9 +2551,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")
     p.add_argument("action", nargs="?", default="list",
-                   choices=["list", "show", "submit", "discard"])
+                   choices=["list", "show", "submit", "resolve", "discard"])
     p.add_argument("ticket_id", nargs="?", default="")
     p.add_argument("--all", action="store_true", help="include resolved tickets")
+    p.add_argument("--note", default="", help="with `resolve`: why, or what fixed it")
+    p.add_argument("--declined", action="store_true",
+                   help="with `resolve`: it was not a bug, rather than fixed")
     p.set_defaults(func=cmd_tickets)
 
     p = sub.add_parser("docker", help="manage the project's agent container")
