@@ -547,6 +547,11 @@ class Tree:
                 health["last_reason"] = ""
                 health["last_success"] = now()
                 health.pop("tripped", None)
+                health.pop("trial_at", None)
+                # The health record is not what routing reads. Leaving the
+                # cooldown behind kept a working provider out of the pool for
+                # the rest of its penalty box.
+                data["cooldowns"].pop(provider, None)
                 return None
             health["consecutive_failures"] += 1
             health["last_reason"] = reason[:200]
@@ -647,16 +652,57 @@ class Tree:
                                 if d.get("id") != deferred_id]
             return len(data["deferred"]) < before
 
-    def set_cooldown(self, provider: str, until: float, reason: str) -> None:
+    def set_cooldown(self, provider: str, until: float, reason: str,
+                     needs_login: bool = False) -> None:
+        record = {"until": until, "reason": reason}
+        if needs_login:
+            # Recorded because it changes what recovery means. A rate limit
+            # heals by waiting; a revoked token never does, and the trial that
+            # tests it should be the provider's own `check`, not somebody's
+            # agent run.
+            record["needs_login"] = True
         with self.transaction() as data:
-            data["cooldowns"][provider] = {"until": until, "reason": reason}
-        self.emit("-", "cooldown", provider=provider, until=until, reason=reason)
+            data["cooldowns"][provider] = record
+        self.emit("-", "cooldown", provider=provider, until=until, reason=reason,
+                  needs_login=needs_login)
+
+    def clear_cooldown(self, provider: str) -> bool:
+        """Let a provider back in early, because it demonstrably works.
+
+        Without this, a provider that was fixed stayed rejected for the rest of
+        its penalty box: the breaker's own health record was cleared by a
+        success and the cooldown, which is what choose_provider actually reads,
+        was not.
+        """
+        with self.transaction() as data:
+            gone = data["cooldowns"].pop(provider, None) is not None
+        if gone:
+            self.emit("-", "cooldown_cleared", provider=provider)
+        return gone
 
     def cooldown(self, provider: str) -> dict | None:
         entry = self.read()["cooldowns"].get(provider)
         if entry and entry.get("until", 0) > now():
             return entry
         return None
+
+    def claim_trial(self, provider: str, window: float = 120.0) -> bool:
+        """Take the single retry allowed when a cooldown has just lapsed.
+
+        "One trial at a time" was a comment rather than a fact: when the timer
+        lapsed, every deferred task woke at once, all found the provider usable,
+        and all failed against it before the first could establish a new
+        cooldown — a synchronised barrage, not a half-open breaker. The claim is
+        made under the same lock the tree is written with, so exactly one caller
+        gets it.
+        """
+        with self.transaction() as data:
+            health = data["provider_health"].setdefault(
+                provider, {"consecutive_failures": 0, "last_reason": ""})
+            if now() - float(health.get("trial_at") or 0) < window:
+                return False
+            health["trial_at"] = now()
+        return True
 
     # -------------------------------------------------------------- display --
 

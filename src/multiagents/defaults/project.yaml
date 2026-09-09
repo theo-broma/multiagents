@@ -230,6 +230,17 @@ limits:
   # launching the role by hand lifts it.
   spend_limit_pause_hours: 12
 
+  # How long a provider is cooled down when its own `check` action says it is
+  # not authenticated. Long, because that fault does not heal by itself: only a
+  # person logging in fixes it, and retrying every half hour spends real agent
+  # runs proving something already known. Recovery does not wait for the timer
+  # — the next spawn re-runs `check`, and a pass clears the cooldown at once.
+  provider_auth_cooldown_seconds: 21600
+  # How often that `check` may be re-run while a provider is locked out, and
+  # how long a single retry is reserved to one task when a cooldown lapses.
+  # Short, because it is what decides how quickly logging back in takes effect.
+  provider_probe_seconds: 120
+
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents
   # said — which is the signal this project learned not to classify on. Set

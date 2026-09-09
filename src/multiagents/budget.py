@@ -690,6 +690,9 @@ def choose_provider(
     ``allowed`` names the providers THIS agent can actually run on: its own,
     plus every provider it names a model for. It matters because a model id
     belongs to its provider's namespace, so an agent cannot simply be moved.
+    A mapping is accepted as well as a set, so a future rule that cares about
+    *which* model it would land on has it to hand rather than needing a new
+    argument.
 
     That argument exists because of a live failure. The chain was
     `[opencode, agy]`, claude was cooling down after a revoked token, and the
