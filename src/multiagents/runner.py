@@ -219,6 +219,13 @@ class Runner:
         except ValueError:
             return 0
 
+    def _orchestrator_provider(self) -> str:
+        """Whose quota the orchestrator itself is spending."""
+        for spec in self.config.agents.values():
+            if spec.launch and spec.role == "orchestrator":
+                return spec.provider
+        return ""
+
     def can_spawn(self) -> bool:
         if self.self_id() is None:
             return True                       # the root orchestrator always may
@@ -554,10 +561,13 @@ class Runner:
             lambda _provider_name: self.executor(),
             global_config_dir(), self.paths.config, None, cooldowns,
         )
+        routed_from, routed_why = "", ""
         chosen, why = budget_mod.choose_provider(
             spec.provider, budgets,
             list(self.config.project.get("budget", {}).get("fallback_chain", [])),
             float(self.config.project.get("budget", {}).get("reserve_headroom", 0.15)),
+            reserved=budget_mod.reserved_providers(
+                self.config.project, self.providers, self._orchestrator_provider()),
         )
         if chosen is None:
             # Prefer a real reset time over the blind cooldown: a provider that
@@ -589,6 +599,7 @@ class Runner:
                 chosen = spec.provider
             else:
                 provider = self.providers[chosen]
+                routed_from, routed_why = spec.provider, why
                 spec = AgentSpec(**{**spec.__dict__, "model": alternative})
 
         # --- git isolation ---------------------------------------------------
@@ -614,8 +625,16 @@ class Runner:
             parent=parent, depth=depth, task=task[:500], branch=branch,
             worktree=str(worktree_path), status="pending",
             verifies=verifies if verifies in self.tree.read()["nodes"] else "",
+            routed_from=routed_from, routed_why=routed_why,
         )
         self.tree.add(node)
+        if routed_from:
+            # Loud enough to find later. This decision changes which model does
+            # the work, and until now it left no trace anywhere.
+            self.tree.emit(node_id, "routed", **{"from": routed_from,
+                                                 "to": provider.name,
+                                                 "model": spec.model,
+                                                 "reason": routed_why})
 
         prompt = self.compose_prompt(spec, task, node, worktree_path)
         try:

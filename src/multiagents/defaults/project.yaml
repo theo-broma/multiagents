@@ -251,8 +251,22 @@ limits:
 # one with headroom, and to park tasks until a bucket resets.
 # --------------------------------------------------------------------------
 budget:
-  # Never spend the orchestrator's last slice on delegation bookkeeping.
+  # Keep this much of a provider's window unspent, so that a run does not end
+  # with an orchestrator that cannot answer for the agents it started.
   reserve_headroom: 0.15
+  # Whether that reserve applies to EVERY provider. Off, because it made a
+  # worker provider unusable long before it was: opencode reports the worst of
+  # its three windows, so at 86% of a WEEKLY window — with the five-hour window
+  # it actually runs against sitting empty — headroom read 0.14, fell under the
+  # reserve, and every agent silently moved to a fallback for the rest of the
+  # week. Off means: use what you are paying for until it genuinely runs out.
+  reserve: false
+  # Whether it applies to the provider the ORCHESTRATOR runs on. On, because
+  # that is the reserve's original and much narrower purpose: delegating work
+  # to the same provider your orchestrator is spending can leave it with no
+  # room to read the results, and an orchestrator that cannot finish a turn
+  # stops the whole tree rather than one agent.
+  reserve_orchestrator: true
   # Consulted in order when an agent's provider is exhausted or cooling down.
   fallback_chain:
     - opencode

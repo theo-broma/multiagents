@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..budget import read_all
+from ..budget import read_all, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
 from ..providers import load_providers
@@ -121,6 +121,10 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
 
     providers = load_providers(config.providers)
     executor_for = _executor_for(paths, config, providers)
+    reserve = float(config.project.get("budget", {}).get("reserve_headroom", 0.15))
+    orchestrator = next((spec.provider for spec in config.agents.values()
+                         if spec.launch and spec.role == "orchestrator"), "")
+    reserved = reserved_providers(config.project, providers, orchestrator)
     health = tree.provider_health()
     spend = spend_by_provider(tree)
     budgets = read_all(providers, executor_for, global_config_dir(),
@@ -135,8 +139,17 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
             lines, source = _usage_lines(name, provider, executor_for(name),
                                          data, paths)
         entry = health.get(name) or {}
+        # Below the reserve a provider is still "usable" and still gets skipped
+        # by choose_provider, which is the least obvious state it can be in and
+        # the one that quietly moves every agent onto a fallback model.
+        headroom = data.get("headroom")
+        below_reserve = bool(name in reserved and data.get("known")
+                             and headroom is not None and headroom < reserve
+                             and data.get("usable"))
         out.append({
             "name": name,
+            "below_reserve": below_reserve,
+            "reserve": reserve,
             "available": bool(getattr(provider, "available", lambda: None)()),
             "budget": data,
             "lines": lines,
@@ -176,6 +189,8 @@ def _node_view(node: dict, now: float) -> dict:
         "task": (node.get("task") or "")[:400],
         "summary": (node.get("summary") or "")[:2000],
         "reason": node.get("reason", ""),
+        "routed_from": node.get("routed_from", ""),
+        "routed_why": node.get("routed_why", ""),
         "steps": node.get("steps", 0),
         "events": node.get("events", 0),
         "tokens": usage.get("total", 0),
@@ -308,6 +323,16 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
             out.append({"level": "error", "kind": "provider",
                         "text": f"{entry['name']} has no headroom",
                         "detail": f"resets {budget.get('resets_at', '?')}"})
+        elif entry.get("below_reserve"):
+            # The state that sent a question to the maintainer: opencode's
+            # five-hour window was empty, its WEEKLY window was not, and every
+            # implementer was silently running on the fallback.
+            out.append({"level": "warn", "kind": "provider",
+                        "text": f"{entry['name']} is below the "
+                                f"{entry.get('reserve', 0.15) * 100:.0f}% reserve — "
+                                f"agents are being routed to a fallback",
+                        "detail": f"{budget.get('used_percent', 0):.0f}% of its "
+                                  f"tightest window used"})
         elif budget.get("severity") == "warning":
             out.append({"level": "warn", "kind": "provider",
                         "text": f"{entry['name']} at "
