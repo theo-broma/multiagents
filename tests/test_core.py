@@ -6007,3 +6007,127 @@ def test_the_page_keeps_what_the_poll_would_have_thrown_away():
     assert "OPEN_DETAILS" in page, "an opened panel is kept outside the DOM"
     assert "fromPoll && TAB === \"config\"" in page, \
         "the config form is not redrawn by the poll"
+
+
+def test_a_provider_below_the_reserve_says_so(tmp_path, monkeypatch):
+    """The state that produced a question to the maintainer: opencode's
+    five-hour window was empty, its WEEKLY window was at 86%, headroom was
+    therefore 0.14 — under the 0.15 reserve — and every implementer silently
+    ran on the fallback provider with nothing anywhere saying why."""
+    from multiagents.budget import Budget
+    from multiagents.config import Config
+    from multiagents.monitor import snapshot as snap
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    config = Config(project={"budget": {"reserve_headroom": 0.15, "reserve": True}},
+                    providers={}, agents={}, models={}, instruction_dirs=[])
+
+    monkeypatch.setattr(snap, "load_providers", lambda _: {"opencode": None})
+    monkeypatch.setattr(snap, "read_all", lambda *a, **k: {
+        "opencode": Budget(provider="opencode", known=True, headroom=0.14,
+                           severity="warning",
+                           windows={"rolling": {"percent": 0.0},
+                                    "weekly": {"percent": 86.0}})})
+    import multiagents.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_executor_for", lambda *a: (lambda name: None))
+
+    rows = snap.providers_view(paths, config, tree, with_scripts=False)
+    assert rows[0]["below_reserve"] is True
+    assert rows[0]["budget"]["usable"] is True, "usable, and skipped anyway"
+
+    found = snap.alerts(paths, config, tree, rows)
+    assert any("below the 15% reserve" in a["text"] for a in found)
+    assert any("routed to a fallback" in a["text"] for a in found)
+
+
+def test_an_agent_moved_to_a_fallback_records_where_it_was_meant_to_go(tmp_path):
+    """Until this, the only way to learn why an implementer was on the wrong
+    model was for somebody to read choose_provider."""
+    from multiagents.monitor import snapshot as snap
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-1", agent="implementer", provider="agy",
+                  model="gemini-3.1-pro-high", parent=None, depth=0,
+                  status="running",
+                  routed_from="opencode",
+                  routed_why="opencode is constrained; falling back to agy"))
+    view = snap._node_view(tree.read()["nodes"]["ag-1"], time.time())
+    assert view["routed_from"] == "opencode"
+    assert "falling back" in view["routed_why"]
+
+    page = Path("src/multiagents/monitor/page.html").read_text()
+    assert "routed_from" in page, "and the card says so"
+
+
+def test_the_reserve_is_off_for_workers_and_on_for_the_orchestrator(tmp_path):
+    """Two switches, because one number was doing two jobs. `reserve` extends
+    it to every provider; `reserve_orchestrator` keeps its original and much
+    narrower purpose."""
+    from multiagents.budget import Budget, choose_provider, reserved_providers
+
+    providers = {"opencode": None, "agy": None, "claude": None}
+    budgets = {
+        # 86% of a WEEKLY window, with the five-hour window it actually runs
+        # against sitting empty. Usable, and under the reserve.
+        "opencode": Budget("opencode", known=True, headroom=0.14),
+        "agy": Budget("agy", known=False),
+        "claude": Budget("claude", known=True, headroom=0.43),
+    }
+    chain = ["opencode", "agy", "defer"]
+
+    shipped = reserved_providers({"budget": {}}, providers, "claude")
+    assert shipped == {"claude"}, "by default only the orchestrator's provider"
+    assert choose_provider("opencode", budgets, chain, 0.15, shipped)[0] == "opencode", \
+        "a worker uses what it is paying for until it genuinely runs out"
+
+    everywhere = reserved_providers({"budget": {"reserve": True}}, providers, "claude")
+    assert everywhere == set(providers)
+    assert choose_provider("opencode", budgets, chain, 0.15, everywhere)[0] == "agy"
+
+    nowhere = reserved_providers(
+        {"budget": {"reserve_orchestrator": False}}, providers, "claude")
+    assert nowhere == set()
+
+
+def test_the_orchestrators_provider_is_protected_as_a_fallback_too(tmp_path):
+    """Otherwise work diverted off a constrained provider lands on the
+    orchestrator's own and eats exactly the slice the reserve exists to keep."""
+    from multiagents.budget import Budget, choose_provider
+
+    budgets = {
+        "opencode": Budget("opencode", known=True, headroom=0.0),   # gone
+        "claude": Budget("claude", known=True, headroom=0.10),      # under reserve
+    }
+    chain = ["opencode", "claude", "defer"]
+    chosen, why = choose_provider("opencode", budgets, chain, 0.15, {"claude"})
+    assert chosen is None and "exhausted" in why
+
+    # With the reserve not covering it, it is a legitimate fallback.
+    assert choose_provider("opencode", budgets, chain, 0.15, set())[0] == "claude"
+
+
+def test_an_unmeasurable_provider_is_still_a_fallback(tmp_path):
+    """`known=False` means unknown headroom, which is not no headroom — and the
+    reserve cannot be applied to a number nobody has."""
+    from multiagents.budget import Budget, choose_provider
+
+    budgets = {"opencode": Budget("opencode", known=True, headroom=0.0),
+               "agy": Budget("agy", known=False)}
+    assert choose_provider("opencode", budgets, ["opencode", "agy", "defer"],
+                           0.15, {"opencode", "agy"})[0] == "agy"
+
+
+def test_the_shipped_budget_switches_match_the_code_defaults():
+    """A default that differs between the code and the file it ships is a
+    default nobody can reason about."""
+    from multiagents.budget import reserved_providers
+    from multiagents.config import load
+
+    shipped = load(None).project.get("budget", {})
+    assert shipped["reserve"] is False
+    assert shipped["reserve_orchestrator"] is True
+    assert reserved_providers({"budget": shipped}, {"a", "b"}, "a") == {"a"}

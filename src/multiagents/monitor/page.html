@@ -284,6 +284,8 @@ function agentCard(a, opts = {}) {
       a.quiet_for !== null && el("span", {}, `quiet ${fmtAge(a.quiet_for)}`),
       rate > 0 && el("span", {}, `${fmtNum(rate)} tok/min`),
       a.stale && el("span", { class: "failed" }, "process gone"),
+      a.routed_from && el("span", { class: "muted" },
+        `↳ meant for ${a.routed_from} — ${a.routed_why}`),
     ),
     el("div", { class: "row wrap", style: "margin-top:7px" },
       el("button", { onclick: () => openTranscript(a.id) }, "transcript"),

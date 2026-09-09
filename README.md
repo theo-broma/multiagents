@@ -1898,6 +1898,40 @@ provider gets an entry with no Python change.
                  weekly    10.0%  resets 2026-09-14T00:00:00
 ```
 
+### The reserve, and what it is for
+
+Before every spawn, `choose_provider` compares the agent's provider against
+`budget.reserve_headroom` (15%) and diverts to the `fallback_chain` if it is
+below. That reserve exists for one narrow reason — an orchestrator with nothing
+left cannot read the results of the agents it started, and a stalled
+orchestrator stops the tree rather than one agent.
+
+Applied to *every* provider, it did something else entirely. opencode reports
+the worst of its three windows, so at **86% of a weekly window** — with the
+five-hour window it actually runs against sitting empty — headroom read 0.14,
+fell under the reserve, and every implementer silently ran on the fallback
+model for the rest of the week. Worse, it diverted work *away* from the
+provider whose quota we can measure and *toward* one that reports nothing,
+because an unmeasurable provider is `usable` by definition.
+
+So it is two switches:
+
+| | default | |
+|---|---|---|
+| `budget.reserve` | `false` | apply the reserve to every provider |
+| `budget.reserve_orchestrator` | `true` | apply it to the provider the orchestrator runs on — including when that provider is somebody's *fallback*, or diverted work would land on exactly the slice being kept |
+
+Off, a worker uses what you are paying for until it genuinely runs out.
+`known: false` is still never treated as empty: the reserve cannot be applied
+to a number nobody has.
+
+**And the routing now says so.** The decision computed a reason and threw it
+away, so an implementer on the wrong model could only be explained by reading
+`choose_provider`. The node records `routed_from` and `routed_why`, a `routed`
+event is emitted, the monitor's agent card shows *"↳ meant for opencode — …"*,
+and a provider sitting below the reserve raises a warning that says work is
+being sent elsewhere.
+
 ### Where the money went
 
 No provider offers a per-model breakdown — opencode's `/usage/{models,detail,

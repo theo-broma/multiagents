@@ -80,6 +80,12 @@ class Node:
     # fresh Run, so a "have I retried?" flag kept there resets on every retry
     # and the guard becomes an infinite loop.
     retries: int = 0        # a standing dialogue, resumed each turn
+    # Where this agent was MEANT to run, when that is not where it ran. Budget
+    # routing silently moved work to a fallback provider and recorded nothing,
+    # so the only way to find out why an implementer was on the wrong model was
+    # to ask someone to read the code.
+    routed_from: str = ""
+    routed_why: str = ""
     turns: int = 0
     paused_at: float | None = None    # entered idle / awaiting_user at
     created_at: float = field(default_factory=now)

@@ -638,31 +638,69 @@ def read_all(providers: dict[str, Any] | None = None,
     return out
 
 
+def reserved_providers(project: dict, providers: Any,
+                       orchestrator: str = "") -> set[str]:
+    """Which providers the headroom reserve applies to.
+
+    The reserve exists for one stated reason — never spend the orchestrator's
+    last slice on delegation bookkeeping — and applying it to every provider
+    turned that into something else: a worker provider whose WEEKLY window was
+    86% full was skipped entirely for the rest of the week, while its five-hour
+    window sat empty, and every agent silently ran on a fallback.
+
+    So it is now two switches. `reserve` extends it to every provider, off by
+    default: use what you are paying for until it actually runs out.
+    `reserve_orchestrator` keeps the original guarantee, on by default.
+    """
+    budget = (project or {}).get("budget", {})
+    if budget.get("reserve", False):
+        return set(providers or ())
+    if budget.get("reserve_orchestrator", True) and orchestrator:
+        return {orchestrator}
+    return set()
+
+
+def _has_room(candidate: Budget | None, reserve: float, reserved: bool) -> bool:
+    """Can work go here? Unknown headroom is not no headroom."""
+    if candidate is None:
+        return True
+    if not candidate.usable:
+        return False
+    if reserved and candidate.known and candidate.headroom is not None:
+        return candidate.headroom >= reserve
+    return True
+
+
 def choose_provider(
     preferred: str,
     budgets: dict[str, Budget],
     chain: list[str],
     reserve: float = 0.15,
+    reserved: Any = None,
 ) -> tuple[str | None, str]:
     """Pick a provider to run on. Returns ``(provider, reason)``.
 
     ``None`` means every candidate is exhausted or cooling down and the task
     should be deferred until something resets.
+
+    ``reserved`` names the providers the headroom reserve applies to — see
+    :func:`reserved_providers`. ``None`` means every provider, which is what
+    every caller used to get whether it wanted it or not.
     """
-    candidate = budgets.get(preferred)
-    if candidate is None or candidate.usable:
-        if candidate and candidate.known and candidate.headroom is not None \
-                and candidate.headroom < reserve:
-            pass                            # below the reserve: fall through
-        else:
-            return preferred, "preferred provider has headroom"
+    reserved = set(budgets) if reserved is None else set(reserved)
+
+    if _has_room(budgets.get(preferred), reserve, preferred in reserved):
+        return preferred, "preferred provider has headroom"
 
     for name in chain:
         if name == "defer":
             break
         if name == preferred:
             continue
-        alternative = budgets.get(name)
-        if alternative is not None and alternative.usable:
+        # The reserve applies to a fallback too. Otherwise work diverted off a
+        # constrained provider lands on the orchestrator's own and eats exactly
+        # the slice the reserve exists to keep.
+        if _has_room(budgets.get(name), reserve, name in reserved) \
+                and budgets.get(name) is not None:
             return name, f"{preferred} is constrained; falling back to {name}"
     return None, f"{preferred} and all fallbacks are exhausted or cooling down"
