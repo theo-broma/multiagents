@@ -342,14 +342,22 @@ def auth_status() -> dict:
         entry["last_run"] = ("failed" if failures else
                              "success" if record.get("last_success") else
                              "untested")
-        if failures:
+        # Warn at the circuit breaker's threshold, not on a single failure.
+        # Agents fail all the time — a watchdog trip, a timeout, a bad task —
+        # and calling a provider suspect after one of those conflates ordinary
+        # stumbling with a broken provider. The first version of this field did
+        # exactly that and had the orchestrator reporting providers as
+        # unreachable all day.
+        threshold = max(2, int(run.config.limits.get(
+            "provider_failure_threshold", 3)) - 1)
+        if failures >= threshold:
             entry["warning"] = (
                 f"{failures} run(s) in a row failed on this provider "
                 f"({record.get('last_reason', '')[:90]}). A stored credential is "
                 f"not a working one — this check reads local state only."
             )
     broken = [n for n, s_ in states.items() if not s_.ok]
-    degraded = [n for n, e in out.items() if e.get("recent_failures")]
+    degraded = [n for n, e in out.items() if e.get("warning")]
     if broken:
         note = "run the `fix` command in a terminal; it may require a browser"
     elif degraded:
