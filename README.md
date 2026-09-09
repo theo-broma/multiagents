@@ -1578,28 +1578,51 @@ when nobody is watching agents that hold your user account on the local
 executor. `init` offers docker for exactly this reason; this is the case that
 makes the offer worth accepting.
 
-## Credentials cached in a running process
+## The container stops sharing your credentials, silently
 
 Re-authenticating writes a new token to a file the container reads through a
-symlink, so it ought to be enough. It is not, for a CLI that keeps the
-credential in a **running process**.
+mount, so it ought to be enough. It is not, and the reason is one line of Unix
+semantics: **Docker binds a file by its inode, not by its path.**
 
-A real session found this the hard way. The token was revoked, the user
-re-authenticated successfully, the host worked — and agents kept failing with
-`401 OAuth access token has been revoked`. Every obvious explanation was
-eliminated in turn: the credential file was a live symlink, byte-identical and
-unexpired; the copied `.claude.json` matched down to `machineID`; the egress
-allowlist was not blocking anything. Cross-testing isolated it:
+Every CLI here writes a credential the safe way — new file, then rename over the
+old one — so a refresh produces a *new inode*. The host path moves on; the
+container keeps the old inode, now unlinked, forever. The two silently stop
+being the same file, and the container goes on presenting a token that the
+refresh rotated away, which the server answers with `401 OAuth access token has
+been revoked`. Measured on a live project:
+
+```
+host       inode=42379566  refreshed 15:51 today
+container  inode=42378882  written 21:43 yesterday, expired 05:43
+```
+
+That container had been serving a dead token for eleven hours while `auth
+status` on the host read the correct file and reported everything fine.
+
+A first diagnosis of this blamed `claude`'s background daemon caching the token
+in memory, because the cross-test fitted:
 
 ```
 container + host's HOME   -> 401 revoked
 host      + agent's HOME  -> works
 ```
 
-`claude` runs a background daemon. The container had been up for hours, started
-before the re-login, and its daemon was serving the revoked token from memory
-while the file on disk was correct throughout. Restarting the container fixed
-it. `auth status` could never have caught this — it reads the same correct file.
+Those observations were right and the conclusion was wrong. Nobody compared the
+file *inside* the container against the host's — the two paths are identical, so
+it did not look like a question worth asking. It is the only question that
+mattered.
+
+**`credential_drift()` asks it**, in one `docker exec`, by comparing inodes.
+`doctor` reports it, the monitor raises it, and `run` and `init-agent` **repair
+it**: a restart re-resolves the bind (verified against docker rather than
+assumed — a rebuild is not needed). Idle, that is a few seconds and is simply
+done; busy, it would kill agents on providers that are working perfectly well,
+so it is reported instead.
+
+The timestamp heuristic this replaces — *"credentials changed after the
+container started"* — went with it. It fired on any container more than a few
+hours old, because a directory mount's mtime moves whenever anything inside it
+does, and it named the wrong cause. A measurement beat it in both directions.
 
 The bug-reporter filed this itself, as `bug-cee638`, and found a second thing
 with it: `steer_agent` returned `{"steered": true, "status": "running"}` against

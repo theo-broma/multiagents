@@ -743,6 +743,8 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
     # — so on a docker project with no images it fails partway through a
     # conversation with the user, which is a confusing place to learn that
     # `build` has not been run.
+    for note in _repair_credential_drift(paths, config):
+        print(f"\ncredentials  {note}")
     problems = _executor_problems(paths, config)
     for problem in problems:
         print(f"\nexecutor     {problem}")
@@ -1550,6 +1552,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
     config = load_config(paths)
 
+    for note in _repair_credential_drift(paths, config):
+        print(f"\ncredentials  {note}")
     problems = _executor_problems(paths, config)
     for problem in problems:
         print(f"\nexecutor     {problem}")
@@ -1624,50 +1628,47 @@ def _refresh_container_after_login(paths, config, provider_name: str) -> None:
               f"using the old credential until you do.", file=sys.stderr)
 
 
-def _stale_container_warnings(paths, config, providers) -> list[str]:
-    """Credentials written after the container started.
+def _repair_credential_drift(paths, config) -> list[str]:
+    """Re-bind credential files the container has stopped sharing with us.
 
-    A CLI that caches its credential in a long-lived process keeps serving the
-    old one after you re-authenticate — `claude` runs a background daemon, and a
-    container started before a re-login had thirteen agents fail with
-    "401 OAuth access token has been revoked" while the file on disk, shared by
-    symlink, was correct the whole time. `auth status` cannot see that: it reads
-    the same correct file.
+    A file bind mount is pinned to an inode, and every CLI here replaces its
+    credential by rename — so the moment a token refreshes, the container is
+    reading a file the host no longer has. It then presents a token that the
+    refresh rotated away, which the server reports as revoked, and `auth status`
+    on the host reads the correct file and says everything is fine.
 
-    Comparing timestamps costs nothing and points straight at it.
+    A restart re-resolves the bind; a rebuild is not needed. Idle, that is a few
+    seconds and is simply done. Busy, it would kill running agents — including
+    agents on providers that are working — so it is reported instead.
     """
     if config.executor != "docker":
         return []
     try:
         executor = _docker_executor(paths)
-        if executor.container_state(executor.container) != "running":
-            return []
-        started = executor.started_at()
+        drift = executor.credential_drift()
     except Exception:
         return []
-    if not started:
+    if not drift:
         return []
 
-    home = Path.home()
-    warnings = []
-    for name, provider in sorted(providers.items()):
-        if not provider.enabled:
-            continue
-        newest = 0.0
-        for relative in list(provider.home_links) + list(provider.home_copy):
-            candidate = home / relative
-            try:
-                newest = max(newest, candidate.stat().st_mtime)
-            except OSError:
-                continue
-        if newest > started:
-            warnings.append(
-                f"{name}: credentials changed {(newest - started) / 60:.0f} min "
-                f"after the container started — a CLI that caches them in a "
-                f"running process is still serving the old ones. "
-                f"`multiagents docker down && multiagents docker up`"
-            )
-    return warnings
+    names = ", ".join(Path(entry["path"]).name for entry in drift)
+    active = Tree(paths.tree_file, paths.events_file).active()
+    if active:
+        return [f"the container is holding an OLD copy of {names} — it was "
+                f"replaced on the host after the container started, and a file "
+                f"mount follows the inode, not the path. Agents in there will "
+                f"fail as if the credential were revoked. "
+                f"{len(active)} agent(s) are running, so this was not fixed "
+                f"automatically: `multiagents docker down && multiagents docker "
+                f"up` when they finish."]
+    try:
+        executor.stop(remove=False)
+        executor.ensure_running()
+    except Exception as exc:
+        return [f"the container holds an old copy of {names} and could not be "
+                f"restarted: {type(exc).__name__}: {exc}"]
+    return [f"restarted the container: it was holding an old copy of {names} "
+            f"(replaced on the host by a token refresh)"]
 
 
 def _report_agents(config, providers) -> int:
@@ -1759,10 +1760,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                       f"resets {str(detail.get('resets_at', '?'))[:19]}")
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
-    for warning in (_stale_container_warnings(paths, config, providers_map)
-                    if paths else []):
-        print(f"  !! {warning}")
-        problems += 1
+    if paths and config.executor == "docker":
+        try:
+            drift = _docker_executor(paths).credential_drift()
+        except Exception:
+            drift = []
+        for entry in drift:
+            print(f"  !! the container is reading an OLD "
+                  f"{Path(entry['path']).name} (inode "
+                  f"{entry['container_inode']}, host has {entry['host_inode']}) "
+                  f"— a refresh replaced it and a file mount follows the inode. "
+                  f"`multiagents docker down && up`, or `run`, which repairs it "
+                  f"when nothing is busy.")
+            problems += 1
     health = Tree(paths.tree_file, paths.events_file).provider_health() if paths else {}
     for name, record in sorted(health.items()):
         if record.get("tripped"):
