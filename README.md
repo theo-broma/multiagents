@@ -1024,7 +1024,16 @@ everything they do goes through one `actions.perform()`, so they cannot drift
 into disagreeing about what is true, or into one of them quietly growing a
 capability the other lacks — there is a test that fails if they do.
 
-The poll is two seconds and has to stay cheap, so it reads files and nothing
+**The poll never moves the page under you.** It compares a signature of what is
+worth showing — counts, statuses, token totals, alert texts — and when nothing
+in it changed, nothing is rebuilt at all. When something did, scroll positions
+are read off before the rebuild and put back after, the page's own included,
+because detaching a node resets its `scrollTop`. Without that, reading the
+activity log or a long transcript meant being snapped back to the top every two
+seconds. The config form is never redrawn by the poll, since redrawing a form
+under a cursor eats what is being typed.
+
+The poll also has to stay cheap, so it reads files and nothing
 else: git and the auth scripts are separate endpoints, asked for on demand, and
 each provider's `usage` script output is cached against the budget that produced
 it — a subprocess per provider per tick is an idle monitor with a fan. Agent
