@@ -3,8 +3,34 @@
 set -u
 BIN="${MULTIAGENTS_BIN:-claude}"
 
+# The container's own claude profile, when there is one: a DIRECTORY, because a
+# bind-mounted credential FILE is frozen at its inode on the host side and
+# cannot be rewritten at all on the container side ("mv: Resource busy").
+#
+# It is READ here, and CLAUDE_CONFIG_DIR is exported only where this script acts
+# on that profile — `check` and `login`. NOT for `launch`: the orchestrator runs
+# on the host even in a docker project, and pointing it at the container's
+# profile would leave it trying to start as an account it was never logged into.
+# Agents need no variable at all; their per-agent HOME already resolves
+# ~/.claude to whatever is mounted there.
+PROFILE=""
+if [ "${MULTIAGENTS_EXECUTOR:-local}" = "docker" ] \
+   && [ -n "${MULTIAGENTS_PRIVATE_BACKING:-}" ]; then
+    PROFILE="$MULTIAGENTS_PRIVATE_BACKING"
+fi
+
 case "${1:-check}" in
 check)
+    if [ -n "$PROFILE" ]; then
+        # Read the file rather than asking the CLI: `auth status` would start a
+        # background daemon on the HOST rooted in the container's profile, and
+        # the container would then find a lock naming a pid it cannot signal.
+        if [ -s "$PROFILE/.credentials.json" ]; then
+            echo "container profile is logged in ($PROFILE)"; exit 0
+        fi
+        echo "the container profile has no credentials yet — run \`multiagents auth login claude\`"
+        exit 10
+    fi
     out=$("$BIN" auth status --json 2>/dev/null) || {
         echo "could not run '$BIN auth status'"; exit 20; }
     case "$out" in
@@ -15,6 +41,45 @@ check)
     esac
     ;;
 login)
+    if [ -n "$PROFILE" ]; then
+        echo "Claude Code sign-in for the CONTAINER's profile."
+        echo
+        echo "It runs here on the host, with your own browser — the container"
+        echo "reads a directory, and this writes into it:"
+        echo "  $PROFILE"
+        echo
+        echo "Your own ~/.claude is untouched and is not mounted into the"
+        echo "container at all, so agents cannot read your conversations."
+        echo
+        echo "READ THIS FIRST: this is a SECOND CLI session. If you sign in"
+        echo "with the same account as the host and this provider allows only"
+        echo "one session at a time, signing in here will sign the host OUT,"
+        echo "and the two will keep evicting each other. A second account has"
+        echo "no such problem. It is checked below either way."
+        echo
+        printf 'continue? [y/N] '
+        read -r answer
+        case "$answer" in
+            [yY]*) ;;
+            *) echo "nothing was changed."; exit 1 ;;
+        esac
+        echo
+        CLAUDE_CONFIG_DIR="$PROFILE" "$BIN" auth login || exit $?
+        # Host-pid state, meaningless inside a container and confusing to the
+        # CLI that finds it.
+        rm -rf "$PROFILE/daemon" "$PROFILE/daemon.lock" "$PROFILE/daemon.status.json"
+        # A backend that caps concurrent CLI sessions would have just evicted
+        # the host's login. Cheap to check, and silent otherwise.
+        if ! "$BIN" auth status --json 2>/dev/null \
+                | grep -q '"loggedIn":[ ]*true'; then
+            echo
+            echo "WARNING: the HOST profile is no longer logged in. This account"
+            echo "appears to allow only one CLI session at a time, so the two"
+            echo "profiles will keep evicting each other. Log the host back in"
+            echo "with \`claude auth login\` and use one account per profile."
+        fi
+        exit 0
+    fi
     echo "Claude Code sign-in."
     echo "A browser window will open; complete the sign-in there."
     echo

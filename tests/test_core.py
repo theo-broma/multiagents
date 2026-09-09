@@ -6332,3 +6332,229 @@ def test_a_local_project_is_never_asked_about_containers(tmp_path, monkeypatch):
                    agents={}, models={}, instruction_dirs=[])
     assert cli._repair_credential_drift(_paths(tmp_path), local) == []
     assert called == []
+
+
+# --------------------------------------------------------------------------
+# The container gets its own claude profile
+
+
+def _docker_for(tmp_path, providers):
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+    return DockerExecutor({"image": "i"}, ProjectPaths(tmp_path), providers, tmp_path)
+
+
+def test_the_hosts_claude_directory_is_never_mounted(tmp_path, monkeypatch):
+    """It holds every past conversation. The old arrangement mounted the
+    credential FILE out of it, which both exposed the directory's path to the
+    container and could not work anyway."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    (home / ".claude" / "projects").mkdir()
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude",
+        "container_private_home": [".claude"],
+        "home_links": [".claude/.credentials.json", ".claude/settings.json"],
+    })
+    executor = _docker_for(tmp_path, {"claude": provider})
+
+    sources = {source for source, _ in executor.mounts()}
+    assert home / ".claude" in sources, "the path is mounted"
+    private = executor.private_state("claude")
+    assert private[home / ".claude"] == tmp_path / "state" / "container-state" \
+        / "shared" / "claude" / ".claude", "…but backed by our own directory"
+    # And it is a DIRECTORY mount, which is the whole point: renames work.
+    assert (home / ".claude" / ".credentials.json") not in sources
+
+
+def test_each_script_is_given_its_own_providers_private_home(tmp_path, monkeypatch):
+    """It used to take whichever entry came first — correct only while exactly
+    one provider had a private home, and silently wrong once a second did."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents import scripts
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    providers = {
+        "agy": Provider.from_dict("agy", {"bin": "agy",
+                                          "container_private_home": [".gemini"]}),
+        "claude": Provider.from_dict("claude", {"bin": "claude",
+                                                "container_private_home": [".claude"]}),
+    }
+    executor = _docker_for(tmp_path, providers)
+
+    for name in ("agy", "claude"):
+        env = scripts.build_env(name, providers[name], executor)
+        assert env["MULTIAGENTS_PRIVATE_BACKING"].endswith(f"{name}/"
+                                                           + (".gemini" if name == "agy"
+                                                              else ".claude"))
+
+
+def test_the_users_settings_are_carried_in_but_not_their_secrets(tmp_path, monkeypatch):
+    """A private profile fixes the credential and would otherwise amputate
+    everything else configured — permissions, hooks, model choice — leaving an
+    agent running as a factory-reset CLI for reasons nobody would connect to a
+    credential change. But `env` is how a settings file hands out secrets, and
+    agents are given none."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(ls)"]},
+        "model": "sonnet",
+        "env": {"SECRET_TOKEN": "sk-do-not-copy-me"},
+    }))
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "container_private_home": [".claude"],
+        "container_private_seed": [".claude/settings.json"],
+        "container_private_reset": [".claude/daemon.lock"],
+    })
+    executor = _docker_for(tmp_path, {"claude": provider})
+    backing = next(iter(executor.private_state("claude").values()))
+    backing.mkdir(parents=True, exist_ok=True)
+    (backing / "daemon.lock").write_text("pid 1234")     # host-pid state
+
+    notes = executor.seed_private_state()
+    carried = json.loads((backing / "settings.json").read_text())
+    assert any("held by a live process" not in note for note in notes)
+    assert carried["permissions"] == {"allow": ["Bash(ls)"]}
+    assert carried["model"] == "sonnet"
+    assert "env" not in carried
+    assert "sk-do-not-copy-me" not in (backing / "settings.json").read_text()
+    assert any("without env" in note for note in notes)
+    assert not (backing / "daemon.lock").exists(), \
+        "a lock naming a host pid means nothing in a container"
+
+
+def test_the_claude_script_uses_the_container_profile_only_where_it_should(tmp_path):
+    """`check` and `login` act on the container's profile. `launch` does not:
+    the orchestrator runs on the HOST even in a docker project, and pointing it
+    at the container's profile would have it start as an account it was never
+    logged into."""
+    import subprocess
+    from pathlib import Path as _Path
+
+    script = _Path("src/multiagents/defaults/providers/claude.sh").resolve()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    env = {**os.environ, "MULTIAGENTS_EXECUTOR": "docker",
+           "MULTIAGENTS_PRIVATE_BACKING": str(profile),
+           "MULTIAGENTS_BIN": "true", "MULTIAGENTS_MODEL": "sonnet"}
+    env.pop("CLAUDE_CONFIG_DIR", None)
+
+    empty = subprocess.run(["sh", str(script), "check"], env=env,
+                           capture_output=True, text=True)
+    assert empty.returncode == 10 and "no credentials yet" in empty.stdout
+
+    (profile / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+    ready = subprocess.run(["sh", str(script), "check"], env=env,
+                           capture_output=True, text=True)
+    assert ready.returncode == 0 and "container profile is logged in" in ready.stdout
+
+    body = script.read_text()
+    launch = body[body.index("\nlaunch)"):]
+    assert "CLAUDE_CONFIG_DIR" not in launch, \
+        "the host-run orchestrator must not be pointed at the container's profile"
+
+
+def test_a_lock_a_live_process_holds_is_left_alone(tmp_path, monkeypatch):
+    """Deleting a lock a running daemon holds does not stop the daemon — it
+    lets a second one start beside it, and then two share one state directory."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "container_private_home": [".claude"],
+        "container_private_reset": [".claude/daemon.lock"]})
+    executor = _docker_for(tmp_path, {"claude": provider})
+    backing = next(iter(executor.private_state("claude").values()))
+    backing.mkdir(parents=True, exist_ok=True)
+
+    live = backing / "daemon.lock"
+    live.write_text(json.dumps({"pid": os.getpid()}))       # us: certainly alive
+    notes = executor.seed_private_state()
+    assert live.exists(), "a live daemon's lock was deleted"
+    assert any("held by a live process" in note for note in notes)
+
+    live.write_text(json.dumps({"pid": 4_000_000}))          # certainly not
+    executor.seed_private_state()
+    assert not live.exists(), "a stale lock should go"
+
+
+def test_a_secret_shaped_value_is_stripped_even_under_an_unknown_key(tmp_path, monkeypatch):
+    """A fixed list of key names is the floor, not the defence: the vendor adds
+    a key, the list does not know it, and a secret rides along."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text(json.dumps({
+        "model": "sonnet",
+        "someFutureKey": {"apiKey": "sk-" + "a" * 40},
+    }))
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "container_private_home": [".claude"],
+        "container_private_seed": [".claude/settings.json"]})
+    executor = _docker_for(tmp_path, {"claude": provider})
+    notes = executor.seed_private_state()
+
+    backing = next(iter(executor.private_state("claude").values()))
+    written = (backing / "settings.json").read_text()
+    assert "sk-" + "a" * 40 not in written
+    assert '"model": "sonnet"' in written
+    assert any("look like secrets" in note for note in notes)
+
+
+def test_a_seeded_file_is_not_clobbered_by_a_later_host_edit(tmp_path, monkeypatch):
+    """Edit the container's copy to fix something container-specific, add an
+    unrelated line to the host's a month later, and "copy when newer" silently
+    throws the fix away."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    host_settings = home / ".claude" / "settings.json"
+    host_settings.write_text(json.dumps({"model": "sonnet"}))
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "container_private_home": [".claude"],
+        "container_private_seed": [".claude/settings.json"]})
+    executor = _docker_for(tmp_path, {"claude": provider})
+    executor.seed_private_state()
+
+    backing = next(iter(executor.private_state("claude").values()))
+    (backing / "settings.json").write_text(json.dumps({"model": "opus",
+                                                       "containerOnly": True}))
+    host_settings.write_text(json.dumps({"model": "sonnet", "unrelated": 1}))
+    executor.seed_private_state()
+
+    kept = json.loads((backing / "settings.json").read_text())
+    assert kept == {"model": "opus", "containerOnly": True}

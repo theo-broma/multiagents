@@ -34,6 +34,7 @@ root, and a matching uid also avoids git's "dubious ownership" refusal.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -250,6 +251,123 @@ class DockerExecutor(Executor):
             mounts.append((host_path, False))
         return mounts
 
+    # Keys never carried into a container-private profile. `env` and an
+    # api-key helper are how a settings file hands out credentials, and this
+    # project's whole environment policy is that agents get none: passing them
+    # in through a config copy would be the same leak by a quieter route.
+    #
+    # A fixed list of names is not enough on its own — an advisor's objection,
+    # and a fair one: the vendor adds a key, this list does not know it, and a
+    # secret rides along. So the names below are the floor, and every remaining
+    # value is also judged by the same redactor that guards everything written
+    # to disk, which recognises secret-SHAPED strings and secret-NAMED keys
+    # whatever the schema does next.
+    UNSAFE_SETTINGS = ("env", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport")
+
+    def seed_private_state(self) -> list[str]:
+        """Carry the user's own configuration into a container-private profile.
+
+        A private profile fixes the credential, and would otherwise amputate
+        everything else the user had configured: permissions, hooks, model
+        choice, plugins. The agent would run as a factory-reset CLI and nobody
+        would connect that to a credential change.
+
+        Copied, not linked, because these files are edited by hand once in a
+        while rather than rewritten by a process — the opposite of the
+        credential, and the reason copying is safe here and wrong there.
+        """
+        notes = []
+        for name, provider in self.providers.items():
+            backing = self.private_state(name)
+            if not backing:
+                continue
+            backing_root = next(iter(backing.values()))
+            for relative in getattr(provider, "container_private_seed", []) or []:
+                source = Path.home() / relative
+                target = backing_root / Path(relative).name
+                if not source.is_file():
+                    continue
+                # Seeded ONCE, not kept in step. "Copy when the host's is
+                # newer" reads well and clobbers: edit the container's copy to
+                # fix something container-specific, add an unrelated line to
+                # the host's a month later, and the fix is silently gone. To
+                # re-seed, delete the copy.
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                stripped = self._copy_settings(source, target)
+                if stripped:
+                    notes.append(f"{name}: copied {Path(relative).name} into the "
+                                 f"container profile without {', '.join(stripped)} "
+                                 f"— agents are not given credentials through config")
+            # Host-pid state means nothing in a container and confuses the CLI
+            # that finds it: a lock naming a pid it cannot signal.
+            #
+            # Only when the process is actually gone. Deleting a lock a live
+            # daemon still holds does not stop the daemon — it lets a second
+            # one start alongside it, and then two of them share one state
+            # directory, which is a worse problem than the one being fixed.
+            for relative in getattr(provider, "container_private_reset", []) or []:
+                stale = backing_root / Path(relative).name
+                if not stale.exists():
+                    continue
+                if self._holder_alive(stale):
+                    notes.append(f"{name}: {stale.name} is held by a live "
+                                 f"process; left alone")
+                    continue
+                if stale.is_dir():
+                    shutil.rmtree(stale, ignore_errors=True)
+                else:
+                    stale.unlink(missing_ok=True)
+        return notes
+
+    @staticmethod
+    def _holder_alive(lock: Path) -> bool:
+        """Does a pid named inside this file still exist on this host?"""
+        import re as _re
+
+        try:
+            text = lock.read_text(errors="replace")[:4096] if lock.is_file() else ""
+        except OSError:
+            return True                       # unreadable: assume it is in use
+        match = _re.search(r'"?pid"?\s*[:=]\s*"?(\d+)', text)
+        if not match:
+            return False
+        try:
+            os.kill(int(match.group(1)), 0)
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True
+        return True
+
+    def _copy_settings(self, source: Path, target: Path) -> list[str]:
+        """Copy a config file, dropping any key that carries a secret."""
+        from ..redact import scrub
+
+        # A target that is a symlink would be followed, and the write would
+        # land on whatever it points at — including, if somebody linked it
+        # back, the user's own file. Replace the link, never write through it.
+        if target.is_symlink():
+            target.unlink()
+        try:
+            data = json.loads(source.read_text())
+        except (OSError, ValueError):
+            shutil.copy2(source, target, follow_symlinks=False)
+            return []
+        if not isinstance(data, dict):
+            shutil.copy2(source, target, follow_symlinks=False)
+            return []
+
+        stripped = [key for key in self.UNSAFE_SETTINGS if key in data]
+        for key in stripped:
+            data.pop(key, None)
+        masked = scrub(data)
+        if masked != data:
+            stripped.append("values that look like secrets")
+        target.write_text(json.dumps(masked, indent=2))
+        return stripped
+
     def credential_drift(self) -> list[dict]:
         """Bind-mounted credential files the container no longer shares with us.
 
@@ -299,8 +417,13 @@ class DockerExecutor(Executor):
                             "container_inode": seen})
         return out
 
-    def private_state(self) -> dict[Path, Path]:
+    def private_state(self, provider: str = "") -> dict[Path, Path]:
         """{path as seen in the container: backing directory on the host}.
+
+        Filtered by provider when asked. It used to be all-or-nothing, and the
+        one caller that wanted a single provider's backing path took whichever
+        entry came first — correct only while exactly one provider had a
+        private home, and silently wrong the moment a second did.
 
         Shared across projects by default: the credential is one account, and
         scoping it per project would mean logging in again for every repository.
@@ -313,8 +436,10 @@ class DockerExecutor(Executor):
         root = base / (self.slug if self.config.get("credential_scope") == "project"
                        else "shared")
         out: dict[Path, Path] = {}
-        for name, provider in self.providers.items():
-            for relative in getattr(provider, "container_private_home", []) or []:
+        for name, entry in self.providers.items():
+            if provider and name != provider:
+                continue
+            for relative in getattr(entry, "container_private_home", []) or []:
                 out[Path.home() / relative] = root / name / relative
         return out
 
@@ -470,6 +595,7 @@ class DockerExecutor(Executor):
     def ensure_running(self) -> dict:
         if not docker_available():
             return {"ok": False, "error": "docker is not on PATH"}
+        self.seed_private_state()
         if not self.image_exists(self.image):
             return {"ok": False, "error": f"image {self.image} not built — run `multiagents docker build`"}
 

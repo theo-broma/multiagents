@@ -1612,7 +1612,39 @@ file *inside* the container against the host's — the two paths are identical, 
 it did not look like a question worth asking. It is the only question that
 mattered.
 
-**`credential_drift()` asks it**, in one `docker exec`, by comparing inodes.
+### The fix: the container gets its own profile
+
+claude now has `container_private_home: [".claude"]`, so the container sees a
+**directory** mount backed by our own state dir rather than the host's
+credential file. Renames work, so the container's CLI can refresh its own token;
+and the host's `~/.claude` — which holds every past conversation — stops being
+mounted at all, so agents can no longer reach it.
+
+It costs one login for that profile, and **not inside the container**:
+`CLAUDE_CONFIG_DIR` relocates everything the CLI keeps, so
+`multiagents auth login claude` runs on the host, with your own browser, and
+writes into the directory the container reads. (The variable is exported only
+for `check` and `login`. Never for `launch`: the orchestrator runs on the host
+even in a docker project, and pointing it at the container's profile would have
+it start as an account it was never logged into.)
+
+Three things a private profile has to get right, each of which an advisor caught
+before it shipped:
+
+- **It must not amputate your configuration.** `settings.json` is seeded into
+  the profile — permissions, model, plugins — or the agent would run as a
+  factory-reset CLI for reasons nobody would connect to a credential change.
+  Seeded **once**, not kept in step: "copy when the host's is newer" silently
+  clobbers a container-specific fix the next time you edit the host's file.
+- **It must not carry secrets in.** `env` and api-key helpers are stripped by
+  name, and everything left goes through the same redactor that guards every
+  write to disk — so a secret under a key name this project has never heard of
+  is still caught by its shape.
+- **It must not delete a lock a live daemon holds.** Removing one does not stop
+  the daemon; it lets a second start beside it, and then two share one state
+  directory. Host-pid state is cleared only when the pid is genuinely gone.
+
+**`credential_drift()` still asks the inode question**, in one `docker exec`, by comparing inodes.
 `doctor` reports it, the monitor raises it, and `run` and `init-agent` **repair
 it**: a restart re-resolves the bind (verified against docker rather than
 assumed — a rebuild is not needed). Idle, that is a few seconds and is simply

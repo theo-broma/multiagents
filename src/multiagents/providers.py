@@ -117,6 +117,10 @@ class Provider:
     home_links: list[str] = field(default_factory=list)
     home_copy: list[str] = field(default_factory=list)
     container_private_home: list[str] = field(default_factory=list)
+    # Host config copied into that private profile, and host-pid state removed
+    # from it. See DockerExecutor.seed_private_state.
+    container_private_seed: list[str] = field(default_factory=list)
+    container_private_reset: list[str] = field(default_factory=list)
     # One script per provider, carrying every action this CLI needs described
     # imperatively: check, login, budget, prepare, launch. Defaults to
     # "<name>.sh". Keeping it to a single file is the point — adding a provider
@@ -147,6 +151,8 @@ class Provider:
             home_links=list(data.get("home_links", []) or []),
             home_copy=list(data.get("home_copy", []) or []),
             container_private_home=list(data.get("container_private_home", []) or []),
+            container_private_seed=list(data.get("container_private_seed", []) or []),
+            container_private_reset=list(data.get("container_private_reset", []) or []),
             script=data.get("script", "") or (data.get("auth", {}) or {}).get("script", ""),
             enabled=bool(data.get("enabled", True)),
             transcript=dict(data.get("transcript", {}) or {}),

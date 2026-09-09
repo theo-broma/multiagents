@@ -250,8 +250,43 @@ providers:
       - {id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 (pinned)"}
     # One result event carries the run total.
     usage_mode: cumulative
+    # The container gets its OWN ~/.claude, backed by a directory under our
+    # state dir, rather than sharing the host's credential file.
+    #
+    # Sharing the file cannot work, and the reason is one line of Unix: docker
+    # binds a FILE by inode. The CLI rewrites its credential the safe way — new
+    # file, rename over the old — so a refresh on the host is invisible inside
+    # the container, and a refresh INSIDE the container fails outright with
+    # `mv: Resource busy`. Both were measured. A DIRECTORY mount is correct in
+    # both directions, which is what this is.
+    #
+    # It costs one login for the container profile, done on the host with
+    # CLAUDE_CONFIG_DIR pointed at the backing directory — no browser inside a
+    # container. It also stops mounting the host's ~/.claude at all, so the
+    # transcripts of every past conversation are no longer reachable by an
+    # agent, which the file mount left exposed.
+    container_private_home:
+      - ".claude"
+    # Carried into that private profile so an agent is not a factory-reset CLI:
+    # permissions, model choice, plugins, hooks. Secret-bearing keys (`env`, an
+    # api-key helper) are stripped on the way in — agents are not handed
+    # credentials through a config file any more than through the environment.
+    container_private_seed:
+      - ".claude/settings.json"
+    # Removed from the profile when the container starts. A daemon lock names a
+    # host pid the container cannot signal, and the CLI that finds one spends
+    # time working out that it is meaningless.
+    container_private_reset:
+      - ".claude/daemon.lock"
+      - ".claude/daemon.status.json"
+      - ".claude/daemon"
+    # Still listed: on the LOCAL executor there is no mount and no isolation
+    # problem, and the per-agent HOME needs the link either way. In a container
+    # these resolve to the private profile above, because the per-agent HOME
+    # links to the host PATH and that path is what the profile is mounted over.
     home_links:
       - ".claude/.credentials.json"
+      - ".claude/settings.json"
     # COPIED, not linked. ~/.claude.json is 136K of project history plus the
     # cachedUsageUtilization the budget adapter reads. Symlinking it would have
     # every concurrent subagent writing the user's real config. Copying also
