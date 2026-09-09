@@ -299,8 +299,9 @@ def auth_status() -> dict:
     asks the server, so a revoked token still reports as authenticated — that
     happened, and it misled an hour of diagnosis while every subagent on that
     provider failed with a 401. `stored_login` is what the check knows;
-    `verified_working` and `recent_failures` come from how runs actually ended,
-    and are the stronger evidence when they disagree.
+    `last_run` (success / failed / untested) and `recent_failures` come from how
+    runs actually ended, and are the stronger evidence when they disagree.
+    `untested` means no evidence either way — not a problem.
 
     Every provider is checked the same way, through its own script, so the
     answer and the fix have the same shape whichever CLI is broken. An agent
@@ -335,7 +336,12 @@ def auth_status() -> dict:
         entry["stored_login"] = entry.pop("authenticated", entry.get("ok", False))
         entry["recent_failures"] = failures
         entry["last_success"] = record.get("last_success")
-        entry["verified_working"] = bool(record.get("last_success")) and failures == 0
+        # Tri-state on purpose. A boolean false would read as "broken" for a
+        # provider that simply has not run yet, and send the orchestrator off to
+        # debug a healthy system.
+        entry["last_run"] = ("failed" if failures else
+                             "success" if record.get("last_success") else
+                             "untested")
         if failures:
             entry["warning"] = (
                 f"{failures} run(s) in a row failed on this provider "

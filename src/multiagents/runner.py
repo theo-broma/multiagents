@@ -49,6 +49,10 @@ MAX_SUMMARY_CHARS = 6000
 # affecting supervision; it only delays what another process sees in
 # check_agent by at most this long.
 TREE_FLUSH_SECONDS = 2.0
+# How long a steer waits for the resumed run to show it is alive — the
+# first stream event, or its death, whichever arrives. Only the ceiling;
+# a healthy agent usually settles it in well under a second.
+STEER_CONFIRM_SECONDS = 5.0
 # How often the worktree is sampled for the doom-loop check. Debounced by time
 # rather than by tool count so a chatty agent cannot turn this into a `git`
 # call per event on a large repository.
@@ -1155,10 +1159,18 @@ class Runner:
         # `{"steered": true, "status": "running"}` against a process already
         # gone, and the caller then waited for progress that could not come.
         # Reported by the bug-reporter as bug-cee638.
+        # Wait for whichever comes first: the run producing its first event, or
+        # the run ending. A fixed sleep would be a race in both directions —
+        # blocking a healthy agent for no reason, and still losing to a failure
+        # that takes longer than the timeout. The first event is the closest
+        # thing to a "ready" signal these CLIs offer.
         run = self.runs.get(agent_id)
         if run is not None:
-            with contextlib.suppress(asyncio.TimeoutError, TimeoutError):
-                await asyncio.wait_for(run.done.wait(), timeout=1.5)
+            deadline = time.monotonic() + STEER_CONFIRM_SECONDS
+            while time.monotonic() < deadline:
+                if run.done.is_set() or run.events:
+                    break
+                await asyncio.sleep(0.05)
         node = self.tree.get(agent_id)
         if node is not None and node.status not in ("running", "pending"):
             return {
