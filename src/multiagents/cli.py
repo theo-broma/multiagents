@@ -1978,6 +1978,41 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_checks(paths) -> int:
+    """What was checked, by what, and how the check ended.
+
+    Reported as the graph rather than as a rework *rate*. Whether a review
+    found something is in its prose, and deciding that from here would be the
+    same mistake as classifying a failure from an agent's own words. What can
+    be stated is what checked what, and how each check ended — enough for a
+    person, or an orchestrator, to see when work is being redone.
+    """
+    nodes = Tree(paths.tree_file, paths.events_file).read()["nodes"]
+    links = [n for n in nodes.values() if n.get("verifies")]
+    if not links:
+        print("No checks have been declared.\n"
+              "`start_agent(..., verifies=<agent_id>)` records that a run checks "
+              "another's work;\nwithout it, what was rechecked cannot be told "
+              "from what was merely done next.")
+        return 0
+
+    by_target = {}
+    for node in links:
+        by_target.setdefault(node["verifies"], []).append(node)
+    print(f"{'work':34} {'checked by':34} outcome")
+    for target, checks in sorted(by_target.items()):
+        subject = nodes.get(target, {})
+        label = f"{target} {subject.get('agent', '?')}"
+        for check in sorted(checks, key=lambda c: c.get("started_at") or 0):
+            print(f"{label:34} {check['id'] + ' ' + check['agent']:34} "
+                  f"{check['status']}")
+            label = ""
+    rechecked = sum(1 for c in by_target.values() if len(c) > 1)
+    print(f"\n{len(by_target)} run(s) checked, {len(links)} check(s); "
+          f"{rechecked} needed more than one.")
+    return 0
+
+
 def cmd_usage(args: argparse.Namespace) -> int:
     """Where this project's tokens and dollars actually went.
 
@@ -1986,6 +2021,8 @@ def cmd_usage(args: argparse.Namespace) -> int:
     stream, so it is ours to compute.
     """
     paths = _resolve(args.path)
+    if args.checks:
+        return _report_checks(paths)
     rows = Tree(paths.tree_file, paths.events_file).usage_by_model()
     if not rows:
         print("No usage recorded yet.")
@@ -2547,6 +2584,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("usage", help="tokens and cost per provider/model")
     p.add_argument("--agents", action="store_true", help="name the agents behind each row")
+    p.add_argument("--checks", action="store_true",
+                   help="what checked what, and how each check ended")
     p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")

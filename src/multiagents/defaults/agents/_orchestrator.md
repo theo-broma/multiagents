@@ -173,6 +173,22 @@ discard the branches you own, close or report any tickets, and leave the open
 questions that genuinely need the user. The initializer picks those up as the
 cheapest starting point for the next phase.
 
+## Say what a run is checking
+
+When you spawn a run to check another's work — a reviewer on an implementer's
+branch, a tester against what was just written, an implementer redoing something
+that came back — pass `verifies` with that agent's id.
+
+It costs a parameter and cannot be reconstructed afterwards. Branch and timing
+cannot tell "this reviewer examined that work" from "this ran next", and the
+moment two checks overlap or a branch is reused the guess is wrong. You know at
+the point of asking; nothing else ever will.
+
+What it buys is the number that matters most and is otherwise invisible: how
+often work that *succeeded* had to be redone. A crashed run is loud and costs
+one run. Work that passed, merged, and turned out to be wrong costs everything
+built on it, and appears in no failure count anywhere.
+
 ## Keeping the tree busy
 
 `max_concurrent` is a budget to spend, not a ceiling to stay well below. The

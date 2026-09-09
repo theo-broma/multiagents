@@ -1372,6 +1372,64 @@ shared container is the thing that makes that observable; per-agent ephemeral
 containers would not have the problem at all, which is a fair argument against
 the current design and not one this handles.
 
+## What a failure rate does and does not tell you
+
+A day of real use looked like a 46% failure rate — 19 of 41 agents. Broken down
+it was almost entirely one thing:
+
+```
+13   the claude token revocation — one incident, counted thirteen times
+ 2   deliberate: one stopped by the orchestrator, one by a test
+ 4   genuinely unexplained
+```
+
+**Four of 41, about 10%.** The headline number was a single credential outage
+wearing nineteen hats, which is worth remembering before optimising any figure
+of this shape.
+
+The four were then legible enough to fix a real gap: three ended with agy
+emitting `{"kind": "result", "status": "ERROR"}` — a structured verdict that
+`_classify` read to decide "failed" and the code recording the outcome then
+discarded, leaving a node marked failed with an empty reason. The provider's own
+verdict is now the reason, and a result carrying a non-success status keeps its
+payload for the same reason an unparsed line does.
+
+Two hypotheses were tested against the data and **refuted**, which is worth
+recording since both were plausible:
+
+- *Long runs exhaust context and die.* The opposite: eight runs over twenty
+  minutes, zero failures, including one of 6506 seconds and one that spent 5.5M
+  tokens successfully. The failure rate was highest at the **short** end, where
+  the 401s died in seconds.
+- *A 300-second gateway timeout.* The three agy failures cluster at 306, 309 and
+  342 seconds, which is suggestive — but the proxy's idle timeout is 600s and
+  those runs were making tool calls throughout.
+
+Twenty-one data points cannot settle this, and slicing them further is a way of
+appearing busy. The useful move was making the next failures say what happened.
+
+### The number that is missing
+
+Every figure above counts runs that **failed**. A run that succeeds, merges, and
+turns out to be wrong costs far more — everything built on it — and appears
+nowhere.
+
+That is not derivable after the fact: branch and timing cannot tell "this
+reviewer examined that work" from "this ran next", and the guess breaks the
+moment two checks overlap or a branch is reused. So the orchestrator declares
+it, with `start_agent(..., verifies=<agent_id>)`, and `multiagents usage
+--checks` reports the graph:
+
+```
+work                        checked by                     outcome
+ag-8a5e14 implementer       ag-bd31b1 reviewer             done
+                            ag-4f2a91 tester               failed
+```
+
+The graph and not a rate: whether a review *found* something is in its prose,
+and deciding that from here would be the same mistake as classifying a failure
+from an agent's own words.
+
 ## Diagnosability
 
 A day of real use produced 41 agents and 19 failures, and three of the four
@@ -1638,7 +1696,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-266 tests covering the parts live runs do not reliably exercise: doom-loop
+269 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the

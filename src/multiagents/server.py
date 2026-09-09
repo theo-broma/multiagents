@@ -173,6 +173,7 @@ async def start_agent(
     workdir: str = "",
     timeout: int = 0,
     model: str = "",
+    verifies: str = "",
 ) -> dict:
     """Start a subagent on a task. Returns immediately with an agent_id.
 
@@ -194,6 +195,11 @@ async def start_agent(
             branch isolation every other guarantee here rests on.
         timeout: Wall-clock seconds; 0 uses the agent's configured default.
         model: Override the configured model for this run.
+        verifies: The agent_id whose work this run checks, when it is a check —
+            a reviewer on an implementer's branch, a tester on what was just
+            written. Recorded so that "how often did work need redoing" is a
+            fact in the tree rather than a guess from branches and timing. Cheap
+            to pass and impossible to reconstruct later.
     """
     run = runner()
     try:
@@ -202,6 +208,7 @@ async def start_agent(
             workdir=workdir or None,
             timeout=timeout or None,
             model=model or None,
+            verifies=verifies,
         ))
     except (PermissionError, RuntimeError, ValueError, KeyError,
             FileNotFoundError) as exc:

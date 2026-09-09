@@ -67,7 +67,12 @@ class Node:
     usage: dict[str, Any] = field(default_factory=dict)
     steps: int = 0
     events: int = 0
-    conversation: bool = False        # a standing dialogue, resumed each turn
+    conversation: bool = False
+    # "this run is a check on that agent's work", declared by whoever spawned
+    # it. Declared rather than inferred: branch-and-timing guesses break the
+    # moment two checks run at once or a branch is reused, and the orchestrator
+    # already knows the answer at the point of asking.
+    verifies: str = ""        # a standing dialogue, resumed each turn
     turns: int = 0
     paused_at: float | None = None    # entered idle / awaiting_user at
     created_at: float = field(default_factory=now)
