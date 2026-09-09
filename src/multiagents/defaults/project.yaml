@@ -195,6 +195,41 @@ limits:
   # the same fault being read again.
   restart_min_runtime_seconds: 60
 
+  # A usage limit never reaches the exit code. The CLI prints it into the chat
+  # log and stays at the prompt, alive and idle, so every restart path — all of
+  # which key on the process ENDING — waits for something that will not happen.
+  # The parent therefore watches for the CLI's own hardcoded message (see
+  # providers.yaml `limit_markers`) and ends the session itself. This is the
+  # one place a transcript is read for a signal: those strings are written by
+  # the CLI's error handler, not by a model.
+  #
+  # A window that resets is waited out this long, then the session is started
+  # again to find out. The wait grows across consecutive limits (x1 x2 x3 x4,
+  # capped) because a window that has not reopened in fifteen minutes is not
+  # about to.
+  limit_wait_seconds: 900
+  # How many such waits before giving up. Waiting is NOT one of the restart
+  # attempts above and does not spend them: the window on claude is FIVE HOURS,
+  # and five tries backing off from a minute would give up halfway through it
+  # having proved only that the limit was still there. Twelve waits reach past
+  # ten hours.
+  limit_max_waits: 12
+  # Read the account's real usage from the provider, rather than only from
+  # whatever cache its CLI happened to leave on disk. It is the same request
+  # that CLI makes, with the same token, at most once every five minutes per
+  # machine and only when something actually asks — but the endpoint is not a
+  # documented one, and the thing at risk if that is ever judged unwelcome is
+  # YOUR account, not this project's. So it is a switch. Turned off, quota
+  # readings fall back to the CLI's cache and go quiet when it does.
+  ask_provider_for_usage: true
+  # For a limit KNOWN not to reset — a dead account rather than a spent window.
+  # Nothing ships marked that way: the provider's own wording does not reliably
+  # tell the two apart (see providers.yaml `limit_markers`), and this is the
+  # expensive mistake to make, since a wall wrongly assumed costs an afternoon
+  # of doing nothing. The hold is only how long the reason stays on record;
+  # launching the role by hand lifts it.
+  spend_limit_pause_hours: 12
+
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents
   # said — which is the signal this project learned not to classify on. Set

@@ -1131,6 +1131,7 @@ third is the one that bit:
 
 | | verdict |
 |---|---|
+| the CLI's own limit message, unanswered | `limited` — its provider stopped it |
 | gone, no headroom | `out_of_quota` — it ran out |
 | gone, headroom fine | `stopped` — it exited or crashed |
 | alive, log moving | `working` |
@@ -1138,8 +1139,136 @@ third is the one that bit:
 | alive, silent, nothing running | `idle` — probably on you |
 | alive, silent, no headroom | `stalled` |
 
-**The quota reading is what makes the first two distinguishable**, and they need
+**The quota reading is what makes the middle two distinguishable**, and they need
 opposite responses: one waits for a reset, the other is a bug.
+
+### The stop that never reaches the exit code
+
+Every path above keys on the process **ending**. A usage limit does not end it.
+The CLI prints the limit into its own chat log and stays at the prompt, alive
+and idle, so `run` waits on a `wait()` that will never return, `status` says
+*"idle — probably waiting for you"*, and a session that a provider stopped dead
+at 11am is still sitting there at 5pm having done nothing.
+
+That is a real morning lost, and it was worse because the quota reader had gone
+blind at the same time: the vendor removed `cachedUsageUtilization` from
+`~/.claude.json`, which took `stalled` off the table too and left `idle` as the
+only thing status could say. Both halves came from one session that sat at a
+limit for three hours and eighteen minutes while `status` reported it as waiting
+for a human who was not being asked for anything.
+
+**That blindness is fixed at the source** — see [asking the account
+directly](#asking-the-account-rather-than-a-cache-of-the-answer) — but the
+detection below stays, because a reader that depends on one undocumented surface
+staying put has already been wrong once.
+
+So the parent now **polls while the child runs** (`STALL_POLL_SECONDS`, 60s)
+instead of blocking on it, and asks one question: is the CLI's own limit message
+the last thing said. If it is, twice in a row, the session is ended so it can be
+restarted — with a printed minute of grace, because anything typed clears the
+detection and hands the session back to the person sitting in front of it.
+
+Then it waits and starts the session again — and the interesting part is what it
+refuses to conclude from the message.
+
+**The wording does not identify the limit.** Measured on 2026-09-09 against
+`/api/oauth/usage`: claude prints *"You've hit your monthly spend limit"* when
+the **five-hour window** fills while the extra-usage credit pool — the thing
+that would otherwise have carried the session past it — happens to be spent. It
+names the pool, not the wall, and then contradicts itself in the same sentence:
+*"your session limit resets 1pm"*. Waiting does fix it. A marker may still
+declare `resets: false` for a
+string one day known to mean a dead account, and the run then stops with exit 3
+rather than waiting, since waiting cannot put money in an account. **Nothing
+ships marked that way, and a test enforces it**, because the two mistakes are
+not equal: a wall wrongly assumed costs a whole afternoon of doing nothing,
+while a window wrongly assumed costs one relaunch per wait.
+
+So the tree is paused for that provider and the run waits — **until the reset
+timestamp the provider gives**, capped at six hours, which is the payoff for
+asking the account instead of parsing the sentence. With no timestamp to be had
+it falls back to `limits.limit_wait_seconds` (15 min, ×2 ×3 ×4 across
+consecutive limits). Then the session starts again with the resume prompt.
+**A wait is not a restart attempt** and does not spend one:
+the window is five hours, and `restart_attempts` backing off from a minute would
+give up halfway through it having proved only that the limit was still there.
+`limits.limit_max_waits` (12) bounds it instead, reaching past ten hours.
+
+For a `resets: false` limit the pause is held for
+`limits.spend_limit_pause_hours` so the reason stays visible to anything reading
+the tree — not as a claim about when it clears. Launching the role by hand lifts
+it immediately: only a person can fix a dead account, so a person starting it
+again *is* the event it was waiting for. Only a person, though — under a script
+(`stdin` is not a tty) the pause stands, or a deliberate stop would become a
+retry loop on a timer.
+
+### Asking the account rather than a cache of the answer
+
+`~/.claude.json`'s `cachedUsageUtilization` held percent-used per window, reset
+timestamps and the overage pool — everything routing needs. Then a vendor update
+removed it, and nothing here noticed: `known=False` is a legitimate state for a
+provider that cannot report headroom, so the system went quiet rather than
+wrong, which is worse.
+
+That key is a **cache of one HTTP response**: `GET /api/oauth/usage`, the
+request Claude Code makes to fill it, authenticated with the OAuth token in
+`~/.claude/.credentials.json`. So the reader now prefers the cache while it is
+fresh — free, and no request against somebody's rate limit — and asks the
+account directly when it is stale or gone. One parser serves both, because they
+are the same payload.
+
+```
+$ multiagents doctor
+budget
+  claude       53.0% used, resets 2026-09-09T16:49:59+00:00
+```
+
+Two things fall out of the payload that prose could never have given us:
+`five_hour.resets_at`, which turns a blind backoff into one wait of the right
+length, and `extra_usage.spend_limit_reached`, which is the honest boolean for
+the condition the CLI describes in a misleading sentence.
+
+**The account being risked is the user's, not this project's.** An advisor's
+objection, which I take: the endpoint is undocumented, a bot-detector cannot see
+an OAuth token's good intentions, and the blast radius of being judged
+unwelcome is somebody's account rather than a degraded reading. So:
+
+- `limits.ask_provider_for_usage` turns it off, and the shipped config explains
+  the trade rather than burying it. Off, readings fall back to the CLI's cache
+  and go quiet when it does.
+- **One fetch per machine, not per process.** Every agent runs its own MCP
+  server, so an in-process cache would put N processes across the same
+  staleness second and into the same millisecond. A shared file plus a
+  non-blocking `flock`: whoever takes the lock fetches, everyone else keeps the
+  stale copy rather than queueing. On a **cold start** there is no stale copy
+  and every process arrives in the same second, so a reader that loses the lock
+  waits up to three seconds for the winner's answer instead of reporting a
+  reading nobody had to be without.
+- **Jittered**, so restarts and machines never settle into one exact heartbeat.
+  A perfectly periodic request is a signature.
+- **A refusal stops the asking.** 401 and 403 hold off for six hours: they need
+  a human, and asking again on a timer until one appears is the behaviour that
+  would deserve being blocked. 429 gets five minutes rather than that company —
+  it far more often means *too many at once* than *you are out*, and answering
+  a sixty-second concurrency limit with an hour of silence turns somebody
+  else's transient into our own outage. A `Retry-After` header overrides all of
+  it: the server knows, we are guessing.
+- **An honest `User-Agent`.** Copying the CLI's own would make the request
+  indistinguishable from it, which is impersonation to evade a check — a
+  different thing from reading your own usage, and not a thing this does.
+
+The token is read at the moment of use, never held, never passed to a child, and
+registered as a redaction literal (see `scrub()` above) so that if it escapes by
+a route nobody thought of it is masked before that output reaches disk. An HTTP
+error keeps only `error.type` and `error.message`, scrubbed and capped — "HTTP
+403" alone would hide *account suspended* and *unsupported region*, while the
+rest of the body can echo back what was sent. An expired token is not sent at
+all: refreshing it is the CLI's job, and since `known=False` means *unknown*
+rather than *empty*, an unreadable quota never stops work — it just says
+plainly that `claude` needs running once.
+
+Undocumented, therefore fenced: every failure degrades to `known=False` with a
+note.
 
 ### Why not read the transcript's contents
 
@@ -1151,6 +1280,18 @@ would have fired on the conversation that designed it.
 That is not hypothetical here: an earlier classifier in this project scanned
 agent output for the same words, and an advisor writing "quota" cooled a
 provider down for fifteen minutes and lost the conversation. Structure only.
+
+**One exception, and it is narrow.** `providers.yaml` may list `limit_markers`
+under a provider's `transcript:` block — literal strings the CLI's *error
+handler* prints, not sentences a model composes. Reading those is not
+classifying prose; it is reading a stack trace that was delivered to the wrong
+address, because the CLI chose the chat log as its error channel instead of
+stderr or an exit code. Three guards keep it from becoming the thing it is not:
+the string is matched only in the **last assistant message**, so a session that
+recovered is history and an agent quoting it mid-conversation is not the CLI
+speaking; anything a **person typed after it** cancels the match, tool results
+excluded by shape rather than by content; and a provider that declares no
+markers is never read for one at all.
 
 `providers.yaml` says where a CLI keeps its session log — only claude declares
 one, since opencode uses a sqlite database and agy an opaque directory. A

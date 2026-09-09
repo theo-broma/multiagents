@@ -34,7 +34,7 @@ from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
 from .providers import load_providers
 from .runner import Runner
-from .tree import Tree
+from .tree import Tree, now as tree_now
 
 GITIGNORE_LINE = ".multiagents/"
 
@@ -138,6 +138,11 @@ RESUME_PROMPT = (
     "genuinely theirs to make."
 )
 
+# How often the parent checks whether a live session has stopped being a working
+# one. Long enough to be free, short enough that nobody watches a dead prompt
+# for an hour.
+STALL_POLL_SECONDS = 60.0
+
 NUDGE = (
     "Continue where you left off. Before anything else: read list_tickets and "
     "list_questions, answer what is within your remit, and check whether any "
@@ -171,7 +176,7 @@ def _restore_terminal(saved) -> None:
         pass
 
 
-def _run_attached(argv, env) -> int:
+def _run_attached(argv, env, stalled=None) -> int:
     """Run the CLI as a child that owns the terminal, and return its exit code.
 
     Four things make this behave like the `exec` it replaces:
@@ -188,6 +193,10 @@ def _run_attached(argv, env) -> int:
       instead of dying first and orphaning it.
     * the terminal mode is saved and restored around the run.
     * nothing in this process reads stdin, or it would steal the child's keys.
+
+    `stalled` is polled while the child runs and, if it ever returns true, the
+    child is stopped. Without it a session that stops working without exiting is
+    invisible: the supervisor waits on a process that will never end.
     """
     saved = _terminal_state()
     previous = {}
@@ -204,7 +213,19 @@ def _run_attached(argv, env) -> int:
         child = subprocess.Popen(argv, env=env)          # NOT start_new_session
         while True:
             try:
-                return child.wait()
+                return child.wait(timeout=STALL_POLL_SECONDS)
+            except subprocess.TimeoutExpired:
+                # Still running — but running is not working. A CLI that hits a
+                # usage limit prints and waits rather than exiting, so every
+                # exit-code path in here is blind to the most common way a
+                # session stops being useful.
+                if stalled is not None and stalled():
+                    child.terminate()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=20)
+                    if child.poll() is None:
+                        child.kill()
+                    return child.wait()
             except KeyboardInterrupt:                    # belt and braces
                 continue
     finally:
@@ -274,6 +295,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
         return 2
 
     executor = _executor_for(paths, config, providers)(spec.provider)
+    _clear_limit_pause(paths, spec)
     context = _launch_context(paths, config, spec)
     # Resuming is only possible if this role has been launched here before.
     # Passing --continue on a first run makes the CLI error out with no prior
@@ -343,15 +365,57 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     from . import watchdog
 
     _start_supervisor(paths, role, os.getpid())
+
+    # A usage limit is the one stop that never reaches the exit code: the CLI
+    # prints it into the chat log and sits at the prompt, alive and idle, so
+    # everything below — which keys on the process ending — waits forever. This
+    # watches for the CLI's own hardcoded message and ends the session so a
+    # decision can be made about it.
+    limit: dict = {}
+    warned: list = []
+
+    def _limit_hit() -> bool:
+        found = watchdog.limit_reached(provider, paths.root)
+        if found is None:
+            warned.clear()
+            return False
+        if not warned:
+            # One poll of grace, and a way out of it. Ending a session someone
+            # is sitting in front of would be worse than the stall this fixes,
+            # and anything typed clears the detection — the limit only counts
+            # while nobody has answered it.
+            warned.append(found)
+            print(f"\n{spec.provider} says: {found.get('detail')}\n"
+                  f"Ending the session in {STALL_POLL_SECONDS:.0f}s so it can be "
+                  f"restarted — type anything to keep it.")
+            return False
+        limit.clear()
+        limit.update(found)
+        return True
+
     began = time.monotonic()
-    code = _run_attached(argv, env)
+    code = _run_attached(argv, env, stalled=_limit_hit)
     ran_for = time.monotonic() - began
     deliberate, why = _exit_was_deliberate(code)
+    if limit:
+        # We sent the SIGTERM, so the exit code says "deliberate" and means it
+        # about us, not about the user.
+        deliberate, why = False, f"stopped by {spec.provider}: {limit['detail']}"
     watchdog.write_status(paths, {
         "at": time.time(), "role": role, "pid": None, "running": False,
-        "verdict": "stopped" if deliberate else "dropped", "detail": why,
+        "verdict": "limited" if limit else ("stopped" if deliberate else "dropped"),
+        "detail": why,
         "transcript": None, "active_agents": 0, "provider": {},
     })
+
+    crash_override = False
+    limit_waits_before_loop = 0
+    if limit:
+        stop = _limit_stop(paths, config, spec, limit)
+        if stop is not None:
+            return stop
+        limit_waits_before_loop = 1
+        crash_override = True            # a limit is not a fault to protect from
 
     if deliberate:
         print(f"\n{why}.")
@@ -372,7 +436,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     # a context-length overrun or an OOM parsing a huge payload takes minutes to
     # arrive and then repeats exactly. So crashes do not retry by default, and
     # the knob to change that is off.
-    crash = code not in (-signal.SIGHUP, 129)
+    crash = not crash_override and code not in (-signal.SIGHUP, 129)
     if crash and not bool(config.limits.get("restart_on_crash", False)):
         print(f"\n{role} {why}. Not retrying: a non-zero exit is an error the "
               f"CLI could not\nhandle, so its cause is still there and a "
@@ -384,9 +448,18 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     attempts = int(config.limits.get("restart_attempts", 5))
     delay = float(config.limits.get("restart_delay_seconds", 60))
     survived = float(config.limits.get("restart_min_runtime_seconds", 60))
-    for attempt in range(1, attempts + 1):
+    # Waiting out a usage window is not a restart attempt and must not spend
+    # them. The window is FIVE HOURS on this provider; five attempts backing off
+    # from a minute would give up in the middle of it, having proved only that
+    # the limit was still there — which was never in doubt.
+    limit_waits = limit_waits_before_loop
+    limit_budget = int(config.limits.get("limit_max_waits", 12))
+    after_limit = bool(limit_waits_before_loop)
+    attempt = 0
+    while attempt < attempts:
         if not sys.stdin.isatty():
             break
+        attempt += 1
         if crash and ran_for is not None and ran_for < survived:
             # Only reachable with restart_on_crash on. Even then, a failure this
             # fast is the same fault being read again.
@@ -394,13 +467,20 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                   f"failure that fast is\nthe same fault being read again, not "
                   f"a passing one.")
             return 1
-        print(f"\n{role} {why}. Retrying in {delay:.0f}s "
-              f"({attempt}/{attempts}) — Ctrl-C to stop.")
-        try:
-            time.sleep(delay)
-        except KeyboardInterrupt:
-            print("\nstopped.")
-            return 0
+        if after_limit:
+            # _limit_stop has already waited out the window and said so; another
+            # minute of "retrying in 60s (1/5)" would be noise about a counter
+            # that a wait does not move.
+            after_limit = False
+            print(f"\n{role}: the wait is over, starting it again.")
+        else:
+            print(f"\n{role} {why}. Retrying in {delay:.0f}s "
+                  f"({attempt}/{attempts}) — Ctrl-C to stop.")
+            try:
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                print("\nstopped.")
+                return 0
 
         held = _orchestrator_hold(paths, config)
         if held is not None:
@@ -412,9 +492,27 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         retry_env = {**env, "MULTIAGENTS_RESUME": "1",
                      "MULTIAGENTS_RESUME_PROMPT": RESUME_PROMPT}
         began = time.monotonic()
-        code = _run_attached(argv, retry_env)
+        limit.clear()
+        code = _run_attached(argv, retry_env, stalled=_limit_hit)
         ran_for = time.monotonic() - began
         deliberate, why = _exit_was_deliberate(code)
+        if limit:
+            # We sent the SIGTERM; "terminated" would be true about us and
+            # misleading about the session.
+            why = f"stopped by {spec.provider}: {limit['detail']}"
+            limit_waits += 1
+            if limit_waits > limit_budget:
+                print(f"\n{spec.provider} is still limited after "
+                      f"{limit_waits - 1} waits; stopping. `multiagents run` "
+                      f"picks it back up.")
+                return 3
+            stop = _limit_stop(paths, config, spec, limit, attempt=limit_waits)
+            if stop is not None:
+                return stop
+            crash = False
+            after_limit = True
+            attempt -= 1                 # a wait is not one of the five tries
+            continue
         if deliberate:
             print(f"\n{why}.")
             return 0 if code == 0 else 1
@@ -506,9 +604,12 @@ def _supervise(paths, config, role, spec, provider, executor,
     when the command *succeeds*, so a turn that worked would end the run, and a
     turn that crashed would be retried forever.
     """
+    from . import watchdog
+
     tree = Tree(paths.tree_file, paths.events_file)
     idle_turns = 0
     failures = 0
+    limit_waits = 0
 
     for turn in range(1, max_turns + 1):
         held = _orchestrator_hold(paths, config)
@@ -534,11 +635,41 @@ def _supervise(paths, config, role, spec, provider, executor,
         try:
             child = subprocess.Popen(argv, env=env)
             _write_pid(paths, f"{role}-turn", child.pid)
-            code = child.wait()
+            # Polled, not blocked on: a headless turn that hits a usage limit
+            # can sit there indefinitely, and an unattended loop is exactly
+            # where nobody is watching it do that.
+            while True:
+                try:
+                    code = child.wait(timeout=STALL_POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    if watchdog.limit_reached(provider, paths.root):
+                        child.terminate()
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            child.wait(timeout=20)
+                        if child.poll() is None:
+                            child.kill()
+                        code = child.wait()
+                        break
             _clear_pid(paths, f"{role}-turn")
         except KeyboardInterrupt:
             print("\nstopped.")
             return 0
+
+        limit = watchdog.limit_reached(provider, paths.root)
+        if limit:
+            limit_waits += 1
+            if limit_waits > int(config.limits.get("limit_max_waits", 12)):
+                print(f"\n{spec.provider} is still limited after "
+                      f"{limit_waits - 1} waits; stopping.")
+                return 3
+            stop = _limit_stop(paths, config, spec, limit, attempt=limit_waits)
+            if stop is not None:
+                return stop
+            # Not a failed turn: nothing ran. `failures` counts a CLI that
+            # broke, and three of those stop the loop — a limit is not one.
+            failures = 0
+            continue
 
         # Failure first. A turn that crashed says nothing about whether work
         # remains, so counting it as "idle" would stop the run with the
@@ -1190,6 +1321,103 @@ def _wait_for_reset(paths, config, until: float | None, poll: int = 120) -> bool
             return True
         stamp = time.strftime("%H:%M:%S")
         print(f"  {stamp}  still no headroom")
+
+
+def _clear_limit_pause(paths, spec) -> None:
+    """Lift a limit pause when a person launches the role again.
+
+    A spend cap is paused for hours because nothing but a human can fix it —
+    which makes the human typing `multiagents run` the event it was waiting
+    for. Leaving the pause up would let the session start and then refuse every
+    agent it tried to spawn, for a reason already dealt with.
+
+    Only for a person, and only for the provider named in the pause. A script
+    relaunching on a timer has fixed nothing, and lifting a pause on its behalf
+    would turn a stop into a loop.
+    """
+    if not sys.stdin.isatty():
+        return                  # no human here; the pause was not for a script
+    tree = Tree(paths.tree_file, paths.events_file)
+    state = tree.pause_state()
+    if state and spec.provider in (state.get("providers") or []):
+        print(f"note         lifting the pause on {spec.provider}: "
+              f"{state.get('reason', '')}")
+        tree.resume("relaunched by hand")
+
+
+def _provider_reset_at(paths, config, provider_name: str) -> float | None:
+    """When the provider says its window reopens, as epoch seconds, or None."""
+    try:
+        providers = load_providers(config.providers)
+        provider = providers.get(provider_name)
+        if provider is None:
+            return None
+        budgets = read_all({provider_name: provider},
+                           _executor_for(paths, config, providers),
+                           global_config_dir(), paths.config, {}, {},
+                           use_cache=False)
+        stamp = getattr(budgets.get(provider_name), "resets_at", None)
+        if not stamp:
+            return None
+        from datetime import datetime
+        when = datetime.fromisoformat(str(stamp)).timestamp()
+        return when if when > time.time() else None
+    except Exception:                      # a wait must never fail to happen
+        return None
+
+
+def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | None:
+    """Act on a provider limit the CLI reported. `None` = worth trying again.
+
+    Two limits, two answers. A window that resets is a wait: the tree is paused
+    for that provider so nothing is spawned into a wall, and the caller retries
+    afterwards. A spend cap does not reset — no amount of waiting adds money to
+    an account — so it stops the run loudly and leaves the reason on record
+    rather than burning the restart budget rediscovering it.
+    """
+    tree = Tree(paths.tree_file, paths.events_file)
+    detail = limit.get("detail") or "the provider reported a limit"
+    said = (limit.get("said") or "").strip()
+
+    if not limit.get("resets", True):
+        hours = float(config.limits.get("spend_limit_pause_hours", 12))
+        tree.pause(tree_now() + hours * 3600,
+                   f"{spec.provider}: {detail}", [spec.provider])
+        print(f"\n{spec.provider} has stopped: {detail}.")
+        if said:
+            print(f"  it said: {said}")
+        print("Not retrying, and not waiting: this one does not reset on its "
+              "own.\nRaise the limit or switch the orchestrator to another "
+              "provider, then\n`multiagents run` picks the session back up.")
+        return 3
+
+    # Backs off across attempts: a window that has not reopened after fifteen
+    # minutes is not about to, and retrying on the same clock only fills the
+    # transcript with start-up-and-stop cycles.
+    wait = float(config.limits.get("limit_wait_seconds", 900)) * min(attempt, 4)
+    # Unless the provider says exactly when, in which case guessing is silly.
+    # This is why the account is asked directly rather than through the CLI's
+    # cache: a real timestamp turns a blind backoff into one wait of the right
+    # length. Capped, because a bad clock or a weekly window should not park
+    # the run until tomorrow without anyone deciding that.
+    exact = _provider_reset_at(paths, config, spec.provider)
+    if exact is not None:
+        wait = max(60.0, min(exact - time.time() + 30, 6 * 3600))
+        print(f"\n{spec.provider} says its window resets at "
+              f"{time.strftime('%H:%M', time.localtime(exact))}.")
+    tree.pause(tree_now() + wait, f"{spec.provider}: {detail}", [spec.provider])
+    print(f"\n{spec.provider} has stopped: {detail}.")
+    if said:
+        print(f"  it said: {said}")
+    print(f"Waiting {wait / 60:.0f} min for the window to reset — Ctrl-C to stop.")
+    sys.stdout.flush()
+    try:
+        time.sleep(wait)
+    except KeyboardInterrupt:
+        print("\nstopped waiting.")
+        return 0
+    tree.resume("the usage window it was waiting for has passed")
+    return None
 
 
 def _reaper(paths):
@@ -2247,6 +2475,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if transcript:
         print(f"{'':14} transcript quiet for {transcript.get('quiet_for', '?')}s")
     print(f"{'':14} {record.get('active_agents', 0)} agent(s) running")
+    limit = record.get("limit") or {}
+    if limit.get("said"):
+        print(f"{'':14} it said: {limit['said']}")
     provider = record.get("provider") or {}
     if provider.get("known") and provider.get("headroom") is not None:
         print(f"{'':14} {provider['name']} headroom "

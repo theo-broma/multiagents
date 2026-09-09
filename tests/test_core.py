@@ -3063,7 +3063,10 @@ def test_two_turns_that_change_nothing_end_the_run(tmp_path, monkeypatch, capsys
     class _Done:
         pid = 1234
 
-        def wait(self):
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
             return 0
 
     monkeypatch.setattr(cli.subprocess, "Popen",
@@ -3087,7 +3090,10 @@ def test_three_failed_turns_stop_rather_than_spin(tmp_path, monkeypatch, capsys)
     class _Fail:
         pid = 1234
 
-        def wait(self):
+        def wait(self, timeout=None):
+            return 1
+
+        def poll(self):
             return 1
 
     slept = []
@@ -3666,7 +3672,7 @@ def test_a_lost_terminal_with_no_tty_left_goes_headless(tmp_path, monkeypatch):
     handed = []
     monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
+    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: False})())
 
     cli._run_supervised(_paths(tmp_path), _config(), "orchestrator", None, None,
@@ -3743,7 +3749,7 @@ def test_a_session_nobody_spoke_to_is_not_continued(tmp_path, monkeypatch, capsy
     handed_over = []
     monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed_over.append(1) or 0)
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
+    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
     paths = _paths(tmp_path)
 
     monkeypatch.setattr(watchdog, "has_human_turn", lambda *a: False)
@@ -3802,7 +3808,7 @@ def test_an_unexpected_end_is_retried_interactively_before_anything_headless(
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
 
     codes = iter([-cli.signal.SIGHUP, -cli.signal.SIGHUP, 0])   # lost, lost, quit
-    def attached(argv, env):
+    def attached(argv, env, stalled=None):
         launches.append(env.get("MULTIAGENTS_RESUME_PROMPT"))
         return next(codes)
     monkeypatch.setattr(cli, "_run_attached", attached)
@@ -3827,7 +3833,7 @@ def test_retrying_gives_up_rather_than_looping_forever(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: -cli.signal.SIGHUP)
+    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
     handed = []
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
 
@@ -3881,7 +3887,7 @@ def test_a_session_that_dies_immediately_is_not_retried(tmp_path, monkeypatch,
     monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: 3)     # instant crash
+    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: 3)     # instant crash
     handed = []
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
 
@@ -3910,7 +3916,7 @@ def test_a_session_that_ran_a_while_before_failing_is_retried(tmp_path,
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
 
     codes = iter([3, 0])
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: next(codes))
+    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: next(codes))
 
     config = Config(project={"limits": {"restart_attempts": 5, "restart_on_crash": True,
                                         "restart_min_runtime_seconds": 60}},
@@ -3949,7 +3955,7 @@ def test_a_crash_is_not_retried_by_default(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
     monkeypatch.setattr(cli, "_run_attached",
-                        lambda *a: retried.append(1) or 3)
+                        lambda *a, **k: retried.append(1) or 3)
     monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
 
     assert cli._run_supervised(_paths(tmp_path), _config(), "orchestrator", None,
@@ -3970,7 +3976,7 @@ def test_a_lost_terminal_is_always_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
     codes = iter([-cli.signal.SIGHUP, 0])
-    monkeypatch.setattr(cli, "_run_attached", lambda *a: runs.append(1) or next(codes))
+    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: runs.append(1) or next(codes))
 
     config = Config(project={"limits": {"restart_delay_seconds": 0}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
@@ -4791,3 +4797,591 @@ def test_the_retry_guard_survives_the_relaunch_it_guards(tmp_path):
     retries = [e for e in events if e["kind"] == "retrying"]
     assert len(retries) == 1, f"one retry, not {len(retries)}"
     assert r.tree.get(agent_id).retries == 1
+
+
+# --------------------------------------------------------------------------
+# A limit the CLI reports in prose instead of in an exit code
+
+
+class _LimitProvider:
+    """A provider whose transcript lives wherever the test puts it."""
+
+    def __init__(self, directory):
+        self.transcript = {
+            "dir": str(directory), "glob": "*.jsonl",
+            "limit_markers": [
+                {"match": "hit your monthly spend limit", "resets": False,
+                 "detail": "monthly spend limit"},
+                {"match": "hit your usage limit", "resets": True,
+                 "detail": "usage limit; it resets on its own"},
+            ],
+        }
+
+
+def _transcript(directory, *messages):
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"type": "assistant",
+                         "message": {"content": [{"text": text}]}})
+             for text in messages]
+    (directory / "session.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def test_a_limit_message_is_read_only_when_it_is_the_last_thing_said(tmp_path):
+    """The CLI writes its limit into the chat log, so position is the only
+    thing separating "it has stopped" from an agent quoting it earlier."""
+    from multiagents import watchdog
+
+    logs = tmp_path / "logs"
+    provider = _LimitProvider(logs)
+
+    _transcript(logs, "working on it", "You've hit your monthly spend limit ·")
+    found = watchdog.limit_reached(provider, tmp_path)
+    assert found is not None and found["resets"] is False
+    assert found["detail"] == "monthly spend limit"
+
+    _transcript(logs, "You've hit your usage limit", "recovered, carrying on")
+    assert watchdog.limit_reached(provider, tmp_path) is None, \
+        "a limit hit and then recovered from is history, not a stop"
+
+
+def test_a_provider_with_no_markers_is_never_read_for_one(tmp_path):
+    """Reading a transcript for a signal is only defensible for strings the CLI
+    hardcodes. A provider that declares none opts out entirely."""
+    from multiagents import watchdog
+
+    logs = tmp_path / "logs"
+    provider = _LimitProvider(logs)
+    provider.transcript["limit_markers"] = []
+    _transcript(logs, "You've hit your monthly spend limit")
+    assert watchdog.limit_reached(provider, tmp_path) is None
+
+
+def test_a_live_session_stopped_by_its_provider_is_not_reported_as_idle():
+    """The bug this exists for: with the quota reader blind, an orchestrator
+    stopped dead read as "alive, nothing running — probably waiting for you"."""
+    from multiagents import watchdog
+
+    state, detail = watchdog.verdict(
+        running=True, quiet_for=1560, quota_known=False, quota_left=None,
+        active_agents=0, limit={"detail": "monthly spend limit"})
+    assert state == "limited"
+    assert "monthly spend limit" in detail
+
+
+def test_a_stalled_child_is_ended_rather_than_waited_on(monkeypatch):
+    """`run` blocked on the child's exit, and a CLI at a usage limit never
+    exits. Every restart path downstream was therefore unreachable."""
+    from multiagents import cli
+
+    monkeypatch.setattr(cli, "STALL_POLL_SECONDS", 0.05)
+    code = cli._run_attached(["sh", "-c", "sleep 30"], dict(os.environ),
+                             stalled=lambda: True)
+    assert code != 0, "the child was terminated, not left running"
+
+
+def test_a_child_that_is_working_is_left_alone(monkeypatch):
+    from multiagents import cli
+
+    monkeypatch.setattr(cli, "STALL_POLL_SECONDS", 0.05)
+    code = cli._run_attached(["sh", "-c", "sleep 0.4; exit 7"], dict(os.environ),
+                             stalled=lambda: False)
+    assert code == 7
+
+
+def test_a_limit_known_not_to_reset_stops_the_run(tmp_path, monkeypatch):
+    """Waiting cannot put money in an account. Nothing ships marked this way —
+    see the marker test below — but the path has to exist and has to be right."""
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+    from multiagents.tree import Tree
+
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+    paths = _paths(tmp_path)
+    spec = AgentSpec("orchestrator", "claude", "m")
+    code = cli._limit_stop(paths, _config(), spec,
+                           {"detail": "monthly spend limit", "resets": False,
+                            "said": "You've hit your monthly spend limit"})
+    assert code == 3
+    assert slept == [], "it did not wait for something that never resets"
+    pause = Tree(paths.tree_file, paths.events_file).pause_state()
+    assert pause["providers"] == ["claude"]
+    assert "monthly spend limit" in pause["reason"]
+
+
+def test_a_window_that_resets_is_waited_out_and_then_retried(tmp_path, monkeypatch):
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+    from multiagents.tree import Tree
+
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+    paths = _paths(tmp_path)
+    spec = AgentSpec("orchestrator", "claude", "m")
+    code = cli._limit_stop(paths, _config(), spec,
+                           {"detail": "usage limit", "resets": True, "said": ""})
+    assert code is None, "None means: try again"
+    assert slept and slept[0] == 900
+    assert Tree(paths.tree_file, paths.events_file).pause_state() == {}, \
+        "the pause is lifted once the window has passed"
+
+
+def test_launching_the_role_by_hand_lifts_its_limit_pause(tmp_path, monkeypatch):
+    """A spend cap is held for hours because only a human can clear it — which
+    makes the human launching it again the event it was waiting for."""
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+    from multiagents.tree import Tree
+
+    monkeypatch.setattr(cli.sys, "stdin",
+                        type("T", (), {"isatty": lambda s: True})())
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.pause(time.time() + 3600, "claude: monthly spend limit", ["claude"])
+    cli._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
+    assert tree.pause_state() == {}
+
+    tree.pause(time.time() + 3600, "opencode: no headroom", ["opencode"])
+    cli._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
+    assert tree.pause_state() != {}, "another provider's pause is not ours to lift"
+
+
+def test_a_script_relaunching_on_a_timer_does_not_lift_the_pause(tmp_path, monkeypatch):
+    """The lift assumes a person fixed something. A cron job fixed nothing, and
+    lifting for it would turn a deliberate stop into a retry loop."""
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+    from multiagents.tree import Tree
+
+    monkeypatch.setattr(cli.sys, "stdin",
+                        type("T", (), {"isatty": lambda s: False})())
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.pause(time.time() + 3600, "claude: monthly spend limit", ["claude"])
+    cli._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
+    assert tree.pause_state() != {}
+
+
+def test_a_reply_to_the_limit_message_hands_the_session_back(tmp_path):
+    """Anything typed after it means a person is here and has taken it from us;
+    ending the session then would be worse than the stall this fixes."""
+    from multiagents import watchdog
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    provider = _LimitProvider(logs)
+    records = [
+        {"type": "assistant",
+         "message": {"content": [{"text": "You've hit your usage limit"}]}},
+        # A tool result is a `user` record too, and is not somebody talking.
+        {"type": "user",
+         "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
+        {"type": "system", "content": None},
+    ]
+    (logs / "session.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n")
+    assert watchdog.limit_reached(provider, tmp_path) is not None, \
+        "a tool result and a system record are not a person replying"
+
+    records.append({"type": "user", "message": {"content": "raised it, carry on"}})
+    (logs / "session.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n")
+    assert watchdog.limit_reached(provider, tmp_path) is None
+
+
+def test_a_limit_is_confirmed_over_two_polls_before_the_session_is_ended(tmp_path, monkeypatch):
+    """One poll of grace, and a printed way out of it: anything typed clears
+    the detection, because a limit somebody has answered is theirs."""
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+
+    seen = []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli, "_limit_stop", lambda *a, **k: 3)
+    monkeypatch.setattr(cli, "watchdog", None, raising=False)
+
+    def attached(argv, env, stalled=None):
+        seen.append(stalled())          # first poll: warns, does not act
+        seen.append(stalled())          # second: the limit is still unanswered
+        return -cli.signal.SIGTERM
+
+    monkeypatch.setattr(cli, "_run_attached", attached)
+    import multiagents.watchdog as wd
+    monkeypatch.setattr(wd, "limit_reached",
+                        lambda *a: {"detail": "usage limit", "resets": True})
+    monkeypatch.setattr(wd, "write_status", lambda *a: None)
+
+    code = cli._run_supervised(_paths(tmp_path), _config(), "orchestrator",
+                               AgentSpec("orchestrator", "claude", "m"),
+                               object(), object(), {}, ["true"], {})
+    assert seen == [False, True]
+    assert code == 3
+
+
+def test_no_shipped_marker_claims_a_limit_never_resets():
+    """Measured 2026-09-09 against the usage dashboard: claude prints "You've
+    hit your monthly spend limit" when what was reached is the FIVE-HOUR
+    window, and contradicts itself in the same sentence ("resets 1pm"). The
+    wording does not identify the limit, and the two mistakes are not equal —
+    a window mistaken for a wall costs an afternoon of doing nothing."""
+    from multiagents.config import load
+
+    markers = (load(None).providers["claude"]["transcript"]["limit_markers"])
+    assert markers, "the claude provider still declares its limit strings"
+    assert all(m.get("resets", True) for m in markers), \
+        "a shipped marker may not assert a limit is permanent from its wording"
+
+
+def test_waiting_out_a_window_does_not_spend_the_restart_attempts(tmp_path, monkeypatch):
+    """The window is five hours. Five attempts backing off from a minute would
+    give up in the middle of it, having proved only that it was still there."""
+    from multiagents import cli
+    from multiagents.config import AgentSpec, Config
+
+    waits = []
+    runs = []
+    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
+
+    def limited(paths, config, spec, limit, attempt=1):
+        waits.append(attempt)
+        return None                      # "the window may have reopened; retry"
+
+    monkeypatch.setattr(cli, "_limit_stop", limited)
+
+    import multiagents.watchdog as wd
+    monkeypatch.setattr(wd, "write_status", lambda *a: None)
+    monkeypatch.setattr(wd, "has_human_turn", lambda *a: True)
+    # Confirmed on the second poll, as in the live path.
+    monkeypatch.setattr(wd, "limit_reached",
+                        lambda *a: {"detail": "usage limit", "resets": True})
+
+    def attached(argv, env, stalled=None):
+        runs.append(1)
+        stalled(); stalled()             # warn, then confirm
+        return -cli.signal.SIGTERM
+
+    monkeypatch.setattr(cli, "_run_attached", attached)
+    config = Config(project={"limits": {"limit_max_waits": 7}}, providers={},
+                    agents={}, models={}, instruction_dirs=[])
+
+    code = cli._run_supervised(_paths(tmp_path), config, "orchestrator",
+                               AgentSpec("orchestrator", "claude", "m"),
+                               object(), object(), {}, ["true"], {})
+    assert code == 3
+    assert len(runs) == 8, "it kept trying the window, not the 5 restart attempts"
+    assert waits == [1, 2, 3, 4, 5, 6, 7], "and backed off across them"
+
+
+# --------------------------------------------------------------------------
+# Asking the account what is left, rather than reading a cache of the answer
+
+# The shape GET /api/oauth/usage returns, trimmed to what is read. It is also
+# exactly what the CLI stores under cachedUsageUtilization, because that key is
+# a cache of this response — which is why one parser serves both.
+USAGE_PAYLOAD = {
+    "five_hour": {"utilization": 96.0, "resets_at": "2026-09-09T16:50:00+00:00"},
+    "seven_day": {"utilization": 40.0, "resets_at": "2026-09-14T14:00:00+00:00"},
+    "limits": [
+        {"kind": "session", "percent": 96, "resets_at": "2026-09-09T16:50:00+00:00"},
+        {"kind": "weekly_all", "percent": 40, "resets_at": "2026-09-14T14:00:00+00:00"},
+    ],
+    "extra_usage": {"is_enabled": False, "monthly_limit": 8500,
+                    "used_credits": 8603.0, "spend_limit_reached": True},
+}
+
+
+def _claude_files(tmp_path, monkeypatch, cache=None, fetched_ms=None,
+                  token="tok-" + "x" * 40, expires_ms=None):
+    import multiagents.budget as budget_mod
+
+    state = tmp_path / ".claude.json"
+    state.write_text(json.dumps(
+        {"cachedUsageUtilization": {"fetchedAtMs": fetched_ms,
+                                    "utilization": cache}} if cache else {}))
+    creds = tmp_path / ".credentials.json"
+    creds.write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": token,
+        "expiresAt": expires_ms if expires_ms is not None
+        else (time.time() + 3600) * 1000}}))
+    monkeypatch.setattr(budget_mod, "CLAUDE_STATE", state)
+    monkeypatch.setattr(budget_mod, "CLAUDE_CREDENTIALS", creds)
+    # Never the machine's real shared copy: a test that reads it would pass or
+    # fail on what the developer's account happened to have left there.
+    monkeypatch.setattr(budget_mod, "_shared_cache_file",
+                        lambda: tmp_path / "usage-claude.json")
+    return budget_mod
+
+
+def test_a_fresh_cache_is_read_and_the_account_is_not_asked(tmp_path, monkeypatch):
+    """The cache is free and the endpoint is somebody's rate limit."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=USAGE_PAYLOAD,
+                              fetched_ms=time.time() * 1000)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: pytest.fail("asked the account for a fresh cache"))
+    b = budget_mod.read_claude()
+    assert b.known and round(b.headroom, 2) == 0.04
+    assert b.resets_at == "2026-09-09T16:50:00+00:00"
+
+
+def test_a_missing_cache_asks_the_account_instead_of_going_blind(tmp_path, monkeypatch):
+    """The bug this exists for: the key vanished in a vendor update and every
+    window reading in the project went with it, for weeks, silently."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: (USAGE_PAYLOAD, ""))
+    b = budget_mod.read_claude()
+    assert b.known and b.source == "api/oauth/usage"
+    assert b.severity == "critical"
+
+
+def test_a_stale_cache_is_refreshed(tmp_path, monkeypatch):
+    budget_mod = _claude_files(
+        tmp_path, monkeypatch, cache={"five_hour": {"utilization": 1.0}},
+        fetched_ms=(time.time() - 4 * 3600) * 1000)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: (USAGE_PAYLOAD, ""))
+    assert round(budget_mod.read_claude().headroom, 2) == 0.04, \
+        "the four-hour-old 1% reading would have sent work at a full window"
+
+
+def test_an_unreachable_account_degrades_to_unknown_rather_than_raising(tmp_path, monkeypatch):
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: (None, "usage endpoint unreachable: URLError"))
+    b = budget_mod.read_claude()
+    assert b.known is False and "unreachable" in b.note
+    assert b.usable, "unknown headroom is not no headroom"
+
+
+def test_the_oauth_token_is_masked_everywhere_before_it_is_used(tmp_path, monkeypatch):
+    """It is read at the moment of use, never held and never passed to a child.
+    Registering it as a literal covers the route nobody thought of."""
+    from multiagents import redact
+
+    secret = "sk-ant-oat01-" + "z" * 60
+    budget_mod = _claude_files(tmp_path, monkeypatch, token=secret)
+    assert budget_mod._claude_token() == secret
+    assert secret not in redact.scrub(f"Authorization: Bearer {secret}")
+
+
+def test_an_expired_token_is_not_sent(tmp_path, monkeypatch):
+    """Refreshing it is the CLI's job; using a dead one just spends a request."""
+    budget_mod = _claude_files(tmp_path, monkeypatch,
+                               expires_ms=(time.time() - 60) * 1000)
+    assert budget_mod._claude_token() is None
+
+
+def test_credits_spent_are_recorded_even_while_the_pool_is_disabled(tmp_path, monkeypatch):
+    """That pool is what would carry a session PAST the window, and its being
+    empty is why the CLI announces a window limit as a spend limit."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=USAGE_PAYLOAD,
+                              fetched_ms=time.time() * 1000)
+    b = budget_mod.read_claude()
+    assert b.spent["extra_credits_used"] == 8603
+    assert "past the window limit" in b.note
+
+
+def test_a_known_reset_time_replaces_the_blind_backoff(tmp_path, monkeypatch):
+    """A real timestamp turns guessing into one wait of the right length."""
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(cli, "_provider_reset_at",
+                        lambda *a: time.time() + 3000)
+    paths = _paths(tmp_path)
+    code = cli._limit_stop(paths, _config(), AgentSpec("o", "claude", "m"),
+                           {"detail": "usage limit", "resets": True, "said": ""})
+    assert code is None
+    assert 3000 <= slept[0] <= 3100, "it waited to the reset, not a round 15 min"
+
+
+def test_an_unknown_reset_time_still_backs_off(tmp_path, monkeypatch):
+    from multiagents import cli
+    from multiagents.config import AgentSpec
+
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(cli, "_provider_reset_at", lambda *a: None)
+    cli._limit_stop(_paths(tmp_path), _config(), AgentSpec("o", "claude", "m"),
+                    {"detail": "usage limit", "resets": True, "said": ""}, attempt=3)
+    assert slept == [2700]
+
+
+def test_one_fetch_per_machine_not_one_per_process(tmp_path, monkeypatch):
+    """Every agent runs its own MCP server. An in-process cache means N
+    processes cross the same staleness second and ask the same undocumented
+    endpoint at once — a herd whose only possible reward is being rate-limited
+    off the one surface that tells us anything."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    fetches = []
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: (fetches.append(1), (USAGE_PAYLOAD, ""))[1])
+
+    first = budget_mod.read_claude()
+    second = budget_mod.read_claude()
+    assert len(fetches) == 1, "the second reader used the shared copy"
+    assert first.headroom == second.headroom
+
+
+def test_a_reader_that_cannot_take_the_lock_keeps_the_stale_number(tmp_path, monkeypatch):
+    """Somebody else's answer is seconds away, and a slightly stale reading is
+    worth far more than a duplicate request."""
+    import fcntl
+
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: (USAGE_PAYLOAD, ""))
+    budget_mod.read_claude()                       # populate the shared copy
+    monkeypatch.setattr(budget_mod, "SHARED_TTL", 0.0)   # force it stale
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: pytest.fail("fetched while another held the lock"))
+
+    held = (tmp_path / "usage-claude.lock").open("a+")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+    try:
+        assert budget_mod.read_claude().known, "fell back to the stale reading"
+    finally:
+        held.close()
+
+
+def test_the_vendors_reason_for_refusing_is_kept_and_scrubbed(tmp_path, monkeypatch):
+    """"HTTP 403" hides "account suspended" and "unsupported region", which are
+    facts somebody needs. The body is not echoed wholesale: an auth failure can
+    quote back what was sent."""
+    import urllib.error
+
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    secret = "sk-ant-oat01-" + "q" * 60
+
+    class _Body:
+        code = 403
+
+        def read(self):
+            return json.dumps({"error": {
+                "type": "permission_error",
+                "message": f"account suspended (token {secret})"}}).encode()
+
+    monkeypatch.setattr(budget_mod.json, "loads", json.loads)
+    from multiagents import redact
+    redact.register_literal(secret)
+    note = budget_mod._error_reason(_Body())
+    assert "permission_error" in note and "account suspended" in note
+    assert secret not in note
+
+
+def test_an_expired_token_leaves_the_run_free_rather_than_blocked(tmp_path, monkeypatch):
+    """The advisor's worry: an agent that finds an expired token and stops is
+    deadlocked until a human appears. It is not — unknown headroom is not no
+    headroom — but the note has to say what to do about it."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None,
+                               expires_ms=(time.time() - 60) * 1000)
+    b = budget_mod.read_claude()
+    assert b.known is False
+    assert b.usable, "an unreadable quota must never stop work"
+    assert "run `claude`" in b.note
+
+
+def test_a_refusal_stops_the_asking_rather_than_retrying_on_a_timer(tmp_path, monkeypatch):
+    """A 401 or 403 needs a human, and asking again every five minutes until
+    one appears is precisely the behaviour that would deserve being blocked."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    calls = []
+
+    def refused():
+        calls.append(1)
+        return None, "usage endpoint returned HTTP 403: permission_error"
+
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage", refused)
+    budget_mod.read_claude()
+    monkeypatch.setattr(budget_mod, "SHARED_TTL", 0.0)   # the TTL has passed
+    budget_mod.read_claude()
+    assert len(calls) == 1, "it did not ask again inside the backoff"
+
+    record = json.loads((tmp_path / "usage-claude.json").read_text())
+    assert record["blocked_until"] > time.time() + 5 * 3600
+    assert "not asking again" in record["note"]
+
+
+def test_the_switch_is_honoured(tmp_path, monkeypatch):
+    """The account at risk is the user's, so whether to ask at all is theirs."""
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    monkeypatch.setattr(budget_mod, "_fetching_allowed", lambda: False)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: pytest.fail("asked while the switch was off"))
+    b = budget_mod.read_claude()
+    assert b.known is False and "ask_provider_for_usage" in b.note
+
+
+def test_the_shipped_default_is_to_ask(tmp_path):
+    from multiagents.config import load
+
+    assert load(None).limits.get("ask_provider_for_usage") is True
+
+
+def test_a_429_is_a_pause_not_an_hour_of_silence(tmp_path, monkeypatch):
+    """429 is overloaded: far more often "too many at once" than "you are out".
+    Answering a sixty-second concurrency limit with an hour of silence turns
+    somebody else's transient into our own outage."""
+    from multiagents import budget as budget_mod
+
+    assert budget_mod._refused_for("usage endpoint returned HTTP 429") == 300
+    assert budget_mod._refused_for("usage endpoint returned HTTP 403") == 6 * 3600
+
+
+def test_the_servers_own_retry_after_wins(tmp_path):
+    """It knows when it will answer; we are guessing."""
+    from multiagents import budget as budget_mod
+
+    class _Exc:
+        headers = {"Retry-After": "45"}
+
+    assert budget_mod._retry_after(_Exc()) == 45
+    note = "usage endpoint returned HTTP 429 [retry-after 45s]"
+    assert budget_mod._refused_for(note) == 45
+
+    class _Absurd:
+        headers = {"Retry-After": "999999"}
+
+    assert budget_mod._retry_after(_Absurd()) == budget_mod.RETRY_AFTER_MAX
+
+    class _Date:
+        from email.utils import format_datetime
+        from datetime import datetime, timezone
+        headers = {"Retry-After": format_datetime(
+            datetime.fromtimestamp(time.time() + 120, timezone.utc))}
+
+    assert 110 <= budget_mod._retry_after(_Date()) <= 125
+
+
+def test_a_cold_start_waits_for_the_writer_instead_of_giving_up(tmp_path, monkeypatch):
+    """Every process on the machine reaches this in the same second the first
+    time anything asks, and there is no stale copy to fall back to."""
+    import fcntl
+    import threading
+
+    budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
+    monkeypatch.setattr(budget_mod, "fetch_claude_usage",
+                        lambda: pytest.fail("fetched while another held the lock"))
+
+    path = tmp_path / "usage-claude.json"
+    held = (tmp_path / "usage-claude.lock").open("a+")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+
+    def writer():
+        time.sleep(0.4)                       # as if the request took that long
+        path.write_text(json.dumps({"at": time.time(), "payload": USAGE_PAYLOAD,
+                                    "note": ""}))
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        assert budget_mod.read_claude().known, "it waited for the answer"
+    finally:
+        thread.join()
+        held.close()

@@ -64,14 +64,27 @@ def alive(pid: int | None) -> bool:
 
 def verdict(*, running: bool, quiet_for: float | None, quota_known: bool,
             quota_left: float | None, active_agents: int,
-            supported: bool = True) -> tuple[str, str]:
+            supported: bool = True, limit: dict | None = None) -> tuple[str, str]:
     """Turn the samples into one word and a sentence.
 
     The quota reading is what separates the two cases that matter and that the
     transcript alone cannot tell apart: a session that ended because it ran out,
     and one that ended because it broke.
+
+    `limit` — the CLI's own limit message, last in the log — outranks all of it.
+    A quota reader can go blind (the vendor moved the field, and this one did),
+    and when it does an orchestrator stopped dead by its provider reads as
+    "idle, probably waiting for you", which is the most misleading sentence
+    this function can produce.
     """
     exhausted = quota_known and quota_left is not None and quota_left <= 0.02
+
+    if limit:
+        if running:
+            return "limited", (f"alive but stopped by its provider: "
+                               f"{limit.get('detail', 'usage limit')}")
+        return "out_of_quota", (f"gone, stopped by its provider: "
+                                f"{limit.get('detail', 'usage limit')}")
 
     if not running:
         if exhausted:
@@ -123,9 +136,11 @@ def sample(paths, config, provider, role: str, pid: int | None,
     quota_known = bool(getattr(budget, "known", False))
     quota_left = getattr(budget, "headroom", None)
 
+    limit = limit_reached(provider, paths.root) if provider is not None else None
     state, detail = verdict(running=running, quiet_for=quiet_for,
                             quota_known=quota_known, quota_left=quota_left,
-                            active_agents=active, supported=supported)
+                            active_agents=active, supported=supported,
+                            limit=limit)
     return {
         "at": time.time(),
         "role": role,
@@ -134,6 +149,7 @@ def sample(paths, config, provider, role: str, pid: int | None,
         "verdict": state,
         "detail": detail,
         "transcript": record or None,
+        "limit": limit,
         "active_agents": active,
         "provider": {
             "name": getattr(provider, "name", ""),
@@ -241,3 +257,68 @@ def has_human_turn(provider: Any, cwd: Path) -> bool | None:
     except OSError:
         return None
     return False
+
+
+def _typed_by_a_person(record: dict) -> bool:
+    """A `user` record someone actually typed, rather than a tool result."""
+    if record.get("type") != "user":
+        return False
+    content = (record.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "text"
+        for block in content)
+
+
+def limit_reached(provider: Any, cwd: Path) -> dict | None:
+    """The CLI's own "I have stopped" message, if it is the last thing said.
+
+    Not a classifier over model prose. These strings are hardcoded by the CLI's
+    error handler, and the only reason they must be read out of a chat log is
+    that the CLI chose the chat log as its error channel rather than stderr or
+    an exit code. Same object as a stack trace, worse address.
+
+    Position matters as much as content: it must be the last assistant message,
+    with nothing a person typed after it. A limit hit and then recovered from is
+    history, an agent quoting the string mid-conversation is not the CLI saying
+    it, and a limit someone has already replied to is theirs, not ours.
+    """
+    markers = (getattr(provider, "transcript", None) or {}).get("limit_markers") or []
+    if not markers:
+        return None
+    path = newest_transcript(provider, cwd)
+    if path is None:
+        return None
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+
+    for line in reversed(lines[-400:]):
+        if '"assistant"' not in line and '"user"' not in line:
+            continue                       # cheap reject before parsing
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        # Someone spoke after it. Whatever the CLI said before that, a person is
+        # here and has taken it from us — acting now would end a session while
+        # its owner is using it. Tool results are `user` records too, so this
+        # asks who typed it, never what it says.
+        if _typed_by_a_person(record):
+            return None
+        if record.get("type") != "assistant":
+            continue                       # `system`, `mode`, hooks: not a turn
+        content = (record.get("message") or {}).get("content")
+        if isinstance(content, list):
+            content = " ".join(str(b.get("text", "")) for b in content
+                               if isinstance(b, dict))
+        text = str(content or "")
+        for marker in markers:
+            if marker.get("match", "") and marker["match"].lower() in text.lower():
+                return {"detail": marker.get("detail") or marker["match"],
+                        "resets": bool(marker.get("resets", True)),
+                        "said": text.strip()[:300]}
+        return None            # the last assistant message is not a limit
+    return None
