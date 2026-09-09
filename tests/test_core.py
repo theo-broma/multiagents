@@ -4320,7 +4320,7 @@ def test_a_stored_login_is_reported_apart_from_evidence_that_it_works(tmp_path,
     out = server_mod.auth_status()
     claude = out["providers"]["claude"]
     assert claude["stored_login"] is True, "the credential really is on disk"
-    assert claude["verified_working"] is False, "and nothing says it works"
+    assert claude["last_run"] == "failed", "and the evidence says it does not work"
     assert claude["recent_failures"] == 2
     assert "not a working one" in claude["warning"]
     assert out["degraded"] == ["claude"]
@@ -4352,3 +4352,71 @@ def test_steer_does_not_report_running_against_a_dead_run(tmp_path):
     assert result["steered"] is False, result
     assert "ended immediately" in result["error"]
     assert result["status"] != "running"
+
+
+def test_never_having_run_is_not_reported_as_failing(tmp_path, monkeypatch):
+    """A boolean false would read as "broken" for a provider that has simply
+    not run yet, and send the orchestrator off to debug a healthy system."""
+    import multiagents.server as server_mod
+    from multiagents.config import Config
+
+    class _Run:
+        providers = {}
+        paths = _paths(tmp_path)
+        tree = _tree(tmp_path)
+        config = Config(project={}, providers={}, agents={}, models={},
+                        instruction_dirs=[])
+    monkeypatch.setattr(server_mod, "runner", lambda: _Run())
+    monkeypatch.setattr(server_mod.auth_mod, "check_all", lambda *a, **k: {
+        "agy": type("S", (), {"ok": True, "to_dict": lambda self: {
+            "provider": "agy", "authenticated": True}})()})
+
+    fresh = server_mod.auth_status()["providers"]["agy"]
+    assert fresh["last_run"] == "untested"
+    assert fresh["recent_failures"] == 0
+    assert "warning" not in fresh, "no evidence is not a problem to report"
+
+    _Run.tree.note_run_outcome("agy", ok=True, threshold=3)
+    assert server_mod.auth_status()["providers"]["agy"]["last_run"] == "success"
+
+
+def test_steer_confirms_on_the_first_event_not_a_fixed_sleep(tmp_path):
+    """A fixed sleep loses in both directions: it blocks a healthy agent for no
+    reason, and still races a failure that takes longer than the timeout."""
+    import asyncio
+    import multiagents.runner as runner_mod
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "sleep 30"],
+                                              "resume": ["-c", "sleep 30"]}}})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
+                    parent=None, depth=1, status="running", session_id="s-1",
+                    worktree=str(tmp_path)))
+
+    async def scenario():
+        started = asyncio.get_running_loop().time()
+        task = asyncio.ensure_future(r.steer("ag-1", "carry on"))
+        await asyncio.sleep(0.2)
+        run = r.runs.get("ag-1")
+        if run is not None:
+            run.events.append({"kind": "step"})      # the agent shows signs of life
+        result = await task
+        return result, asyncio.get_running_loop().time() - started
+
+    result, elapsed = asyncio.run(scenario())
+    assert result["steered"] is True and result["status"] == "running"
+    assert elapsed < runner_mod.STEER_CONFIRM_SECONDS, (
+        f"returned in {elapsed:.1f}s; it must not wait out the ceiling")
+
+
+def test_the_bug_reporter_is_told_where_to_stop_guessing():
+    """It got the evidence and the fix right and the cause wrong, guessing at a
+    mechanism it could not see. A confident wrong hypothesis reads as a finding
+    and costs someone an hour."""
+    brief = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+             / "defaults" / "agents" / "bug-reporter.md").read_text()
+    flat = " ".join(brief.split())
+
+    assert "Do not guess at systems you cannot verify" in flat
+    assert "say exactly where the trail goes cold" in flat

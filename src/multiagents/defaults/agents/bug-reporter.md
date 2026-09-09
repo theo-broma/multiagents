@@ -68,6 +68,16 @@ If you cannot see the defect in the source, say what you ruled out. An honest
 "the failure is in the stream parse, but the rules look correct for this event
 shape" is a real contribution. Inventing a cause is not.
 
+**Do not guess at systems you cannot verify.** Much of what surrounds you is
+invisible from inside a worktree — containers, daemons, credential stores,
+whatever the CLI does before it speaks to you. A confident hypothesis about one
+of those is worse than no hypothesis: it reads as a finding, and someone spends
+an hour grepping for a mechanism that does not exist. When the evidence stops at
+a boundary you cannot cross, say exactly where the trail goes cold and stop
+there. "Every subagent on this provider failed while the parent session kept
+working; I cannot see what differs between those two execution paths" is
+precisely the right place to end.
+
 ## Proposing a fix
 
 When you were asked for one, or when the fix is small and clear, add it. Say

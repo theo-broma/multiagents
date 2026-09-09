@@ -1324,10 +1324,14 @@ and reports what actually happened.
 `auth_status` reports the two things separately rather than blending them:
 
 ```
-stored_login     true     the credential really is on disk
-verified_working false    and nothing says it works
-recent_failures  2        401 revoked
+stored_login    true      the credential really is on disk
+last_run        failed    and the evidence says it does not work
+recent_failures 2         401 revoked
 ```
+
+`last_run` is `success`, `failed` or **`untested`** rather than a boolean: a
+provider that has simply not run yet is not a broken one, and a false there
+would send the orchestrator off to debug a healthy system.
 
 Three things now close it:
 
@@ -1580,7 +1584,7 @@ $ multiagents upgrade-config --dry-run
 make test
 ```
 
-256 tests covering the parts live runs do not reliably exercise: doom-loop
+259 tests covering the parts live runs do not reliably exercise: doom-loop
 detection, credential redaction, config merge semantics, corrupt-tree recovery,
 catalog drift assessment, the docker executor's mount and network construction,
 the provider script contract, the orchestrator-not-spawnable guards, the
