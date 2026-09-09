@@ -5130,7 +5130,7 @@ def _claude_files(tmp_path, monkeypatch, cache=None, fetched_ms=None,
     # Never the machine's real shared copy: a test that reads it would pass or
     # fail on what the developer's account happened to have left there.
     monkeypatch.setattr(budget_mod, "_shared_cache_file",
-                        lambda: tmp_path / "usage-claude.json")
+                        lambda config_dir=None: tmp_path / "usage-claude.json")
     return budget_mod
 
 
@@ -5139,7 +5139,7 @@ def test_a_fresh_cache_is_read_and_the_account_is_not_asked(tmp_path, monkeypatc
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=USAGE_PAYLOAD,
                               fetched_ms=time.time() * 1000)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: pytest.fail("asked the account for a fresh cache"))
+                        lambda config_dir=None: pytest.fail("asked the account for a fresh cache"))
     b = budget_mod.read_claude()
     assert b.known and round(b.headroom, 2) == 0.04
     assert b.resets_at == "2026-09-09T16:50:00+00:00"
@@ -5150,7 +5150,7 @@ def test_a_missing_cache_asks_the_account_instead_of_going_blind(tmp_path, monke
     window reading in the project went with it, for weeks, silently."""
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: (USAGE_PAYLOAD, ""))
+                        lambda config_dir=None: (USAGE_PAYLOAD, ""))
     b = budget_mod.read_claude()
     assert b.known and b.source == "api/oauth/usage"
     assert b.severity == "critical"
@@ -5161,7 +5161,7 @@ def test_a_stale_cache_is_refreshed(tmp_path, monkeypatch):
         tmp_path, monkeypatch, cache={"five_hour": {"utilization": 1.0}},
         fetched_ms=(time.time() - 4 * 3600) * 1000)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: (USAGE_PAYLOAD, ""))
+                        lambda config_dir=None: (USAGE_PAYLOAD, ""))
     assert round(budget_mod.read_claude().headroom, 2) == 0.04, \
         "the four-hour-old 1% reading would have sent work at a full window"
 
@@ -5169,7 +5169,7 @@ def test_a_stale_cache_is_refreshed(tmp_path, monkeypatch):
 def test_an_unreachable_account_degrades_to_unknown_rather_than_raising(tmp_path, monkeypatch):
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: (None, "usage endpoint unreachable: URLError"))
+                        lambda config_dir=None: (None, "usage endpoint unreachable: URLError"))
     b = budget_mod.read_claude()
     assert b.known is False and "unreachable" in b.note
     assert b.usable, "unknown headroom is not no headroom"
@@ -5239,7 +5239,7 @@ def test_one_fetch_per_machine_not_one_per_process(tmp_path, monkeypatch):
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     fetches = []
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: (fetches.append(1), (USAGE_PAYLOAD, ""))[1])
+                        lambda config_dir=None: (fetches.append(1), (USAGE_PAYLOAD, ""))[1])
 
     first = budget_mod.read_claude()
     second = budget_mod.read_claude()
@@ -5254,11 +5254,11 @@ def test_a_reader_that_cannot_take_the_lock_keeps_the_stale_number(tmp_path, mon
 
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: (USAGE_PAYLOAD, ""))
+                        lambda config_dir=None: (USAGE_PAYLOAD, ""))
     budget_mod.read_claude()                       # populate the shared copy
     monkeypatch.setattr(budget_mod, "SHARED_TTL", 0.0)   # force it stale
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: pytest.fail("fetched while another held the lock"))
+                        lambda config_dir=None: pytest.fail("fetched while another held the lock"))
 
     held = (tmp_path / "usage-claude.lock").open("a+")
     fcntl.flock(held.fileno(), fcntl.LOCK_EX)
@@ -5311,7 +5311,7 @@ def test_a_refusal_stops_the_asking_rather_than_retrying_on_a_timer(tmp_path, mo
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     calls = []
 
-    def refused():
+    def refused(config_dir=None):
         calls.append(1)
         return None, "usage endpoint returned HTTP 403: permission_error"
 
@@ -5331,7 +5331,7 @@ def test_the_switch_is_honoured(tmp_path, monkeypatch):
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     monkeypatch.setattr(budget_mod, "_fetching_allowed", lambda: False)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: pytest.fail("asked while the switch was off"))
+                        lambda config_dir=None: pytest.fail("asked while the switch was off"))
     b = budget_mod.read_claude()
     assert b.known is False and "ask_provider_for_usage" in b.note
 
@@ -5385,7 +5385,7 @@ def test_a_cold_start_waits_for_the_writer_instead_of_giving_up(tmp_path, monkey
 
     budget_mod = _claude_files(tmp_path, monkeypatch, cache=None)
     monkeypatch.setattr(budget_mod, "fetch_claude_usage",
-                        lambda: pytest.fail("fetched while another held the lock"))
+                        lambda config_dir=None: pytest.fail("fetched while another held the lock"))
 
     path = tmp_path / "usage-claude.json"
     held = (tmp_path / "usage-claude.lock").open("a+")
@@ -6558,3 +6558,212 @@ def test_a_seeded_file_is_not_clobbered_by_a_later_host_edit(tmp_path, monkeypat
 
     kept = json.loads((backing / "settings.json").read_text())
     assert kept == {"model": "opus", "containerOnly": True}
+
+
+# --------------------------------------------------------------------------
+# More than one account on the same CLI
+
+
+def _family_budgets(**kwargs):
+    from multiagents.budget import Budget
+    out = {}
+    for name, spec in kwargs.items():
+        name = name.replace("_", "-")
+        if spec == "free":
+            out[name] = Budget(name, known=True, headroom=0.9)
+        elif spec == "low":
+            out[name] = Budget(name, known=True, headroom=0.10)
+        elif isinstance(spec, (int, float)):
+            out[name] = Budget(name, known=True, headroom=0.0,
+                               cooldown_until=time.time() + spec)
+    return out
+
+
+def _choose(preferred, budgets, family, **kwargs):
+    from multiagents.budget import choose_provider
+    return choose_provider(preferred, budgets, ["opencode", "defer"], 0.15,
+                           reserved={"claude"},
+                           allowed=set(budgets) | set(family),
+                           family=family, **kwargs)
+
+
+def test_a_second_account_is_four_lines_and_inherits_the_integration(tmp_path):
+    """A subscription is not a new vendor. Duplicating the whole block to add
+    one would leave two copies of a parsing contract to keep in step."""
+    from multiagents.providers import families, load_providers
+
+    providers = load_providers({
+        "claude": {"bin": "claude", "spawn": {"args": ["-p", "{prompt}"]},
+                   "stream": {"format": "ndjson"},
+                   "container_private_home": [".claude"]},
+        "claude-b": {"extends": "claude",
+                     "env": {"CLAUDE_CONFIG_DIR": "~/.profiles/b"},
+                     "container_private_home": [".claude-b"]},
+    })
+    instance = providers["claude-b"]
+    assert instance.bin == "claude"                       # the integration
+    assert instance.spawn == {"args": ["-p", "{prompt}"]}
+    assert instance.family == "claude"                    # the namespace
+    assert instance.env == {"CLAUDE_CONFIG_DIR": "~/.profiles/b"}
+    assert families(providers) == {"claude": ["claude", "claude-b"]}
+
+
+def test_two_instances_may_not_claim_the_same_container_profile(tmp_path):
+    """Inheriting the parent's private home is the natural way to write that by
+    accident, and it would be two mounts at one destination with both accounts
+    authenticating as whichever won."""
+    from multiagents.providers import _instance_conflicts, load_providers
+
+    providers = load_providers({
+        "claude": {"bin": "claude", "spawn": {}, "stream": {},
+                   "container_private_home": [".claude"]},
+        "claude-b": {"extends": "claude"},                # inherits ~/.claude
+    })
+    problems = _instance_conflicts(providers)
+    assert problems and "both claim ~/.claude" in problems[0]
+    assert "env:" in problems[0], "and it says how to fix it"
+
+
+def test_the_instances_environment_reaches_scripts_and_agents(tmp_path):
+    """An instance that authenticates as B but runs as A is worse than no
+    second instance at all."""
+    import inspect
+    from multiagents import scripts
+    from multiagents.providers import load_providers
+    from multiagents.runner import Runner
+
+    provider = load_providers({"claude-b": {
+        "bin": "claude", "spawn": {}, "stream": {},
+        "env": {"CLAUDE_CONFIG_DIR": "~/.profiles/b"}}})["claude-b"]
+
+    class _Executor:
+        kind = "local"
+
+    env = scripts.build_env("claude-b", provider, _Executor())
+    assert env["CLAUDE_CONFIG_DIR"] == str(Path.home() / ".profiles/b"), \
+        "expanded, so a script does not have to"
+
+    body = inspect.getsource(Runner._launch)
+    assert "provider.env or {}" in body, "and agent runs get it too"
+
+
+def test_a_worker_leaves_the_orchestrators_account_while_it_still_can(tmp_path):
+    """The owner's rule: the orchestrator uses the first account and the agents
+    the second, so the orchestrator keeps a window to read results in. That has
+    to happen while its account still looks healthy, not once it is in
+    trouble."""
+    chosen, why = _choose("claude", _family_budgets(claude="free", claude_b="free"),
+                          ["claude", "claude-b"])
+    assert chosen == "claude-b"
+    assert "held for the orchestrator" in why
+
+
+def test_the_least_busy_account_takes_the_work_not_the_emptiest(tmp_path):
+    """Headroom is a percentage refreshed every few minutes and shared by every
+    concurrent agent: sorting on it pins ten spawns to whichever instance was
+    ahead at the last reading and annihilates it before the next."""
+    budgets = _family_budgets(claude="free", claude_b="free", claude_c="free")
+    budgets["claude-b"].headroom = 0.95                   # the emptiest
+    chosen, _ = _choose("claude", budgets, ["claude", "claude-b", "claude-c"],
+                        load={"claude-b": 3, "claude-c": 1})
+    assert chosen == "claude-c", \
+        "ranked by agents running (c has 1, b has 3), not by b's larger headroom"
+
+    # Equal load: the one used longest ago, so ties do not pin.
+    chosen, _ = _choose("claude", budgets, ["claude", "claude-b", "claude-c"],
+                        load={}, last_used={"claude-b": time.time(),
+                                            "claude-c": time.time() - 600})
+    assert chosen == "claude-c"
+
+
+def test_a_short_window_is_waited_out_rather_than_spilled(tmp_path):
+    """Moving a swarm of workers onto the orchestrator's account to avoid a
+    twenty-minute wait is how the orchestrator starves."""
+    chosen, why = _choose("claude", _family_budgets(claude=6 * 3600, claude_b=600),
+                          ["claude", "claude-b"], wait_for_reset_within=1800)
+    assert chosen is None and "resets shortly" in why
+
+    # A wall days away is a different thing, and moving is then right.
+    chosen, _ = _choose("claude", _family_budgets(claude="free", claude_b=50 * 3600),
+                        ["claude", "claude-b"], wait_for_reset_within=1800)
+    assert chosen == "claude"
+
+
+def test_the_orchestrators_account_keeps_its_floor_even_under_spill(tmp_path):
+    """Spilling onto a reserved instance must look at the TARGET's surplus, not
+    only at how long the source is down for."""
+    chosen, why = _choose("claude", _family_budgets(claude="low", claude_b=50 * 3600),
+                          ["claude", "claude-b"], wait_for_reset_within=1800)
+    assert chosen is None, "10% left is not a spare account"
+
+
+def test_one_account_behaves_exactly_as_before(tmp_path):
+    """The whole feature has to be invisible to a project with one
+    subscription."""
+    chosen, why = _choose("claude", _family_budgets(claude="free"), ["claude"])
+    assert chosen == "claude" and why == "preferred provider has headroom"
+
+
+def test_a_family_is_cooled_only_when_two_of_its_accounts_fail(tmp_path, monkeypatch):
+    """If the CLI itself breaks, each account fails in turn and each needs its
+    own three failed runs — twelve wasted runs with four profiles. But a corrupt
+    profile or one account's own trouble must not take the family down."""
+    from multiagents.providers import load_providers
+    from multiagents.runner import Runner
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    runner = Runner.__new__(Runner)
+    runner.paths = paths
+    runner.config = _config()
+    runner.tree = Tree(paths.tree_file, paths.events_file)
+    runner.providers = load_providers({
+        "claude": {"bin": "claude", "spawn": {}, "stream": {}},
+        "claude-b": {"extends": "claude"},
+        "claude-c": {"extends": "claude"},
+        "opencode": {"bin": "opencode", "spawn": {}, "stream": {}},
+    })
+
+    # One account in trouble is one account's problem.
+    runner._maybe_cool_family("claude", 1800)
+    assert runner.tree.cooldown("claude-b") is None
+
+    # A second one cooling is evidence about the vendor, not about either.
+    runner.tree.set_cooldown("claude-b", time.time() + 50 * 3600, "a 50h quota wall")
+    runner._maybe_cool_family("claude", 50 * 3600)
+    inferred = runner.tree.cooldown("claude-c")
+    assert inferred is not None
+    assert runner.tree.cooldown("opencode") is None, "a different vendor is untouched"
+    # SHORT, and not the fifty hours that tripped it: one account's quota wall
+    # plus another's transient error must not lock the vendor out for days.
+    assert inferred["until"] - time.time() < 3600
+
+
+def test_a_fan_out_does_not_send_every_worker_to_one_account(tmp_path):
+    """Routing counts running agents, and a node is not running — not even
+    recorded — until after the choice. So five spawns in the same instant read
+    the same counts and pick the same account, which is the pile-up the
+    counting exists to prevent."""
+    from multiagents.budget import pick_instance
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    budgets = _family_budgets(claude_a="free", claude_b="free")
+    names = ["claude-a", "claude-b"]
+
+    picked = []
+    for _ in range(4):
+        load = dict(tree.recent_claims())
+        chosen = pick_instance(names, budgets, 0.15, set(), load)
+        tree.claim_instance(chosen)
+        picked.append(chosen)
+    assert picked == ["claude-a", "claude-b", "claude-a", "claude-b"], \
+        "without the claim, all four would have read a count of zero"
+
+    # A claim is spent when the node it stood in for starts, or the instance
+    # would look twice as busy as it is.
+    tree.add(Node(id="ag-1", agent="w", provider="claude-a", model="m",
+                  parent=None, depth=0))
+    tree.set_status("ag-1", "running")
+    assert tree.recent_claims()["claude-a"] == 1

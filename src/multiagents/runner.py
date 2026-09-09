@@ -35,6 +35,7 @@ from . import gitops
 from .config import AgentSpec, Config
 from .executor import build_env, get_executor, prepare_home
 from .executor.base import Handle
+from . import providers as providers_mod
 from .paths import ProjectPaths, global_config_dir
 from .providers import Event, Provider, load_providers
 from .redact import scrub
@@ -292,6 +293,67 @@ class Runner:
                 budget.cooldown_until = now() + auth_window
                 budget.note = reason
 
+    def _maybe_cool_family(self, tripped: str, _seconds: float) -> None:
+        """Stop the router walking every account of a broken integration.
+
+        If the CLI itself breaks — a parse rule, an update, a vendor outage —
+        each account fails in turn and each needs its own three failed runs to
+        trip. With four profiles that is twelve wasted runs before anything
+        stops.
+
+        But an instance-only fault must not take the family down with it: a
+        corrupt profile, a permission error, one account's own trouble. So the
+        family is only cooled on CORRELATED failure — a second member already
+        cooling — which is evidence about the vendor rather than a guess about
+        the cause. An advisor's rule, and the right one.
+        """
+        provider = self.providers.get(tripped)
+        family = getattr(provider, "family", "") or tripped
+        members = [name for name, entry in self.providers.items()
+                   if (getattr(entry, "family", "") or name) == family
+                   and name != tripped]
+        if not members:
+            return
+        cooling = [name for name in members if self.tree.cooldown(name)]
+        if not cooling:
+            return
+        # SHORT, and deliberately not the tripped instance's own window. That
+        # one is an observed penalty — this account hit a wall that lasts fifty
+        # hours. A family cooldown is an inference from two members failing at
+        # once, and inheriting the observed duration would turn one account's
+        # quota wall plus another's transient error into a multi-day lockout of
+        # a vendor that was never actually down. An advisor's point, and right.
+        seconds = float(self.config.limits.get(
+            "provider_family_cooldown_seconds", 300))
+        for name in members:
+            if not self.tree.cooldown(name):
+                self.tree.set_cooldown(
+                    name, now() + seconds,
+                    f"{family}: {tripped} and {cooling[0]} both failed — pausing "
+                    f"the family briefly, which looks like the integration "
+                    f"rather than either account")
+        self.tree.emit("system", "family_down", family=family,
+                       members=sorted([tripped, *members]))
+
+    def _instance_load(self) -> tuple[dict[str, int], dict[str, float]]:
+        """How busy each provider is, and when it was last given work.
+
+        Read from the tree rather than kept in memory: every agent runs its own
+        MCP server process, so an in-memory count would have each of them
+        believing it was the only one choosing.
+        """
+        load: dict[str, int] = dict(self.tree.recent_claims())
+        last: dict[str, float] = {}
+        for node in self.tree.read().get("nodes", {}).values():
+            name = node.get("provider") or ""
+            if not name:
+                continue
+            started = float(node.get("started_at") or node.get("created_at") or 0)
+            last[name] = max(last.get(name, 0.0), started)
+            if node.get("status") in ("running", "starting"):
+                load[name] = load.get(name, 0) + 1
+        return load, last
+
     def _orchestrator_provider(self) -> str:
         """Whose quota the orchestrator itself is spending."""
         for spec in self.config.agents.values():
@@ -545,6 +607,13 @@ class Runner:
                 "MULTIAGENTS_PROJECT": str(self.paths.root),
             },
         )
+        # The provider instance's own environment — the thing that makes a
+        # second subscription a second account rather than the same one twice.
+        # After build_env, because build_env starts from a clean slate and this
+        # is not passthrough: it is configuration, not inheritance.
+        for key, value in (provider.env or {}).items():
+            env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+
         options = {"effort": spec.effort,
                    **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
         argv = provider.build_command(
@@ -636,17 +705,30 @@ class Runner:
         )
         self._half_open(budgets, cooldowns)
         routed_from, routed_why = "", ""
+        budget_cfg = self.config.project.get("budget", {})
+        # Other accounts on the same CLI. Interchangeable without a `models:`
+        # entry, because a model id means the same thing on both.
+        family = providers_mod.families(self.providers).get(
+            self.providers[spec.provider].family
+            if spec.provider in self.providers else "", [])
+        load, last_used = self._instance_load()
         chosen, why = budget_mod.choose_provider(
             spec.provider, budgets,
-            list(self.config.project.get("budget", {}).get("fallback_chain", [])),
-            float(self.config.project.get("budget", {}).get("reserve_headroom", 0.15)),
+            list(budget_cfg.get("fallback_chain", [])),
+            float(budget_cfg.get("reserve_headroom", 0.15)),
             reserved=budget_mod.reserved_providers(
                 self.config.project, self.providers, self._orchestrator_provider()),
             # Only the providers this agent has a model to run on. A candidate
             # it cannot use is not a candidate, and discovering that afterwards
             # is how a run ended up back on the provider just ruled out.
-            allowed={spec.provider, *(spec.models or spec.extra.get("models") or {})},
+            allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
+                     *family},
+            family=family,
+            load=load, last_used=last_used,
+            wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
         )
+        if chosen is not None and len(family) > 1:
+            self.tree.claim_instance(chosen)
         if chosen is None:
             # Prefer a real reset time over the blind cooldown: a provider that
             # told us when it comes back should not be waited on for longer.
@@ -936,6 +1018,7 @@ class Runner:
                               f"`multiagents doctor`")
                 self.tree.set_cooldown(name, now() + seconds, reason,
                                        needs_login=authenticated is False)
+                self._maybe_cool_family(name, seconds)
 
         # Commit anything the agent left uncommitted so no work is stranded on
         # an unreferenced worktree. Skipped while parked on a question: the

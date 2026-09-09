@@ -367,3 +367,61 @@ providers:
   #       - match: {kind: "tool_call"}
   #         as: tool
   #         fields: {name: "tool.name", args: "tool.arguments"}
+
+  # ---------------------------------------------------------------------
+  # A SECOND ACCOUNT ON THE SAME CLI
+  #
+  # Two subscriptions are two providers: same binary, same script, same
+  # parsing, different credentials. `extends` copies the integration so this is
+  # four lines rather than a duplicated block, and `family` says the two share a
+  # MODEL NAMESPACE — which is what makes failover between them free. `opus`
+  # means the same thing on both accounts, so no agent needs a `models:` entry
+  # to move from one to the other.
+  #
+  # `env` is what actually separates them, and it is applied to every action as
+  # well as to every agent run. Measured on this machine rather than assumed:
+  # CLAUDE_CONFIG_DIR relocates claude's whole state — credentials, config,
+  # transcripts, even the daemon lock — and XDG_DATA_HOME does the same for
+  # opencode. agy is the exception: its host credential lives in the GNOME
+  # keyring, which no environment variable moves, so a second agy account needs
+  # a container profile of its own instead.
+  #
+  # Then: `multiagents auth login claude-b`, which signs that profile in with
+  # your own browser, and the roster needs no change at all — the agents' pins
+  # choose the family, and the router chooses which account runs the work.
+  #
+  # claude-b:
+  #   extends: claude
+  #   env:
+  #     CLAUDE_CONFIG_DIR: "~/.multiagents/profiles/claude-b"
+  #   # Under docker, an instance needs its OWN container profile path, or two
+  #   # instances would be two mounts at one destination and both would
+  #   # authenticate as whichever won. Checked at load time, not left to chance.
+  #   container_private_home: [".claude-b"]
+  #
+  # opencode-b:
+  #   extends: opencode
+  #   env:
+  #     XDG_DATA_HOME: "~/.multiagents/profiles/opencode-b/share"
+  #     XDG_CONFIG_HOME: "~/.multiagents/profiles/opencode-b/config"
+  #
+  # `family` is what makes the two INTERCHANGEABLE, and that is a choice. Two
+  # accounts you keep apart on purpose — work and personal, two clients, two
+  # billing lines — should not be interchangeable, and saying so is one line:
+  #
+  # claude-personal:
+  #   extends: claude
+  #   family: claude-personal        # its own family of one: never failed over to
+  #   env: {CLAUDE_CONFIG_DIR: "~/.multiagents/profiles/personal"}
+  #
+  # What the router then does, in the owner's words and in this order:
+  #   * an agent pinned to the orchestrator's account runs on the OTHER one
+  #     while it can, so the orchestrator keeps a window to read results in;
+  #   * among the other accounts it picks the least busy, counted from the tree
+  #     so every agent process ranks them the same way — never "the most
+  #     headroom", which is a stale percentage that pins ten spawns to one
+  #     account and annihilates it before the next reading;
+  #   * if they are all full but one comes back within
+  #     `budget.wait_for_reset_seconds`, the work WAITS rather than moving;
+  #   * only a long exhaustion sends work to the orchestrator's account, and
+  #     even then only while that account is above `budget.reserve_headroom`.

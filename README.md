@@ -2048,6 +2048,61 @@ event is emitted, the monitor's agent card shows *"↳ meant for opencode — �
 and a provider sitting below the reserve raises a warning that says work is
 being sent elsewhere.
 
+### More than one account on the same CLI
+
+Two subscriptions are two providers: same binary, same script, same parsing,
+different credentials.
+
+```yaml
+claude-b:
+  extends: claude                                   # the integration, inherited
+  env: {CLAUDE_CONFIG_DIR: "~/.multiagents/profiles/claude-b"}
+  container_private_home: [".claude-b"]             # its own profile in the container
+```
+
+then `multiagents auth login claude-b`. **The roster does not change.** An
+agent's pin chooses the *family* — providers sharing a model namespace, which is
+what makes failover between them free, since `opus` means the same thing on both
+accounts — and the router chooses which account runs the work. Two accounts you
+keep apart on purpose are one line the other way: `family: claude-personal` puts
+an instance in a family of its own, never failed over to.
+
+`env` is what separates them, and it is applied to every action *and* every agent
+run, because an instance that authenticates as B and runs as A is worse than no
+second instance at all. Measured rather than assumed: `CLAUDE_CONFIG_DIR`
+relocates claude's whole state, `XDG_DATA_HOME` does the same for opencode. agy
+is the exception — its host credential is in the GNOME keyring, which no
+variable moves — so a second agy account needs a container profile instead.
+
+What the router does, in order:
+
+| | |
+|---|---|
+| an agent pinned to the orchestrator's account | runs on another one **while it still can**, so the orchestrator keeps a window to read results in |
+| choosing among the others | fewest agents running, then longest since last used — counted from the tree, so every agent process ranks them alike |
+| all full, one back within `budget.wait_for_reset_seconds` | **waits**, rather than moving the work |
+| all full for a long time | spills onto the orchestrator's account — but only while that account is above `budget.reserve_headroom` |
+
+**Never the emptiest account.** Headroom is a percentage refreshed every few
+minutes and shared by every concurrent agent; sorting on it pins ten spawns to
+whichever instance led at the last reading and annihilates it before the next.
+It is a filter here, never a ranking. For the same reason routing **claims** the
+instance it picked: a node is not recorded until after the choice is made, so a
+fan-out of five would otherwise read the same counts and all pick the same
+account. The claim is written under the tree's lock and is spent when the node
+it stood in for starts running.
+
+**An instance choice binds for the life of a thread.** A conversation lives in
+its profile directory, so "resume on the other account" would resume nothing.
+Routing happens once, at spawn; steer and resume reuse the node's own provider.
+
+**The breaker works at two levels.** An account failing cools that account. The
+*family* is cooled only when a second member is already cooling — evidence about
+the vendor rather than a guess about the cause — and then only for
+`limits.provider_family_cooldown_seconds` (5 min), because that is an inference,
+not the observed penalty that tripped the first one. Without it, a broken
+integration is discovered once per account at three failed runs each.
+
 ### Where the money went
 
 No provider offers a per-model breakdown — opencode's `/usage/{models,detail,

@@ -103,6 +103,12 @@ def build_env(provider_name: str, provider: Any, executor: Any,
             env["MULTIAGENTS_PRIVATE_HOME"] = str(container_path)
             env["MULTIAGENTS_PRIVATE_BACKING"] = str(host_path)
             break
+    # The instance's own environment, expanded. This is what separates two
+    # accounts on one CLI, so it is applied to EVERY action: a `check` that
+    # inspects profile A while `launch` runs as profile B would report on an
+    # account nobody is using.
+    for key, value in (getattr(provider, "env", None) or {}).items():
+        env[key] = os.path.expanduser(os.path.expandvars(str(value)))
     env.update(extra or {})
     return env
 
