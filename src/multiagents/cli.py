@@ -2484,31 +2484,41 @@ def cmd_supervise(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """What the orchestrator is doing, from outside it."""
+    """What is driving this project, from outside it.
+
+    Both roles report: `run` launches the orchestrator and `init-agent` the
+    initializer, and either may be the one doing the work. Reading only the
+    orchestrator's file meant that while init-agent was running, its state was
+    printed under the orchestrator's name.
+    """
     from . import watchdog
 
     paths = _resolve(args.path)
-    record = watchdog.read_status(paths)
-    if record is None:
+    records = watchdog.read_all_status(paths)
+    if not records:
         print("No supervisor has reported yet. `multiagents run` starts one.")
         return 0
 
-    age = time.time() - record.get("at", 0)
-    stale = "  (stale)" if age > 120 else ""
-    print(f"{record['verdict']:14} {record['detail']}")
-    print(f"{'':14} observed {age:.0f}s ago{stale}")
-    transcript = record.get("transcript") or {}
-    if transcript:
-        print(f"{'':14} transcript quiet for {transcript.get('quiet_for', '?')}s")
-    print(f"{'':14} {record.get('active_agents', 0)} agent(s) running")
-    limit = record.get("limit") or {}
-    if limit.get("said"):
-        print(f"{'':14} it said: {limit['said']}")
-    provider = record.get("provider") or {}
-    if provider.get("known") and provider.get("headroom") is not None:
-        print(f"{'':14} {provider['name']} headroom "
-              f"{provider['headroom'] * 100:.0f}%"
-              f"{', resets ' + str(provider['resets_at'])[:19] if provider.get('resets_at') else ''}")
+    for role, record in records.items():
+        age = time.time() - record.get("at", 0)
+        stale = "  (stale)" if age > 120 else ""
+        live = "" if record.get("running") else "  (ended)"
+        print(f"{role:14} {record['verdict']} — {record['detail']}{live}")
+        print(f"{'':14} observed {age:.0f}s ago{stale}")
+        transcript = record.get("transcript") or {}
+        if transcript:
+            print(f"{'':14} transcript quiet for {transcript.get('quiet_for', '?')}s")
+        print(f"{'':14} {record.get('active_agents', 0)} agent(s) running")
+        limit = record.get("limit") or {}
+        if limit.get("said"):
+            print(f"{'':14} it said: {limit['said']}")
+        provider = record.get("provider") or {}
+        if provider.get("known") and provider.get("headroom") is not None:
+            print(f"{'':14} {provider['name']} headroom "
+                  f"{provider['headroom'] * 100:.0f}%"
+                  f"{', resets ' + str(provider['resets_at'])[:19] if provider.get('resets_at') else ''}")
+        if len(records) > 1:
+            print()
     return 0
 
 

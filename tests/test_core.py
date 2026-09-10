@@ -6990,3 +6990,68 @@ def test_elapsed_is_how_long_it_ran_not_how_long_until_it_was_merged(tmp_path):
     view = snap._node_view(node, now)
     assert 290 <= view["elapsed"] <= 310, "five minutes of work, not four hours"
     assert view["settled_at"], "and the wait is kept, not thrown away"
+
+
+def test_both_drivers_report_under_their_own_name(tmp_path):
+    """`run` launches the orchestrator and `init-agent` the initializer, and
+    both are supervised the same way. One status file for both meant the second
+    to write won and was reported as the first: with init-agent running, the
+    monitor and `multiagents status` showed the INITIALIZER's state labelled
+    "orchestrator", with nothing to tell you."""
+    from multiagents import watchdog
+
+    paths = _paths(tmp_path)
+    watchdog.write_status(paths, {"at": time.time() - 60, "role": "orchestrator",
+                                  "verdict": "stopped", "detail": "ended",
+                                  "running": False})
+    watchdog.write_status(paths, {"at": time.time(), "role": "initializer",
+                                  "verdict": "working", "detail": "producing output",
+                                  "running": True})
+
+    assert watchdog.status_file(paths, "orchestrator").name == "orchestrator-status.json"
+    assert watchdog.status_file(paths, "initializer").name == "initializer-status.json"
+
+    both = watchdog.read_all_status(paths)
+    assert list(both) == ["initializer", "orchestrator"], "newest first"
+    assert both["initializer"]["running"] is True
+    assert both["orchestrator"]["running"] is False
+
+
+def test_a_record_is_labelled_by_what_it_says_about_itself(tmp_path):
+    """A supervisor started before the split writes the initializer's state
+    into the orchestrator's file. Reading that file as the orchestrator's would
+    reproduce, during the upgrade, exactly the confusion being fixed."""
+    from multiagents import watchdog
+
+    paths = _paths(tmp_path)
+    legacy = watchdog.status_file(paths, "orchestrator")
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"at": time.time(), "role": "initializer",
+                                  "verdict": "working", "detail": "x",
+                                  "running": True}))
+    assert list(watchdog.read_all_status(paths)) == ["initializer"]
+
+
+def test_the_monitor_names_every_driver(tmp_path):
+    """The snapshot carries them all; the page reads `drivers` and falls back
+    to the single orchestrator entry only for a state written before this."""
+    from multiagents import watchdog
+    from multiagents.monitor import snapshot as snap
+
+    paths = _paths(tmp_path)
+    watchdog.write_status(paths, {"at": time.time(), "role": "initializer",
+                                  "verdict": "working", "detail": "shaping",
+                                  "running": True, "active_agents": 2})
+    state = snap.snapshot(paths, _config(), with_scripts=False)
+    assert [d["role"] for d in state["drivers"]] == ["initializer"]
+    assert state["drivers"][0]["active_agents"] == 2
+
+    page = Path("src/multiagents/monitor/page.html").read_text()
+    assert "s.drivers" in page and "d.role" in page
+
+    # An alert names the role rather than assuming which one it is.
+    watchdog.write_status(paths, {"at": time.time(), "role": "initializer",
+                                  "verdict": "limited", "detail": "monthly cap",
+                                  "running": True})
+    found = snap.alerts(paths, _config(), snap.Tree(paths.tree_file, paths.events_file), [])
+    assert any("initializer limited" in a["text"] for a in found)

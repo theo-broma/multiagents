@@ -160,23 +160,51 @@ def sample(paths, config, provider, role: str, pid: int | None,
     }
 
 
-def status_file(paths) -> Path:
-    return paths.data / "orchestrator-status.json"
+# Two roles can drive a project — `run` launches the orchestrator, `init-agent`
+# launches the initializer — and both are supervised the same way. One file for
+# both meant the second to write won and the first was reported as the second:
+# with init-agent running, `status` and the monitor showed the INITIALIZER's
+# state under the orchestrator's name, with no way to tell.
+DRIVERS = ("orchestrator", "initializer")
 
 
-def write_status(paths, record: dict) -> None:
-    path = status_file(paths)
+def status_file(paths, role: str = "orchestrator") -> Path:
+    return paths.data / f"{role}-status.json"
+
+
+def write_status(paths, record: dict, role: str = "") -> None:
+    path = status_file(paths, role or record.get("role") or "orchestrator")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(record, indent=2) + "\n")
     os.replace(tmp, path)
 
 
-def read_status(paths) -> dict | None:
+def read_status(paths, role: str = "orchestrator") -> dict | None:
     try:
-        return json.loads(status_file(paths).read_text())
+        return json.loads(status_file(paths, role).read_text())
     except (OSError, ValueError):
         return None
+
+
+def read_all_status(paths) -> dict[str, dict]:
+    """Every driver that has reported here, newest report first.
+
+    Keyed by the role the RECORD claims, not by the file it was found in. A
+    supervisor started before this split writes the initializer's state into
+    the orchestrator's file, and the honest reading of that file is what it
+    says about itself — otherwise the transition period reports exactly the
+    confusion this change exists to end.
+    """
+    out: dict[str, dict] = {}
+    for role in DRIVERS:
+        record = read_status(paths, role)
+        if not record:
+            continue
+        claimed = str(record.get("role") or role)
+        if (record.get("at") or 0) >= (out.get(claimed, {}).get("at") or 0):
+            out[claimed] = record
+    return dict(sorted(out.items(), key=lambda kv: -(kv[1].get("at") or 0)))
 
 
 def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
@@ -213,7 +241,7 @@ def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
                 budget = None
 
         record = sample(paths, config, provider, role, pid, budget)
-        write_status(paths, record)
+        write_status(paths, record, role)
         if not record["running"]:
             return 0
         if max_seconds and time.time() - started > max_seconds:
