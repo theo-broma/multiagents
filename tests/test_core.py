@@ -6908,3 +6908,85 @@ def test_every_providers_token_shape_is_counted(tmp_path):
 
     rows = {row["provider"]: row for row in tree.usage_by_model()}
     assert rows["p2"]["tokens"] == 4000, "`multiagents usage` counts claude too"
+
+
+def test_one_tool_call_reported_twice_is_one_call(tmp_path):
+    """Providers report a tool's lifecycle, not just its invocation: agy sends
+    state=ACTIVE and then state=DONE for the same call, with the same name,
+    arguments and step. Counting both halved the doom-loop threshold without
+    anyone deciding to — measured on a real project, doom_loop was 53% of every
+    watchdog alert and 89% of those agents went on to merge, because "called
+    five times" was really two and a half."""
+    from multiagents.providers import Event
+    from multiagents.supervisor import Supervisor
+
+    def observe(events):
+        supervisor = Supervisor(loop_repeats=5)
+        trip = None
+        for state, step in events:
+            trip = trip or supervisor.observe(
+                Event(kind="tool", name="view_file", args={"p": "a.py"},
+                      state=state, step=step))
+        return trip
+
+    lifecycle = [(state, step) for step in range(2, 22, 2)
+                 for state in ("ACTIVE", "DONE")]
+    assert observe(lifecycle[:5]) is None, "two and a half calls is not a loop"
+    assert observe(lifecycle[:8]) is None, "nor is four"
+    assert observe(lifecycle[:10]) is not None, "five identical calls is"
+
+    # A provider that reports once per call is unaffected: the threshold means
+    # the same thing either way, which is the point.
+    assert observe([("", step) for step in range(5)]) is not None
+
+
+def test_a_fallback_may_say_what_the_agent_becomes(tmp_path):
+    """A model id is not the only thing that belongs to a provider's namespace.
+    An agent pinned effort:high failed over, kept its effort, and the CLI
+    refused the combination in eight seconds having said nothing:
+    "--effort is not supported for model claude-opus-4-6-thinking"."""
+    from multiagents.config import AgentSpec
+
+    plain = AgentSpec("a", "claude", "opus", effort="high",
+                      models={"agy": "claude-opus-4-6-thinking"})
+    assert plain.fallback_for("agy") == ("claude-opus-4-6-thinking", {})
+
+    explicit = AgentSpec("a", "claude", "opus", effort="high",
+                         models={"agy": {"model": "claude-opus-4-6-thinking",
+                                         "effort": ""}})
+    model, overrides = explicit.fallback_for("agy")
+    assert model == "claude-opus-4-6-thinking" and overrides == {"effort": ""}
+
+    # Applied the way the runner applies it.
+    moved = AgentSpec(**{**explicit.__dict__, "model": model, **overrides})
+    assert moved.effort == "" and moved.model == "claude-opus-4-6-thinking"
+
+    assert AgentSpec("a", "claude", "opus").fallback_for("agy") == ("", {})
+
+
+def test_no_shipped_agent_carries_an_effort_its_fallback_refuses():
+    """The specific pairing that cost a real spawn. Cheap to assert, and the
+    roster grows."""
+    from multiagents.config import load
+
+    for name, spec in load(None).agents.items():
+        for provider in (spec.models or {}):
+            model, overrides = spec.fallback_for(provider)
+            if model == "claude-opus-4-6-thinking" and spec.effort:
+                assert overrides.get("effort") == "", \
+                    f"{name} would fail over into a refused --effort flag"
+
+
+def test_elapsed_is_how_long_it_ran_not_how_long_until_it_was_merged(tmp_path):
+    """A node ends when the PARENT merges it, which can be hours later: one
+    overnight run showed 277 minutes for an agent that worked for five and then
+    waited for somebody to wake up."""
+    from multiagents.monitor import snapshot as snap
+
+    now = time.time()
+    node = {"id": "ag-1", "agent": "implementer", "status": "merged",
+            "started_at": now - 16800, "last_event_at": now - 16500,
+            "ended_at": now - 60, "usage": {"total": 10}}
+    view = snap._node_view(node, now)
+    assert 290 <= view["elapsed"] <= 310, "five minutes of work, not four hours"
+    assert view["settled_at"], "and the wait is kept, not thrown away"

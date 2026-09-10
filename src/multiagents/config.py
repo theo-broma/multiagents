@@ -182,12 +182,38 @@ class AgentSpec:
     # its provider's namespace, so failing over without one would run
     # `agy --model opencode-go/glm-5.3-flash`. Named here, an agent can move to
     # another provider when its own is exhausted; without one it waits instead.
-    models: dict[str, str] = field(default_factory=dict)
+    # {provider: model_id} or {provider: {model: ..., effort: ...}}. The second
+    # form exists because a model id is not the only thing that belongs to a
+    # provider's namespace: `effort` does too. An agent pinned effort:high
+    # failed over to another vendor, kept its effort, and the CLI refused the
+    # combination in eight seconds — "--effort is not supported for model
+    # claude-opus-4-6-thinking". The move was right and the options came with
+    # it uninvited.
+    models: dict[str, Any] = field(default_factory=dict)
     launch: bool = False
     # Which command launches it: "orchestrator" for `run`, "initializer" for
     # `init-agent`. Both are launch: true; the role says which door they use.
     role: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def fallback_for(self, provider: str) -> tuple[str, dict[str, Any]]:
+        """What this agent becomes on another provider: `(model, overrides)`.
+
+        A bare string names the model and says nothing about options, so the
+        options it was configured with travel unchanged — deliberately, because
+        silently dropping `effort: high` from an agent that exists BECAUSE it
+        reasons deeply is a slow, quiet failure, and a refused flag is a loud
+        one that takes eight seconds. Say `{model: ..., effort: ""}` to mean
+        something else.
+        """
+        entry = (self.models or {}).get(provider)
+        if isinstance(entry, dict):
+            model = str(entry.get("model") or entry.get("id") or "")
+            fields = set(AgentSpec.__dataclass_fields__)
+            overrides = {k: v for k, v in entry.items()
+                         if k in fields and k not in ("name", "model", "models")}
+            return model, overrides
+        return str(entry or ""), {}
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> AgentSpec:

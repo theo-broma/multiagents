@@ -171,6 +171,14 @@ deletes the branch. An agent squash-merges its own children automatically —
 their work is still quarantined on its branch — but landing on *your* base
 branch is always an explicit `merge_agent()` call.
 
+**One call is one call.** Providers report a tool's *lifecycle*, not just its
+invocation: agy sends `state=ACTIVE` and then `state=DONE` for the same call,
+with the same name, arguments and step number. Counting both halved the
+doom-loop threshold without anyone deciding to — measured on a real project,
+`doom_loop` produced **53% of every watchdog alert and 89% of those agents went
+on to merge**, because "called five times" was really two and a half. A repeat
+of the same signature within the same step is now the same call.
+
 **Agents are supervised through their event stream.** Every provider is
 configured to emit streaming JSON rather than a single result at exit, which is
 what makes four conditions detectable while a run is still alive:
@@ -2024,6 +2032,33 @@ So it is two switches:
 Off, a worker uses what you are paying for until it genuinely runs out.
 `known: false` is still never treated as empty: the reserve cannot be applied
 to a number nobody has.
+
+### What a fallback carries with it
+
+A model id belongs to its provider's namespace — and so does everything else on
+the command line. An agent pinned `effort: high` failed over to another vendor,
+kept its effort, and the CLI refused the combination in eight seconds having
+said nothing:
+
+```
+error: invalid model selection (--model "claude-opus-4-6-thinking" --effort "high"):
+--effort is not supported for model "claude-opus-4-6-thinking"
+```
+
+The move was right; the options came with it uninvited. So a `models:` entry may
+say what the agent *becomes* elsewhere, not just which model:
+
+```yaml
+models:
+  agy: {model: claude-opus-4-6-thinking, effort: ""}
+```
+
+A bare string still means the model alone, and the options travel unchanged —
+deliberately. Silently dropping `effort: high` from an agent that exists
+*because* it reasons deeply is a slow, quiet degradation that merges mediocre
+work; a refused flag is a loud failure that costs eight seconds. The advisor's
+argument, and the right way round. A test asserts no shipped agent carries an
+effort into a fallback known to refuse it.
 
 ### Failing over past a provider the agent cannot use
 

@@ -768,10 +768,12 @@ class Runner:
             # reverting to the provider it had just ruled out. Measured cost of
             # that: an agent whose configured fallback sat one place further
             # down the chain ran five times into a revoked token instead.
-            alternative = (spec.models or spec.extra.get("models") or {})[chosen]
+            alternative, overrides = spec.fallback_for(chosen)
             provider = self.providers[chosen]
             routed_from, routed_why = spec.provider, why
-            spec = AgentSpec(**{**spec.__dict__, "model": alternative})
+            if overrides:
+                routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
+            spec = AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
 
         # --- git isolation ---------------------------------------------------
         # EVERY agent gets a worktree, including read-only ones. `writes: false`
