@@ -162,6 +162,30 @@ Then compare the p90 of `merged` runs against each agent's configured `timeout`.
 
 ---
 
+## 3b · Known gap: the drivers are not in the tree
+
+`run` and `init-agent` both `exec` into a CLI, so neither creates a node. Only
+the agents they consult or spawn do, and those appear as roots with `parent:
+null`. An advisor's framing, which I think is right: the tree is meant to carry
+"what is being done and why", and leaving the two decision-makers out of it
+means an agent appears with no record of who asked or in which session.
+
+**What it would take.** Create a node at launch, keep it updated from the same
+samples the supervisor already takes, close it when the process ends, and set
+`MULTIAGENTS_AGENT_ID` in the driver's environment so the agents it starts
+become its children rather than roots.
+
+**Why it is not done yet.** `parent` is load-bearing in more places than it
+looks: depth limits, `max_children`, merge-into-parent, the orphan reaper, and
+the monitor's forest. Giving every agent a parent it has never had changes all
+of them at once, and the failure mode is subtle rather than loud.
+
+**What would settle it:** whether the history view is actually hard to read
+without it. Two sessions' agents currently interleave as roots ordered by time,
+which is confusing at 40 nodes and probably unusable at 400.
+
+---
+
 ## 4 · Declined, and what would change the answer
 
 Positions taken against an advisor's recommendation. Each is a judgement, not a
@@ -188,6 +212,11 @@ fact, and each names its own falsifier.
   silently losing `effort: high` from an agent that exists to reason deeply is
   a slow failure that merges mediocre work, while a refused flag costs eight
   seconds and says so.
+- **Enforcing filename == payload role for status files.** Proposed on the
+  grounds that accepting a payload's claim hides a zombie supervisor. Taken
+  halfway: the label follows the payload, so it is never wrong, *and* the
+  disagreement is raised as its own alert naming the file. Refusing to read it
+  would have made the upgrade window report nothing at all.
 - **An agent's pin meaning the account rather than the family.** Declined
   because the owner's requirement is precisely that agents run on the second
   account while the orchestrator keeps the first. Keeping two accounts apart on

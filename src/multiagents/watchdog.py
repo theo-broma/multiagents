@@ -202,6 +202,19 @@ def read_all_status(paths) -> dict[str, dict]:
         if not record:
             continue
         claimed = str(record.get("role") or role)
+        if claimed != role:
+            # Honest about both halves: the label follows the payload, and the
+            # disagreement is reported rather than smoothed over. A supervisor
+            # from before roles had their own files is still writing here, and
+            # if a new one starts writing the same file the two will alternate.
+            record = {**record, "misfiled_in": role}
+        # A record says "running" until its supervisor writes again — and a
+        # supervisor that was killed never does. The pid it recorded settles
+        # it: without this a status file outlives its process and reports a
+        # driver that has not existed for hours.
+        if record.get("running") and record.get("pid") and not alive(record["pid"]):
+            record = {**record, "running": False, "verdict": "stopped",
+                      "detail": f"{record.get('detail', '')} — process is gone".strip(" —")}
         if (record.get("at") or 0) >= (out.get(claimed, {}).get("at") or 0):
             out[claimed] = record
     return dict(sorted(out.items(), key=lambda kv: -(kv[1].get("at") or 0)))

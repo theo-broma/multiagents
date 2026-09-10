@@ -274,8 +274,39 @@ def _start_supervisor(paths, role: str, pid: int) -> None:
         print(f"supervisor   not started: {exc}", file=sys.stderr)
 
 
+DRIVER_CLASH = (
+    "{other} is already running here (pid {pid}).\n"
+    "\n"
+    "They are not meant to overlap. The initializer shapes BRIEF.md and\n"
+    "context/ in the project itself, while the orchestrator builds against\n"
+    "them and branches agents from that same tree — so running both means\n"
+    "building against a moving target, in one worktree, with one tree.json.\n"
+    "\n"
+    "Finish or stop that one first (`multiagents stop`), or pass --force if\n"
+    "you know why you want both."
+)
+
+
+def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
+    """Is the project's OTHER driver alive? `(role, pid)`."""
+    from . import watchdog
+
+    for other in watchdog.DRIVERS:
+        if other == role:
+            continue
+        path = _pid_file(paths, other)
+        try:
+            pid = int(path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if _alive(pid):
+            return other, pid
+    return None
+
+
 def _launch_agent(paths, config, role: str, resume: bool,
-                  unattended: int = 0, supervise: bool = True) -> int:
+                  unattended: int = 0, supervise: bool = True,
+                  force: bool = False) -> int:
     """Launch a roster entry as an interactive MCP client.
 
     Normally execs, so the CLI owns the terminal and this process is gone.
@@ -287,6 +318,10 @@ def _launch_agent(paths, config, role: str, resume: bool,
     if spec is None:
         print(f"No agent in agents.yaml is marked `launch: true, role: {role}`.",
               file=sys.stderr)
+        return 2
+    clash = None if force else _other_driver_running(paths, role)
+    if clash:
+        print(DRIVER_CLASH.format(other=clash[0], pid=clash[1]), file=sys.stderr)
         return 2
     providers = load_providers(config.providers)
     provider = providers.get(spec.provider)
@@ -765,7 +800,8 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
             return 3
 
     print()
-    return _launch_agent(paths, config, "initializer", resume=args.resume)
+    return _launch_agent(paths, config, "initializer", resume=args.resume,
+                         force=getattr(args, "force", False))
 
 
 def _ensure_authenticated(paths, config, providers, interactive: bool = True) -> int:
@@ -1586,6 +1622,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     # moves. The orchestrator calls check_model_catalog when something suggests
     # it has.
     return _launch_agent(paths, config, "orchestrator", resume=args.resume,
+                         force=getattr(args, "force", False),
                          unattended=getattr(args, "unattended", 0),
                          supervise=getattr(args, "supervise", True))
 
@@ -2785,6 +2822,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--wait", action="store_true",
                        help="if the orchestrator's provider is exhausted, block "
                             "until its quota resets instead of exiting")
+        p.add_argument("--force", action="store_true",
+                       help="start even though the project's other driver "
+                            "(orchestrator or initializer) is running")
         p.add_argument("--no-supervise", dest="supervise", action="store_false",
                        default=True,
                        help="hand the terminal over and exit; nothing carries on "
@@ -2801,6 +2841,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="shape the project with the initializer (resumable)")
     p.add_argument("--fresh", dest="resume", action="store_false", default=True,
                    help="start a new session instead of continuing the last one")
+    p.add_argument("--force", action="store_true",
+                   help="start even though the orchestrator is running")
     p.add_argument("--wait", action="store_true",
                    help="if the provider is exhausted, block until its quota resets")
     p.set_defaults(func=cmd_init_agent)

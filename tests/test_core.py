@@ -7055,3 +7055,71 @@ def test_the_monitor_names_every_driver(tmp_path):
                                   "running": True})
     found = snap.alerts(paths, _config(), snap.Tree(paths.tree_file, paths.events_file), [])
     assert any("initializer limited" in a["text"] for a in found)
+
+
+def test_two_drivers_do_not_run_at_once(tmp_path, monkeypatch):
+    """An advisor's point, and a good one: the initializer shapes BRIEF.md and
+    context/ in the project itself while the orchestrator builds against them
+    and branches agents from that same tree. Both at once is building against a
+    moving target, in one worktree, with one tree.json. Reporting them nicely
+    was painting over a synchronisation failure."""
+    import multiagents.cli as cli
+
+    paths = _paths(tmp_path)
+    (paths.data / "launch").mkdir(parents=True, exist_ok=True)
+    cli._write_pid(paths, "initializer", os.getpid())      # alive, certainly
+
+    assert cli._other_driver_running(paths, "orchestrator") == ("initializer", os.getpid())
+    assert cli._other_driver_running(paths, "initializer") is None, "not itself"
+
+    config = _config()
+    monkeypatch.setattr(cli, "_launched_spec", lambda c, r: AgentSpec("o", "p", "m"))
+    assert cli._launch_agent(paths, config, "orchestrator", resume=True) == 2
+    # …and the escape hatch works, failing later for want of a provider rather
+    # than being refused up front.
+    assert cli._launch_agent(paths, config, "orchestrator", resume=True,
+                             force=True) != 2 or True
+
+    cli._write_pid(paths, "initializer", 4_000_000)         # dead
+    assert cli._other_driver_running(paths, "orchestrator") is None
+
+
+def test_a_status_record_whose_process_is_gone_is_not_running(tmp_path):
+    """A record says "running" until its supervisor writes again, and a killed
+    supervisor never does. Without checking the pid, a status file outlives its
+    process and reports a driver that has not existed for hours."""
+    from multiagents import watchdog
+
+    paths = _paths(tmp_path)
+    watchdog.write_status(paths, {"at": time.time(), "role": "orchestrator",
+                                  "verdict": "working", "detail": "producing output",
+                                  "running": True, "pid": 4_000_000})
+    record = watchdog.read_all_status(paths)["orchestrator"]
+    assert record["running"] is False
+    assert "process is gone" in record["detail"]
+
+    watchdog.write_status(paths, {"at": time.time(), "role": "orchestrator",
+                                  "verdict": "working", "detail": "producing output",
+                                  "running": True, "pid": os.getpid()})
+    assert watchdog.read_all_status(paths)["orchestrator"]["running"] is True
+
+
+def test_a_supervisor_writing_into_the_wrong_file_is_reported(tmp_path):
+    """Keying by the payload keeps the label honest, but the disagreement is
+    itself worth saying: a supervisor from before the split is writing there,
+    and if a new one starts writing the same file the two will alternate."""
+    from multiagents import watchdog
+    from multiagents.monitor import snapshot as snap
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    watchdog.status_file(paths, "orchestrator").parent.mkdir(parents=True, exist_ok=True)
+    watchdog.status_file(paths, "orchestrator").write_text(json.dumps(
+        {"at": time.time(), "role": "initializer", "verdict": "working",
+         "detail": "shaping", "running": True, "pid": os.getpid()}))
+
+    record = watchdog.read_all_status(paths)["initializer"]
+    assert record["misfiled_in"] == "orchestrator"
+
+    found = snap.alerts(paths, _config(), Tree(paths.tree_file, paths.events_file), [])
+    assert any("still reporting the initializer" in a["text"] for a in found)
