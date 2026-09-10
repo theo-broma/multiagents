@@ -608,7 +608,7 @@ class Tree:
     # spawn into it is the failure worth preventing.
 
     def note_run_outcome(self, provider: str, ok: bool, threshold: int = 3,
-                         reason: str = "") -> dict | None:
+                         reason: str = "", kind: str = "") -> dict | None:
         """Record how a run ended. Returns trip details when the breaker opens."""
         if not provider:
             return None
@@ -621,6 +621,7 @@ class Tree:
                 health["last_success"] = now()
                 health.pop("tripped", None)
                 health.pop("trial_at", None)
+                health.pop("last_kind", None)
                 # The health record is not what routing reads. Leaving the
                 # cooldown behind kept a working provider out of the pool for
                 # the rest of its penalty box.
@@ -628,6 +629,11 @@ class Tree:
                 return None
             health["consecutive_failures"] += 1
             health["last_reason"] = reason[:200]
+            # What KIND of failure, so a reader can tell a full provider from a
+            # broken one. An orchestrator told only "4 runs in a row failed"
+            # concluded, correctly on that evidence, that claude was unsafe to
+            # route to — when all four were the provider saying it was full.
+            health["last_kind"] = str(kind or "failed")
             count = health["consecutive_failures"]
             # Latching on `tripped` alone meant the breaker opened once and
             # never again: after its cooldown lapsed, every further failure was
@@ -636,7 +642,14 @@ class Tree:
             # — which is the half-open state, one trial at a time.
             cooling = ((data.get("cooldowns") or {}).get(provider) or {}
                        ).get("until", 0) > now()
-            if count < threshold or cooling:
+            if cooling:
+                return None                   # already routed around
+            # Half-open: once it has tripped, the trial after a lapsed cooldown
+            # decides on its own. Requiring the threshold again would allow
+            # three runs per cycle into a provider already known to be in
+            # trouble — and it is what let the failure count keep climbing
+            # while nothing was learned from it.
+            if not health.get("tripped") and count < threshold:
                 return None
             health["tripped"] = now()
             trip = {"provider": provider, "failures": count, "reason": reason[:200]}
@@ -649,6 +662,25 @@ class Tree:
     def clear_provider_health(self, provider: str) -> None:
         with self.transaction() as data:
             data["provider_health"].pop(provider, None)
+
+    def begin_trial(self, provider: str) -> None:
+        """A cooldown has lapsed: the next run decides, so the count starts over.
+
+        `consecutive_failures` is cleared by a SUCCESS and by nothing else,
+        which deadlocked a real session: four failures marked the provider
+        unsafe, the orchestrator read that and refused to route there, and the
+        success that would have cleared it could therefore never happen. The
+        breaker has already done its work by then — a failed trial re-trips
+        immediately, so nothing is lost by letting the counter start fresh.
+        """
+        with self.transaction() as data:
+            health = data["provider_health"].get(provider)
+            if not health:
+                return
+            health["consecutive_failures"] = 0
+            health["last_reason"] = "cooldown lapsed; the next run is the trial"
+            health.pop("last_kind", None)
+        self.emit("system", "provider_trial", provider=provider)
 
     # ---------------------------------------------------------------- pause --
     #

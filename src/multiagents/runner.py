@@ -295,6 +295,13 @@ class Runner:
                 if not cooling:
                     budget.cooldown_until = now() + 60     # somebody else is trying
                 continue
+            if not cooling:
+                # This run IS the trial, so the tally of what went wrong before
+                # it starts again. Left standing, it is read as "this provider
+                # is unsafe" by everything that looks — including the
+                # orchestrator, which then never routes the run that would have
+                # cleared it.
+                self.tree.begin_trial(name)
             if not entry.get("needs_login"):
                 continue                      # a real run is the trial; let it
             ok = self._auth_ok(name)
@@ -1028,6 +1035,7 @@ class Runner:
             trip = self.tree.note_run_outcome(
                 run.provider.name, ok=status in ("done", "merged"),
                 threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
+                kind=status,
                 # Both ends of the output. A CLI puts the reason it stopped at
                 # the END — the limit message that started all this was in the
                 # last 120 characters, and what was recorded was the first 120,

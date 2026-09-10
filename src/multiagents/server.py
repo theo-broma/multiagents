@@ -357,12 +357,32 @@ def auth_status() -> dict:
         # unreachable all day.
         threshold = max(2, int(run.config.limits.get(
             "provider_failure_threshold", 3)) - 1)
+        kind = record.get("last_kind") or ""
+        entry["last_failure_kind"] = kind or None
         if failures >= threshold:
-            entry["warning"] = (
-                f"{failures} run(s) in a row failed on this provider "
-                f"({record.get('last_reason', '')[:90]}). A stored credential is "
-                f"not a working one — this check reads local state only."
-            )
+            # WHY they failed, not just how many. An orchestrator told "4 runs
+            # in a row failed" concluded the provider was unsafe to route to
+            # and stopped using it — correctly, on that evidence. All four were
+            # the provider saying it was full, which is a different fact with a
+            # different remedy: wait, do not avoid.
+            if kind == "limited":
+                entry["warning"] = (
+                    f"{failures} run(s) in a row ended because this provider "
+                    f"was out of quota, not because it is broken. It is "
+                    f"usable again when its window resets — check "
+                    f"`budget_status` rather than routing around it."
+                )
+            elif kind == "unauthenticated":
+                entry["warning"] = (
+                    f"{failures} run(s) in a row failed to authenticate. Only a "
+                    f"person can fix that: `multiagents auth login`."
+                )
+            else:
+                entry["warning"] = (
+                    f"{failures} run(s) in a row failed on this provider "
+                    f"({record.get('last_reason', '')[:90]}). A stored credential is "
+                    f"not a working one — this check reads local state only."
+                )
     broken = [n for n, s_ in states.items() if not s_.ok]
     degraded = [n for n, e in out.items() if e.get("warning")]
     if broken:

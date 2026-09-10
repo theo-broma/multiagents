@@ -1343,6 +1343,31 @@ Two guards, because a string alone is not evidence:
   strictly the last: a model handed a limit error usually answers it, and a
   stricter rule would turn that answer into a failure.
 
+### A counter nothing can clear is a deadlock
+
+`consecutive_failures` was cleared by a success and by nothing else. In a real
+session that produced a stalemate the tooling could not leave:
+
+> *"claude is still failing (0 successes since the earlier hard-limit hit) — not
+> safe to route there."*
+
+The orchestrator was reading exactly what it was shown — four failures, last run
+failed — and reasoning correctly from it. But all four were the provider saying
+it was full, its window had since reset, and the success that would have cleared
+the count could never happen because nothing would route there to earn it.
+
+Two changes, and both are about telling the orchestrator the truth rather than a
+number:
+
+- **A lapsed cooldown starts the count again.** The next run is the trial, and
+  the breaker has already done its work. Nothing is lost: once tripped, a single
+  failed trial re-trips immediately, rather than allowing three more runs into a
+  provider already known to be in trouble.
+- **The health record says what KIND of failure.** *"4 runs in a row failed"* and
+  *"4 runs in a row ended because the provider was out of quota"* call for
+  opposite responses — route around it, or wait for it — and `auth_status` now
+  says which, including the third case where only a person can help.
+
 ### An agent that worked in silence is not a failure either
 
 Nine runs in one project exited 0 after five minutes and fifty-odd steps of
