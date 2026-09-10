@@ -44,8 +44,13 @@ def render(ticket: dict) -> str:
     parts = [ticket.get("body", "").strip()]
     if ticket.get("proposed_fix", "").strip():
         parts += ["", "## Proposed fix", "", ticket["proposed_fix"].strip()]
+    # The version it was observed against travels with the report: a ticket
+    # read a week later, or filed upstream, otherwise leaves "is this still
+    # true?" as an investigation rather than a comparison.
+    against = ticket.get("tooling")
     parts += ["", "---", f"Filed by the multiagents bug-reporter agent "
-                        f"({ticket.get('severity', 'minor')})."]
+                        f"({ticket.get('severity', 'minor')})"
+                        + (f", against multiagents {against}." if against else ".")]
     return "\n".join(parts).strip() + "\n"
 
 

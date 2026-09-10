@@ -2397,7 +2397,9 @@ def cmd_tickets(args: argparse.Namespace) -> int:
         if ticket is None:
             print(f"unknown ticket {args.ticket_id!r}", file=sys.stderr)
             return 2
-        print(f"{ticket['id']}  [{ticket['severity']}]  {ticket['status']}")
+        print(f"{ticket['id']}  [{ticket['severity']}]  {ticket['status']}"
+              + (f"  ·  filed against multiagents {ticket['tooling']}"
+                 if ticket.get("tooling") else ""))
         print(f"{ticket['title']}\n")
         print(bugs.render(ticket))
         return 0
