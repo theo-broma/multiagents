@@ -7305,3 +7305,45 @@ def test_a_ticket_records_what_it_was_filed_against(tmp_path):
     from multiagents import bugs
     assert "against multiagents" in bugs.render(ticket), \
         "and it travels with the report when it is filed upstream"
+
+
+def test_a_lapsed_cooldown_lets_the_failure_count_start_again(tmp_path):
+    """The deadlock this fixes, from a real session: four failures marked the
+    provider unsafe, the orchestrator read that and refused to route there —
+    "0 successes since the earlier hard-limit hit, not safe to route" — and the
+    success that would have cleared the count could therefore never happen."""
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    for _ in range(4):
+        tree.note_run_outcome("claude", ok=False, reason="limited", kind="limited")
+    assert tree.provider_health()["claude"]["consecutive_failures"] == 4
+
+    tree.begin_trial("claude")
+    health = tree.provider_health()["claude"]
+    assert health["consecutive_failures"] == 0
+    assert "the next run is the trial" in health["last_reason"]
+
+    # Nothing is lost by that: once tripped, a single failed trial re-trips,
+    # rather than allowing three more runs into a provider already in trouble.
+    assert tree.note_run_outcome("claude", ok=False, reason="again") is not None
+
+
+def test_the_failure_count_says_what_kind_of_failure(tmp_path, monkeypatch):
+    """"4 runs in a row failed" and "4 runs in a row ended because the provider
+    was full" call for opposite responses: avoid it, or wait for it."""
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    for _ in range(3):
+        tree.note_run_outcome("claude", ok=False, reason="x", kind="limited")
+    assert tree.provider_health()["claude"]["last_kind"] == "limited"
+
+    tree.note_run_outcome("claude", ok=True)
+    assert "last_kind" not in tree.provider_health()["claude"]
+
+    body = Path("src/multiagents/server.py").read_text()
+    assert "was out of quota, not because it is broken" in body
+    assert "person can fix that" in body
