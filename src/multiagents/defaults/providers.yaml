@@ -280,13 +280,22 @@ providers:
       - ".claude/daemon.lock"
       - ".claude/daemon.status.json"
       - ".claude/daemon"
-    # Still listed: on the LOCAL executor there is no mount and no isolation
-    # problem, and the per-agent HOME needs the link either way. In a container
-    # these resolve to the private profile above, because the per-agent HOME
-    # links to the host PATH and that path is what the profile is mounted over.
+    # The DIRECTORY, not the files inside it. A per-agent HOME links these into
+    # place, and a link to a FILE is destroyed by the thing this whole provider
+    # does routinely: the CLI refreshes its token by writing a temp file and
+    # renaming over the path, which replaces the symlink with a plain file. The
+    # refreshed token then sits in an agent's throwaway home, the shared profile
+    # keeps the old one — and that refresh has just rotated the old one away, so
+    # every other agent is now holding a revoked credential. Measured; it is the
+    # mechanism that survived fixing the mount.
+    #
+    # Linking the directory instead means a refresh renames INSIDE the shared
+    # profile, where every agent sees it. `.claude.json` stays per-agent through
+    # home_copy below, so concurrent agents still cannot corrupt each other's
+    # config: with CLAUDE_CONFIG_DIR unset the CLI keeps that file beside HOME,
+    # not inside the profile.
     home_links:
-      - ".claude/.credentials.json"
-      - ".claude/settings.json"
+      - ".claude"
     # COPIED, not linked. ~/.claude.json is 136K of project history plus the
     # cachedUsageUtilization the budget adapter reads. Symlinking it would have
     # every concurrent subagent writing the user's real config. Copying also

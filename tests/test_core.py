@@ -6767,3 +6767,63 @@ def test_a_fan_out_does_not_send_every_worker_to_one_account(tmp_path):
                   parent=None, depth=0))
     tree.set_status("ag-1", "running")
     assert tree.recent_claims()["claude-a"] == 1
+
+
+def test_the_credential_link_is_the_directory_not_the_file(tmp_path):
+    """A link to a FILE is destroyed by the thing this provider does routinely.
+    The CLI refreshes by writing a temp file and renaming over the path, which
+    replaces the symlink with a plain file: the new token lands in an agent's
+    throwaway home while the shared profile keeps the old one — and that refresh
+    has just rotated the old one away, so every other agent is holding a revoked
+    credential. Measured, and it is what survived fixing the mount."""
+    from multiagents.config import load
+    from multiagents.executor.base import prepare_home
+
+    claude = load(None).providers["claude"]
+    assert claude["home_links"] == [".claude"], \
+        "linking files inside it puts a symlink where a rename will land"
+
+    # The mechanism, in three lines, so the reason is not only a comment.
+    real, home = tmp_path / "real", tmp_path / "home"
+    real.mkdir()
+    (real / ".credentials.json").write_text('{"token": "shared"}')
+    home.mkdir()
+    (home / ".credentials.json").symlink_to(real / ".credentials.json")
+    (home / ".tmp").write_text('{"token": "refreshed"}')
+    (home / ".tmp").rename(home / ".credentials.json")
+    assert not (home / ".credentials.json").is_symlink(), "the link is gone"
+    assert json.loads((real / ".credentials.json").read_text())["token"] == "shared", \
+        "and the shared profile never saw the refresh"
+
+
+def test_a_directory_link_carries_a_refresh_back_to_the_shared_profile(tmp_path, monkeypatch):
+    from multiagents.executor import base as base_mod
+    from multiagents.executor.base import prepare_home
+
+    real_home = tmp_path / "user"
+    (real_home / ".claude").mkdir(parents=True)
+    (real_home / ".claude" / ".credentials.json").write_text('{"token": "old"}')
+    monkeypatch.setattr(base_mod.Path, "home", staticmethod(lambda: real_home))
+
+    agent_home = prepare_home(tmp_path / "agent", [".claude"], "per-agent")
+    profile = agent_home / ".claude"
+    assert profile.is_symlink()
+
+    # A refresh: temp file, then rename over the path — inside the linked dir.
+    (profile / ".tmp").write_text('{"token": "new"}')
+    (profile / ".tmp").rename(profile / ".credentials.json")
+    shared = json.loads((real_home / ".claude" / ".credentials.json").read_text())
+    assert shared["token"] == "new", "every other agent sees it too"
+
+
+def test_the_container_shell_gets_an_agents_home_and_path():
+    """Otherwise the shell you inspect with is not the environment you are
+    inspecting: `claude: command not found`, then `loggedIn: false` from a
+    container that is in fact logged in."""
+    import inspect
+    import multiagents.cli as cli
+
+    body = inspect.getsource(cli.cmd_docker)
+    shell = body[body.index('if args.action == "shell"'):]
+    assert 'f"HOME={Path.home()}"' in shell
+    assert 'PATH=' in shell
