@@ -1718,6 +1718,26 @@ shared profile where every agent sees it. `.claude.json` stays per-agent through
 `CLAUDE_CONFIG_DIR` unset the CLI keeps that file beside `HOME`, not inside the
 profile.
 
+### `down` and `up` do not replace a container
+
+Bind mounts are decided when a container is **created**. Stopping and starting
+it re-resolves each source path — which is why a restart cures inode drift — but
+the *set* of mounts is whatever was decided at creation, so a configuration
+change reaches a long-lived container only when it is replaced.
+
+Measured cost of not saying so: a project ran for three days against a container
+created before its credential layout changed, with every fix shipped, tested,
+believed in, and not in effect. `mount_drift()` compares the running container's
+mounts against what the configuration now wants, and `doctor`, the launch
+preflight and the monitor all say it:
+
+```
+!! the running container was created before the current configuration (2 mount(s) differ):
+     missing: …/container-state/shared/claude/.claude>/home/u/.claude
+     Mounts are fixed at CREATION — `down` and `up` only stop and start.
+     `multiagents docker rm && multiagents docker up` replaces it.
+```
+
 **`credential_drift()` still asks the inode question**, in one `docker exec`, by comparing inodes.
 `doctor` reports it, the monitor raises it, and `run` and `init-agent` **repair
 it**: a restart re-resolves the bind (verified against docker rather than

@@ -7123,3 +7123,50 @@ def test_a_supervisor_writing_into_the_wrong_file_is_reported(tmp_path):
 
     found = snap.alerts(paths, _config(), Tree(paths.tree_file, paths.events_file), [])
     assert any("still reporting the initializer" in a["text"] for a in found)
+
+
+def test_a_container_older_than_its_configuration_is_reported(tmp_path, monkeypatch):
+    """Bind mounts are fixed when a container is CREATED. Stopping and starting
+    it re-resolves each source path — which is why a restart cures inode drift —
+    but the SET of mounts is whatever was decided at creation.
+
+    Measured cost of not saying so: a project ran for three days against a
+    container created before its credential layout changed, with every fix
+    shipped, tested, believed in, and not in effect. `down` and `up` do not do
+    it; `rm` and `up` do."""
+    import multiagents.executor.docker as docker_mod
+    from multiagents.providers import Provider
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    monkeypatch.setattr(docker_mod.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(docker_mod, "state_root", lambda: tmp_path / "state")
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "container_private_home": [".claude"],
+        "home_links": [".claude"]})
+    executor = _docker_for(tmp_path, {"claude": provider})
+    monkeypatch.setattr(executor, "container_state", lambda name: "running")
+
+    backing = next(iter(executor.private_state("claude").values()))
+
+    class _Old:
+        returncode = 0
+        # what a container created before the change actually has
+        stdout = f"{home}/.claude/.credentials.json>{home}/.claude/.credentials.json\n"
+
+    monkeypatch.setattr(docker_mod, "_run", lambda *a, **k: _Old())
+    drift = executor.mount_drift()
+    assert any(f"missing: {backing}>{home}/.claude" in line for line in drift)
+
+    private = executor.private_state()
+    current = "".join(f"{private.get(path, path)}>{path}\n"
+                      for path, _ in executor.mounts())
+
+    class _Current:
+        returncode = 0
+        stdout = current
+
+    monkeypatch.setattr(docker_mod, "_run", lambda *a, **k: _Current())
+    assert executor.mount_drift() == [], "a current container has nothing to say"

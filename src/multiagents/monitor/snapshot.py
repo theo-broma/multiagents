@@ -523,6 +523,13 @@ def deep_checks(paths: ProjectPaths, config: Config) -> list[dict]:
     if config.executor == "docker":
         try:
             from ..cli import _docker_executor
+            for line in _docker_executor(paths).mount_drift():
+                out.append({
+                    "level": "warn", "kind": "container",
+                    "text": "the running container predates the current "
+                            "configuration",
+                    "detail": f"{line} — mounts are fixed at creation; "
+                              f"`multiagents docker rm && ... up` replaces it"})
             for entry in _docker_executor(paths).credential_drift():
                 out.append({
                     "level": "error", "kind": "credentials",

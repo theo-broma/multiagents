@@ -112,7 +112,7 @@ Written, tested, and not yet proven by a real run. Each names what would prove i
 
 | | proven when |
 |---|---|
-| **A container agent runs on the container profile.** The profile is logged in and verified from inside the container, but no agent has yet done real work through it. | one claude agent merges from inside a container |
+| **A container agent runs on the container profile.** The profile is logged in and verified from inside the container, but no agent has yet done real work through it — and as of 2026-09-10 the live container still predates the change, so nothing has used it at all. | one claude agent merges from inside a container created after the layout change |
 | **A refresh inside an agent reaches the shared profile.** The directory link makes it possible; nothing has observed it happening. | an agent runs across a token expiry and the next agent is not revoked |
 | **Two accounts on one provider.** Instance selection, family failover, the orchestrator's reserved account: all tested in unit tests against synthetic budgets, never against two real subscriptions. | a second subscription exists and work spreads across both |
 | **The family circuit breaker.** Requires two accounts of one vendor failing at once; there has only ever been one account per vendor. | it fires, and does not fire on a single account's trouble |

@@ -368,6 +368,37 @@ class DockerExecutor(Executor):
         target.write_text(json.dumps(masked, indent=2))
         return stripped
 
+    def mount_drift(self) -> list[str]:
+        """Mounts the running container has that the configuration no longer wants.
+
+        Bind mounts are fixed when a container is CREATED. Stopping and starting
+        it re-resolves each source path — which is why a restart cures inode
+        drift — but the SET of mounts is whatever was decided at creation, so a
+        configuration change reaches a long-lived container only when it is
+        replaced.
+
+        Measured cost of not saying so: a project ran for three days against a
+        container created before its credential layout changed, with every fix
+        shipped, tested, believed in, and not actually in effect. `down` and
+        `up` do not do it; `rm` and `up` do.
+        """
+        if self.container_state(self.container) != "running":
+            return []
+        result = _run(["docker", "inspect", "-f",
+                       "{{range .Mounts}}{{.Source}}>{{.Destination}}\n{{end}}",
+                       self.container])
+        if result.returncode != 0:
+            return []
+        have = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        private = self.private_state()
+        want = {f"{private.get(path, path)}>{path}" for path, _ in self.mounts()}
+        missing = sorted(want - have)
+        extra = sorted(h for h in have - want if h.split(">")[1] in
+                       {str(p) for p, _ in self.mounts()} | {str(p) for p in private})
+        out = [f"missing: {m}" for m in missing]
+        out += [f"stale:   {e}" for e in extra]
+        return out
+
     def credential_drift(self) -> list[dict]:
         """Bind-mounted credential files the container no longer shares with us.
 
