@@ -231,7 +231,7 @@ function signature(s) {
     (s.questions || []).map((q) => [q.id, !!q.answered_at]),
     (s.tickets || []).map((t) => [t.id, t.status]),
     (s.deferred || []).length,
-    s.orchestrator.verdict,
+    (s.drivers || []).map((d) => [d.role, d.verdict, d.running]),
     SELECTED, TAB, FILTER,
   ]);
 }
@@ -444,19 +444,28 @@ function renderLive() {
     ));
   }
 
+  // Every role that drives the project, each under its own name: `run`
+  // launches the orchestrator and `init-agent` the initializer, and either may
+  // be the one working. This panel used to read only the first and label
+  // whatever it found "orchestrator".
+  const drivers = (s.drivers || []).length ? s.drivers
+    : [{ role: "orchestrator", ...s.orchestrator }];
   right.append(el("div", { class: "panel" },
-    el("h2", {}, "orchestrator"),
-    el("div", { class: "row" },
-      el("span", { class: "dot " + (s.orchestrator.running ? "running" : "done") }),
-      el("strong", {}, s.orchestrator.verdict || "not started")),
-    el("div", { class: "muted pre", style: "margin:5px 0" }, s.orchestrator.detail || ""),
-    s.orchestrator.limit && el("div", { class: "muted pre" }, s.orchestrator.limit.said || ""),
+    el("h2", {}, drivers.length > 1 ? "drivers" : drivers[0].role),
+    drivers.map((d) => el("div", { style: "margin-bottom:10px" },
+      el("div", { class: "row" },
+        el("span", { class: "dot " + (d.running ? "running" : "done") }),
+        el("strong", {}, d.role),
+        el("span", {}, d.verdict || "not started"),
+        el("span", { class: "right muted" },
+          d.observed_ago === undefined ? "" : `${fmtAge(d.observed_ago)} ago`)),
+      el("div", { class: "muted pre", style: "margin:5px 0" }, d.detail || ""),
+      d.limit && el("div", { class: "muted pre" }, d.limit.said || ""),
+    )),
     el("div", { class: "row wrap", style: "margin-top:8px" },
       el("button", { onclick: () => confirm("Start the orchestrator headless, in the background?") && act("launch_orchestrator") }, "run headless"),
       el("button", { class: "danger", onclick: () => confirm("Stop everything? Work is kept.") && act("stop_all") }, "stop all"),
     ),
-    el("div", { class: "muted", style: "margin-top:6px;font-size:11px" },
-      `observed ${fmtAge(s.orchestrator.observed_ago)} ago`),
   ));
 
   right.append(...s.providers.map(providerPanel));

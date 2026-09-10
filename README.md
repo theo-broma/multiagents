@@ -1161,6 +1161,27 @@ Destructive actions declare themselves in `actions.DESTRUCTIVE` and both front
 ends confirm them in the same words. `signal_process` will only signal a pid the
 tree says is ours.
 
+## Watching whatever is driving
+
+Two roles drive a project — `run` launches the orchestrator, `init-agent`
+launches the initializer — and both are supervised identically. They used to
+share one status file, so the second to write won and was reported as the first:
+with `init-agent` running, `status` and the monitor showed the **initializer's**
+state under the orchestrator's name, and nothing said so.
+
+Each role now has its own file, `status` prints every driver that has reported,
+and the monitor names them. A record is labelled by the role it claims rather
+than by the file it was found in, so a supervisor started before this change —
+writing the initializer's state into the orchestrator's file — is still read
+correctly.
+
+```
+$ multiagents status
+initializer    working — producing output 11s ago
+               observed 6s ago
+               claude headroom 22%, resets 2026-09-14T13:59:59
+```
+
 ## Watching the orchestrator
 
 `run` execs into the provider's CLI, so the orchestrator *is* that process and

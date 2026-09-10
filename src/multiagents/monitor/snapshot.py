@@ -309,19 +309,22 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
     from .. import watchdog
 
     out = []
-    status = watchdog.read_status(paths) or {}
-    verdict = status.get("verdict")
-    age = time.time() - float(status.get("at") or 0)
-    if verdict in ("limited", "out_of_quota", "stalled"):
-        out.append({"level": "error", "kind": "orchestrator",
-                    "text": f"orchestrator {verdict}: {status.get('detail', '')}",
-                    "detail": (status.get("limit") or {}).get("said", "")})
-    elif verdict == "dropped":
-        out.append({"level": "warn", "kind": "orchestrator",
-                    "text": f"orchestrator {status.get('detail', 'ended')}"})
-    elif verdict and age > 300 and status.get("running"):
-        out.append({"level": "warn", "kind": "orchestrator",
-                    "text": f"no supervisor report for {age / 60:.0f}m"})
+    # Both drivers, named. `run` launches the orchestrator and `init-agent` the
+    # initializer; reading only the first meant that while init-agent was
+    # running, its state was reported as the orchestrator's.
+    for role, status in (watchdog.read_all_status(paths) or {}).items():
+        verdict = status.get("verdict")
+        age = time.time() - float(status.get("at") or 0)
+        if verdict in ("limited", "out_of_quota", "stalled"):
+            out.append({"level": "error", "kind": "driver",
+                        "text": f"{role} {verdict}: {status.get('detail', '')}",
+                        "detail": (status.get("limit") or {}).get("said", "")})
+        elif verdict == "dropped":
+            out.append({"level": "warn", "kind": "driver",
+                        "text": f"{role} {status.get('detail', 'ended')}"})
+        elif verdict and age > 300 and status.get("running"):
+            out.append({"level": "warn", "kind": "driver",
+                        "text": f"no {role} report for {age / 60:.0f}m"})
 
     pause = tree.pause_state()
     if pause:
@@ -411,7 +414,8 @@ def snapshot(paths: ProjectPaths, config: Config,
               if n.get("status") in PAUSED and n.get("session_id")]
     parked.sort(key=lambda v: -(v["last_spoke"] or 0))
 
-    status = watchdog.read_status(paths) or {}
+    drivers = watchdog.read_all_status(paths) or {}
+    status = drivers.get("orchestrator", {})
     return {
         "at": now,
         "project": {
@@ -420,6 +424,18 @@ def snapshot(paths: ProjectPaths, config: Config,
             "executor": config.executor,
             "branch_prefix": config.branch_prefix,
         },
+        # Every role that drives this project, each under its own name. The
+        # `orchestrator` key stays for anything that only knows about that one.
+        "drivers": [
+            {"role": role,
+             "verdict": record.get("verdict"),
+             "detail": record.get("detail", ""),
+             "running": bool(record.get("running")),
+             "observed_ago": round(now - float(record.get("at") or now)),
+             "active_agents": record.get("active_agents", 0),
+             "limit": record.get("limit")}
+            for role, record in drivers.items()
+        ],
         "orchestrator": {
             "verdict": status.get("verdict"),
             "detail": status.get("detail", ""),

@@ -281,7 +281,10 @@ class Screen:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
         project = self.state.get("project") or {}
-        head = f" multiagents · {project.get('name', '?')} · {project.get('executor', '')}"
+        driving = ", ".join(d["role"] for d in (self.state.get("drivers") or [])
+                            if d.get("running")) or "idle"
+        head = (f" multiagents · {project.get('name', '?')} · "
+                f"{project.get('executor', '')} · {driving}")
         self.put(0, 0, head + " " * max(0, width - len(head)), curses.A_REVERSE)
         tabs = "  ".join(f"[{i + 1}]{name}" for i, name in enumerate(TABS))
         self.put(1, 1, tabs.replace(f"[{TABS.index(self.tab) + 1}]{self.tab}",
