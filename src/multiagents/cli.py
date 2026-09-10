@@ -2647,12 +2647,18 @@ def cmd_docker(args: argparse.Namespace) -> int:
         if not state.get("ok"):
             print(state.get("error"), file=sys.stderr)
             return 1
-        private = ex.private_state()
+        # This provider's profile, not every provider's: with two of them
+        # having private homes, the unfiltered version listed both and named
+        # the wrong directory as the one about to be written.
+        private = ex.private_state(provider_name)
         if not private:
             print(f"{provider_name} has no container_private_home in providers.yaml — "
                   f"it uses the host's credentials directly and needs no separate login.")
             return 0
         print(f"Logging {provider_name} in INSIDE the container.")
+        print(f"(`multiagents auth login {provider_name}` is the usual route, and "
+              f"for a provider whose\n credentials are plain files it does this "
+              f"on the host, with your own browser.)")
         print("Its credentials are stored in a container-private directory:")
         for container_path, host_path in private.items():
             print(f"  {container_path}  ->  {host_path}")
