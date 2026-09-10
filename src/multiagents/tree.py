@@ -791,6 +791,56 @@ class Tree:
             return entry
         return None
 
+    # How a provider's window is being spent, sampled wherever a budget is
+    # already being read. Kept in the tree because every agent runs its own
+    # server process and the window is shared by all of them: one process's
+    # view of the burn rate is not the burn rate.
+    HEADROOM_SAMPLES = 24
+
+    def note_headroom(self, provider: str, headroom: float | None,
+                      spent: float | None = None) -> None:
+        if headroom is None:
+            return
+        with self.transaction() as data:
+            series = data.setdefault("headroom", {}).setdefault(provider, [])
+            if series and now() - series[-1][0] < 20:
+                return                       # already sampled this moment
+            series.append([now(), round(float(headroom), 4),
+                           round(float(spent or 0), 4)])
+            del series[:-self.HEADROOM_SAMPLES]
+
+    def burn(self, provider: str, window: float = 3600.0) -> dict:
+        """How fast this provider's window is draining, and what that implies.
+
+        Measured globally, which is the only way it means anything: the window
+        belongs to the account, not to an agent, so an agent reasoning about
+        its own consumption is reasoning about a fraction of the thing that
+        will stop it. An advisor's point, and the reason this lives here rather
+        than in a Run.
+
+        `window_dollars` is derived the same way — from how much percentage a
+        known amount of spending moved — because the provider never states what
+        a window is worth. It is an estimate and is reported as one.
+        """
+        series = [s for s in (self.read().get("headroom", {}).get(provider) or [])
+                  if now() - s[0] <= window]
+        if len(series) < 2:
+            return {"samples": len(series)}
+        first, last = series[0], series[-1]
+        minutes = (last[0] - first[0]) / 60
+        if minutes <= 0:
+            return {"samples": len(series)}
+        drop = (first[1] - last[1]) * 100          # percentage points spent
+        rate = drop / minutes                       # points per minute
+        out = {"samples": len(series), "points_per_minute": round(rate, 3),
+               "headroom": last[1]}
+        if rate > 0.01:
+            out["seconds_to_wall"] = max(0.0, last[1] * 100 / rate * 60)
+        spent = last[2] - first[2]
+        if drop > 1 and spent > 0:
+            out["window_dollars"] = round(spent / (drop / 100), 2)
+        return out
+
     def claim_instance(self, provider: str, window: float = 120.0) -> None:
         """Record that work has just been sent to this account.
 

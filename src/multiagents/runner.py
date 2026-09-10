@@ -24,6 +24,7 @@ import signal
 import hashlib
 import json
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -54,6 +55,25 @@ TREE_FLUSH_SECONDS = 2.0
 # first stream event, or its death, whichever arrives. Only the ceiling;
 # a healthy agent usually settles it in well under a second.
 STEER_CONFIRM_SECONDS = 5.0
+WRAP_UP = (
+    "STOP AND HAND OVER. {provider} is about to run out of quota — roughly "
+    "{minutes} minute(s) of it left, shared with every other agent running "
+    "right now. You are being interrupted deliberately, before it cuts you off "
+    "mid-thought, because what you leave behind decides what the next run "
+    "costs.\n\n"
+    "Do exactly this, and nothing else:\n"
+    "1. Commit whatever currently works, even if incomplete. An uncommitted "
+    "worktree is the one thing that cannot be recovered.\n"
+    "2. Write a short handoff — what is done, what is left, which file you were "
+    "in the middle of, and anything you worked out that is not obvious from the "
+    "diff.\n"
+    "3. Stop. Do not start anything new.\n\n"
+    "The work resumes from your branch and this handoff, not from your memory "
+    "of this conversation: after the window resets, that memory costs more to "
+    "reload than it is worth."
+)
+
+
 def _both_ends(text: str, keep: int = 80, tail: int = 200) -> str:
     """The start and the end of some output, which is where reasons live.
 
@@ -197,6 +217,7 @@ class Run:
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     ticket: dict | None = None        # a TICKET filed from the final message
+    wrap_up_asked: bool = False       # asked once to land its work before a wall
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -258,6 +279,43 @@ class Runner:
         if code == auth.NOT_AUTHENTICATED:
             return False
         return None
+
+    def _sample_headroom(self, provider) -> None:
+        """One cached budget reading, recorded for the burn rate. Blocking."""
+        try:
+            from .budget import read_provider
+
+            budget = read_provider(provider.name, provider, self.executor(),
+                                   global_config_dir(), self.paths.config)
+            self.tree.note_headroom(provider.name, budget.headroom,
+                                    self.tree.rollup_usage().get("cost_usd", 0))
+        except Exception:
+            pass                              # a reading must never break a run
+
+    def _wind_down(self, budgets: dict) -> None:
+        """Stop sending work to a provider that is minutes from its wall.
+
+        Not a cooldown — nothing is broken — but starting an agent into the
+        last minutes of a window buys a run that will be cut off mid-thought,
+        and its context has to be paid for again afterwards. Measured: two opus
+        agents refilled a fresh five-hour window in thirteen minutes, and the
+        second pair was doomed the moment it launched.
+
+        It also gives the agents already running the room to wrap up, which an
+        advisor pointed out is otherwise self-defeating: interrupting them to
+        write a handoff while new work keeps draining the same window means the
+        handoff is cut off too.
+        """
+        lead = float(self.config.limits.get("wind_down_seconds", 300))
+        for name, budget in budgets.items():
+            if not budget.usable or budget.cooldown_until:
+                continue
+            burn = self.tree.burn(name)
+            left = burn.get("seconds_to_wall")
+            if left is not None and left < lead:
+                budget.cooldown_until = now() + max(60.0, left)
+                budget.note = (f"winding down: about {left / 60:.0f} min of this "
+                               f"window left at the current rate")
 
     def _half_open(self, budgets: dict, cooldowns: dict) -> None:
         """When a tripped provider's cooldown lapses, allow exactly one trial.
@@ -676,7 +734,56 @@ class Runner:
         self.tree.update(node_id, pid=handle.pid)
         self.tree.set_status(node_id, "running")
         run.task = asyncio.create_task(self._consume(run))
+        # Owned by the Runner, not by the run: asking an agent to wrap up means
+        # stopping and relaunching it, which a task belonging to that same run
+        # cannot safely do to itself.
+        asyncio.create_task(self._wrap_up_watch(node_id))
         return run
+
+    async def _wrap_up_watch(self, node_id: str) -> None:
+        """Ask an agent to land what it has, once, before the window closes.
+
+        The alternative is not "keep working" — it is being cut off mid-thought
+        with an uncommitted worktree and a 173,000-token conversation that costs
+        more to reload than it saved. Measured on the day this was written: four
+        agents cut off that way, four branches discarded, the work re-derived
+        from scratch by other agents.
+
+        Once per run, and only while the run is still going.
+        """
+        interval = float(self.config.limits.get("wind_down_poll_seconds", 60))
+        # Staggered, so N agents do not all decide to write their handoffs in
+        # the same second — the spike would be what finally hits the wall.
+        await asyncio.sleep(interval * (0.5 + random.random()))
+        while True:
+            run = self.runs.get(node_id)
+            if run is None or run.done.is_set() or run.awaiting:
+                return
+            if getattr(run, "wrap_up_asked", False):
+                return
+            # Take a reading rather than trusting the last one. An advisor's
+            # point, and a good one: budgets are sampled where they are already
+            # read, which is at spawn — so a tree full of agents running local
+            # test suites for ten minutes reads a burn rate from before any of
+            # them started, and walks into the wall without ever crossing a
+            # threshold. The read is cached (60s in process, 5 min per machine),
+            # so polling it is nearly free.
+            await asyncio.to_thread(self._sample_headroom, run.provider)
+            burn = self.tree.burn(run.provider.name)
+            left = burn.get("seconds_to_wall")
+            lead = float(self.config.limits.get("wrap_up_seconds", 420))
+            if left is None or left > lead:
+                await asyncio.sleep(interval)
+                continue
+            run.wrap_up_asked = True
+            self.tree.emit(node_id, "wrap_up", provider=run.provider.name,
+                           seconds_left=round(left))
+            try:
+                await self.steer(node_id, WRAP_UP.format(
+                    provider=run.provider.name, minutes=max(1, round(left / 60))))
+            except Exception as exc:            # never let this kill the run
+                self.tree.emit(node_id, "wrap_up_failed", detail=str(exc)[:200])
+            return
 
     # ----------------------------------------------------------------- start --
 
@@ -728,6 +835,10 @@ class Runner:
             global_config_dir(), self.paths.config, None, cooldowns,
         )
         self._half_open(budgets, cooldowns)
+        spend_now = self.tree.rollup_usage().get("cost_usd", 0)
+        for name, entry in budgets.items():
+            self.tree.note_headroom(name, entry.headroom, spend_now)
+        self._wind_down(budgets)
         routed_from, routed_why = "", ""
         budget_cfg = self.config.project.get("budget", {})
         # Other accounts on the same CLI. Interchangeable without a `models:`
@@ -1205,7 +1316,11 @@ class Runner:
                 cost = f", after {ran:.0f}m" + (f" and ${spent:.2f}" if spent else "")
                 reason = limited["reason"] + (
                     f"{cost} — back at "
-                    f"{time.strftime('%H:%M', time.localtime(limited['until']))}")
+                    f"{time.strftime('%H:%M', time.localtime(limited['until']))}. "
+                    f"RESUMABLE: steer_agent({node_id!r}, ...) continues this "
+                    f"session on its branch. Reissuing the task instead pays "
+                    f"for the whole conversation again — measured at 7.2M "
+                    f"cached tokens on a run that had cost 173k.")
             elif status == "failed":
                 if run.final_status and run.final_status.upper() not in {
                         "SUCCESS", "OK", "COMPLETED"}:

@@ -248,6 +248,29 @@ limits:
   # transient error into a multi-day lockout of a vendor that was never down.
   provider_family_cooldown_seconds: 300
 
+  # Winding down, rather than hitting a wall.
+  #
+  # A provider's usage window is shared by every agent running against it, so
+  # how fast it is draining is a GLOBAL fact — measured from the headroom
+  # readings the router already takes, not from any one agent's consumption.
+  # Measured on a real project: two opus agents refilled a fresh five-hour
+  # window in thirteen minutes, were restarted the moment it reopened, and
+  # filled it again.
+  #
+  # These are a COUNTDOWN, so the larger number happens first. Getting that
+  # backwards is easy and was got backwards here first time: new work has to
+  # stop BEFORE the running agents are asked to land, or they are writing their
+  # handoffs while fresh work drains the same window underneath them.
+  #
+  # T-10min: no NEW work is routed to that provider. A run started here is one
+  # that gets cut off mid-thought, and its context has to be paid for again.
+  wind_down_seconds: 600
+  # T-7min: the agents already running are asked ONCE to commit what works and
+  # write a handoff — with three minutes of quiet ahead of them in which to do
+  # it, because nothing new has been started since T-10.
+  wrap_up_seconds: 420
+  wind_down_poll_seconds: 60
+
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents
   # said — which is the signal this project learned not to classify on. Set

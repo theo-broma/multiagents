@@ -7347,3 +7347,102 @@ def test_the_failure_count_says_what_kind_of_failure(tmp_path, monkeypatch):
     body = Path("src/multiagents/server.py").read_text()
     assert "was out of quota, not because it is broken" in body
     assert "person can fix that" in body
+
+
+def test_the_burn_rate_is_measured_globally(tmp_path):
+    """The window belongs to the account, not to an agent: an agent reasoning
+    about its own consumption is reasoning about a fraction of the thing that
+    will stop it. Two opus agents refilled a fresh five-hour window in thirteen
+    minutes, which no single agent's view would have predicted."""
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    assert tree.burn("claude") == {"samples": 0}
+
+    now = time.time()
+    with tree.transaction() as data:
+        data["headroom"] = {"claude": [[now - 780, 1.00, 0.00],
+                                       [now - 390, 0.55, 5.60],
+                                       [now - 60, 0.12, 10.90]]}
+    burn = tree.burn("claude")
+    assert 7 < burn["points_per_minute"] < 8
+    assert burn["seconds_to_wall"] < 180, "minutes, not hours"
+    # The provider never says what a window is worth; this derives it from how
+    # much percentage a known amount of spending moved.
+    assert 11 < burn["window_dollars"] < 14
+
+
+def test_no_new_work_is_sent_into_the_last_minutes_of_a_window(tmp_path):
+    """A run started there is one that gets cut off mid-thought, and its
+    context has to be paid for again afterwards."""
+    from multiagents.budget import Budget
+    from multiagents.config import Config
+    from multiagents.runner import Runner
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    runner = Runner.__new__(Runner)
+    runner.tree = Tree(paths.tree_file, paths.events_file)
+    runner.config = Config(project={"limits": {"wind_down_seconds": 300}},
+                           providers={}, agents={}, models={}, instruction_dirs=[])
+
+    now = time.time()
+    with runner.tree.transaction() as data:
+        data["headroom"] = {"claude": [[now - 600, 0.90, 0.0],
+                                       [now - 60, 0.05, 9.0]]}
+    budgets = {"claude": Budget("claude", known=True, headroom=0.05)}
+    runner._wind_down(budgets)
+    assert budgets["claude"].usable is False
+    assert "winding down" in budgets["claude"].note
+
+    # A window draining slowly is not winding down.
+    with runner.tree.transaction() as data:
+        data["headroom"] = {"agy": [[now - 3600, 0.95, 0.0], [now - 60, 0.90, 1.0]]}
+    slow = {"agy": Budget("agy", known=True, headroom=0.90)}
+    runner._wind_down(slow)
+    assert slow["agy"].usable is True
+
+
+def test_an_agent_is_asked_to_land_its_work_before_the_wall():
+    """The alternative is not "keep working" — it is being cut off mid-thought
+    with an uncommitted worktree and a conversation that costs more to reload
+    than it saved."""
+    import inspect
+    from multiagents.runner import WRAP_UP, Runner
+
+    assert "Commit whatever currently works" in WRAP_UP
+    assert "handoff" in WRAP_UP and "Stop." in WRAP_UP
+
+    body = inspect.getsource(Runner._wrap_up_watch)
+    assert "wrap_up_asked" in body, "once per run, not once per poll"
+    assert "self.steer" in body
+
+    # It must not be a task belonging to the run it interrupts.
+    launch = inspect.getsource(Runner._launch)
+    assert "asyncio.create_task(self._wrap_up_watch" in launch
+
+
+def test_new_work_stops_before_the_running_agents_are_asked_to_land():
+    """These are a COUNTDOWN, so the larger number happens first — which is easy
+    to get backwards and was got backwards here first time. New work has to stop
+    BEFORE agents are asked to land, or they write their handoffs while fresh
+    work drains the same window underneath them."""
+    from multiagents.config import load
+
+    limits = load(None).limits
+    assert limits["wind_down_seconds"] > limits["wrap_up_seconds"], \
+        "no new work first, then ask the running agents to wrap up"
+
+
+def test_the_burn_rate_is_re_read_rather_than_remembered():
+    """Budgets are sampled where they are already read, which is at spawn. A
+    tree full of agents running local test suites for ten minutes would read a
+    rate from before any of them started, and walk into the wall without ever
+    crossing a threshold."""
+    import inspect
+    from multiagents.runner import Runner
+
+    body = inspect.getsource(Runner._wrap_up_watch)
+    assert "_sample_headroom" in body, "it takes a reading, not just the last one"
+    assert "random.random()" in body, "and staggers, so N agents do not spike together"
