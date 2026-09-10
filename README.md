@@ -1041,7 +1041,18 @@ transcripts and the event log are read **backwards from the end**; this project
 has seen an 11 MB stream, and the button that opens one is the button you press
 when something has already gone wrong.
 
-**Live** is the page you leave open. Running agents with their tokens, cost,
+**Live** distinguishes two things the tree has always distinguished and the
+monitor originally did not. `ACTIVE` is work in progress; `PAUSED` — *"the
+process has exited but the session is resumable"* — is a **standing
+conversation**, which is how the orchestrator asks the same advisor a second
+question. Showing them in one list, with a clock that looked like it was
+running and a red *"process gone"* beside a state that is designed, produced
+exactly the question it should have prevented: *is it safe to stop these?* They
+now sit apart, described by what resuming one would cost and how stale it has
+become, and the button says **end conversation**, because no work is lost —
+what goes is the context, and the next consultation starts cold.
+
+**Live** is otherwise the page you leave open. Running agents with their tokens, cost,
 steps, elapsed time and token rate; each provider's usage; anything an agent is
 blocked on, answerable in place; and an alert banner at the top for the things
 that silently cost you a morning — a limited or stalled orchestrator with its
@@ -1077,6 +1088,15 @@ which still hold unmerged work, and how much.
 **Costs** rolls the same usage up three ways, because *what did last night
 cost*, *which agent is expensive* and *which model is expensive* are three
 different questions.
+
+Every provider reports usage in its own words and the words do not overlap:
+opencode sends `total`, agy sends `total_tokens`, and claude sends neither —
+just the API's own parts. Reading `total` alone therefore counted the most
+expensive provider in the roster as having spent nothing. Measured on one
+project when this was found: **nine million tokens dropped**, and every claude
+row in `multiagents usage` reading zero. `tree.token_count()` normalises the
+three shapes on read, so a tree already on disk is fixed by the upgrade rather
+than by a migration.
 
 ### Each provider shows its own usage
 

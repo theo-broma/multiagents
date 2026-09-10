@@ -23,10 +23,15 @@ from ..budget import read_all, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
 from ..providers import load_providers
-from ..tree import Tree
+from ..tree import ACTIVE, PAUSED, Tree, cost_of, token_count
 
-# Statuses that mean "this agent is the reason something is happening".
-LIVE = ("running", "starting", "idle")
+# The tree already draws this line and draws it deliberately: ACTIVE is work in
+# progress, PAUSED is "the process has exited but the session is resumable".
+# The monitor used to invent a third set spanning both, which put parked
+# conversations under RUNNING, printed "process gone" in red beside a state
+# that is designed, and raised an orphan alert advising a repair for a system
+# that was working. It cost the maintainer a question and me an afternoon.
+LIVE = tuple(sorted(ACTIVE))
 
 
 def _alive(pid: int | None) -> bool:
@@ -193,8 +198,10 @@ def _node_view(node: dict, now: float) -> dict:
         "routed_why": node.get("routed_why", ""),
         "steps": node.get("steps", 0),
         "events": node.get("events", 0),
-        "tokens": usage.get("total", 0),
-        "cost_usd": usage.get("cost_usd", 0.0),
+        # Every provider names these differently and one of them names them not
+        # at all; see tree.token_count.
+        "tokens": token_count(usage),
+        "cost_usd": cost_of(usage),
         "usage": usage,
         "started_at": started,
         "ended_at": ended,
@@ -202,7 +209,11 @@ def _node_view(node: dict, now: float) -> dict:
         "quiet_for": max(0.0, now - node["last_event_at"])
         if node.get("last_event_at") else None,
         "alive": alive,
-        "stale": bool(node.get("status") in LIVE and not alive),
+        "stale": bool(node.get("status") in ACTIVE and not alive),
+        # A standing conversation: no process, a resumable session, and the
+        # orchestrator's way of asking the same advisor a second question.
+        "parked": bool(node.get("status") in PAUSED and node.get("session_id")),
+        "last_spoke": node.get("last_event_at"),
         "has_transcript": True,
     }
 
@@ -237,11 +248,9 @@ def spend_by_provider(tree: Tree) -> dict[str, dict[str, int]]:
     for node in tree.read().get("nodes", {}).values():
         usage = node.get("usage") or {}
         bucket = out.setdefault(node.get("provider") or "?", {})
-        for key in ("total", "input", "output", "reasoning"):
-            if usage.get(key):
-                bucket[key] = bucket.get(key, 0) + int(usage[key])
-        if usage.get("cost_usd"):
-            bucket["cost_usd"] = round(bucket.get("cost_usd", 0) + usage["cost_usd"], 4)
+        bucket["total"] = bucket.get("total", 0) + token_count(usage)
+        if cost_of(usage):
+            bucket["cost_usd"] = round(bucket.get("cost_usd", 0) + cost_of(usage), 4)
     return out
 
 
@@ -255,7 +264,7 @@ def totals(nodes: dict) -> dict:
 
     for node in nodes.values():
         usage = node.get("usage") or {}
-        tokens, cost = int(usage.get("total") or 0), float(usage.get("cost_usd") or 0)
+        tokens, cost = token_count(usage), cost_of(usage)
         stamp = node.get("started_at") or node.get("created_at") or 0
         day = time.strftime("%Y-%m-%d", time.localtime(stamp)) if stamp else "?"
         for key, bucket in ((node.get("agent") or "?", by_agent),
@@ -353,7 +362,11 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
                     "text": f"{len(deferred)} task(s) deferred, waiting to retry"})
 
     for node in data.get("nodes", {}).values():
-        if node.get("status") in LIVE and node.get("pid") and not _alive(node["pid"]):
+        # ACTIVE only. A PAUSED conversation whose process has exited is the
+        # designed state, not an orphan, and telling somebody to run
+        # `multiagents resume` over it is advice that would reopen the
+        # orchestrator's own session for no reason.
+        if node.get("status") in ACTIVE and node.get("pid") and not _alive(node["pid"]):
             out.append({"level": "error", "kind": "orphan",
                         "text": f"{node['id']} ({node['agent']}) is marked "
                                 f"{node['status']} but its process is gone",
@@ -380,8 +393,13 @@ def snapshot(paths: ProjectPaths, config: Config,
     provider_rows = providers_view(paths, config, tree, with_scripts=with_scripts)
     roots = agent_tree(nodes, now)
     running = [_node_view(n, now) for n in nodes.values()
-               if n.get("status") in LIVE]
+               if n.get("status") in ACTIVE]
     running.sort(key=lambda v: v["started_at"] or 0)
+    # Shown apart, and shown at all: it is state the orchestrator will act on,
+    # and invisible state is how the last several surprises happened.
+    parked = [_node_view(n, now) for n in nodes.values()
+              if n.get("status") in PAUSED and n.get("session_id")]
+    parked.sort(key=lambda v: -(v["last_spoke"] or 0))
 
     status = watchdog.read_status(paths) or {}
     return {
@@ -402,6 +420,7 @@ def snapshot(paths: ProjectPaths, config: Config,
         "alerts": alerts(paths, config, tree, provider_rows),
         "providers": provider_rows,
         "running": running,
+        "conversations": parked,
         "history": roots,
         "totals": totals(nodes),
         "tickets": data.get("tickets", []),
@@ -411,6 +430,7 @@ def snapshot(paths: ProjectPaths, config: Config,
         "counts": {
             "nodes": len(nodes),
             "running": len(running),
+            "conversations": len(parked),
             "open_tickets": sum(1 for t in data.get("tickets", [])
                                 if t.get("status") == "open"),
             "open_questions": sum(1 for q in data.get("questions", [])

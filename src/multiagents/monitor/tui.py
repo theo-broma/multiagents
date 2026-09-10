@@ -118,6 +118,30 @@ class Screen:
                             f"  {agent['steps']:>3} steps  {agent['status']}")
             y += 1
 
+        # Apart from the running list, and described as what they are: parked
+        # conversations with no process, which the orchestrator resumes by
+        # session id. Listing them as "running" is what made somebody ask
+        # whether it was safe to stop them.
+        parked = self.state.get("conversations") or []
+        if parked:
+            y += 1
+            self.put(y, 0, f" STANDING CONVERSATIONS ({len(parked)})"
+                           f"  parked, resumable, costing nothing", curses.A_BOLD)
+            y += 1
+            offset = len(self.rows)
+            for index, agent in enumerate(parked):
+                self.rows.append({"kind": "agent", "id": agent["id"], "agent": agent})
+                mark = ">" if offset + index == self.cursor else " "
+                quiet = (self.state.get("at", 0) - (agent.get("last_spoke") or 0))
+                self.put(y, 0, f"{mark} {agent['agent']:<14} {agent['id']:<10}",
+                         curses.A_REVERSE if offset + index == self.cursor else 0)
+                self.put(y, 28, f"{agent['provider']}/{agent['model']}"[:26],
+                         curses.color_pair(4))
+                self.put(y, 56, f"{_num(agent['tokens']):>7} tok of context   "
+                                f"last consulted {_age(quiet)} ago",
+                         curses.color_pair(4))
+                y += 1
+
         y += 1
         self.put(y, 0, " PROVIDERS", curses.A_BOLD)
         y += 1
@@ -263,8 +287,9 @@ class Screen:
         self.put(1, 1, tabs.replace(f"[{TABS.index(self.tab) + 1}]{self.tab}",
                                     f"[{TABS.index(self.tab) + 1}]{self.tab.upper()}"))
         counts = self.state.get("counts") or {}
-        self.put(1, max(0, width - 34),
+        self.put(1, max(0, width - 44),
                  f"{counts.get('running', 0)} running · "
+                 f"{counts.get('conversations', 0)} parked · "
                  f"{counts.get('open_questions', 0)}q · {counts.get('open_tickets', 0)}t")
 
         drawer = {"live": self.draw_live, "history": self.draw_history,
@@ -339,7 +364,14 @@ class Screen:
             if message:
                 self.do("steer_agent", agent_id=agent["id"], message=message)
         elif char == ord("x") and agent:
-            if self.confirm(f"stop {agent['id']}?"):
+            if agent.get("parked"):
+                # Different act, different word: nothing is lost but the
+                # context, and the next consultation starts cold.
+                question = (f"end {agent['agent']}'s conversation? "
+                            f"{_num(agent['tokens'])} tokens of context go")
+            else:
+                question = f"stop {agent['id']}?"
+            if self.confirm(question):
                 self.do("stop_agent", agent_id=agent["id"])
         elif char == ord("m") and agent:
             if self.confirm(f"merge {agent.get('branch') or agent['id']}?"):

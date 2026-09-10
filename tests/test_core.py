@@ -6827,3 +6827,84 @@ def test_the_container_shell_gets_an_agents_home_and_path():
     shell = body[body.index('if args.action == "shell"'):]
     assert 'f"HOME={Path.home()}"' in shell
     assert 'PATH=' in shell
+
+
+def test_a_parked_conversation_is_not_a_running_agent(tmp_path):
+    """The tree draws this line deliberately — ACTIVE is work in progress,
+    PAUSED is "the process has exited but the session is resumable" — and the
+    monitor invented a third set spanning both. The result put standing
+    conversations under RUNNING with a clock that appeared to be counting, a
+    red "process gone" next to a designed state, and an error alert advising a
+    repair. It cost the maintainer a question about a system that was fine."""
+    from multiagents.monitor import snapshot as snap
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-live", agent="implementer", provider="agy", model="m",
+                  parent=None, depth=0, status="running", pid=os.getpid()))
+    tree.add(Node(id="ag-parked", agent="critic", provider="agy", model="m",
+                  parent=None, depth=0, status="idle", conversation=True,
+                  session_id="ses-1", pid=4_000_000))
+    tree.update("ag-parked", usage={"total_tokens": 219669},
+                last_event_at=time.time() - 3600)
+
+    snapshot = snap.snapshot(paths, _config(), with_scripts=False)
+    assert [a["id"] for a in snapshot["running"]] == ["ag-live"]
+    assert [c["id"] for c in snapshot["conversations"]] == ["ag-parked"]
+
+    parked = snapshot["conversations"][0]
+    assert parked["parked"] is True and parked["stale"] is False
+    assert parked["tokens"] == 219669, "not '0 tok': that is the per-turn counter"
+    assert parked["last_spoke"], "and it is described by when it last spoke"
+
+    assert not [a for a in snapshot["alerts"] if a["kind"] == "orphan"], \
+        "a parked conversation with no process is the designed state"
+
+
+def test_an_active_agent_whose_process_died_is_still_an_orphan(tmp_path):
+    """The alert has a real case; it was only ever firing on the wrong one."""
+    from multiagents.monitor import snapshot as snap
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.add(Node(id="ag-zombie", agent="implementer", provider="agy", model="m",
+                  parent=None, depth=0, status="running", pid=4_000_000))
+    found = snap.alerts(paths, _config(), tree, [])
+    assert any(a["kind"] == "orphan" for a in found)
+
+
+def test_every_providers_token_shape_is_counted(tmp_path):
+    """Each provider reports usage in its own words and the words do not
+    overlap. Reading `total` alone reported the most expensive provider in the
+    roster as having spent nothing — nine million tokens dropped on one
+    project, and every claude row in `usage` showing zero."""
+    from multiagents.monitor import snapshot as snap
+    from multiagents.tree import Node, Tree, token_count
+
+    assert token_count({"total": 4_016_666}) == 4_016_666          # opencode
+    assert token_count({"total_tokens": 89_623}) == 89_623         # agy
+    assert token_count({                                            # claude
+        "input_tokens": 110, "output_tokens": 76_080,
+        "cache_creation_input_tokens": 156_504,
+        "cache_read_input_tokens": 5_122_394}) == 5_355_088
+    assert token_count({}) == 0 and token_count(None) == 0
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    for index, usage in enumerate((
+            {"total": 1000, "cost_usd": 0.5},
+            {"total_tokens": 2000},
+            {"input_tokens": 1, "output_tokens": 2,
+             "cache_read_input_tokens": 3997, "cost_usd": 1.5})):
+        tree.add(Node(id=f"ag-{index}", agent="a", provider=f"p{index}",
+                      model="m", parent=None, depth=0, status="done"))
+        tree.update(f"ag-{index}", usage=usage)
+
+    totals = snap.totals(tree.read()["nodes"])
+    assert totals["grand"]["tokens"] == 7000, "all three shapes, none dropped"
+    assert totals["grand"]["cost_usd"] == 2.0
+
+    rows = {row["provider"]: row for row in tree.usage_by_model()}
+    assert rows["p2"]["tokens"] == 4000, "`multiagents usage` counts claude too"

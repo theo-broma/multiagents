@@ -40,6 +40,36 @@ AWAITING = "awaiting_user"
 PAUSED = {"idle", AWAITING}
 
 
+# Each provider reports usage in its own words, and the words do not overlap:
+# opencode sends `total`, agy sends `total_tokens`, and claude sends none of
+# either — just the Anthropic API's own parts, `input_tokens`,
+# `output_tokens` and two cache counters. Anything reading `total` alone
+# therefore reported the most expensive provider in the roster as having spent
+# nothing. Measured on one project: nine million tokens dropped, and every
+# claude row in `usage` showing 0.
+#
+# Normalised on READ rather than on write, so trees already on disk are fixed
+# by the upgrade rather than by a migration.
+TOKEN_TOTALS = ("total", "total_tokens")
+TOKEN_PARTS = ("input_tokens", "output_tokens",
+               "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def token_count(usage: dict[str, Any] | None) -> int:
+    """How many tokens a run spent, whichever provider is describing it."""
+    usage = usage or {}
+    for key in TOKEN_TOTALS:
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and value:
+            return int(value)
+    parts = sum(float(usage.get(key) or 0) for key in TOKEN_PARTS)
+    return int(parts)
+
+
+def cost_of(usage: dict[str, Any] | None) -> float:
+    return float((usage or {}).get("cost_usd") or 0.0)
+
+
 def new_id() -> str:
     return "ag-" + uuid.uuid4().hex[:6]
 
@@ -377,8 +407,8 @@ class Tree:
             })
             row["runs"] += 1
             row["agents"].add(node.get("agent") or "?")
-            row["tokens"] += int(usage.get("total") or usage.get("total_tokens") or 0)
-            row["cost_usd"] += float(usage.get("cost_usd") or 0)
+            row["tokens"] += token_count(usage)
+            row["cost_usd"] += cost_of(usage)
         out = []
         for row in rows.values():
             row["agents"] = sorted(row["agents"])
