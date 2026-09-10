@@ -1191,11 +1191,20 @@ class Runner:
             # reason and nothing to act on.
             reason = ""
             if status == "limited":
-                # The provider's own words, and when it comes back. The work on
-                # this branch is real and the session is resumable: this is a
-                # place to carry on from, not a failure to investigate.
+                # The provider's own words, when it comes back, and what this
+                # run spent getting there. The last one matters more than it
+                # looks: on the day this was written, two opus agents filled a
+                # freshly-reset five-hour window in THIRTEEN MINUTES, were
+                # restarted on the same tasks the moment it reopened, and filled
+                # it again. Nothing told the orchestrator that the pair costs a
+                # whole window, so it had no way to know not to start both.
+                spent = (usage or {}).get("cost_usd") or 0
+                node = self.tree.get(node_id)
+                started = getattr(node, "started_at", 0) or now()
+                ran = (now() - started) / 60
+                cost = f", after {ran:.0f}m" + (f" and ${spent:.2f}" if spent else "")
                 reason = limited["reason"] + (
-                    f" — back at "
+                    f"{cost} — back at "
                     f"{time.strftime('%H:%M', time.localtime(limited['until']))}")
             elif status == "failed":
                 if run.final_status and run.final_status.upper() not in {
@@ -1313,7 +1322,7 @@ class Runner:
                         str(budget.resets_at)).timestamp())
                 except (TypeError, ValueError):
                     pass
-        return {"until": until,
+        return {"until": until, "detail": detail,
                 "reason": f"{provider.name} stopped it: {detail}"}
 
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:

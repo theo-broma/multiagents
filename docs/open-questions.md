@@ -186,6 +186,37 @@ which is confusing at 40 nodes and probably unusable at 400.
 
 ---
 
+## 3c · Heavy agents can refill a window faster than anyone can react
+
+Measured on 2026-09-10. Two `implementer-deep` agents on claude/opus ran
+concurrently, filled the five-hour window, and both stopped at 13:32 with the
+provider's limit message. The window reopened around 15:05; the orchestrator
+restarted the same two tasks at 15:07; **thirteen minutes later they had filled
+it again** and both stopped at 15:20.
+
+```
+13:23  ag-136bda  backend traceability   271 steps  6.2M cache-read  $5.05  → discarded
+13:30  ag-bdfac7  flutter recipe units   140 steps  1.0M cache-read  $1.39  → discarded
+15:07  ag-fb583d  the same backend task  357 steps  7.2M cache-read  $6.38  → discarded
+15:07  ag-8b601b  the same flutter task  369 steps  1.6M cache-read  $2.44  → merged
+```
+
+The four "failures" behind §3b's deadlock are exactly these. Meanwhile a free
+`implementer` on agy merged equivalent backend work at 14:54, for $0.00, while
+the second $6.38 attempt was still running.
+
+Two things follow, and only the first is done:
+
+- **Done:** a `limited` run now records what it spent and how long it lasted, so
+  "this pair costs a whole window" is visible rather than inferred.
+- **Open:** nothing stops the orchestrator restarting both heavy agents the
+  moment a window reopens. Staggering them, or telling it what a run consumed
+  relative to the window, would have turned two wasted attempts into one. What
+  would settle the design: whether the budget reader can express "this run used
+  40% of the window" rather than only a percentage of the whole.
+
+---
+
 ## 4 · Declined, and what would change the answer
 
 Positions taken against an advisor's recommendation. Each is a judgement, not a
