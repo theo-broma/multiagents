@@ -1644,6 +1644,31 @@ before it shipped:
   the daemon; it lets a second start beside it, and then two share one state
   directory. Host-pid state is cleared only when the pid is genuinely gone.
 
+### The third mechanism: a symlink where a rename will land
+
+Fixing the mount left one more, found while verifying the fix rather than by
+reasoning about it. Each agent gets a private HOME containing symlinks to the
+provider's state. A link to a **file** does not survive the thing this provider
+does routinely:
+
+```
+$ ln -s real/.credentials.json home/.credentials.json
+$ echo new > home/.tmp && mv home/.tmp home/.credentials.json
+home/.credentials.json   is now a plain file, not a link
+real/.credentials.json   still says "shared"
+```
+
+So an agent that refreshed its token wrote the new one into its own throwaway
+home, the shared profile kept the old one — and the refresh had just rotated the
+old one away, which revokes it. Every other agent was then holding a dead
+credential, and the one that could have fixed it had thrown its copy away.
+
+`home_links` now names the **directory**, so a refresh renames *inside* the
+shared profile where every agent sees it. `.claude.json` stays per-agent through
+`home_copy`, so concurrent agents still cannot corrupt each other's config: with
+`CLAUDE_CONFIG_DIR` unset the CLI keeps that file beside `HOME`, not inside the
+profile.
+
 **`credential_drift()` still asks the inode question**, in one `docker exec`, by comparing inodes.
 `doctor` reports it, the monitor raises it, and `run` and `init-agent` **repair
 it**: a restart re-resolves the bind (verified against docker rather than

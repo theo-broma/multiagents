@@ -2682,8 +2682,16 @@ def cmd_docker(args: argparse.Namespace) -> int:
         ])
 
     if args.action == "shell":
+        # HOME and PATH as an AGENT gets them, or the shell is not the thing you
+        # came to inspect: the CLIs are bind-mounted at their host paths, which
+        # are not on the image's PATH, and `~/.claude` resolves to the image
+        # user's empty home rather than to the mounted profile. Both produced
+        # confusing answers — "command not found", then "loggedIn: false" from a
+        # container that was in fact logged in.
         os.execvp("docker", ["docker", "exec", "-it",
                              "--user", f"{os.getuid()}:{os.getgid()}",
+                             "--env", f"HOME={Path.home()}",
+                             "--env", f"PATH={os.environ.get('PATH', '')}",
                              "--workdir", str(paths.root), ex.container, "bash"])
 
     if args.action == "status":
