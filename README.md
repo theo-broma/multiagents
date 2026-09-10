@@ -2276,6 +2276,18 @@ $ multiagents upgrade-config --dry-run
   keep    agents.yaml            (you edited it; shipped version has changed)
 ```
 
+## What is still open
+
+[`docs/open-questions.md`](docs/open-questions.md) tracks what this project has
+settled by measurement, what is shipped but not yet proven by a real run, which
+thresholds are waiting on data before they are touched again, and which
+recommendations were declined and on what condition that would change.
+
+It exists because several of the beliefs in this README were wrong the first
+time, and were corrected by reading a run rather than by reasoning about the
+code. A conclusion with no evidence attached gets re-derived at the worst
+moment.
+
 ## Tests
 
 ```bash
