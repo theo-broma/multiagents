@@ -29,7 +29,12 @@ from typing import Any, Iterator
 from .redact import depersonalise, scrub
 
 # Terminal states never transition again.
-TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned"}
+# "limited" is terminal and is NOT "failed": the provider stopped the run, the
+# work on its branch is real, and the agent is resumable by session id once the
+# window reopens. Filing it as a failure is what made a full account look like
+# a broken one.
+TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned",
+            "limited"}
 ACTIVE = {"pending", "running", "stuck"}
 # Two states are neither, for the same reason: the process has exited but the
 # session is resumable, so they must not be counted against the concurrency
@@ -510,6 +515,31 @@ class Tree:
 
     TICKET_SEVERITIES = ("blocking", "minor")
 
+    @staticmethod
+    def _tooling_version() -> str:
+        """Which multiagents a ticket was filed against.
+
+        A running orchestrator filed two blocking tickets describing bugs that
+        had been fixed hours earlier the same day. It could not have known, and
+        neither could the person reading them later without checking each one
+        by hand. The commit is cheap to record and turns "is this still true?"
+        into a comparison.
+        """
+        from . import __version__
+
+        sha = ""
+        try:
+            import subprocess
+            here = Path(__file__).resolve().parent
+            result = subprocess.run(
+                ["git", "-C", str(here), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                sha = result.stdout.strip()
+        except Exception:
+            sha = ""
+        return f"{__version__}+{sha}" if sha else __version__
+
     def add_ticket(self, agent_id: str, title: str, body: str,
                    severity: str = "minor", proposed_fix: str = "",
                    project_root=None) -> dict:
@@ -521,6 +551,9 @@ class Tree:
             "proposed_fix": proposed_fix,
             "severity": severity if severity in self.TICKET_SEVERITIES else "minor",
             "filed_at": now(),
+            # Which multiagents this was observed against, so "is it still
+            # true?" is a comparison rather than an investigation.
+            "tooling": Tree._tooling_version(),
             # open -> reported (submitted upstream) | fixed (handled locally)
             # | declined (the user said no) | awaiting_user (needs a decision)
             "status": "open",

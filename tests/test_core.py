@@ -7170,3 +7170,138 @@ def test_a_container_older_than_its_configuration_is_reported(tmp_path, monkeypa
 
     monkeypatch.setattr(docker_mod, "_run", lambda *a, **k: _Current())
     assert executor.mount_drift() == [], "a current container has nothing to say"
+
+
+def test_a_run_the_provider_stopped_is_not_a_run_that_failed(tmp_path, monkeypatch):
+    """Two agents did 42,000 tokens of real work each, ended with "You've hit
+    your monthly spend limit … resets 5:50pm", exited 1, and were filed as
+    failures. Four of those tripped the breaker, whose `check` then reported
+    the provider perfectly authenticated — true, useless, and the reason the
+    day's account of itself was "claude is unreliable" when claude was full."""
+    from multiagents.budget import Budget
+    from multiagents.config import Config
+    from multiagents.providers import Provider
+    from multiagents.runner import Runner
+
+    provider = Provider.from_dict("claude", {
+        "bin": "claude", "spawn": {}, "stream": {},
+        "transcript": {"limit_markers": [
+            {"match": "hit your monthly spend limit", "resets": True,
+             "detail": "usage limit"}]}})
+
+    runner = Runner.__new__(Runner)
+    runner.config = Config(project={}, providers={}, agents={}, models={},
+                           instruction_dirs=[])
+    runner.paths = _paths(tmp_path)
+    runner.executor = lambda spec=None: None
+
+    import multiagents.budget as budget_mod
+    monkeypatch.setattr(budget_mod, "read_provider",
+                        lambda *a, **k: Budget("claude", known=True, headroom=0.0,
+                                               resets_at=None))
+
+    verdict = runner._limit_verdict(
+        provider, ["writing the reference core…",
+                   "You've hit your monthly spend limit · resets 5:50pm"])
+    assert verdict and "usage limit" in verdict["reason"]
+    assert verdict["until"] > time.time()
+
+    # Position is deliberately not strict: a model handed a limit error often
+    # answers it ("I have received a usage limit error, I will stop here"),
+    # which would push the marker one place back and turn a limit into a
+    # failure. The last few chunks count — an advisor's point.
+    assert runner._limit_verdict(
+        provider, ["You've hit your monthly spend limit",
+                   "I will stop here until it resets"]) is not None
+
+    # Further back than that is the run's history, not its ending.
+    assert runner._limit_verdict(
+        provider, ["You've hit your monthly spend limit",
+                   "waited", "resumed", "wrote the tests", "all green"]) is None
+
+    # And the account has to corroborate: matching a string alone would let an
+    # agent that wrote documentation containing the phrase take a provider out.
+    monkeypatch.setattr(budget_mod, "read_provider",
+                        lambda *a, **k: Budget("claude", known=True, headroom=0.9))
+    assert runner._limit_verdict(
+        provider, ["You've hit your monthly spend limit"]) is None
+
+
+def test_limited_is_terminal_and_is_not_failed():
+    """The provider stopped the run; the work on its branch is real and the
+    session is resumable. Filing it as a failure is what made a full account
+    look like a broken one."""
+    from multiagents.tree import ACTIVE, PAUSED, TERMINAL
+
+    assert "limited" in TERMINAL
+    assert "limited" not in ACTIVE and "limited" not in PAUSED
+
+
+def test_the_reason_records_both_ends_of_the_output(tmp_path):
+    """A CLI announces why it stopped at the END; an agent announces what it is
+    about to do at the start. Recording only the first 120 characters recorded
+    "I'll start by reading the spec" as the reason a provider went out of
+    service."""
+    from multiagents.runner import _both_ends
+
+    text = ("I'll start by reading the spec and the test suite. " * 6
+            + "You've hit your monthly spend limit")
+    kept = _both_ends(text)
+    assert kept.startswith("I'll start by reading")
+    assert kept.endswith("You've hit your monthly spend limit")
+    assert _both_ends("short") == "short"
+
+
+def test_an_agent_that_worked_silently_is_not_a_failure(tmp_path, monkeypatch):
+    """Nine runs in one project exited 0 after five minutes and fifty-odd steps
+    of editing files and running commands, said nothing at the end, and were
+    filed as failures. The parent merged three of their branches anyway,
+    because the work was there. The question is not "did it speak" but "did it
+    do anything"."""
+    from multiagents.config import Config
+    from multiagents.runner import Run, Runner
+    from multiagents.supervisor import Supervisor
+    from multiagents.tree import Node, Tree
+
+    paths = _paths(tmp_path)
+    runner = Runner.__new__(Runner)
+    runner.paths = paths
+    runner.tree = Tree(paths.tree_file, paths.events_file)
+    runner.config = Config(project={}, providers={}, agents={}, models={},
+                           instruction_dirs=[])
+    runner.tree.add(Node(id="ag-1", agent="implementer", provider="p", model="m",
+                         parent=None, depth=0))
+
+    class _Run:
+        node_id = "ag-1"
+        supervisor = Supervisor()
+        final_status = ""
+
+    run = _Run()
+    run.supervisor.steps = 52
+    assert runner._classify(run, 0, "", "") == "done", \
+        "fifty-two steps of work is not nothing"
+
+    run.supervisor.steps = 1
+    assert runner._classify(run, 0, "", "") == "failed", \
+        "a run that did nothing and said nothing still reads as a denied tool"
+
+    # An exit code the CLI chose still wins: silence plus failure is a failure.
+    run.supervisor.steps = 52
+    assert runner._classify(run, 1, "", "") == "failed"
+
+
+def test_a_ticket_records_what_it_was_filed_against(tmp_path):
+    """A running orchestrator filed two blocking tickets describing bugs fixed
+    hours earlier the same day. It could not have known, and nor could anyone
+    reading them later without checking each by hand."""
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    ticket = tree.add_ticket("ag-1", "a title", "a body")
+    assert ticket["tooling"], "the version it was observed against"
+
+    from multiagents import bugs
+    assert "against multiagents" in bugs.render(ticket), \
+        "and it travels with the report when it is filed upstream"

@@ -54,6 +54,23 @@ TREE_FLUSH_SECONDS = 2.0
 # first stream event, or its death, whichever arrives. Only the ceiling;
 # a healthy agent usually settles it in well under a second.
 STEER_CONFIRM_SECONDS = 5.0
+def _both_ends(text: str, keep: int = 80, tail: int = 200) -> str:
+    """The start and the end of some output, which is where reasons live.
+
+    A CLI announces why it stopped at the END; an agent announces what it is
+    about to do at the start. Recording only one of them recorded, on the day
+    this was written, "I'll start by reading the spec" as the reason a provider
+    was taken out of service.
+    """
+    text = (text or "").strip()
+    if len(text) <= keep + tail:
+        return text
+    # More from the end than the start: a reason is usually the last thing
+    # written and is rarely one line — a stack trace's meat sits above its
+    # final line, and eighty characters of tail is often just the exit call.
+    return f"{text[:keep]} … {text[-tail:]}"
+
+
 # How often the worktree is sampled for the doom-loop check. Debounced by time
 # rather than by tool count so a chatty agent cannot turn this into a `git`
 # call per event on a large repository.
@@ -985,15 +1002,37 @@ class Runner:
         # `stuck` with the question invisible.
         status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
 
+        # A run the PROVIDER stopped is not a run that failed. The CLI says so
+        # in its own hardcoded words, and until now it said them into an agent's
+        # output where nothing was listening: two agents did 42,000 tokens of
+        # real work each, ended with "You've hit your monthly spend limit …
+        # resets 5:50pm", exited 1, and were filed as failures. Four of those
+        # tripped the breaker, whose `check` then reported the provider
+        # perfectly authenticated — true, useless, and the reason the day's
+        # account of itself was "claude is unreliable" when claude was full.
+        if status == "failed":
+            limited = await asyncio.to_thread(
+                self._limit_verdict, run.provider, run.text_parts)
+            if limited:
+                status = "limited"
+                self.tree.set_cooldown(run.provider.name, limited["until"],
+                                       limited["reason"])
+                self.tree.emit(node_id, "limited", provider=run.provider.name,
+                               until=limited["until"], detail=limited["reason"])
+
         # Cause-agnostic circuit breaker. A provider whose last few runs all
         # failed is broken whatever the reason, and that is knowable without
         # reading a word of what the agent said — which is the part this
         # project has already got wrong once.
-        if status not in ("awaiting_user",):
+        if status not in ("awaiting_user", "limited"):
             trip = self.tree.note_run_outcome(
                 run.provider.name, ok=status in ("done", "merged"),
                 threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
-                reason=f"{status}: {(stderr or text or '').strip()[:120]}",
+                # Both ends of the output. A CLI puts the reason it stopped at
+                # the END — the limit message that started all this was in the
+                # last 120 characters, and what was recorded was the first 120,
+                # which said "I'll start by reading the spec".
+                reason=f"{status}: {_both_ends(stderr or text)}",
             )
             if trip:
                 # A cooldown rather than a permanent mark: the cause may be
@@ -1143,7 +1182,14 @@ class Runner:
             # leaving the orchestrator a node marked failed with an empty
             # reason and nothing to act on.
             reason = ""
-            if status == "failed":
+            if status == "limited":
+                # The provider's own words, and when it comes back. The work on
+                # this branch is real and the session is resumable: this is a
+                # place to carry on from, not a failure to investigate.
+                reason = limited["reason"] + (
+                    f" — back at "
+                    f"{time.strftime('%H:%M', time.localtime(limited['until']))}")
+            elif status == "failed":
                 if run.final_status and run.final_status.upper() not in {
                         "SUCCESS", "OK", "COMPLETED"}:
                     reason = f"{run.provider.name} reported {run.final_status}"
@@ -1200,6 +1246,68 @@ class Runner:
                 self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
                 return
 
+    def _did_work(self, run: Run) -> bool:
+        """Is there anything to show for this run besides its silence?"""
+        node = self.tree.get(run.node_id)
+        branch = getattr(node, "branch", "") if node else ""
+        if branch:
+            try:
+                base = self.config.base_branch or gitops.current_branch(self.paths.root)
+                if gitops.commits_on(self.paths.root, branch, base) > 0:
+                    return True
+            except Exception:
+                pass
+        return (run.supervisor.steps or 0) >= int(
+            self.config.limits.get("silent_success_steps", 10))
+
+    def _limit_verdict(self, provider, text_parts: list[str]) -> dict | None:
+        """Did the provider stop this run, and until when? Blocking; off-thread.
+
+        Two things must agree before a run is called limited rather than
+        failed. The CLI's own marker has to be the LAST thing said — the same
+        guard the orchestrator's detector uses, because a marker anywhere else
+        is an agent quoting it — and the account's own budget has to corroborate
+        it. An advisor's point: matching a string alone would let an agent that
+        wrote documentation containing the phrase, and then crashed, take a
+        provider offline.
+        """
+        markers = (getattr(provider, "transcript", None) or {}).get("limit_markers") or []
+        # The last few chunks, not strictly the last one. A model that is handed
+        # a limit error often answers it — "I have received a usage limit error,
+        # I will stop here" — which would push the marker one place back and,
+        # under a stricter rule, turn a limit into a failure. The budget check
+        # below is what keeps this honest; position alone never was.
+        tail = "\n".join((text_parts or [])[-3:]).lower()
+        hit = next((m for m in markers
+                    if m.get("match", "") and m["match"].lower() in tail), None)
+        if hit is None:
+            return None
+
+        until = now() + float(self.config.limits.get(
+            "provider_down_cooldown_seconds", 1800))
+        detail = hit.get("detail") or hit["match"]
+        try:
+            from .budget import read_provider
+            budget = read_provider(provider.name, provider, self.executor(),
+                                   global_config_dir(), self.paths.config,
+                                   use_cache=False)
+        except Exception:
+            budget = None
+        if budget is not None and budget.known:
+            # It says it is fine: something else ended this run and the
+            # sentence was somebody quoting it.
+            if budget.headroom is not None and budget.headroom > 0.25:
+                return None
+            if budget.resets_at:
+                try:
+                    from datetime import datetime
+                    until = max(until, datetime.fromisoformat(
+                        str(budget.resets_at)).timestamp())
+                except (TypeError, ValueError):
+                    pass
+        return {"until": until,
+                "reason": f"{provider.name} stopped it: {detail}"}
+
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:
         succeeded = code == 0 and (
             not run.final_status
@@ -1222,8 +1330,18 @@ class Runner:
         if code != 0:
             return "failed"
         if not text.strip():
-            # A headless agent that produced nothing almost always hit an
-            # auto-denied permission rather than finishing successfully.
+            # A headless agent that produced nothing USUALLY hit an auto-denied
+            # permission — but not always, and the difference is visible. Nine
+            # runs in one project exited 0 after five minutes and fifty-odd
+            # steps of editing files and running commands, said nothing at the
+            # end, and were filed as failures; the parent merged three of their
+            # branches anyway, because the work was there.
+            #
+            # So the question is not "did it speak" but "did it do anything".
+            # Commits are the evidence; steps are the fallback when the agent
+            # has no branch of its own.
+            if self._did_work(run):
+                return "done"
             return "failed"
         return "done"
 

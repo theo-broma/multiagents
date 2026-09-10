@@ -1318,6 +1318,42 @@ third is the one that bit:
 **The quota reading is what makes the middle two distinguishable**, and they need
 opposite responses: one waits for a reset, the other is a bug.
 
+### A run the provider stopped is not a run that failed
+
+The same detection, one level down. Two agents did 42,000 output tokens of real
+work each, ended with *"You've hit your monthly spend limit … your session limit
+resets 5:50pm"*, exited 1, and were filed as **failures**. Four of those tripped
+the circuit breaker, whose `check` then reported the provider perfectly
+authenticated — true, useless, and the reason the day's account of itself read
+*"claude is unreliable"* when claude was simply full.
+
+A non-zero run whose last words carry the provider's own limit marker is now
+`limited`: a terminal status of its own, not a failure. It does not touch the
+breaker, its branch is kept and nothing is auto-merged from it, and the
+provider is cooled **on the first one** rather than after the breaker's third —
+so the other agents are re-routed instead of walking into the same wall.
+
+Two guards, because a string alone is not evidence:
+
+- **the account has to agree.** The budget is read uncached, and if it reports
+  real headroom the sentence was somebody quoting it and the run stays a
+  failure. Without this, an agent that wrote documentation containing the
+  phrase could take a provider out of service.
+- **position, loosely.** The marker must be in the last few things said, not
+  strictly the last: a model handed a limit error usually answers it, and a
+  stricter rule would turn that answer into a failure.
+
+### An agent that worked in silence is not a failure either
+
+Nine runs in one project exited 0 after five minutes and fifty-odd steps of
+editing files and running commands, said nothing at the end, and were classified
+`failed` because the classifier asked whether the agent had *spoken*. The parent
+merged three of their branches anyway — the work was there.
+
+It now asks whether the agent *did* anything: commits on its branch, or steps
+taken. Silence with nothing behind it still reads as a denied tool, which is
+what that rule was written for.
+
 ### The stop that never reaches the exit code
 
 Every path above keys on the process **ending**. A usage limit does not end it.

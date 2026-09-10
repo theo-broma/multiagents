@@ -124,6 +124,16 @@ agents:
     can_spawn: false
     timeout: 900
     silence_timeout: 180
+    # 40 is low ON PURPOSE, and it is not a ceiling: a runaway_steps trip marks
+    # the run `stuck` and reports it — it never kills — so for this tier the
+    # number is an ESCALATION signal, not a limit. "This cheap agent has taken
+    # more than forty steps" is exactly when the parent should consider a
+    # stronger one.
+    #
+    # Worth knowing when tuning it: on one real project the implementers'
+    # successful runs had a median of 71 steps and a p90 of 176. So this trips
+    # on ordinary work by design, and if you want it to mean "runaway" rather
+    # than "escalate", it belongs nearer those numbers.
     max_steps: 40
 
   implementer:
