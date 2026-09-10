@@ -151,7 +151,14 @@ agents:
     model: opencode-go/kimi-k3
     instructions: implementer.md
     models:
-      agy: claude-opus-4-6-thinking
+      # A fallback may say what this agent BECOMES elsewhere, not just which
+      # model. `effort` belongs to a provider's namespace as much as a model id
+      # does: this one carries effort: high, and agy refuses that flag for this
+      # model — "--effort is not supported for model claude-opus-4-6-thinking",
+      # in eight seconds, on a real run. Naming it empty drops the flag.
+      agy:
+        model: claude-opus-4-6-thinking
+        effort: ""
     description: >-
       Strong coder for work that needs design judgement, or that a lower tier
       escalated. Expensive; used deliberately.
@@ -190,7 +197,10 @@ agents:
     model: opencode-go/deepseek-v4-pro
     instructions: pentester.md
     models:
-      agy: claude-opus-4-6-thinking
+      # effort: high does not survive the move; see implementer-deep.
+      agy:
+        model: claude-opus-4-6-thinking
+        effort: ""
     description: >-
       Attacks existing code for exploitable paths and reports position, path and
       outcome. May commit a failing test that proves a finding.

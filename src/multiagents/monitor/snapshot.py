@@ -177,10 +177,18 @@ def _node_view(node: dict, now: float) -> dict:
     started = node.get("started_at") or node.get("created_at") or 0
     ended = node.get("ended_at")
     alive = _alive(node.get("pid")) if node.get("status") in LIVE else False
-    # An agent left marked "running" by a server that died keeps counting up
-    # forever, and "running 95h" is a lie told confidently. With the process
-    # gone, the last thing it said is the last thing that happened.
-    until = ended or (node.get("last_event_at") if not alive else None) or now
+    # How long it RAN, which is not how long the node existed. Two ways that
+    # comes apart: an agent left marked running by a server that died counts up
+    # forever ("running 95h", said confidently), and a finished agent's node
+    # ends when the parent MERGES it, which can be hours later — one overnight
+    # run showed 277 minutes for an agent that worked for five and then waited
+    # for somebody to wake up. The last thing it said is the last thing that
+    # happened, either way.
+    spoke = node.get("last_event_at")
+    if ended and spoke and spoke < ended:
+        until = spoke
+    else:
+        until = ended or (spoke if not alive else None) or now
     return {
         "id": node.get("id"),
         "agent": node.get("agent"),
@@ -205,6 +213,8 @@ def _node_view(node: dict, now: float) -> dict:
         "usage": usage,
         "started_at": started,
         "ended_at": ended,
+        # When the parent picked it up, if that was later than the work.
+        "settled_at": ended if (ended and spoke and spoke < ended) else None,
         "elapsed": max(0.0, until - started) if started else 0.0,
         "quiet_for": max(0.0, now - node["last_event_at"])
         if node.get("last_event_at") else None,

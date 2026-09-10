@@ -51,6 +51,10 @@ class Supervisor:
     # behaviour of a test agent, which this used to call a doom loop.
     signatures: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=20))
     current_progress: str = ""
+    # The last signature seen, and the step it belonged to: together they say
+    # whether the next event is a NEW call or the same one reported again.
+    last_digest: str = ""
+    last_step: int | None = None
     tripped: Trip | None = None
 
     def __post_init__(self) -> None:
@@ -69,10 +73,21 @@ class Supervisor:
         signature = event.loop_signature()
         if signature:
             digest = hashlib.sha1(signature.encode()).hexdigest()[:12]
-            self.signatures.append((digest, self.current_progress))
-            trip = self._check_loop(event)
-            if trip:
-                return self._trip(trip)
+            # ONE call, not one per lifecycle event. Providers report a tool
+            # twice — agy sends state=ACTIVE and then state=DONE for the same
+            # invocation, with the same name, arguments and step number — and
+            # counting both halved the threshold without anyone deciding to.
+            # Measured on a real project: doom_loop produced 53% of every
+            # watchdog alert and 89% of those agents went on to merge, because
+            # "called 5 times" was really two and a half.
+            repeat = (digest == self.last_digest and event.step is not None
+                      and event.step == self.last_step)
+            self.last_digest, self.last_step = digest, event.step
+            if not repeat:
+                self.signatures.append((digest, self.current_progress))
+                trip = self._check_loop(event)
+                if trip:
+                    return self._trip(trip)
 
         if self.steps > self.max_steps:
             return self._trip(Trip("runaway_steps", f"{self.steps} steps exceeds max_steps={self.max_steps}"))
