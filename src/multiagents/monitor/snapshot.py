@@ -325,6 +325,13 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
         elif verdict and age > 300 and status.get("running"):
             out.append({"level": "warn", "kind": "driver",
                         "text": f"no {role} report for {age / 60:.0f}m"})
+        if status.get("misfiled_in"):
+            out.append({"level": "info", "kind": "driver",
+                        "text": f"a supervisor from before roles had separate "
+                                f"status files is still reporting the {role} "
+                                f"into the {status['misfiled_in']}'s file",
+                        "detail": "it stops when that process ends; two writers "
+                                  "on one file would alternate until then"})
 
     pause = tree.pause_state()
     if pause:
