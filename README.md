@@ -1343,6 +1343,58 @@ Two guards, because a string alone is not evidence:
   strictly the last: a model handed a limit error usually answers it, and a
   stricter rule would turn that answer into a failure.
 
+### Winding down, rather than hitting a wall
+
+Being cut off by a usage limit is expensive twice: the agent loses a
+conversation that cannot be resumed warm — the longest prompt cache is an hour
+and the window is five — and it leaves an uncommitted worktree behind. Measured
+here: two opus agents filled a fresh window in **thirteen minutes**, were
+restarted the moment it reopened, filled it again, and all four branches were
+discarded and the work re-derived by other agents.
+
+So the wall is now something to see coming. `tree.burn()` keeps a series of
+`(time, headroom, spend)` samples **in the shared tree** — every agent runs its
+own server process, so one process's view of the rate is not the rate — and
+turns it into points-per-minute and seconds-to-wall:
+
+```
+100% → 55% → 12% over 13 minutes
+  -> 7.3 points/minute, wall in 1.6 minutes, a window worth about $12.39
+```
+
+That last figure is derived, not published: the provider never says what a
+window is worth, but the same series carries cumulative spend, so
+`window_dollars = Δ$ / Δ%`. On the run above it lands at $12.39 against $11.43
+actually spent. It is reported, not yet used for gating — one window is not
+evidence.
+
+Two thresholds follow, and **they are a countdown, so the larger fires first**:
+
+| | |
+|---|---|
+| `limits.wind_down_seconds` (T-10min) | no **new** work is routed to that provider — a run started here is one that gets cut off |
+| `limits.wrap_up_seconds` (T-7min) | agents already running are asked **once** to commit what works and write a handoff |
+
+Getting that order backwards is easy, and it was backwards here first: at
+T-7min the agents were being asked to land while fresh work kept draining the
+same window underneath them. New work has to stop first.
+
+The wrap-up steer is asked from a task owned by the Runner rather than by the
+run it interrupts, staggered so several agents do not all generate handoffs in
+the same second, and it takes its own budget reading rather than trusting the
+last one — budgets are sampled where they are already read, which is at spawn,
+so a tree full of agents running local test suites would otherwise read a rate
+from before any of them started and walk into the wall.
+
+An advisor argued the steer is not worth its cost: a handoff cannot replace
+173,000 tokens of context, and interrupting aborts an in-flight generation. The
+answer is that the comparison is not *wrap up* versus *keep working* — the wall
+is coming either way, which is what seconds-to-wall means — it is *wrap up*
+versus *be cut off*, and cut off loses the same context **and** the uncommitted
+work. Its related claim, that a cut-off agent can resume warm from the
+provider's cache, is the one thing measurement settles outright: an hour of
+cache against a five-hour window.
+
 ### A counter nothing can clear is a deadlock
 
 `consecutive_failures` was cleared by a success and by nothing else. In a real
