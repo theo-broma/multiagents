@@ -205,15 +205,20 @@ The four "failures" behind §3b's deadlock are exactly these. Meanwhile a free
 `implementer` on agy merged equivalent backend work at 14:54, for $0.00, while
 the second $6.38 attempt was still running.
 
-Two things follow, and only the first is done:
+**Both halves of this are now built** — see "Winding down, rather than hitting a
+wall" in the README — but neither has run in anger:
 
-- **Done:** a `limited` run now records what it spent and how long it lasted, so
-  "this pair costs a whole window" is visible rather than inferred.
-- **Open:** nothing stops the orchestrator restarting both heavy agents the
-  moment a window reopens. Staggering them, or telling it what a run consumed
-  relative to the window, would have turned two wasted attempts into one. What
-  would settle the design: whether the budget reader can express "this run used
-  40% of the window" rather than only a percentage of the whole.
+| | proven when |
+|---|---|
+| the burn rate and seconds-to-wall are right on real traffic | a `wrap_up` event appears in a live run and the agent lands its work |
+| `window_dollars` is stable enough to gate on | the estimate holds across several windows, at which point launch refusal can use "this agent costs 30% of a window" instead of a flat time threshold |
+| the two thresholds (T-10min, T-7min) are the right ones | an agent asked to wrap up finishes its handoff before the wall, more than once |
+
+The thresholds are guesses in seconds. An advisor argued they should be derived
+from absolute headroom instead — "it takes N points for an agent to land, so
+the threshold is N × active agents" — which is better reasoning and needs the
+`window_dollars` estimate to be trustworthy first. That is the same
+prerequisite as gating, so both wait on the same evidence.
 
 ---
 
