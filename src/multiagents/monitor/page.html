@@ -226,6 +226,7 @@ function signature(s) {
     (s.alerts || []).map((a) => a.text),
     (s.providers || []).map((p) => [p.name, p.budget.used_percent, p.lines]),
     (s.running || []).map((a) => [a.id, a.status, a.tokens, a.steps]),
+    (s.conversations || []).map((c) => [c.id, c.tokens, c.last_spoke]),
     (s.history || []).length,
     (s.questions || []).map((q) => [q.id, !!q.answered_at]),
     (s.tickets || []).map((t) => [t.id, t.status]),
@@ -263,6 +264,41 @@ function details(name, summaryText, ...kids) {
       if (e.target.open && name === "activity" && !EVENTS.length) loadEvents();
     },
   }, el("summary", {}, summaryText), ...kids);
+}
+
+function conversationCard(c) {
+  // Not a process: a parked conversation the orchestrator can pick back up.
+  // No clock pretending to run, no red "process gone" beside a designed state.
+  // The numbers that matter here are what resuming it would cost and how stale
+  // it has become.
+  return el("div", { class: "agent" },
+    el("div", { class: "row wrap" },
+      el("span", { class: "dot idle" }),
+      el("strong", {}, c.agent),
+      el("span", { class: "muted" }, c.id),
+      el("span", { class: "muted" }, `${c.provider}/${c.model}`),
+      el("span", { class: "right muted" },
+        `last consulted ${fmtAge(STATE.at - (c.last_spoke || STATE.at))} ago`),
+    ),
+    c.task && el("div", { class: "muted pre", style: "margin:4px 0" },
+      c.task.slice(0, 200)),
+    el("div", { class: "row wrap muted", style: "margin-top:4px" },
+      el("span", {}, `${fmtNum(c.tokens)} tok of context`),
+      c.cost_usd ? el("span", {}, fmtCost(c.cost_usd)) : null,
+      el("span", {}, `${c.steps} turns`),
+    ),
+    el("div", { class: "row wrap", style: "margin-top:7px" },
+      el("button", { onclick: () => openTranscript(c.id) }, "transcript"),
+      el("button", {
+        class: "danger",
+        onclick: () => confirm(
+          `End ${c.agent}'s conversation?\n\nNo work is lost — it has committed nothing.`
+          + ` What goes is ${fmtNum(c.tokens)} tokens of context, and the next`
+          + ` consultation starts cold.`)
+          && act("stop_agent", { agent_id: c.id }),
+      }, "end conversation"),
+    ),
+  );
 }
 
 function agentCard(a, opts = {}) {
@@ -353,6 +389,14 @@ function renderLive() {
       ? s.running.map((a) => agentCard(a, { live: true }))
       : el("div", { class: "muted" }, "nothing running"),
   ));
+
+  if ((s.conversations || []).length) {
+    left.append(details("conversations",
+      el("span", {}, `standing conversations — ${s.conversations.length}`,
+        el("span", { class: "muted" },
+          "  · parked, resumable, costing nothing")),
+      s.conversations.map(conversationCard)));
+  }
 
   const openQ = s.questions.filter((q) => !q.answered_at);
   if (openQ.length) {
@@ -725,7 +769,8 @@ function render(fromPoll = false) {
   $("#pulse").className = "dot " + (worst === "error" ? "failed"
     : STATE.counts.running ? "running" : "idle");
   $("#verdict").textContent =
-    `${STATE.counts.running} running · ${STATE.counts.open_questions} question(s) · `
+    `${STATE.counts.running} running · ${STATE.counts.conversations || 0} parked · `
+    + `${STATE.counts.open_questions} question(s) · `
     + `${STATE.counts.open_tickets} ticket(s)`;
 
   if (redraw) {
