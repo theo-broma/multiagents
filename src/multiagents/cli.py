@@ -1313,7 +1313,16 @@ def _executor_problems(paths, config) -> list[str]:
     if config.executor != "docker":
         return []
     try:
-        return _docker_executor(paths).preflight()
+        executor = _docker_executor(paths)
+        problems = executor.preflight()
+        stale = executor.mount_drift()
+        if stale:
+            problems.append(
+                f"the running container predates the current configuration "
+                f"({len(stale)} mount(s) differ, e.g. {stale[0]}). Mounts are "
+                f"fixed at CREATION, so `down` and `up` will not change them — "
+                f"`multiagents docker rm && multiagents docker up` replaces it.")
+        return problems
     except Exception as exc:                 # never block a launch on the check
         return [f"could not check the docker executor: {type(exc).__name__}: {exc}"]
 
@@ -1798,6 +1807,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
     if paths and config.executor == "docker":
+        try:
+            stale_mounts = _docker_executor(paths).mount_drift()
+        except Exception:
+            stale_mounts = []
+        if stale_mounts:
+            print(f"  !! the running container was created before the current "
+                  f"configuration ({len(stale_mounts)} mount(s) differ):")
+            for line in stale_mounts[:4]:
+                print(f"  {'':5}{line}")
+            print(f"  {'':5}Mounts are fixed at CREATION — `down` and `up` only "
+                  f"stop and start.\n"
+                  f"  {'':5}`multiagents docker rm && multiagents docker up` "
+                  f"replaces it.")
+            problems += 1
         try:
             drift = _docker_executor(paths).credential_drift()
         except Exception:
