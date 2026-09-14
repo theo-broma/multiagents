@@ -3134,6 +3134,115 @@ def test_the_opencode_budget_script_is_quiet_without_a_key(tmp_path):
     assert json.loads(out.stdout)["known"] is False
 
 
+def _fake_agy(tmp_path, payload):
+    """An `agy` whose only job is to answer the /usage probe with `payload`."""
+    import json
+    fake = tmp_path / "bin"
+    fake.mkdir(exist_ok=True)
+    binary = fake / "agy"
+    binary.write_text("#!/bin/sh\ncat <<'EOF'\n%s\nEOF\n" % json.dumps(payload))
+    binary.chmod(0o755)
+    return binary
+
+
+def _agy_buckets(gemini_weekly, gemini_5h, third_weekly, third_5h):
+    def bucket(ident, left, reset):
+        return {"id": ident, "window": ident.split("-")[-1],
+                "remaining_fraction": left, "reset_time": reset}
+    return {"command": {"name": "usage", "data": {"groups": [
+        {"name": "Gemini Models", "buckets": [
+            bucket("gemini-weekly", gemini_weekly, "GEM-WEEK"),
+            bucket("gemini-5h", gemini_5h, "GEM-5H")]},
+        {"name": "Claude and GPT models", "buckets": [
+            bucket("3p-weekly", third_weekly, "3P-WEEK"),
+            bucket("3p-5h", third_5h, "3P-5H")]},
+    ]}}}
+
+
+def test_the_agy_budget_script_never_counts_the_third_party_pool(tmp_path):
+    """agy resells Claude and GPT models out of a pool separate from its Gemini
+    one. That pool sits at zero for much of the day, and letting it set headroom
+    would park every Gemini agent behind a wall it never spends against."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "agy.sh")
+
+    binary = _fake_agy(tmp_path, _agy_buckets(0.80, 0.93, 0.32, 0.0))
+    out = subprocess.run(
+        ["sh", str(script), "budget"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_BIN": str(binary)},
+    )
+    data = json.loads(out.stdout)
+    assert data["known"] is True
+    assert data["headroom"] == 0.8, "the worst GEMINI bucket, not the empty 3p one"
+    assert data["resets_at"] == "GEM-WEEK"
+    # Excluded from the number, but never hidden: an agent pinned to a Claude
+    # model through agy still needs to see why it is being refused.
+    assert data["windows"]["3p-5h"]["headroom"] == 0.0
+    assert data["windows"]["3p-5h"]["counted"] is False
+    assert data["windows"]["gemini-weekly"]["counted"] is True
+
+
+def test_the_agy_budget_script_takes_the_worst_gemini_window(tmp_path):
+    """Within the pool that does count, the fullest bucket is the constraint."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "agy.sh")
+
+    binary = _fake_agy(tmp_path, _agy_buckets(0.75, 0.04, 1.0, 1.0))
+    out = subprocess.run(
+        ["sh", str(script), "budget"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_BIN": str(binary)},
+    )
+    data = json.loads(out.stdout)
+    assert data["headroom"] == 0.04, "the 5-hour window, not the roomy weekly one"
+    assert data["resets_at"] == "GEM-5H", "and its reset, so the wait is right"
+    assert "gemini-5h" in data["note"]
+
+
+def test_the_agy_budget_script_distrusts_a_reply_with_no_command(tmp_path):
+    """`/usage` is only free because print mode expands slash commands. With
+    expansion disabled the same string goes to the MODEL as a prompt, and the
+    reply is prose about quota rather than quota. The structured `command` key
+    is what tells the two apart, so its absence is reported unknown rather than
+    scraped out of the text."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "agy.sh")
+
+    binary = _fake_agy(tmp_path, {
+        "status": "SUCCESS",
+        "response": "You have 80% of your weekly limit remaining.",
+        "usage": {"total_tokens": 412},
+    })
+    out = subprocess.run(
+        ["sh", str(script), "budget"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_BIN": str(binary)},
+    )
+    assert out.returncode == 0, "an unreadable quota is not a failed run"
+    data = json.loads(out.stdout)
+    assert data["known"] is False
+    assert "80" not in json.dumps(data), "the prose number must not be believed"
+
+
+def test_the_agy_budget_script_is_quiet_when_the_cli_says_nothing(tmp_path):
+    """Logged out, or no binary at all. Unknown headroom is not no headroom."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "agy.sh")
+
+    out = subprocess.run(
+        ["sh", str(script), "budget"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_BIN": str(tmp_path / "nope")},
+    )
+    assert out.returncode == 0
+    assert json.loads(out.stdout)["known"] is False
+
+
 # --------------------------------------------------------------------------
 # Executor default, and the offer that sets it
 

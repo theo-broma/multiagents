@@ -973,8 +973,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             # Which bucket is the constraint changes what to do about it: a
             # rolling window clears in hours, a monthly one does not.
             for window, detail in sorted((data.get("windows") or {}).items()):
-                print(f"  {'':12}   {window:8} {detail.get('percent', '?'):>5}%  "
-                      f"resets {str(detail.get('resets_at', '?'))[:19]}")
+                # A window the provider does not spend against is shown but
+                # labelled. agy resells Claude and GPT models from a separate
+                # pool, and an unlabelled 100%-used row there reads as this
+                # provider being out when it is not.
+                aside = "" if detail.get("counted", True) else "  (separate pool)"
+                # Wide enough for the longest bucket name any provider has
+                # ("gemini-weekly"); short names still line up under it.
+                print(f"  {'':12}   {window:13} {detail.get('percent', '?'):>5}%  "
+                      f"resets {str(detail.get('resets_at', '?'))[:19]}{aside}")
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
     if paths and config.executor == "docker":

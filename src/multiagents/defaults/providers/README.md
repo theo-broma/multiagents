@@ -21,8 +21,8 @@ realistic slips are reported with the fix named rather than as whatever the
 kernel said.
 
 This exists because the alternative was worse. The three scripts here all reach
-for inline `python3 -c` heredocs to parse JSON — `claude.sh` has one, and
-`opencode.sh` has three — not because shell was the right language for reading
+for inline `python3 -c` heredocs to parse JSON — `claude.sh` and `agy.sh` have
+one each, and `opencode.sh` has three — not because shell was the right language for reading
 a billing API, but because it was the only one the contract accepted. A
 provider whose quota lives behind JSON should be written in something that can
 read JSON.

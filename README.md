@@ -2136,8 +2136,14 @@ honestly rather than inventing a number:
 
 - **claude** — real subscription state from `~/.claude.json`: percent used per
   bucket, reset times, overage credits. It is a cache, so staleness is reported.
-- **agy** — has a full quota subsystem internally but exposes none of it. Spend
-  only; exhaustion is detected reactively from a failed run.
+- **agy** — real headroom, out of a CLI that has no flag for it. The quota
+  subsystem is internal, but the interactive `/usage` slash command reads it,
+  and print mode expands slash commands and answers this one locally — no
+  model, no tokens. The structured payload carries an exact remaining fraction
+  and a reset per bucket. agy serves two independent pools from one binary, so
+  only the Gemini one feeds `headroom`; the Claude/GPT pool it resells is
+  carried through as a `counted: false` window, because folding the two
+  together would park every Gemini agent behind a wall it never spends against.
 Budget is read through each provider's own `budget` action, so a newly added
 provider gets an entry with no Python change.
 

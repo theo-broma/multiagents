@@ -395,7 +395,8 @@ class Tree:
         """Spend and tokens per provider/model, from our own stream accounting.
 
         The providers do not offer this: opencode's usage endpoint reports three
-        whole-account windows and no breakdown, and agy reports nothing at all.
+        whole-account windows and no breakdown, and agy's `/usage` reports
+        whole-pool buckets that say nothing about which model drained them.
         We already parse per-run usage out of every stream, so the finer figure
         is ours to compute — and it is more useful than a vendor's would be,
         because it is joined to the agent that spent it.

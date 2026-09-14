@@ -716,13 +716,16 @@ def budget_status() -> dict:
     """Report quota headroom and spend per provider, and what it implies.
 
     `known: false` means spend is tracked but capacity is not — never treat that
-    as "plenty left". Claude and opencode expose real subscription state; agy
-    exposes none, so its exhaustion is only detected reactively.
+    as "plenty left". Claude and agy expose real subscription state; opencode
+    does not, so its exhaustion is only detected reactively.
 
-    opencode reports three windows — rolling, weekly, monthly — under
-    `windows`. `headroom` is the worst of them, because the fullest bucket is
-    what will actually stop a run, but which one it is changes what to do: a
-    rolling window clears in hours, a monthly one does not.
+    Where a provider reports several windows they are listed under `windows`,
+    and `headroom` is the worst of them, because the fullest bucket is what
+    will actually stop a run — but which one it is changes what to do: a
+    rolling or 5-hour window clears in hours, a weekly or monthly one does not.
+    agy's `windows` also carry buckets with `counted: false`: it resells Claude
+    and GPT models from a pool separate from its Gemini one, and only the pool
+    the agent actually spends against feeds `headroom`.
 
     `by_model` breaks spend down per provider/model from our own stream
     accounting, joined to the agents that spent it. No provider offers that, and
