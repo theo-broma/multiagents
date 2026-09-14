@@ -227,8 +227,8 @@ same discipline as `open-questions.md` §4.
 2. ~~Provider scripts: any executable (2)~~ — **done**, and smaller than planned:
    `script:` already took any filename, so only the argv needed changing
 3. ~~Routing collaborator (1b)~~ — **cancelled**, see above
-4. `driver.py` out of `cli.py` (3a) ← next
-5. Conversations module (1c)
+4. ~~`driver.py` out of `cli.py` (3a)~~ — **done**, 3,000 → 2,152 + 891
+5. Conversations module (1c) ← next
 6. `commands/` (3b)
 
 Two unplanned items were taken along the way, both because the suite is the
