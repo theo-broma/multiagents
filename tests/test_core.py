@@ -3589,6 +3589,73 @@ def test_the_agy_usage_view_defers_when_it_has_nothing_to_format(tmp_path):
         assert lines == []
 
 
+@pytest.fixture
+def paris_clock(monkeypatch):
+    """Pin the local zone so these assertions mean the same thing anywhere.
+
+    Undone explicitly before yielding back: this fixture's teardown runs before
+    monkeypatch's, so TZ is still set when tzset would otherwise be called.
+    """
+    import time as _time
+    monkeypatch.setenv("TZ", "Europe/Paris")
+    _time.tzset()
+    yield
+    monkeypatch.undo()
+    _time.tzset()
+
+
+def test_a_reset_time_is_shown_on_the_reader_s_own_clock(paris_clock):
+    """Providers send UTC. Slicing the ISO string to 19 characters drops the
+    offset and prints a UTC wall clock on a local face — the monitor said a
+    window reset at 00:00 while the CLI's own display said 2am, and both look
+    equally like a time."""
+    import datetime
+    from multiagents.budget import reset_label
+
+    stamp = "2026-09-15T00:00:00.965787+00:00"        # CEST is UTC+2 in September
+    now = datetime.datetime(2026, 9, 14, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
+    label = reset_label(stamp, now=now)
+    assert label.startswith("Sep 15 02:00"), label
+    assert "00:00" not in label, "that is the UTC clock, not the reader's"
+
+
+def test_a_reset_time_always_carries_the_part_that_cannot_be_misread(paris_clock):
+    """A timezone confusion moves the clock time and never the countdown, so
+    the countdown is always there."""
+    import datetime
+    from multiagents.budget import reset_label
+
+    now = datetime.datetime(2026, 9, 14, 22, 0, tzinfo=datetime.timezone.utc)
+    assert "in 2h00m" in reset_label("2026-09-15T00:00:00+00:00", now=now.timestamp())
+    assert "in 6d16h" in reset_label("2026-09-21T14:00:00+00:00", now=now.timestamp())
+    assert "due" in reset_label("2026-09-14T20:00:00+00:00", now=now.timestamp())
+
+
+def test_a_reset_time_with_no_offset_is_not_silently_converted(paris_clock):
+    """Converting an unanchored timestamp would invent a two-hour error rather
+    than fix one, so it is shown as sent and said to be unanchored."""
+    from multiagents.budget import reset_label
+    label = reset_label("2026-09-15T02:00:00")
+    assert "02:00" in label and "no timezone" in label
+
+
+def test_every_window_carries_its_own_local_label(paris_clock):
+    """Provider scripts format this dict. Three of them each slicing an ISO
+    string is three chances to print UTC, so the label is computed once here."""
+    from multiagents.budget import Budget
+    data = Budget(
+        provider="p", known=True, headroom=0.5,
+        resets_at="2026-09-15T00:00:00+00:00",
+        windows={"weekly": {"percent": 50, "resets_at": "2026-09-21T14:00:00+00:00"},
+                 "odd": "not a dict"},
+    ).to_dict()
+    assert data["resets_label"].startswith("Sep 15 02:00")
+    assert data["windows"]["weekly"]["resets_label"].startswith("Sep 21 16:00")
+    assert data["windows"]["weekly"]["resets_at"] == "2026-09-21T14:00:00+00:00", (
+        "the machine-readable value stays exactly as the provider sent it")
+    assert data["windows"]["odd"] == "not a dict", "a non-dict window is left alone"
+
+
 # --------------------------------------------------------------------------
 # Executor default, and the offer that sets it
 

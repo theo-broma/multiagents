@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..budget import read_all, reserved_providers
+from ..budget import read_all, reset_label, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
 from ..providers import load_providers
@@ -101,7 +101,7 @@ def _generic_usage(budget: dict) -> list[str]:
         filled = int(round(used / 10))
         lines.append(f"{'█' * filled}{'░' * (10 - filled)}  {used:.0f}% used")
         if budget.get("resets_at"):
-            lines.append(f"resets {str(budget['resets_at'])[:19].replace('T', ' ')}")
+            lines.append(f"resets {reset_label(budget['resets_at'])}")
     else:
         lines.append(budget.get("note") or "no quota surface; spend-only")
     for window, detail in (budget.get("windows") or {}).items():
@@ -353,7 +353,7 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
         elif budget.get("known") and not budget.get("usable"):
             out.append({"level": "error", "kind": "provider",
                         "text": f"{entry['name']} has no headroom",
-                        "detail": f"resets {budget.get('resets_at', '?')}"})
+                        "detail": f"resets {reset_label(budget.get('resets_at')) or '?'}"})
         elif entry.get("below_reserve"):
             # The state that sent a question to the maintainer: opencode's
             # five-hour window was empty, its WEEKLY window was not, and every
