@@ -2,7 +2,30 @@
 
 One script per provider, implementing a single contract so that every CLI is
 checked, repaired and measured the same way. Adding a provider means adding a block to
-`providers.yaml` and a script here — no Python.
+`providers.yaml` and a script here — no Python in the package.
+
+## It does not have to be a shell script
+
+The contract is a filename, an argument, an exit code and some environment
+variables, none of which are shell. Name yours in `providers.yaml` and it runs:
+
+    providers:
+      myprov:
+        bin: myprov
+        script: myprov.py        # or myprov.js, or a compiled myprov
+
+A `.sh` runs under `sh` whatever its mode, which is what every shipped script
+and every existing install is. **Anything else runs itself**, so it needs a
+shebang (or an ELF header, if you compiled it) and `chmod +x`. Both of the
+realistic slips are reported with the fix named rather than as whatever the
+kernel said.
+
+This exists because the alternative was worse. The three scripts here all reach
+for inline `python3 -c` heredocs to parse JSON — `claude.sh` has one, and
+`opencode.sh` has three — not because shell was the right language for reading
+a billing API, but because it was the only one the contract accepted. A
+provider whose quota lives behind JSON should be written in something that can
+read JSON.
 
 ## Contract
 
