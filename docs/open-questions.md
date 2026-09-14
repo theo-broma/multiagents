@@ -170,19 +170,43 @@ null`. An advisor's framing, which I think is right: the tree is meant to carry
 "what is being done and why", and leaving the two decision-makers out of it
 means an agent appears with no record of who asked or in which session.
 
-**What it would take.** Create a node at launch, keep it updated from the same
-samples the supervisor already takes, close it when the process ends, and set
-`MULTIAGENTS_AGENT_ID` in the driver's environment so the agents it starts
-become its children rather than roots.
+**Done — 2026-09-14 — but NOT the way this section proposed.**
 
-**Why it is not done yet.** `parent` is load-bearing in more places than it
-looks: depth limits, `max_children`, merge-into-parent, the orphan reaper, and
-the monitor's forest. Giving every agent a parent it has never had changes all
-of them at once, and the failure mode is subtle rather than loud.
+The proposal was to set `MULTIAGENTS_AGENT_ID` in the driver's environment so
+its agents become its children. The worry above was right and understated. Each
+of the five was measured:
 
-**What would settle it:** whether the history view is actually hard to read
-without it. Two sessions' agents currently interleave as roots ordered by time,
-which is confusing at 40 nodes and probably unusable at 400.
+- **`max_children` starts applying.** `_preflight` keeps the whole cap inside
+  `if parent:`, so a root orchestrator skips it. Give it an id and every agent
+  it spawns is capped at 2. Breaks spawning at once — loudly, at least.
+- **The explicit merge gate disappears.** `_maybe_merge_into_parent` returns
+  early on a missing parent, and *that early return is the gate* the README is
+  built around. A driver node owns no worktree, so `target` falls through to
+  `self.paths.root`: agent branches would land in the user's own tree by
+  themselves. Silent, and it removes the one guarantee the design exists for.
+- **The driver eats a `max_concurrent` slot**, and `wait_for_agents` waits on it
+  until timeout, because `execvpe` replaced the process that would finish it.
+- The two forests were fine — both build roots as "no parent, or a parent not
+  in nodes", so they degrade rather than break.
+
+So the mechanism changed. Re-reading the need — "no record of who asked **or in
+which session**" — the load-bearing word is *session*, and `_role_session_id()`
+already existed and was already in the driver's environment as
+`MULTIAGENTS_SESSION_ID`. `Node` now carries `session` and `role`: the driver
+gets a root node marked with its role, every agent records its session, and
+`parent` keeps meaning git isolation and nothing else. The grouping is done in
+`Tree.render()`, which is a view.
+
+**What this does not do.** The driver node's usage is never updated and its
+status is never closed — nothing of ours survives the `exec`. It sits `running`
+until something else marks it. That is why the role field exists: a stale driver
+node is inert rather than harmful. Until the supervisor updates it,
+`multiagents usage` and `burn()`'s `window_dollars` still understate by whatever
+the orchestrator itself spent. `seconds_to_wall` is unaffected — it is computed
+from the provider's own headroom, which measures the account.
+
+**What would still settle the original question:** whether grouping alone makes
+the history readable at 400 nodes, or whether the agents also need to nest.
 
 ---
 

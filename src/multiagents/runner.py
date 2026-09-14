@@ -253,6 +253,15 @@ class Runner:
         """Which node *this* server is running as, if it was spawned by us."""
         return os.environ.get("MULTIAGENTS_AGENT_ID") or None
 
+    def session(self) -> str:
+        """Which launched session this server belongs to, if any.
+
+        `driver.py` puts it in the CLI's environment before exec'ing, and the
+        CLI starts this server as a child, so it arrives by inheritance. Empty
+        for a server nobody launched — a bare `python -m multiagents.server`.
+        """
+        return os.environ.get("MULTIAGENTS_SESSION_ID", "")
+
     def self_depth(self) -> int:
         try:
             return int(os.environ.get("MULTIAGENTS_DEPTH", "0"))
@@ -935,6 +944,7 @@ class Runner:
             worktree=str(worktree_path), status="pending",
             verifies=verifies if verifies in self.tree.read()["nodes"] else "",
             routed_from=routed_from, routed_why=routed_why,
+            session=self.session(),
         )
         self.tree.add(node)
         if routed_from:
@@ -1870,6 +1880,7 @@ class Runner:
                 id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
                 parent=parent, depth=depth, task=message[:500], branch=branch,
                 worktree=str(worktree_path), status="pending", conversation=True,
+                session=self.session(),
             )
             self.tree.add(node)
             prompt = self.compose_prompt(spec, message, node, worktree_path)

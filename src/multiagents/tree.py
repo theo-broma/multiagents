@@ -36,6 +36,9 @@ from .redact import depersonalise, scrub
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned",
             "limited"}
 ACTIVE = {"pending", "running", "stuck"}
+# `run` and `init-agent` exec into a CLI, so neither is an agent and neither
+# must be counted as one. See Node.role.
+DRIVER_ROLES = {"orchestrator", "initializer"}
 # Two states are neither, for the same reason: the process has exited but the
 # session is resumable, so they must not be counted against the concurrency
 # limit, reaped as orphans, or cleaned up as finished work.
@@ -103,6 +106,26 @@ class Node:
     steps: int = 0
     events: int = 0
     conversation: bool = False
+    # Which launched session this node belongs to, and what kind of thing it is.
+    #
+    # `session` is NOT `parent`. open-questions.md §3b proposed parenting every
+    # agent to its driver so the tree would record who asked; measuring that
+    # found `parent` is load-bearing in five guards, two of them badly —
+    # `_preflight` skips the `max_children` cap entirely while a spawner has no
+    # parent, and `_maybe_merge_into_parent` returns early on a missing parent,
+    # which IS the explicit merge_agent() gate the whole design rests on. A
+    # driver node has no worktree, so giving depth-1 agents a parent would have
+    # resolved the merge target to the project root and landed their branches
+    # in the user's tree by itself.
+    #
+    # The need was "no record of who asked or in which session", and the
+    # load-bearing word there is session. So it is its own field: agents stay
+    # roots, `parent` keeps meaning git isolation, and grouping is a view.
+    session: str = ""
+    # "orchestrator" | "initializer" for a driver, "" for an agent. Declared,
+    # not inferred: guessing from `parent is None and branch == ""` would call
+    # a read-only agent an orchestrator the first time one is spawned as a root.
+    role: str = ""
     # "this run is a check on that agent's work", declared by whoever spawned
     # it. Declared rather than inferred: branch-and-timing guesses break the
     # moment two checks run at once or a branch is reused, and the orchestrator
@@ -379,7 +402,20 @@ class Tree:
         return [Node(**data["nodes"][c]) for c in node.get("children", []) if c in data["nodes"]]
 
     def active(self) -> list[Node]:
-        return [Node(**n) for n in self.read()["nodes"].values() if n.get("status") in ACTIVE]
+        """Active AGENTS. Drivers are excluded — see `DRIVER_ROLES`.
+
+        Every caller but the display ones means "work the project is doing",
+        and a driver counted among them costs a `max_concurrent` slot, and is
+        waited on forever by `wait_for_any` because nothing in this process
+        will ever finish it.
+        """
+        return [Node(**n) for n in self.read()["nodes"].values()
+                if n.get("status") in ACTIVE and n.get("role", "") not in DRIVER_ROLES]
+
+    def drivers(self) -> list[Node]:
+        """The launched sessions — what `active()` deliberately leaves out."""
+        return [Node(**n) for n in self.read()["nodes"].values()
+                if n.get("role", "") in DRIVER_ROLES]
 
     def ancestry(self, agent_id: str) -> list[str]:
         """Root-first chain of ids down to `agent_id`, for cycle and depth checks."""
@@ -926,8 +962,31 @@ class Tree:
             for i, kid in enumerate(kids):
                 walk(kid, child_indent, i == len(kids) - 1, top=False)
 
-        for root in roots:
-            walk(root, "", True, top=True)
+        # Grouped by session, so two nights' work stops interleaving. The
+        # nesting is done HERE, in the view, and not by giving agents a parent:
+        # `parent` drives git isolation and the merge gate, and a session is a
+        # different question from "whose branch does this land on". Sessions
+        # newest first; anything from before sessions were recorded, or from a
+        # server nobody launched, keeps the old flat listing under no heading.
+        by_session: dict[str, list[dict]] = {}
+        for node in roots:
+            by_session.setdefault(node.get("session") or "", []).append(node)
+
+        def session_order(item: tuple[str, list[dict]]) -> float:
+            return -max((n.get("created_at") or 0) for n in item[1])
+
+        for session, members in sorted(by_session.items(), key=session_order):
+            driver = next((n for n in members if n.get("role")), None)
+            if session and driver is not None:
+                started = driver.get("started_at") or driver.get("created_at") or 0
+                when = time.strftime("%d %b %H:%M", time.localtime(started))
+                lines.append(f"{driver['agent']} session · {when} "
+                             f"· {driver.get('status', '?')}")
+            for node in members:
+                if node is driver and len(members) > 1:
+                    continue             # the heading already named it
+                walk(node, "  " if (session and driver is not None) else "",
+                     True, top=True)
         pending = [q for q in data.get("questions", []) if q.get("status") == "open"]
         if pending:
             lines.append("")

@@ -33,7 +33,7 @@ from .budget import read_all
 from .executor import executor_for
 from .paths import global_config_dir
 from .providers import load_providers
-from .tree import Tree, now as tree_now
+from .tree import Node, Tree, now as tree_now
 
 
 def _mcp_config_path() -> Path:
@@ -340,6 +340,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
         paths, role, rotate=not resume)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(time.time()))
+    _driver_node(paths, role, spec, context["MULTIAGENTS_SESSION_ID"])
 
     code, out, err = scripts.run_action(
         spec.provider, provider, executor, "prepare",
@@ -600,6 +601,41 @@ def _role_session_id(paths, role: str, rotate: bool = False) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(fresh)
     return fresh
+
+
+def _driver_node(paths, role: str, spec, session: str) -> str:
+    """Put this session in the tree, so the agents it starts have a `why`.
+
+    open-questions.md §3b: `run` and `init-agent` exec into a CLI, so neither
+    left a node, and the two decision-makers were the only things in the
+    project doing work with no record of it. An agent appeared as a root with
+    nothing saying who asked for it.
+
+    The node is a ROOT with no parent and no branch, and it is marked with its
+    role so that `Tree.active()` leaves it out. That exclusion is the whole
+    reason the role is a field: a driver counted as an active agent takes a
+    `max_concurrent` slot away from real work, and `wait_for_any` would wait on
+    it until its timeout, because this process is about to be replaced by
+    `execvpe` and nothing here will ever mark it finished.
+
+    Reused across resumes rather than added per launch. A session id is stable
+    for the life of the role unless `--fresh` rotates it, so a project that has
+    been resumed thirty times gets one node and not thirty.
+    """
+    tree = Tree(paths.tree_file, paths.events_file)
+    existing = next((n for n in tree.drivers() if n.session == session), None)
+    if existing is not None:
+        tree.update(existing.id, status="running", started_at=tree_now())
+        return existing.id
+
+    node = Node(
+        id=f"dr-{session[:6]}", agent=role, provider=spec.provider,
+        model=spec.model, parent=None, depth=0, status="running",
+        task=f"{role} session", session=session, role=role,
+        started_at=tree_now(),
+    )
+    tree.add(node)
+    return node.id
 
 
 def _pid_file(paths, role: str) -> Path:
