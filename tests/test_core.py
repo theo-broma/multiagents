@@ -1637,6 +1637,93 @@ def test_a_new_session_id_is_flushed_immediately():
     assert gate.add(urgent=True, now=0.2) == 2       # forces the batch out
 
 
+def test_a_driver_is_in_the_tree_without_being_an_agent(tmp_path):
+    """open-questions.md §3b: `run` and `init-agent` exec into a CLI, so neither
+    left a node and an agent appeared with no record of who asked.
+
+    The node is a root with a role. The role is what keeps it out of `active()`,
+    and that exclusion is the point: a driver counted as a running agent takes a
+    max_concurrent slot from real work, and `wait_for_agents` would wait on it
+    until its timeout because the process that would have finished it was
+    replaced by execvpe.
+    """
+    from multiagents.tree import Node, Tree
+
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    tree.add(Node(id="dr-abc123", agent="orchestrator", provider="claude",
+                  model="sonnet", parent=None, depth=0, status="running",
+                  session="s-1", role="orchestrator"))
+    tree.add(Node(id="ag-1", agent="implementer", provider="agy", model="m",
+                  parent=None, depth=1, status="running", session="s-1"))
+
+    assert [n.id for n in tree.active()] == ["ag-1"], \
+        "a driver must not be counted as an active agent"
+    assert [n.id for n in tree.drivers()] == ["dr-abc123"]
+    assert tree.get("ag-1").session == "s-1", "the agent records which session asked"
+
+
+def test_the_session_is_recorded_without_touching_parent(tmp_path):
+    """`parent` is load-bearing in five guards and two of them fail badly if it
+    is repurposed for grouping.
+
+    `_preflight` skips the max_children cap entirely while the spawner has no
+    parent, so parenting agents to their driver would cap the orchestrator at
+    two. Worse, `_maybe_merge_into_parent` returns early on a missing parent —
+    that early return IS the explicit merge_agent() gate — and a driver node has
+    no worktree, so the merge target would resolve to the project root and land
+    agent branches in the user's own tree.
+
+    So the session is its own field and agents stay roots. This test is the
+    guard on that decision.
+    """
+    from multiagents.tree import Node, Tree
+
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    tree.add(Node(id="dr-abc123", agent="orchestrator", provider="claude",
+                  model="sonnet", parent=None, depth=0, status="running",
+                  session="s-1", role="orchestrator"))
+    tree.add(Node(id="ag-1", agent="implementer", provider="agy", model="m",
+                  parent=None, depth=1, status="running", session="s-1"))
+
+    assert tree.get("ag-1").parent is None, \
+        "an agent grouped into a session must still be a root for git purposes"
+    assert tree.get("dr-abc123").branch == "", "a driver owns no branch"
+
+
+def test_the_tree_view_groups_sessions_instead_of_interleaving_them(tmp_path):
+    """Two nights' agents currently sort together as flat roots, which the doc
+    calls confusing at 40 nodes and unusable at 400. The grouping is done in the
+    VIEW, which is the whole reason it was safe to do at all."""
+    from multiagents.tree import Node, Tree
+
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    for n, (sess, role) in enumerate([("s-1", "orchestrator"), ("s-2", "orchestrator")]):
+        tree.add(Node(id=f"dr-{n}", agent=role, provider="claude", model="sonnet",
+                      parent=None, depth=0, status="running", session=sess,
+                      role=role, started_at=1000.0 + n))
+        tree.add(Node(id=f"ag-{n}", agent="implementer", provider="agy", model="m",
+                      parent=None, depth=1, status="running", session=sess))
+
+    out = tree.render()
+    assert out.count("orchestrator session") == 2, out
+    # Each agent sits under its own session's heading, not in one flat list.
+    lines = [l for l in out.split("\n") if "session" in l or "ag-" in l]
+    assert lines[0].startswith("orchestrator session"), lines
+    assert "ag-" in lines[1], lines
+
+
+def test_a_node_from_before_sessions_still_renders(tmp_path):
+    """Every node already in somebody's tree.json has no session and no role.
+    They keep the old flat listing rather than vanishing under a heading."""
+    from multiagents.tree import Node, Tree
+
+    tree = Tree(tmp_path / "tree.json", tmp_path / "events.jsonl")
+    tree.add(Node(id="ag-old", agent="implementer", provider="agy", model="m",
+                  parent=None, depth=1, status="done"))
+    out = tree.render()
+    assert "ag-old" in out and "session" not in out, out
+
+
 def test_merge_is_deferred_while_the_parent_is_still_working(tmp_path):
     """Landing commits in a worktree an agent is using silently changes files it
     has already read. gitops.merge's dirty-tree guard only catches uncommitted
