@@ -504,6 +504,104 @@ class _Exec:
     kind = "local"
 
 
+def test_a_provider_script_need_not_be_shell(tmp_path):
+    """The contract's promise is that adding a provider takes a providers.yaml
+    block and one script, no Python in this package. Until this, the only
+    language the contract accepted was shell, which is why all three shipped
+    scripts reach for inline `python3 -c` heredocs to do JSON work.
+
+    Exercised end to end through run_action, in Python, reading its answer back
+    as the budget action would.
+    """
+    import json
+    import multiagents.scripts as scripts_mod
+
+    script = tmp_path / "providers" / "myprov.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "if sys.argv[1] != 'budget':\n"
+        "    sys.exit(64)\n"
+        "print(json.dumps({'known': True, 'headroom': 0.5,\n"
+        "                  'note': os.environ['MULTIAGENTS_PROVIDER']}))\n"
+    )
+    script.chmod(0o755)
+
+    code, out, err = scripts_mod.run_action(
+        "myprov", _Prov({"script": "myprov.py"}), _Exec(), "budget", tmp_path)
+
+    assert code == 0, err
+    assert json.loads(out) == {"known": True, "headroom": 0.5, "note": "myprov"}
+
+
+def test_a_shell_script_still_runs_under_sh_whatever_its_mode(tmp_path):
+    """The path every existing install takes must be byte-identical. A `.sh`
+    goes to `sh` regardless of its mode, so an override somebody wrote in an
+    editor and never chmod'd keeps working exactly as it did."""
+    import multiagents.scripts as scripts_mod
+
+    script = tmp_path / "providers" / "plain.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("echo ran; exit 0\n")       # no shebang, no exec bit
+    script.chmod(0o644)
+
+    assert scripts_mod.script_argv(script) == ["sh", str(script)]
+    code, out, _ = scripts_mod.run_action(
+        "plain", _Prov({"script": "plain.sh"}), _Exec(), "check", tmp_path)
+    assert (code, out.strip()) == (0, "ran")
+
+
+def test_a_native_binary_is_not_handed_to_the_shell(tmp_path):
+    """A provider compiled in Go or Rust has an ELF header and no shebang.
+
+    Sniffing the first two bytes for `#!` — the obvious way to decide how to
+    run something — would send it to `sh` and fail as a syntax error in a
+    language nobody wrote. The rule keys on the extension instead.
+    """
+    import multiagents.scripts as scripts_mod
+
+    binary = tmp_path / "myprov"                  # no extension, as compiled
+    binary.write_bytes(b"\x7fELF\x02\x01\x01\x00")
+    binary.chmod(0o755)
+    assert scripts_mod.script_argv(binary) == [str(binary)]
+
+
+def test_the_two_ways_a_custom_script_fails_each_name_their_fix(tmp_path):
+    """`Permission denied` and `Exec format error` are what a forgotten chmod
+    and a missing shebang look like, and neither says so for itself. Before
+    this, a non-executable myprov.py was handed to `sh` and failed as a Python
+    file parsed as shell, which names nothing at all."""
+    import errno
+    import multiagents.scripts as scripts_mod
+
+    script = tmp_path / "providers" / "myprov.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/usr/bin/env python3\nprint('hi')\n")
+    script.chmod(0o644)                           # forgot chmod +x
+
+    _, _, err = scripts_mod.run_action(
+        "myprov", _Prov({"script": "myprov.py"}), _Exec(), "check", tmp_path)
+    assert "chmod +x" in err, err
+
+    assert "shebang" in scripts_mod.why_it_would_not_run(
+        script, OSError(errno.ENOEXEC, "Exec format error"))
+
+
+def test_handing_over_the_terminal_reports_a_script_it_cannot_run(tmp_path):
+    """login and launch replace this process, so nothing is left to format an
+    error with. A bad script otherwise surfaces as a raw traceback at the
+    moment the user expected their CLI to open."""
+    import multiagents.cli as cli
+
+    script = tmp_path / "myprov.py"
+    script.write_text("#!/usr/bin/env python3\n")
+    script.chmod(0o644)
+
+    code = cli._hand_over([str(script), "login"], {}, script)
+    assert code == 126
+
+
 def test_auth_check_maps_exit_codes(tmp_path):
     """0 authenticated, 10 not, anything else unknown — the whole contract."""
     _auth_script(tmp_path, "ok.sh", 'echo "signed in as a@b"; exit 0')

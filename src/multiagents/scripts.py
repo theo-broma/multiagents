@@ -32,10 +32,19 @@ caller to ``execvpe``, because they need the terminal.
 
 Scripts resolve project-first, then global, then the shipped copies, so a
 project can override one provider's behaviour without touching the machine.
+
+A script need not be shell. The file named by ``script:`` in ``providers.yaml``
+is run by :func:`script_argv`, which sends a ``.sh`` to ``sh`` and lets anything
+else run itself — so a provider whose quota lives behind a JSON API can be
+``myprovider.py``, or a compiled binary, without a line of Python in this
+package. That is what keeps the promise in ``providers.yaml``'s header honest:
+the three shipped scripts reach for inline ``python3 -c`` heredocs precisely
+because shell was the only language the contract accepted.
 """
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 from pathlib import Path
@@ -119,6 +128,40 @@ def resolve(provider_name: str, provider: Any, config_dir: Path,
     return find_script(name, config_dir, project_config)
 
 
+def script_argv(script: Path) -> list[str]:
+    """The command that runs this script, minus the action.
+
+    A ``.sh`` runs under ``sh`` whatever its mode. Every shipped provider is
+    one and every existing install has one, so that path is byte-identical to
+    before this function existed — including the case of a hand-written
+    override nobody remembered to ``chmod +x``.
+
+    Anything else runs ITSELF and the kernel decides how: a shebang for
+    ``myprovider.py``, an ELF header for somebody's compiled one. Deliberately
+    not a shebang sniff — reading the first two bytes would send a native
+    binary to ``sh``, which fails as a syntax error in a language nobody wrote.
+    """
+    if script.suffix == ".sh":
+        return ["sh", str(script)]
+    return [str(script)]
+
+
+def why_it_would_not_run(script: Path, exc: OSError) -> str:
+    """Turn an exec failure into the sentence that names the fix.
+
+    Both realistic slips are ordinary and neither says so for itself: `Exec
+    format error` is what a missing shebang looks like, and `Permission denied`
+    is what a forgotten chmod looks like.
+    """
+    if exc.errno == errno.ENOEXEC:
+        return (f"{script} is executable but the system cannot tell how to run "
+                f"it — a script needs a shebang line, e.g. #!/usr/bin/env python3")
+    if exc.errno in (errno.EACCES, errno.EPERM):
+        return (f"{script} is not executable — a provider script that is not a "
+                f"shell script runs itself, so it needs: chmod +x {script}")
+    return f"{type(exc).__name__}: {exc}"
+
+
 def run_action(provider_name: str, provider: Any, executor: Any, action: str,
                config_dir: Path, project_config: Path | None = None,
                timeout: int = CAPTURE_TIMEOUT,
@@ -134,12 +177,14 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
         return 127, "", f"no script for provider {provider_name!r}"
     try:
         result = subprocess.run(
-            ["sh", str(script), action],
+            [*script_argv(script), action],
             capture_output=True, text=True, timeout=timeout,
             env=build_env(provider_name, provider, executor, extra_env),
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except subprocess.TimeoutExpired as exc:
         return 124, "", f"{type(exc).__name__}: {exc}"
+    except OSError as exc:
+        return 124, "", why_it_would_not_run(script, exc)
     return result.returncode, result.stdout, result.stderr
 
 
@@ -150,5 +195,5 @@ def exec_action(provider_name: str, provider: Any, executor: Any, action: str,
     script = resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return None
-    return (["sh", str(script), action],
+    return ([*script_argv(script), action],
             build_env(provider_name, provider, executor, extra_env))

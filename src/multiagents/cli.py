@@ -235,6 +235,25 @@ def _run_attached(argv, env, stalled=None) -> int:
         _restore_terminal(saved)
 
 
+def _hand_over(argv: list[str], env: dict, script: Path | None) -> int:
+    """Replace this process with the provider's script, or say why not.
+
+    `login` and `launch` take the terminal, so there is nothing left to format
+    an error with once the handover succeeds — and nothing to catch one if it
+    fails. A script that is not executable, or is executable with no shebang,
+    otherwise surfaces here as a raw OSError traceback at the moment the user
+    was expecting their CLI to open.
+    """
+    try:
+        os.execvpe(argv[0], argv, env)
+    except OSError as exc:
+        where = script or Path(argv[0])
+        print(f"cannot run {where}: {scripts.why_it_would_not_run(where, exc)}",
+              file=sys.stderr)
+        return 126
+    return 0                              # unreachable: execvpe does not return
+
+
 def _exit_was_deliberate(code: int) -> tuple[bool, str]:
     """Did a person end this, or did it end on its own?
 
@@ -380,7 +399,9 @@ def _launch_agent(paths, config, role: str, resume: bool,
             # Exec: this process is replaced, so a separate watcher is the only
             # way anything can report on the session.
             _start_supervisor(paths, role, os.getpid())
-            os.execvpe(argv[0], argv, env)
+            # Returns only when the handover FAILED; execvpe does not come back.
+            return _hand_over(argv, env, scripts.resolve(
+                spec.provider, provider, global_config_dir(), paths.config))
         return _run_supervised(paths, config, role, spec, provider, executor,
                                context, argv, env)
     finally:
@@ -2220,7 +2241,8 @@ def cmd_auth(args: argparse.Namespace) -> int:
             return 2
         argv, env = built
         sys.stdout.flush()
-        os.execvpe(argv[0], argv, env)
+        return _hand_over(argv, env, scripts.resolve(
+            name, provider, global_config_dir(), project_config))
 
     states = auth_mod.check_all(providers, executor_for, global_config_dir(), project_config)
     broken = 0

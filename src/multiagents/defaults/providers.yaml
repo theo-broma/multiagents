@@ -1,5 +1,7 @@
 # How to drive each agent CLI. Adding an integration means adding a block here
-# — no Python — provided the CLI can stream line-delimited JSON.
+# — no Python in the package — provided the CLI can stream line-delimited JSON.
+# The script the block names may be written in any language: a `.sh` runs under
+# `sh`, anything else runs itself. See providers/README.md.
 #
 # Command building
 #   args        argv after the binary. A token that is exactly "{name}" is
