@@ -47,6 +47,19 @@ read JSON.
                             exit 64 = not implemented; multiagents falls back to
                                       a built-in reader if it has one
 
+    <provider>.sh usage     non-interactive, fast. Render THIS provider's quota
+                            for the monitor, as up to 12 plain lines on stdout.
+                            Receives the already-parsed budget as
+                            MULTIAGENTS_BUDGET and formats it; it must not
+                            re-probe the CLI, because a slow action here stalls
+                            every monitor refresh behind a 30s line cache.
+                            The FIRST FOUR lines must each stand alone — the
+                            curses monitor shows only four per provider, while
+                            the web view shows all of them.
+                            exit 0  = the lines are usable
+                            exit 64 = not implemented; multiagents falls back to
+                                      a generic rendering of the same budget
+
     <provider>.sh prepare   idempotently register the MCP server for this CLI,
                             so it can act as an orchestrator
                             exit 0  = ready (or nothing needed)
