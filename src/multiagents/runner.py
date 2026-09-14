@@ -27,6 +27,7 @@ import os
 import random
 import re
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1106,21 +1107,42 @@ class Runner:
             stderr_task.cancel()
             stream_log.close()
 
-        remainder = flush.drain()
-        if remainder:
-            self.tree.note_event(node_id, steps=run.supervisor.steps or None,
-                                 usage=usage or None, session_id=session_id or None,
-                                 events=remainder)
-
-        # Nothing may follow this call. `_finalize` returns early when it
-        # relaunches a run that died young and said nothing, and that early
-        # return is exactly what skips the merge, the worktree reclaim and
-        # `run.done.set()`. A statement added here would run on the retry
-        # path too, where none of the rest of the teardown did.
-        await self._finalize(run, code, usage, session_id)
+        # Everything after the stream is guarded, because nothing else releases
+        # this run. `consult` waits on `run.done` for the agent's whole timeout
+        # and then reports "no reply within Ns" — an unresponsive-agent verdict
+        # for a crash in our own post-mortem, accusing the agent of a fault that
+        # was ours. Mistaking our own silence for the other side's is the exact
+        # shape of error this project has already been caught by twice.
+        relaunched = False
+        try:
+            remainder = flush.drain()
+            if remainder:
+                self.tree.note_event(node_id, steps=run.supervisor.steps or None,
+                                     usage=usage or None, session_id=session_id or None,
+                                     events=remainder)
+            relaunched = await self._finalize(run, code, usage, session_id)
+        except Exception as exc:
+            # The traceback is the only thing that makes this debuggable, and
+            # the node's reason can hold one line. Written where someone
+            # reading a bad run already looks.
+            with contextlib.suppress(OSError):
+                (run_dir / "postmortem-crash.txt").write_text(traceback.format_exc())
+            # Only a node still claiming to be in flight. A crash in the last
+            # few lines — filing a ticket, reclaiming a worktree — must not
+            # overwrite a verdict already recorded: `failed` over `done`
+            # discards work that is merged and correct, over `awaiting_user`
+            # loses the question, over `limited` loses a resumable session.
+            node = self.tree.get(node_id)
+            if node and node.status in ("running", "pending", "steered"):
+                self.tree.set_status(
+                    node_id, "failed",
+                    f"the post-mortem crashed: {type(exc).__name__}: {exc}")
+        finally:
+            if not relaunched:
+                run.done.set()
 
     async def _finalize(self, run: Run, code: int, usage: dict[str, Any],
-                        session_id: str) -> None:
+                        session_id: str) -> bool:
         """Decide what a finished run meant, and record it.
 
         Split from `_consume`, which is the pump. Nothing here reads the
@@ -1129,7 +1151,11 @@ class Runner:
         is also why the outcome logic — the part carrying most of the hard-won
         reasoning in this file — could only be reached by starting a process.
 
-        Returns early, WITHOUT setting `run.done`, when it relaunches the run.
+        True means this run has been RELAUNCHED and is not over, so the caller
+        must not release `run.done`. Said as a return value rather than left to
+        the order of statements: the relaunch used to work by returning early
+        past the line that set it, which made "nothing may follow this call" a
+        rule a reader had to know.
         """
         node_id = run.node_id
         run_dir = self.paths.run_dir(node_id)
@@ -1241,7 +1267,7 @@ class Runner:
                     )
                     self.tree.set_status(node_id, "running", "retried once after "
                                          "an unexplained early exit")
-                    return
+                    return True
 
             # Say why, when the provider told us. Three real failures ended with
             # agy emitting {"kind": "result", "status": "ERROR"} — a structured
@@ -1290,7 +1316,7 @@ class Runner:
         if not run.awaiting:
             # A parked agent still owns its worktree and will resume in it.
             self._drop_if_empty(node_id, run.spec)
-        run.done.set()
+        return False
 
     async def _provider_health_after(self, run: Run, status: str, text: str,
                                      stderr: str) -> tuple[str, dict | None]:
