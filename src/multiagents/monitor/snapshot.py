@@ -65,7 +65,8 @@ def _usage_lines(name: str, provider: Any, executor: Any, budget: dict,
 
     The shape of a quota differs per provider and there is no honest common
     denominator: claude has two rolling windows and a credit pool, opencode
-    serves three windows over HTTP, agy exposes nothing and is spend-only.
+    serves three windows over HTTP, and agy has two windows for its own models
+    plus two more for a resold pool it does not spend against.
     Flattening those into one bar would invent precision for two of them.
 
     So a provider may implement the ``usage`` action and print whatever its own
@@ -110,7 +111,8 @@ def _generic_usage(budget: dict) -> list[str]:
         # Both mean the same thing and neither is worth a migration.
         percent = detail.get("used_percent", detail.get("percent"))
         if percent is not None:
-            lines.append(f"{window:<10} {percent:.0f}%")
+            aside = "" if detail.get("counted", True) else "  (other pool)"
+            lines.append(f"{window:<13} {percent:.0f}%{aside}")
     spent = budget.get("spent") or {}
     if spent.get("cost_usd"):
         lines.append(f"spent ${spent['cost_usd']:.2f} here")

@@ -71,11 +71,108 @@ login)
     exec "$BIN"
     ;;
 budget)
-    # agy has a full quota subsystem internally (quota_manager.go,
-    # RetrieveUserQuotaSummary, refreshed every few minutes per its logs) but
-    # exposes none of it — no subcommand, no cached file. Exhaustion is detected
-    # reactively from a failed run.
-    printf '{"known": false, "note": "CLI exposes no quota surface; exhaustion detected from failed runs"}\n'
+    # agy's quota IS reachable, just not where a CLI usually puts it: the only
+    # surface is the interactive `/usage` slash command. Print mode expands
+    # slash commands — that is precisely what --disable-slash-commands turns
+    # off — and `/usage` is answered LOCALLY from quota_manager's cache. The
+    # reply comes back with num_turns 0 and total_tokens 0, so this reaches no
+    # model and costs nothing, which is what the contract requires here.
+    #
+    # Read `.command.data`, never the `.response` text: the text is a rounded
+    # four-line table, while the structured payload carries the exact
+    # remaining_fraction (RetrieveUserQuotaResponse_BucketInfo_RemainingFraction,
+    # already 0..1 the same way headroom is) and an RFC-3339 reset per bucket.
+    # Its absence is also the signal that slash expansion was disabled, in
+    # which case "/usage" WOULD have gone to the model as a prompt — so a
+    # missing .command is reported unknown rather than parsed out of the text.
+    #
+    # --log-file /dev/null because agy otherwise drops a ~15KB dated log in
+    # ~/.gemini/antigravity-cli/log on every single invocation, and budget is
+    # polled on every spawn. That directory held 2,458 logs / 46MB when this
+    # was written; a 60s poll would have added a thousand a day.
+    body=$("$BIN" -p "/usage" --output-format json --log-file /dev/null \
+        --print-timeout 8s 2>/dev/null) || true
+    [ -n "$body" ] || {
+        printf '{"known": false, "note": "agy did not answer /usage; not logged in, or the CLI is unavailable"}\n'
+        exit 0; }
+
+    # Everything from here to the closing quote is a double-quoted SHELL
+    # string, so it carries no backtick and no bare $ — either would be
+    # substituted by sh before python ever sees this.
+    printf '%s' "$body" | python3 -c "
+import json, sys
+
+try:
+    groups = ((json.load(sys.stdin).get('command') or {}).get('data') or {}).get('groups')
+except Exception:
+    groups = None
+if not isinstance(groups, list) or not groups:
+    print(json.dumps({'known': False, 'note':
+        '/usage returned no quota groups; slash expansion may be disabled'}))
+    raise SystemExit
+
+# agy bills two INDEPENDENT pools and serves both from one binary: the Gemini
+# models, and a 'Claude and GPT models' group for the third-party models it
+# resells. Only the Gemini pool belongs to this provider's headroom. Folding
+# them together would strand agy on a number it does not spend against — the
+# third-party 5-hour bucket sits at zero for most of the day, and reporting
+# that as agy's headroom would park every Gemini agent behind a wall that was
+# never in front of it. The other group is still reported, under windows.
+GEMINI = 'gemini'
+
+windows, worst, worst_left = {}, None, None
+for group in groups:
+    if not isinstance(group, dict):
+        continue
+    name = str(group.get('name') or '')
+    for bucket in group.get('buckets') or []:
+        if not isinstance(bucket, dict):
+            continue
+        left = bucket.get('remaining_fraction')
+        if not isinstance(left, (int, float)):
+            continue
+        left = float(left)
+        # The bucket ids are stable machine keys ('gemini-weekly', '3p-5h');
+        # the group NAME is display text and moves with the model line-up.
+        key = str(bucket.get('id') or '%s/%s' % (name, bucket.get('window')))
+        counted = key.startswith(GEMINI)
+        windows[key] = {
+            # Both figures, because the two readers of this dict want
+            # opposite ones: headroom is what the contract speaks, while every
+            # window renderer in the project shows percent USED, the way
+            # claude's and opencode's windows already report it.
+            'headroom': round(left, 4),
+            'percent': round((1 - left) * 100, 1),
+            'resets_at': bucket.get('reset_time'),
+            'group': name,
+            'counted': counted,
+        }
+        # Worst counted bucket wins: whichever is closest to empty is the one
+        # that actually stops a run, and which one it is changes the response —
+        # a 5-hour window clears over lunch, a weekly one does not.
+        if counted and (worst_left is None or left < worst_left):
+            worst, worst_left = key, left
+
+if worst is None:
+    print(json.dumps({'known': False, 'source': 'agy /usage', 'windows': windows,
+                      'note': '/usage reported no Gemini buckets'}))
+    raise SystemExit
+
+other = [w for k, w in windows.items() if not w['counted']]
+note = '%s is the constraint at %.0f%% used' % (worst, (1 - worst_left) * 100)
+if other:
+    note += '; the Claude/GPT pool is separate (%s remaining) and not counted' % (
+        ', '.join('%.0f%%' % (w['headroom'] * 100) for w in other))
+
+print(json.dumps({
+    'known': True,
+    'headroom': round(worst_left, 4),
+    'resets_at': windows[worst]['resets_at'],
+    'source': 'agy /usage',
+    'note': note,
+    'windows': windows,
+}))
+"
     exit 0
     ;;
 prepare)

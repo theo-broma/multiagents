@@ -18,10 +18,13 @@ honestly via ``known`` rather than inventing a number:
 * **opencode** — a Go subscription is detectable (``auth.json``), but the CLI
   exposes no quota surface even with one active. Spend-only; see
   :func:`probe_opencode` for what was checked and ruled out.
-* **agy** — has a full quota subsystem internally (``quota_manager.go``,
-  ``RetrieveUserQuotaSummary``, refreshed every few minutes per its logs) but
-  exposes none of it: no subcommand, no cached file. Spend-only, with
-  exhaustion detected reactively from a failed run.
+* **agy** — real headroom, reached through the one surface that exposes its
+  internal quota subsystem (``quota_manager.go``, ``RetrieveUserQuotaSummary``):
+  the interactive ``/usage`` slash command, which print mode expands and answers
+  locally for no tokens. Its script reports it; see ``providers/agy.sh``. agy
+  bills two independent pools from one binary and only the Gemini one is this
+  provider's, so the third-party pool is reported under ``windows`` but kept out
+  of ``headroom``.
 
 The point of all this is *routing*, not reporting. Quota pressure on the
 orchestrator is precisely when delegating to an unrationed provider is most
@@ -519,7 +522,8 @@ def read_agy(spent: dict[str, int] | None = None) -> Budget:
         known=False,
         source="stream usage",
         spent=spent or {},
-        note="CLI exposes no quota surface; exhaustion is detected from failed runs",
+        note="quota comes from the provider script's /usage probe; this built-in "
+             "is the fallback for when that script is missing or cannot answer",
     )
 
 
