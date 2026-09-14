@@ -122,17 +122,17 @@ def _generic_usage(budget: dict) -> list[str]:
 def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
                    with_scripts: bool = True) -> list[dict]:
     """One entry per configured provider: quota, health, and how to show it."""
-    from ..cli import _executor_for
+    from ..executor import executor_for
 
     providers = load_providers(config.providers)
-    executor_for = _executor_for(paths, config, providers)
+    executor_of = executor_for(paths, config, providers)
     reserve = float(config.project.get("budget", {}).get("reserve_headroom", 0.15))
     orchestrator = next((spec.provider for spec in config.agents.values()
                          if spec.launch and spec.role == "orchestrator"), "")
     reserved = reserved_providers(config.project, providers, orchestrator)
     health = tree.provider_health()
     spend = spend_by_provider(tree)
-    budgets = read_all(providers, executor_for, global_config_dir(),
+    budgets = read_all(providers, executor_of, global_config_dir(),
                        paths.config, spend, tree.read().get("cooldowns") or {})
 
     out = []
@@ -141,7 +141,7 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
         data = budget.to_dict() if budget else {"provider": name, "known": False}
         lines, source = ([], "")
         if with_scripts:
-            lines, source = _usage_lines(name, provider, executor_for(name),
+            lines, source = _usage_lines(name, provider, executor_of(name),
                                          data, paths)
         entry = health.get(name) or {}
         # Below the reserve a provider is still "usable" and still gets skipped
@@ -515,7 +515,8 @@ def branches(paths: ProjectPaths, config: Config) -> list[dict]:
 def deep_checks(paths: ProjectPaths, config: Config) -> list[dict]:
     """Authentication and executor readiness: seconds, so asked for by hand."""
     from .. import auth
-    from ..cli import _executor_for, _executor_problems
+    from ..cli import _executor_problems
+    from ..executor import executor_for
 
     out = []
     for problem in _executor_problems(paths, config):
@@ -542,7 +543,7 @@ def deep_checks(paths: ProjectPaths, config: Config) -> list[dict]:
             pass
     try:
         providers = load_providers(config.providers)
-        states = auth.check_all(providers, _executor_for(paths, config, providers),
+        states = auth.check_all(providers, executor_for(paths, config, providers),
                                 global_config_dir(), paths.config)
         for name, state in states.items():
             if not state.ok:

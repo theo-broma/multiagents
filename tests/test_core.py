@@ -598,7 +598,7 @@ def test_handing_over_the_terminal_reports_a_script_it_cannot_run(tmp_path):
     script.write_text("#!/usr/bin/env python3\n")
     script.chmod(0o644)
 
-    code = cli._hand_over([str(script), "login"], {}, script)
+    code = cli.driver._hand_over([str(script), "login"], {}, script)
     assert code == 126
 
 
@@ -1429,9 +1429,9 @@ def test_launched_spec_selects_by_role():
             "researcher": AgentSpec("researcher", "opencode", "m"),
         },
     )
-    assert cli._launched_spec(config, "orchestrator").name == "orchestrator"
-    assert cli._launched_spec(config, "initializer").name == "initializer"
-    assert cli._launched_spec(config, "nobody") is None
+    assert cli.driver._launched_spec(config, "orchestrator").name == "orchestrator"
+    assert cli.driver._launched_spec(config, "initializer").name == "initializer"
+    assert cli.driver._launched_spec(config, "nobody") is None
 
 
 def test_a_roleless_launch_entry_still_orchestrates():
@@ -1440,8 +1440,8 @@ def test_a_roleless_launch_entry_still_orchestrates():
     from multiagents.config import Config
     config = Config(project={}, providers={}, models={}, instruction_dirs=[],
                     agents={"boss": AgentSpec("boss", "claude", "sonnet", launch=True)})
-    assert cli._launched_spec(config, "orchestrator").name == "boss"
-    assert cli._launched_spec(config, "initializer") is None
+    assert cli.driver._launched_spec(config, "orchestrator").name == "boss"
+    assert cli.driver._launched_spec(config, "initializer") is None
 
 
 def test_neither_launched_role_can_be_spawned(tmp_path):
@@ -3284,10 +3284,10 @@ def test_two_turns_that_change_nothing_end_the_run(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(cli.subprocess, "Popen",
                         lambda *a, **k: calls.append(a) or _Done())
     monkeypatch.setattr(cli.scripts, "exec_action", lambda *a, **k: (["true"], {}))
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
 
     paths = _paths(tmp_path)
-    code = cli._supervise(paths, _config(), "orchestrator", AgentSpec("o", "p", "m"),
+    code = cli.driver._supervise(paths, _config(), "orchestrator", AgentSpec("o", "p", "m"),
                           object(), object(), {"MULTIAGENTS_RESUME": "0"}, 20)
     assert code == 0
     assert len(calls) == 2, "stops after the second idle turn, not the twentieth"
@@ -3311,11 +3311,11 @@ def test_three_failed_turns_stop_rather_than_spin(tmp_path, monkeypatch, capsys)
     slept = []
     monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: _Fail())
     monkeypatch.setattr(cli.scripts, "exec_action", lambda *a, **k: (["false"], {}))
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
 
     paths = _paths(tmp_path)
-    code = cli._supervise(paths, _config(), "orchestrator", AgentSpec("o", "p", "m"),
+    code = cli.driver._supervise(paths, _config(), "orchestrator", AgentSpec("o", "p", "m"),
                           object(), object(), {"MULTIAGENTS_RESUME": "0"}, 20)
     assert code == 1
     assert slept == [30, 60], "backoff grows rather than hammering"
@@ -3467,13 +3467,13 @@ def test_stop_ends_the_thing_that_starts_more_agents(tmp_path, quiet_git,
     paths = cli._resolve(str(tmp_path))
 
     signalled = []
-    cli._write_pid(paths, "orchestrator", 4242)
-    monkeypatch.setattr(cli, "_alive", lambda pid: True)
+    cli.driver._write_pid(paths, "orchestrator", 4242)
+    monkeypatch.setattr(cli.driver, "_alive", lambda pid: True)
     monkeypatch.setattr(cli.os, "kill", lambda pid, sig: signalled.append((pid, sig)))
 
     cli.cmd_stop(argparse.Namespace(path=str(tmp_path), keep_containers=True))
     assert (4242, cli.signal.SIGTERM) in signalled
-    assert not cli._pid_file(paths, "orchestrator").exists(), "stale pid removed"
+    assert not cli.driver._pid_file(paths, "orchestrator").exists(), "stale pid removed"
     assert "orchestrator (pid 4242)" in capsys.readouterr().out
 
 
@@ -3830,14 +3830,14 @@ def test_the_supervisor_stops_when_what_it_watches_does(tmp_path, quiet_git,
 def test_the_three_deliberate_endings_are_identified(monkeypatch):
     import multiagents.cli as cli
     for code in (0, -cli.signal.SIGINT, 130, -cli.signal.SIGTERM, 143):
-        assert cli._exit_was_deliberate(code)[0] is True, code
+        assert cli.driver._exit_was_deliberate(code)[0] is True, code
 
 
 def test_a_lost_terminal_or_a_crash_is_not_deliberate():
     import multiagents.cli as cli
-    lost, why = cli._exit_was_deliberate(-cli.signal.SIGHUP)
+    lost, why = cli.driver._exit_was_deliberate(-cli.signal.SIGHUP)
     assert lost is False and "terminal was lost" in why
-    assert cli._exit_was_deliberate(3)[0] is False
+    assert cli.driver._exit_was_deliberate(3)[0] is False
 
 
 def test_ctrl_c_still_reaches_the_child(tmp_path):
@@ -3847,7 +3847,7 @@ def test_ctrl_c_still_reaches_the_child(tmp_path):
     import os
     import multiagents.cli as cli
 
-    code = cli._run_attached(
+    code = cli.driver._run_attached(
         ["python3", "-c", "import os,signal; os.kill(os.getpid(), signal.SIGINT)"],
         dict(os.environ))
     assert code == -cli.signal.SIGINT, (
@@ -3858,11 +3858,11 @@ def test_the_parent_outlives_a_signalled_child_and_restores_the_terminal(tmp_pat
     import os
     import multiagents.cli as cli
 
-    saved = cli._terminal_state()          # None when the suite has no tty
+    saved = cli.driver._terminal_state()          # None when the suite has no tty
     for script in ("import os,signal; os.kill(os.getpid(), signal.SIGINT)",
                    "raise SystemExit(3)"):
-        cli._run_attached(["python3", "-c", script], dict(os.environ))
-    assert cli._terminal_state() == saved, "the terminal must come back as it was"
+        cli.driver._run_attached(["python3", "-c", script], dict(os.environ))
+    assert cli.driver._terminal_state() == saved, "the terminal must come back as it was"
 
 
 def test_a_child_is_not_put_in_its_own_session(tmp_path):
@@ -3872,7 +3872,7 @@ def test_a_child_is_not_put_in_its_own_session(tmp_path):
     import inspect
     import multiagents.cli as cli
 
-    source = inspect.getsource(cli._run_attached)
+    source = inspect.getsource(cli.driver._run_attached)
     assert "start_new_session" not in source or "NOT start_new_session" in source
 
 
@@ -3882,12 +3882,12 @@ def test_a_lost_terminal_with_no_tty_left_goes_headless(tmp_path, monkeypatch):
     import multiagents.cli as cli
 
     handed = []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
-    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: handed.append(1) or 0)
+    monkeypatch.setattr(cli.driver, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: False})())
 
-    cli._run_supervised(_paths(tmp_path), _config(), "orchestrator", None, None,
+    cli.driver._run_supervised(_paths(tmp_path), _config(), "orchestrator", None, None,
                         None, {}, [], {})
     assert handed == [1]
 
@@ -3959,19 +3959,19 @@ def test_a_session_nobody_spoke_to_is_not_continued(tmp_path, monkeypatch, capsy
     import multiagents.watchdog as watchdog
 
     handed_over = []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed_over.append(1) or 0)
-    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: handed_over.append(1) or 0)
+    monkeypatch.setattr(cli.driver, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
     paths = _paths(tmp_path)
 
     monkeypatch.setattr(watchdog, "has_human_turn", lambda *a: False)
-    assert cli._run_supervised(paths, _config(), "orchestrator", None, None,
+    assert cli.driver._run_supervised(paths, _config(), "orchestrator", None, None,
                                None, {}, [], {}) == 1
     assert handed_over == []
     assert "nothing was asked of it" in capsys.readouterr().out
 
     monkeypatch.setattr(watchdog, "has_human_turn", lambda *a: True)
-    cli._run_supervised(paths, _config(), "orchestrator", None, None, None,
+    cli.driver._run_supervised(paths, _config(), "orchestrator", None, None, None,
                         {}, [], {})
     assert handed_over == [1], "a session with real work does continue"
 
@@ -4013,22 +4013,22 @@ def test_an_unexpected_end_is_retried_interactively_before_anything_headless(
     from multiagents.config import Config
 
     launches, slept = [], []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: 99)
 
     codes = iter([-cli.signal.SIGHUP, -cli.signal.SIGHUP, 0])   # lost, lost, quit
     def attached(argv, env, stalled=None):
         launches.append(env.get("MULTIAGENTS_RESUME_PROMPT"))
         return next(codes)
-    monkeypatch.setattr(cli, "_run_attached", attached)
+    monkeypatch.setattr(cli.driver, "_run_attached", attached)
 
     config = Config(project={"limits": {"restart_attempts": 5,
                                         "restart_delay_seconds": 30}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
-    result = cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+    result = cli.driver._run_supervised(_paths(tmp_path), config, "orchestrator", None,
                                  None, None, {}, [], {})
 
     assert result == 0, "a clean quit on a retry ends the loop"
@@ -4041,18 +4041,18 @@ def test_retrying_gives_up_rather_than_looping_forever(tmp_path, monkeypatch):
     import multiagents.cli as cli
     from multiagents.config import Config
 
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
-    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
+    monkeypatch.setattr(cli.driver, "_run_attached", lambda *a, **k: -cli.signal.SIGHUP)
     handed = []
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: handed.append(1) or 0)
 
     config = Config(project={"limits": {"restart_attempts": 2,
                                         "restart_delay_seconds": 0}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
-    result = cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+    result = cli.driver._run_supervised(_paths(tmp_path), config, "orchestrator", None,
                                  None, None, {}, [], {})
     assert handed == [1], "out of attempts with no terminal left -> headless"
     assert result == 0
@@ -4065,7 +4065,7 @@ def test_the_parent_ignores_the_signal_that_takes_the_terminal(tmp_path):
     import inspect
     import multiagents.cli as cli
 
-    source = inspect.getsource(cli._run_attached)
+    source = inspect.getsource(cli.driver._run_attached)
     assert "signal.SIGHUP" in source
     # The prose explains why SIG_IGN is wrong; what matters is that it is not
     # what gets installed.
@@ -4077,7 +4077,7 @@ def test_the_restart_prompt_does_not_ask_for_permission_to_continue():
     proposes a plan and waits has turned an interruption into a second one —
     and nobody may be reading."""
     import multiagents.cli as cli
-    prompt = " ".join(cli.RESUME_PROMPT.split())
+    prompt = " ".join(cli.driver.RESUME_PROMPT.split())
 
     assert "carry straight on with the work" in prompt
     assert "Do not propose a plan and wait" in prompt
@@ -4095,18 +4095,18 @@ def test_a_session_that_dies_immediately_is_not_retried(tmp_path, monkeypatch,
     import multiagents.cli as cli
     from multiagents.config import Config
 
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
-    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: 3)     # instant crash
+    monkeypatch.setattr(cli.driver, "_run_attached", lambda *a, **k: 3)     # instant crash
     handed = []
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: handed.append(1) or 0)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: handed.append(1) or 0)
 
     config = Config(project={"limits": {"restart_attempts": 5, "restart_on_crash": True,
                                         "restart_min_runtime_seconds": 60}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
-    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+    assert cli.driver._run_supervised(_paths(tmp_path), config, "orchestrator", None,
                                None, None, {}, [], {}) == 1
     out = capsys.readouterr().out
     assert "the same fault being read again" in out
@@ -4121,19 +4121,19 @@ def test_a_session_that_ran_a_while_before_failing_is_retried(tmp_path,
     from multiagents.config import Config
 
     clock = iter([0.0, 4000.0, 4000.0, 8000.0])      # each run lasts ~an hour
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
 
     codes = iter([3, 0])
-    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: next(codes))
+    monkeypatch.setattr(cli.driver, "_run_attached", lambda *a, **k: next(codes))
 
     config = Config(project={"limits": {"restart_attempts": 5, "restart_on_crash": True,
                                         "restart_min_runtime_seconds": 60}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
-    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+    assert cli.driver._run_supervised(_paths(tmp_path), config, "orchestrator", None,
                                None, None, {}, [], {}) == 0
 
 
@@ -4147,10 +4147,10 @@ def test_the_parent_survives_a_hangup_and_the_child_does_not(tmp_path):
               "os.kill(os.getppid(), signal.SIGHUP)\n"   # as the terminal would
               "time.sleep(0.2)\n"
               "os.kill(os.getpid(), signal.SIGHUP)\n")   # and the child dies of it
-    code = cli._run_attached(["python3", "-c", script], dict(os.environ))
+    code = cli.driver._run_attached(["python3", "-c", script], dict(os.environ))
 
     assert code == -cli.signal.SIGHUP, "the child must still die on SIGHUP"
-    deliberate, why = cli._exit_was_deliberate(code)
+    deliberate, why = cli.driver._exit_was_deliberate(code)
     assert deliberate is False and "terminal was lost" in why
 
 
@@ -4164,13 +4164,13 @@ def test_a_crash_is_not_retried_by_default(tmp_path, monkeypatch, capsys):
     from multiagents.config import Config
 
     retried = []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
-    monkeypatch.setattr(cli, "_run_attached",
+    monkeypatch.setattr(cli.driver, "_run_attached",
                         lambda *a, **k: retried.append(1) or 3)
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: 99)
 
-    assert cli._run_supervised(_paths(tmp_path), _config(), "orchestrator", None,
+    assert cli.driver._run_supervised(_paths(tmp_path), _config(), "orchestrator", None,
                                None, None, {}, [], {}) == 1
     assert len(retried) == 1, "the first run only; no retry"
     assert "still there and a restart would meet it again" in capsys.readouterr().out
@@ -4183,16 +4183,16 @@ def test_a_lost_terminal_is_always_retried(tmp_path, monkeypatch):
     from multiagents.config import Config
 
     runs = []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
     codes = iter([-cli.signal.SIGHUP, 0])
-    monkeypatch.setattr(cli, "_run_attached", lambda *a, **k: runs.append(1) or next(codes))
+    monkeypatch.setattr(cli.driver, "_run_attached", lambda *a, **k: runs.append(1) or next(codes))
 
     config = Config(project={"limits": {"restart_delay_seconds": 0}},
                     providers={}, agents={}, models={}, instruction_dirs=[])
-    assert cli._run_supervised(_paths(tmp_path), config, "orchestrator", None,
+    assert cli.driver._run_supervised(_paths(tmp_path), config, "orchestrator", None,
                                None, None, {}, [], {}) == 0
     assert len(runs) == 2, "retried without needing restart_on_crash"
 
@@ -4239,11 +4239,11 @@ def test_each_launched_role_owns_a_stable_session_id(tmp_path):
     import multiagents.cli as cli
     paths = _paths(tmp_path)
 
-    orchestrator = cli._role_session_id(paths, "orchestrator")
-    initializer = cli._role_session_id(paths, "initializer")
+    orchestrator = cli.driver._role_session_id(paths, "orchestrator")
+    initializer = cli.driver._role_session_id(paths, "initializer")
 
     assert orchestrator != initializer, "sharing one is the bug this fixes"
-    assert cli._role_session_id(paths, "orchestrator") == orchestrator, "stable"
+    assert cli.driver._role_session_id(paths, "orchestrator") == orchestrator, "stable"
     assert len(orchestrator.split("-")) == 5, "claude requires a uuid"
 
 
@@ -4253,10 +4253,10 @@ def test_fresh_rotates_the_id_rather_than_colliding(tmp_path):
     import multiagents.cli as cli
     paths = _paths(tmp_path)
 
-    first = cli._role_session_id(paths, "orchestrator")
-    rotated = cli._role_session_id(paths, "orchestrator", rotate=True)
+    first = cli.driver._role_session_id(paths, "orchestrator")
+    rotated = cli.driver._role_session_id(paths, "orchestrator", rotate=True)
     assert rotated != first
-    assert cli._role_session_id(paths, "orchestrator") == rotated, "and it sticks"
+    assert cli.driver._role_session_id(paths, "orchestrator") == rotated, "and it sticks"
 
 
 def test_the_launcher_resumes_by_id_only_when_that_session_exists(tmp_path):
@@ -5095,8 +5095,8 @@ def test_a_stalled_child_is_ended_rather_than_waited_on(monkeypatch):
     exits. Every restart path downstream was therefore unreachable."""
     from multiagents import cli
 
-    monkeypatch.setattr(cli, "STALL_POLL_SECONDS", 0.05)
-    code = cli._run_attached(["sh", "-c", "sleep 30"], dict(os.environ),
+    monkeypatch.setattr(cli.driver, "STALL_POLL_SECONDS", 0.05)
+    code = cli.driver._run_attached(["sh", "-c", "sleep 30"], dict(os.environ),
                              stalled=lambda: True)
     assert code != 0, "the child was terminated, not left running"
 
@@ -5104,8 +5104,8 @@ def test_a_stalled_child_is_ended_rather_than_waited_on(monkeypatch):
 def test_a_child_that_is_working_is_left_alone(monkeypatch):
     from multiagents import cli
 
-    monkeypatch.setattr(cli, "STALL_POLL_SECONDS", 0.05)
-    code = cli._run_attached(["sh", "-c", "sleep 0.4; exit 7"], dict(os.environ),
+    monkeypatch.setattr(cli.driver, "STALL_POLL_SECONDS", 0.05)
+    code = cli.driver._run_attached(["sh", "-c", "sleep 0.4; exit 7"], dict(os.environ),
                              stalled=lambda: False)
     assert code == 7
 
@@ -5121,7 +5121,7 @@ def test_a_limit_known_not_to_reset_stops_the_run(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
     paths = _paths(tmp_path)
     spec = AgentSpec("orchestrator", "claude", "m")
-    code = cli._limit_stop(paths, _config(), spec,
+    code = cli.driver._limit_stop(paths, _config(), spec,
                            {"detail": "monthly spend limit", "resets": False,
                             "said": "You've hit your monthly spend limit"})
     assert code == 3
@@ -5140,7 +5140,7 @@ def test_a_window_that_resets_is_waited_out_and_then_retried(tmp_path, monkeypat
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
     paths = _paths(tmp_path)
     spec = AgentSpec("orchestrator", "claude", "m")
-    code = cli._limit_stop(paths, _config(), spec,
+    code = cli.driver._limit_stop(paths, _config(), spec,
                            {"detail": "usage limit", "resets": True, "said": ""})
     assert code is None, "None means: try again"
     assert slept and slept[0] == 900
@@ -5160,11 +5160,11 @@ def test_launching_the_role_by_hand_lifts_its_limit_pause(tmp_path, monkeypatch)
     paths = _paths(tmp_path)
     tree = Tree(paths.tree_file, paths.events_file)
     tree.pause(time.time() + 3600, "claude: monthly spend limit", ["claude"])
-    cli._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
+    cli.driver._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
     assert tree.pause_state() == {}
 
     tree.pause(time.time() + 3600, "opencode: no headroom", ["opencode"])
-    cli._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
+    cli.driver._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
     assert tree.pause_state() != {}, "another provider's pause is not ours to lift"
 
 
@@ -5180,7 +5180,7 @@ def test_a_script_relaunching_on_a_timer_does_not_lift_the_pause(tmp_path, monke
     paths = _paths(tmp_path)
     tree = Tree(paths.tree_file, paths.events_file)
     tree.pause(time.time() + 3600, "claude: monthly spend limit", ["claude"])
-    cli._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
+    cli.driver._clear_limit_pause(paths, AgentSpec("orchestrator", "claude", "m"))
     assert tree.pause_state() != {}
 
 
@@ -5218,8 +5218,8 @@ def test_a_limit_is_confirmed_over_two_polls_before_the_session_is_ended(tmp_pat
     from multiagents.config import AgentSpec
 
     seen = []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
-    monkeypatch.setattr(cli, "_limit_stop", lambda *a, **k: 3)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_limit_stop", lambda *a, **k: 3)
     monkeypatch.setattr(cli, "watchdog", None, raising=False)
 
     def attached(argv, env, stalled=None):
@@ -5227,13 +5227,13 @@ def test_a_limit_is_confirmed_over_two_polls_before_the_session_is_ended(tmp_pat
         seen.append(stalled())          # second: the limit is still unanswered
         return -cli.signal.SIGTERM
 
-    monkeypatch.setattr(cli, "_run_attached", attached)
+    monkeypatch.setattr(cli.driver, "_run_attached", attached)
     import multiagents.watchdog as wd
     monkeypatch.setattr(wd, "limit_reached",
                         lambda *a: {"detail": "usage limit", "resets": True})
     monkeypatch.setattr(wd, "write_status", lambda *a: None)
 
-    code = cli._run_supervised(_paths(tmp_path), _config(), "orchestrator",
+    code = cli.driver._run_supervised(_paths(tmp_path), _config(), "orchestrator",
                                AgentSpec("orchestrator", "claude", "m"),
                                object(), object(), {}, ["true"], {})
     assert seen == [False, True]
@@ -5262,17 +5262,17 @@ def test_waiting_out_a_window_does_not_spend_the_restart_attempts(tmp_path, monk
 
     waits = []
     runs = []
-    monkeypatch.setattr(cli, "_start_supervisor", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_start_supervisor", lambda *a: None)
     monkeypatch.setattr(cli.sys, "stdin", type("T", (), {"isatty": lambda s: True})())
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cli, "_orchestrator_hold", lambda *a: None)
-    monkeypatch.setattr(cli, "_supervise", lambda *a, **k: 99)
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
+    monkeypatch.setattr(cli.driver, "_supervise", lambda *a, **k: 99)
 
     def limited(paths, config, spec, limit, attempt=1):
         waits.append(attempt)
         return None                      # "the window may have reopened; retry"
 
-    monkeypatch.setattr(cli, "_limit_stop", limited)
+    monkeypatch.setattr(cli.driver, "_limit_stop", limited)
 
     import multiagents.watchdog as wd
     monkeypatch.setattr(wd, "write_status", lambda *a: None)
@@ -5286,11 +5286,11 @@ def test_waiting_out_a_window_does_not_spend_the_restart_attempts(tmp_path, monk
         stalled(); stalled()             # warn, then confirm
         return -cli.signal.SIGTERM
 
-    monkeypatch.setattr(cli, "_run_attached", attached)
+    monkeypatch.setattr(cli.driver, "_run_attached", attached)
     config = Config(project={"limits": {"limit_max_waits": 7}}, providers={},
                     agents={}, models={}, instruction_dirs=[])
 
-    code = cli._run_supervised(_paths(tmp_path), config, "orchestrator",
+    code = cli.driver._run_supervised(_paths(tmp_path), config, "orchestrator",
                                AgentSpec("orchestrator", "claude", "m"),
                                object(), object(), {}, ["true"], {})
     assert code == 3
@@ -5414,10 +5414,10 @@ def test_a_known_reset_time_replaces_the_blind_backoff(tmp_path, monkeypatch):
 
     slept = []
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
-    monkeypatch.setattr(cli, "_provider_reset_at",
+    monkeypatch.setattr(cli.driver, "_provider_reset_at",
                         lambda *a: time.time() + 3000)
     paths = _paths(tmp_path)
-    code = cli._limit_stop(paths, _config(), AgentSpec("o", "claude", "m"),
+    code = cli.driver._limit_stop(paths, _config(), AgentSpec("o", "claude", "m"),
                            {"detail": "usage limit", "resets": True, "said": ""})
     assert code is None
     assert 3000 <= slept[0] <= 3100, "it waited to the reset, not a round 15 min"
@@ -5429,8 +5429,8 @@ def test_an_unknown_reset_time_still_backs_off(tmp_path, monkeypatch):
 
     slept = []
     monkeypatch.setattr(cli.time, "sleep", lambda s: slept.append(s))
-    monkeypatch.setattr(cli, "_provider_reset_at", lambda *a: None)
-    cli._limit_stop(_paths(tmp_path), _config(), AgentSpec("o", "claude", "m"),
+    monkeypatch.setattr(cli.driver, "_provider_reset_at", lambda *a: None)
+    cli.driver._limit_stop(_paths(tmp_path), _config(), AgentSpec("o", "claude", "m"),
                     {"detail": "usage limit", "resets": True, "said": ""}, attempt=3)
     assert slept == [2700]
 
@@ -6252,8 +6252,8 @@ def test_a_provider_below_the_reserve_says_so(tmp_path, monkeypatch):
                            severity="warning",
                            windows={"rolling": {"percent": 0.0},
                                     "weekly": {"percent": 86.0}})})
-    import multiagents.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_executor_for", lambda *a: (lambda name: None))
+    import multiagents.executor as executor_mod
+    monkeypatch.setattr(executor_mod, "executor_for", lambda *a: (lambda name: None))
 
     rows = snap.providers_view(paths, config, tree, with_scripts=False)
     assert rows[0]["below_reserve"] is True
@@ -7271,21 +7271,21 @@ def test_two_drivers_do_not_run_at_once(tmp_path, monkeypatch):
 
     paths = _paths(tmp_path)
     (paths.data / "launch").mkdir(parents=True, exist_ok=True)
-    cli._write_pid(paths, "initializer", os.getpid())      # alive, certainly
+    cli.driver._write_pid(paths, "initializer", os.getpid())      # alive, certainly
 
-    assert cli._other_driver_running(paths, "orchestrator") == ("initializer", os.getpid())
-    assert cli._other_driver_running(paths, "initializer") is None, "not itself"
+    assert cli.driver._other_driver_running(paths, "orchestrator") == ("initializer", os.getpid())
+    assert cli.driver._other_driver_running(paths, "initializer") is None, "not itself"
 
     config = _config()
-    monkeypatch.setattr(cli, "_launched_spec", lambda c, r: AgentSpec("o", "p", "m"))
-    assert cli._launch_agent(paths, config, "orchestrator", resume=True) == 2
+    monkeypatch.setattr(cli.driver, "_launched_spec", lambda c, r: AgentSpec("o", "p", "m"))
+    assert cli.driver._launch_agent(paths, config, "orchestrator", resume=True) == 2
     # …and the escape hatch works, failing later for want of a provider rather
     # than being refused up front.
-    assert cli._launch_agent(paths, config, "orchestrator", resume=True,
+    assert cli.driver._launch_agent(paths, config, "orchestrator", resume=True,
                              force=True) != 2 or True
 
-    cli._write_pid(paths, "initializer", 4_000_000)         # dead
-    assert cli._other_driver_running(paths, "orchestrator") is None
+    cli.driver._write_pid(paths, "initializer", 4_000_000)         # dead
+    assert cli.driver._other_driver_running(paths, "orchestrator") is None
 
 
 def test_a_status_record_whose_process_is_gone_is_not_running(tmp_path):
