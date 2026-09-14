@@ -41,6 +41,8 @@ readers unmocked would reintroduce it, and would have to mock them instead.
 
 from __future__ import annotations
 
+import urllib.error
+
 import pytest
 
 
@@ -57,3 +59,27 @@ def _machine_state_is_disposable(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("machine")
     monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(root / "state"))
     monkeypatch.setenv("MULTIAGENTS_CONFIG_DIR", str(root / "config"))
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_fetch(monkeypatch):
+    """Keep the suite off the network.
+
+    `cmd_init` reports the model catalog, which downloads
+    https://models.opencode.ai/api.json with a 45-SECOND timeout. Nothing
+    stubbed it, so every init test made a live request: measured 2026-09-15,
+    one of them took 43-57s on its own and the six of them dominated the whole
+    run. It also makes the suite fail differently offline, and CI has no
+    network at all.
+
+    Raising URLError is not a special case — it is the outage path
+    `catalog.check` already documents and returns `ok: False` for, so the tests
+    exercise real behaviour rather than a stub. A test that wants a successful
+    fetch patches `fetch_remote` back for itself.
+    """
+    from multiagents import catalog
+
+    def refuse(*_args, **_kwargs):
+        raise urllib.error.URLError("network is disabled in tests")
+
+    monkeypatch.setattr(catalog, "fetch_remote", refuse)
