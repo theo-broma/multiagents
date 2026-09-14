@@ -509,6 +509,73 @@ class _Exec:
     kind = "local"
 
 
+def test_doctor_clear_forgets_a_stale_breaker(tmp_path, capsys):
+    """There was no way to clear a latched breaker. clear_provider_health had
+    exactly one caller — the runner's own auth probe — so a record left by a bug
+    that has since been fixed could only be removed by editing tree.json.
+
+    It is not cosmetic: a LAPSED cooldown still leaves `tripped` set, and
+    note_run_outcome reads that as half-open, where one further failure re-trips
+    at once instead of waiting for the threshold. That is why a real project
+    logged `provider_down {"failures": 1}` against a configured threshold of 3.
+    """
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.note_run_outcome("agy", ok=False, threshold=1, reason="print timeout")
+    tree.set_cooldown("agy", time.time() - 60, "3 runs in a row failed")
+    assert tree.provider_health()["agy"]["tripped"]
+
+    args = argparse.Namespace(path=str(tmp_path), clear="agy", force=False)
+    assert cli.cmd_doctor(args) == 0
+    out = capsys.readouterr().out
+    assert "cleared" in out and "starts over" in out, out
+
+    assert "agy" not in tree.provider_health(), "the breaker must start over"
+    assert tree.cooldown("agy") is None
+    kinds = [json.loads(l)["kind"] for l in paths.events_file.read_text().splitlines() if l.strip()]
+    assert "health_cleared" in kinds, "a person deciding this is worth recording"
+
+
+def test_doctor_clear_refuses_while_the_cooldown_is_still_running(tmp_path, capsys):
+    """Then the breaker is not stale, it is working, and clearing it is talking
+    past a live outage rather than recovering from a dead one."""
+    import argparse
+    import multiagents.cli as cli
+    from multiagents.tree import Tree
+
+    paths = _paths(tmp_path)
+    tree = Tree(paths.tree_file, paths.events_file)
+    tree.note_run_outcome("agy", ok=False, threshold=1, reason="still broken")
+    tree.set_cooldown("agy", time.time() + 900, "3 runs in a row failed")
+
+    args = argparse.Namespace(path=str(tmp_path), clear="agy", force=False)
+    assert cli.cmd_doctor(args) == 1
+    assert "still cooling" in capsys.readouterr().err
+    assert tree.cooldown("agy") is not None, "refusing must change nothing"
+    assert "agy" in tree.provider_health()
+
+    # --force is for when the operator knows the cause is gone.
+    args.force = True
+    assert cli.cmd_doctor(args) == 0
+    assert tree.cooldown("agy") is None
+    assert "agy" not in tree.provider_health()
+
+
+def test_doctor_clear_names_the_providers_it_knows(tmp_path, capsys):
+    """A typo must not read as "that provider is fine"."""
+    import argparse
+    import multiagents.cli as cli
+
+    _paths(tmp_path)
+    args = argparse.Namespace(path=str(tmp_path), clear="cluade", force=False)
+    assert cli.cmd_doctor(args) == 2
+    assert "unknown provider" in capsys.readouterr().err
+
+
 def test_a_present_but_expired_credential_is_not_a_login(tmp_path):
     """On 2026-09-14 `check` under docker was `[ -s .credentials.json ]` alone.
     The token had expired, every run came back `401 OAuth access token has

@@ -69,6 +69,14 @@ after you have already briefed the orchestrator:
 `run --no-launch` reports both without refusing, because inspecting a broken
 project is what it is for.
 
+`multiagents doctor --clear <provider>` forgets what the circuit breaker
+learned about one provider. It is for a record left behind by a cause that
+has since been fixed — which is not cosmetic, because a lapsed cooldown
+still leaves the provider marked tripped, and a tripped provider re-trips on
+a *single* further failure instead of waiting for the threshold. It refuses
+while the cooldown is still running, since that is the breaker working
+rather than a stale record; `--force` is for when you know the cause is gone.
+
 `make install` runs `uv sync` **and** `uv tool install --editable .`, because
 `uv sync` alone only populates this repository's `.venv` — the command would
 exist nowhere else, which is not much of an install. `--editable` means the
