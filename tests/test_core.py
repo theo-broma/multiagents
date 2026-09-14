@@ -3532,9 +3532,26 @@ def test_the_agy_usage_view_keeps_the_numbers_in_its_first_four_lines(tmp_path):
     }}
     code, lines = _agy_usage_lines(budget)
     assert code == 0
-    assert all("% left" in line for line in lines[:4]), (
+    assert all("% used" in line for line in lines[:4]), (
         "every one of the four lines the TUI shows must carry its own number")
     assert any("=" in line for line in lines[4:]), "legend follows, not leads"
+
+
+def test_the_agy_usage_bar_fills_as_the_quota_is_spent(tmp_path):
+    """Same direction as the header above it and every other provider. Counting
+    remaining here made a full bar mean untouched on one row and exhausted on
+    the next, which is the one thing a bar has to get right."""
+    budget = {"known": True, "windows": {
+        "gemini-weekly": _agy_window(1.0, None, True),   # untouched
+        "gemini-5h": _agy_window(0.0, None, True),       # exhausted
+    }}
+    code, lines = _agy_usage_lines(budget)
+    untouched = next(l for l in lines if l.startswith("gemini weekly"))
+    spent = next(l for l in lines if l.startswith("gemini 5h"))
+    assert "0% used" in untouched and "\u2588" not in untouched, (
+        "an untouched bucket is an empty bar")
+    assert "100% used" in spent and "\u2591" not in spent, (
+        "an exhausted bucket is a full bar")
 
 
 def test_the_agy_usage_view_marks_the_pool_it_does_not_spend_against(tmp_path):
