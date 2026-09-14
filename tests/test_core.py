@@ -6961,6 +6961,7 @@ def test_the_page_keeps_what_the_poll_would_have_thrown_away():
         "the config form is not redrawn by the poll"
 
 
+@pytest.mark.real_providers
 def test_a_provider_below_the_reserve_says_so(tmp_path, monkeypatch):
     """The state that produced a question to the maintainer: opencode's
     five-hour window was empty, its WEEKLY window was at 86%, headroom was
