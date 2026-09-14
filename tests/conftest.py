@@ -83,3 +83,32 @@ def _no_catalog_fetch(monkeypatch):
         raise urllib.error.URLError("network is disabled in tests")
 
     monkeypatch.setattr(catalog, "fetch_remote", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_provider_subprocesses(request, monkeypatch):
+    """Keep the monitor's snapshot from shelling out to real agent CLIs.
+
+    `providers_view` runs each provider's `budget` and `usage` script, and the
+    shipped providers are the real ones: `claude auth status`, an HTTPS call
+    from opencode.sh, and since 2026-09-14 a genuine `agy -p "/usage"` that
+    takes about four seconds. The two monitor HTTP tests give their client a
+    ten-second deadline and then serve `/api/state`, so on a loaded machine the
+    request outran the client and the test failed on a socket timeout — three
+    times in a row here, while passing in isolation.
+
+    Only the provider ROWS are stubbed. Everything those tests are named for —
+    the token gate, the Host check, the page — is untouched. A test that is
+    actually about the rows marks itself `@pytest.mark.real_providers`.
+    """
+    if request.node.get_closest_marker("real_providers"):
+        return
+    from multiagents.monitor import snapshot
+
+    monkeypatch.setattr(snapshot, "providers_view", lambda *a, **k: [])
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_providers: this test is about providers_view itself, so let it run")
