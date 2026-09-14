@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 from . import scripts
-from .budget import read_all
+from .budget import read_all, reset_label
 from .executor import executor_for
 from .paths import global_config_dir
 from .providers import load_providers
@@ -807,7 +807,7 @@ def _orchestrator_hold(paths, config) -> tuple[str, float | None] | None:
     budget = budgets.get(spec.provider)
     if budget is None or budget.usable:
         return None
-    when = f", resets {budget.resets_at}" if budget.resets_at else ""
+    when = f", resets {reset_label(budget.resets_at)}" if budget.resets_at else ""
     return (f"paused       {spec.provider} has no headroom for the "
             f"orchestrator{when}", budget.cooldown_until)
 

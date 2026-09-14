@@ -27,7 +27,7 @@ from . import driver
 from .executor import executor_for
 from . import scripts
 from . import gitops
-from .budget import read_all
+from .budget import read_all, reset_label
 from .config import load as load_config
 from .config import seed_global, seed_project, sync_layer
 from .models import refresh_models, validate_agent_models
@@ -969,7 +969,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, entry in _budget.items():
         data = entry.to_dict()
         if data.get("known"):
-            print(f"  {name:12} {data['used_percent']}% used, resets {data.get('resets_at','?')}")
+            print(f"  {name:12} {data['used_percent']}% used, "
+                  f"resets {reset_label(data.get('resets_at')) or '?'}")
             # Which bucket is the constraint changes what to do about it: a
             # rolling window clears in hours, a monthly one does not.
             for window, detail in sorted((data.get("windows") or {}).items()):
@@ -981,7 +982,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 # Wide enough for the longest bucket name any provider has
                 # ("gemini-weekly"); short names still line up under it.
                 print(f"  {'':12}   {window:13} {detail.get('percent', '?'):>5}%  "
-                      f"resets {str(detail.get('resets_at', '?'))[:19]}{aside}")
+                      f"resets {reset_label(detail.get('resets_at')) or '?'}{aside}")
         else:
             print(f"  {name:12} headroom unknown — {data.get('note','')}")
     if paths and config.executor == "docker":
@@ -1781,7 +1782,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         if provider.get("known") and provider.get("headroom") is not None:
             print(f"{'':14} {provider['name']} headroom "
                   f"{provider['headroom'] * 100:.0f}%"
-                  f"{', resets ' + str(provider['resets_at'])[:19] if provider.get('resets_at') else ''}")
+                  f"{', resets ' + reset_label(provider['resets_at']) if provider.get('resets_at') else ''}")
         if len(records) > 1:
             print()
     return 0

@@ -112,8 +112,11 @@ if not b.get('known'):
 used = b.get('used_percent') or 0
 bar = '#' * int(round(used / 10)) + '.' * (10 - int(round(used / 10)))
 print(f\"{bar}  {used:.0f}% of the tightest window\")
-if b.get('resets_at'):
-    print(f\"resets {str(b['resets_at'])[:16].replace('T', ' ')}\")
+# resets_label is the local clock plus a countdown, computed by the caller so
+# that every provider script shows the same time the user's own clock does.
+# Slicing the ISO string here printed UTC on a local face: two hours out.
+if b.get('resets_label') or b.get('resets_at'):
+    print(f\"resets {b.get('resets_label') or str(b['resets_at'])[:16]}\")
 spent = b.get('spent') or {}
 u, limit = spent.get('extra_credits_used'), spent.get('extra_credits_limit')
 if u is not None and limit:

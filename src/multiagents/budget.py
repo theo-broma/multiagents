@@ -38,10 +38,53 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .redact import register_literal, scrub
+
+
+def reset_label(stamp: Any, now: float | None = None) -> str:
+    """A reset time as the person reading it experiences it: their own clock.
+
+    Every provider sends UTC — claude as "...+00:00", agy as "...Z" — and every
+    display of it used to cut the string at 19 characters, which drops the
+    offset and prints a UTC wall clock on a local clock face. Silent, because
+    the result still looks exactly like a time: the monitor said a window reset
+    at 00:00 while the CLI's own display said 2am, and only a person who knew
+    both numbers could tell which was lying. Two hours of error here in summer,
+    none in winter, which is the kind of bug that survives a whole season.
+
+    The countdown is the half that cannot be misread at all, so it is always
+    there: a timezone confusion shifts the clock time, never "in 3h12m".
+    """
+    if not stamp:
+        return ""
+    text = str(stamp)
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text[:19].replace("T", " ")
+    if when.tzinfo is None:
+        # No offset to trust. Converting would invent an error rather than fix
+        # one, so it is shown as sent and marked as unanchored.
+        return when.strftime("%b %d %H:%M") + " (no timezone)"
+    local = when.astimezone()
+    left = when.timestamp() - (time.time() if now is None else now)
+    if left <= 0:
+        return f"{local:%b %d %H:%M %Z} \u00b7 due"
+    days, rest = divmod(int(left), 86400)
+    hours, rest = divmod(rest, 3600)
+    if days:
+        ago = f"{days}d{hours:02d}h"
+    elif hours:
+        ago = f"{hours}h{rest // 60:02d}m"
+    elif rest >= 60:
+        ago = f"{rest // 60}m"
+    else:
+        ago = "<1m"
+    return f"{local:%b %d %H:%M %Z} \u00b7 in {ago}"
 
 
 @dataclass
@@ -83,9 +126,19 @@ class Budget:
             data["headroom"] = round(self.headroom, 3)
             data["used_percent"] = round((1 - self.headroom) * 100, 1)
         if self.windows:
-            data["windows"] = self.windows
+            # Each window carries its own local label for the same reason the
+            # top-level one does: a provider script formats this dict, and
+            # three scripts each slicing an ISO string is three chances to
+            # print UTC on a local clock. Computed once, here.
+            data["windows"] = {
+                name: ({**detail, "resets_label": reset_label(detail["resets_at"])}
+                       if isinstance(detail, dict) and detail.get("resets_at")
+                       else detail)
+                for name, detail in self.windows.items()
+            }
         if self.resets_at:
             data["resets_at"] = self.resets_at
+            data["resets_label"] = reset_label(self.resets_at)
         if self.stale_seconds is not None:
             data["stale_seconds"] = round(self.stale_seconds)
         if self.spent:
