@@ -2364,6 +2364,51 @@ own interactive sessions draw from. A `$0.00` row is a subscription rather than
 a free lunch, so the command names which providers those are: their tokens are
 real and their dollars are not comparable.
 
+### The other budget: what we cost the orchestrator
+
+Everything above is what the *agents* spent. It misses the bill this project
+runs up just by existing: our MCP server is attached to a Claude Code session,
+and every tool result it returns sits in that session's context on every later
+request, paid for out of the human's own subscription.
+
+Claude Code knows this and says so — its `/usage` panel reports a line like
+"16% of your usage came from the MCP server multiagents". We do not ask it.
+`claude -p "/usage" --output-format json` is free (`num_turns` 0, and
+`local_command: "usage"` marks it as answered without reaching a model), but
+unlike agy's `/usage` it returns prose rather than a payload: rounded figures
+and a list truncated to "Top MCP servers". Worse, each probe opens a session and
+writes a transcript, so polling it inflates the session count it reports.
+
+The figures are computed from local transcripts, so `multiagents usage --mcp`
+computes them from those instead:
+
+```
+last 24h · 704 requests · 4 sessions · $103.68 weighted
+
+MCP servers
+  multiagents             13.4%  $   13.86 #####
+  (tool definitions are not counted — each server's share is a floor)
+
+87% of it was spent at >150k context
+```
+
+The unit is one API request, deduplicated by `requestId` — one request writes
+several assistant records, and counting records instead inflates the total
+twofold. Its denominator is the *measured* context, because the system prompt,
+CLAUDE.md and the tool schemas are in context but not in the transcript;
+reconstructing the denominator overstated the share about twofold. Its numerator
+is the MCP content accumulated before it, scaled down at each `compact_boundary`
+by the `preTokens`/`postTokens` the record carries — carrying it across the
+boundary doubled every share, and zeroing it credits back content the summary
+still describes.
+
+It is a **floor**, and says so every time it prints. A server puts its whole
+tool schema in context before any tool is called and the transcript never
+records it, which is why the measured 13.4% sits under the panel's 16%. The gap
+widens over a week (6.2% against 11%) for the reason you would expect: 92% of
+that window's spend was in sessions with the server attached, each paying the
+schema cost on every request whether it called a tool or not.
+
 Providers declare how their usage accumulates, because getting it wrong corrupts
 every number above it:
 

@@ -1502,6 +1502,48 @@ def _report_checks(paths) -> int:
     return 0
 
 
+def _report_mcp_overhead(hours: float) -> int:
+    """The other direction of spend: what the orchestrator pays to run us.
+
+    `usage` proper reports what the agents cost, from our own stream
+    accounting. This reports what attaching our MCP server costs the human's
+    Claude subscription, from Claude Code's local transcripts — the two are
+    different budgets and only one of them shows up in the agent tree.
+    """
+    from .transcripts import BIG_CONTEXT, analyse
+
+    report = analyse(window_hours=hours)
+    if not report.requests:
+        print(f"No Claude Code requests in the last {hours:g}h.")
+        return 0
+
+    print(f"last {hours:g}h · {report.requests} requests · "
+          f"{report.sessions} sessions · ${report.cost_usd:.2f} weighted")
+    print()
+    if report.by_server:
+        print("MCP servers")
+        for name, cost in sorted(report.by_server.items(), key=lambda kv: -kv[1]):
+            share = report.share(cost)
+            print(f"  {name:22} {share:6.1%}  ${cost:8.2f} {'#' * int(share * 40)}")
+        # Stated every time, because the number is a floor and reading it as a
+        # total is the one way to be wrong with it.
+        print("  (tool definitions are not counted — each server's share is a floor)")
+    else:
+        print("No MCP server activity in this window.")
+
+    print()
+    print("models")
+    for name, cost in sorted(report.by_model.items(), key=lambda kv: -kv[1]):
+        if cost:
+            print(f"  {name:22} {report.share(cost):6.1%}  ${cost:8.2f}")
+    print()
+    print(f"{report.share(report.big_context_usd):.0%} of it was spent at "
+          f">{BIG_CONTEXT // 1000}k context")
+    print("Dollars weight one model against another; a subscription is not "
+          "billed at API rates.")
+    return 0
+
+
 def cmd_usage(args: argparse.Namespace) -> int:
     """Where this project's tokens and dollars actually went.
 
@@ -1512,6 +1554,8 @@ def cmd_usage(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     if args.checks:
         return _report_checks(paths)
+    if getattr(args, "mcp", False):
+        return _report_mcp_overhead(args.hours)
     rows = Tree(paths.tree_file, paths.events_file).usage_by_model()
     if not rows:
         print("No usage recorded yet.")
@@ -2119,6 +2163,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--agents", action="store_true", help="name the agents behind each row")
     p.add_argument("--checks", action="store_true",
                    help="what checked what, and how each check ended")
+    p.add_argument("--mcp", action="store_true",
+                   help="what this project costs the orchestrator's own subscription")
+    p.add_argument("--hours", type=float, default=24.0,
+                   help="window for --mcp, in hours (default 24)")
     p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")
