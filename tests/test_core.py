@@ -3330,6 +3330,160 @@ def test_the_agy_budget_script_is_quiet_when_the_cli_says_nothing(tmp_path):
     assert json.loads(out.stdout)["known"] is False
 
 
+def _cc_transcript(root, project, session, records):
+    """Write one Claude Code transcript, newest-mtime so the window keeps it."""
+    import json
+    d = root / project
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{session}.jsonl"
+    f.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return f
+
+
+def _cc_assistant(rid, ctx_cached, out=100, model="claude-opus-5", blocks=(), when=None):
+    import datetime
+    when = when or datetime.datetime.now(datetime.timezone.utc)
+    return {
+        "type": "assistant", "requestId": rid,
+        "timestamp": when.isoformat().replace("+00:00", "Z"),
+        "message": {"model": model, "content": list(blocks),
+                    "usage": {"input_tokens": 0, "output_tokens": out,
+                              "cache_read_input_tokens": ctx_cached,
+                              "cache_creation_input_tokens": 0}},
+    }
+
+
+def _cc_tool_result(tool_id, payload, when=None):
+    import datetime
+    when = when or datetime.datetime.now(datetime.timezone.utc)
+    return {"type": "user", "timestamp": when.isoformat().replace("+00:00", "Z"),
+            "message": {"content": [{"type": "tool_result",
+                                     "tool_use_id": tool_id, "content": payload}]}}
+
+
+def test_mcp_cost_is_carried_by_every_later_request(tmp_path):
+    """An MCP tool result is not paid for once. It sits in the context of every
+    later request in the session, which is the whole reason a chatty server is
+    expensive, and an attribution that charges it to one request misses that."""
+    from multiagents.transcripts import analyse
+    root = tmp_path / "projects"
+    call = [{"type": "tool_use", "id": "t1", "name": "mcp__multiagents__agent_tree",
+             "input": {}}]
+    _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 100_000, blocks=call),        # before the result exists
+        _cc_tool_result("t1", "x" * 40_000),              # 40k chars ~ 10k tokens
+        _cc_assistant("r2", 100_000),                     # now carrying it
+        _cc_assistant("r3", 100_000),                     # and still carrying it
+    ])
+    report = analyse(window_hours=24, root=root)
+    assert report.requests == 3
+    per_request = report.cost_usd / 3
+    charged = report.by_server["multiagents"]
+    # r1 predates the result and is charged nothing; r2 and r3 each carry
+    # ~10k of their 100k context, so ~10% of each.
+    assert 0.18 * per_request < charged < 0.22 * per_request, (
+        "two of three requests should carry ~10% each")
+
+
+def test_mcp_attribution_uses_the_measured_context_as_denominator(tmp_path):
+    """The context also holds the system prompt, CLAUDE.md and every tool
+    schema, none of which are in the transcript. Reconstructing the denominator
+    instead of measuring it overstated the share roughly twofold."""
+    from multiagents.transcripts import analyse
+    root = tmp_path / "projects"
+    call = [{"type": "tool_use", "id": "t1", "name": "mcp__srv__go", "input": {}}]
+    # The only transcript content is 40k chars of MCP result (~10k tokens), but
+    # the request measured 200k of context. The share is 5%, not 100%.
+    _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 1_000, blocks=call),
+        _cc_tool_result("t1", "x" * 40_000),
+        _cc_assistant("r2", 200_000),
+    ])
+    report = analyse(window_hours=24, root=root)
+    share_of_all = report.by_server["srv"] / report.cost_usd
+    assert share_of_all < 0.10, "measured context must be the denominator"
+    assert report.by_server["srv"] > 0, "but it is still charged something"
+
+
+def test_compaction_shrinks_what_a_server_is_still_charged_for(tmp_path):
+    """Compaction drops tool results first. Carrying the accumulator across the
+    boundary bills a server for tokens that are gone; the record says how much
+    survived, so use it."""
+    from multiagents.transcripts import analyse
+    root = tmp_path / "projects"
+    call = [{"type": "tool_use", "id": "t1", "name": "mcp__srv__go", "input": {}}]
+    boundary = {"type": "system", "subtype": "compact_boundary",
+                "compactMetadata": {"preTokens": 100_000, "postTokens": 10_000}}
+    before = _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 100, blocks=call),
+        _cc_tool_result("t1", "x" * 40_000),
+        _cc_assistant("r2", 100_000),
+    ])
+    plain = analyse(window_hours=24, root=root).by_server["srv"]
+
+    before.unlink()
+    _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 100, blocks=call),
+        _cc_tool_result("t1", "x" * 40_000),
+        boundary,
+        _cc_assistant("r2", 100_000),
+    ])
+    compacted = analyse(window_hours=24, root=root).by_server["srv"]
+    assert compacted == pytest.approx(plain * 0.10, rel=0.02), (
+        "a 10x compaction should leave a tenth of the weight behind")
+
+
+def test_two_servers_never_add_up_to_more_than_the_request(tmp_path):
+    """The share is capped at the whole request, and the cap is split between
+    servers rather than applied to each of them."""
+    from multiagents.transcripts import analyse
+    root = tmp_path / "projects"
+    calls = [{"type": "tool_use", "id": "a", "name": "mcp__one__go", "input": {}},
+             {"type": "tool_use", "id": "b", "name": "mcp__two__go", "input": {}}]
+    _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 100, blocks=calls),
+        _cc_tool_result("a", "x" * 400_000),          # each alone exceeds the
+        _cc_tool_result("b", "x" * 400_000),          # whole measured context
+        _cc_assistant("r2", 10_000),
+    ])
+    report = analyse(window_hours=24, root=root)
+    assert sum(report.by_server.values()) <= report.cost_usd + 1e-9
+    assert report.by_server["one"] == pytest.approx(report.by_server["two"])
+
+
+def test_requests_outside_the_window_still_set_up_the_ones_inside(tmp_path):
+    """A long session's early requests are out of window but its accumulated
+    context is not. Starting the walk at the boundary would report the later
+    requests as carrying almost nothing."""
+    import datetime
+    from multiagents.transcripts import analyse
+    root = tmp_path / "projects"
+    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=40)
+    call = [{"type": "tool_use", "id": "t1", "name": "mcp__srv__go", "input": {}}]
+    _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 100, blocks=call, when=old),
+        _cc_tool_result("t1", "x" * 40_000, when=old),
+        _cc_assistant("r2", 100_000),                      # in window
+    ])
+    report = analyse(window_hours=24, root=root)
+    assert report.requests == 1, "only the in-window request is counted"
+    assert report.by_server["srv"] > 0, "but it carries what preceded it"
+
+
+def test_built_in_tools_are_not_attributed_to_any_server(tmp_path):
+    from multiagents.transcripts import analyse
+    root = tmp_path / "projects"
+    _cc_transcript(root, "proj", "s1", [
+        _cc_assistant("r1", 100, blocks=[{"type": "tool_use", "id": "t1",
+                                       "name": "Bash", "input": {}}]),
+        _cc_tool_result("t1", "x" * 40_000),
+        _cc_assistant("r2", 100_000),
+    ])
+    report = analyse(window_hours=24, root=root)
+    assert report.by_server == {}
+    assert report.requests == 2
+
+
 # --------------------------------------------------------------------------
 # Executor default, and the offer that sets it
 

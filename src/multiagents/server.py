@@ -770,6 +770,47 @@ def budget_status() -> dict:
     })
 
 
+@mcp.tool()
+def mcp_overhead(hours: float = 24.0) -> dict:
+    """What running this project costs the human's own Claude subscription.
+
+    `budget_status` reports the agents' spend and the providers' headroom. This
+    reports the other budget, the one no stream of ours can see: our MCP server
+    is attached to a Claude Code session, and its tool results sit in that
+    session's context on every request for the rest of it. That is paid for out
+    of the subscription running the orchestrator.
+
+    Computed from Claude Code's local transcripts, not from asking it: its own
+    `/usage` panel reports this only as rounded prose with a truncated server
+    list, and each probe opens a session, which inflates the session count it
+    reports.
+
+    `share` is a FLOOR. An MCP server also puts its whole tool schema in context
+    before any tool is called, and the transcript never records that, so the
+    real cost is higher than the number here — by more in sessions that keep the
+    server attached without calling it much.
+
+    Use it to decide whether a chatty tool is worth its context: a result you
+    fetch once and re-read ten times is paid for eleven times.
+    """
+    from .transcripts import BIG_CONTEXT, analyse
+
+    report = analyse(window_hours=hours)
+    payload = report.to_dict()
+    advice = []
+    for name, entry in payload["mcp_servers"].items():
+        if entry["share"] >= 0.20:
+            advice.append(
+                f"{name} carries at least {entry['share']:.0%} of the window's "
+                f"usage; prefer fewer, larger tool calls over many small ones")
+    if payload[f"share_above_{BIG_CONTEXT // 1000}k_context"] >= 0.75:
+        advice.append(
+            "most of the spend is at high context; /compact between tasks is "
+            "worth more here than switching models")
+    payload["advice"] = advice or ["no MCP server is a material share of usage"]
+    return _ok(payload)
+
+
 # --------------------------------------------------------------------------
 # Resources — full transcripts stay out of tool results
 # --------------------------------------------------------------------------
