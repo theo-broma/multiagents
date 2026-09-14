@@ -711,6 +711,7 @@ class Runner:
         argv = provider.build_command(
             prompt=prompt, model=spec.model, workdir=str(workdir),
             permission=spec.permission, session_id=session_id, options=options,
+            timeout=int(timeout or spec.timeout),
         )
 
         run_dir = self.paths.run_dir(node_id)
@@ -1305,6 +1306,13 @@ class Runner:
                     f"session on its branch. Reissuing the task instead pays "
                     f"for the whole conversation again — measured at 7.2M "
                     f"cached tokens on a run that had cost 173k.")
+            elif status == "truncated":
+                reason = (
+                    f"{run.provider.name} stopped its own turn at the time limit "
+                    f"and returned partial output. The branch holds real but "
+                    f"UNFINISHED work and has not been merged. RESUMABLE: "
+                    f"steer_agent({node_id!r}, ...) continues this session on "
+                    f"its branch, which is far cheaper than reissuing the task.")
             elif status == "failed":
                 if run.final_status and run.final_status.upper() not in {
                         "SUCCESS", "OK", "COMPLETED"}:
@@ -1362,7 +1370,7 @@ class Runner:
         # failed is broken whatever the reason, and that is knowable without
         # reading a word of what the agent said — which is the part this
         # project has already got wrong once.
-        if status not in ("awaiting_user", "limited"):
+        if status not in ("awaiting_user", "limited", "truncated"):
             trip = self.tree.note_run_outcome(
                 run.provider.name, ok=status in ("done", "merged"),
                 threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
@@ -1449,8 +1457,21 @@ class Runner:
     async def _watch_timers(self, run: Run) -> None:
         """Detect the conditions no event will announce: silence and wall clock."""
         assert run.supervisor is not None
+        node = self.tree.get(run.node_id)
+        progress_dir = (Path(node.worktree) if node and node.worktree
+                        and gitops.is_repo(Path(node.worktree)) else None)
         while True:
             await asyncio.sleep(5)
+            # Only while the agent is quiet, and only if it has a tree of its
+            # own. The silence check needs a CURRENT reading to tell a long tool
+            # call from a stall, and `_consume` refreshes this on tool events,
+            # which is exactly what a silent agent is not producing. Threaded,
+            # because a blocking git call on this loop would stop the pipe from
+            # being drained — a deadlock, not a slowdown.
+            if (progress_dir is not None
+                    and run.supervisor.quiet_for() >= run.supervisor.silence_timeout):
+                run.supervisor.note_progress(
+                    await asyncio.to_thread(_worktree_state, progress_dir))
             trip = run.supervisor.check_timers()
             if trip:
                 self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
@@ -1520,6 +1541,13 @@ class Runner:
                 "reason": f"{provider.name} stopped it: {detail}"}
 
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:
+        # Before everything, including the clean-exit shortcut below. A CLI that
+        # cut its own turn short exits 0 with a stream that parses perfectly, so
+        # every other signal here says it finished. Only its stderr disagrees.
+        marker = next((m for m in (run.provider.truncation_markers or [])
+                       if m.lower() in (stderr or "").lower()), None)
+        if marker:
+            return "truncated"
         succeeded = code == 0 and (
             not run.final_status
             or run.final_status.upper() in {"SUCCESS", "OK", "COMPLETED"}

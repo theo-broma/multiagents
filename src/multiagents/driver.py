@@ -325,6 +325,10 @@ def _launch_agent(paths, config, role: str, resume: bool,
         return 2
 
     executor = executor_for(paths, config, providers)(spec.provider)
+    problem = _auth_problem(paths, config, spec)
+    if problem:
+        print(f"not ready: {problem}", file=sys.stderr)
+        return 2
     _clear_limit_pause(paths, spec)
     context = _launch_context(paths, config, spec)
     # Resuming is only possible if this role has been launched here before.
@@ -636,6 +640,30 @@ def _driver_node(paths, role: str, spec, session: str) -> str:
     )
     tree.add(node)
     return node.id
+
+
+def _auth_problem(paths, config, spec) -> str:
+    """Why the orchestrator's own provider cannot be used, or "".
+
+    `run` checked the quota and the container images and never once asked
+    whether the CLI it was about to hand the terminal to was signed in. On
+    2026-09-14 it launched against an expired claude token and the only sign
+    was every delegation coming back `401 OAuth access token has expired` —
+    which reads as a broken install, not an expired login.
+    """
+    from . import auth as auth_mod
+
+    providers = load_providers(config.providers)
+    provider = providers.get(spec.provider)
+    if provider is None:
+        return ""                             # a different check already says so
+    executor = executor_for(paths, config, providers)(spec.provider)
+    state = auth_mod.check(spec.provider, provider, executor,
+                           global_config_dir(), paths.config)
+    if state.status != "not_authenticated":
+        return ""                             # authenticated, or it would not say
+    return (f"{spec.provider} is not authenticated — {state.detail}. "
+            f"Run `multiagents auth login {spec.provider}`.")
 
 
 def _pid_file(paths, role: str) -> Path:

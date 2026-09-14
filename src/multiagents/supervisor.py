@@ -51,6 +51,9 @@ class Supervisor:
     # behaviour of a test agent, which this used to call a doom loop.
     signatures: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=20))
     current_progress: str = ""
+    # What the working tree looked like the last time silence was considered.
+    # Compared, not counted: see check_timers.
+    progress_when_last_quiet: str | None = None
     # The last signature seen, and the step it belonged to: together they say
     # whether the next event is a NEW call or the same one reported again.
     last_digest: str = ""
@@ -148,6 +151,11 @@ class Supervisor:
 
     # --------------------------------------------------------------- polling --
 
+    def quiet_for(self) -> float:
+        """Seconds since the last stream event. Lets the caller sample the
+        working tree only when silence is actually in question."""
+        return time.monotonic() - self.last_event
+
     def check_timers(self) -> Trip | None:
         """Call periodically; detects conditions no event will announce."""
         if self.tripped:
@@ -156,6 +164,34 @@ class Supervisor:
         if now - self.started > self.wall_timeout:
             return self._trip(Trip("timeout", f"exceeded {self.wall_timeout:.0f}s wall clock"))
         if now - self.last_event > self.silence_timeout:
+            # "Said nothing" is not "did nothing". A single long tool call —
+            # a test suite, an install, a large edit — streams nothing while it
+            # runs, and this fired on seven opencode implementers in one night
+            # that all merged, then twice more on 2026-09-14 at 181s and 244s
+            # against a 180s threshold, both on runs that finished.
+            #
+            # So the working tree decides, which is the same evidence the
+            # doom-loop guard uses and the same reason: a change on disk is
+            # proof of work that no stream event announced. The caller samples
+            # it only while the agent is quiet, so this costs nothing in the
+            # normal case.
+            #
+            # NOT a threshold change. open-questions.md §3 says those must come
+            # from re-measurement, not judgement, and this is deliberately a
+            # different kind of fix. It also inherits §3's known limit: an agent
+            # with `writes: false` never moves its tree, so for a specifier or a
+            # critic this degrades to exactly the old behaviour.
+            previous = self.progress_when_last_quiet
+            self.progress_when_last_quiet = self.current_progress
+            if previous is None:
+                # First look. There is a reading but nothing to compare it to,
+                # so the question cannot be answered yet — and answering it
+                # wrongly here is the whole bug. Costs one poll interval before
+                # a genuine stall is reported.
+                return None
+            if self.current_progress != previous:
+                self.last_event = now              # it is working; start again
+                return None
             quiet = now - self.last_event
             return self._trip(Trip("silence", f"no stream event for {quiet:.0f}s"))
         return None

@@ -99,7 +99,14 @@ providers:
       allow-rules in the CLI's own settings.json; until then, isolation comes
       from the worktree.
     spawn:
-      args: ["-p", "{prompt}", "--model", "{model}", "--output-format", "stream-json", "--add-dir", "{workdir}"]
+      # --print-timeout is NOT optional. Without it agy stops a turn at its own
+      # default of 5 minutes, prints "print timeout after 5m0s with turn in
+      # progress; returning partial output", flushes a clean final event and
+      # exits 0 — so a truncated run parses perfectly and reads as a finished
+      # one. Measured 2026-09-14: every agy run in a real project that day
+      # lasted 5.0-5.1 minutes and two of them merged half a turn into main.
+      args: ["-p", "{prompt}", "--model", "{model}", "--output-format", "stream-json",
+             "--add-dir", "{workdir}", "--print-timeout", "{timeout_s}"]
       resume: ["--conversation", "{session_id}"]
       permission:
         full: ["--dangerously-skip-permissions"]
@@ -117,6 +124,13 @@ providers:
         effort: ["--effort", "{effort}"]
     # agy reports RUNNING TOTALS on every step, so they must be taken at their
     # maximum rather than added. It reports no cost at all.
+    # Text the CLI prints when it cut the turn short ITSELF. Matched against
+    # stderr, case-insensitively. A run that matches is `truncated`, never
+    # `done`, so it cannot be merged as though it had finished — and it is not
+    # counted against the provider either, for the same reason `limited` is
+    # not: the provider did exactly what it was asked, the budget ran out.
+    truncation_markers:
+      - "print timeout"
     usage_mode: cumulative
     # Under docker, do NOT mount the host's copy of these paths. A private
     # directory is mounted over each one instead, so the container keeps its own
