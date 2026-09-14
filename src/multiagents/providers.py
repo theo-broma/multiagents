@@ -75,6 +75,21 @@ def get_path(obj: Any, path: str) -> Any:
     return cursor
 
 
+def _given(value: Any) -> bool:
+    """Is this option actually set?
+
+    Empty means UNSET, not "set to empty". `AgentSpec.fallback_for`'s docstring
+    tells people to write `effort: ""` in a `models:` entry to stop an option
+    travelling to another provider — and until this, that produced `--effort ""`
+    on the command line instead of dropping the flag. The real cost was the
+    other half: an agent carrying `effort: medium` failed over onto
+    `gemini-3.1-pro-high`, whose NAME already states the effort, and agy refused
+    the pair outright — "--model gemini-3.1-pro-high conflicts with
+    --effort=medium" — nine seconds into a run that had a worktree and a branch.
+    """
+    return value is not None and value != ""
+
+
 @dataclass
 class Event:
     """One normalised stream event."""
@@ -111,6 +126,8 @@ class Provider:
     models_cmd: list[str] = field(default_factory=list)
     models_parse: str = "lines"
     usage_mode: str = "cumulative"       # cumulative | delta
+    # Text a CLI prints when it stopped a turn early of its own accord.
+    truncation_markers: list[str] = field(default_factory=list)
     models_include: list[str] = field(default_factory=list)
     models_exclude: list[str] = field(default_factory=list)
     models_static: list[dict[str, str]] = field(default_factory=list)
@@ -160,6 +177,7 @@ class Provider:
             spawn=data.get("spawn", {}) or {},
             stream=data.get("stream", {}) or {},
             models_cmd=list(data.get("models_cmd", []) or []),
+            truncation_markers=data.get("truncation_markers", []) or [],
             models_parse=data.get("models_parse", "lines"),
             usage_mode=data.get("usage_mode", "cumulative"),
             models_include=list(data.get("models_include", []) or []),
@@ -211,6 +229,7 @@ class Provider:
         permission: str = "full",
         session_id: str | None = None,
         options: dict[str, Any] | None = None,
+        timeout: int | None = None,
     ) -> list[str]:
         """Render the argv for one run.
 
@@ -222,7 +241,13 @@ class Provider:
             "model": model,
             "workdir": workdir,
             "session_id": session_id or "",
-            **{k: str(v) for k, v in (options or {}).items() if v is not None},
+            # This run's wall-clock budget, in the two shapes CLIs ask for.
+            # A CLI with a timeout of its own MUST be told ours or it enforces
+            # its own default: agy's print mode stops at 5 minutes, exits 0 and
+            # returns partial output, which parses as a clean finish.
+            "timeout": str(int(timeout or 0)),
+            "timeout_s": f"{int(timeout or 0)}s",
+            **{k: str(v) for k, v in (options or {}).items() if _given(v)},
         }
 
         def render(tokens: Iterable[str]) -> list[str]:
@@ -244,7 +269,7 @@ class Provider:
             argv += render(perms)
 
         for key, template in (self.spawn.get("optional") or {}).items():
-            if (options or {}).get(key) is not None:
+            if _given((options or {}).get(key)):
                 argv += render(template)
 
         return argv

@@ -33,8 +33,12 @@ from .redact import depersonalise, scrub
 # work on its branch is real, and the agent is resumable by session id once the
 # window reopens. Filing it as a failure is what made a full account look like
 # a broken one.
+# "truncated" is terminal and is NOT "failed" either: the CLI stopped its own
+# turn early — agy's print mode does this at its deadline — so the work on the
+# branch is real but unfinished. It must never be merged as done, and it says
+# nothing about the provider's health.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned",
-            "limited"}
+            "limited", "truncated"}
 ACTIVE = {"pending", "running", "stuck"}
 # `run` and `init-agent` exec into a CLI, so neither is an agent and neither
 # must be counted as one. See Node.role.

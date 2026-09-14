@@ -25,7 +25,31 @@ check)
         # Read the file rather than asking the CLI: `auth status` would start a
         # background daemon on the HOST rooted in the container's profile, and
         # the container would then find a lock naming a pid it cannot signal.
+        # A NON-EMPTY FILE IS NOT A LOGIN. Read the expiry that is sitting in
+        # it. On 2026-09-14 this test was `[ -s ... ]` alone: the token had
+        # expired, every run came back `401 OAuth access token has expired`,
+        # and `check` reported the profile logged in throughout. That answer is
+        # load-bearing — the runner asks it to decide whether a failed run means
+        # "not authenticated" (a six-hour cooldown that a login clears at once)
+        # or "something broke" (thirty minutes, cleared only by waiting) — so
+        # the whole afternoon retried an expired token half-hourly, two spawns
+        # at a time, and never once said the word.
         if [ -s "$PROFILE/.credentials.json" ]; then
+            expires=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$PROFILE/.credentials.json'))
+except Exception:
+    sys.exit(0)                      # unreadable: fall through to 'present'
+for block in d.values():
+    if isinstance(block, dict) and block.get('expiresAt'):
+        print(int(block['expiresAt']) // 1000); break
+" 2>/dev/null)
+            now=$(date +%s)
+            if [ -n "$expires" ] && [ "$expires" -le "$now" ]; then
+                echo "the container profile's token expired $(( (now - expires) / 60 ))m ago — run \`multiagents auth login claude\`"
+                exit 10
+            fi
             echo "container profile is logged in ($PROFILE)"; exit 0
         fi
         echo "the container profile has no credentials yet — run \`multiagents auth login claude\`"

@@ -201,6 +201,11 @@ def test_only_first_trip_is_reported():
 def test_silence_and_wall_clock_trip():
     sup = Supervisor(silence_timeout=0.01, wall_timeout=999)
     time.sleep(0.05)
+    # Two looks, not one: the first records the working tree so the second can
+    # tell a long tool call from a stall. See
+    # test_silence_forgives_an_agent_whose_working_tree_is_moving.
+    assert sup.check_timers() is None
+    time.sleep(0.05)
     trip = sup.check_timers()
     assert trip and trip.reason == "silence"
 
@@ -502,6 +507,181 @@ class _Prov:
 
 class _Exec:
     kind = "local"
+
+
+def test_a_present_but_expired_credential_is_not_a_login(tmp_path):
+    """On 2026-09-14 `check` under docker was `[ -s .credentials.json ]` alone.
+    The token had expired, every run came back `401 OAuth access token has
+    expired`, and check reported the profile logged in all afternoon.
+
+    That answer is load-bearing twice over: `run` never asks it at all, and the
+    runner asks it to choose between a six-hour cooldown a login clears at once
+    and a thirty-minute one only waiting clears. Saying "logged in" bought the
+    wrong one, half-hourly, all day.
+    """
+    import json, subprocess, time
+    from multiagents.paths import shipped_defaults_dir
+
+    script = shipped_defaults_dir() / "providers" / "claude.sh"
+    for label, offset, expected in [("valid", +3600, 0), ("expired", -7200, 10)]:
+        profile = tmp_path / label
+        profile.mkdir()
+        (profile / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "x",
+                               "expiresAt": int((time.time() + offset) * 1000)}}))
+        done = subprocess.run(
+            ["sh", str(script), "check"], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_EXECUTOR": "docker",
+                 "MULTIAGENTS_PRIVATE_BACKING": str(profile),
+                 "MULTIAGENTS_BIN": "/bin/true"})
+        assert done.returncode == expected, (label, done.returncode, done.stdout, done.stderr)
+    assert "expired" in done.stdout and "auth login claude" in done.stdout, done.stdout
+
+
+def test_an_option_a_fallback_clears_is_actually_dropped(tmp_path):
+    """`fallback_for`'s docstring tells people to write `effort: ""` to stop an
+    option travelling to another provider, and it produced `--effort ""`.
+
+    The cost showed up the other way round: an agent carrying `effort: medium`
+    failed over onto gemini-3.1-pro-high, whose NAME states the effort, and agy
+    refused the pair nine seconds into a run that already had a worktree and a
+    branch.
+    """
+    provider = _provider_double(
+        "agy", spawn={"args": ["-p", "{prompt}"],
+                      "optional": {"effort": ["--effort", "{effort}"]}})
+    assert provider.build_command(prompt="go", model="m", workdir="/w",
+                                  options={"effort": "high"})[-2:] == ["--effort", "high"]
+    for cleared in ("", None):
+        argv = provider.build_command(prompt="go", model="m", workdir="/w",
+                                      options={"effort": cleared})
+        assert "--effort" not in argv, (cleared, argv)
+
+
+def test_silence_forgives_an_agent_whose_working_tree_is_moving():
+    """A long tool call streams nothing while it runs, and "said nothing" is not
+    "did nothing". Seven opencode implementers tripped this in one night and all
+    merged; two more on 2026-09-14 at 181s and 244s against a 180s threshold,
+    both of which finished.
+
+    Deliberately NOT a threshold change — open-questions.md §3 says those come
+    from re-measurement, not judgement. The working tree is evidence.
+    """
+    import time
+    from multiagents.supervisor import Supervisor
+
+    sup = Supervisor(silence_timeout=0.01)
+    sup.note_progress("tree-state-A")
+    time.sleep(0.02)
+    assert sup.check_timers() is None, "first quiet check only records the tree"
+
+    sup.note_progress("tree-state-B")            # the tool call wrote something
+    time.sleep(0.02)
+    assert sup.check_timers() is None, "a moving tree is proof of work"
+
+    time.sleep(0.02)                              # nothing changed this time
+    trip = sup.check_timers()
+    assert trip is not None and trip.reason == "silence", trip
+
+
+def test_a_read_only_agent_still_trips_on_silence():
+    """The limit inherited from open-questions.md §3: an agent with
+    `writes: false` never moves its tree, so for a specifier or a critic this
+    degrades to exactly the old behaviour. Stated so it is a known edge rather
+    than a surprise."""
+    import time
+    from multiagents.supervisor import Supervisor
+
+    sup = Supervisor(silence_timeout=0.01)
+    time.sleep(0.02)
+    assert sup.check_timers() is None
+    time.sleep(0.02)
+    trip = sup.check_timers()
+    assert trip is not None and trip.reason == "silence"
+
+
+def test_a_cli_that_cut_its_own_turn_short_is_never_merged(tmp_path):
+    """Measured in a real project on 2026-09-14: every agy run that day lasted
+    5.0-5.1 minutes, because --print-timeout was never passed and agy's own
+    default is 5m. It prints a warning to stderr, flushes a clean final event
+    and exits 0 — so the stream parses, _classify saw exit 0 with output and
+    said "done", and two half-finished turns were merged into the user's main
+    branch as though they had completed.
+
+    `truncated` exists so that cannot happen: it is terminal, it is not `done`,
+    and only `done` merges.
+    """
+    from types import SimpleNamespace
+    from multiagents.config import AgentSpec
+    from multiagents.providers import Provider
+    from multiagents.runner import Run
+
+    r = _runner(tmp_path)
+    provider = Provider(name="agy", bin="agy", spawn={}, stream={},
+                        truncation_markers=["print timeout"])
+    run = Run(node_id="ag-1", provider=provider, spec=AgentSpec("b", "agy", "m"),
+              handle=SimpleNamespace(stderr_tail=""), supervisor=SimpleNamespace(steps=3))
+
+    truncated = "[agy] print timeout after 5m0s with turn in progress; returning partial output"
+    assert r._classify(run, 0, "I'll start by reading the key files...", truncated) \
+        == "truncated", "a clean exit with real output still is not a finished turn"
+    # The same run without the marker is the thing it would otherwise look like.
+    assert r._classify(run, 0, "I'll start by reading the key files...", "") == "done"
+
+
+def test_the_run_tells_the_cli_its_own_deadline(tmp_path):
+    """A CLI with a timeout of its own enforces it unless told otherwise, and
+    agy's is 5 minutes against this project's default_timeout of 900s."""
+    from multiagents.providers import Provider
+
+    provider = Provider(
+        name="agy", bin="agy",
+        spawn={"args": ["-p", "{prompt}", "--print-timeout", "{timeout_s}"]},
+        stream={})
+    argv = provider.build_command(prompt="go", model="m", workdir="/w", timeout=900)
+    assert argv == ["agy", "-p", "go", "--print-timeout", "900s"], argv
+
+
+def test_a_truncated_run_is_not_held_against_its_provider(tmp_path):
+    """Three truncations tripped the breaker on 2026-09-14 and cooled agy, which
+    with claude already cooled paused the whole tree for 25 minutes. The
+    provider did exactly what it was asked; the budget ran out. Same reasoning
+    as `limited`, which is excluded for the same sentence."""
+    import asyncio
+    from types import SimpleNamespace
+    from multiagents.config import AgentSpec
+    from multiagents.providers import Provider
+    from multiagents.runner import Run
+
+    r = _runner(tmp_path)
+    provider = Provider(name="agy", bin="agy", spawn={}, stream={},
+                        truncation_markers=["print timeout"])
+    run = Run(node_id="ag-1", provider=provider, spec=AgentSpec("b", "agy", "m"),
+              handle=SimpleNamespace(stderr_tail=""), supervisor=SimpleNamespace(steps=3))
+
+    for _ in range(3):
+        status, limited = asyncio.run(
+            r._provider_health_after(run, "truncated", "", "print timeout"))
+        assert (status, limited) == ("truncated", None)
+    assert r.tree.provider_health().get("agy", {}).get("consecutive_failures", 0) == 0, \
+        "a truncated run must not count toward the provider circuit breaker"
+
+    # A real failure still does, or the breaker would stop working entirely.
+    asyncio.run(r._provider_health_after(run, "failed", "", "boom"))
+    assert r.tree.provider_health()["agy"]["consecutive_failures"] == 1
+
+
+def test_every_shipped_provider_that_can_truncate_declares_its_marker():
+    """agy is the one that does it today. The check is here so a provider added
+    later is thought about rather than discovered in a merge."""
+    import yaml
+    from multiagents.paths import shipped_defaults_dir
+
+    data = yaml.safe_load((shipped_defaults_dir() / "providers.yaml").read_text())
+    agy = data["providers"]["agy"]
+    assert "print timeout" in (agy.get("truncation_markers") or []), agy
+    assert "--print-timeout" in agy["spawn"]["args"], \
+        "the marker is the safety net; passing our own deadline is the fix"
 
 
 def test_a_provider_script_need_not_be_shell(tmp_path):
@@ -1145,6 +1325,18 @@ def test_read_all_hands_the_provider_name_to_executor_for(tmp_path):
 # --------------------------------------------------------------------------
 
 
+def _provider_double(name: str = "p", **kw):
+    """A Provider with just enough on it for the code under test.
+
+    A real Provider is a dataclass, so every field the runner reads exists on
+    it; the stubs that predate a field are what break. Built from the real class
+    so a field added later cannot silently go missing here.
+    """
+    from multiagents.providers import Provider
+    return Provider(**{"name": name, "bin": name, "spawn": {},
+                       "stream": {}, **kw})
+
+
 def _runner(tmp_path, agents=None, providers_yaml=None, git=True, project=None):
     """A Runner over a throwaway project, with config injected directly.
 
@@ -1568,7 +1760,8 @@ def test_a_clean_exit_is_never_reclassified_as_a_failure(tmp_path):
     successful and which produced output did not fail."""
     from multiagents.runner import Run
     r = _runner(tmp_path)
-    run = Run(node_id="ag-1", provider=None, spec=AgentSpec("a", "p", "m"))
+    run = Run(node_id="ag-1", provider=_provider_double(),
+              spec=AgentSpec("a", "p", "m"))
     run.final_status = "SUCCESS"
     assert r._classify(run, 0, "we ran out of quota, 429, unauthorized", "") == "done"
 
@@ -1771,7 +1964,7 @@ def test_children_merge_before_the_parent_does(tmp_path):
                     parent=None, depth=1))
     r.paths.run_dir("ag-1").mkdir(parents=True, exist_ok=True)
 
-    run = Run(node_id="ag-1", provider=SimpleNamespace(name="p"),
+    run = Run(node_id="ag-1", provider=_provider_double(),
               spec=AgentSpec("b", "p", "m"),
               handle=SimpleNamespace(stderr_tail=""),
               supervisor=SimpleNamespace(steps=1))
@@ -6135,9 +6328,22 @@ def test_a_cold_start_waits_for_the_writer_instead_of_giving_up(tmp_path, monkey
 # The monitor: one snapshot, two front ends
 
 
+# A fixed instant at local midday. Everything _tree_with_agents stamps hangs off
+# it, and so must anything a test adds to those nodes, or the two disagree.
+_FIXED_NOW = time.mktime(time.strptime("2026-09-01 12:00:00", "%Y-%m-%d %H:%M:%S"))
+
+
 def _tree_with_agents(tmp_path):
-    """A project whose tree holds a small family of finished agents."""
+    """A project whose tree holds a small family of finished agents.
+
+    Timestamps are anchored to a FIXED instant at local midday, not to
+    `time.time()`. Relative offsets straddle midnight whenever the suite runs
+    just after it — `totals()` buckets by day, so the two agents landed on
+    different dates and the by_day assertion failed once a night, for reasons
+    having nothing to do with the code under test.
+    """
     from multiagents.tree import Node, Tree
+
 
     paths = _paths(tmp_path)
     tree = Tree(paths.tree_file, paths.events_file)
@@ -6145,12 +6351,14 @@ def _tree_with_agents(tmp_path):
                            model="sonnet", parent=None, depth=0, status="merged",
                            task="build it", branch="agents/implementer/parent"))
     tree.update(parent.id, usage={"total": 12000, "cost_usd": 0.42},
-                started_at=time.time() - 600, ended_at=time.time() - 300)
+                created_at=_FIXED_NOW - 700, started_at=_FIXED_NOW - 600,
+                ended_at=_FIXED_NOW - 300)
     child = tree.add(Node(id="ag-child", agent="tester", provider="opencode",
                           model="opencode-go/glm", parent="ag-parent", depth=1,
                           status="done", task="test it"))
     tree.update(child.id, usage={"total": 3000, "cost_usd": 0.01},
-                started_at=time.time() - 500, ended_at=time.time() - 400)
+                created_at=_FIXED_NOW - 550, started_at=_FIXED_NOW - 500,
+                ended_at=_FIXED_NOW - 400)
     return paths, tree
 
 
@@ -6174,7 +6382,7 @@ def test_an_agent_whose_process_is_gone_stops_counting_up(tmp_path):
 
     paths, tree = _tree_with_agents(tmp_path)
     tree.update("ag-parent", status="running", ended_at=None, pid=999999,
-                last_event_at=time.time() - 400)
+                last_event_at=_FIXED_NOW - 400)
     view = snap._node_view(tree.read()["nodes"]["ag-parent"], time.time())
     assert view["stale"] is True
     assert 190 <= view["elapsed"] <= 210, "measured to its last event, not to now"
@@ -8002,6 +8210,7 @@ def test_an_agent_that_worked_silently_is_not_a_failure(tmp_path, monkeypatch):
         node_id = "ag-1"
         supervisor = Supervisor()
         final_status = ""
+        provider = _provider_double()
 
     run = _Run()
     run.supervisor.steps = 52

@@ -97,6 +97,74 @@ timeout        -> merged  4   —
 Fixed by treating a repeat within the same step as one call. **The numbers above
 are therefore stale** — see §3.
 
+### A CLI can end its own turn and still exit 0 — 2026-09-14
+
+agy's print mode stops at `--print-timeout`, default **5 minutes**. It warns on
+stderr, flushes a clean final event, and exits 0. Nothing was passing it our own
+deadline, so every agy run in a real project that day lasted the same length:
+
+```
+17:55  ag-f0ad8b  implementer-deep  agy  merged     5.1m
+18:07  ag-a9c032  implementer-deep  agy  merged     5.1m
+18:30  ag-ce8b5d  tester            agy  discarded  5.1m
+18:41  ag-107755  tester            agy  discarded  5.0m
+19:11  ag-a21cbe  implementer-deep  agy  discarded  5.1m
+```
+
+The project's own `default_timeout` was 900s throughout. Two of those runs were
+classified `done` and **merged into main** carrying half a turn — `860b296` and
+`4e74d75`, the second titled "Continue making…" because the orchestrator was
+working around a truncation it could not see.
+
+**Check:** `tests/test_core.py::test_a_cli_that_cut_its_own_turn_short_is_never_merged`.
+`--print-timeout {timeout_s}` is now in agy's spawn args, and
+`truncation_markers` makes a matching stderr `truncated` — terminal, never
+`done`, so it cannot merge, and excluded from the breaker for the same reason
+`limited` is.
+
+### A non-empty credential file is not a login — 2026-09-14
+
+`claude.sh check` under docker was `[ -s "$PROFILE/.credentials.json" ]`. The
+token had expired; the file was still there. Every delegation came back `401
+OAuth access token has expired` while `check` reported the profile logged in.
+
+That answer is load-bearing in two places, and both went the wrong way:
+`_provider_health_after` asks it to choose between a six-hour `needs_login`
+cooldown that a login clears at once and a thirty-minute one that only waiting
+clears — so an expired token was retried half-hourly all afternoon, two spawns
+at a time. And `run` never asked at all: `_ensure_authenticated` was reachable
+only from `build`.
+
+`expiresAt` was in the file the whole time.
+
+**Check:** `tests/test_core.py::test_a_present_but_expired_credential_is_not_a_login`
+runs the real script against both a valid and an expired profile.
+
+### Two healthy providers can pause the whole tree — 2026-09-14
+
+19:22:27 `paused` — "claude and all fallbacks are exhausted or cooling down".
+Nothing was exhausted. claude was cooled by the auth bug above; agy was cooled
+by three truncations from the one above that; opencode was unusable for that
+agent because it had no `models:` entry. 25 minutes, 19:22 to 19:47.
+
+Worth keeping as the shape of the thing: neither provider was broken, and every
+individual decision was locally correct.
+
+### An option can travel onto a model that refuses it — 2026-09-14
+
+```
+17:00:35  routed claude -> agy, model gemini-3.1-pro-high
+17:00:39  error: --model gemini-3.1-pro-high conflicts with --effort=medium
+```
+
+§4 below decided that options travel unchanged on failover, and that is still
+right — the failure is loud and costs seconds. What was wrong is that the escape
+hatch did not work: `fallback_for`'s docstring says to write `effort: ""` in a
+`models:` entry, and empty was passed through as `--effort ""` rather than
+dropping the flag.
+
+**Check:** `tests/test_core.py::test_an_option_a_fallback_clears_is_actually_dropped`.
+
 ### Providers describe usage in words that do not overlap — 2026-09-10
 
 opencode sends `total`, agy sends `total_tokens`, claude sends neither and only
@@ -136,7 +204,13 @@ statistics above are invalid** and must be re-gathered before any number moves.
   runs to be worth doing. *Note when re-measuring:* a node's `ended_at` is when
   the parent MERGED it, not when the agent stopped — use `last_event_at`.
 - **`silence_timeout`** — fired seven times on opencode implementers in one
-  night, all of which merged. Long tool calls stream sparsely.
+  night, all of which merged, then twice more on 2026-09-14 at 181s and 244s
+  against the 180s threshold, both on runs that finished. **The number has still
+  not moved**, deliberately: a silence trip now requires the working tree to
+  have stood still as well, which is the same evidence the doom-loop guard uses
+  and is a fact rather than a guess. It inherits the same limit as that guard —
+  an agent with `writes: false` never moves its tree, so for a specifier or a
+  critic this is exactly the old behaviour. Re-measure before touching 180.
 - **The doom-loop's second condition is vacuous for `writes: false` agents.**
   It requires the working tree to have stood still, which for a specifier,
   adversary, critic or RED-test author is their normal state, so the guard

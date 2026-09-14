@@ -773,6 +773,12 @@ def cmd_resume(args: argparse.Namespace) -> int:
     problems = _executor_problems(paths, config)
     for problem in problems:
         print(f"\nexecutor     {problem}")
+    # Reported here so `--no-launch` says it too; the refusal itself lives in
+    # driver._launch_agent, which is the path `init-agent` takes as well.
+    spec = driver._launched_spec(config, "orchestrator")
+    auth_problem = driver._auth_problem(paths, config, spec) if spec else ""
+    if auth_problem:
+        print(f"\nauth         {auth_problem}")
 
     if args.no_launch:
         return 0
