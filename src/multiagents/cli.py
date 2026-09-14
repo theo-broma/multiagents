@@ -933,10 +933,75 @@ def _report_agents(config, providers) -> int:
     return problems
 
 
+def _clear_provider(paths, providers, name: str, force: bool) -> int:
+    """Forget what the breaker learned about one provider.
+
+    There was no way to do this. `clear_provider_health` had exactly one caller
+    — the runner's own auth probe — so a breaker latched by a bug that has since
+    been FIXED could only be cleared by reaching into tree.json by hand. Found
+    the obvious way: agy's record still said "3 consecutive failures: print
+    timeout" the morning after the print timeout was fixed.
+
+    It matters more than tidiness. A lapsed cooldown leaves `tripped` set, and
+    `note_run_outcome` reads that as half-open, where a SINGLE further failure
+    re-trips immediately instead of waiting for the threshold. A stale record
+    therefore makes the next unrelated hiccup cost a provider.
+
+    Refuses while the cooldown is still running, because then the breaker is
+    not stale, it is working, and clearing it is talking past a live outage
+    rather than recovering from a dead one. `--force` for when the operator
+    knows the cause is gone.
+    """
+    if paths is None:
+        print("not inside a project — run this where the tree is.", file=sys.stderr)
+        return 2
+    if name not in providers:
+        print(f"unknown provider {name!r}. This project has: "
+              f"{', '.join(sorted(providers))}", file=sys.stderr)
+        return 2
+
+    tree = Tree(paths.tree_file, paths.events_file)
+    record = tree.provider_health().get(name) or {}
+    cooling = tree.cooldown(name) or {}
+    left = cooling.get("until", 0) - time.time()
+
+    if not record and not cooling:
+        print(f"{name}: nothing to clear — no failure record, no cooldown.")
+        return 0
+
+    if left > 0 and not force:
+        print(f"{name} is still cooling for {left / 60:.0f}m: "
+              f"{str(cooling.get('reason'))[:90]}\n"
+              f"That is the breaker working, not a stale record. Wait for it, "
+              f"fix the cause, or `--clear {name} --force` if you know it is "
+              f"gone.", file=sys.stderr)
+        return 1
+
+    if record.get("tripped"):
+        print(f"  cleared  {name} failure record "
+              f"({record.get('consecutive_failures', 0)} consecutive: "
+              f"{str(record.get('last_reason'))[:60]})")
+    elif record:
+        print(f"  cleared  {name} failure record")
+    tree.clear_provider_health(name)
+    if tree.clear_cooldown(name):
+        was = "expired" if left <= 0 else f"{left / 60:.0f}m remaining"
+        print(f"  cleared  {name} cooldown ({was})")
+    # Recorded, because "a person decided this" is a different fact from the
+    # auth probe clearing it, and the next reader of the log wants to know which.
+    tree.emit("-", "health_cleared", provider=name, by="doctor --clear",
+              forced=bool(force and left > 0))
+    print(f"{name}: the breaker starts over.")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     paths = _resolve(args.path) if find_project_root() else None
     config = load_config(paths)
     providers = load_providers(config.providers)
+    if getattr(args, "clear", None):
+        return _clear_provider(paths, providers, args.clear,
+                               getattr(args, "force", False))
     problems = 0
 
     print("providers")
@@ -1022,7 +1087,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, record in sorted(health.items()):
         if record.get("tripped"):
             print(f"  !! {name:9} stopped after {record['consecutive_failures']} "
-                  f"consecutive failures: {record.get('last_reason','')[:70]}")
+                  f"consecutive failures: {record.get('last_reason','')[:70]}\n"
+                  f"       if that cause is fixed: multiagents doctor --clear {name}")
             problems += 1
 
     if paths:
@@ -2089,6 +2155,12 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("doctor", help="check CLIs, agents, models, budget and git")
+    p.add_argument("--clear", metavar="PROVIDER",
+                   help="forget a provider's failure record and cooldown, so "
+                        "the circuit breaker starts over")
+    p.add_argument("--force", action="store_true",
+                   help="with --clear, clear even while the cooldown is still "
+                        "running")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("refresh-models", help="regenerate models.yaml from the installed CLIs")
