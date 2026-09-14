@@ -1607,11 +1607,72 @@ def test_children_merge_before_the_parent_does(tmp_path):
     r._merge_pending_children = _children
     r._maybe_merge_into_parent = _parent
 
-    asyncio.run(r._finalize(run, 0, {}, ""))
+    relaunched = asyncio.run(r._finalize(run, 0, {}, ""))
 
     assert order == ["children", "parent"], \
         "children must merge before the parent is itself merged upward"
-    assert run.done.is_set(), "a finished run must release wait_for_agents"
+    assert relaunched is False, "a run that ended must be released by the caller"
+
+
+def test_a_crash_in_the_post_mortem_still_releases_the_run(tmp_path):
+    """Nothing but `_consume` releases `run.done`, and `consult` waits on it for
+    the agent's whole timeout before reporting "no reply within Ns".
+
+    So an exception anywhere below the stream used to kill a healthy agent and
+    blame it for being unresponsive — our own crash, reported as the other
+    side's fault. Two of this project's worst days were that same mistake.
+
+    The node must also stop claiming to be running, but ONLY if it never
+    reached a verdict: a crash while filing a ticket must not turn a merged
+    `done` into `failed` and invite the orchestrator to discard real work.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from multiagents.runner import Run
+    from multiagents.tree import Node
+
+    class _Handle:
+        pid = 4321
+        stderr_tail = ""
+
+        async def lines(self):
+            return
+            yield                             # an agent that said nothing
+
+        async def wait(self):
+            return 0
+
+        async def drain_stderr(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("post-mortem exploded")
+
+    for before, expected in [("running", "failed"), ("done", "done")]:
+        r = _runner(tmp_path, {"b": AgentSpec("b", "p", "m")})
+        r.tree.add(Node(id="ag-1", agent="b", provider="p", model="m",
+                        parent=None, depth=1))
+        r.tree.set_status("ag-1", before)
+        r.paths.run_dir("ag-1").mkdir(parents=True, exist_ok=True)
+
+        run = Run(node_id="ag-1", provider=SimpleNamespace(name="p"),
+                  spec=AgentSpec("b", "p", "m"), handle=_Handle(),
+                  supervisor=SimpleNamespace(steps=0, check_timers=lambda: None))
+        r._provider_health_after = _boom
+
+        asyncio.run(r._consume(run))
+
+        assert run.done.is_set(), \
+            f"a post-mortem crash must still release the run (node was {before})"
+        assert r.tree.get("ag-1").status == expected, \
+            f"a node that was {before} must end {expected}, not be overwritten"
+        if expected == "failed":
+            assert "post-mortem crashed" in r.tree.get("ag-1").reason
+            assert (r.paths.run_dir("ag-1") / "postmortem-crash.txt").is_file(), \
+                "the traceback is the only thing that makes this debuggable"
 
 
 def test_every_cli_subcommand_is_wired():
