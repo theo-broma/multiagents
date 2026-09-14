@@ -1112,14 +1112,198 @@ class Runner:
                                  usage=usage or None, session_id=session_id or None,
                                  events=remainder)
 
+        # Nothing may follow this call. `_finalize` returns early when it
+        # relaunches a run that died young and said nothing, and that early
+        # return is exactly what skips the merge, the worktree reclaim and
+        # `run.done.set()`. A statement added here would run on the retry
+        # path too, where none of the rest of the teardown did.
+        await self._finalize(run, code, usage, session_id)
+
+    async def _finalize(self, run: Run, code: int, usage: dict[str, Any],
+                        session_id: str) -> None:
+        """Decide what a finished run meant, and record it.
+
+        Split from `_consume`, which is the pump. Nothing here reads the
+        stream: the process is already gone, and every line below runs once.
+        The two were one 374-line method whose subject changed halfway, which
+        is also why the outcome logic — the part carrying most of the hard-won
+        reasoning in this file — could only be reached by starting a process.
+
+        Returns early, WITHOUT setting `run.done`, when it relaunches the run.
+        """
+        node_id = run.node_id
+        run_dir = self.paths.run_dir(node_id)
         text = "\n".join(run.text_parts).strip()
-        stderr = handle.stderr_tail
+        stderr = run.handle.stderr_tail if run.handle else ""
         # Checked first and unconditionally. Stopping the process makes wait()
         # return a signal code, which _classify would read as "failed"; and a
         # silence trip in the window before exit would otherwise leave the node
         # `stuck` with the question invisible.
         status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
 
+        status, limited = await self._provider_health_after(run, status, text, stderr)
+
+        # Commit anything the agent left uncommitted so no work is stranded on
+        # an unreferenced worktree. Skipped while parked on a question: the
+        # agent is mid-thought and will resume in the same worktree, and a
+        # commit per question would both add noise and change what
+        # _drop_if_empty decides for every later run.
+        node = self.tree.get(node_id)
+        if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
+            gitops.commit_all(Path(node.worktree), f"{node.agent}: work in progress ({node_id})")
+
+        # A run that ends with nothing to say still ended for a reason.
+        said_nothing = not text.strip()
+        if status not in ("done", "merged", "awaiting_user") and said_nothing:
+            text = self._no_output_summary(run, code)
+
+        summary = text[-MAX_SUMMARY_CHARS:] if text else ""
+        (run_dir / "result.json").write_text(json.dumps(scrub({
+            "status": status, "exit_code": code, "session_id": session_id,
+            "usage": usage, "text": text, "stderr_tail": stderr,
+        }), indent=2))
+
+        self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
+        # Filed even when the run failed: a partial write-up of a real defect is
+        # worth more than a lost one, and the orchestrator can see the status.
+        # The last verdict wins, for the same reason the last TICKET does: a
+        # verifier reasoning about the format may quote it before giving one.
+        verdicts = list(VERDICT.finditer(text or ""))
+        if verdicts and not run.awaiting:
+            found = verdicts[-1]
+            self.tree.update(
+                node_id,
+                verdict=found.group(1).lower(),
+                defects=int(found.group(2)) if found.group(2) else 0,
+            )
+
+        ticket = self._file_ticket(node_id, text) if not run.awaiting else None
+        if ticket:
+            run.ticket = {k: ticket[k] for k in ("id", "severity", "title", "status")}
+        if run.awaiting:
+            question = self.tree.add_question(
+                node_id, run.awaiting["topic"], run.awaiting["question"],
+                run.awaiting["proposed"],
+            )
+            self.tree.update(node_id, summary=summary[:2000])
+            self.tree.set_status(
+                node_id, "awaiting_user",
+                f"needs a decision on {run.awaiting['topic'] or 'something'} ({question['id']})",
+            )
+        elif status == "unauthenticated":
+            self.tree.set_status(
+                node_id, "failed",
+                f"{run.provider.name} is not authenticated — "
+                f"run: multiagents auth login {run.provider.name}",
+            )
+            self.tree.emit(node_id, "unauthenticated", provider=run.provider.name)
+        elif status == "quota":
+            cooldown = now() + float(
+                self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
+            )
+            self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run")
+            self.tree.set_status(node_id, "failed", "quota exhausted")
+        elif self.tree.get(node_id) and self.tree.get(node_id).status == "stuck":
+            pass                              # keep the trip reason visible
+        elif run.spec.conversational and status == "done":
+            # A conversation is not finished just because a turn is. Park it as
+            # idle so the session stays resumable for the next question.
+            self.tree.set_status(node_id, "idle")
+        else:
+            # One free retry for a cheap, unexplained death — a crash with
+            # nothing to say, gone before it did any work. That shape is a
+            # transient glitch far more often than a real fault, and making
+            # the orchestrator handle it means a model reasoning about
+            # infrastructure.
+            #
+            # Bounded by cost, which is where I part company with the advice to
+            # retry any such failure: a run that died at 996 seconds had spent
+            # 5.5M tokens, and silently spending that again is not absorbing a
+            # glitch. Past the threshold it is reported and handed back.
+            fresh = self.tree.get(node_id)
+            if (status == "failed" and said_nothing
+                    and fresh and not fresh.retries
+                    and fresh.elapsed() < float(self.config.limits.get(
+                        "retry_silent_failure_under_seconds", 60))):
+                self.tree.emit(node_id, "retrying",
+                               reason=f"died in {fresh.elapsed():.0f}s with no output")
+                # Counted on the NODE, not on the Run: _launch replaces the Run,
+                # so a flag kept there resets on every retry and one free retry
+                # becomes an unbounded loop. Found by running it.
+                self.tree.update(node_id, retries=fresh.retries + 1)
+                with contextlib.suppress(Exception):
+                    await self._launch(
+                        node_id=node_id, spec=run.spec, provider=run.provider,
+                        prompt=(run_dir / "prompt.md").read_text(),
+                        workdir=Path(fresh.worktree), branch=fresh.branch,
+                        parent=fresh.parent, depth=fresh.depth,
+                        session_id=session_id or None,
+                    )
+                    self.tree.set_status(node_id, "running", "retried once after "
+                                         "an unexplained early exit")
+                    return
+
+            # Say why, when the provider told us. Three real failures ended with
+            # agy emitting {"kind": "result", "status": "ERROR"} — a structured
+            # verdict, which _classify read to decide "failed" and then dropped,
+            # leaving the orchestrator a node marked failed with an empty
+            # reason and nothing to act on.
+            reason = ""
+            if status == "limited":
+                # The provider's own words, when it comes back, and what this
+                # run spent getting there. The last one matters more than it
+                # looks: on the day this was written, two opus agents filled a
+                # freshly-reset five-hour window in THIRTEEN MINUTES, were
+                # restarted on the same tasks the moment it reopened, and filled
+                # it again. Nothing told the orchestrator that the pair costs a
+                # whole window, so it had no way to know not to start both.
+                spent = (usage or {}).get("cost_usd") or 0
+                node = self.tree.get(node_id)
+                started = getattr(node, "started_at", 0) or now()
+                ran = (now() - started) / 60
+                cost = f", after {ran:.0f}m" + (f" and ${spent:.2f}" if spent else "")
+                reason = limited["reason"] + (
+                    f"{cost} — back at "
+                    f"{time.strftime('%H:%M', time.localtime(limited['until']))}. "
+                    f"RESUMABLE: steer_agent({node_id!r}, ...) continues this "
+                    f"session on its branch. Reissuing the task instead pays "
+                    f"for the whole conversation again — measured at 7.2M "
+                    f"cached tokens on a run that had cost 173k.")
+            elif status == "failed":
+                if run.final_status and run.final_status.upper() not in {
+                        "SUCCESS", "OK", "COMPLETED"}:
+                    reason = f"{run.provider.name} reported {run.final_status}"
+                elif code != 0:
+                    reason = f"exited {code}"
+                else:
+                    reason = "produced no output"
+            self.tree.set_status(node_id, status, reason)
+
+        # Auto-merge this agent's own children upward: their work is still
+        # quarantined on this agent's branch, so nothing real has changed yet.
+        if status == "done":
+            # Children first: this agent's branch should carry their work when
+            # it is itself merged upward, rather than stranding it.
+            await self._merge_pending_children(node_id)
+            await self._maybe_merge_into_parent(node_id)
+
+        if not run.awaiting:
+            # A parked agent still owns its worktree and will resume in it.
+            self._drop_if_empty(node_id, run.spec)
+        run.done.set()
+
+    async def _provider_health_after(self, run: Run, status: str, text: str,
+                                     stderr: str) -> tuple[str, dict | None]:
+        """What this run's outcome says about its provider, recorded.
+
+        Two questions in order: did the provider itself stop the run, and has
+        this provider now failed often enough in a row to be worth cooling
+        down? Returns the possibly-revised status and the limit verdict —
+        the caller needs both, because a `limited` run reports when it is back
+        and nothing else knows that.
+        """
+        node_id = run.node_id
+        limited = None
         # A run the PROVIDER stopped is not a run that failed. The CLI says so
         # in its own hardcoded words, and until now it said them into an agent's
         # output where nothing was listening: two agents did 42,000 tokens of
@@ -1179,170 +1363,29 @@ class Runner:
                 self.tree.set_cooldown(name, now() + seconds, reason,
                                        needs_login=authenticated is False)
                 self._maybe_cool_family(name, seconds)
+        return status, limited
 
-        # Commit anything the agent left uncommitted so no work is stranded on
-        # an unreferenced worktree. Skipped while parked on a question: the
-        # agent is mid-thought and will resume in the same worktree, and a
-        # commit per question would both add noise and change what
-        # _drop_if_empty decides for every later run.
-        node = self.tree.get(node_id)
-        if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
-            gitops.commit_all(Path(node.worktree), f"{node.agent}: work in progress ({node_id})")
+    def _no_output_summary(self, run: Run, code: int) -> str:
+        """Why a run that said nothing ended, from the mechanics alone.
 
-        # A run that ends with nothing to say still ended for a reason, and the
-        # mechanics are knowable: exit code, elapsed, the last thing it did.
-        # Deliberately NOT a story about why — inventing intent from a failed
-        # run is the mistake that once cooled a provider down over the word
-        # "quota". These are facts, labelled as facts.
-        said_nothing = not text.strip()
-        if status not in ("done", "merged", "awaiting_user") and said_nothing:
-            tail = [e for e in run.events if e.get("kind") in ("tool", "raw")][-3:]
-            trace = "; ".join(
-                (f"raw: {str(e.get('raw'))[:160]}" if e.get("kind") == "raw"
-                 else f"{e.get('name')}({str(e.get('args'))[:80]})")
-                for e in tail
-            )
-            node_now = self.tree.get(node_id)
-            elapsed = round(node_now.elapsed()) if node_now else 0
-            text = (f"[no output] the run ended with exit {code} after {elapsed}s "
-                    f"and {run.supervisor.steps if run.supervisor else 0} step(s), "
-                    f"having said nothing."
-                    + (f" Last activity: {trace}" if trace else ""))
-
-        summary = text[-MAX_SUMMARY_CHARS:] if text else ""
-        (run_dir / "result.json").write_text(json.dumps(scrub({
-            "status": status, "exit_code": code, "session_id": session_id,
-            "usage": usage, "text": text, "stderr_tail": stderr,
-        }), indent=2))
-
-        self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
-        # Filed even when the run failed: a partial write-up of a real defect is
-        # worth more than a lost one, and the orchestrator can see the status.
-        # The last verdict wins, for the same reason the last TICKET does: a
-        # verifier reasoning about the format may quote it before giving one.
-        verdicts = list(VERDICT.finditer(text or ""))
-        if verdicts and not run.awaiting:
-            found = verdicts[-1]
-            self.tree.update(
-                node_id,
-                verdict=found.group(1).lower(),
-                defects=int(found.group(2)) if found.group(2) else 0,
-            )
-
-        ticket = self._file_ticket(node_id, text) if not run.awaiting else None
-        if ticket:
-            run.ticket = {k: ticket[k] for k in ("id", "severity", "title", "status")}
-        if run.awaiting:
-            question = self.tree.add_question(
-                node_id, run.awaiting["topic"], run.awaiting["question"],
-                run.awaiting["proposed"],
-            )
-            self.tree.update(node_id, summary=summary[:2000])
-            self.tree.set_status(
-                node_id, "awaiting_user",
-                f"needs a decision on {run.awaiting['topic'] or 'something'} ({question['id']})",
-            )
-        elif status == "unauthenticated":
-            self.tree.set_status(
-                node_id, "failed",
-                f"{run.provider.name} is not authenticated — "
-                f"run: multiagents auth login {run.provider.name}",
-            )
-            self.tree.emit(node_id, "unauthenticated", provider=run.provider.name)
-        elif status == "quota":
-            cooldown = now() + float(
-                self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
-            )
-            self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run")
-            self.tree.set_status(node_id, "failed", "quota exhausted")
-        elif self.tree.get(node_id) and self.tree.get(node_id).status == "stuck":
-            pass                              # keep the trip reason visible
-        elif run.spec.conversational and status == "done":
-            # A conversation is not finished just because a turn is. Park it as
-            # idle so the session stays resumable for the next question.
-            self.tree.set_status(node_id, "idle")
-        else:
-                # One free retry for a cheap, unexplained death — a crash with
-            # nothing to say, gone before it did any work. That shape is a
-            # transient glitch far more often than a real fault, and making
-            # the orchestrator handle it means a model reasoning about
-            # infrastructure.
-            #
-            # Bounded by cost, which is where I part company with the advice to
-            # retry any such failure: a run that died at 996 seconds had spent
-            # 5.5M tokens, and silently spending that again is not absorbing a
-            # glitch. Past the threshold it is reported and handed back.
-            fresh = self.tree.get(node_id)
-            if (status == "failed" and said_nothing
-                    and fresh and not fresh.retries
-                    and fresh.elapsed() < float(self.config.limits.get(
-                        "retry_silent_failure_under_seconds", 60))):
-                self.tree.emit(node_id, "retrying",
-                               reason=f"died in {fresh.elapsed():.0f}s with no output")
-                # Counted on the NODE, not on the Run: _launch replaces the Run,
-                # so a flag kept there resets on every retry and one free retry
-                # becomes an unbounded loop. Found by running it.
-                self.tree.update(node_id, retries=fresh.retries + 1)
-                with contextlib.suppress(Exception):
-                    await self._launch(
-                        node_id=node_id, spec=run.spec, provider=run.provider,
-                        prompt=(run_dir / "prompt.md").read_text(),
-                        workdir=Path(fresh.worktree), branch=fresh.branch,
-                        parent=fresh.parent, depth=fresh.depth,
-                        session_id=session_id or None,
-                    )
-                    self.tree.set_status(node_id, "running", "retried once after "
-                                         "an unexplained early exit")
-                    return
-
-        # Say why, when the provider told us. Three real failures ended with
-            # agy emitting {"kind": "result", "status": "ERROR"} — a structured
-            # verdict, which _classify read to decide "failed" and then dropped,
-            # leaving the orchestrator a node marked failed with an empty
-            # reason and nothing to act on.
-            reason = ""
-            if status == "limited":
-                # The provider's own words, when it comes back, and what this
-                # run spent getting there. The last one matters more than it
-                # looks: on the day this was written, two opus agents filled a
-                # freshly-reset five-hour window in THIRTEEN MINUTES, were
-                # restarted on the same tasks the moment it reopened, and filled
-                # it again. Nothing told the orchestrator that the pair costs a
-                # whole window, so it had no way to know not to start both.
-                spent = (usage or {}).get("cost_usd") or 0
-                node = self.tree.get(node_id)
-                started = getattr(node, "started_at", 0) or now()
-                ran = (now() - started) / 60
-                cost = f", after {ran:.0f}m" + (f" and ${spent:.2f}" if spent else "")
-                reason = limited["reason"] + (
-                    f"{cost} — back at "
-                    f"{time.strftime('%H:%M', time.localtime(limited['until']))}. "
-                    f"RESUMABLE: steer_agent({node_id!r}, ...) continues this "
-                    f"session on its branch. Reissuing the task instead pays "
-                    f"for the whole conversation again — measured at 7.2M "
-                    f"cached tokens on a run that had cost 173k.")
-            elif status == "failed":
-                if run.final_status and run.final_status.upper() not in {
-                        "SUCCESS", "OK", "COMPLETED"}:
-                    reason = f"{run.provider.name} reported {run.final_status}"
-                elif code != 0:
-                    reason = f"exited {code}"
-                else:
-                    reason = "produced no output"
-            self.tree.set_status(node_id, status, reason)
-
-        # Auto-merge this agent's own children upward: their work is still
-        # quarantined on this agent's branch, so nothing real has changed yet.
-        if status == "done":
-            # Children first: this agent's branch should carry their work when
-            # it is itself merged upward, rather than stranding it.
-            await self._merge_pending_children(node_id)
-            await self._maybe_merge_into_parent(node_id)
-
-        if not run.awaiting:
-            # A parked agent still owns its worktree and will resume in it.
-            self._drop_if_empty(node_id, run.spec)
-        run.done.set()
+        Exit code, elapsed, the last thing it did. Deliberately NOT a story
+        about why — inventing intent from a failed run is the mistake that
+        once cooled a provider down over the word "quota". These are facts,
+        labelled as facts.
+        """
+        node_id = run.node_id
+        tail = [e for e in run.events if e.get("kind") in ("tool", "raw")][-3:]
+        trace = "; ".join(
+            (f"raw: {str(e.get('raw'))[:160]}" if e.get("kind") == "raw"
+             else f"{e.get('name')}({str(e.get('args'))[:80]})")
+            for e in tail
+        )
+        node_now = self.tree.get(node_id)
+        elapsed = round(node_now.elapsed()) if node_now else 0
+        return (f"[no output] the run ended with exit {code} after {elapsed}s "
+                f"and {run.supervisor.steps if run.supervisor else 0} step(s), "
+                f"having said nothing."
+                + (f" Last activity: {trace}" if trace else ""))
 
     def _drop_if_empty(self, node_id: str, spec: AgentSpec) -> None:
         """Reclaim a worktree that holds nothing worth keeping.

@@ -1561,12 +1561,57 @@ def test_merge_is_deferred_while_the_parent_is_still_working(tmp_path):
     asyncio.run(r._maybe_merge_into_parent("ag-child"))
     assert ("ag-child", "merge_deferred") in merged, "must not merge into a live worktree"
 
-    # Once the parent stops, the deferred merge is picked up.
+    # Once the parent stops, the deferred merge is picked up — see
+    # test_children_merge_before_the_parent_does for the ordering.
     assert hasattr(r, "_merge_pending_children")
-    import inspect
-    body = inspect.getsource(r._consume)
-    assert body.index("_merge_pending_children") < body.index("_maybe_merge_into_parent(node_id)"), \
+
+
+def test_children_merge_before_the_parent_does(tmp_path):
+    """A finishing agent's branch must carry its children's work before it is
+    itself merged upward, or their commits are stranded on a branch nothing
+    references again.
+
+    Behavioural. The previous version read `_consume`'s source and compared the
+    two call sites by string index, which broke the moment the outcome logic
+    moved into `_finalize` — the same trap
+    test_cancellation_reasons_are_distinguished was already rescued from.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from multiagents.runner import Run
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"b": AgentSpec("b", "p", "m")})
+    r.tree.add(Node(id="ag-1", agent="b", provider="p", model="m",
+                    parent=None, depth=1))
+    r.paths.run_dir("ag-1").mkdir(parents=True, exist_ok=True)
+
+    run = Run(node_id="ag-1", provider=SimpleNamespace(name="p"),
+              spec=AgentSpec("b", "p", "m"),
+              handle=SimpleNamespace(stderr_tail=""),
+              supervisor=SimpleNamespace(steps=1))
+    run.text_parts.append("finished the job")
+
+    order = []
+
+    async def _health(run_, status, text, stderr):
+        return status, None                 # not what this test is about
+
+    async def _children(node_id):
+        order.append("children")
+
+    async def _parent(node_id):
+        order.append("parent")
+
+    r._provider_health_after = _health
+    r._merge_pending_children = _children
+    r._maybe_merge_into_parent = _parent
+
+    asyncio.run(r._finalize(run, 0, {}, ""))
+
+    assert order == ["children", "parent"], \
         "children must merge before the parent is itself merged upward"
+    assert run.done.is_set(), "a finished run must release wait_for_agents"
 
 
 def test_every_cli_subcommand_is_wired():
