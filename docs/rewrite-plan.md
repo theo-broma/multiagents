@@ -103,14 +103,28 @@ health and agent lifecycle sharing a class, or a second consumer of the health
 logic that is not the Runner. Either makes the object real rather than
 hypothetical.
 
-### 1c · Parked conversations are not spawned agents
+### 1c · CANCELLED — it fails the falsifier harder than 1b did
 
-`consult` (128 lines), `_find_conversation`, `answer_question`, `steer` — about
-250 lines implementing a different lifecycle: a conversation persists, is
-resumed by id, holds context across calls, and is *parked* rather than running.
-Commit `ea0e7c1` ("Stop calling a parked conversation a running agent") is the
-history of confusing the two. Give it its own module so the distinction is
-structural rather than remembered.
+The four methods are 242 lines and they are a real lifecycle: a conversation
+persists, is resumed by id, holds context across calls, and is *parked* rather
+than running. That part of the argument stands. Commit `ea0e7c1` is the history
+of confusing the two.
+
+What does not stand is that they can be lifted out. Measured, the group reaches
+for six of `Runner`'s methods — `_launch`, `_preflight`, `compose_prompt`,
+`self_id`, `self_depth`, `stop` — and five of its attributes, including
+`self.runs`, the live in-process registry of running agents. `steer` and
+`consult` both launch through `_launch`, which writes to `runs`, and `consult`
+stops through `stop`, which reads it.
+
+So a Conversations object would be a facade holding a reference to the Runner
+and mutating its registry. 1b needed the Runner's *constructed* state; this
+needs its *live* state as well. If 1b was a bag of functions, this is a bag of
+functions with a pointer back to the thing it came out of.
+
+***What would change the answer:*** conversations getting their own registry,
+which would mean they no longer share the spawn path — a redesign, not a
+refactor.
 
 ### What would change this
 
@@ -172,8 +186,24 @@ watches it and survives its exit.
   is also where `open-questions.md` §3b's known gap lands — the drivers not
   appearing in the tree — so having it in its own module is a prerequisite for
   that work rather than a detour from it.
-- **3b.** Then split the `cmd_*` functions into `commands/` by topic. Genuine
-  plumbing; do it last, or on a slow afternoon.
+- **3b. CANCELLED.** Measured after 3a: `cli.py` is 2,152 lines of 23 commands,
+  24 helpers and 174 lines of argparse. The helper-to-command map is clean —
+  four helpers are genuinely shared (`_resolve`, `_docker_executor`, `_confirm`,
+  `_report_catalog`), three are used by exactly two related commands, and every
+  other one belongs to a single command. No function exceeds 129 lines and there
+  are no cycles. It is long, not tangled.
+
+  Against that, the tests reach into `cli` in about 160 places — `_confirm`
+  patched 30 times, `cmd_init` called directly 23 — and only ONE test goes
+  through `main()`. The split buys no behaviour, no testability, and unblocks
+  nothing in `open-questions.md`; 3a at least was a prerequisite for §3b. This
+  is filing.
+
+  *Recorded for whoever revisits it:* the topology to use would be shared
+  helpers into their own module, never command modules importing `cli` to reach
+  a `_confirm` — cheapness is not a reason to invert a dependency. And the
+  retargeting fails loudly, not quietly: `monkeypatch.setattr` raises
+  `AttributeError` on an attribute that no longer exists.
 
 ## 4 · The tests follow the code, not the other way round
 
@@ -228,8 +258,16 @@ same discipline as `open-questions.md` §4.
    `script:` already took any filename, so only the argv needed changing
 3. ~~Routing collaborator (1b)~~ — **cancelled**, see above
 4. ~~`driver.py` out of `cli.py` (3a)~~ — **done**, 3,000 → 2,152 + 891
-5. Conversations module (1c) ← next
-6. `commands/` (3b)
+5. ~~Conversations module (1c)~~ — **cancelled**, see above
+6. ~~`commands/` (3b)~~ — **cancelled**, see above
+
+**The plan is finished.** Three steps shipped, three declined on measurement.
+Nothing in `src/` now has a function over 191 lines, and the three largest are
+argparse wiring, the supervised launch loop and the orchestrator's entry point —
+each one thing, at the size that thing is. The next work is behavioural, and
+`open-questions.md` already says what it is: §3's thresholds need re-measuring
+now that a tool call is counted once, §3b needs the drivers in the tree, and
+§3c's wind-down has never fired in anger.
 
 Two unplanned items were taken along the way, both because the suite is the
 gate for everything here and both were undermining it: a post-mortem crash
