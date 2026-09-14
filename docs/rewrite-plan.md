@@ -63,16 +63,45 @@ logic is under-tested today relative to how much reasoning lives in it.
 
 Cheapest step in the plan, largest single reduction. Start here.
 
-### 1b · Routing and provider health are a separate object
+### 1b · CANCELLED — the grouping was wrong
 
-`_auth_ok`, `_sample_headroom`, `_wind_down`, `_half_open`, `_maybe_cool_family`,
-`_instance_load`, `_orchestrator_provider`, `can_spawn`, `_preflight` — roughly
-300 lines that touch budgets, the tree's health/cooldown/claim records, and the
-providers config, and touch no subprocess and no git. They are already a
-coherent thing; they are simply not named.
+**Done: 1a, and step 2 below. 1b is withdrawn; this section records why so it
+is not proposed again.**
 
-Extract as a `Routing` collaborator constructed with the same `paths` and
-`config`. `Runner` keeps one attribute and the call sites barely move.
+The claim was that `_auth_ok`, `_sample_headroom`, `_wind_down`, `_half_open`,
+`_maybe_cool_family`, `_instance_load`, `_orchestrator_provider`, `can_spawn`
+and `_preflight` were "already a coherent thing, simply not named". Reading all
+nine says they are at least three things:
+
+- `self_id`, `self_depth`, `can_spawn` — identity and permission of the current
+  *process*, read from the environment. `server.py` calls all three on the
+  Runner as part of the MCP surface (`you_are`, `your_depth`, `you_may_spawn`),
+  so moving them buys delegation shims.
+- `_preflight`, 109 lines — admission control. Depth, concurrency, children,
+  is there a repo, is the pause in force, does the spec name a real enabled
+  provider with a readable brief. *May this agent start*, not *where should it
+  run*.
+- the remaining six, plus `_provider_health_after` — genuinely one thing:
+  which providers are usable now, and what this run just taught us.
+
+Only the third group is an object, and extracting it fails this plan's own
+falsifier. It would need `paths`, `config`, `providers`, `tree` and
+`executor()` — the Runner's entire constructed state — while holding none of
+its own, which is a bag of functions behind a file boundary rather than a
+decoupling. Worse, the routing *decision* is not in those helpers at all: it is
+~90 lines inline in `start()`, and lifting that out too would have the
+collaborator returning MCP response payloads.
+
+The acute problem was `_consume`, and 1a fixed it. The largest method is now
+`start` at 183 lines, which is the entry point of an orchestrator making
+capacity and admission decisions and is a reasonable size for one.
+`open-questions.md` — a catalogue of everything that has actually gone wrong
+here — has no entry blaming this coupling for anything.
+
+***What would change the answer:*** a bug that is genuinely caused by provider
+health and agent lifecycle sharing a class, or a second consumer of the health
+logic that is not the Runner. Either makes the object real rather than
+hypothetical.
 
 ### 1c · Parked conversations are not spawned agents
 
@@ -194,12 +223,18 @@ same discipline as `open-questions.md` §4.
 
 ## Order
 
-1. `_consume` → `_finalize` (1a) — largest reduction, smallest risk
-2. Provider scripts: any executable (2) — independent, three call sites
-3. Routing collaborator (1b)
-4. `driver.py` out of `cli.py` (3a)
+1. ~~`_consume` → `_finalize` (1a)~~ — **done**, 374 → 149 lines
+2. ~~Provider scripts: any executable (2)~~ — **done**, and smaller than planned:
+   `script:` already took any filename, so only the argv needed changing
+3. ~~Routing collaborator (1b)~~ — **cancelled**, see above
+4. `driver.py` out of `cli.py` (3a) ← next
 5. Conversations module (1c)
 6. `commands/` (3b)
+
+Two unplanned items were taken along the way, both because the suite is the
+gate for everything here and both were undermining it: a post-mortem crash
+could strand a run and get the agent blamed for it, and the suite was writing
+28,000 directories into the developer's own home and so was not idempotent.
 
 Every step: `pytest tests/` green before and after, plus `multiagents doctor`
 and `multiagents probe <provider>` on a real project, because neither the
