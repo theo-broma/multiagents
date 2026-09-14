@@ -139,8 +139,13 @@ print(f\"{bar}  {used:.0f}% of the tightest window\")
 # resets_label is the local clock plus a countdown, computed by the caller so
 # that every provider script shows the same time the user's own clock does.
 # Slicing the ISO string here printed UTC on a local face: two hours out.
+# The fallback keeps the offset rather than trimming to a tidy 16 characters.
+# A script here can be newer than the Python that feeds it — provider scripts
+# sync into the global config dir on their own, a running monitor does not
+# reload — and a fallback that prints \"2026-09-15T00:00\" states a local time
+# it has not computed. Raw and unambiguous is the right way to be out of date.
 if b.get('resets_label') or b.get('resets_at'):
-    print(f\"resets {b.get('resets_label') or str(b['resets_at'])[:16]}\")
+    print(f\"resets {b.get('resets_label') or b['resets_at']}\")
 spent = b.get('spent') or {}
 u, limit = spent.get('extra_credits_used'), spent.get('extra_credits_limit')
 if u is not None and limit:

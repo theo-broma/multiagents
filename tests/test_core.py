@@ -3916,6 +3916,49 @@ def test_every_window_carries_its_own_local_label(paris_clock):
     assert data["windows"]["odd"] == "not a dict", "a non-dict window is left alone"
 
 
+@pytest.mark.parametrize("script", ["claude.sh", "opencode.sh"])
+def test_a_usage_script_never_invents_a_local_time_it_did_not_compute(script):
+    """These scripts can be NEWER than the Python feeding them: provider scripts
+    sync into the global config dir on their own, while a running monitor never
+    reloads. When that skew hides `resets_label`, trimming the ISO string to a
+    tidy "2026-09-15T00:00" states a local time nobody converted — which is the
+    original bug wearing the fix's clothes. Out of date must look out of date.
+    """
+    import json
+    import subprocess
+    path = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+            / "defaults" / "providers" / script)
+    stamp = "2026-09-15T00:00:00.965787+00:00"
+    budget = {"known": True, "used_percent": 32, "resets_at": stamp,
+              "windows": {"weekly": {"percent": 32, "resets_at": stamp}}}
+    out = subprocess.run(
+        ["sh", str(path), "usage"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
+             "MULTIAGENTS_BUDGET": json.dumps(budget)},
+    )
+    assert out.returncode == 0, out.stderr
+    printed = out.stdout
+    assert stamp[:16] not in printed or "+00:00" in printed, (
+        "a timestamp shown without its offset reads as local and is not")
+
+
+def test_a_usage_script_prefers_the_label_when_it_is_given_one():
+    import json
+    import subprocess
+    path = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+            / "defaults" / "providers" / "claude.sh")
+    budget = {"known": True, "used_percent": 32,
+              "resets_at": "2026-09-15T00:00:00.965787+00:00",
+              "resets_label": "Sep 15 02:00 CEST \u00b7 in 33m"}
+    out = subprocess.run(
+        ["sh", str(path), "usage"], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
+             "MULTIAGENTS_BUDGET": json.dumps(budget)},
+    )
+    assert "Sep 15 02:00 CEST" in out.stdout
+    assert "2026-09-15T00:00" not in out.stdout, "the raw stamp is the fallback only"
+
+
 # --------------------------------------------------------------------------
 # Executor default, and the offer that sets it
 

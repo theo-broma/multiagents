@@ -119,8 +119,11 @@ for name, w in windows.items():
     used = (w or {}).get('used_percent', (w or {}).get('percent'))
     if used is None: continue
     bar = '#' * int(round(used / 10)) + '.' * (10 - int(round(used / 10)))
-    # Local clock and countdown from the caller; slicing the ISO string showed UTC.
-    resets = (w or {}).get('resets_label') or str((w or {}).get('resets_at') or '')[:16]
+    # Local clock and countdown from the caller; slicing the ISO string showed
+    # UTC on a local face. The fallback keeps the offset for the same reason:
+    # this script can be newer than the Python feeding it, and a trimmed
+    # timestamp claims a local time nobody converted.
+    resets = (w or {}).get('resets_label') or str((w or {}).get('resets_at') or '')
     print(f\"{name:<8} {bar} {used:>3.0f}%  {resets}\")
 if not windows:
     print(f\"{b.get('used_percent', 0):.0f}% used\")
