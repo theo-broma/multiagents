@@ -3484,6 +3484,94 @@ def test_built_in_tools_are_not_attributed_to_any_server(tmp_path):
     assert report.requests == 2
 
 
+def _agy_usage_lines(budget, tmp_path=None):
+    """Run agy.sh's `usage` action over a budget payload, as the monitor does."""
+    import json
+    import subprocess
+    script = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
+              / "defaults" / "providers" / "agy.sh")
+    out = subprocess.run(
+        ["sh", str(script), "usage"], capture_output=True, text=True,
+        # sort_keys mirrors how the monitor serialises it before handing it over.
+        env={"PATH": "/usr/bin:/bin",
+             "MULTIAGENTS_BUDGET": json.dumps(budget, sort_keys=True)},
+    )
+    return out.returncode, out.stdout.strip().splitlines()
+
+
+def _agy_window(headroom, resets_at, counted, models="Some, Models"):
+    return {"headroom": headroom, "percent": round((1 - headroom) * 100, 1),
+            "resets_at": resets_at, "counted": counted, "models": models}
+
+
+def test_the_agy_usage_view_orders_pools_and_windows_for_itself(tmp_path):
+    """The monitor hands the budget over with sort_keys, so insertion order is
+    not the script's to rely on — relying on it put the 5-hour row above the
+    weekly one only when read through the monitor and not standalone."""
+    budget = {"known": True, "windows": {
+        "3p-5h": _agy_window(0.0, None, False),
+        "3p-weekly": _agy_window(0.33, None, False),
+        "gemini-5h": _agy_window(0.92, None, True),
+        "gemini-weekly": _agy_window(0.80, None, True),
+    }}
+    code, lines = _agy_usage_lines(budget)
+    assert code == 0
+    assert [l.split()[0] + " " + l.split()[1] for l in lines[:4]] == [
+        "gemini weekly", "gemini 5h", "3p weekly", "3p 5h"
+    ], "counted pool first, longest window first"
+
+
+def test_the_agy_usage_view_keeps_the_numbers_in_its_first_four_lines(tmp_path):
+    """The curses monitor shows four lines per provider. The group legend is a
+    bonus for the web view, so it must never displace a percentage."""
+    budget = {"known": True, "windows": {
+        "gemini-weekly": _agy_window(0.80, None, True, "Gemini Flash"),
+        "gemini-5h": _agy_window(0.92, None, True, "Gemini Flash"),
+        "3p-weekly": _agy_window(0.33, None, False, "Claude Opus"),
+        "3p-5h": _agy_window(0.0, None, False, "Claude Opus"),
+    }}
+    code, lines = _agy_usage_lines(budget)
+    assert code == 0
+    assert all("% left" in line for line in lines[:4]), (
+        "every one of the four lines the TUI shows must carry its own number")
+    assert any("=" in line for line in lines[4:]), "legend follows, not leads"
+
+
+def test_the_agy_usage_view_marks_the_pool_it_does_not_spend_against(tmp_path):
+    budget = {"known": True, "windows": {
+        "gemini-weekly": _agy_window(0.80, None, True),
+        "3p-5h": _agy_window(0.0, None, False),
+    }}
+    code, lines = _agy_usage_lines(budget)
+    gemini = next(l for l in lines if l.startswith("gemini"))
+    third = next(l for l in lines if l.startswith("3p"))
+    assert "not counted" not in gemini
+    assert "not counted" in third, "an empty bucket must not read as agy's own"
+
+
+def test_the_agy_usage_view_counts_down_from_now_not_from_the_probe(tmp_path):
+    """A five-hour window moves while the monitor looks at it, so the remaining
+    time is computed at render rather than baked in when the quota was read."""
+    import datetime
+    soon = (datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(hours=2, minutes=30))
+    budget = {"known": True, "windows": {
+        "gemini-5h": _agy_window(0.5, soon.isoformat().replace("+00:00", "Z"), True),
+    }}
+    code, lines = _agy_usage_lines(budget)
+    assert code == 0
+    assert "2h29m" in lines[0] or "2h30m" in lines[0], lines
+
+
+def test_the_agy_usage_view_defers_when_it_has_nothing_to_format(tmp_path):
+    """Exit 64 is the contract's "not implemented", and it is what makes the
+    monitor fall back to the generic rendering instead of showing a blank."""
+    for budget in ({}, {"known": False}, {"known": False, "windows": {}}):
+        code, lines = _agy_usage_lines(budget)
+        assert code == 64, budget
+        assert lines == []
+
+
 # --------------------------------------------------------------------------
 # Executor default, and the offer that sets it
 
