@@ -195,9 +195,12 @@ usage)
     # four lines per provider, so the group legend below them is a bonus for the
     # web view, never where the percentages live.
     #
-    # Phrased as REMAINING, the way agy phrases it. The shared header above
-    # these lines says "20% used" of the same bucket; saying "80% left" here is
-    # the reconciliation, not a second opinion.
+    # Phrased as USED, and the bar fills as the quota is spent. agy's own
+    # screen counts remaining, but this panel is not agy's screen: the header
+    # directly above these lines says "20% used", and so does every other
+    # provider in the monitor. Counting the other way round here made a FULL
+    # bar mean untouched on one row and exhausted on the next, which is the
+    # one thing a bar has to get right.
     [ -n "${MULTIAGENTS_BUDGET:-}" ] || exit 64
     # Captured rather than streamed, so that the formatter's exit 64 survives.
     # Ending this block with a bare `exit 0` swallowed it, and the fallback then
@@ -251,13 +254,13 @@ def rank(item):
 for key, w in sorted(windows.items(), key=rank):
     if not isinstance(w, dict) or w.get('headroom') is None:
         continue
-    left = float(w['headroom'])
+    used = 1.0 - float(w['headroom'])
     pool, _, span = str(key).partition('-')
-    filled = int(round(left * 10))
-    rows.append('%-6s %-6s %s %3.0f%% left%s%s' % (
+    filled = int(round(used * 10))
+    rows.append('%-6s %-6s %s %3.0f%% used%s%s' % (
         pool, span or '?',
         '█' * filled + '░' * (10 - filled),
-        left * 100,
+        used * 100,
         ' · ' + until(w.get('resets_at')) if w.get('resets_at') else '',
         '' if w.get('counted', True) else ' · not counted',
     ))
