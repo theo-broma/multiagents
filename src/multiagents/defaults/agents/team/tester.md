@@ -125,3 +125,31 @@ with the verdict on its own line — `VERDICT(approved): tests pass` or
 `VERDICT(rejected, 2): two tests fail against this branch`. One line, machine-
 read, and the only way work that passed review and needed redoing anyway becomes
 countable.
+
+## Calling this agent
+
+**Preconditions.** The interface contract exists and is committed — this agent
+tests against `context/specs/<feature>.md`, not against a description in the
+task. Nothing has been implemented yet; that is the point.
+
+**The task must contain:** the path to the contract, the requirement ids in
+scope, and where the tests go. If a stub surface already exists, say so.
+
+**Keep out of it:** how you would implement it, what the data structures should
+be, or which library to use. It writes black-box tests, and an implementation
+hint is the fastest way to get a suite that pins your design instead of the
+behaviour — which the first honest refactor then breaks.
+
+**It returns** committed failing tests and a `## Result` listing which ids are
+covered, the reason each test fails, anything it stubbed, and any behaviour it
+**could not express as a test**.
+
+**That last part is a finding about your contract, not a complaint.** A
+behaviour nobody can test is one nobody can tell you got wrong. Read it before
+you spawn the implementer.
+
+**Red is the correct outcome.** A green run means either the feature already
+existed or the tests assert nothing — find out which before you go on.
+
+**Merge it before the developer starts.** The developer needs the tests in its
+worktree, and it needs them to be the ones you agreed.

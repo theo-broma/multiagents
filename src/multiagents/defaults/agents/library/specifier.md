@@ -75,3 +75,28 @@ here, once, rather than discovered by users.
 Commit the file. Finish with a section headed `## Result` giving the path, the
 number of requirements, and the two or three you consider most likely to be
 skipped by an implementation that is not paying attention.
+
+## Calling this agent
+
+**Preconditions.** `BRIEF.md` exists and the feature has a name. Nothing has
+been designed yet — run it before anyone writes a contract, not after.
+
+**The task must contain:** the feature, what the user actually said about it,
+the path for the spec file, and any constraint already agreed. Point it at the
+existing code if the feature touches it: a requirement that contradicts what is
+already built is worth knowing now.
+
+**Keep out of it:** your design. Schemas, signatures and library choices in the
+task become requirements, and a requirement that can only be met one way has
+already made the implementer's decision for it.
+
+**It returns** `context/specs/<feature>.md` with numbered `R<n>` requirements,
+each with a `Verified by:` line, and a `## Result` naming the ones most likely
+to be skipped by an implementation that is not paying attention.
+
+**Read the `UNCONFIRMED` ones.** It marks domain rules it is unsure of rather
+than asserting them, and those are yours or the user's to settle before anyone
+builds on them.
+
+**Four requirements where you expected forty is a finding about the feature**,
+not a finished step.

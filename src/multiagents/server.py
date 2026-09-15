@@ -27,6 +27,7 @@ from . import auth as auth_mod
 from . import budget as budget_mod
 from . import bugs
 from . import catalog as catalog_mod
+from . import findings as findings_mod
 from . import gitops
 from .config import load as load_config
 from .config import seed_project
@@ -77,8 +78,16 @@ def list_agents() -> dict:
     run = runner()
     agents = []
     launched = []
+    off_team = []
     for name, spec in sorted(run.config.agents.items()):
         provider = run.providers.get(spec.provider)
+        if run.config.team and not run.config.in_team(name) and not spec.launch:
+            # Named rather than hidden. An orchestrator that cannot see what it
+            # is missing will invent a way round the gap; one that can see it
+            # can tell the user the roster is wrong, which is the useful
+            # outcome. start_agent still refuses these.
+            off_team.append({"name": name, "description": spec.description})
+            continue
         if spec.launch:
             # The orchestrator is launched by `multiagents run`, never spawned.
             # Listing it as delegable invites trying it and getting a refusal.
@@ -96,13 +105,32 @@ def list_agents() -> dict:
             "timeout": spec.timeout,
             "available": bool(provider and provider.available()),
         })
-    return _ok({
+    payload = {
         "agents": agents,
+        "how_to_call": (
+            "Each of these has an interface contract saying what a task to it "
+            "must contain. Read it with how_to_call(<name>) before you delegate "
+            "to one for the first time — it costs one short call and it is the "
+            "difference between a run that answers your question and one that "
+            "answers a different one."
+        ),
         "launched_not_spawnable": launched,
         "you_may_spawn": run.can_spawn(),
         "your_depth": run.self_depth(),
         "max_depth": run.config.limits.get("max_depth", 3),
-    })
+    }
+    if run.config.team:
+        payload["team"] = run.config.team
+        payload["team_description"] = run.config.team_spec().get("description", "")
+    if off_team:
+        payload["not_in_this_team"] = off_team
+        payload["note"] = (
+            f"These exist but are outside the {run.config.team!r} team and "
+            f"start_agent will refuse them. If you need one, say so in your "
+            f"reply — the roster is the user's to change, not yours to route "
+            f"around."
+        )
+    return _ok(payload)
 
 
 @mcp.tool()
@@ -166,6 +194,28 @@ def agent_tree() -> dict:
 # --------------------------------------------------------------------------
 
 
+def _attach_contract(run, agent: str, result: dict) -> None:
+    """Add an agent's calling contract to the result of its FIRST spawn here."""
+    spec = run.config.agents.get(agent)
+    if spec is None:
+        return
+    contract = run.config.calling_contract(spec)
+    if not contract:
+        return
+    session = run.session()
+    seen = [node for node in run.tree.read()["nodes"].values()
+            if node.get("agent") == agent
+            and (not session or node.get("session") == session)]
+    if len(seen) > 1:                       # the one just started is in there
+        return
+    result["calling_contract"] = contract
+    result["calling_contract_note"] = (
+        f"First {agent} of this session, so here is its interface contract. If "
+        f"the task you just sent does not meet it, steer_agent now — it is "
+        f"cheaper than the run you will otherwise read and discard."
+    )
+
+
 @mcp.tool()
 async def start_agent(
     agent: str,
@@ -174,6 +224,8 @@ async def start_agent(
     timeout: int = 0,
     model: str = "",
     verifies: str = "",
+    budget_tag: str = "",
+    budget_tokens: int = 0,
 ) -> dict:
     """Start a subagent on a task. Returns immediately with an agent_id.
 
@@ -200,19 +252,171 @@ async def start_agent(
             written. Recorded so that "how often did work need redoing" is a
             fact in the tree rather than a guess from branches and timing. Cheap
             to pass and impossible to reconstruct later.
+        budget_tag: A named slice of work to spend against — a bounded context
+            under review, a feature, whatever you are budgeting. Spend is summed
+            across every run carrying the tag.
+        budget_tokens: The ceiling for that tag, in tokens. Set once, on the
+            FIRST spawn that names the tag; later values are ignored, because a
+            ceiling the spender can raise is a suggestion and the agent asking
+            to raise it is the one that has just run out. When a tag is spent,
+            start_agent refuses: decide what that slice does NOT get, say what
+            you covered and what you did not, and move on.
     """
     run = runner()
     try:
-        return _ok(await run.start(
+        result = await run.start(
             agent, task,
             workdir=workdir or None,
             timeout=timeout or None,
             model=model or None,
             verifies=verifies,
-        ))
+            budget_tag=budget_tag,
+            budget_tokens=budget_tokens,
+        )
+        # First use of this agent in this session: hand back its calling
+        # contract unasked. The brief tells you to read it beforehand, and a
+        # model that did will not need this — but one that did not has just
+        # written a task without it, and this is the moment that is still
+        # recoverable with steer_agent. Cheaper than refusing the spawn until
+        # the contract has been read, which would cost a round trip on every
+        # first delegation including the ones that were already right.
+        _attach_contract(run, agent, result)
+        return _ok(result)
     except (PermissionError, RuntimeError, ValueError, KeyError,
             FileNotFoundError) as exc:
         return _ok({"error": f"{type(exc).__name__}: {exc}"})
+
+
+@mcp.tool()
+def how_to_call(agent: str) -> dict:
+    """This agent's interface contract: how to write a task it can act on.
+
+    Read it BEFORE you first delegate to an agent in a session. It is written in
+    the agent's own brief, by whoever knows best what a task to it must contain,
+    and the agent itself never sees it — so it cannot drift from what the agent
+    actually needs the way a copy in your brief would.
+
+    `list_agents` answers "should I use this one". This answers "how do I use
+    it": what the task must contain, what must stay out of it, what state has to
+    exist first, what it hands back, and what to carry over from the run before.
+    """
+    run = runner()
+    spec = run.config.agents.get(agent)
+    if spec is None:
+        return _ok({"error": f"No agent named {agent!r}. See list_agents."})
+    contract = run.config.calling_contract(spec)
+    if not contract:
+        return _ok({"agent": agent, "description": spec.description,
+                    "contract": "",
+                    "note": "This agent's brief names no calling contract. Give "
+                            "it everything it needs up front — it cannot ask."})
+    return _ok({"agent": agent, "description": spec.description,
+                "contract": contract})
+
+
+@mcp.tool()
+def record_findings(source: str) -> dict:
+    """Ingest a merged findings file into the ledger.
+
+    Call it after merging an auditor's (or characterizer's, or adversary's)
+    branch, with the path it wrote — `context/review/C1.md`. Parsing is
+    mechanical: you do not have to read the file or transcribe anything, which
+    is the point. Your context should hold the index, not the evidence.
+
+    A new id is recorded `open`. An id already in the ledger keeps whatever
+    decision it carries — a re-run must not quietly reopen a finding the user
+    accepted. But an id that was marked `fixed` and has been filed again comes
+    back as a **regression**, and that is the number worth watching: it means
+    the fix did not hold, and it is how this loop finds out it is not
+    converging instead of generating a fresh id for the same problem forever.
+    """
+    run = runner()
+    denied = _root_only("record_findings")
+    if denied:
+        return _ok({"error": denied})
+    return _ok(findings_mod.record(run.paths.root, source,
+                                   gitops.head_sha(run.paths.root)))
+
+
+@mcp.tool()
+def set_finding_status(finding_id: str, status: str, note: str = "") -> dict:
+    """Record what became of a finding.
+
+    `open` → `scheduled` when it becomes work, `fixed` when that work merges,
+    `accepted` when it is real and nobody will act on it, `deferred` when it is
+    real and not now. `regression` is set for you when a fixed finding is filed
+    again; you should not need to set it by hand.
+
+    History is appended, never replaced. The findings file itself is never
+    touched — it is evidence written against a commit, and editing it to say
+    "fixed" leaves its line numbers and its trace pointing at code that has
+    since moved.
+
+    Say WHY in the note, especially for `accepted`. The next review reads this,
+    and "accepted" with no reason gets relitigated every time.
+    """
+    run = runner()
+    denied = _root_only("set_finding_status")
+    if denied:
+        return _ok({"error": denied})
+    role = os.environ.get("MULTIAGENTS_ROLE") or "orchestrator"
+    return _ok(findings_mod.set_status(run.paths.root, finding_id, status,
+                                       note=note,
+                                       sha=gitops.head_sha(run.paths.root),
+                                       by=role))
+
+
+@mcp.tool()
+def list_findings(status: str = "", context: str = "") -> dict:
+    """The ledger as an index — id, status, severity, class, one line each.
+
+    Deliberately without the evidence. You are deciding what to work on, and a
+    reader that loads every trace to make that decision has spent its context
+    before it gets to the decision. Use read_finding for the one you are
+    actually deciding about.
+
+    `live` counts what still needs someone: open, scheduled and regressed.
+    `accepted` and `deferred` are decisions, not unfinished business. When
+    `done` is true there is nothing outstanding that anyone has chosen to
+    care about, which is what "this project is reviewed" means.
+    """
+    return _ok(findings_mod.summary(runner().paths.root, status, context))
+
+
+@mcp.tool()
+def read_finding(finding_id: str) -> dict:
+    """One finding's full text and its history, pulled on demand.
+
+    A findings file holds every finding for a context, so opening it to answer
+    a question about one of them loads all of them. This keeps a conversation
+    about F12 costing the size of F12.
+    """
+    return _ok(findings_mod.evidence(runner().paths.root, finding_id))
+
+
+@mcp.tool()
+def budget_tag_status(tag: str = "") -> dict:
+    """What a named slice of work has spent, and what it has left.
+
+    Check this before deciding how much of a slice to attempt, not after
+    start_agent refuses. A refusal is recoverable but wastes the turn, and the
+    useful move — deciding what this slice will not get — is one you make
+    better before you are out than after.
+    """
+    run = runner()
+    tree = run.tree
+    if tag:
+        cap = tree.budget_for_tag(tag)
+        spent = int(tree.usage_for_tag(tag).get("total", 0) or 0)
+        return _ok({"tag": tag, "tokens_spent": spent, "tokens_budgeted": cap,
+                    "tokens_left": max(0, cap - spent) if cap else None,
+                    "exhausted": bool(cap and spent >= cap)})
+    tags = {node.get("budget_tag") for node in tree.read()["nodes"].values()}
+    known = sorted(t for t in tags if t) or []
+    return _ok({"tags": [
+        {"tag": t, "tokens_spent": int(tree.usage_for_tag(t).get("total", 0) or 0),
+         "tokens_budgeted": tree.budget_for_tag(t)} for t in known
+    ]})
 
 
 @mcp.tool()

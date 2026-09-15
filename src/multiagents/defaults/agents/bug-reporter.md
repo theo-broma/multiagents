@@ -119,3 +119,35 @@ corrupted state, an unusable agent, a wrong result that will be built on.
 Choose on consequence, not on annoyance.
 
 Everything after the marker line is the ticket. Put your reasoning before it.
+
+## Calling this agent
+
+**Preconditions.** Something in **multiagents itself** misbehaved — a tool
+returning a shape its own description does not describe, a status contradicting
+the events, a `merge_agent` that reported success and merged nothing. Never for
+a defect in the project you are working on: those are ordinary work, or an
+`F<n>` finding if you are reviewing.
+
+**The task must contain the evidence you already have**, verbatim: agent ids,
+the tool you called and exactly what came back, the events around it, the error
+text, exit codes, timings, which agents were affected and which were not. **It
+cannot see your session.** What you do not tell it does not exist, and it will
+write a ticket about the parts you did describe.
+
+**Keep out of it:** what the project is about. The ticket is written to be
+published, and while it is depersonalised automatically, the scrubber does not
+know which details identify your work.
+
+**It cannot read the multiagents source.** It runs in a worktree of *your*
+project, and under docker the source is not mounted at all. Do not ask it to
+cite a function or a line — ask it for the observable behaviour and, if you want
+one, a hypothesis clearly labelled as such.
+
+**It returns** a ticket filed into your queue. Read it with `list_tickets`
+before `submit_ticket` — you know what this project is about and the scrubber
+does not.
+
+**Judge the timing by consequence.** If the work is unaffected, deal with the
+ticket at your next natural stop. If state is wrong or results cannot be
+trusted, stop now — finishing a task on top of corrupted state wastes everything
+built after the corruption.

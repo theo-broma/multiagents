@@ -21,7 +21,8 @@
 #
 # Model choices below are a deliberate spread across the CLIs so the whole
 # system is exercised from day one. Retune once your subscription changes what
-# is available — and see the note on checking pairs at the bottom before you do.
+# is available — and read BOTH notes at the bottom of this file before you do:
+# one on checking pairs, one on the opencode spend tier.
 
 agents:
 
@@ -35,7 +36,7 @@ agents:
   # roster is the one decision a human stays in the loop for.
   initializer:
     provider: claude
-    model: sonnet
+    model: opus
     instructions: team/_initializer.md
     description: Shapes the project with you. Launched by `multiagents init-agent`.
     launch: true
@@ -53,7 +54,7 @@ agents:
   # is the one resource here that cannot be replaced.
   orchestrator:
     provider: claude
-    model: sonnet
+    model: opus
     instructions: team/_orchestrator.md
     description: Drives the project. Launched by `multiagents run`.
     launch: true
@@ -82,7 +83,7 @@ agents:
     model: gemini-3.1-pro-high
     instructions: team/advisor.md
     models:
-      opencode: opencode-go/deepseek-v4-pro
+      opencode: opencode-go/qwen3.6-plus
     description: >-
       Consultative second opinion. Reads the code and advises; decides and
       changes nothing.
@@ -98,28 +99,57 @@ agents:
     timeout: 900
     silence_timeout: 180
 
+  # Reads the codebase and answers one question, burning ITS context instead of
+  # the orchestrator's. That is the whole of its value and it is worth a roster
+  # slot: the orchestrator's context is the one resource here that cannot be
+  # replaced, and it now writes the interface contracts and reads the final
+  # diff as well as deciding everything. Cheap, read-only, blocks nothing, and
+  # runs alongside any other work.
+  #
+  # It checks nobody's work, so it carries no model-family constraint.
+  researcher:
+    provider: opencode
+    model: opencode-go/glm-5.3-flash
+    instructions: team/researcher.md
+    models:
+      agy: gemini-3.8-flash-medium
+    description: Reads the codebase and answers questions. No writes.
+    writes: false
+    permission: readonly
+    can_spawn: false
+    timeout: 600
+    silence_timeout: 120
+
   # ---------------------------------------------------------------- phase 3 --
   # Writes the black-box behavioural suite from the orchestrator's contract,
   # BEFORE any implementation exists. Red is the correct outcome of its run.
   #
-  # On a strong model rather than a fast one, unlike earlier versions of this
-  # roster: the job is no longer "iterate until green" but "decide what done
-  # means", and an exhaustive edge-case suite written against an interface that
-  # does not exist yet is the most consequential writing in the pipeline. A
-  # cheap test engineer is how a project ends up with a green suite that
-  # asserts the happy path and nothing else.
+  # On the strongest model in the roster, not a fast one: the job is not
+  # "iterate until green" but "decide what done means", and an exhaustive
+  # edge-case suite written against an interface that does not exist yet is the
+  # most consequential writing in the pipeline. A cheap test engineer is how a
+  # project ends up with a green suite that asserts the happy path and nothing
+  # else.
+  #
+  # It shares `opus` with implementer-deep. See the note at the bottom of this
+  # file for what that costs and how to undo it.
   tester:
-    provider: agy
-    model: gemini-3.1-pro-high
+    provider: claude
+    model: opus
     instructions: team/tester.md
     models:
-      opencode: opencode-go/gpt-5.6-luna
+      # Deliberately NOT agy here. With claude gone, the two implementers that
+      # fall back land on agy; sending the tester there too would put the
+      # contract and the code it holds on one provider at the worst moment.
+      opencode: opencode-go/kimi-k2.6
     description: >-
       Writes the black-box behavioural test suite that defines done, before the
       implementation exists. Red is success.
     writes: true
     permission: sandbox
-    effort: high
+    # No `effort`: that is an agy flag. claude declares only max_budget_usd, so
+    # an effort key here would be silently dropped and read as if it did
+    # something. Opus is the strong setting; there is no dial to turn.
     can_spawn: false
     timeout: 1500
     silence_timeout: 240
@@ -178,8 +208,8 @@ agents:
     max_steps: 40
 
   implementer:
-    provider: opencode
-    model: opencode-go/kimi-k2.7-code
+    provider: claude
+    model: sonnet
     instructions: team/implementer.md
     models:
       agy: claude-sonnet-4-6
@@ -198,30 +228,72 @@ agents:
   # handed back. Expensive per run, so the orchestrator is told to spend it on
   # judgement rather than on importance.
   implementer-deep:
-    provider: opencode
-    model: opencode-go/kimi-k3
+    provider: claude
+    model: opus
     instructions: team/implementer.md
     models:
-      # A fallback may say what this agent BECOMES elsewhere, not just which
-      # model. `effort` belongs to a provider's namespace as much as a model id
-      # does: this one carries effort: high, and agy refuses that flag for this
-      # model — "--effort is not supported for model claude-opus-4-6-thinking",
-      # in eight seconds, on a real run. Naming it empty drops the flag.
-      agy:
-        model: claude-opus-4-6-thinking
-        effort: ""
+      agy: claude-opus-4-6-thinking
     description: >-
       Strong coder for work that needs design judgement, or that a lower tier
       escalated. Expensive; used deliberately.
     writes: true
     permission: full
-    effort: high
+    # No `effort`, for two reasons that happen to agree. claude declares no
+    # such flag, so it would be dead config here; and agy REFUSES it for
+    # claude-opus-4-6-thinking, the fallback — "--effort is not supported for
+    # model claude-opus-4-6-thinking", in eight seconds, on a real run. When
+    # this agent was on opencode the fallback had to name `effort: ""` to drop
+    # it. Now there is nothing to drop.
     can_spawn: true
     max_children: 2
     timeout: 2700
     silence_timeout: 300
     # Measured: real runs of this reach 700-800 steps.
     max_steps: 1000
+
+  # A SECOND conversational advisor, reached by `implementer-deep` rather than
+  # by the orchestrator. Separate from `advisor` because consult() finds a
+  # standing conversation by AGENT NAME: a developer consulting `advisor` would
+  # resume the orchestrator's session, landing an algorithm question in the
+  # middle of orchestration context and racing the orchestrator for the same
+  # session. Two names, two conversations.
+  #
+  # Deliberately NOT a Claude model, and that is the whole reason it exists
+  # here. `tester` and `implementer-deep` both run on opus — the one accepted
+  # exception to the checking-pair rule — so the agent writing the contract and
+  # the agent satisfying it share a view of which cases matter. This is the
+  # only participant in that loop on a different family.
+  #
+  # Reached by `implementer` and `implementer-deep`. NOT by
+  # `implementer-quick`, which has can_spawn: false deliberately — a cheap task
+  # that turns out to need a conversation was routed to the wrong tier, and
+  # handing it back costs one cheap run instead of a consult and then the
+  # escalation anyway.
+  #
+  # Including the default tier is a deliberate call and it is the expensive
+  # half: that tier runs far more often than the deep one, so this will be
+  # consulted far more often than `advisor` ever is. Two things keep the bill
+  # honest, and both live in the briefs rather than here — the developer is
+  # told to check what it can check first (run the test, read the function,
+  # find the caller), and this agent is told to answer and stop rather than
+  # hold forth. If it turns out to be consulted reflexively, the lever is
+  # can_spawn on `implementer`, not a longer instruction.
+  dev-advisor:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: team/dev-advisor.md
+    models:
+      opencode: opencode-go/kimi-k2.7-code
+    description: >-
+      Second opinion for the deep implementer, mid-task. Names the problem,
+      suggests an approach, never writes the implementation.
+    conversational: true
+    writes: false
+    permission: readonly
+    effort: high
+    can_spawn: false
+    timeout: 600
+    silence_timeout: 180
 
   # ---------------------------------------------------------------- phase 5 --
   # Attacks code that already passes its tests: mutation testing, fuzzing,
@@ -235,11 +307,11 @@ agents:
   # the one thing it must not do.
   #
   # A strong-reasoning pick, and yours to change; the family difference is the
-  # part that matters. This model previously carried the `pentester` brief,
-  # whose attacker-position work this role absorbed.
+  # part that matters. It was `deepseek-v4-pro` until the opencode pins were
+  # held to the $60 monthly tier — see the note at the bottom of this file.
   adversary:
     provider: opencode
-    model: opencode-go/deepseek-v4-pro
+    model: opencode-go/qwen3.7-plus
     instructions: team/adversary.md
     models:
       agy: gemini-3.8-flash-high
@@ -252,6 +324,174 @@ agents:
     can_spawn: false
     timeout: 1500
     silence_timeout: 240
+    # EVERYTHING that already exists is read-only to it, which is stricter than
+    # any other agent — and correct, because its product is new files plus its
+    # report. It never legitimately modifies anything.
+    #
+    # This closes a hole the tests-only default left open. To find out whether
+    # the suite actually holds, it MUTATES the implementation — flips a
+    # comparison, deletes a validation branch — and is told to revert each
+    # mutation afterwards. Its branch is then merged, because that is how its
+    # failing tests reach you. An instruction is all that stood between a
+    # forgotten revert and a deliberately broken operator landing on the base
+    # branch inside a commit that reads as "new tests". Now a forgotten one is
+    # reverted at the gate.
+    #
+    # It also means it cannot weaken an existing test, which its brief already
+    # forbids, so its tests go in NEW files named for what they attack.
+    readonly_paths: ["**"]
+
+  # ---------------------------------------------------------------- phase 6 --
+  # Ordinary code review, which nothing else here does. The tester asks whether
+  # the code matches the contract; the adversary asks whether it survives
+  # attack. Neither asks whether it is GOOD code — an N+1 query, a leaked
+  # handle, a swallowed exception, a retry with no backoff. All of those pass a
+  # green suite and survive fuzzing.
+  #
+  # It also spares the orchestrator reading the whole diff itself, which is the
+  # largest context cost in phase 6. It does not replace that reading: checking
+  # the diff against BRIEF.md is asking "was the right thing built", and only
+  # the orchestrator can answer it. So this is an added run, not a saved one —
+  # which is why its brief carries a threshold rather than running on every
+  # merge. A checker used on everything teaches its reader to skim it.
+  reviewer:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: team/reviewer.md
+    models:
+      opencode: opencode-go/minimax-m3
+    description: Reviews a diff for correctness and reports findings. No writes.
+    writes: false
+    permission: readonly
+    effort: high
+    can_spawn: false
+    timeout: 900
+    silence_timeout: 180
+
+  # ----------------------------------------------------- the review team --
+  # These five run under `team: review`. The rest of that team — advisor,
+  # researcher, adversary, bug-reporter — is shared with the implement team,
+  # which is most of why a team is a roster subset rather than a parallel
+  # universe of agents.
+
+  # Maps the codebase into at most SEVEN bounded contexts, ranked by what it
+  # would cost to be wrong in each, with a suggested budget per context. Seven
+  # is about the human who approves the list: forty micro-components get
+  # rubber-stamped or abandoned, and either way nobody has chosen.
+  #
+  # Reads widely and measures; on a strong model because the ranking is the
+  # decision everything downstream is held to, and a bad map wastes every
+  # budget under it.
+  cartographer:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: team/cartographer.md
+    models:
+      opencode: opencode-go/qwen3.6-plus
+    description: >-
+      Maps a codebase into at most seven ranked, budgeted bounded contexts.
+      Writes context/review/MAP.md. No findings, no fixes.
+    writes: true
+    permission: sandbox
+    effort: high
+    can_spawn: false
+    timeout: 1800
+    silence_timeout: 300
+
+  # Makes a context observable, alone, before the characterizers fan out. The
+  # ONLY agent in this team without readonly_paths: it must be able to modify
+  # shared test infrastructure, and that is exactly why it runs by itself.
+  # Characterizers are add-only so they cannot collide; the cost of that is
+  # that somebody has to build the thing they share, first.
+  harness:
+    provider: claude
+    model: sonnet
+    instructions: team/harness.md
+    models:
+      agy: claude-sonnet-4-6
+    description: >-
+      Builds or extends the test harness for one context so it can be
+      exercised. Runs alone, before characterization.
+    writes: true
+    permission: full
+    can_spawn: false
+    timeout: 2400
+    silence_timeout: 300
+    max_steps: 1000
+
+  # Pins what the code currently does, including the parts that are wrong —
+  # an unpinned bug is indistinguishable from an unpinned feature. Green is
+  # success here, which inverts the tester's stance.
+  #
+  # Add-only, like the adversary, and for the same reason twice over: several
+  # run in parallel and must not fight over shared fixtures, and none of them
+  # may quietly adjust the system it is measuring.
+  characterizer:
+    provider: opencode
+    model: opencode-go/kimi-k2.7-code
+    instructions: team/characterizer.md
+    models:
+      # NOT gemini-3.1-pro-high, which is where the auditor lands: the auditor
+      # partly judges what this agent chose to pin, and with opencode down they
+      # would have collapsed onto one model at the moment nobody is watching.
+      agy: claude-sonnet-4-6
+    description: >-
+      Writes characterization tests pinning a context's current behaviour, and
+      flags every behaviour it had to pin that looks wrong.
+    writes: true
+    permission: sandbox
+    can_spawn: false
+    timeout: 1800
+    silence_timeout: 240
+    max_steps: 600
+    readonly_paths: ["**"]
+
+  # The review team's reviewer. Not `reviewer`, which returns a verdict on a
+  # diff: this one is given code that already shipped and produces durable
+  # numbered findings with an evidence tier, which an initializer later turns
+  # into work and an implementer cites in a commit.
+  #
+  # On a different family from the characterizer, whose pinned behaviour it is
+  # partly judging.
+  auditor:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: team/auditor.md
+    models:
+      opencode: opencode-go/qwen3.6-plus
+    description: >-
+      Audits existing code and writes numbered findings with an evidence tier,
+      severity and disposition. Fixes nothing.
+    writes: true
+    permission: sandbox
+    effort: high
+    can_spawn: false
+    timeout: 1800
+    silence_timeout: 300
+
+  # Assembles the findings into one document. Deliberately NOT the
+  # orchestrator's job: holding every finding in the one context that cannot be
+  # replaced, in order to write a summary, is how a long review ends with
+  # hallucinated findings and dropped early ones.
+  #
+  # Cheap on purpose. It selects and orders; it never re-derives a severity,
+  # because the auditor recorded the reasoning precisely so this agent does not
+  # have to think about it.
+  reporter:
+    provider: opencode
+    model: opencode-go/qwen3.7-plus
+    instructions: team/reporter.md
+    models:
+      agy: gemini-3.8-flash-high
+    description: >-
+      Assembles context/review/REPORT.md from the findings files. Discovers
+      nothing; selects, orders and frames.
+    writes: true
+    permission: sandbox
+    can_spawn: false
+    timeout: 1200
+    silence_timeout: 240
+    readonly_paths: ["**"]
 
   # ------------------------------------------------------------ infrastructure
   # Writes up defects in multiagents ITSELF — not bugs in your project, which
@@ -285,7 +525,10 @@ agents:
   critic:
     disabled: true
     provider: opencode
-    model: opencode-go/gpt-5.6-luna
+    # Repinned to the $60 tier even though it never runs: a disabled entry is a
+    # template someone re-enables, and it should not carry a pin the rest of
+    # the file forbids.
+    model: opencode-go/qwen3.6-plus
     description: Deprecated. Use `advisor`.
 
   gemini:
@@ -297,9 +540,72 @@ agents:
 # ---------------------------------------------------------------------------
 # Checking pairs, if you repin
 #
-# Three of these agents check each other's work, and a checker sharing the
-# author's blind spots agrees with it — silently, at the moment nobody is
-# watching. `tester`, the `implementer` tiers and `adversary` must land on
-# DIFFERENT models, and must still do so after a failover: the `models:`
-# fallbacks above are chosen so that with either provider down, no two of them
-# collapse onto the same model. Check that again if you change a pin.
+# A checker sharing the author's blind spots agrees with it — silently, at the
+# moment nobody is watching. So each of `tester`, `adversary` and `reviewer`
+# should land on a different model from every `implementer` tier, and
+# `adversary` on a different one from `tester`, since its mutation testing is a
+# judgement on the tester's coverage. That should hold after a failover too:
+# the `models:` fallbacks above are chosen so it survives any one provider
+# going down.
+#
+# `tester` and `reviewer` MAY share. They are not checking each other — they
+# ask different questions about the same diff.
+#
+# ONE EXCEPTION, chosen deliberately: `tester` and `implementer-deep` are both
+# on `opus`. The requested distribution puts the strongest model on both, and
+# with one model named there is no way to have both and keep them apart. What
+# it costs is real and worth knowing: the agent writing the contract and the
+# agent hardest to satisfy it share a view of which edge cases matter, so a
+# case that does not occur to one will not occur to the other, and the suite
+# will look complete either way. `adversary` is the backstop — it is on a
+# different family precisely so something in the chain does not share that
+# blind spot.
+#
+# To remove the exception, move ONE of them. `tester` to gemini-3.1-pro-high,
+# or `implementer-deep` to agy/claude-opus-4-6-thinking (nearly the same model,
+# so that one is mostly cosmetic — prefer the first).
+#
+# Check this again if you change a pin. A test asserts it for every outage
+# direction, because it is exactly the property that degrades quietly.
+
+# ---------------------------------------------------------------------------
+# The opencode spend tier
+#
+# Every `opencode-go/*` pin here is on a model with a **$60 monthly limit**.
+# The subscription meters each model against its own ceiling, and the $15 and
+# $30 models drain far too quickly to run a whole team on — a single deep
+# implementer or an adversary fuzzing for an afternoon can eat a $15 allowance
+# on its own, and when it goes the agent stops rather than degrading.
+#
+# So this is a budget rule, not a capability one, and it costs something real:
+# the strongest models opencode offers (kimi-k3, deepseek-v4-pro, grok-4.6,
+# qwen3.8-max) are all $15 and are deliberately NOT used. What replaced them:
+#
+#   adversary          deepseek-v4-pro  -> qwen3.7-plus
+#   tester (fallback)  gpt-5.6-luna     -> kimi-k2.6
+#   reviewer (fb)      gpt-5.6-luna     -> minimax-m3
+#   advisor (fallback) deepseek-v4-pro  -> qwen3.6-plus
+#
+# `implementer` and `implementer-deep` have since moved to claude entirely, so
+# the tier no longer constrains them; `implementer-quick`, `adversary`,
+# `researcher` and `bug-reporter` are what still spend opencode.
+#
+# On the $60 tier as of 2026-09-15:
+#   glm-5.3-flash  glm-5.2  glm-5.1  kimi-k2.7-code  kimi-k2.6  longcat-2.0
+#   mimo-v2.5  minimax-m3  minimax-m2.7  qwen3.7-plus  qwen3.6-plus  hy3
+#   muse-spark-1.2-contributor  muse-spark-1.3-contributor
+#
+# NOT on it, so not to be pinned: glm-5.3, kimi-k3, mimo-v2.5-pro, qwen3.8-max,
+# deepseek-v4-pro, deepseek-v4-flash-vision-exp, grok-4.6, gpt-5.6-luna ($15);
+# qwen3.8-flash, qwen3.7-max, deepseek-v4-flash, hy4-preview ($30). `omen-alpha`
+# and the `opencode/*` free tier are unpriced here, so treat them as unknown.
+#
+# **Watch for promotional ceilings.** A model can sit at $60 temporarily — the
+# published table showed DeepSeek V4.1 Flash at "$15 $60, 4x, ends Sep 20",
+# which is a $15 model wearing a $60 badge for a few days. Pinning to one of
+# those buys an agent that quietly starts running out next week. Check the
+# limit, not the badge, and prefer a model that has always been $60.
+#
+# These ceilings are not in `models.yaml` — `refresh-models` records what a CLI
+# offers, not what it costs — so nothing in code can enforce this. A test pins
+# the roster against the list above; the list itself is maintained by hand.

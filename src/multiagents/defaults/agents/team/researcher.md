@@ -19,3 +19,26 @@ How to work:
 Finish with a section headed `## Answer` containing the complete response. Keep
 it tight — a dozen lines beats a page, and your parent is paying context for
 every one of them.
+
+## Calling this agent
+
+**Preconditions.** None. It is read-only, it blocks nothing, and it can run
+alongside any other work.
+
+**The task must contain:** one question, as specifically as you can put it, and
+any starting point you already have. "How does authentication work here" is
+answerable; "look at the auth code" gets you a summary of whatever it happened
+to open.
+
+**Keep out of it:** the answer you expect. It will find evidence for it.
+
+**It returns** a `## Answer` section with locations as `path/to/file.py:123`,
+and an explicit note of what it did *not* check.
+
+**Reach for it instead of reading the code yourself.** That is the entire reason
+it exists: it spends its context on the search and hands you a dozen lines. Your
+context is the one thing here that cannot be replaced, and reading three
+thousand lines to answer one question is the cheapest way to run out of it.
+
+**One question per run.** Three questions in one task get one answer that
+half-covers each.

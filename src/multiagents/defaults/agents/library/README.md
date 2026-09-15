@@ -10,18 +10,26 @@ Nothing here is active until you do.
 
 The point of the library is that adding a specialist should be a paste, not a
 writing exercise. A brief written in a hurry during initialisation is worse than
-one that has been used and revised, and a project that needs a reviewer needs
-roughly the same reviewer as the last one did.
+one that has been used and revised, and a project that needs a pentester needs
+roughly the same pentester as the last one did.
 
 **Adding one yourself** is the same paste. The blocks are complete: a provider,
 a model, a brief path and the permissions the role needs. Retune the model to
 what your subscription actually has — `multiagents refresh-models` lists it.
 
-**Two rules worth keeping when you edit these.** Every agent names a fallback
+**Three rules worth keeping when you edit these.** Every agent names a fallback
 model on the other provider under `models:`, or it waits instead of failing over
-when its provider is exhausted. And where two agents check each other's work,
-they stay on different model families — a checker that shares the author's blind
-spots agrees with it, which is the one thing it must not do.
+when its provider is exhausted. Where two agents check each other's work, they
+stay on different model families — a checker that shares the author's blind
+spots agrees with it, which is the one thing it must not do. And every
+`opencode-go/*` pin is on a model with a **$60 monthly limit**; the $15 and $30
+models drain too fast to run a team on. The allowed list, and why the strongest
+opencode models are deliberately not used, is at the bottom of `agents.yaml`.
+
+`reviewer` and `researcher` used to live here and are now in the default team:
+review covers a question neither the tester nor the adversary asks, and a cheap
+read-only researcher exists to spend its own context instead of the
+orchestrator's. Both earned a permanent slot.
 
 ---
 
@@ -30,10 +38,17 @@ spots agrees with it, which is the one thing it must not do.
 Turns an intention into numbered, individually testable requirements in
 `context/specs/<feature>.md`. Writes no code.
 
-**Add it when** the project is one where features are specified before they are
-built, and you want the requirements written by something other than whoever
-designs the solution. Without it the orchestrator writes the contract itself,
-which is faster and grades its own homework.
+**Add it when** the domain carries the difficulty — money, regulation, real
+invariants, anything where the interesting requirements are never in the
+request. Then you want them written by something other than whoever designs the
+solution.
+
+Without it the orchestrator writes the contract itself, which is faster and is
+the default for good reason: it is the only agent holding the brief, the earlier
+phases and your conversation, while a specifier starts cold. Two checks already
+stand between that and marking its own homework — the advisor reviews the
+contract before anyone builds to it, and the tester reports what it could not
+express as a test. This is for when those are not enough.
 
 ```yaml
   specifier:
@@ -41,7 +56,7 @@ which is faster and grades its own homework.
     model: gemini-3.1-pro-high
     instructions: library/specifier.md
     models:
-      opencode: opencode-go/deepseek-v4-pro
+      opencode: opencode-go/qwen3.6-plus
     description: >-
       Turns an intention into numbered, individually testable requirements in
       context/specs/<feature>.md. Writes no code.
@@ -65,7 +80,7 @@ different model family on purpose.
 ```yaml
   spec-adversary:
     provider: opencode
-    model: opencode-go/gpt-5.6-luna
+    model: opencode-go/minimax-m3
     instructions: library/spec-adversary.md
     models:
       agy: claude-sonnet-4-6
@@ -78,56 +93,6 @@ different model family on purpose.
     can_spawn: false
     timeout: 1200
     silence_timeout: 240
-```
-
-## `reviewer` — reads a diff, reports defects
-
-Correctness review with a location, a concrete failure and a machine-read
-verdict. No writes, no fixes.
-
-**Add it when** you want a correctness pass the orchestrator is not doing
-itself — a large team, a long session, or a project where the orchestrator's
-context is the bottleneck. The default team folds this into Phase 6, which is
-cheaper and less thorough.
-
-```yaml
-  reviewer:
-    provider: agy
-    model: gemini-3.1-pro-high
-    instructions: library/reviewer.md
-    models:
-      opencode: opencode-go/gpt-5.6-luna
-    description: Reviews a diff for correctness and reports findings. No writes.
-    writes: false
-    permission: readonly
-    effort: high
-    can_spawn: false
-    timeout: 900
-    silence_timeout: 180
-```
-
-## `researcher` — reads widely, reports narrowly
-
-Answers questions about a codebase, burning its own context instead of its
-parent's.
-
-**Add it when** the codebase is large or unfamiliar enough that "how does X
-work here?" is a real question. It is cheap, read-only, blocks nothing and can
-run alongside anything.
-
-```yaml
-  researcher:
-    provider: opencode
-    model: opencode-go/glm-5.3-flash
-    instructions: library/researcher.md
-    models:
-      agy: gemini-3.8-flash-medium
-    description: Reads the codebase and answers questions. No writes.
-    writes: false
-    permission: readonly
-    can_spawn: false
-    timeout: 600
-    silence_timeout: 120
 ```
 
 ## `security-advisor` — consulted while the design can still move
@@ -146,7 +111,7 @@ that a boundary can still be moved for free.
     model: gemini-3.1-pro-high
     instructions: library/security-advisor.md
     models:
-      opencode: opencode-go/gpt-5.6-luna
+      opencode: opencode-go/qwen3.7-plus
     description: >-
       Design-time security advice, phrased as candidate requirements the
       specifier can absorb. Advises; decides nothing.
@@ -173,7 +138,7 @@ by whoever approved the design.
 ```yaml
   pentester:
     provider: opencode
-    model: opencode-go/deepseek-v4-pro
+    model: opencode-go/glm-5.2
     instructions: library/pentester.md
     models:
       # effort: high does not survive the move to agy for this model.

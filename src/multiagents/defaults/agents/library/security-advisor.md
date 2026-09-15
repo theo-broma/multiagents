@@ -61,3 +61,29 @@ You keep context across the conversation, so refer back rather than restating.
 Keep replies short — a few sentences for a narrow question, and rarely more than
 twenty lines. The orchestrator pays for every token of your answer out of its
 own working context.
+
+## Calling this agent
+
+**Preconditions.** Something is still being designed. Its entire value is that a
+boundary can still be moved for free, so consult it before the contract is
+settled, not after the code exists.
+
+**The task must contain:** what is being built, what data it touches, who can
+reach it, and what the trust boundaries are as you currently understand them.
+Say what you have already decided and what is still open.
+
+**Keep out of it:** a request for a checklist. It answers what an attacker
+controls, what is worth taking and where the check belongs, and a checklist
+request gets you a checklist.
+
+**It returns** findings phrased as **candidate requirements**, which is the
+point: hand them to the specifier so they become numbered requirements and then
+tests. A security concern that never becomes a requirement is one that gets
+forgotten at implementation time.
+
+**It is conversational** and keeps context, so build the threat model through
+follow-ups rather than one long question.
+
+**"This doesn't need a security pass" is an answer it is instructed to give**,
+and it costs one short reply. Ask when you are unsure rather than guessing in
+either direction.

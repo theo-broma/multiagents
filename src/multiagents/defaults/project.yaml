@@ -150,6 +150,58 @@ security:
 # Ceilings. Recursion makes these mandatory rather than advisory: an agent that
 # can spawn agents that can spawn agents is an exponential with a credit card.
 # --------------------------------------------------------------------------
+# Which pipeline this project is currently running. A team is an orchestrator
+# brief plus the roster that executes it: building new work and auditing an
+# existing system are different jobs and want differently shaped teams.
+#
+# `multiagents run --team <name>` overrides this for one run. The initializer
+# proposes a change when the project's phase changes; accepting it is a human
+# edit here, like any other roster decision.
+#
+# This key shipping in the DEFAULTS layer is what keeps a project written
+# before teams existed working: the layers deep-merge, so such a project
+# resolves to `implement` and behaves exactly as it did.
+team: implement
+
+teams:
+  implement:
+    description: >-
+      Builds new work from BRIEF.md: contract, tests, implementation, attack,
+      review, delivery.
+    # The orchestrator's brief, composed in order. The first file is the
+    # team-independent half — branches, budget, parked questions, delegation,
+    # concurrency — and the second is this team's pipeline. Split rather than
+    # copied because a per-team copy of the common half drifts invisibly, which
+    # is the same reason the three coder tiers share one brief.
+    orchestrator: [team/_orchestrator.md, teams/implement/pipeline.md]
+    roster:
+      - advisor
+      - dev-advisor
+      - researcher
+      - tester
+      - implementer-quick
+      - implementer
+      - implementer-deep
+      - adversary
+      - reviewer
+      - bug-reporter
+
+  review:
+    description: >-
+      Audits an existing codebase one bounded context at a time: map, gate,
+      harness, characterize, attack, report. Builds no features.
+    orchestrator: [team/_orchestrator.md, teams/review/pipeline.md]
+    roster:
+      - advisor
+      - researcher
+      - cartographer
+      - harness
+      - characterizer
+      - auditor
+      - adversary
+      - reporter
+      - bug-reporter
+
 limits:
   max_depth: 3              # root orchestrator is depth 0
   max_children: 2           # per node, unless the agent overrides it

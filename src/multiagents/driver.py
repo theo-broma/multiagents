@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from dataclasses import replace
 import os
 import signal
 import subprocess
@@ -57,14 +58,25 @@ def _write_mcp_config() -> Path:
     path.write_text(json.dumps(config, indent=2) + "\n")
     return path
 
-def _launched_spec(config, role: str):
+def _launched_spec(config, role: str, team: str = ""):
     """The roster entry launched by a given command, or None.
 
     Both the orchestrator and the initializer are launched rather than spawned;
     the role says which door they come through.
+
+    The ORCHESTRATOR's brief varies by team — that is most of what a team is —
+    so an active team's `orchestrator:` briefs replace the roster entry's. The
+    INITIALIZER's never does, and that is deliberate rather than an oversight:
+    it is the agent that decides which team comes next, so a team-scoped
+    initializer could not pivot a project from reviewing to building. It is not
+    a team member; it is what hires the team, and it runs outside them.
     """
     for spec in config.agents.values():
         if spec.launch and spec.role == role:
+            if role == "orchestrator":
+                briefs = config.team_spec(team).get("orchestrator")
+                if briefs:
+                    spec = replace(spec, instructions=briefs)
             return spec
     # An entry marked launch: true with no role still serves as the orchestrator,
     # so a config written before roles existed keeps working.
@@ -309,7 +321,9 @@ def _launch_agent(paths, config, role: str, resume: bool,
     crash, quota, or the model simply stopping — is followed by another, which
     is the whole point of leaving it running overnight.
     """
-    spec = _launched_spec(config, role)
+    # The orchestrator's brief is team-dependent; the initializer's never is,
+    # because it is the agent that decides which team comes next.
+    spec = _launched_spec(config, role, config.team)
     if spec is None:
         print(f"No agent in agents.yaml is marked `launch: true, role: {role}`.",
               file=sys.stderr)

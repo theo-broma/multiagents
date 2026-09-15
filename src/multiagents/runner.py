@@ -26,6 +26,7 @@ import json
 import os
 import random
 import re
+import textwrap
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from typing import Any
 
 from . import budget as budget_mod
 from . import gitops
+from . import config as config_mod
 from .config import AgentSpec, Config, matches_any
 from .executor import build_env, get_executor, prepare_home
 from .executor.base import Handle
@@ -126,6 +128,15 @@ TICKET = re.compile(r"(?im)^[ \t]*TICKET\((blocking|minor)\)[ \t]*:[ \t]*(.+)$")
 VERDICT = re.compile(
     r"(?im)^[ \t]*VERDICT\((approved|rejected)(?:[ \t]*,[ \t]*(\d+))?\)[ \t]*:[ \t]*(.*)$")
 PROPOSED_FIX = re.compile(r"(?im)^[ \t]*PROPOSED_FIX[ \t]*:[ \t]*$")
+
+
+def _wrap_globs(patterns: list[str], limit: int = 12) -> str:
+    """Indented, wrapped list of globs for the generated preamble."""
+    shown = ", ".join(f"`{p}`" for p in patterns[:limit])
+    if len(patterns) > limit:
+        shown += f", and {len(patterns) - limit} more"
+    return textwrap.fill(shown, width=76, initial_indent="    ",
+                         subsequent_indent="    ") + "\n"
 
 
 PREAMBLE = """\
@@ -460,7 +471,8 @@ class Runner:
 
     # ------------------------------------------------------------- guardrails --
 
-    def _preflight(self, spec: AgentSpec, workdir: str | None = None) -> None:
+    def _preflight(self, spec: AgentSpec, workdir: str | None = None,
+                   budget_tag: str = "") -> None:
         limits = self.config.limits
         if spec.launch:
             raise PermissionError(
@@ -512,6 +524,20 @@ class Runner:
                 "This agent was not granted permission to spawn subagents "
                 "(can_spawn is false in its config)."
             )
+        # Refused, not quietly allowed. An orchestrator denied an agent it
+        # genuinely needs will say so, and that is a finding about the team's
+        # roster — the alternative is a `teams` concept that describes nothing,
+        # because anyone can step outside it. The expensive failure this guards
+        # against is the orchestrator doing the work in its own context instead.
+        team = self.config.team
+        if team and not self.config.in_team(spec.name):
+            raise PermissionError(
+                f"Agent {spec.name!r} is not in the {team!r} team's roster "
+                f"({', '.join(self.config.team_roster()) or 'empty'}). Either this "
+                f"work belongs to a different team, or the roster is missing "
+                f"someone — say which in your reply rather than doing it "
+                f"yourself. Changing the roster is the user's call."
+            )
 
         depth = self.self_depth() + 1
         max_depth = int(limits.get("max_depth", 3))
@@ -539,6 +565,19 @@ class Runner:
             if used >= ceiling:
                 raise RuntimeError(f"Tree token budget exhausted: {used:,} >= {ceiling:,}")
 
+        if budget_tag:
+            cap = self.tree.budget_for_tag(budget_tag)
+            if cap:
+                spent = int(self.tree.usage_for_tag(budget_tag).get("total", 0) or 0)
+                if spent >= cap:
+                    raise RuntimeError(
+                        f"Budget for {budget_tag!r} is spent: {spent:,} of {cap:,} "
+                        f"tokens. This is the limit doing its job, not an "
+                        f"obstacle — decide what this slice of work does NOT get, "
+                        f"report what you covered and what you did not, and move "
+                        f"on. Raising it is the user's call, not yours."
+                    )
+
         provider = self.providers.get(spec.provider)
         if provider is None:
             raise KeyError(f"Agent {spec.name!r} names unknown provider {spec.provider!r}")
@@ -553,12 +592,14 @@ class Runner:
         # The file is resolved across three config layers, so this is a typo or
         # a deleted brief, and the symptom without it — a capable agent doing
         # something adjacent to the task — is expensive to diagnose.
-        if spec.instructions and not self.config.instructions_for(spec).strip():
+        missing = self.config.missing_instructions(spec)
+        if missing:
             raise FileNotFoundError(
-                f"Agent {spec.name!r} names instructions {spec.instructions!r}, "
-                f"which is not in any config layer's agents/ directory. Fix the "
+                f"Agent {spec.name!r} names instructions {', '.join(missing)}, "
+                f"which are not in any config layer's agents/ directory. Fix the "
                 f"path in agents.yaml or restore the file; `multiagents doctor` "
-                f"lists every agent whose brief is missing."
+                f"lists every agent whose brief is missing, and `multiagents "
+                f"prompt {spec.name}` shows what it would actually be sent."
             )
         if not (provider.spawn or {}).get("args"):
             raise PermissionError(
@@ -582,13 +623,26 @@ class Runner:
         readonly = self.config.readonly_paths_for(spec)
         readonly_line = ""
         if readonly and node.branch:
+            protects_everything = any(
+                p.strip() in ("**", "*") for p in readonly
+            ) and not any(str(p).strip().startswith("!") for p in readonly)
+            if protects_everything:
+                head = ("- Read-only to you: EVERY file that already exists. You may ADD\n"
+                        "  new files — that is how your work reaches anyone — but you\n")
+            else:
+                keep = [p for p in readonly if not str(p).strip().startswith("!")]
+                drop = [p[1:].strip() for p in (str(x).strip() for x in readonly)
+                        if p.startswith("!")]
+                head = "- Read-only to you:\n" + _wrap_globs(keep)
+                if drop:
+                    head += "  except, which you may change freely:\n" + _wrap_globs(drop)
+                head += "  You may READ these, and you may ADD new files among them, but you\n"
             readonly_line = (
-                "- Read-only to you: " + ", ".join(f"`{p}`" for p in readonly[:12])
-                + ". You may READ them, and you may ADD new files there. You may not\n"
-                "  modify, delete or rename an existing one — if you do, the change is\n"
-                "  reverted before your branch merges and your parent is told. When one\n"
-                "  of them looks wrong, say so with NEED_INFO and let your parent settle\n"
-                "  it; editing it is the one thing that cannot work.\n"
+                head
+                + "  may not modify, delete or rename an existing one — if you do, the\n"
+                "  change is reverted before your branch merges and your parent is told.\n"
+                "  When one of them looks wrong, say so with NEED_INFO and let your\n"
+                "  parent settle it; editing it is the one thing that cannot work.\n"
             )
         preamble = PREAMBLE.format(
             agent_id=node.id,
@@ -603,7 +657,12 @@ class Runner:
             spawn_line=spawn_line,
             readonly_line=readonly_line,
         )
-        instructions = self.config.instructions_for(spec)
+        # The caller half of the brief is stripped here. An agent that reads
+        # "your caller should give you the harness API" may behave as though it
+        # had been given, or spend its run complaining it was not — and either
+        # way it is paying context for instructions addressed to somebody else.
+        instructions, _ = config_mod._split_calling(
+            self.config.instructions_for(spec))
         parts = [preamble]
         if spec.role == "bug-reporter":
             parts.append(self._bug_context())
@@ -826,6 +885,8 @@ class Runner:
         timeout: int | None = None,
         model: str | None = None,
         verifies: str = "",
+        budget_tag: str = "",
+        budget_tokens: int = 0,
     ) -> dict[str, Any]:
         spec = self.config.agent(agent_name)
         if model:
@@ -866,7 +927,10 @@ class Runner:
                 )
             else:
                 spec = AgentSpec(**{**spec.__dict__, "model": model})
-        self._preflight(spec, workdir)
+        if budget_tag and budget_tokens:
+            # First value wins, so a re-declaration cannot lift a spent ceiling.
+            self.tree.set_budget(budget_tag, budget_tokens)
+        self._preflight(spec, workdir, budget_tag)
         provider = self.providers[spec.provider]
 
         parent = self.self_id()
@@ -985,6 +1049,7 @@ class Runner:
             parent=parent, depth=depth, task=task[:500], branch=branch,
             worktree=str(worktree_path), status="pending",
             verifies=verifies if verifies in self.tree.read()["nodes"] else "",
+            budget_tag=budget_tag,
             routed_from=routed_from, routed_why=routed_why,
             session=self.session(),
         )
