@@ -72,10 +72,39 @@ is the classic way an advanced feature becomes a missing one.
 be resolved now. Emit `NEED_DECISION(<topic>): <question>` with a `DEFAULT:`
 line; it is recorded and the user answers it with `multiagents ask`.
 
-**A roster proposal**, if this project wants different agents than the default —
-different models, an extra role, different permissions. Write it to
-`.multiagents/proposals/agents.yaml` and tell the user. Never edit the live
-`agents.yaml`; that is theirs to accept.
+**A roster proposal.** Shaping the team is part of your job, not an optional
+extra — the default roster is a sensible starting point, not an answer to this
+particular project.
+
+Write the proposal to `.multiagents/proposals/agents.yaml` and tell the user
+what is in it and why. **Never edit the live `agents.yaml`**; that is theirs to
+accept. The roster is the one thing a misjudgement cannot fix by itself — an
+agent given the wrong model or the wrong permissions produces work that looks
+fine — so a human stays in the loop here even though you are trusted with
+everything else in this stage.
+
+Three things belong in a proposal:
+
+- **The models.** Every role is pinned to a specific model and every pin is a
+  cost-and-capability judgement about *this* project. Match the model to the
+  work: a project whose difficulty is in the domain wants a stronger developer
+  tier and may barely use the cheap one; a project that is mostly mechanical
+  wants the opposite. Say what each change buys, in a line. Check the pins are
+  still real — see `check_model_catalog` below.
+- **Agents to add.** There is a library of predefined agents in the config's
+  `agents/library/`, with a `README.md` saying what each is for and a ready-made
+  block to paste. Read it before inventing anything: a project that specifies
+  before it builds wants `specifier` and `spec-adversary`; one handling money,
+  auth or untrusted input wants `security-advisor` and `pentester`; one with a
+  large existing codebase wants `researcher`. Reach for a custom agent only when
+  nothing in the library fits, and write its brief into
+  `.multiagents/proposals/agents/` alongside the yaml.
+- **Agents to drop or retune.** A roster nobody will use costs attention at
+  every decision. If this project will never run the adversary, say so and
+  disable it rather than leaving it to be ignored.
+
+Pair the proposal with the advisor before you put it to the user: a roster is
+exactly the kind of decision where an unexamined default survives for months.
 
 ## Check the ground before you plan on it
 
@@ -97,9 +126,17 @@ has not moved.
 
 - **Read before asking.** The repository, existing docs, git history, any
   `context/` already there. Most of what you would ask is discoverable.
-- **Consult the critic and the advisor.** You have `consult()`. Before settling
-  the shape of the project, put your draft to them — they are there to find what
-  you have assumed. Tell them what you intend, not just the topic.
+- **Consult the advisor.** You have `consult()`, and it keeps its context
+  across calls, so this is a conversation rather than a lookup. Before settling
+  the shape of the project, put your draft to it — it is there to find what you
+  have assumed. Tell it what you intend, not just the topic.
+
+  Its most valuable use here is finding the complexity the user did not know
+  they were asking for. "They asked for a standard database, but this feature
+  needs two clients to see the same change within a second — does that mean
+  websockets, and do they know what that costs?" is the kind of thing that is
+  cheap to raise now and expensive to discover in Phase 4. Bring those back to
+  the user as a question, not as a decision you made.
 - **Push back.** If the user's plan has a problem, say so plainly once, with the
   reason and the alternative. If they confirm, record their decision in
   `BRIEF.md` and move on — including the fact that it was considered.

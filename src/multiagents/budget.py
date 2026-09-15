@@ -737,6 +737,22 @@ def reserved_providers(project: dict, providers: Any,
     return set()
 
 
+def _why_not(candidate: Budget | None, reserve: float, reserved: bool) -> str:
+    """The one phrase that says why a candidate was passed over."""
+    if candidate is None:
+        return "no budget reading"
+    if candidate.cooldown_until and candidate.cooldown_until > time.time():
+        left = (candidate.cooldown_until - time.time()) / 60
+        return f"cooling down for {left:.0f}m"
+    if candidate.known and candidate.headroom is not None and candidate.headroom <= 0.02:
+        return "window empty"
+    if reserved and candidate.known and candidate.headroom is not None \
+            and candidate.headroom < reserve:
+        return (f"below the {reserve:.0%} reserve kept for the orchestrator "
+                f"({candidate.headroom:.0%} left)")
+    return "no room"
+
+
 def _has_room(candidate: Budget | None, reserve: float, reserved: bool) -> bool:
     """Can work go here? Unknown headroom is not no headroom."""
     if candidate is None:
@@ -865,7 +881,7 @@ def choose_provider(
     elif _has_room(budgets.get(preferred), reserve, preferred in reserved):
         return preferred, "preferred provider has headroom"
 
-    skipped = []
+    skipped, no_room = [], []
     for name in chain:
         if name == "defer":
             break
@@ -880,9 +896,22 @@ def choose_provider(
         if budgets.get(name) is not None \
                 and _has_room(budgets.get(name), reserve, name in reserved):
             return name, f"{preferred} is constrained; falling back to {name}"
+        no_room.append(f"{name} ({_why_not(budgets.get(name), reserve, name in reserved)})")
 
+    # Both halves, and the second one is the half that matters. Naming only the
+    # providers skipped for lack of a MODEL made the message actively
+    # misleading: an agent whose only fallback was cooling down was told "no
+    # model named for opencode", the one provider it had never asked for, and
+    # nothing at all about the one that had failed it. Reported as bug-583360 by
+    # somebody who reasonably concluded the router was looking at the wrong
+    # provider entirely.
     why = f"{preferred} and all fallbacks are exhausted or cooling down"
+    detail = []
+    if no_room:
+        detail.append("; ".join(no_room))
     if skipped:
-        why += (f" (no model named for {', '.join(skipped)} — add one under "
-                f"`models:` to allow failover there)")
+        detail.append(f"no model named for {', '.join(skipped)} — add one under "
+                      f"`models:` to allow failover there")
+    if detail:
+        why += f" ({'; '.join(detail)})"
     return None, why

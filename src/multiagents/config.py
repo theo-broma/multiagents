@@ -89,7 +89,13 @@ def layer_files(source: Path, scope: str = "global") -> list[str]:
     through the global layer, and a project may add its own if it wants.
     """
     names = [n for n in CONFIG_FILES if (source / n).is_file()]
-    names += [f"agents/{p.name}" for p in sorted((source / "agents").glob("*.md"))]
+    # Recursive: the briefs are foldered — `team/` for the roster that ships
+    # active, `library/` for the predefined agents the initializer draws on.
+    # A flat glob copied neither into the global or project layers, so a
+    # library agent resolved only for whoever ran from the source checkout.
+    agents_dir = source / "agents"
+    names += [f"agents/{p.relative_to(agents_dir).as_posix()}"
+              for p in sorted(agents_dir.rglob("*.md"))]
     if scope == "global":
         names += [n for n in STANDALONE_FILES if (source / n).is_file()]
         names += [f"providers/{p.name}" for p in sorted((source / "providers").glob("*"))
@@ -290,14 +296,27 @@ class Config:
         # names them without it, and an install can carry both files at once
         # mid-upgrade — so the exact name always wins, and the other spelling
         # is only a fallback.
-        names = [spec.instructions]
-        stem = spec.instructions
-        names.append(stem[1:] if stem.startswith("_") else "_" + stem)
+        stem = Path(spec.instructions)
+        other = stem.name[1:] if stem.name.startswith("_") else "_" + stem.name
+        names = [spec.instructions, (stem.parent / other).as_posix()]
         for name in names:
             for base in self.instruction_dirs:
                 path = base / name
                 if path.is_file():
                     return path.read_text()
+        # Last resort: match on the basename anywhere under agents/. The briefs
+        # moved into team/ and library/ subfolders, and a config written before
+        # that says `tester.md` where the file is now `team/tester.md`. Without
+        # this an upgrade turns every such entry into a missing brief, which
+        # _preflight refuses outright.
+        for name in names:
+            leaf = Path(name).name
+            for base in self.instruction_dirs:
+                if not base.is_dir():
+                    continue
+                for path in sorted(base.rglob(leaf)):
+                    if path.is_file():
+                        return path.read_text()
         return ""
 
 

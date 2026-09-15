@@ -165,6 +165,52 @@ dropping the flag.
 
 **Check:** `tests/test_core.py::test_an_option_a_fallback_clears_is_actually_dropped`.
 
+### An agent has two model namespaces, and only one was checked — 2026-09-15
+
+`flutter-tester` declares `models: {agy: gemini-3.1-pro-high}`. Asking
+`start_agent` for exactly that string was refused:
+
+```
+ValueError: claude does not serve a model called 'gemini-3.1-pro-high'.
+... name a model under `models:` in its agents.yaml entry instead of
+overriding it here.
+```
+
+The remedy the refusal gave was the thing it was refusing. The check only ever
+looked at `config.models[spec.provider]`, so an agent could see a fallback it
+had no way to reach. Naming a fallback's model now carries the PROVIDER across
+too, which is the point — the id is meaningless in the old provider's
+namespace, which is why the check exists at all.
+
+**Check:** `tests/test_core.py::test_naming_a_fallback_model_runs_the_agent_on_that_provider`.
+
+### A router that named the one provider nobody asked about — 2026-09-15
+
+When every fallback was unusable, the message listed only those skipped for
+lack of a MODEL. An agent whose sole fallback was cooling down was told "no
+model named for opencode" — a provider it had never configured — and nothing
+about agy, the one that had actually failed it. It reasonably concluded the
+router was looking at the wrong provider.
+
+Both halves are named now, each fallback with the phrase that says why:
+cooling for N minutes, window empty, below the reserve.
+
+**Check:** `tests/test_core.py::test_routing_says_why_each_fallback_was_passed_over`.
+
+### Restarted is not answered — 2026-09-15
+
+`steer_agent` waits `STEER_CONFIRM_SECONDS` for the relaunched run to produce
+its first event or die, and bug-cee638 already made it report a run that died.
+A run that is ALIVE and silent left the loop the same way a healthy one did, so
+three silent agents were steered, all three returned `steered: true`, one
+resumed and two never spoke again — with no way to tell them apart except
+waiting several more minutes by hand.
+
+The reply now carries `confirmed`, and says plainly that a long first tool call
+and a wedged process look identical from here.
+
+**Check:** `tests/test_core.py::test_a_steer_says_whether_anything_answered`.
+
 ### Providers describe usage in words that do not overlap — 2026-09-10
 
 opencode sends `total`, agy sends `total_tokens`, claude sends neither and only
