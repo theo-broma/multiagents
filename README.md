@@ -218,20 +218,263 @@ multiagents tree     # snapshot
 multiagents monitor  # all of it, in a browser or (--tui) in this terminal
 ```
 
+## Teams
+
+A **team** is an orchestrator pipeline plus the roster that runs it. Building
+new work and auditing an existing system are different jobs, and one roster
+shaped for both is shaped for neither.
+
+```yaml
+# project.yaml
+team: implement
+
+teams:
+  implement:
+    description: Builds new work from BRIEF.md.
+    orchestrator: [team/_orchestrator.md, teams/implement/pipeline.md]
+    roster: [advisor, researcher, tester, implementer-quick, implementer,
+             implementer-deep, adversary, reviewer, bug-reporter]
+```
+
+`multiagents run --team <name>` overrides for one run, and says which team it
+is running before it launches.
+
+### The review team
+
+Audits an existing codebase, one bounded context at a time. Its product is
+**findings and a characterization suite** — both committed, both merged — not
+just a document.
+
+```
+1 map          cartographer → context/review/MAP.md: at most SEVEN bounded
+                              contexts, ranked by what it would cost to be
+                              wrong in each, with a budget for each
+2 gate         you approve each context before its deep phase        [per context]
+3 harness      harness → makes that context observable. Alone.
+4 characterize characterizer ×N → pins what the code CURRENTLY does,
+                              including the parts that are wrong
+5 attack       adversary + auditor → mutation, fuzzing, and the defects
+                              that run perfectly well
+6 report       reporter → context/review/REPORT.md
+```
+
+Four things stop it becoming a wall of text nobody reads:
+
+**Seven contexts, and a gate per context.** Seven is about the human who
+approves the list — forty micro-components get rubber-stamped or abandoned, and
+either way nobody has chosen. The gate is per context rather than once for the
+list because the first context changes what the second is worth: if `C1` turns
+out to be in good shape, `C4` may not be worth its budget, and you can only know
+that after seeing `C1`.
+
+**Budgets that are enforced, not advised.** Each approved context gets a
+`budget_tag` and a ceiling in tokens, fixed on the first spawn and **not
+raisable** — a ceiling the spender can lift is a suggestion, and the agent
+asking to lift it is the one that has just run out. When a tag is spent,
+`start_agent` refuses and the orchestrator has to decide what that context does
+*not* get. That is what turns termination from a hope into a property.
+
+**Evidence tiers.** Every finding declares `reproduction` (a committed failing
+test), `trace` (a checkable chain of `file:line` hops) or `opinion`. A trace is
+legitimate where a reproduction genuinely is not reachable — a distributed race,
+a missing index, a flaw in the domain model — but the auditor must say *which*,
+in one line. An unjustified trace is an opinion wearing a better label, and left
+unchecked it becomes the default that swallows the mandate.
+
+**The orchestrator holds the index, never the evidence.** Ids, classes,
+severities, one line each. It reads a finding's full evidence only when deciding
+about that finding, and it does not assemble the report — that is the
+`reporter`'s job precisely so the one context that cannot be replaced is not
+spent on a summary.
+
+The characterizers are add-only by configuration (`readonly_paths: ["**"]`), so
+several run in parallel without fighting over shared fixtures. That is why
+`harness` runs **alone** first: somebody has to build what they share, and if
+they fan out before it exists they each invent their own setup and you merge
+fifty files of duplicated scaffolding — legacy debt in an afternoon.
+
+If a context cannot be exercised without changing production code, the harness
+builder does not refactor it. It files that as a `critical` architecture finding
+with a trace, and the context stops there. "Untestable without refactoring" is
+the most consequential thing a review can discover about a system.
+
+### The findings ledger, and how the loop ends
+
+Two kinds of file, and the distinction is the whole design.
+
+A **findings file** — `context/review/<context>.md` — is what an auditor wrote
+while looking at the code. It is evidence, tied to the commit it was written
+against, and **nothing ever edits it**. Marking `F12` "fixed" inside it would
+leave its line numbers and its trace pointing at code that has since moved,
+which is how an audit trail becomes a set of confident lies.
+
+The **ledger** — `context/review/ledger.yaml` — is the state machine over those
+ids: append-only history, one current status each. When the two disagree the
+ledger wins, because the finding records a moment and the ledger records
+decisions.
+
+```
+open → scheduled → fixed          the ordinary path
+open → accepted                   real, and nobody will act on it
+open → deferred                   real, not now
+fixed → regression                filed again; the fix did not hold
+```
+
+It is written only through MCP tools — `record_findings`, `set_finding_status`,
+`list_findings`, `read_finding` — and only by the orchestrator and the
+initializer, both of which run at the project root. Agents write findings files
+in their own worktrees and never touch it, so several of them merging cannot
+conflict over it.
+
+**This is what stops the loop.** review → fix → review → fix generates work
+forever if each pass starts from nothing: the second review of a context the
+implement team has touched will map it afresh and file the same problems under
+new ids. Against the ledger it cannot. A finding claimed fixed and still present
+comes back as a **regression on `F12`**, not a new `F105` — so a fix that did
+not hold is visible instead of being laundered into a fresh number. And a second
+pass over a reviewed context is a *verification* rather than an exploration:
+does each `fixed` finding stay fixed, does each `open` one still reproduce, and
+only then what is new in what actually changed.
+
+A project is done being reviewed when `list_findings` reports `done` — nothing
+open, scheduled or regressed. `accepted` and `deferred` are decisions, not
+unfinished business: a project with fifty accepted findings has an owner who
+looked at fifty things and said no.
+
+### The handoff
+
+```
+review ends        → REPORT.md, the ledger, and a merged characterization suite
+init-agent         → the initializer reads the REPORT (never the findings files)
+                     and decides each finding with you: scheduled, accepted,
+                     deferred — every one recorded, with a reason
+                   → BRIEF.md work items citing F12, F14
+                   → proposes team: implement
+run                → implement orchestrator turns those items into contracts
+                     citing the same ids; the implementer cites them in commits
+                   → set_finding_status(F12, "fixed") when the work merges
+```
+
+The initializer writes work items, **not** interface contracts. That is phase 2
+of the implement pipeline and its orchestrator's job; having a conversational
+agent write the contract would put the systems architecture in the wrong place.
+
+`F12` is followable from the review that found it to the merge that fixed it
+without anyone reconstructing anything — which is the point of stable ids, and
+why the auditor's brief says they are permanent and never reused.
+
+**The orchestrator's brief is composed from two files**, and that is most of
+what a team is. The first is team-independent: branches, budget, parked
+questions, delegation, concurrency, reporting bugs in the tooling. The second is
+the team's pipeline — its phases and what it delegates. Split rather than
+copied, because a per-team copy of the common half drifts invisibly, which is
+the same reason the three coder tiers share one brief. The core half opens by
+telling the orchestrator to stop and say so if no pipeline section follows it:
+half a brief is the expensive kind of wrong.
+
+`instructions:` therefore accepts a list. It exists for this case, not for
+small shared sections — two briefs that share forty lines of craft advice
+should copy them, because making a reader open three files to understand one
+agent costs more than the duplication does.
+
+**An agent outside the active team is refused, not hidden.** `list_agents`
+names them under `not_in_this_team` so the orchestrator can see what it is
+missing, and `start_agent` refuses. A soft failure would make teams a fiction —
+anyone could step outside one — and the refusal is itself the useful signal:
+an orchestrator that needed an agent it was not given should say so rather than
+do the work in its own context, which is the expensive failure. A team that
+declares no `roster` restricts nothing.
+
+**The initializer is exempt.** It is not a team member; it is what hires the
+team. A team-scoped initializer could not pivot a project from reviewing to
+building, which is the entire reason it runs between phases. `init-agent`
+ignores the active team and sees the whole roster.
+
+**Existing projects need no migration.** `team: implement` ships in the
+defaults layer, the three layers deep-merge, and a project.yaml that has never
+heard of teams inherits it and behaves exactly as before.
+
+### How to call an agent
+
+Every agent brief ends with a `## Calling this agent` section: its interface
+contract. Preconditions — what must already exist. What the task must contain.
+What to keep out of it. What it returns and in what shape. What to carry over
+from the run before.
+
+It is authored in the agent's own file, because nobody knows better than the
+agent what a task to it must contain — and then **split by audience**:
+
+- `compose_prompt` **strips it** before the agent is prompted, so the agent
+  never reads instructions addressed to someone else. That is not only token
+  waste: an agent that reads "your caller should give you the harness API" may
+  behave as though it had been given, or spend its run complaining it was not.
+- `how_to_call(<agent>)` serves it to the caller instead.
+
+One file, one source of truth, each reader getting only their half. The
+alternative — writing calling instructions into the orchestrator's brief — is
+the drift this exists to prevent: that brief would still say "give the auditor a
+diff" long after the auditor started needing a bounded context.
+
+`list_agents` answers *should I use this one* (that is the one-line
+`description`). `how_to_call` answers *how do I use it*. They are kept
+orthogonal on purpose, and `how_to_call` is lazy rather than folded into
+`list_agents` because sixteen contracts in one payload is a wall of text in the
+one context that cannot be replaced.
+
+The orchestrator's brief tells it to read the contract before first delegating
+to an agent. It also gets the contract back automatically on its **first spawn**
+of each agent in a session — by then the task is written and the best it can do
+is `steer_agent`, but that is cheaper than a run it reads and discards, and
+cheaper than refusing every first spawn until the contract has been fetched.
+
+### Seeing what an agent is actually sent
+
+```bash
+multiagents prompt implementer          # preamble + brief + task, composed
+multiagents prompt orchestrator --team review
+```
+
+A brief can now come from several files, resolved across three config layers
+with a basename fallback on top, and half of the orchestrator's comes from
+whichever team is active. "Read agents.yaml and guess" stopped being viable at
+that point. This prints exactly what the agent would receive, names the files it
+was composed from, and flags any part that resolved to nothing — exiting
+non-zero if so.
+
 ## The roster
 
-Nine agents ship active: **six roles** that make up the default team, plus the
-two extra coder tiers and one that reports bugs in multiagents itself. Six more
-sit in a **library**, predefined but switched off until a project asks for them.
+Eleven agents ship active: **six roles** that make up the pipeline, two agents
+that support it, the two extra coder tiers, and one that reports bugs in
+multiagents itself. Four more sit in a **library**, predefined but switched off
+until a project asks for them.
 
 | role | agent | mandate |
 |---|---|---|
 | **Initializer** | `initializer` | Converses with you, writes `BRIEF.md`, proposes the team and the model for each role. Launched by `init-agent`. |
 | **Orchestrator** | `orchestrator` | Drives the project to completion. Writes the interface contracts, makes every delegation and architectural call, writes no implementation code. Launched by `run`. |
 | **Advisor** | `advisor` | Second opinion for the drivers. Reads the code, analyses proposals and prompts, offers alternatives. Decides nothing, changes nothing. |
+| **Advisor** | `dev-advisor` | The same role for the `implementer` and `implementer-deep` tiers, mid-task. A separate entry because a standing conversation is found by agent name — a developer consulting `advisor` would resume the orchestrator's session and race it. On a different family from both `tester` and `implementer-deep`, which share `opus`: it is the only participant in that loop that does not share their blind spots. Names the problem, suggests an approach, never writes the code. |
 | **Test Engineer** | `tester` | Writes the black-box behavioural suite from the contract, before any implementation exists. Defines what done means. |
 | **Developer** | `implementer-quick`, `implementer`, `implementer-deep` | Writes the code that turns the suite green. Three tiers, one brief. The tests are read-only to them. |
 | **Adversary** | `adversary` | Attacks the green code: mutation, fuzzing, untested inputs, interleaving, the attacker's position. Breaks it; fixes nothing. |
+
+The **review** team shares `advisor`, `researcher`, `adversary` and
+`bug-reporter` with it, and adds five of its own:
+
+| agent | mandate |
+|---|---|
+| `cartographer` | Maps the codebase into at most **seven** ranked, budgeted bounded contexts, with the measurements behind the ranking. Seven is about the human who approves the list: forty micro-components get rubber-stamped or abandoned, and either way nobody has chosen. |
+| `harness` | Makes one context observable — builds or extends the test harness so it can be exercised. Runs **alone**, before characterization, and is the only review agent allowed to modify shared test infrastructure. If a context cannot be exercised without changing production code, that is a `critical` finding and the context stops there. |
+| `characterizer` | Pins what the code **currently does**, including the parts that are wrong — an unpinned bug is indistinguishable from an unpinned feature. Green is success. Every behaviour it had to pin that looks wrong becomes a finding, as does every test that passed when it expected failure. Add-only, so several run in parallel without colliding. |
+| `auditor` | The review team's reviewer. Given code that already shipped, not a diff; produces durable `F<n>` findings with an evidence tier, a severity, reasoning and a disposition. |
+| `reporter` | Assembles `REPORT.md` from the findings files. Discovers nothing — it selects, orders and frames. Deliberately not the orchestrator's job. |
+
+Two more support the implement pipeline rather than forming a phase of it:
+
+| agent | mandate |
+|---|---|
+| `reviewer` | Ordinary code review — *is this good code?* — which nothing else here asks. The tester checks the code against the contract; the adversary checks whether it survives attack. An N+1 query, a leaked handle, a swallowed exception or a retry with no backoff violates no contract, is not exploitable, and passes both. Ranked findings and a verdict, no writes. It carries a threshold: it is an added run, not a saved one. |
+| `researcher` | Answers one question about the codebase and burns *its* context doing it. The orchestrator's context is the scarcest thing in the system and it now writes the contracts and reads the final diff as well as deciding everything; sending a question is how it stops spending that on reading code. Cheap, read-only, blocks nothing. |
 
 `bug-reporter` is none of these. It is spawned like a task agent, but its
 product is a **ticket about multiagents itself** rather than work on your
@@ -243,7 +486,7 @@ The kind of an agent decides how you reach it:
 |---|---|---|
 | **launched** | `orchestrator`, `initializer` | `multiagents run` / `init-agent` — MCP clients, never spawned |
 | **conversational** | `advisor` | `consult()` — blocks for a reply, keeps context between calls |
-| **task** | `tester`, `implementer-quick`, `implementer`, `implementer-deep`, `adversary`, `bug-reporter` | `start_agent()` — own branch and worktree, collected when done |
+| **task** | `tester`, `implementer-quick`, `implementer`, `implementer-deep`, `adversary`, `reviewer`, `researcher`, `bug-reporter` | `start_agent()` — own branch and worktree, collected when done |
 
 Reading agents and writing agents are separated by intent rather than by
 permission: every agent gets a worktree regardless, so `writes: false` controls
@@ -254,16 +497,16 @@ Delete or replace any of them except the two launched roles — see
 
 ### The agent library
 
-Six specialists ship with briefs but **no roster entry**: `specifier`,
-`spec-adversary`, `reviewer`, `researcher`, `security-advisor` and `pentester`.
-They live in `agents/library/`, each with a paste-ready `agents.yaml` block in
+Four specialists ship with briefs but **no roster entry**: `specifier`,
+`spec-adversary`, `security-advisor` and `pentester`. They live in
+`agents/library/`, each with a paste-ready `agents.yaml` block in
 `agents/library/README.md`.
 
 The initializer reads that catalogue during `multiagents init-agent` and
 proposes the ones a project actually needs — `specifier` and `spec-adversary`
-for a project that specifies before it builds, `security-advisor` and
-`pentester` for one handling money or untrusted input, `researcher` for a large
-unfamiliar codebase. You accept by copying the block into your `agents.yaml`.
+where the domain carries the difficulty, `security-advisor` and `pentester`
+where security is a first-class concern rather than one of several. You accept
+by copying the block into your `agents.yaml`.
 
 The point is that adding a specialist should be a paste rather than a writing
 exercise. A brief written in a hurry during initialisation is worse than one
@@ -444,7 +687,8 @@ to, and a team arranged so nobody grades their own homework:
 1  initializer  →  BRIEF.md, context/, and a proposed roster. With you,
                    before anything is built.
 2  orchestrator →  interface contracts in context/specs/<feature>.md:
-                   signatures, schemas, errors, numbered behaviours R1…Rn.
+                   signatures, schemas, errors, numbered behaviours R1…Rn,
+                   then put to the advisor: "what does this not say?" 
 3  tester       →  the black-box suite, before the code exists.
                    Red is the correct outcome here.
 4  implementer  →  given the ids and the tests, not a prose description.
@@ -452,7 +696,10 @@ to, and a team arranged so nobody grades their own homework:
 5  adversary    →  mutation, fuzzing, inputs the suite never uses.
                    Findings go back to 4 with a failing test attached.
 6  orchestrator →  reads the diff against BRIEF.md, consults the advisor,
-                   merges, and presents it to you.
+   + reviewer       merges, and presents it to you.
+
+`researcher` runs alongside any of these, answering a question so the
+orchestrator does not have to read the code itself.
 ```
 
 Five properties make this more than ceremony:
@@ -460,10 +707,11 @@ Five properties make this more than ceremony:
 - **The contract exists before the tests, and the tests before the code.** This
   is the part that does not rely on anyone's diligence: a missing advanced case
   shows up as a red test rather than as nobody noticing.
-- **The test suite is read-only to the developer.** The fastest way to make a
-  failing test pass is always to change the test, so the brief forbids it
-  outright — no edits, no skips, no widened tolerances. A test that is genuinely
-  wrong goes back to the test engineer, who changes it deliberately.
+- **The test suite is read-only to the developer, and that is enforced.** The
+  fastest way to make a failing test pass is always to change the test. A test
+  that is genuinely wrong goes back to the test engineer, who changes it
+  deliberately. See [protected paths](#protected-paths) for how the rule is
+  actually held.
 - **Green is not done.** A model optimising against a visible target will
   special-case the exact inputs the tests use. Phase 5 exists because that is
   what optimising against a visible target looks like, not because anyone is
@@ -475,6 +723,14 @@ Five properties make this more than ceremony:
 - **Nobody holds a veto.** Advisors advise and the orchestrator decides. The
   gate is an *artifact*, not an authority: no implementation task until the
   contract exists. You can check that by reading a committed file.
+- **The contract itself gets read by someone else.** The orchestrator writes it
+  in phase 2 and marks the result against it in phase 6, which is the one place
+  the same agent sets the target and grades the answer. Two things close that,
+  and neither costs a run: the advisor is asked what the contract *does not
+  say* before anyone builds to it, and the tester reports every behaviour it
+  could not express as a test. A project where the domain carries the
+  difficulty should add `specifier` and `spec-adversary` from the library
+  instead — that is what they are for.
 
 The orchestrator **writes no implementation code** — not the tricky function,
 not the one-line fix. Its context is the one resource here that cannot be
@@ -486,6 +742,86 @@ carries a threshold rather than applying the pipeline to everything:
 behaviour-shaped requests, work touching several files, or mistakes that would
 be expensive to unwind. A one-line fix, a rename or a bug with a known cause
 goes straight to `implementer`.
+
+### Protected paths
+
+`limits.readonly_paths` in `project.yaml` lists files an agent may not modify —
+the test suite by default. The coder tiers are held to it; `tester` carries
+`readonly_paths: []` because it owns those files, and an agent's own list
+replaces the project default rather than adding to it.
+
+```yaml
+limits:
+  readonly_paths: ["tests/**", "**/test_*.py", "**/*.spec.ts", "conftest.py"]
+```
+
+Gitignore-style globs against repo-relative paths: `*` and `?` stay inside a
+segment, `**` crosses them, and a pattern with no `/` matches at any depth. A
+leading `!` un-selects and the **last matching pattern wins**, so `["**",
+"!db/**"]` reads as "everything except the database layer" — which is how you
+scope a specialist to its own area without listing every directory it may not
+enter. Order matters: a negation written before what it carves out does nothing.
+
+**Adding a file is always allowed.** Only modifications, deletions and renames
+are caught. A new test cannot weaken a contract. That distinction is why this is
+a diff filter rather than a file permission: `chmod -w` cannot express "you may
+add but not rewrite".
+
+It is also what lets the strictest setting be useful. The **adversary** carries
+`readonly_paths: ["**"]` — every file that already exists is read-only to it —
+and it still works, because its product is new files plus its report. That
+setting closes a hole the tests-only default left open: to find out whether the
+suite actually holds, the adversary *mutates the implementation* (flips a
+comparison, deletes a validation branch) and is told to revert each mutation
+afterwards. Its branch is then merged, because that is how its failing tests
+reach you. An instruction was all that stood between a forgotten revert and a
+deliberately broken operator landing on the base branch inside a commit that
+reads as "new tests".
+
+**It is enforced when a branch merges, not in the filesystem**, and that is a
+deliberate choice rather than a shortcut. Neither filesystem route is reachable
+per-agent here:
+
+- `chmod` does not hold. The container runs as the invoking uid
+  (`--user $(id -u):$(id -g)`, because rootful Docker otherwise writes every
+  file as root and git then refuses the worktree as "dubious ownership"). An
+  agent that owns a file can make it writable again.
+- `:ro` bind mounts cannot be per-agent. Docker supports them and the executor
+  already emits them, but the mount set is fixed when the container is
+  *created*, and there is one container per project with a `docker exec` per
+  agent. Per-agent paths would mean a container per agent.
+
+The merge gate has neither problem. `merge_agent` runs in the parent's process,
+outside the agent's worktree, and an agent cannot merge itself — `_may_act_on`
+gates branch lifecycle by ancestry. It is the one point in the system an agent
+provably cannot reach, and it is also the point where work becomes real.
+
+**Revert and report.** On a violation the protected files are restored to the
+base branch on the agent's own branch, and then everything else merges
+normally:
+
+```
+readonly_reverted: ["tests/test_checkout.py"]
+1 file(s) implementer may not modify were reverted to main before merging;
+everything else it did was merged. If it was editing a test to make its code
+pass, the merged result now has that test failing — which is the outcome you
+want, and yours to resolve.
+```
+
+Refusing the whole branch would throw away real work over one file. Reverting
+keeps the implementation and drops the tampering, and a red test at merge is
+strictly better than a green weakened one. `collect_agent` reports
+`readonly_violations` too, so the orchestrator sees it while it is still
+deciding rather than as a surprise at the gate.
+
+The agent is told which paths these are in its generated preamble, so the rule
+follows your project's layout rather than living only in a brief that can say
+"the tests" and nothing more precise. If the branch cannot be corrected —
+its worktree is gone — the merge is **blocked** rather than allowed through,
+because reporting a revert that did not happen is worse than refusing.
+
+What this does not give you is a kernel-level guarantee that the agent cannot
+write the byte. That needs a container per agent, which is a different project.
 
 ### Specifying before the contract
 
@@ -2174,12 +2510,75 @@ provider in `agents.yaml`:
     provider: agy
     model: gemini-3.1-pro-high
     models:
-      opencode: opencode-go/gpt-5.6-luna
+      opencode: opencode-go/kimi-k2.6
 ```
 
 A model id belongs to its provider's namespace, so failing over without one
 would run `agy --model opencode-go/glm-5.3-flash`. Named, a constrained provider
 costs you a model rather than an agent.
+
+### The opencode spend tier
+
+Every `opencode-go/*` pin in the shipped roster is on a model with a **$60
+monthly limit**. The subscription meters each model against its own ceiling, and
+the $15 and $30 models drain too fast to run a team on — one deep implementer,
+or an adversary fuzzing for an afternoon, can eat a $15 allowance by itself, and
+an exhausted model *stops* its agent rather than degrading it.
+
+That costs something real, and it is worth being plain about it: the strongest
+models opencode offers — `kimi-k3`, `deepseek-v4-pro`, `grok-4.6`,
+`qwen3.8-max` — are all $15 and are deliberately not used. What still spends opencode — `implementer-quick`, `adversary`, `researcher`,
+`bug-reporter`, and several fallbacks — runs on `glm-5.3-flash`,
+`qwen3.7-plus`, `kimi-k2.6`, `minimax-m3` and `qwen3.6-plus` instead. It is a
+budget decision, not a capability one.
+
+**Watch for promotional ceilings.** A model can sit at $60 temporarily — the
+published table has carried DeepSeek V4.1 Flash at "$15 $60, 4x, ends Sep 20",
+which is a $15 model wearing a $60 badge for a few days. Pin one of those and
+you have bought an agent that quietly starts running out next week. Check the
+limit, not the badge.
+
+Nothing in code can enforce this: `refresh-models` records what a provider
+*serves*, never what it costs, so there is no ceiling in `models.yaml` to read.
+The allowed list lives at the bottom of `agents.yaml` and is mirrored by a test,
+both maintained by hand. Re-check them when your subscription changes.
+
+### Where the work actually runs
+
+The shipped distribution concentrates judgement on Claude and spends the
+cheaper providers on volume:
+
+| agent | provider / model |
+|---|---|
+| `initializer`, `orchestrator` | claude / **opus** |
+| `tester`, `implementer-deep` | claude / **opus** |
+| `implementer` | claude / **sonnet** |
+| `advisor`, `reviewer` | agy / gemini-3.1-pro-high |
+| `implementer-quick`, `researcher`, `bug-reporter` | opencode / glm-5.3-flash |
+| `adversary` | opencode / qwen3.7-plus |
+
+Two consequences worth knowing before you run it.
+
+**Five of eleven agents spend the same quota as the orchestrator.** Context
+isolation is unaffected — a subagent always burns its own context, whatever
+provider it is on. Quota isolation is not: when the Claude bucket tightens, the
+orchestrator and four of its agents tighten together, and `budget_status` will
+report the squeeze on the one bucket you cannot refill by delegating. The
+fallbacks exist for exactly this, and `implementer`/`implementer-deep` land on
+agy's Claude models so a Claude outage costs a provider rather than a
+capability.
+
+**`tester` and `implementer-deep` share `opus`**, which is a deliberate
+exception to the rule below. The agent writing the contract and the agent
+hardest to satisfy it share a view of which edge cases matter, so a case that
+occurs to neither leaves a suite that looks complete. `adversary` is on a
+different family precisely so something in the chain does not share that blind
+spot. `agents.yaml` says how to undo it if you would rather not carry it.
+
+Note also that `effort` is an **agy** flag. `claude` declares only
+`max_budget_usd`, so an `effort` key on a Claude agent is dead config that
+reads as though it did something — and agy actively refuses it for
+`claude-opus-4-6-thinking`. A test asserts no Claude agent carries one.
 
 The fallbacks are chosen so that a **checking pair never collapses onto one
 model** under a single-provider outage — `tester`, the `implementer` tiers and

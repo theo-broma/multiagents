@@ -11,7 +11,10 @@ Three buckets:
 
 ## `team/` — the default roster
 
-The six roles that ship active, and the pipeline they run.
+The roles that ship active, and the pipeline they run. Six of them are the
+pipeline proper; `reviewer` and `researcher` support it — one asks a question
+nobody else asks, the other exists so the orchestrator does not spend its own
+context reading code.
 
 | Brief | Agent | Mandate |
 | --- | --- | --- |
@@ -19,17 +22,19 @@ The six roles that ship active, and the pipeline they run.
 | `_orchestrator.md` | `orchestrator` | Drives the project to completion. Makes every architectural and delegation decision; writes the interface contracts; never writes implementation code. Launched by `multiagents run`. |
 | `advisor.md` | `advisor` | Second opinion for the drivers. Reads the code, analyses proposals and prompts, offers alternatives. Decides nothing, changes nothing. |
 | `tester.md` | `tester` | Writes the black-box behavioural test suite from the orchestrator's contract, before any implementation exists. Defines what done means. |
-| `implementer.md` | `implementer-quick`, `implementer`, `implementer-deep` | Writes the code that makes the suite green. Three tiers on one brief, routed by how much judgement the task needs. The tests are read-only to them. |
-| `adversary.md` | `adversary` | Attacks the green code — mutation, fuzzing, untested inputs, interleaving, the attacker's position. Breaks it; fixes nothing. |
+| `implementer.md` | `implementer-quick`, `implementer`, `implementer-deep` | Writes the code that makes the suite green. Three tiers on one brief, routed by how much judgement the task needs. The tests are read-only to them, enforced at the merge gate by `limits.readonly_paths`. |
+| `adversary.md` | `adversary` | Attacks the green code — mutation, fuzzing, untested inputs, interleaving, the attacker's position. Breaks it; fixes nothing. Everything that already exists is read-only to it. |
+| `reviewer.md` | `reviewer` | Ordinary code review, which nothing else here does: is this *good* code? Ranked findings and a verdict, no writes. Carries a threshold — not every merge. |
+| `researcher.md` | `researcher` | Answers one question about the codebase, burning its own context instead of the orchestrator's. Cheap, read-only, blocks nothing. |
 
 The two leading-underscore briefs are mandatory: the drivers will not run
 without them, and the underscore is there to say they are not yours to delete.
 
 ## `library/` — predefined, not active
 
-Specialists a project can add: `specifier`, `spec-adversary`, `reviewer`,
-`researcher`, `security-advisor`, `pentester`. Each has a brief here and a
-paste-ready `agents.yaml` block in `library/README.md`.
+Specialists a project can add: `specifier`, `spec-adversary`,
+`security-advisor`, `pentester`. Each has a brief here and a paste-ready
+`agents.yaml` block in `library/README.md`.
 
 The initializer reads that README during `multiagents init-agent` and proposes
 the ones this project needs. Nothing here runs until an entry for it exists in

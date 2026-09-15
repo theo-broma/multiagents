@@ -148,6 +148,13 @@ class Node:
     # to ask someone to read the code.
     routed_from: str = ""
     routed_why: str = ""
+    # A named slice of work this run is spent against — a review team's bounded
+    # context, a feature, whatever the parent is budgeting. Spend is summed per
+    # tag and a tag can be given a ceiling, which is what makes a phase
+    # TERMINATE rather than hope to: an orchestrator told "you have 50k left
+    # here" will skip the utility folder, and one merely asked to watch its
+    # budget will not.
+    budget_tag: str = ""
     turns: int = 0
     paused_at: float | None = None    # entered idle / awaiting_user at
     created_at: float = field(default_factory=now)
@@ -462,6 +469,42 @@ class Tree:
             out.append(row)
         out.sort(key=lambda r: (-r["cost_usd"], -r["tokens"]))
         return out
+
+    def usage_for_tag(self, tag: str) -> dict[str, float]:
+        """Total spend across every run tagged with this slice of work."""
+        total: dict[str, float] = {}
+        for node in self.read()["nodes"].values():
+            if node.get("budget_tag") != tag:
+                continue
+            for key, value in (node.get("usage") or {}).items():
+                if isinstance(value, (int, float)):
+                    total[key] = total.get(key, 0) + value
+        return total
+
+    def budget_for_tag(self, tag: str) -> int:
+        return int((self.read().get("budgets") or {}).get(tag, {}).get("tokens", 0) or 0)
+
+    def set_budget(self, tag: str, tokens: int) -> dict[str, Any]:
+        """Record a tag's ceiling. The FIRST value wins.
+
+        Deliberately not raisable. A ceiling the spender may lift on its own is
+        a suggestion, and the agent asking to lift it is the one that has just
+        run out — which is exactly when it is least able to judge. Raising one
+        is a human edit, and a tag that genuinely needs more can be given a new
+        name and a new budget, which at least leaves a record of the decision.
+        """
+        result: dict[str, Any] = {}
+        with self.transaction() as state:
+            budgets = state.setdefault("budgets", {})
+            existing = budgets.get(tag)
+            if existing:
+                result = {"tag": tag, "tokens": int(existing.get("tokens", 0)),
+                          "created": False,
+                          "note": "already set; a budget cannot be raised from here"}
+            else:
+                budgets[tag] = {"tokens": int(tokens), "set_at": now()}
+                result = {"tag": tag, "tokens": int(tokens), "created": True}
+        return result
 
     def rollup_usage(self, agent_id: str | None = None) -> dict[str, int]:
         """Total token usage for the whole tree, or one subtree."""

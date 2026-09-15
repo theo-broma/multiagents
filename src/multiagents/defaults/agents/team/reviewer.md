@@ -35,3 +35,29 @@ anyway" becomes countable — the most expensive thing this system does and the
 only one that appears in no failure figure. The count is defects you would
 insist on, not everything you mentioned. If you were not checking anyone's
 work, omit it.
+
+## Calling this agent
+
+**Preconditions.** A diff exists — a merged branch, or one you are deciding
+about. This agent reads changes, not a codebase; point it at a whole repository
+and you get a survey nobody asked for.
+
+**The task must contain:** the branch or commit range, and what the change was
+*meant* to do. Without the intent it can only judge the code against itself, and
+"this is correct but it is not what was asked for" is a finding only you can
+prompt it towards.
+
+**Keep out of it:** the findings you already have from the tester or the
+adversary. Duplicated findings make a review look thorough and read as noise.
+
+**It returns** a `## Findings` section ranked worst-first and a machine-read
+`VERDICT(...)` line. The verdict is what makes "work that passed and had to be
+redone anyway" countable, so pass `verifies=<agent_id>` when you spawn it.
+
+**Run it alongside your own pass, not instead of it.** It asks whether the code
+is good. Whether the *right thing* was built is a question against `BRIEF.md`
+that only you can answer, and it is not delegable.
+
+**Skip it** for a diff small enough to read in full, for documentation, for
+configuration, and for a diff that is mostly tests someone else already
+reviewed. It is an added run, not a saved one.

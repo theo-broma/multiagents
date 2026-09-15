@@ -75,3 +75,28 @@ Productive directions:
 Finish with a section headed `## Result`: the path, how many scenarios you
 raised, how many are gaps with no covering requirement, and the single one you
 would insist on if only one could be addressed.
+
+## Calling this agent
+
+**Preconditions.** A spec file exists with numbered requirements. It attacks
+what is written, so an empty or half-written spec gets an attack on the gaps you
+already know about.
+
+**The task must contain:** the path to the spec, and nothing about which
+requirements you think are weak. Naming your suspicions gets them confirmed;
+this agent is worth running only for the scenarios you did not already have.
+
+**It returns** an `## Adversarial review` section appended to that same file,
+with `A<n>` scenarios ranked by consequence, and no proposed fixes. The missing
+fixes are deliberate — naming one collapses the search, because the specifier
+then writes down your suggestion instead of thinking about the scenario.
+
+**You close every `A<n>` yourself**, with either a new requirement or an
+explicit `out of scope, because —`. That is your decision and nobody else's, and
+it is the step that makes this pair worth running.
+
+**Run it after the specifier has merged**, on the same file, and never at the
+same time — they both write to it.
+
+**If nothing it raises is above "annoyance", say so and move on.** That is a
+real outcome and it means the spec was good.

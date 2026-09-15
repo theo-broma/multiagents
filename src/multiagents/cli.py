@@ -12,6 +12,7 @@ from __future__ import annotations
 import signal
 import asyncio
 import argparse
+import dataclasses
 import json
 import os
 import shutil
@@ -767,6 +768,20 @@ def cmd_resume(args: argparse.Namespace) -> int:
               f"restarts by itself")
 
     config = load_config(paths)
+    requested = getattr(args, "team", "")
+    if requested:
+        known = set(config.teams)
+        if requested not in known:
+            print(f"\nno team named {requested!r}. Known: "
+                  f"{', '.join(sorted(known)) or 'none'}", file=sys.stderr)
+            return 1
+        config = dataclasses.replace(
+            config, project={**config.project, "team": requested})
+    if config.team:
+        note = config.team_spec().get("description", "").strip().replace("\n", " ")
+        print(f"\nteam         {config.team}"
+              + (f" — {' '.join(note.split())}" if note else "")
+              + ("  (this run only)" if requested else ""))
 
     for note in _repair_credential_drift(paths, config):
         print(f"\ncredentials  {note}")
@@ -775,7 +790,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         print(f"\nexecutor     {problem}")
     # Reported here so `--no-launch` says it too; the refusal itself lives in
     # driver._launch_agent, which is the path `init-agent` takes as well.
-    spec = driver._launched_spec(config, "orchestrator")
+    spec = driver._launched_spec(config, "orchestrator", config.team)
     auth_problem = driver._auth_problem(paths, config, spec) if spec else ""
     if auth_problem:
         print(f"\nauth         {auth_problem}")
@@ -993,6 +1008,64 @@ def _clear_provider(paths, providers, name: str, force: bool) -> int:
               forced=bool(force and left > 0))
     print(f"{name}: the breaker starts over.")
     return 0
+
+
+def cmd_prompt(args) -> int:
+    """Print the prompt an agent would actually receive.
+
+    A brief may now be composed of several files, and it is resolved across
+    three config layers with a basename fallback on top. That is several places
+    a surprise can hide, and "read agents.yaml and guess" stops being viable the
+    moment a team supplies half the orchestrator's brief. This prints the
+    result — preamble, brief, task — exactly as the agent would be handed it.
+    """
+    from dataclasses import replace
+
+    from . import driver
+    from .runner import Runner
+    from .tree import Node
+
+    paths = _resolve(args.path) if find_project_root() else None
+    config = load_config(paths)
+    if args.team:
+        config = replace(config, project={**config.project, "team": args.team})
+
+    name = args.agent
+    spec = config.agents.get(name)
+    if spec is None:
+        print(f"No agent named {name!r}. Known: {', '.join(sorted(config.agents))}",
+              file=sys.stderr)
+        return 1
+    # The orchestrator's brief is team-dependent, so compose it the way the
+    # launcher would rather than the way the roster entry reads.
+    if spec.launch and spec.role:
+        spec = driver._launched_spec(config, spec.role, config.team) or spec
+
+    missing = config.missing_instructions(spec)
+    root = paths.root if paths else Path.cwd()
+    node = Node(id="ag-preview", agent=name, provider=spec.provider,
+                model=spec.model, parent=None, depth=1,
+                branch=f"{config.branch_prefix}/{name}/preview" if spec.writes else "",
+                task=args.task)
+
+    header = f"# {name} — {spec.provider}/{spec.model}"
+    if config.team:
+        header += f" — team {config.team!r}"
+        if not spec.launch and not config.in_team(name):
+            header += "  [NOT in this team's roster; start_agent would refuse it]"
+    print(header)
+    print(f"# briefs: {', '.join(config.instruction_parts(spec)) or '(none)'}")
+    if missing:
+        print(f"# MISSING: {', '.join(missing)} — resolves to nothing in any layer")
+    print("#" + "-" * 70)
+    if spec.launch:
+        # A launched agent is handed its brief as a file, with no preamble and
+        # no task: it is an MCP client, not a subagent.
+        print(config.instructions_for(spec))
+    else:
+        print(Runner(_resolve(args.path), config)
+              .compose_prompt(spec, args.task, node, root))
+    return 1 if missing else 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -2130,6 +2203,10 @@ def main(argv: list[str] | None = None) -> int:
                        default=True,
                        help="hand the terminal over and exit; nothing carries on "
                             "if the session drops")
+        p.add_argument("--team", default="",
+                       help="run this team instead of the project's current one "
+                            "(project.yaml `team:`); the team decides the "
+                            "orchestrator's pipeline and which agents it may spawn")
         p.add_argument("--unattended", nargs="?", type=int, const=50, default=0,
                        metavar="TURNS",
                        help="run headless, turn after turn, without a terminal: "
@@ -2153,6 +2230,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-auth", action="store_true",
                    help="report authentication problems without offering to fix them")
     p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("prompt", help="print the exact prompt an agent would be sent")
+    p.add_argument("agent", help="agent name from agents.yaml")
+    p.add_argument("--task", default="<the task you would pass to start_agent>",
+                   help="the task text to compose in")
+    p.add_argument("--team", default="",
+                   help="compose as this team instead of the project's current one")
+    p.set_defaults(func=cmd_prompt)
 
     p = sub.add_parser("doctor", help="check CLIs, agents, models, budget and git")
     p.add_argument("--clear", metavar="PROVIDER",

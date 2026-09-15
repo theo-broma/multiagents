@@ -28,10 +28,39 @@ import yaml
 
 from .paths import ProjectPaths, global_config_dir, shipped_defaults_dir
 
+# The heading that marks the half of a brief addressed to whoever CALLS the
+# agent, rather than to the agent itself. It is authored in the agent's own file
+# — nobody knows better than the agent what a task to it must contain — and then
+# split by audience: stripped before the agent is prompted, and served to the
+# caller through `how_to_call`.
+#
+# Both halves in one file because the alternative is the drift this exists to
+# prevent: the orchestrator's brief saying "give the auditor a diff" long after
+# the auditor's brief started needing a bounded context.
+CALLING_HEADING = "## Calling this agent"
+
 CONFIG_FILES = ("project.yaml", "providers.yaml", "agents.yaml", "models.yaml")
 # Kept for installs that still carry a top-level orchestrator.md from before it
 # became a normal agent brief under agents/.
 STANDALONE_FILES = ()
+
+
+def _split_calling(text: str) -> tuple[str, str]:
+    """Split a brief into (what the agent reads, what its caller reads).
+
+    The caller half runs from CALLING_HEADING to the next heading of the same
+    level, so a brief can still carry sections after it.
+    """
+    start = text.find(CALLING_HEADING)
+    if start == -1:
+        return text, ""
+    after = text.index("\n", start) + 1 if "\n" in text[start:] else len(text)
+    end = len(text)
+    for line_start in range(after, len(text)):
+        if text.startswith("\n## ", line_start - 1):
+            end = line_start
+            break
+    return (text[:start] + text[end:]).rstrip() + "\n", text[start:end].strip()
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -127,9 +156,31 @@ def _cached_regex(pattern: str) -> re.Pattern[str]:
 
 
 def matches_any(patterns: Sequence[str], path: str) -> bool:
-    """Does this repo-relative path match any of these globs?"""
+    """Is this repo-relative path selected by these globs?
+
+    Gitignore rules, including negation: a leading `!` un-selects, and the LAST
+    pattern that matches decides. So `["**", "!tests/**"]` reads as "everything
+    except the tests" — which is how an agent whose product is new test files
+    says it may not rewrite anything else.
+
+    Order therefore matters, and a negation before the pattern it means to
+    carve out does nothing. Write `\\!` for a filename that really begins with
+    an exclamation mark.
+    """
     candidate = str(path).strip().removeprefix("./")
-    return any(_cached_regex(p).match(candidate) for p in patterns if str(p).strip())
+    selected = False
+    for raw in patterns:
+        pattern = str(raw).strip()
+        if not pattern:
+            continue
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:].strip()
+        elif pattern.startswith("\\!"):
+            pattern = pattern[1:]
+        if pattern and _cached_regex(pattern).match(candidate):
+            selected = not negated
+    return selected
 
 
 def layer_files(source: Path, scope: str = "global") -> list[str]:
@@ -221,7 +272,16 @@ class AgentSpec:
     name: str
     provider: str
     model: str
-    instructions: str = ""
+    # One brief, or several concatenated in the order given. A list exists for
+    # ONE case: the orchestrator's brief is mostly team-independent (branches,
+    # budget, questions, delegation) with a per-team pipeline on top, and
+    # copying the common part per team would drift invisibly — the failure the
+    # three coder tiers already share one brief to avoid.
+    #
+    # It is not for small shared sections. Two briefs that share forty lines of
+    # craft advice should copy them: making a reader open three files to
+    # understand one agent costs more than the duplication does.
+    instructions: str | list[str] = ""
     description: str = ""
     effort: str | None = None
     permission: str = "full"          # full | sandbox | readonly
@@ -340,6 +400,44 @@ class Config:
     def limits(self) -> dict[str, Any]:
         return self.project.get("limits", {})
 
+    # ------------------------------------------------------------- teams --
+    #
+    # A team is a pipeline: an orchestrator brief and the roster that runs it.
+    # A project is in one team at a time — auditing an existing system and
+    # building new work are different jobs and want differently shaped rosters.
+    #
+    # The roster is listed per TEAM rather than per agent on purpose. "What is
+    # the review team" is asked far more often than "which teams is the tester
+    # in", and the first question should be answerable by reading one block
+    # instead of grepping every agent definition.
+
+    @property
+    def teams(self) -> dict[str, Any]:
+        return self.project.get("teams", {}) or {}
+
+    @property
+    def team(self) -> str:
+        """The active team. Shipped defaults carry `team: implement`, so a
+        project written before teams existed resolves to today's behaviour
+        through the ordinary layer merge rather than needing a migration."""
+        return str(self.project.get("team", "") or "")
+
+    def team_spec(self, team: str = "") -> dict[str, Any]:
+        return self.teams.get(team or self.team, {}) or {}
+
+    def team_roster(self, team: str = "") -> list[str]:
+        """Agent names this team may spawn. Empty list means no restriction."""
+        return [str(n) for n in (self.team_spec(team).get("roster") or [])]
+
+    def in_team(self, name: str, team: str = "") -> bool:
+        """May this agent be spawned by the active team?
+
+        A team with no roster declared restricts nothing, which is what keeps a
+        project that has never heard of teams working exactly as before.
+        """
+        roster = self.team_roster(team)
+        return not roster or name in roster
+
     def agent(self, name: str) -> AgentSpec:
         if name not in self.agents:
             raise KeyError(f"No agent named {name!r}. Configured: {sorted(self.agents)}")
@@ -358,12 +456,45 @@ class Config:
         default = self.limits.get("readonly_paths") or []
         return [str(p) for p in default]
 
+    def instruction_parts(self, spec: AgentSpec) -> list[str]:
+        """The brief files this agent names, as a list even when there is one."""
+        if not spec.instructions:
+            return []
+        if isinstance(spec.instructions, str):
+            return [spec.instructions]
+        return [str(part) for part in spec.instructions if str(part).strip()]
+
+    def missing_instructions(self, spec: AgentSpec) -> list[str]:
+        """Named brief files that resolve to nothing, in the order given.
+
+        Checked separately from the text because a brief may be composed of
+        several files: if one resolves and one does not, the joined result is
+        non-empty and a plain truthiness test would call that fine. It is not —
+        an orchestrator running on its common core with no pipeline section is
+        an agent with no idea what it is doing, which is the expensive kind of
+        wrong.
+        """
+        return [part for part in self.instruction_parts(spec)
+                if not self._resolve_instruction(part).strip()]
+
+    def calling_contract(self, spec: AgentSpec) -> str:
+        """The part of this agent's brief addressed to its caller, if any."""
+        return _split_calling(self.instructions_for(spec))[1]
+
     def instructions_for(self, spec: AgentSpec) -> str:
-        """Resolve an agent's ``.md`` file across the config layers.
+        """Resolve an agent's brief across the config layers, in order.
 
         Project instructions win over global ones, so you can rewrite a shipped
         agent's brief without touching the machine-wide copy.
         """
+        parts = [self._resolve_instruction(part) for part in self.instruction_parts(spec)]
+        return "\n\n".join(part.strip() for part in parts if part.strip())
+
+    def _resolve_instruction(self, name: str) -> str:
+        spec = AgentSpec(name="", provider="", model="", instructions=name)
+        return self._resolve_one(spec)
+
+    def _resolve_one(self, spec: AgentSpec) -> str:
         if not spec.instructions:
             return ""
         candidate = Path(spec.instructions).expanduser()
@@ -387,6 +518,15 @@ class Config:
         # that says `tester.md` where the file is now `team/tester.md`. Without
         # this an upgrade turns every such entry into a missing brief, which
         # _preflight refuses outright.
+        #
+        # Only for a BARE filename. A name that already carries a directory
+        # means that directory: `teams/nope/pipeline.md` must not quietly
+        # resolve to `teams/implement/pipeline.md` because the basenames match.
+        # A mistyped team would then load another team's pipeline and run it
+        # with complete confidence — which is worse than the missing brief this
+        # fallback exists to avoid.
+        if stem.parent != Path("."):
+            return ""
         for name in names:
             leaf = Path(name).name
             for base in self.instruction_dirs:
