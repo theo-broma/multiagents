@@ -198,6 +198,43 @@ def diff_stat(repo: Path, branch: str, base: str) -> str:
     return result.out if result.ok else ""
 
 
+def changed_paths(repo: Path, branch: str, base: str,
+                  filters: str = "MDR") -> list[str]:
+    """Repo-relative paths `branch` changed, restricted to those change kinds.
+
+    The default excludes additions on purpose. A protected file that an agent
+    ADDS cannot weaken anything — a new test is a new test — while modifying,
+    deleting or renaming one is how a contract gets quietly edited to fit the
+    code. That distinction is the whole reason this is a diff filter and not a
+    filesystem permission: `chmod -w` cannot express "you may add but not
+    rewrite", and this can.
+    """
+    result = run(repo, "diff", "--name-only", f"--diff-filter={filters}",
+                 f"{base}...{branch}")
+    if not result.ok:
+        return []
+    return [line.strip() for line in result.out.splitlines() if line.strip()]
+
+
+def restore_paths(worktree: Path, base: str, paths: list[str],
+                  message: str) -> GitResult:
+    """Put these paths back to their `base` content and commit, in a worktree.
+
+    Used to undo an agent's edits to files it was not allowed to modify, before
+    its branch is merged. Runs in the agent's own worktree because that is
+    where its branch is checked out; the caller has already established that
+    the worktree still exists.
+    """
+    if not paths:
+        return GitResult(True, "nothing to restore", "", 0)
+    restore = run(worktree, "checkout", base, "--", *paths)
+    if not restore.ok:
+        return restore
+    if run(worktree, "diff", "--cached", "--quiet").ok:
+        return GitResult(True, "paths already matched base", "", 0)
+    return run(worktree, "commit", "-m", message)
+
+
 def commit_all(worktree: Path, message: str) -> GitResult:
     """Commit whatever an agent left uncommitted, so no work is stranded."""
     run(worktree, "add", "-A")

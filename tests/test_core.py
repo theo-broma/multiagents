@@ -667,6 +667,30 @@ def test_a_read_only_agent_still_trips_on_silence():
     assert trip is not None and trip.reason == "silence"
 
 
+def test_the_bug_reporter_is_not_sent_after_source_it_cannot_reach(tmp_path):
+    """Its file tools are confined to its worktree, and under docker the
+    multiagents source is not mounted in the container at all. Telling it to
+    read the source and cite a function bought a paragraph of apology in every
+    ticket instead of a description of the bug — two blocking ones ended that
+    way. The commit hash is what locates the code.
+
+    The path also named a home directory, in a prompt whose product is meant to
+    be publishable.
+    """
+    r = _runner(tmp_path)
+    context = r._bug_context()
+
+    assert "multiagents commit:" in context, "the hash is what replaces the path"
+    assert "cannot read the multiagents source" in context
+    assert str(Path(__file__).resolve().parents[1]) not in context, \
+        "no source path in a prompt the agent cannot use it from"
+
+    brief = (Path(__file__).resolve().parents[1]
+             / "src/multiagents/defaults/agents/bug-reporter.md").read_text()
+    assert "## You cannot read the multiagents source" in brief
+    assert "Hypothesis (unconfirmed" in brief, "an inferred cause must be labelled"
+
+
 def test_naming_a_fallback_model_runs_the_agent_on_that_provider(tmp_path):
     """bug-583360. An agent has TWO model namespaces — its provider's, and the
     one its own `models:` map names — and only the first was checked.
@@ -2656,12 +2680,13 @@ def test_the_generated_environment_block_carries_no_identity(tmp_path):
     r = _runner(tmp_path)
     block = r._bug_context()
 
-    verbatim = block.split("The multiagents source is at")[0]
-    assert "commit:" in verbatim and "providers available:" in verbatim
-    assert str(Path.home()) not in verbatim
-    assert getpass.getuser() not in verbatim
-    # The path itself is still given, outside the part that gets copied.
-    assert "The multiagents source is at" in block
+    assert "commit:" in block and "providers available:" in block
+    # Stronger than it used to be. The home path was previously given below the
+    # verbatim part, on the grounds that the agent needed it to read the source;
+    # it cannot read the source, so the path is now absent from the whole block
+    # rather than merely from the half that gets copied.
+    assert str(Path.home()) not in block
+    assert getpass.getuser() not in block
 
 
 def test_the_tree_still_shows_a_queued_ticket_with_no_agents(tmp_path):
@@ -2928,9 +2953,12 @@ def test_the_phase_agents_commit_their_artifacts():
         assert not spec.get("launch")
 
 
-def test_the_advisor_decides_nothing_and_executes_nothing():
-    """It is consulted, so it keeps context across calls; and it is read-only,
-    because an advisor that can act is a second decision-maker."""
+def test_the_advisor_decides_nothing_but_still_investigates():
+    """It is consulted, so it keeps context across calls, and it changes
+    nothing, because an advisor that can act is a second decision-maker. But
+    `readonly` is not an enforced mode — it is a sandbox with a worktree — so
+    the brief must not tell it that it cannot look. An advisor answering from
+    memory is worth a fraction of one that went and read the code."""
     agents = _shipped_agents()
     advisor = agents["advisor"]
     assert advisor["conversational"] is True, "advice is built by follow-ups"
@@ -2942,7 +2970,11 @@ def test_the_advisor_decides_nothing_and_executes_nothing():
 
     flat = " ".join((_briefs_dir() / "team" / "advisor.md").read_text().split())
     assert "You decide nothing" in flat
-    assert "You execute nothing" in flat
+    assert "You change nothing" in flat
+    # It has a full toolset in its own worktree; a brief claiming otherwise
+    # would suppress the one thing it is better placed than anyone to do.
+    assert "you investigate freely" in flat
+    assert "go and check" in flat
 
 
 def test_the_orchestrator_does_not_write_the_implementation():
@@ -8781,3 +8813,222 @@ def test_the_burn_rate_is_re_read_rather_than_remembered():
     body = inspect.getsource(Runner._wrap_up_watch)
     assert "_sample_headroom" in body, "it takes a reading, not just the last one"
     assert "random.random()" in body, "and staggers, so N agents do not spike together"
+
+# --------------------------------------------------------------------------
+# Protected paths
+#
+# The fastest way to make a failing test pass is always to change the test.
+# The developer's brief forbids it; these are what make it true. Enforcement
+# is at the MERGE GATE rather than in the filesystem, because neither is
+# reachable per-agent: the container runs as the invoking uid so an agent can
+# chmod its own files back, and bind mounts are fixed when the container is
+# created. The merge gate runs in the parent's process, and an agent cannot
+# merge itself.
+
+
+def _protected_project(tmp_path, patterns=("tests/**",), agent_paths=None):
+    """A runner whose `dev` agent may not modify `patterns`, on a real repo."""
+    spec = AgentSpec("dev", "p", "m", readonly_paths=agent_paths)
+    r = _runner(tmp_path, {"dev": spec},
+                project={"limits": {"readonly_paths": list(patterns)}})
+    return r, spec
+
+
+def _branch_with(r, tmp_path, changes, node_id="ag-1"):
+    """Commit `changes` on an agent branch and register the node."""
+    import subprocess
+
+    from multiagents import gitops
+    from multiagents.tree import Node
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid"}
+
+    # `paths.ensure()` created .multiagents/ — gitignored in a real project,
+    # untracked here, and `gitops.merge` refuses a dirty target tree.
+    (tmp_path / ".gitignore").write_text(".multiagents/\n")
+    # Seed the protected file on the base branch so edits to it are M, not A.
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_a.py").write_text("assert real_behaviour()\n")
+    (tmp_path / "src.py").write_text("original\n")
+    for args in (["add", "-A"], ["commit", "-m", "seed"]):
+        subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, env=env)
+
+    # Outside the project: a worktree inside it is an untracked directory, and
+    # `gitops.merge` refuses to merge into a dirty tree — which is exactly what
+    # the real layout avoids by putting worktrees under ~/.multiagents.
+    worktree = tmp_path.parent / f"{tmp_path.name}-wt" / node_id
+    branch = gitops.create_worktree(tmp_path, worktree, f"agents/dev/{node_id}")
+    for rel, body in changes.items():
+        target = worktree / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body)
+    for args in (["add", "-A"], ["commit", "-m", "agent work"]):
+        subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, env=env)
+
+    node = Node(id=node_id, agent="dev", provider="p", model="m", parent=None,
+                depth=1, branch=branch, worktree=str(worktree), status="done",
+                task="t")
+    r.tree.add(node)
+    return node
+
+
+def test_editing_a_protected_file_is_reverted_and_the_rest_still_merges(tmp_path):
+    """Revert-and-report: the implementation lands, the test tampering does
+    not. Refusing the whole branch would throw away real work over one file."""
+    from multiagents import gitops
+    r, _ = _protected_project(tmp_path)
+    node = _branch_with(r, tmp_path, {
+        "tests/test_a.py": "assert True  # weakened to pass\n",
+        "src.py": "the actual implementation\n",
+    })
+
+    out = r.merge_agent(node.id)
+    assert out["result"] == "merged", out
+    assert out["readonly_reverted"] == ["tests/test_a.py"]
+    assert "reverted" in out["readonly_note"]
+
+    # The implementation merged; the test is back to what it said before.
+    assert (tmp_path / "src.py").read_text() == "the actual implementation\n"
+    assert (tmp_path / "tests" / "test_a.py").read_text() == "assert real_behaviour()\n"
+
+
+def test_adding_a_test_is_not_a_violation(tmp_path):
+    """A new test cannot weaken a contract, and the adversary's whole job is
+    committing failing ones. Only M, D and R are caught."""
+    r, _ = _protected_project(tmp_path)
+    node = _branch_with(r, tmp_path, {
+        "tests/test_new.py": "assert something_else()\n",
+        "src.py": "impl\n",
+    })
+
+    base = gitops_current(r, tmp_path)
+    assert r.readonly_violations(node, base) == []
+    out = r.merge_agent(node.id)
+    assert out["result"] == "merged"
+    assert "readonly_reverted" not in out
+    assert (tmp_path / "tests" / "test_new.py").is_file()
+
+
+def gitops_current(r, tmp_path):
+    from multiagents import gitops
+    return r.config.base_branch or gitops.current_branch(tmp_path)
+
+
+def test_deleting_a_protected_file_is_caught_too(tmp_path):
+    """Deletion is the other way to make a failing test stop failing."""
+    import subprocess
+    r, _ = _protected_project(tmp_path)
+    node = _branch_with(r, tmp_path, {"src.py": "impl\n"})
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid"}
+    wt = Path(node.worktree)
+    (wt / "tests" / "test_a.py").unlink()
+    for args in (["add", "-A"], ["commit", "-m", "drop the test"]):
+        subprocess.run(["git", "-C", str(wt), *args], capture_output=True, env=env)
+
+    out = r.merge_agent(node.id)
+    assert out["result"] == "merged"
+    assert out["readonly_reverted"] == ["tests/test_a.py"]
+    assert (tmp_path / "tests" / "test_a.py").is_file(), "the deletion was undone"
+
+
+def test_an_agent_that_owns_the_files_is_exempt(tmp_path):
+    """`readonly_paths: []` on the agent REPLACES the project default — which
+    is how the test engineer is allowed to revise the contract it wrote."""
+    r, _ = _protected_project(tmp_path, agent_paths=[])
+    node = _branch_with(r, tmp_path, {"tests/test_a.py": "a revised contract\n"})
+
+    assert r.readonly_violations(node, gitops_current(r, tmp_path)) == []
+    out = r.merge_agent(node.id)
+    assert out["result"] == "merged"
+    assert (tmp_path / "tests" / "test_a.py").read_text() == "a revised contract\n"
+
+
+def test_collect_reports_the_violation_before_the_merge_is_decided(tmp_path):
+    """The orchestrator should learn about it while it is still deciding, not
+    as a surprise in the merge result."""
+    r, _ = _protected_project(tmp_path)
+    node = _branch_with(r, tmp_path, {"tests/test_a.py": "weakened\n"})
+
+    out = r.collect(node.id)
+    assert out["readonly_violations"] == ["tests/test_a.py"]
+    assert "reverted" in out["readonly_note"]
+    # Reporting is not acting: nothing has changed on disk yet.
+    assert (tmp_path / "tests" / "test_a.py").read_text() == "assert real_behaviour()\n"
+
+
+def test_a_missing_worktree_blocks_the_merge_rather_than_letting_it_through(tmp_path):
+    """The branch cannot be corrected in place without its worktree. Merging
+    anyway would carry the edits in, and reporting a revert that did not happen
+    is worse than refusing."""
+    import shutil
+    r, _ = _protected_project(tmp_path)
+    node = _branch_with(r, tmp_path, {"tests/test_a.py": "weakened\n",
+                                      "src.py": "impl\n"})
+    shutil.rmtree(node.worktree)
+
+    out = r.merge_agent(node.id)
+    assert out["result"] == "blocked", out
+    assert out["readonly_violations"] == ["tests/test_a.py"]
+    assert "Nothing was merged" in out["detail"]
+    assert (tmp_path / "src.py").read_text() == "original\n", "nothing merged"
+
+
+def test_an_unknown_agent_name_does_not_make_a_branch_unmergeable(tmp_path):
+    """A roster entry deleted mid-run must not strand the work it produced."""
+    r, _ = _protected_project(tmp_path)
+    node = _branch_with(r, tmp_path, {"tests/test_a.py": "weakened\n"})
+    del r.config.agents["dev"]
+
+    assert r.readonly_violations(node, gitops_current(r, tmp_path)) == []
+    assert r.merge_agent(node.id)["result"] == "merged"
+
+
+def test_the_protected_paths_are_named_in_the_agents_own_prompt(tmp_path):
+    """The brief can only say "the tests"; the preamble says which files, in
+    this repository. Without it the rule only exists where the agent is not."""
+    from multiagents.tree import Node
+    r, spec = _protected_project(tmp_path, patterns=("tests/**", "conftest.py"))
+    node = Node(id="ag-1", agent="dev", provider="p", model="m", parent=None,
+                depth=1, branch="agents/dev/1", task="t")
+    prompt = r.compose_prompt(spec, "do the thing", node, tmp_path)
+
+    assert "Read-only to you" in prompt
+    assert "`tests/**`" in prompt and "`conftest.py`" in prompt
+    assert "may ADD new files" in prompt
+    assert "NEED_INFO" in prompt
+
+
+def test_an_agent_with_no_branch_is_told_nothing_about_protected_paths(tmp_path):
+    """A read-only agent has nothing to merge, so the rule is noise to it."""
+    from multiagents.tree import Node
+    r, spec = _protected_project(tmp_path)
+    node = Node(id="ag-1", agent="dev", provider="p", model="m", parent=None,
+                depth=1, branch="", task="t")
+    assert "Read-only to you" not in r.compose_prompt(spec, "go", node, tmp_path)
+
+
+def test_the_shipped_roster_protects_the_tests_from_the_coders(tmp_path):
+    """The default that matters: developers cannot rewrite the contract, and
+    the agent that wrote it can."""
+    import yaml
+    from multiagents.paths import shipped_defaults_dir
+    from multiagents.config import Config
+    project = yaml.safe_load((shipped_defaults_dir() / "project.yaml").read_text())
+    agents = {n: AgentSpec.from_dict(n, s) for n, s in _shipped_agents().items()}
+    config = Config(project=project, providers={}, agents=agents, models={},
+                    instruction_dirs=[])
+
+    for tier in ("implementer-quick", "implementer", "implementer-deep"):
+        patterns = config.readonly_paths_for(agents[tier])
+        assert patterns, tier
+        from multiagents.config import matches_any
+        assert matches_any(patterns, "tests/test_core.py"), tier
+        assert matches_any(patterns, "src/thing.test.ts"), tier
+        assert not matches_any(patterns, "src/thing.py"), tier
+
+    assert config.readonly_paths_for(agents["tester"]) == [], \
+        "the test engineer owns the contract it writes"
+    # The adversary keeps the protection and simply never trips it: its brief
+    # has it ADD failing tests, never rewrite one.
+    assert config.readonly_paths_for(agents["adversary"])

@@ -62,8 +62,14 @@ agents:
 
   # The standing second opinion. Talked to with consult(), which blocks for a
   # reply and keeps context between calls, so a driver can hold an actual
-  # back-and-forth instead of firing off amnesiac one-shot questions. It
-  # decides nothing and executes nothing.
+  # back-and-forth instead of firing off amnesiac one-shot questions.
+  #
+  # It decides nothing and changes nothing, but it is NOT prevented from
+  # looking: `permission: readonly` is a sandbox with a worktree rather than an
+  # enforced mode (see the note in providers.yaml), so it has a full toolset
+  # and its brief tells it to read the code before answering. `writes: false`
+  # means its branch is dropped when it stays empty — it states intent and
+  # controls cleanup, and is not a permission boundary.
   #
   # Only the two drivers can reach it — consult() needs spawn rights, which the
   # workers do not have. A worker that wants advice stops with NEED_INFO and
@@ -77,13 +83,19 @@ agents:
     instructions: team/advisor.md
     models:
       opencode: opencode-go/deepseek-v4-pro
-    description: Consultative second opinion. Advises; decides and executes nothing.
+    description: >-
+      Consultative second opinion. Reads the code and advises; decides and
+      changes nothing.
     conversational: true
     writes: false
     permission: readonly
     effort: high
     can_spawn: false
-    timeout: 420
+    # Per CONSULT TURN, not per conversation. Higher than a pure question-and-
+    # answer agent would need because this one is expected to go and read the
+    # code first; consult() takes a per-call timeout when one question warrants
+    # more.
+    timeout: 900
     silence_timeout: 180
 
   # ---------------------------------------------------------------- phase 3 --
@@ -111,6 +123,11 @@ agents:
     can_spawn: false
     timeout: 1500
     silence_timeout: 240
+    # The one agent exempt from limits.readonly_paths, because it OWNS those
+    # files. An agent's own list replaces the project default rather than
+    # adding to it, so [] is the way to say "this one may write the tests".
+    # Everyone else who touches them has their changes reverted at merge.
+    readonly_paths: []
 
   # ---------------------------------------------------------------- phase 4 --
   # Three coder tiers sharing one brief. They differ in what they cost and how
@@ -119,8 +136,12 @@ agents:
   # tier). The routing rule and the escalation path live in the orchestrator's
   # brief; without them a tiered roster just becomes an expensive one.
   #
-  # All three have read-only access to the test suite by instruction: a suite
-  # the implementer can edit is not a contract, it is a suggestion.
+  # All three are held read-only on the test suite. That is `limits.readonly_paths`
+  # in project.yaml, enforced when their branch merges rather than by the
+  # filesystem: a change to a protected file is reverted to the base branch and
+  # reported, and the rest of the run merges normally. Adding a test is fine;
+  # rewriting one is what gets undone. A suite the implementer can edit is not
+  # a contract, it is a suggestion.
   #
   # The model pins are a starting point, not a ranking anyone has measured
   # here. Retune them for your own work: what the tiers give you is the
