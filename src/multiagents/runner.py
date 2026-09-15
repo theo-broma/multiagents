@@ -34,7 +34,7 @@ from typing import Any
 
 from . import budget as budget_mod
 from . import gitops
-from .config import AgentSpec, Config
+from .config import AgentSpec, Config, matches_any
 from .executor import build_env, get_executor, prepare_home
 from .executor.base import Handle
 from . import providers as providers_mod
@@ -136,7 +136,7 @@ generated — it tells you where you stand.
 - Parent: {parent}
 - Depth: {depth} of a maximum {max_depth}
 - Working directory: {workdir}
-{branch_line}{spawn_line}
+{branch_line}{spawn_line}{readonly_line}
 How this works:
 
 - Nobody is watching you interactively and you cannot ask a question mid-run.
@@ -576,6 +576,20 @@ class Runner:
             f"- You may spawn subagents (up to {spec.max_children}).\n"
             if spec.can_spawn else "- You may not spawn subagents.\n"
         )
+        # Naming the protected paths HERE, rather than leaving it to the brief,
+        # is what lets the rule follow the project's own layout. The brief can
+        # only say "the tests"; this says which files, in this repository.
+        readonly = self.config.readonly_paths_for(spec)
+        readonly_line = ""
+        if readonly and node.branch:
+            readonly_line = (
+                "- Read-only to you: " + ", ".join(f"`{p}`" for p in readonly[:12])
+                + ". You may READ them, and you may ADD new files there. You may not\n"
+                "  modify, delete or rename an existing one — if you do, the change is\n"
+                "  reverted before your branch merges and your parent is told. When one\n"
+                "  of them looks wrong, say so with NEED_INFO and let your parent settle\n"
+                "  it; editing it is the one thing that cannot work.\n"
+            )
         preamble = PREAMBLE.format(
             agent_id=node.id,
             agent_name=spec.name,
@@ -587,6 +601,7 @@ class Runner:
             workdir=workdir,
             branch_line=branch_line,
             spawn_line=spawn_line,
+            readonly_line=readonly_line,
         )
         instructions = self.config.instructions_for(spec)
         parts = [preamble]
@@ -607,7 +622,7 @@ class Runner:
         """
         import platform
 
-        source = Path(__file__).resolve().parent
+        source = Path(__file__).resolve().parent   # for the commit only
         commit = ""
         if gitops.is_repo(source):
             commit = gitops.head_sha(source)[:12]
@@ -616,11 +631,15 @@ class Runner:
         providers = ", ".join(sorted(
             n for n, p in self.providers.items() if p.enabled and p.available()
         ))
-        # The source path is deliberately OUTSIDE the verbatim block: it
-        # contains a home directory, which names the user, and the agent is
-        # instructed to copy that block into a ticket unchanged. It still needs
-        # the path to read the code, so it is given separately and excluded in
-        # words. depersonalise() catches it anyway if the model ignores that.
+        # The source path is NOT given. It used to be, with "read it to locate
+        # the defect" — and the agent cannot: its file tools are confined to its
+        # worktree, and under docker the source is not mounted in the container
+        # at all. Two blocking tickets ended with a paragraph apologising for
+        # that instead of describing the bug, and the path itself was a home
+        # directory in a prompt whose product is meant to be publishable.
+        #
+        # The commit hash does the job the path was there for: it lets whoever
+        # reads the ticket open the exact code the agent could not.
         return (
             "## Environment (generated — include it verbatim, add nothing to it)\n\n"
             f"- multiagents commit: {commit or 'unknown (not a checkout)'}\n"
@@ -628,10 +647,10 @@ class Runner:
             f"{platform.release().split('-')[0]}\n"
             f"- executor: {self.config.project.get('executor', {}).get('kind', 'local')}\n"
             f"- providers available: {providers or 'none'}\n\n"
-            f"The multiagents source is at `{source}`. Read it to locate the "
-            "defect — that path names this machine, so it belongs in your work, "
-            "not in the ticket. Do not modify anything there: you have no branch "
-            "on it.\n\n---\n"
+            "You cannot read the multiagents source from here and are not "
+            "expected to: report what you observed, and label any cause you "
+            "infer as a hypothesis. The commit above is what locates the code.\n"
+            "\n---\n"
         )
 
     def _file_ticket(self, node_id: str, text: str) -> dict | None:
@@ -1713,6 +1732,25 @@ class Runner:
                     continue
         return out
 
+    def readonly_violations(self, node, base: str) -> list[str]:
+        """Protected paths this agent's branch MODIFIED, deleted or renamed.
+
+        Additions are not violations — see `gitops.changed_paths`. An unknown
+        agent name yields no patterns and therefore no violations, which is the
+        right way round: a roster entry deleted mid-run must not make the
+        branch unmergeable.
+        """
+        if not node.branch:
+            return []
+        spec = self.config.agents.get(node.agent)
+        if spec is None:
+            return []
+        patterns = self.config.readonly_paths_for(spec)
+        if not patterns:
+            return []
+        changed = gitops.changed_paths(self.paths.root, node.branch, base)
+        return [path for path in changed if matches_any(patterns, path)]
+
     def collect(self, agent_id: str, mode: str = "summary") -> dict[str, Any]:
         node = self.tree.get(agent_id)
         if node is None:
@@ -1750,6 +1788,21 @@ class Runner:
             base = self.config.base_branch or gitops.current_branch(self.paths.root)
             payload["commits"] = gitops.commits_on(self.paths.root, node.branch, base)
             payload["diff_stat"] = gitops.diff_stat(self.paths.root, node.branch, base)[:2000]
+            # Surfaced HERE as well as at the merge gate, so the orchestrator
+            # learns about it while it is still deciding rather than as a
+            # surprise in the merge result. The revert happens at merge.
+            violations = self.readonly_violations(node, base)
+            if violations:
+                payload["readonly_violations"] = violations[:50]
+                payload["readonly_note"] = (
+                    f"{node.agent} modified {len(violations)} file(s) it may not "
+                    f"change. They will be reverted to {base} when this branch "
+                    f"merges; the rest of its work is unaffected. Read what it "
+                    f"was trying to do before you re-run it — a developer "
+                    f"editing a test usually means the test and the "
+                    f"implementation disagree, and which one is wrong is your "
+                    f"call, not its."
+                )
         return payload
 
     # ---------------------------------------------------------------- control --
@@ -2259,6 +2312,47 @@ class Runner:
             return {"agent_id": agent_id, "merged": False, "error": "agent has no branch (writes: false)"}
         target = Path(into).expanduser() if into else self.paths.root
         policy = self.config.project.get("git", {}).get("merge", {})
+
+        # Revert-and-report, before the merge. The agent's own work still
+        # lands; its edits to files it was not allowed to change do not. This
+        # runs in the parent's process, outside the agent's worktree, and an
+        # agent cannot call merge_agent on itself (see `_may_act_on`) — which
+        # is what makes it enforcement rather than an instruction.
+        base = self.config.base_branch or gitops.current_branch(self.paths.root)
+        reverted: list[str] = []
+        revert_failed = ""
+        violations = self.readonly_violations(node, base)
+        if violations:
+            worktree = Path(node.worktree) if node.worktree else None
+            if worktree and worktree.is_dir():
+                result = gitops.restore_paths(
+                    worktree, base, violations,
+                    f"revert {node.agent}'s changes to {len(violations)} protected "
+                    f"file(s)\n\n{chr(10).join(violations[:50])}",
+                )
+                if result.ok:
+                    reverted = violations
+                else:
+                    revert_failed = result.err or result.out
+            else:
+                revert_failed = ("the agent's worktree is gone, so its branch cannot "
+                                 "be corrected in place")
+            if revert_failed:
+                # Refusing is the only honest answer: merging now would carry
+                # the edits in, and reporting a revert that did not happen is
+                # worse than refusing to merge.
+                self.tree.emit(agent_id, "merge", result="blocked",
+                               detail=revert_failed[:400], protected=len(violations))
+                return {
+                    "agent_id": agent_id, "result": "blocked", "branch": node.branch,
+                    "readonly_violations": violations[:50],
+                    "detail": f"{node.agent} modified {len(violations)} protected "
+                              f"file(s) and they could not be reverted: "
+                              f"{revert_failed}. Nothing was merged.",
+                }
+            self.tree.emit(agent_id, "readonly_revert", paths=reverted[:50],
+                           count=len(reverted), base=base)
+
         status, detail = gitops.merge(
             target, node.branch, f"{node.agent}: {node.task[:72]}", policy.get("style", "squash")
         )
@@ -2266,7 +2360,18 @@ class Runner:
         if status == "merged":
             self.tree.set_status(agent_id, "merged")
             self._cleanup(node)
-        return {"agent_id": agent_id, "result": status, "detail": detail[:1000], "branch": node.branch}
+        payload = {"agent_id": agent_id, "result": status, "detail": detail[:1000],
+                   "branch": node.branch}
+        if reverted:
+            payload["readonly_reverted"] = reverted[:50]
+            payload["readonly_note"] = (
+                f"{len(reverted)} file(s) {node.agent} may not modify were reverted "
+                f"to {base} before merging; everything else it did was merged. If it "
+                f"was editing a test to make its code pass, the merged result now "
+                f"has that test failing — which is the outcome you want, and yours "
+                f"to resolve."
+            )
+        return payload
 
     def discard_agent(self, agent_id: str, force: bool = False) -> dict[str, Any]:
         node = self.tree.get(agent_id)

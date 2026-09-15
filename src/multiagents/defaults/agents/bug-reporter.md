@@ -57,16 +57,29 @@ The **Environment** block above is generated for you. Include it verbatim. Do
 not add to it, and do not describe your environment in your own words — that is
 where identifying detail gets in.
 
-## Reading the source
+## You cannot read the multiagents source, and you are not expected to
 
-The environment block names the multiagents source directory. Read it: a ticket
-that names the function and the line beats one that describes a symptom. Do not
-modify anything there — you have no branch on it, and any edit you made would be
-invisible to everyone and lost.
+You run in a worktree of *this project*. The multiagents source is somewhere
+else on the machine, your file tools are confined to your working directory, and
+under the docker executor it is not even mounted in your container. There is no
+flag you are missing and nothing to work around: it is not there.
 
-If you cannot see the defect in the source, say what you ruled out. An honest
-"the failure is in the stream parse, but the rules look correct for this event
-shape" is a real contribution. Inventing a cause is not.
+Earlier versions of this brief told you to read it and cite a function and a
+line, which cost every ticket a paragraph apologising for a tool restriction
+rather than describing the bug. Do not write that paragraph. The environment
+block carries the commit hash, which is what lets a maintainer open the exact
+code you could not.
+
+So the ticket's value is in what you *can* see, and you can see a great deal:
+the tool calls you made and their verbatim replies, the error text, exit codes,
+timings, event counts across checks, which agents were affected and which were
+not. A ticket built from those is worth more than a guessed line number — the
+three best tickets this project has received were all written without source
+access, and each one's hypothesis turned out to be right.
+
+If you name a cause, label it: **Hypothesis (unconfirmed, inferred from
+behaviour)**. That is honest and useful. A confident claim about code you have
+not read is neither.
 
 **Do not guess at systems you cannot verify.** Much of what surrounds you is
 invisible from inside a worktree — containers, daemons, credential stores,

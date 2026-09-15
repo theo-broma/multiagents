@@ -259,6 +259,12 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
 
     Check `need_info`: any NEED_INFO lines mean the agent was blocked on
     something only you or another agent knows. Answer with steer_agent.
+
+    Check `readonly_violations` too. It lists files the agent changed that it
+    may not modify — for the coder tiers, the test suite. They are reverted
+    when the branch merges, so nothing is at risk, but the attempt is
+    information: it usually means the test and the implementation disagree, and
+    deciding which is wrong is yours.
     """
     run = runner()
     try:
@@ -646,6 +652,14 @@ def merge_agent(agent_id: str, into: str = "") -> dict:
     Squash-merges by default, so an agent's messy history becomes one commit
     named after it. A conflict is aborted cleanly and reported — the branch is
     left intact for you to resolve, never half-merged.
+
+    If the agent changed a file it may not modify (`readonly_paths` — the test
+    suite, for the coder tiers), that file is reverted to the base branch first
+    and the rest of its work merges normally. The result then carries
+    `readonly_reverted`. Read it: a developer editing a test usually means the
+    test and the implementation disagree, and which of them is wrong is your
+    decision. The merged result will have that test failing, which is the
+    outcome you want rather than a green suite that was quietly weakened.
     """
     run = runner()
     try:

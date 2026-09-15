@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +81,55 @@ def _read_manifest(target: Path) -> dict:
 
 def _write_manifest(target: Path, data: dict) -> None:
     (target / MANIFEST).write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """Compile one gitignore-style glob into a full-match regex.
+
+    `*` and `?` stay inside a path segment, `**` crosses them, and a pattern
+    with no `/` in it matches at any depth — so `conftest.py` covers
+    `tests/conftest.py` the way anyone writing it would expect. A trailing `/`
+    means the directory and everything under it.
+    """
+    pat = pattern.strip().removeprefix("./")
+    if not pat:
+        return re.compile(r"(?!)")                 # matches nothing
+    if pat.endswith("/"):
+        pat += "**"
+    anchored = "/" in pat
+    out: list[str] = []
+    i = 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out.append(r"(?:.*/)?")
+            i += 3
+        elif pat.startswith("**", i):
+            out.append(r".*")
+            i += 2
+        elif pat[i] == "*":
+            out.append(r"[^/]*")
+            i += 1
+        elif pat[i] == "?":
+            out.append(r"[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    body = "".join(out)
+    if not anchored:
+        body = r"(?:.*/)?" + body
+    return re.compile(body + r"\Z")
+
+
+@lru_cache(maxsize=512)
+def _cached_regex(pattern: str) -> re.Pattern[str]:
+    return _glob_regex(pattern)
+
+
+def matches_any(patterns: Sequence[str], path: str) -> bool:
+    """Does this repo-relative path match any of these globs?"""
+    candidate = str(path).strip().removeprefix("./")
+    return any(_cached_regex(p).match(candidate) for p in patterns if str(p).strip())
 
 
 def layer_files(source: Path, scope: str = "global") -> list[str]:
@@ -197,6 +249,19 @@ class AgentSpec:
     # it uninvited.
     models: dict[str, Any] = field(default_factory=dict)
     launch: bool = False
+    # Paths this agent may not MODIFY, as gitignore-style globs. Adding a new
+    # file is always allowed; changing, deleting or renaming a matching one is
+    # reverted before its branch merges. `None` means "use the project default"
+    # (limits.readonly_paths); `[]` opts out, which is how the agent that OWNS
+    # those files — the test engineer — is exempted.
+    #
+    # This is enforced at the merge gate rather than in the filesystem, and it
+    # is a deliberate choice rather than a shortcut: the container runs as the
+    # invoking uid so an agent can chmod its own files back, and bind mounts
+    # are fixed when the container is created, so neither is per-agent. The
+    # merge gate runs in the parent's process, outside the worktree, and an
+    # agent cannot merge itself — see `_may_act_on`.
+    readonly_paths: list[str] | None = None
     # Which command launches it: "orchestrator" for `run`, "initializer" for
     # `init-agent`. Both are launch: true; the role says which door they use.
     role: str = ""
@@ -279,6 +344,19 @@ class Config:
         if name not in self.agents:
             raise KeyError(f"No agent named {name!r}. Configured: {sorted(self.agents)}")
         return self.agents[name]
+
+    def readonly_paths_for(self, spec: AgentSpec) -> list[str]:
+        """Globs this agent may not modify.
+
+        An agent's own list REPLACES the project default rather than adding to
+        it — the same rule the config layers use for lists, because a partially
+        overridden list is never what anyone means. `[]` is therefore a real
+        answer ("this agent may touch them") and not an absent one.
+        """
+        if spec.readonly_paths is not None:
+            return [str(p) for p in spec.readonly_paths]
+        default = self.limits.get("readonly_paths") or []
+        return [str(p) for p in default]
 
     def instructions_for(self, spec: AgentSpec) -> str:
         """Resolve an agent's ``.md`` file across the config layers.

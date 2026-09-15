@@ -228,7 +228,7 @@ sit in a **library**, predefined but switched off until a project asks for them.
 |---|---|---|
 | **Initializer** | `initializer` | Converses with you, writes `BRIEF.md`, proposes the team and the model for each role. Launched by `init-agent`. |
 | **Orchestrator** | `orchestrator` | Drives the project to completion. Writes the interface contracts, makes every delegation and architectural call, writes no implementation code. Launched by `run`. |
-| **Advisor** | `advisor` | Second opinion for the drivers. Analyses proposals and prompts, offers alternatives. Decides nothing, executes nothing. |
+| **Advisor** | `advisor` | Second opinion for the drivers. Reads the code, analyses proposals and prompts, offers alternatives. Decides nothing, changes nothing. |
 | **Test Engineer** | `tester` | Writes the black-box behavioural suite from the contract, before any implementation exists. Defines what done means. |
 | **Developer** | `implementer-quick`, `implementer`, `implementer-deep` | Writes the code that turns the suite green. Three tiers, one brief. The tests are read-only to them. |
 | **Adversary** | `adversary` | Attacks the green code: mutation, fuzzing, untested inputs, interleaving, the attacker's position. Breaks it; fixes nothing. |
@@ -317,10 +317,19 @@ consult("advisor", "The catalog says glm-5.3-flash input price rose 7.5x.
                     agents.yaml alone — is that reasonable?")
 ```
 
-It **decides nothing and executes nothing**: read-only against the project, no
-commands, no commits, no spawning. The only thing it produces is its reply. That
-is the point rather than a limitation — the orchestrator is accountable for the
+It **decides nothing and changes nothing**: no edits that survive, no commits,
+no merging, no spawning. The only thing it produces is its reply. That is the
+point rather than a limitation — the orchestrator is accountable for the
 outcome, and "the advisor said so" is not a reason.
+
+It does **investigate**, though, and its brief pushes it to. Like every agent it
+gets its own worktree with a full toolset, so it can read the code, search the
+tree, check `git log` and run the suite before answering — and its branch is
+discarded whether or not it touches anything. That is the division of labour
+worth having: verification costs *its* context rather than the orchestrator's,
+and an advisor answering from memory is worth a fraction of one that went and
+looked. Its brief tells it to cite `path/to/file.py:123` and to say plainly when
+it did not check.
 
 Its brief pushes against both failure modes, rubber-stamping and obstructing,
 and it is told to answer "this doesn't need review, go ahead" when consulted

@@ -177,6 +177,41 @@ limits:
   # editing a file, and an agent cannot grant it to itself.
   allow_workdir_override: false
 
+  # Files an agent may not MODIFY. Gitignore-style globs, matched against
+  # repo-relative paths: `*` and `?` stay inside a path segment, `**` crosses
+  # them, and a pattern with no `/` matches at any depth.
+  #
+  # This is the test suite by default, and it exists because the fastest way to
+  # make a failing test pass is always to change the test. The developer is
+  # told not to; this is what makes it true. Adding a file is always allowed —
+  # a new test cannot weaken a contract — so only modifications, deletions and
+  # renames are caught.
+  #
+  # Enforced when a branch MERGES, not in the filesystem: the container runs as
+  # the invoking uid, so an agent can chmod its own files back, and bind mounts
+  # are fixed when the container is created rather than per agent. The merge
+  # gate runs in the parent's process and an agent cannot merge itself, so that
+  # is the one point it cannot reach. A violation is reverted to the base
+  # branch, the rest of the agent's work merges, and the parent is told.
+  #
+  # Set it to [] to switch this off. Agents that legitimately own these files —
+  # the test engineer — carry `readonly_paths: []` in agents.yaml instead, and
+  # an agent's own list replaces this one rather than adding to it.
+  #
+  # Retune these to your own layout: the point is not the globs, it is that the
+  # contract and the code are written by different agents.
+  readonly_paths:
+    - "tests/**"
+    - "test/**"
+    - "spec/**"
+    - "**/test_*.py"
+    - "**/*_test.go"
+    - "**/*.test.ts"
+    - "**/*.test.js"
+    - "**/*.spec.ts"
+    - "**/*.spec.js"
+    - "conftest.py"
+
   # When the orchestrator ends for a reason that was not you — a crash, or a
   # terminal that went away — `run` waits and starts it again, interactively,
   # with an opening message asking it to take stock. Interactive on purpose:
