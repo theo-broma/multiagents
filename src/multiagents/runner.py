@@ -815,16 +815,38 @@ class Runner:
             # and `claude --model deep`, both of which the CLI rejected after a
             # spawn had already been paid for. Refusing here costs nothing and
             # says what the choices are.
+            #
+            # But an agent has TWO namespaces, and only checking the first made
+            # the refusal wrong and its own advice circular: `flutter-tester`
+            # names `models: {agy: gemini-3.1-pro-high}`, and asking for exactly
+            # that string was refused with "claude does not serve a model called
+            # 'gemini-3.1-pro-high' — name a model under `models:` instead",
+            # which is what the agent already did. Filed as bug-583360 by an
+            # agent that then had no way to run the fallback it could see.
             known = {m.get("id") for m in (self.config.models.get(spec.provider) or [])
                      if isinstance(m, dict)}
-            if known and model not in known:
+            elsewhere = next((name for name in (spec.models or {})
+                              if spec.fallback_for(name)[0] == model), None)
+            if elsewhere is not None and (not known or model not in known):
+                # Naming a fallback's model is a request to run THERE. Carrying
+                # the provider across matters as much as the model: the id is
+                # meaningless in the old one's namespace, which is the whole
+                # reason this check exists.
+                alternative, overrides = spec.fallback_for(elsewhere)
+                spec = AgentSpec(**{**spec.__dict__, "provider": elsewhere,
+                                    "model": alternative, **overrides})
+            elif known and model not in known:
+                offers = ", ".join(
+                    f"{name}:{spec.fallback_for(name)[0]}" for name in (spec.models or {})
+                    if spec.fallback_for(name)[0]) or "none"
                 raise ValueError(
                     f"{spec.provider} does not serve a model called {model!r}. "
-                    f"A model id belongs to its provider's namespace — to run "
-                    f"{agent_name!r} elsewhere, name a model under `models:` in "
-                    f"its agents.yaml entry instead of overriding it here."
+                    f"A model id belongs to its provider's namespace. "
+                    f"{agent_name!r} can also run on: {offers} — naming one of "
+                    f"those models here runs it on that provider."
                 )
-            spec = AgentSpec(**{**spec.__dict__, "model": model})
+            else:
+                spec = AgentSpec(**{**spec.__dict__, "model": model})
         self._preflight(spec, workdir)
         provider = self.providers[spec.provider]
 
@@ -1830,10 +1852,12 @@ class Runner:
         # that takes longer than the timeout. The first event is the closest
         # thing to a "ready" signal these CLIs offer.
         run = self.runs.get(agent_id)
+        heard = False
         if run is not None:
             deadline = time.monotonic() + STEER_CONFIRM_SECONDS
             while time.monotonic() < deadline:
                 if run.done.is_set() or run.events:
+                    heard = bool(run.events)
                     break
                 await asyncio.sleep(0.05)
         node = self.tree.get(agent_id)
@@ -1844,8 +1868,23 @@ class Runner:
                          f"({node.status}: {node.reason or 'no reason recorded'}). "
                          f"The message was not acted on.",
             }
-        self.tree.emit(agent_id, "steered", message=message[:400])
-        return {"agent_id": agent_id, "steered": True, "status": "running"}
+        self.tree.emit(agent_id, "steered", message=message[:400], confirmed=heard)
+        # Started is not the same as answering. The loop above ends either
+        # because the run spoke or because the window ran out, and reporting
+        # both as plain "running" is what bug-4374b7 is about: three silent
+        # agents were steered, all three returned `steered: true`, one resumed
+        # and two never produced another event — and there was no way to tell
+        # the cases apart except waiting several more minutes by hand.
+        result = {"agent_id": agent_id, "steered": True, "status": "running",
+                  "confirmed": heard}
+        if not heard:
+            result["note"] = (
+                f"the process restarted and is alive, but said nothing within "
+                f"{STEER_CONFIRM_SECONDS:.0f}s. That is normal for an agent whose "
+                f"first move is a long tool call, and it is also what a wedged "
+                f"one looks like. Check it again before assuming the steer landed; "
+                f"if it is still silent, stop_agent keeps the branch and worktree.")
+        return result
 
     # ---------------------------------------------------------- conversation --
 

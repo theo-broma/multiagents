@@ -5,102 +5,122 @@
 # Keys
 #   provider     which block in providers.yaml drives it
 #   model        must exist in models.yaml (refresh with `multiagents refresh-models`)
-#   instructions .md file in agents/, resolved project-first then global
+#   instructions .md file under agents/, resolved project-first then global
+#   models       per-provider fallback, used when `provider` is exhausted
 #   writes       true  -> gets its own git worktree and branch
 #                false -> runs read-only against the project directory
 #   permission   full | sandbox | readonly   (see providers.yaml for caveats)
 #   can_spawn    may this agent delegate to subagents of its own
 #   timeout      wall-clock seconds; silence_timeout is per-stream quiet time
 #
-# Model choices below are a deliberate spread across both CLIs so the whole
-# system is exercised from day one. Retune once your opencode subscription
-# changes what is available.
+# This file holds the DEFAULT TEAM — six roles, described in agents/README.md.
+# Specialists that are not in it (specifier, reviewer, researcher, pentester,
+# security-advisor, spec-adversary) live in agents/library/ with a paste-ready
+# block each in agents/library/README.md. The initializer proposes the ones a
+# project needs during `multiagents init-agent`; adding one is a paste.
+#
+# Model choices below are a deliberate spread across the CLIs so the whole
+# system is exercised from day one. Retune once your subscription changes what
+# is available — and see the note on checking pairs at the bottom before you do.
 
 agents:
 
+  # ---------------------------------------------------------------- phase 1 --
   # Shapes the project WITH you before any implementation starts. Launched by
   # `multiagents init-agent`, resumable by running that again — this stage is
-  # expected to take several sessions. It writes BRIEF.md and fills context/,
-  # and can consult the critic and advisor while it works.
+  # expected to take several sessions. It writes BRIEF.md, fills context/, and
+  # proposes the team and the model for each role into
+  # .multiagents/proposals/agents.yaml for you to accept. It never edits this
+  # file: an agent given the wrong model produces work that looks fine, so the
+  # roster is the one decision a human stays in the loop for.
   initializer:
     provider: claude
     model: sonnet
-    instructions: _initializer.md
+    instructions: team/_initializer.md
     description: Shapes the project with you. Launched by `multiagents init-agent`.
     launch: true
     role: initializer
     can_spawn: true
 
+  # ------------------------------------------------------------- phases 2, 6 --
   # The orchestrator. Unlike every other entry this one is LAUNCHED, not
   # spawned: `multiagents run` starts this CLI as an MCP client and it drives
   # everything else. Change the provider and model here to orchestrate with a
   # different CLI — nothing else in the system needs to know.
+  #
+  # It writes the interface contracts and it makes every delegation and
+  # architectural decision. It does NOT write implementation code; its context
+  # is the one resource here that cannot be replaced.
   orchestrator:
     provider: claude
     model: sonnet
-    instructions: _orchestrator.md
+    instructions: team/_orchestrator.md
     description: Drives the project. Launched by `multiagents run`.
     launch: true
     role: orchestrator
     can_spawn: true
 
-
-  researcher:
-    provider: opencode
-    model: opencode-go/glm-5.3-flash
-    instructions: researcher.md
-    models:
-      agy: gemini-3.8-flash-medium
-    description: Reads the codebase and answers questions. No writes.
-    writes: false
-    permission: readonly
-    can_spawn: false
-    timeout: 600
-    silence_timeout: 120
-
-  # Writes the numbered requirements a feature is built against. No code.
-  # A broad prompt gets the median implementation because "build the checkout"
-  # does not say what better means; this is what makes better sayable.
-  specifier:
+  # The standing second opinion. Talked to with consult(), which blocks for a
+  # reply and keeps context between calls, so a driver can hold an actual
+  # back-and-forth instead of firing off amnesiac one-shot questions. It
+  # decides nothing and executes nothing.
+  #
+  # Only the two drivers can reach it — consult() needs spawn rights, which the
+  # workers do not have. A worker that wants advice stops with NEED_INFO and
+  # the orchestrator relays.
+  #
+  # Deliberately NOT a Claude model: feedback from the same family as the
+  # orchestrator tends to agree with it, which defeats the purpose.
+  advisor:
     provider: agy
     model: gemini-3.1-pro-high
-    instructions: specifier.md
+    instructions: team/advisor.md
     models:
       opencode: opencode-go/deepseek-v4-pro
-    description: >-
-      Turns an intention into numbered, individually testable requirements in
-      context/specs/<feature>.md. Writes no code.
-    writes: true
-    permission: sandbox
+    description: Consultative second opinion. Advises; decides and executes nothing.
+    conversational: true
+    writes: false
+    permission: readonly
     effort: high
     can_spawn: false
-    timeout: 1200
-    silence_timeout: 240
+    timeout: 420
+    silence_timeout: 180
 
-  # Attacks a specification before anything is built. Deliberately on a
-  # DIFFERENT model family from the specifier: an adversary that shares the
-  # author's blind spots agrees with it, which is the one thing it must not do.
-  adversary:
-    provider: opencode
-    model: opencode-go/gpt-5.6-luna
-    instructions: adversary.md
+  # ---------------------------------------------------------------- phase 3 --
+  # Writes the black-box behavioural suite from the orchestrator's contract,
+  # BEFORE any implementation exists. Red is the correct outcome of its run.
+  #
+  # On a strong model rather than a fast one, unlike earlier versions of this
+  # roster: the job is no longer "iterate until green" but "decide what done
+  # means", and an exhaustive edge-case suite written against an interface that
+  # does not exist yet is the most consequential writing in the pipeline. A
+  # cheap test engineer is how a project ends up with a green suite that
+  # asserts the happy path and nothing else.
+  tester:
+    provider: agy
+    model: gemini-3.1-pro-high
+    instructions: team/tester.md
     models:
-      agy: claude-sonnet-4-6
+      opencode: opencode-go/gpt-5.6-luna
     description: >-
-      Attacks a spec with concrete failure scenarios before implementation.
-      Appends them to the spec file; proposes no fixes.
+      Writes the black-box behavioural test suite that defines done, before the
+      implementation exists. Red is success.
     writes: true
     permission: sandbox
     effort: high
     can_spawn: false
-    timeout: 1200
+    timeout: 1500
     silence_timeout: 240
 
+  # ---------------------------------------------------------------- phase 4 --
   # Three coder tiers sharing one brief. They differ in what they cost and how
   # much judgement the task needs — NOT in how important the feature is, which
   # is the tempting and wrong way to route (it sends everything to the top
   # tier). The routing rule and the escalation path live in the orchestrator's
   # brief; without them a tiered roster just becomes an expensive one.
+  #
+  # All three have read-only access to the test suite by instruction: a suite
+  # the implementer can edit is not a contract, it is a suggestion.
   #
   # The model pins are a starting point, not a ranking anyone has measured
   # here. Retune them for your own work: what the tiers give you is the
@@ -113,7 +133,7 @@ agents:
   implementer-quick:
     provider: opencode
     model: opencode-go/glm-5.3-flash
-    instructions: implementer.md
+    instructions: team/implementer.md
     models:
       agy: gemini-3.8-flash-medium
     description: >-
@@ -139,9 +159,9 @@ agents:
   implementer:
     provider: opencode
     model: opencode-go/kimi-k2.7-code
-    instructions: implementer.md
+    instructions: team/implementer.md
     models:
-      agy: gemini-3.1-pro-high
+      agy: claude-sonnet-4-6
     description: Writes code on its own branch. The workhorse, and the default.
     writes: true
     permission: full
@@ -159,7 +179,7 @@ agents:
   implementer-deep:
     provider: opencode
     model: opencode-go/kimi-k3
-    instructions: implementer.md
+    instructions: team/implementer.md
     models:
       # A fallback may say what this agent BECOMES elsewhere, not just which
       # model. `effort` belongs to a provider's namespace as much as a model id
@@ -182,38 +202,29 @@ agents:
     # Measured: real runs of this reach 700-800 steps.
     max_steps: 1000
 
-  reviewer:
-    provider: agy
-    model: gemini-3.1-pro-high
-    instructions: reviewer.md
-    models:
-      opencode: opencode-go/gpt-5.6-luna
-    description: Reviews a diff for correctness and reports findings. No writes.
-    writes: false
-    permission: readonly
-    effort: high
-    can_spawn: false
-    timeout: 900
-    silence_timeout: 180
-
-  # Attacks written code from an attacker's position. Not the reviewer, which
-  # asks whether the code is correct; this asks what someone gets when they try
-  # to break it. On a different provider from security-advisor on purpose: the
-  # audit should not be done by whoever blessed the design. The specific model
-  # is a strong-reasoning pick and yours to change — the family difference is
-  # the part that matters.
-  pentester:
+  # ---------------------------------------------------------------- phase 5 --
+  # Attacks code that already passes its tests: mutation testing, fuzzing,
+  # inputs the suite never uses, interleaving, and the attacker's position on
+  # anything reachable from outside. It commits tests that fail now and fixes
+  # nothing.
+  #
+  # It checks BOTH the implementer's code and — through mutation — the
+  # coverage of the tester's suite, so it is pinned away from both of them. An
+  # attacker that shares the author's blind spots agrees with them, which is
+  # the one thing it must not do.
+  #
+  # A strong-reasoning pick, and yours to change; the family difference is the
+  # part that matters. This model previously carried the `pentester` brief,
+  # whose attacker-position work this role absorbed.
+  adversary:
     provider: opencode
     model: opencode-go/deepseek-v4-pro
-    instructions: pentester.md
+    instructions: team/adversary.md
     models:
-      # effort: high does not survive the move; see implementer-deep.
-      agy:
-        model: claude-opus-4-6-thinking
-        effort: ""
+      agy: gemini-3.8-flash-high
     description: >-
-      Attacks existing code for exploitable paths and reports position, path and
-      outcome. May commit a failing test that proves a finding.
+      Attacks green code with mutation, fuzzing and untested inputs. Commits
+      failing tests that prove findings; proposes no fixes.
     writes: true
     permission: sandbox
     effort: high
@@ -221,83 +232,12 @@ agents:
     timeout: 1500
     silence_timeout: 240
 
-  tester:
-    provider: agy
-    model: gemini-3.8-flash-medium
-    instructions: tester.md
-    models:
-      opencode: opencode-go/glm-5.3-flash
-    description: Writes and runs tests, iterating until green. Fast loop.
-    writes: true
-    permission: sandbox
-    effort: medium
-    can_spawn: false
-    timeout: 1200
-    silence_timeout: 180
-
-  # A standing advisor rather than a task runner. Talked to with consult(),
-  # which blocks for a reply and keeps context between calls, so the
-  # orchestrator can hold an actual back-and-forth instead of firing off
-  # amnesiac one-shot questions.
-  #
-  # Deliberately NOT a Claude model: feedback from the same family as the
-  # orchestrator tends to agree with it, which defeats the purpose.
-  critic:
-    provider: opencode
-    model: opencode-go/gpt-5.6-luna
-    instructions: critic.md
-    models:
-      agy: gemini-3.8-flash-high
-    description: Critical thinker. Advises the orchestrator; decides nothing.
-    conversational: true
-    writes: false
-    permission: readonly
-    can_spawn: false
-    timeout: 300
-    silence_timeout: 120
-
-  # Consulted while something is still being designed, when a boundary can
-  # still be moved for free. Conversational for the same reason the critic is:
-  # a threat model is built through follow-ups, not one-shot questions.
-  security-advisor:
-    provider: agy
-    model: gemini-3.1-pro-high
-    instructions: security-advisor.md
-    models:
-      opencode: opencode-go/gpt-5.6-luna
-    description: >-
-      Design-time security advice, phrased as candidate requirements the
-      specifier can absorb. Advises; decides nothing.
-    conversational: true
-    writes: false
-    permission: readonly
-    effort: high
-    can_spawn: false
-    timeout: 420
-    silence_timeout: 180
-
-  # A second standing advisor, on Gemini rather than the critic's GPT model.
-  # Useful when you want a genuinely different perspective on the same
-  # question, or a long technical discussion with a large-context model.
-  advisor:
-    provider: agy
-    model: gemini-3.1-pro-high
-    instructions: critic.md
-    models:
-      opencode: opencode-go/deepseek-v4-pro
-    description: Conversational advisor on Gemini 3.1 Pro. Advises; decides nothing.
-    conversational: true
-    writes: false
-    permission: readonly
-    effort: high
-    can_spawn: false
-    timeout: 420
-    silence_timeout: 180
-
+  # ------------------------------------------------------------ infrastructure
   # Writes up defects in multiagents ITSELF — not bugs in your project, which
-  # are ordinary work for the implementer. Read-only and cheap: its product is
-  # one ticket, and the runner gives it the environment block so it does not
-  # have to discover (or invent) facts about the machine it runs on.
+  # are ordinary work for the implementer. Not part of the six-phase pipeline.
+  # Read-only and cheap: its product is one ticket, and the runner gives it the
+  # environment block so it does not have to discover (or invent) facts about
+  # the machine it runs on.
   bug-reporter:
     provider: opencode
     model: opencode-go/glm-5.3-flash
@@ -314,11 +254,31 @@ agents:
     timeout: 420
     silence_timeout: 180
 
-  # Renamed to `advisor` so it is not bound to one model family. deep_merge can
-  # only add and override, never delete, so an install that already carries a
-  # `gemini` entry keeps it unless it is shipped explicitly disabled.
+  # -------------------------------------------------------------- deprecated --
+  # deep_merge can only add and override, never delete, so an install that
+  # already carries these keeps them unless they are shipped explicitly
+  # disabled.
+
+  # Folded into `advisor`, which is the same role without a model family in its
+  # name. Its brief is now agents/team/advisor.md.
+  critic:
+    disabled: true
+    provider: opencode
+    model: opencode-go/gpt-5.6-luna
+    description: Deprecated. Use `advisor`.
+
   gemini:
     disabled: true
     provider: agy
     model: gemini-3.1-pro-high
     description: Deprecated alias for `advisor`.
+
+# ---------------------------------------------------------------------------
+# Checking pairs, if you repin
+#
+# Three of these agents check each other's work, and a checker sharing the
+# author's blind spots agrees with it — silently, at the moment nobody is
+# watching. `tester`, the `implementer` tiers and `adversary` must land on
+# DIFFERENT models, and must still do so after a failover: the `models:`
+# fallbacks above are chosen so that with either provider down, no two of them
+# collapse onto the same model. Check that again if you change a pin.

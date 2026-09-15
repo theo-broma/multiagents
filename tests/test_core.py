@@ -667,6 +667,109 @@ def test_a_read_only_agent_still_trips_on_silence():
     assert trip is not None and trip.reason == "silence"
 
 
+def test_naming_a_fallback_model_runs_the_agent_on_that_provider(tmp_path):
+    """bug-583360. An agent has TWO model namespaces — its provider's, and the
+    one its own `models:` map names — and only the first was checked.
+
+    `flutter-tester` declares `models: {agy: gemini-3.1-pro-high}`. Asking for
+    exactly that string was refused with "claude does not serve a model called
+    'gemini-3.1-pro-high' — name a model under `models:` instead", which is
+    what the agent had already done. The refusal's own remedy was the thing it
+    was refusing.
+    """
+    import asyncio
+
+    spec = AgentSpec("flutter-tester", "claude", "opus",
+                     models={"agy": "gemini-3.1-pro-high"})
+    runnable = {"bin": "sh", "spawn": {"args": ["-c", "true"]}, "stream": {}}
+    r = _runner(tmp_path, {"flutter-tester": spec},
+                {"claude": dict(runnable), "agy": dict(runnable)})
+    r.config.models = {"claude": [{"id": "opus"}], "agy": [{"id": "gemini-3.1-pro-high"}]}
+
+    seen = {}
+
+    async def _fake_launch(*, spec, provider, **kw):
+        seen["provider"], seen["model"] = provider.name, spec.model
+        raise RuntimeError("stop here — routing is what this test is about")
+
+    r._launch = _fake_launch
+    asyncio.run(r.start("flutter-tester", "go", model="gemini-3.1-pro-high"))
+
+    assert seen == {"provider": "agy", "model": "gemini-3.1-pro-high"}, seen
+
+
+def test_an_unknown_model_names_where_the_agent_can_actually_run(tmp_path):
+    """The old message told the caller to do what it had already done. It now
+    lists the agent's real alternatives instead."""
+    import asyncio
+
+    spec = AgentSpec("flutter-tester", "claude", "opus",
+                     models={"agy": "gemini-3.1-pro-high"})
+    r = _runner(tmp_path, {"flutter-tester": spec},
+                {"claude": {"bin": "sh"}, "agy": {"bin": "sh"}})
+    r.config.models = {"claude": [{"id": "opus"}]}
+
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(r.start("flutter-tester", "go", model="no-such-model"))
+    message = str(excinfo.value)
+    assert "agy:gemini-3.1-pro-high" in message, message
+    assert "name a model under" not in message, "the circular advice is gone"
+
+
+def test_routing_says_why_each_fallback_was_passed_over(tmp_path):
+    """bug-583360's other half. Naming only the providers skipped for lack of a
+    MODEL meant an agent whose one fallback was cooling was told "no model named
+    for opencode" — a provider it had never asked for — and nothing about the
+    one that had actually failed it."""
+    import time as _time
+    from multiagents.budget import Budget, choose_provider
+
+    budgets = {
+        "claude": Budget(provider="claude", known=True, headroom=0.0),
+        "agy": Budget(provider="agy", known=True, headroom=0.8,
+                      cooldown_until=_time.time() + 600),
+    }
+    chosen, why = choose_provider(
+        "claude", budgets, ["opencode", "agy", "defer"], 0.15,
+        allowed={"claude", "agy"})
+
+    assert chosen is None
+    assert "agy (cooling down for" in why, why
+    assert "no model named for opencode" in why, why
+
+
+def test_a_steer_says_whether_anything_answered(tmp_path):
+    """bug-4374b7. Three silent agents were steered, all three returned
+    `steered: true`, one resumed and two never spoke again — and nothing in the
+    reply distinguished them. `confirmed` is that distinction."""
+    import asyncio
+    from types import SimpleNamespace
+    from multiagents.runner import Run
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"b": AgentSpec("b", "p", "m")}, {"p": {"bin": "sh"}})
+    r.tree.add(Node(id="ag-1", agent="b", provider="p", model="m",
+                    parent=None, depth=1, session_id="s-1", worktree=str(tmp_path)))
+    r.tree.set_status("ag-1", "running")
+
+    async def _noop(*a, **kw):
+        return None
+
+    r.stop = _noop
+    r._launch = _noop
+
+    for events, expected in ([{"kind": "text"}], True), ([], False):
+        run = Run(node_id="ag-1", provider=_provider_double(), spec=AgentSpec("b", "p", "m"),
+                  handle=SimpleNamespace(stderr_tail=""), supervisor=SimpleNamespace(steps=1))
+        run.events.extend(events)
+        r.runs["ag-1"] = run
+        r.tree.set_status("ag-1", "running")
+
+        out = asyncio.run(r.steer("ag-1", "still there?"))
+        assert out["steered"] is True and out["confirmed"] is expected, out
+        assert ("note" in out) is (not expected), out
+
+
 def test_a_cli_that_cut_its_own_turn_short_is_never_merged(tmp_path):
     """Measured in a real project on 2026-09-14: every agy run that day lasted
     5.0-5.1 minutes, because --print-timeout was never passed and agy's own
@@ -987,8 +1090,11 @@ def test_project_layer_does_not_pin_machine_level_files(tmp_path):
         (source / name).write_text("x")
     (source / "agents" / "a.md").write_text("x")
     # The orchestrator's brief is a normal agent instruction file, so it is
-    # pinned per project like every other one and can be tuned there.
-    (source / "agents" / "_orchestrator.md").write_text("x")
+    # pinned per project like every other one and can be tuned there. It lives
+    # in a subfolder, so the layer has to carry nested names — a flat glob
+    # copied neither team/ nor library/ into any layer but the package's own.
+    (source / "agents" / "team").mkdir()
+    (source / "agents" / "team" / "_orchestrator.md").write_text("x")
     (source / "providers" / "a.sh").write_text("x")
 
     glob_names = layer_files(source, "global")
@@ -997,7 +1103,7 @@ def test_project_layer_does_not_pin_machine_level_files(tmp_path):
     # liability, and they resolve through the global layer anyway.
     assert "providers/a.sh" in glob_names
     assert not any(n.startswith("providers/") for n in proj_names)
-    assert "agents/_orchestrator.md" in proj_names
+    assert "agents/team/_orchestrator.md" in proj_names
     assert "agents/a.md" in proj_names and "project.yaml" in proj_names
 
 
@@ -1505,7 +1611,7 @@ def test_orchestrator_entry_ships_and_is_marked_launch():
     from multiagents.paths import shipped_defaults_dir
     agents = yaml.safe_load((shipped_defaults_dir() / "agents.yaml").read_text())["agents"]
     assert agents["orchestrator"]["launch"] is True
-    assert (shipped_defaults_dir() / "agents" / "_orchestrator.md").is_file()
+    assert (shipped_defaults_dir() / "agents" / "team" / "_orchestrator.md").is_file()
 
 
 # --------------------------------------------------------------------------
@@ -1642,8 +1748,9 @@ def test_both_launched_roles_ship_and_are_distinguishable():
         # The file the config names, not one guessed from the agent's name:
         # the entry may be renamed, and only `role` is load-bearing.
         assert (shipped_defaults_dir() / "agents" / brief).is_file()
-        # Leading underscore marks the briefs a project must not delete.
-        assert brief.startswith("_"), brief
+        # Leading underscore marks the briefs a project must not delete. The
+        # briefs live in folders now, so the convention is about the filename.
+        assert Path(brief).name.startswith("_"), brief
 
 
 def test_only_the_mandatory_briefs_are_underscored():
@@ -1651,7 +1758,8 @@ def test_only_the_mandatory_briefs_are_underscored():
     this file breaks a command."""
     from multiagents.paths import shipped_defaults_dir
     agents = _shipped_agents()
-    underscored = {p.name for p in (shipped_defaults_dir() / "agents").glob("_*.md")}
+    root = shipped_defaults_dir() / "agents"
+    underscored = {p.relative_to(root).as_posix() for p in root.rglob("_*.md")}
     required = {spec["instructions"] for spec in agents.values()
                 if spec.get("launch") and spec.get("instructions")}
     assert underscored == required, (underscored, required)
@@ -1673,6 +1781,42 @@ def test_a_config_naming_the_old_brief_still_resolves(tmp_path):
     # And the exact name wins when both spellings are present.
     (briefs / "orchestrator.md").write_text("the local one")
     assert config.instructions_for(old_style) == "the local one"
+
+
+def test_a_config_naming_a_brief_before_the_folder_split_still_resolves(tmp_path):
+    """The briefs moved into team/ and library/. An agents.yaml written before
+    that says `tester.md` where the file is now `team/tester.md`, and without a
+    fallback the upgrade turns every such entry into a missing brief — which
+    _preflight refuses outright, so the whole roster stops spawning."""
+    from multiagents.config import Config
+    briefs = tmp_path / "agents"
+    (briefs / "team").mkdir(parents=True)
+    (briefs / "team" / "tester.md").write_text("the team brief")
+    config = Config(project={}, providers={}, agents={}, models={},
+                    instruction_dirs=[briefs])
+
+    flat = AgentSpec("tester", "p", "m", instructions="tester.md")
+    assert config.instructions_for(flat) == "the team brief"
+
+    # An exact path still wins over the search, so a project that keeps its own
+    # flat copy is not quietly redirected to the shipped one.
+    (briefs / "tester.md").write_text("the local one")
+    assert config.instructions_for(flat) == "the local one"
+
+
+def test_a_missing_brief_still_resolves_to_nothing(tmp_path):
+    """The fallback searches by filename, so it must not match something else
+    that happens to be nearby. An empty result is what makes _preflight refuse
+    with the agent named, instead of a capable model inventing a purpose."""
+    from multiagents.config import Config
+    briefs = tmp_path / "agents"
+    (briefs / "team").mkdir(parents=True)
+    (briefs / "team" / "tester.md").write_text("the team brief")
+    config = Config(project={}, providers={}, agents={}, models={},
+                    instruction_dirs=[briefs])
+
+    assert config.instructions_for(
+        AgentSpec("ghost", "p", "m", instructions="ghost.md")) == ""
 
 
 def test_launched_spec_selects_by_role():
@@ -1791,8 +1935,8 @@ def test_the_catalog_check_belongs_to_the_initializer():
     ground that rarely moves; the orchestrator checks it reactively instead."""
     from multiagents.paths import shipped_defaults_dir
     briefs = shipped_defaults_dir() / "agents"
-    initializer = (briefs / "_initializer.md").read_text()
-    orchestrator = (briefs / "_orchestrator.md").read_text()
+    initializer = (briefs / "team" / "_initializer.md").read_text()
+    orchestrator = (briefs / "team" / "_orchestrator.md").read_text()
 
     assert "check_model_catalog" in initializer
     assert "update_model_catalog" in initializer
@@ -2742,91 +2886,145 @@ def test_the_state_root_is_not_mistaken_for_a_project(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Spec-first delegation
+# The default team
 #
-# The failure being designed against: a broad task gets the median
-# implementation. These pin the structural properties that counter it, not the
-# prose — the prose is free to be rewritten, the structure is not.
+# Six roles and a pipeline. These pin the structural properties that make the
+# arrangement work — not the prose, which is free to be rewritten.
 
 
-def test_the_spec_first_roster_ships_and_writes():
-    """specifier and adversary both produce committed artifacts, so `writes`
-    must be true or their branch is dropped as empty and the work vanishes."""
-    root = Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
+def _briefs_dir():
+    from multiagents.paths import shipped_defaults_dir
+    return shipped_defaults_dir() / "agents"
+
+
+def test_the_default_team_ships_the_six_roles_and_nothing_spare():
+    """A roster nobody will use costs attention at every delegation. The
+    specialists live in the library and are added deliberately."""
+    agents = {n: s for n, s in _shipped_agents().items() if not s.get("disabled")}
+    assert set(agents) == {
+        "initializer", "orchestrator", "advisor", "tester",
+        "implementer-quick", "implementer", "implementer-deep", "adversary",
+        "bug-reporter",                      # infrastructure, not a pipeline role
+    }, sorted(agents)
+
+    for name, spec in agents.items():
+        brief = spec.get("instructions")
+        assert brief, name
+        assert (_briefs_dir() / brief).is_file(), brief
+        # Everything in the default roster is a team brief, except the one
+        # agent that reports bugs in multiagents itself.
+        folder = "" if name == "bug-reporter" else "team/"
+        assert brief.startswith(folder), (name, brief)
+
+
+def test_the_phase_agents_commit_their_artifacts():
+    """tester and adversary both produce committed files, so `writes` must be
+    true or their branch is dropped as empty and the work vanishes."""
     agents = _shipped_agents()
-
-    for name in ("specifier", "adversary"):
+    for name in ("tester", "adversary"):
         spec = agents[name]
-        assert spec["writes"] is True, f"{name} commits a file"
+        assert spec["writes"] is True, f"{name} commits files"
         assert spec["can_spawn"] is False
         assert not spec.get("launch")
-        assert (root / "agents" / spec["instructions"]).is_file()
 
 
-def test_the_adversary_is_not_the_specifier_s_model_family():
-    """An adversary sharing the author's blind spots agrees with it, which is
-    the one thing it must not do."""
+def test_the_advisor_decides_nothing_and_executes_nothing():
+    """It is consulted, so it keeps context across calls; and it is read-only,
+    because an advisor that can act is a second decision-maker."""
     agents = _shipped_agents()
-    assert agents["adversary"]["provider"] != agents["specifier"]["provider"]
-    assert agents["adversary"]["model"] != agents["specifier"]["model"]
+    advisor = agents["advisor"]
+    assert advisor["conversational"] is True, "advice is built by follow-ups"
+    assert advisor["writes"] is False
+    assert advisor["permission"] == "readonly"
+    assert advisor["can_spawn"] is False
+    assert advisor["provider"] != agents["orchestrator"]["provider"], \
+        "same-family feedback agrees with the orchestrator, which defeats it"
+
+    flat = " ".join((_briefs_dir() / "team" / "advisor.md").read_text().split())
+    assert "You decide nothing" in flat
+    assert "You execute nothing" in flat
+
+
+def test_the_orchestrator_does_not_write_the_implementation():
+    """Its context is the one resource here that cannot be replaced. An
+    orchestrator that starts coding has stopped supervising."""
+    flat = " ".join((_briefs_dir() / "team" / "_orchestrator.md").read_text().split())
+    assert "You do not write implementation code" in flat
+    assert "not the one-line fix" in flat
+    assert "never write the tests yourself" in flat, "grading its own homework"
+
+
+def test_the_orchestrator_owns_the_contract_the_others_are_held_to():
+    """Phase 2 is the one piece of writing that is the orchestrator's, because
+    it is the decision everything downstream is measured against."""
+    flat = " ".join((_briefs_dir() / "team" / "_orchestrator.md").read_text().split())
+    assert "interface contracts" in flat
+    assert "context/specs/" in flat
+    assert "Contracts, not implementations" in flat
 
 
 def test_the_briefs_agree_on_where_specs_live_and_how_ids_look():
-    """specifier, adversary, tester, implementer and the orchestrator all refer
-    to the same path and the same id convention; a drift between them silently
-    breaks the hand-off, since nothing in code enforces it."""
-    briefs = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
-              / "defaults" / "agents")
-    for name in ("specifier", "adversary", "tester", "implementer",
-                 "_orchestrator"):
-        text = (briefs / f"{name}.md").read_text()
-        assert "context/specs/" in text, name
-        assert "R7" in text or "R1" in text or "R<n>" in text, name
+    """The orchestrator, the tester and the implementer all refer to the same
+    path and the same id convention; a drift between them silently breaks the
+    hand-off, since nothing in code enforces it."""
+    for rel in ("team/_orchestrator.md", "team/tester.md", "team/implementer.md",
+                "library/specifier.md", "library/spec-adversary.md"):
+        text = (_briefs_dir() / rel).read_text()
+        assert "context/specs/" in text, rel
+        assert "R7" in text or "R1" in text or "R<n>" in text, rel
 
 
-def test_the_orchestrator_is_told_when_not_to_use_the_spec_path():
+def test_the_orchestrator_is_told_when_not_to_use_the_full_pipeline():
     """A rule that applies to everything gets ignored. The threshold is the
     part that makes it followable."""
-    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "_orchestrator.md").read_text())
+    text = (_briefs_dir() / "team" / "_orchestrator.md").read_text()
     assert "threshold" in text.lower()
     assert "straight to `implementer`" in text
 
 
 # --------------------------------------------------------------------------
-# Security roster
+# The contract between the tester, the developer and the adversary
 
 
-def test_the_security_pair_ships_at_both_ends_of_the_work():
-    """One is consulted while a boundary can still be moved for free; the other
-    attacks what was actually built."""
-    root = Path(__file__).resolve().parents[1] / "src" / "multiagents" / "defaults"
-    agents = _shipped_agents()
-
-    advisor = agents["security-advisor"]
-    assert advisor["conversational"] is True, "a threat model is built by follow-ups"
-    assert advisor["writes"] is False
-
-    pentester = agents["pentester"]
-    assert not pentester.get("conversational"), "it is given a target, not a chat"
-    assert pentester["writes"] is True, "it commits a test that proves a finding"
-
-    for name in ("security-advisor", "pentester"):
-        assert agents[name]["can_spawn"] is False
-        assert (root / "agents" / agents[name]["instructions"]).is_file()
+def test_the_tests_are_read_only_to_the_developer():
+    """The fastest way to make a failing test pass is always to change the
+    test. A suite the implementer can edit is not a contract."""
+    flat = " ".join((_briefs_dir() / "team" / "implementer.md").read_text().split())
+    assert "The tests are read-only to you" in flat
+    assert "You do not edit it" in flat
+    assert "Never add a skip" in flat
+    # And it has somewhere to go when a test really is wrong.
+    assert "NEED_INFO(<test name>)" in flat
 
 
-def test_the_pentester_does_not_audit_the_design_it_was_given():
-    """Different provider from the security advisor on purpose."""
-    agents = _shipped_agents()
-    assert agents["pentester"]["provider"] != agents["security-advisor"]["provider"]
+def test_the_tester_writes_the_contract_before_the_code_exists():
+    """Red is the correct outcome of its run; a green one means the tests
+    assert nothing, and that has to be said in the brief."""
+    flat = " ".join((_briefs_dir() / "team" / "tester.md").read_text().split())
+    assert "Red is the correct outcome" in flat
+    assert "Black box, without exception" in flat
+    assert "reimplemented this feature from scratch" in flat, "the black-box test"
+    # The trap: everything fails at import before the module exists, which
+    # tells you nothing about the assertions inside.
+    assert "its own assertion" in flat
 
 
-def test_the_pentester_brief_bounds_it_to_this_repository():
-    """A dual-use role needs its limits in the brief, not in the caller's head:
-    no live targets, no using a discovered secret, proof rather than weapon."""
-    raw = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
-            / "defaults" / "agents" / "pentester.md").read_text().lower())
+def test_the_adversary_attacks_code_rather_than_the_specification():
+    """It runs after the suite is green, on the premise that green proves only
+    that the code satisfies the tests that were written."""
+    flat = " ".join((_briefs_dir() / "team" / "adversary.md").read_text().split())
+    assert "You attack code that already works" in flat
+    for attack in ("Mutation", "Hardcoding", "Fuzzing", "Interference"):
+        assert attack in flat, attack
+    assert "Never weaken an existing test" in flat
+    assert "Do not propose the fix" in flat
+
+
+def test_the_adversary_brief_bounds_it_to_this_repository():
+    """It absorbed the pentester's attacker-position work, and a dual-use role
+    needs its limits in the brief rather than in the caller's head: no live
+    targets, no using a discovered secret, proof rather than weapon."""
+    raw = (_briefs_dir() / "team" / "adversary.md").read_text().lower()
     # Reflowed prose puts line breaks mid-sentence; the rule is the content.
     text = " ".join(raw.split())
     assert "no live systems" in text
@@ -2834,13 +3032,102 @@ def test_the_pentester_brief_bounds_it_to_this_repository():
     assert "not a weapon" in text
 
 
-def test_the_orchestrator_is_told_when_security_agents_are_not_needed():
-    """Running them on everything trains the reader to skim them."""
-    text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "_orchestrator.md").read_text())
-    assert "When not to." in text
-    assert "neither of these" in " ".join(text.split())
-    assert "holds a veto" in text
+def test_the_orchestrator_is_told_when_the_adversary_is_not_needed():
+    """Running it on everything trains the reader to skim it, which costs more
+    than not running it at all."""
+    flat = " ".join((_briefs_dir() / "team" / "_orchestrator.md").read_text().split())
+    assert "Skip it for documentation" in flat
+    assert "trains you to skim it" in flat
+
+
+def test_only_the_drivers_can_reach_the_advisor():
+    """consult() runs through the spawn preflight, so an agent without
+    can_spawn cannot reach it. The workers stop with NEED_INFO and the
+    orchestrator relays — which only works if its brief says so."""
+    agents = _shipped_agents()
+    for name in ("tester", "implementer-quick", "adversary"):
+        assert agents[name]["can_spawn"] is False, name
+    for name in ("orchestrator", "initializer"):
+        assert agents[name]["can_spawn"] is True, name
+
+    flat = " ".join((_briefs_dir() / "team" / "_orchestrator.md").read_text().split())
+    assert "the advisor's only route to the rest of the team" in flat
+    assert "steer_agent" in flat
+
+
+# --------------------------------------------------------------------------
+# The agent library
+
+
+def _library_blocks():
+    """The paste-ready agents.yaml blocks in the library's README."""
+    import re
+    import textwrap
+
+    import yaml
+    text = (_briefs_dir() / "library" / "README.md").read_text()
+    blocks = re.findall(r"```yaml\n(.*?)```", text, re.S)
+    merged = {}
+    for block in blocks:
+        parsed = yaml.safe_load(textwrap.dedent(block))
+        assert parsed, block[:60]
+        merged.update(parsed)
+    return merged
+
+
+def test_every_library_agent_ships_a_brief_and_a_pasteable_block():
+    """The point of the library is that adding a specialist is a paste, not a
+    writing exercise. A block that does not parse, or names a brief that is not
+    there, fails at spawn time inside someone's session instead."""
+    blocks = _library_blocks()
+    assert set(blocks) == {"specifier", "spec-adversary", "reviewer",
+                           "researcher", "security-advisor", "pentester"}, sorted(blocks)
+
+    roster = _shipped_agents()
+    for name, spec in blocks.items():
+        assert name not in roster, f"{name} is in the library, not the default team"
+        brief = spec["instructions"]
+        assert brief.startswith("library/"), brief
+        assert (_briefs_dir() / brief).is_file(), brief
+        assert spec["can_spawn"] is False, name
+        # Without a fallback an agent waits instead of failing over.
+        assert spec.get("models"), f"{name} names no cross-provider fallback"
+        assert spec["provider"] not in spec["models"], name
+
+
+def test_every_library_brief_is_listed_in_the_readme():
+    """A brief nobody can find is a brief nobody adds."""
+    briefs = {p.name for p in (_briefs_dir() / "library").glob("*.md")
+              if p.name != "README.md"}
+    listed = {f"{n}.md" for n in _library_blocks()}
+    assert briefs == listed, (briefs, listed)
+
+
+def test_the_library_spec_pair_stays_on_different_model_families():
+    """spec-adversary attacks what specifier wrote, and pentester audits what
+    security-advisor approved. A checker sharing the author's blind spots
+    agrees with it, which is the one thing it must not do."""
+    blocks = _library_blocks()
+    assert blocks["spec-adversary"]["provider"] != blocks["specifier"]["provider"]
+    assert blocks["spec-adversary"]["model"] != blocks["specifier"]["model"]
+    assert blocks["pentester"]["provider"] != blocks["security-advisor"]["provider"]
+
+
+def test_the_initializer_is_pointed_at_the_library():
+    """It proposes the roster, and a brief written in a hurry during
+    initialisation is worse than one that has been used and revised."""
+    flat = " ".join((_briefs_dir() / "team" / "_initializer.md").read_text().split())
+    assert "agents/library/" in flat
+    assert "Never edit the live `agents.yaml`" in flat
+    assert ".multiagents/proposals/agents.yaml" in flat
+
+
+def test_the_orchestrator_asks_rather_than_absorbing_a_missing_role():
+    """The roster belongs to the initializer and the user. An orchestrator that
+    fills the gap itself spends the one context that cannot be refilled."""
+    flat = " ".join((_briefs_dir() / "team" / "_orchestrator.md").read_text().split())
+    assert "agents/library/" in flat
+    assert "Do not work around the gap" in flat
 
 
 # --------------------------------------------------------------------------
@@ -2854,7 +3141,7 @@ def test_the_coder_tiers_share_one_brief_on_different_models():
     tiers = ["implementer-quick", "implementer", "implementer-deep"]
 
     briefs = {agents[t]["instructions"] for t in tiers}
-    assert briefs == {"implementer.md"}, briefs
+    assert briefs == {"team/implementer.md"}, briefs
     models = [agents[t]["model"] for t in tiers]
     assert len(set(models)) == 3, models
     for t in tiers:
@@ -2876,7 +3163,7 @@ def test_the_brief_tells_the_cheap_tier_to_hand_work_back():
     """Escalation is what makes routing low safe; without it, routing low just
     produces plausible wrong implementations."""
     text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "implementer.md").read_text())
+             / "defaults" / "agents" / "team" / "implementer.md").read_text())
     flat = " ".join(text.split())
     assert "stop and hand it back" in flat
     assert "Handing back is not failure" in flat
@@ -2886,7 +3173,7 @@ def test_the_orchestrator_routes_by_judgement_not_importance():
     """The tempting criterion sends everything that matters to the top tier,
     which buys a tiered roster and none of its benefit."""
     text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "_orchestrator.md").read_text())
+             / "defaults" / "agents" / "team" / "_orchestrator.md").read_text())
     flat = " ".join(text.split())
     assert "never by how important" in flat
     assert "implementer-deep" in flat and "implementer-quick" in flat
@@ -2914,8 +3201,10 @@ def test_a_checking_pair_never_collapses_onto_one_model():
     spots. A fallback that lands both on the same model silently undoes that,
     at exactly the moment nobody is watching."""
     agents = _shipped_agents()
-    pairs = [("specifier", "adversary"), ("security-advisor", "pentester"),
-             ("critic", "advisor")]
+    pairs = [("tester", "implementer"), ("tester", "adversary"),
+             ("implementer", "adversary"),
+             ("implementer-quick", "adversary"),
+             ("implementer-deep", "adversary")]
 
     def resolve(spec, down):
         if spec["provider"] != down:
@@ -3398,7 +3687,7 @@ def test_idle_slots_are_called_out_while_something_is_running(tmp_path):
 
 def test_the_orchestrator_brief_says_when_parallel_is_safe_and_when_not():
     text = ((Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "_orchestrator.md").read_text())
+             / "defaults" / "agents" / "team" / "_orchestrator.md").read_text())
     flat = " ".join(text.split())
     assert "budget to spend, not a ceiling" in flat
     assert "Different files, different specs" in flat
@@ -5029,7 +5318,7 @@ def test_the_initializer_knows_it_may_be_shaping_a_second_phase():
     through greenfield instructions produces a brief that plans what already
     exists."""
     brief = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "_initializer.md").read_text()
+             / "defaults" / "agents" / "team" / "_initializer.md").read_text()
     flat = " ".join(brief.split())
 
     assert "Returning after work has been done" in brief
@@ -5043,7 +5332,7 @@ def test_the_orchestrator_hands_back_rather_than_inventing_a_next_phase():
     tree with budget left is exactly when a system like this starts spending a
     subscription on work nobody asked for."""
     brief = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
-             / "defaults" / "agents" / "_orchestrator.md").read_text()
+             / "defaults" / "agents" / "team" / "_orchestrator.md").read_text()
     flat = " ".join(brief.split())
 
     assert "When the brief is done" in brief

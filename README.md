@@ -13,8 +13,8 @@ steered and killed while it runs.
 you/master  ← explicit merge_agent() gate
   orchestrator (any provider)
     ├─ implementer  [running]         38,381tok  $0.0104  agents/implementer/8a5e14
-    ├─ reviewer     [awaiting you 6m] store: Postgres or SQLite?
-    └─ critic       [idle · 2 turns]  10,419tok  $0.0006
+    ├─ tester       [awaiting you 6m] store: Postgres or SQLite?
+    └─ advisor      [idle · 2 turns]  10,419tok  $0.0006
 ```
 
 ## The lifecycle
@@ -32,7 +32,7 @@ multiagents stop         # halt everything for this project, resumably
 ```
 
 `build` comes before `init-agent`, not after: the initializer is told to
-consult the critic and the advisor, and a consult spawns an agent, so on a
+consult the advisor, and a consult spawns an agent, so on a
 docker project it needs the images too. Both commands check for them and refuse
 with the fix named rather than failing partway through a conversation.
 
@@ -120,8 +120,9 @@ it cannot be checked until it exists.
 
 `init-agent` launches the **initializer**: an agent that shapes the project with
 you before anything is built. It reads the repository, forms a view, puts
-specific questions rather than interrogating you, consults the critic and
-advisor, and writes `BRIEF.md` and `context/`. It also reviews the model catalog
+specific questions rather than interrogating you, consults the advisor, and
+writes `BRIEF.md` and `context/`. It also proposes the team and the model for
+each role. It reviews the model catalog
 against that first snapshot, so a roster that has already drifted is caught
 before the project is planned around it. Expect several sessions — re-running
 the command resumes it.
@@ -219,22 +220,62 @@ multiagents monitor  # all of it, in a browser or (--tui) in this terminal
 
 ## The roster
 
-Fifteen agents ship by default. They come in three kinds, and the kind decides
-how you reach one:
+Nine agents ship active: **six roles** that make up the default team, plus the
+two extra coder tiers and one that reports bugs in multiagents itself. Six more
+sit in a **library**, predefined but switched off until a project asks for them.
+
+| role | agent | mandate |
+|---|---|---|
+| **Initializer** | `initializer` | Converses with you, writes `BRIEF.md`, proposes the team and the model for each role. Launched by `init-agent`. |
+| **Orchestrator** | `orchestrator` | Drives the project to completion. Writes the interface contracts, makes every delegation and architectural call, writes no implementation code. Launched by `run`. |
+| **Advisor** | `advisor` | Second opinion for the drivers. Analyses proposals and prompts, offers alternatives. Decides nothing, executes nothing. |
+| **Test Engineer** | `tester` | Writes the black-box behavioural suite from the contract, before any implementation exists. Defines what done means. |
+| **Developer** | `implementer-quick`, `implementer`, `implementer-deep` | Writes the code that turns the suite green. Three tiers, one brief. The tests are read-only to them. |
+| **Adversary** | `adversary` | Attacks the green code: mutation, fuzzing, untested inputs, interleaving, the attacker's position. Breaks it; fixes nothing. |
+
+`bug-reporter` is none of these. It is spawned like a task agent, but its
+product is a **ticket about multiagents itself** rather than work on your
+project. See below.
+
+The kind of an agent decides how you reach it:
 
 | | agents | how |
 |---|---|---|
 | **launched** | `orchestrator`, `initializer` | `multiagents run` / `init-agent` — MCP clients, never spawned |
-| **conversational** | `critic`, `advisor`, `security-advisor` | `consult()` — blocks for a reply, keeps context between calls |
-| **task** | `researcher`, `specifier`, `adversary`, `implementer-quick`, `implementer`, `implementer-deep`, `tester`, `reviewer`, `pentester`, `bug-reporter` | `start_agent()` — own branch and worktree, collected when done |
+| **conversational** | `advisor` | `consult()` — blocks for a reply, keeps context between calls |
+| **task** | `tester`, `implementer-quick`, `implementer`, `implementer-deep`, `adversary`, `bug-reporter` | `start_agent()` — own branch and worktree, collected when done |
 
-Reading agents (`researcher`, `reviewer`, `pentester`) and writing agents
-(`implementer*`, `tester`, `specifier`, `adversary`) are separated by intent
-rather than by permission: every agent gets a worktree regardless, so `writes:
-false` controls cleanup, not safety.
+Reading agents and writing agents are separated by intent rather than by
+permission: every agent gets a worktree regardless, so `writes: false` controls
+cleanup, not safety.
 
 Delete or replace any of them except the two launched roles — see
 [which agents you can delete](#which-agents-you-can-delete-and-which-you-cannot).
+
+### The agent library
+
+Six specialists ship with briefs but **no roster entry**: `specifier`,
+`spec-adversary`, `reviewer`, `researcher`, `security-advisor` and `pentester`.
+They live in `agents/library/`, each with a paste-ready `agents.yaml` block in
+`agents/library/README.md`.
+
+The initializer reads that catalogue during `multiagents init-agent` and
+proposes the ones a project actually needs — `specifier` and `spec-adversary`
+for a project that specifies before it builds, `security-advisor` and
+`pentester` for one handling money or untrusted input, `researcher` for a large
+unfamiliar codebase. You accept by copying the block into your `agents.yaml`.
+
+The point is that adding a specialist should be a paste rather than a writing
+exercise. A brief written in a hurry during initialisation is worse than one
+that has been used and revised, and a project needing a reviewer needs roughly
+the same reviewer as the last one did.
+
+Two rules survive any edit you make to them. Every agent names a fallback model
+on the other provider under `models:`, or it waits instead of failing over when
+its provider is exhausted. And where two agents check each other's work, they
+stay on different model families — a checker sharing the author's blind spots
+agrees with it, which is the one thing it must not do.
+
 
 ### Coder tiers
 
@@ -264,35 +305,47 @@ The model pins are a starting point rather than a measured ranking; retune them
 for your own work. What the tiers give you is the routing rule and the
 escalation path, and those survive any repin.
 
-### Standing advisors
+### The advisor
 
-Three agents are not task runners at all. `critic`, `advisor` and
-`security-advisor` are reached with `consult()` — which blocks for a reply and
-**keeps its context between calls**, so the orchestrator holds an actual
+`advisor` is not a task runner. It is reached with `consult()` — which blocks
+for a reply and **keeps its context between calls**, so a driver holds an actual
 conversation rather than firing off amnesiac one-shot questions:
 
 ```
-consult("critic", "The catalog says glm-5.3-flash input price rose 7.5x.
-                   My researcher pins it. I intend to leave agents.yaml
-                   alone — is that reasonable?")
+consult("advisor", "The catalog says glm-5.3-flash input price rose 7.5x.
+                    My implementer-quick pins it. I intend to leave
+                    agents.yaml alone — is that reasonable?")
 ```
 
-`critic` and `advisor` review decisions; `security-advisor` is narrower and is
-described [below](#security-at-both-ends). All three advise; they decide nothing
-and gate nothing. The orchestrator is
-accountable for the outcome, and "the critic said so" is not a reason. Their
-instructions push against both failure modes — rubber-stamping and
-obstructing — and they are told to say "this doesn't need review" when consulted
-about trivia. None runs on a Claude model, in its primary pin or its fallback:
-feedback from the same family as the orchestrator tends to agree with it.
+It **decides nothing and executes nothing**: read-only against the project, no
+commands, no commits, no spawning. The only thing it produces is its reply. That
+is the point rather than a limitation — the orchestrator is accountable for the
+outcome, and "the advisor said so" is not a reason.
+
+Its brief pushes against both failure modes, rubber-stamping and obstructing,
+and it is told to answer "this doesn't need review, go ahead" when consulted
+about trivia. It does not run on a Claude model in its primary pin or its
+fallback: feedback from the same family as the orchestrator tends to agree with
+it.
+
+One use worth calling out: hand it a **task you are about to delegate** and ask
+whether it will produce what you want. It reads the task as the receiving agent
+will — with no access to the conversation that produced it — and names what the
+agent will have to invent. A vague delegation is the cheapest failure here to
+prevent and the most expensive to discover.
+
+**Only the two drivers can reach it.** `consult()` runs through the same
+preflight as spawning, so an agent with `can_spawn: false` cannot call it, and
+the workers all have `can_spawn: false`. A worker that wants advice stops with
+`NEED_INFO(...)`; the orchestrator sees that in `collect_agent`, consults on its
+behalf, and steers the answer back. If you would rather the workers consulted
+directly, granting `can_spawn` also grants the right to spawn arbitrary
+subagents — there is no separate flag today.
 
 Conversational agents sit in an `idle` state between turns — not active (so they
 do not count against the concurrency limit), not terminal (so their session
 stays resumable and their worktree survives).
 
-`bug-reporter` is a third kind again: it is spawned like a task agent, but its
-product is a **ticket about multiagents itself** rather than work on your
-project. See below.
 
 ### Which agents you can delete, and which you cannot
 
@@ -333,8 +386,8 @@ A config written before the rename that still says `instructions: orchestrator.m
 keeps working — the loader falls back to the other spelling — but the exact name
 always wins, so a local `orchestrator.md` you wrote yourself is never shadowed.
 
-Every other agent is yours. `researcher`, `implementer`, `reviewer`, `tester`,
-`critic`, `advisor` and `bug-reporter` are referenced by name only in *prompts*,
+Every other agent is yours. `advisor`, `tester`, the `implementer` tiers,
+`adversary` and `bug-reporter` are referenced by name only in *prompts*,
 never in code, so removing one costs you whatever that prompt asks for — the
 orchestrator told to delegate to `bug-reporter` will find no such agent — and
 nothing else. Add as many of your own as you like.
@@ -356,7 +409,7 @@ but never remove. To drop a shipped agent, give it `disabled: true`.
   all**, which is not a safe default — agy then auto-denies every tool and
   returns nothing, so the agent looks broken rather than misconfigured.
 - `conversational: true` is what makes an agent reachable by `consult()` and
-  gives it memory between turns. Remove it from `critic` and consulting it
+  gives it memory between turns. Remove it from `advisor` and consulting it
   fails.
 - `instructions:` must name a file that exists in one of the config layers'
   `agents/` directories. A missing file is not an error — the agent runs on the
@@ -369,75 +422,95 @@ but never remove. To drop a shipped agent, give it `disabled: true`.
 `multiagents doctor` reports every one of these. Run it after editing the
 roster; it is faster than discovering the mistake through a confused agent.
 
-## Specifying before building
+## The pipeline
 
 A model given a broad task builds the median version of it. Not from
 incapacity — a broad task does not say what *better* means, and the median
 satisfies the words. "Build the checkout" gets a bakery till.
 
 The counter is not a better prompt. It is a written contract the work is held
-to, produced by agents that do not write the code:
+to, and a team arranged so nobody grades their own homework:
 
 ```
-specifier   →  context/specs/<feature>.md, numbered requirements R1…Rn,
-               each with a `Verified by:` line
-adversary   →  concrete failure scenarios A1…An appended to that file,
-               with no proposed fixes
-orchestrator→  closes every A: a new requirement, or "out of scope, because —"
-tester      →  failing tests named after the ids. Red is correct here.
-implementer →  given the ids, not a prose description. Makes them pass.
+1  initializer  →  BRIEF.md, context/, and a proposed roster. With you,
+                   before anything is built.
+2  orchestrator →  interface contracts in context/specs/<feature>.md:
+                   signatures, schemas, errors, numbered behaviours R1…Rn.
+3  tester       →  the black-box suite, before the code exists.
+                   Red is the correct outcome here.
+4  implementer  →  given the ids and the tests, not a prose description.
+                   Iterates until green. Cannot edit the tests.
+5  adversary    →  mutation, fuzzing, inputs the suite never uses.
+                   Findings go back to 4 with a failing test attached.
+6  orchestrator →  reads the diff against BRIEF.md, consults the advisor,
+                   merges, and presents it to you.
 ```
 
-Three properties make this more than ceremony:
+Five properties make this more than ceremony:
 
-- **The adversary runs on a different model family from the specifier.** One
-  that shares the author's blind spots agrees with it, which is the one thing it
-  must not do.
-- **The adversary proposes no fixes.** Naming the fix collapses the search —
-  the specifier writes down the suggestion instead of thinking about the
-  scenario.
-- **Requirements become failing tests before implementation.** This is the part
-  that does not rely on anyone's diligence: a missing advanced case shows up as
-  a red test rather than as nobody noticing.
+- **The contract exists before the tests, and the tests before the code.** This
+  is the part that does not rely on anyone's diligence: a missing advanced case
+  shows up as a red test rather than as nobody noticing.
+- **The test suite is read-only to the developer.** The fastest way to make a
+  failing test pass is always to change the test, so the brief forbids it
+  outright — no edits, no skips, no widened tolerances. A test that is genuinely
+  wrong goes back to the test engineer, who changes it deliberately.
+- **Green is not done.** A model optimising against a visible target will
+  special-case the exact inputs the tests use. Phase 5 exists because that is
+  what optimising against a visible target looks like, not because anyone is
+  being dishonest.
+- **The adversary is pinned away from both the tester and the developer.** It
+  checks the developer's code *and*, through mutation, the coverage of the
+  tester's suite — so all three land on different models, and the `models:`
+  fallbacks are chosen so they still do under a single-provider outage.
+- **Nobody holds a veto.** Advisors advise and the orchestrator decides. The
+  gate is an *artifact*, not an authority: no implementation task until the
+  contract exists. You can check that by reading a committed file.
 
-Nobody holds a veto. Advisors advise and the orchestrator decides — the gate is
-an *artifact*, not an authority: no implementation task until the spec exists
-and has been attacked. You can check that by reading a committed file.
+The orchestrator **writes no implementation code** — not the tricky function,
+not the one-line fix. Its context is the one resource here that cannot be
+replaced, and the moment it starts implementing, the project has a busy coder
+and no project manager.
 
 It costs roughly double the tokens for that feature, so the orchestrator's brief
-carries a threshold rather than applying it to everything: behaviour-shaped
-requests, work touching several files, or mistakes that would be expensive to
-unwind. A one-line fix goes straight to `implementer`.
+carries a threshold rather than applying the pipeline to everything:
+behaviour-shaped requests, work touching several files, or mistakes that would
+be expensive to unwind. A one-line fix, a rename or a bug with a known cause
+goes straight to `implementer`.
 
-## Security agents, at both ends
+### Specifying before the contract
 
-Two agents outside the default path, because running them on everything trains
-you to skim their output:
+Projects that want the requirements written by something other than whoever
+designs the solution can add `specifier` and `spec-adversary` from the library.
+They run *before* phase 2: `specifier` produces numbered requirements with a
+`Verified by:` line each, `spec-adversary` appends concrete failure scenarios
+`A1…An` and proposes no fixes, and the orchestrator closes every `A` with either
+a new requirement or an explicit "out of scope, because —".
 
-- **`security-advisor`** — consulted with `consult()` *while a thing is still
-  being designed*, when a boundary can still be moved for free. It answers what
-  an attacker controls, what is worth taking, and where the check happens, and
-  phrases findings as **candidate requirements** so `specifier` can turn them
-  into numbered requirements and then tests. A security concern that never
-  becomes a requirement is one that gets forgotten at implementation time.
-- **`pentester`** — run with `start_agent` on code that already exists. Every
-  finding must carry the attacker's position, the concrete path, and what the
-  attacker gets; anything without those three is a hunch. It may commit a test
-  that fails now and passes once fixed.
+They are on different model families for the same reason the adversary is. And
+the spec adversary proposes no fixes deliberately: naming the fix collapses the
+search, because the specifier writes down the suggestion instead of thinking
+about the scenario.
 
+### Security
+
+The adversary attacks from an attacker's position as part of its remit —
+untrusted data reaching a sink, an id used without scoping it to the caller, a
+check on the read path but not the write path, tokens bound to nothing. Its
+brief bounds it: this repository only, no live targets, never use or print a
+secret it discovers, and a reproducing test rather than a working exploit. Its
+container has no route out in any case.
+
+Projects where security is a first-class concern rather than one of several can
+add the library's `security-advisor` — consulted while a boundary can still be
+moved for free, phrasing findings as *candidate requirements* so they become
+tests — and `pentester`, a dedicated deeper pass on code that already exists.
 They run on different providers deliberately: the audit should not be performed
 by whoever approved the design.
 
-The pentester's brief bounds it — this repository only, no live targets, never
-use or print a secret it discovers, and a reproducing test rather than a
-working exploit. Its container has no route out in any case. Neither agent holds
-a veto, but a finding with a position, a path and an outcome is a defect rather
-than an opinion; declining to act on one is a decision to record, not to leave
-implicit.
+A finding with a position, a path and an outcome is a defect rather than an
+opinion. Declining to act on one is a decision to record, not to leave implicit.
 
-`_orchestrator.md` carries the trigger list — untrusted input, authorisation,
-credentials, money, injection sinks, cryptography, anything reachable without a
-session — and the matching list of cases that do not warrant a pass.
 
 ## When multiagents is the thing that is broken
 
@@ -659,9 +732,9 @@ matters:
 ```
 catalog      3 change(s) since 2026-09-05T18:24:11+0200  [warning]
              WARNING  changed: glm-5.3-flash (cost input 0.01 -> 0.075)
-                      used by: researcher
+                      used by: implementer-quick
              1 other change(s) not touching your roster
-             -> consult the critic before editing agents.yaml
+             -> consult the advisor before editing agents.yaml
 ```
 
 It runs on `init` and `init-agent`, where the baseline belongs. The orchestrator
@@ -674,7 +747,7 @@ an agent that should be making them. Cosmetic churn
 `reasoning`, `structured_output` and `modalities` are watched.
 
 Nothing edits `agents.yaml` automatically. The tool reports, the orchestrator
-consults the critic about what it intends to do, and then the orchestrator
+consults the advisor about what it intends to do, and then the orchestrator
 decides.
 
 ## Configuration
@@ -1953,14 +2026,14 @@ turns out to be wrong costs far more — everything built on it — and appears
 nowhere.
 
 That is not derivable after the fact: branch and timing cannot tell "this
-reviewer examined that work" from "this ran next", and the guess breaks the
+adversary examined that work" from "this ran next", and the guess breaks the
 moment two checks overlap or a branch is reused. So the orchestrator declares
 it, with `start_agent(..., verifies=<agent_id>)`, and `multiagents usage
 --checks` reports the graph:
 
 ```
 work                        checked by                     outcome
-ag-8a5e14 implementer       ag-bd31b1 reviewer             done
+ag-8a5e14 implementer       ag-bd31b1 adversary            done
                             ag-4f2a91 tester               failed
 ```
 
@@ -1973,10 +2046,10 @@ VERDICT(approved): nothing here needs changing
 VERDICT(rejected, 3): three defects, the first blocking
 ```
 
-That is not circular. The whole arrangement already trusts a reviewer's
+That is not circular. The whole arrangement already trusts a checker's
 judgement over an implementer's code; this only asks it to state that judgement
-where it can be counted. `reviewer`, `tester` and `pentester` are told to end
-with one, and the report becomes a rate over the work that was actually judged —
+where it can be counted. `tester` and `adversary` are told to end with one, and
+so are the library's `reviewer` and `pentester`, and the report becomes a rate over the work that was actually judged —
 counting unjudged runs as approved would flatter it:
 
 ```
@@ -2088,7 +2161,7 @@ Three layers, because the providers fail differently.
 provider in `agents.yaml`:
 
 ```yaml
-  reviewer:
+  tester:
     provider: agy
     model: gemini-3.1-pro-high
     models:
@@ -2100,8 +2173,8 @@ would run `agy --model opencode-go/glm-5.3-flash`. Named, a constrained provider
 costs you a model rather than an agent.
 
 The fallbacks are chosen so that a **checking pair never collapses onto one
-model** under a single-provider outage — specifier/adversary,
-security-advisor/pentester, critic/advisor stay on different models whichever
+model** under a single-provider outage — `tester`, the `implementer` tiers and
+`adversary` all check each other's work, and stay on different models whichever
 provider is down. A test asserts it for both outage directions, because this is
 exactly the property that would degrade silently at the moment nobody is
 watching.
