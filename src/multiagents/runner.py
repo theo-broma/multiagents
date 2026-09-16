@@ -40,6 +40,7 @@ from .config import AgentSpec, Config, matches_any
 from .executor import build_env, get_executor, prepare_home
 from .executor.base import Handle
 from . import providers as providers_mod
+from . import procs
 from .paths import ProjectPaths, global_config_dir
 from .providers import Event, Provider, load_providers
 from .redact import scrub
@@ -820,7 +821,8 @@ class Runner:
             ),
         )
         self.runs[node_id] = run
-        self.tree.update(node_id, pid=handle.pid)
+        self.tree.update(node_id, pid=handle.pid,
+                         pid_start=procs.start_time(handle.pid))
         self.tree.set_status(node_id, "running")
         run.task = asyncio.create_task(self._consume(run))
         # Owned by the Runner, not by the run: asking an agent to wrap up means
@@ -1887,7 +1889,12 @@ class Runner:
             with contextlib.suppress(Exception):
                 if executor.kill_detached(node.id):
                     return True
-        if not node.pid:
+        # Checked, not merely attempted. The suppression below makes a signal
+        # to a stranger indistinguishable from a signal to the agent, and this
+        # runs after a restart — the one moment when every recorded pid may
+        # belong to something else. killpg reaches a whole process group, so
+        # getting it wrong is not a wasted signal, it is someone else's session.
+        if not procs.alive(node.pid, getattr(node, "pid_start", "")):
             return False
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(node.pid), signal.SIGTERM)
@@ -1918,7 +1925,7 @@ class Runner:
                 killer = getattr(executor, "kill_detached", None)
                 if killer is not None:
                     killer(agent_id)
-                if node.pid:
+                if procs.alive(node.pid, getattr(node, "pid_start", "")):
                     try:
                         os.killpg(os.getpgid(node.pid), 15)
                     except (ProcessLookupError, PermissionError, OSError):

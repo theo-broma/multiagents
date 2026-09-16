@@ -14,7 +14,6 @@ Two rules hold this together:
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ from ..budget import read_all, reset_label, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
 from ..providers import load_providers
+from .. import procs
 from ..tree import ACTIVE, PAUSED, Tree, cost_of, token_count
 
 # The tree already draws this line and draws it deliberately: ACTIVE is work in
@@ -34,16 +34,13 @@ from ..tree import ACTIVE, PAUSED, Tree, cost_of, token_count
 LIVE = tuple(sorted(ACTIVE))
 
 
-def _alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    return True
+def _alive(pid: int | None, start: str = "") -> bool:
+    """One source for this question: see :mod:`multiagents.procs`.
+
+    Display, but not therefore harmless — a recycled pid shows a dead agent as
+    RUNNING, which is the state this panel exists to be trusted about.
+    """
+    return procs.alive(pid, start)
 
 
 # --------------------------------------------------------------------------

@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import scripts
+from . import procs, scripts
 from .budget import read_all, reset_label
 from .executor import executor_for
 from .paths import global_config_dir
@@ -301,13 +301,11 @@ def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
     for other in watchdog.DRIVERS:
         if other == role:
             continue
-        path = _pid_file(paths, other)
-        try:
-            pid = int(path.read_text().strip())
-        except (OSError, ValueError):
+        recorded = _read_pid(paths, other)
+        if recorded is None:
             continue
-        if _alive(pid):
-            return other, pid
+        if procs.alive(*recorded):
+            return other, recorded[0]
     return None
 
 
@@ -694,23 +692,42 @@ def _pid_file(paths, role: str) -> Path:
 
 
 def _write_pid(paths, role: str, pid: int) -> None:
+    """Record the pid AND what makes it identifiable after a reboot.
+
+    Two fields, space separated, because a pid on its own is not an identity:
+    see :mod:`multiagents.procs`. A file written by an older install has one
+    field and still reads, with the guard simply unavailable for it.
+    """
     path = _pid_file(paths, role)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(pid))
+    path.write_text(f"{pid} {procs.start_time(pid)}".strip())
+
+
+def _read_pid(paths, role: str) -> tuple[int, str] | None:
+    """`(pid, start_time)` from a role's pid file, or None.
+
+    One parser, because there were four copies of `int(read_text().strip())`
+    and a second field would have been silently dropped by three of them.
+    """
+    try:
+        parts = _pid_file(paths, role).read_text().split()
+        return int(parts[0]), (parts[1] if len(parts) > 1 else "")
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _clear_pid(paths, role: str) -> None:
     _pid_file(paths, role).unlink(missing_ok=True)
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        return False
-    except PermissionError:
-        return True                      # exists, owned by someone else
-    return True
+def _role_alive(paths, role: str) -> bool:
+    """Is the process this role's pid file names still that process?"""
+    recorded = _read_pid(paths, role)
+    return recorded is not None and procs.alive(*recorded)
+
+
+def _alive(pid: int, start: str = "") -> bool:
+    return procs.alive(pid, start)
 
 
 def _supervise(paths, config, role, spec, provider, executor,

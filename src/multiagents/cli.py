@@ -25,6 +25,7 @@ from . import auth as auth_mod
 from . import bugs
 from . import catalog as catalog_mod
 from . import driver
+from . import procs
 from .executor import executor_for
 from . import scripts
 from . import gitops
@@ -647,11 +648,7 @@ def _reaper(paths):
 
 
 def _alive_pid(paths, role: str) -> bool:
-    path = driver._pid_file(paths, role)
-    try:
-        return driver._alive(int(path.read_text().strip()))
-    except (OSError, ValueError):
-        return False
+    return driver._role_alive(paths, role)
 
 
 INTERRUPTED_COMMIT = (
@@ -697,13 +694,14 @@ def cmd_resume(args: argparse.Namespace) -> int:
     orchestrator_live = _alive_pid(paths, "orchestrator")
     reclaimed, reaped, saved = 0, 0, 0
     for node in tree.active():
-        alive = False
-        if node.pid:
-            try:
-                os.kill(node.pid, 0)
-                alive = True
-            except (ProcessLookupError, PermissionError):
-                alive = False
+        # `procs.alive`, not `os.kill(pid, 0)`. This loop runs after a restart,
+        # and after a REBOOT every pid here was issued by a kernel that is gone
+        # while the low numbers have already been handed out again — so the
+        # bare question "does something hold this number" gets the wrong answer
+        # in both directions, and this is the one place where both answers do
+        # damage: a false alive sends SIGTERM to a stranger's process group
+        # below, and a false alive on the orchestrator skips the whole pass.
+        alive = procs.alive(node.pid, node.pid_start)
         if alive and not orchestrator_live:
             # An orphan: nobody is reading its stream, so it is spending tokens
             # into a closed pipe. Leaving it running would also let it mutate a
@@ -1952,12 +1950,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
         path = driver._pid_file(paths, role)
         if not path.is_file():
             continue
-        try:
-            pid = int(path.read_text().strip())
-        except (OSError, ValueError):
+        recorded = driver._read_pid(paths, role)
+        if recorded is None:
             path.unlink(missing_ok=True)
             continue
-        if not driver._alive(pid):
+        pid, pid_start = recorded
+        if not driver._alive(pid, pid_start):
             path.unlink(missing_ok=True)
             continue
         try:

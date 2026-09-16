@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import procs
+
 # How long a live session may produce nothing before it is called idle rather
 # than working. Long enough to cover a slow tool call or a big file read.
 IDLE_AFTER = 180.0
@@ -50,16 +52,15 @@ def newest_transcript(provider: Any, cwd: Path) -> Path | None:
     return max(files, key=lambda p: p.stat().st_mtime, default=None)
 
 
-def alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OSError):
-        return True
-    return True
+def alive(pid: int | None, start: str = "") -> bool:
+    """See :mod:`multiagents.procs`.
+
+    The watchdog is handed its subject's pid by the parent that just spawned
+    it, so there is no reboot between the two and no `start` to compare — but
+    it goes through the same door as everything else, so that there is one
+    answer to this question and not four.
+    """
+    return procs.alive(pid, start)
 
 
 def verdict(*, running: bool, quiet_for: float | None, quota_known: bool,
@@ -145,6 +146,10 @@ def sample(paths, config, provider, role: str, pid: int | None,
         "at": time.time(),
         "role": role,
         "pid": pid,
+        # What makes that pid answerable after a reboot: see
+        # :mod:`multiagents.procs`. Without it the reconciliation below reads a
+        # recycled number as the driver still running.
+        "pid_start": procs.start_time(pid),
         "running": running,
         "verdict": state,
         "detail": detail,
@@ -212,7 +217,8 @@ def read_all_status(paths) -> dict[str, dict]:
         # supervisor that was killed never does. The pid it recorded settles
         # it: without this a status file outlives its process and reports a
         # driver that has not existed for hours.
-        if record.get("running") and record.get("pid") and not alive(record["pid"]):
+        if record.get("running") and record.get("pid") and \
+                not alive(record["pid"], record.get("pid_start", "")):
             record = {**record, "running": False, "verdict": "stopped",
                       "detail": f"{record.get('detail', '')} — process is gone".strip(" —")}
         if (record.get("at") or 0) >= (out.get(claimed, {}).get("at") or 0):
