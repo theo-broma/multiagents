@@ -339,6 +339,64 @@ class DockerExecutor(Executor):
                     stale.unlink(missing_ok=True)
         return notes
 
+    # How stale the container profile's token may be before a spawn renews it.
+    # Renewed EARLY, not on expiry: an agent that starts with four minutes left
+    # gets a 401 partway through a run it has already paid for, and a run that
+    # dies mid-turn costs far more than a refresh that was not strictly due.
+    REFRESH_MARGIN = 30 * 60
+
+    def refresh_private_credentials(self) -> list[str]:
+        """Renew a container-private token that the container cannot renew.
+
+        The container has no route to the refresh endpoint and giving it one
+        means handing every agent a host that also serves account settings. It
+        does not need one: this runs on the HOST, through the provider's own
+        script, and the container reads the file afterwards.
+
+        Called from `ensure_running`, which is on the path of every spawn, so
+        the check has to be cheap. It is a file read; the network call happens
+        only inside the margin above, which is at most once per token lifetime.
+        """
+        from .. import scripts
+        from ..paths import global_config_dir
+
+        notes = []
+        for name, provider in self.providers.items():
+            backing = self.private_state(name)
+            if not backing:
+                continue
+            root = next(iter(backing.values()))
+            if not self._expiring_soon(root / ".credentials.json"):
+                continue
+            code, out, err = scripts.run_action(
+                name, provider, self, "refresh", global_config_dir(),
+                self.paths.config if self.paths else None, timeout=120)
+            line = (out.strip() or err.strip()).splitlines()
+            if code == scripts.UNIMPLEMENTED:
+                continue                  # provider has no container profile
+            notes.append(f"{name}: {line[-1][:200] if line else f'refresh exit {code}'}")
+        return notes
+
+    @classmethod
+    def _expiring_soon(cls, credentials: Path) -> bool:
+        """Is this stored token inside the renewal margin? Never raises.
+
+        Unreadable or unfamiliar reads as "no", because the alternative is
+        forcing a network call on every single spawn for a file shape we do
+        not recognise.
+        """
+        import json as _json
+        import time as _time
+
+        try:
+            data = _json.loads(credentials.read_text())
+        except (OSError, ValueError):
+            return False
+        for block in data.values():
+            if isinstance(block, dict) and block.get("expiresAt"):
+                return int(block["expiresAt"]) / 1000 - _time.time() < cls.REFRESH_MARGIN
+        return False
+
     @staticmethod
     def _holder_alive(lock: Path) -> bool:
         """Does a pid named inside this file still exist on this host?"""
@@ -645,6 +703,7 @@ class DockerExecutor(Executor):
         if not docker_available():
             return {"ok": False, "error": "docker is not on PATH"}
         self.seed_private_state()
+        self.refresh_private_credentials()
         if not self.image_exists(self.image):
             return {"ok": False, "error": f"image {self.image} not built — run `multiagents docker build`"}
 

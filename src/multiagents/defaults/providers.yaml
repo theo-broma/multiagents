@@ -296,6 +296,13 @@ providers:
       - ".claude/daemon.lock"
       - ".claude/daemon.status.json"
       - ".claude/daemon"
+      # A bare mkdir mutex: an empty DIRECTORY naming no owner, so nothing can
+      # ask whether the holder is alive. An agent that begins a refresh it
+      # cannot finish leaves one, and every later refresh — the host's
+      # included — then fails with "another Claude Code process is refreshing
+      # it". Observed 2026-09-16 blocking the host from renewing the
+      # container's token at all.
+      - ".claude/.oauth_refresh.lock"
     # The DIRECTORY, not the files inside it. A per-agent HOME links these into
     # place, and a link to a FILE is destroyed by the thing this whole provider
     # does routinely: the CLI refreshes its token by writing a temp file and

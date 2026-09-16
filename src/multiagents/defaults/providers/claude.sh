@@ -110,34 +110,24 @@ for block in d.values():
                     exit 10
                 fi
                 if [ "$access" -le "$now" ]; then
-                    # A lapsed ACCESS token is renewed from the refresh token
-                    # on first use — on the HOST, where that demonstrably
-                    # happens. This branch is the CONTAINER profile, and the
-                    # container cannot do it: the refresh endpoint is
-                    # platform.claude.com and the proxy allowlist carries
-                    # api.anthropic.com only, so agents can infer and can
-                    # never renew. Verified 2026-09-16 from inside a running
-                    # container: api.anthropic.com answers, platform.claude.com
-                    # does not resolve at all, and the container credential had
-                    # not been rewritten once since the login eight hours
-                    # earlier while the host's had refreshed itself silently.
+                    # A lapsed ACCESS token is renewed before the next spawn,
+                    # by the HOST, through this script's `refresh` action —
+                    # the container has no route to the refresh endpoint and
+                    # is not being given one.
                     #
-                    # So this says "needs a login" even though a refresh token
-                    # is sitting right there, because nothing here can spend
-                    # it. Saying otherwise reports a renewal that will not
-                    # happen and, worse, tells the runner to treat the 401
-                    # that follows as "something broke" — a thirty-minute
-                    # cooldown cleared only by waiting — rather than as the
-                    # login it actually is.
+                    # This line has now been wrong in both directions, which is
+                    # worth recording. It first reported a login (false: the
+                    # container could not renew, so agents 401'd three seconds
+                    # into every run while `auth` said all was well). Then it
+                    # reported "needs a login" (true, and a daily chore). It
+                    # reports a login again — but this time because the renewal
+                    # was built, not assumed. The lesson is the order: the
+                    # check may only promise what something actually does.
                     #
-                    # If the refresh endpoint is allowlisted for the container,
-                    # this stops being true and this branch should go back to
-                    # reporting a login. Nothing here can tell the difference
-                    # cheaply: probing costs a round trip on every check, and
-                    # a proxy that blackholes rather than refuses makes it a
-                    # timeout. `multiagents doctor` is where that probe belongs.
-                    echo "the container profile's access token lapsed $(( (now - access) / 60 ))m ago and this container cannot renew it (the refresh endpoint is not on the egress allowlist) — run \`multiagents auth login claude\`"
-                    exit 10
+                    # If the refresh token itself were dead, the branch above
+                    # would have caught it and this would never run.
+                    echo "container profile is logged in ($PROFILE); its access token lapsed $(( (now - access) / 60 ))m ago and the host renews it before the next spawn"
+                    exit 0
                 fi
             fi
             echo "container profile is logged in ($PROFILE)"; exit 0
@@ -198,6 +188,49 @@ login)
     echo "A browser window will open; complete the sign-in there."
     echo
     exec "$BIN" auth login
+    ;;
+refresh)
+    # Renew the CONTAINER profile's access token, from the host.
+    #
+    # The container cannot do this itself and never could: the refresh endpoint
+    # is platform.claude.com and the egress allowlist carries api.anthropic.com,
+    # so agents can infer and can never renew. Widening the allowlist to fix
+    # that would hand every agent — all of which run with approvals off — a
+    # host that also serves /settings/keys and /settings/billing.
+    #
+    # It does not need widening. The host already has the egress AND the CLI
+    # that knows how to do this properly, so the refresh happens out here and
+    # the container simply reads the file afterwards. No tunnel, no new
+    # reachable host, and the OAuth flow stays where it belongs: inside the
+    # vendor's own client, not reimplemented against an undocumented endpoint.
+    #
+    # There is no `claude auth refresh`, so the trigger is the cheapest real
+    # call there is. At most once per token lifetime, on the cheapest model.
+    [ -z "$PROFILE" ] && exit 64          # no container profile; nothing to do
+    if [ ! -s "$PROFILE/.credentials.json" ]; then
+        echo "no container credentials to refresh"; exit 10
+    fi
+    # `.oauth_refresh.lock` is a bare mkdir mutex — an empty DIRECTORY naming
+    # no owner, so nothing can ask whether the holder is alive. An agent that
+    # starts a refresh it cannot finish (see above: it cannot reach the
+    # endpoint) leaves one behind, and every later refresh anywhere, host
+    # included, then fails with "another Claude Code process is refreshing it".
+    # Observed on 2026-09-16, and it blocked the host too.
+    #
+    # Removed only when old enough that no refresh could still be running. A
+    # refresh takes seconds; a minute is not a close call.
+    lock="$PROFILE/.oauth_refresh.lock"
+    if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
+        rmdir "$lock" 2>/dev/null && echo "cleared a stale refresh lock"
+    fi
+    out=$(CLAUDE_CONFIG_DIR="$PROFILE" "$BIN" -p "ok" --model haiku 2>&1) || {
+        echo "refresh failed: $(printf '%s' "$out" | tail -1 | head -c 200)"
+        exit 10
+    }
+    # Host-pid state is meaningless inside a container, same as after `login`.
+    rm -rf "$PROFILE/daemon" "$PROFILE/daemon.lock" "$PROFILE/daemon.status.json"
+    echo "refreshed the container profile's token"
+    exit 0
     ;;
 budget)
     # Deliberately unimplemented. Claude's quota lives in ~/.claude.json under
@@ -299,5 +332,5 @@ launch)
     fi
     exec "$BIN" "$@"
     ;;
-*)  echo "usage: $0 check|login|budget|usage|prepare|launch" >&2; exit 64 ;;
+*)  echo "usage: $0 check|login|refresh|budget|usage|prepare|launch" >&2; exit 64 ;;
 esac
