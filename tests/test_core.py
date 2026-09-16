@@ -706,6 +706,12 @@ def test_the_host_renews_a_token_the_container_cannot(tmp_path):
     done = refresh()
     assert "cleared a stale refresh lock" in done.stdout, done.stdout
     assert not lock.exists()
+    # And it reports what HAPPENED, not what was attempted. There is no
+    # `claude auth refresh`, so a renewal is forced by making a real call — and
+    # a real call succeeds whether or not anything needed renewing. `/bin/true`
+    # renews nothing, so anything but "already current" here is a claim about
+    # something the script never looked at.
+    assert "already current" in done.stdout, done.stdout
 
     # ...and a FRESH one is not, because a refresh really may be in flight and
     # nothing in that empty directory can say otherwise.
@@ -713,6 +719,54 @@ def test_the_host_renews_a_token_the_container_cannot(tmp_path):
     done = refresh("/bin/false")
     assert lock.is_dir(), "a lock that young may still be held"
     assert done.returncode == 10
+
+
+def test_only_one_process_renews_the_shared_credential(tmp_path):
+    """Several agents can spawn at once and every spawn passes through the
+    renewal check, so without a lock of our own they would race.
+
+    The vendor ships a lock for exactly this and it is the reason any of this
+    was found: a bare mkdir mutex, an empty directory naming no owner, left
+    behind forever by anything that dies mid-refresh. Serialising on it would
+    be building on the thing that broke — and if this provider rotates refresh
+    tokens, two renewals racing on one token is how a provider decides it has
+    been stolen."""
+    import subprocess
+    import sys
+    import textwrap
+    import time
+
+    body = textwrap.dedent("""
+        import sys, time
+        sys.path.insert(0, %r)
+        from multiagents.executor.docker import DockerExecutor
+        ex = DockerExecutor(config={}, providers={}, paths=None)
+        with ex._refresh_lock("pytest-provider") as held:
+            print("held", held, flush=True)
+            time.sleep(float(sys.argv[1]))
+    """) % str(Path("src").resolve())
+
+    first = subprocess.Popen([sys.executable, "-c", body, "3"],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        time.sleep(1.0)
+        second = subprocess.run([sys.executable, "-c", body, "0"],
+                                capture_output=True, text=True, timeout=30)
+        assert second.stdout.strip() == "held False", \
+            f"a second process must not renew concurrently: {second.stdout!r}"
+    finally:
+        out = first.communicate(timeout=30)[0]
+    assert out.strip() == "held True"
+
+    # And it is NON-blocking: the loser proceeds rather than stalling a spawn.
+    # The margin means its token is still good for half an hour either way.
+    ex = None
+    from multiagents.executor.docker import DockerExecutor
+    ex = DockerExecutor(config={}, providers={}, paths=None)
+    started = time.monotonic()
+    with ex._refresh_lock("pytest-provider") as held:
+        assert held is True
+    assert time.monotonic() - started < 1.0
 
 
 def test_a_spawn_does_not_call_the_network_for_a_token_that_is_still_good(tmp_path):
