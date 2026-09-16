@@ -24,6 +24,19 @@ the ledger — not these files — is what you read to decide what to work on. U
 findings file to get an overview**: each holds every finding for a whole context,
 and reading it to answer a question about one of them loads all of them.
 
+## The provider plugin seam
+
+The review has a standing invariant to guard — **a provider's logic lives in its
+config and its script, never hardcoded in the main program**. `BRIEF.md` carries
+the grep, the baseline of five already-argued sites, and the finding worth
+making. Both halves of the seam are tracked and readable from a worktree:
+
+- `src/multiagents/defaults/providers.yaml`
+- `src/multiagents/defaults/providers/{claude,agy,opencode}.sh`
+
+The live copies under `.multiagents/config/` are gitignored and you will not see
+them. Review the tracked defaults; that is where a new provider starts from.
+
 ## What is NOT here, and where it lives instead
 
 - **Requirements and specs.** This project does not specify before it builds.
