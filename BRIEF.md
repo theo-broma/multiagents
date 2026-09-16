@@ -192,6 +192,81 @@ and decides; the map then goes to the user.
 
 ---
 
+## The second invariant: agy carries Gemini only
+
+**Stated by the user, 2026-09-16.**
+
+> `agy` is for Gemini models. Its resold Claude and GPT models are not to be
+> pinned.
+
+The reason is measurement, and it is the same reason the budget section gives
+for distrusting failover. agy resells `claude-sonnet-4-6` and
+`claude-opus-4-6-thinking` from a pool that `budget_status` reports with
+`counted: false` — separate from the Gemini pool and readable by nothing. A pin
+there trades a provider whose spend can be seen for one whose cannot.
+
+**The live project roster now complies.** Three fallbacks were repinned:
+`implementer` and `harness` and `characterizer` all carried
+`agy: claude-sonnet-4-6`.
+
+### The finding to file
+
+**The shipped defaults do not comply**, and they are what every new project
+starts from — so `multiagents init` reintroduces the violation on each one:
+
+| site | pin |
+|---|---|
+| `src/multiagents/defaults/agents.yaml:225` | `agy: claude-sonnet-4-6` |
+| `src/multiagents/defaults/agents.yaml:245` | `agy: claude-opus-4-6-thinking` |
+| `src/multiagents/defaults/agents.yaml:421` | `agy: claude-sonnet-4-6` |
+| `src/multiagents/defaults/agents.yaml:447` | `agy: claude-sonnet-4-6` |
+| `src/multiagents/defaults/agents/library/README.md:86,146` | both, in paste-ready blocks |
+
+These were **not** changed during initialisation: they are production source, and
+this phase builds nothing. File them as a finding, with the same shape as the
+provider-plugin one — the fix is a lint assertion that no `agy:` pin names a
+non-Gemini model, so the rule is enforced rather than remembered.
+
+Note the second-order effect before judging severity: the library README blocks
+are *copied by the initializer into proposals*, so one stale block propagates
+into projects that never read the defaults file.
+
+## The roster's own guard rail does not cover this project
+
+`test_a_checking_pair_never_collapses_onto_one_model` reads `_shipped_agents()` —
+the defaults. **The live `.multiagents/config/agents.yaml` is asserted by
+nothing**, and the pair list it checks contains only implement-team pairs
+(`tester`/`adversary`/`reviewer` against the three implementer tiers). No review
+team pair is in it.
+
+That is how this roster arrived at a real collision that nothing caught: the
+cartographer and the characterizer were both pinned to `claude/opus`, primary,
+so they collided always rather than only during an outage. Found by hand,
+2026-09-16, and fixed by moving the characterizer to sonnet.
+
+**Another finding to file**, and the most valuable of the three, because it is
+the one that would have caught the other two: extend the property to the live
+roster and to the review team's pairs.
+
+### One known exception, recorded so it stays deliberate
+
+`harness` and `characterizer` are both `claude/sonnet`, and both fall to
+`opencode-go/kimi-k2.7-code`. They collide in every direction, and it is
+accepted rather than fixed:
+
+- They are a funnel, not a checking pair. The characterizer never judges the
+  harness; it consumes the API the harness reports.
+- The dangerous case is already surfaced to a human. When the harness finds a
+  context cannot be exercised without changing production code, the pipeline
+  stops that context and the harness files it as a `critical` architecture
+  finding — so its judgement is read, not silently applied.
+- **In this project specifically it bounds almost nothing.** The suite is
+  already green at 547 tests, so phase 3 has little to build. See below.
+
+Revisit it on a project where the harness has real work to do.
+
+---
+
 ## Constraints that are real
 
 ### Budget is the binding constraint on this review
@@ -282,20 +357,29 @@ Recorded so nobody re-derives them.
 - **Two to three contexts in the first pass, not seven.** Budget.
 - **Rank by blast radius, not LOC.** A large parser is not a large risk.
 - **One new test file per characterizer.** Merge mechanics.
+- **agy carries Gemini only.** The user's constraint, 2026-09-16. The live
+  roster complies; the shipped defaults do not, and that is a finding. Its own
+  section above.
+- **The characterizer is `claude/sonnet`, not opus.** See the revised budget
+  decision below.
 - **Providers are plugins, and the review guards it.** The user's constraint,
   stated 2026-09-16. It has its own section above, with a grep, a baseline of 5
   argued sites, and the finding worth making.
 - **`security-advisor` is deliberately NOT on the roster.** It gives design-time
   advice phrased as candidate requirements, and this team builds nothing there is
   a design for. A roster nobody will use costs attention at every decision.
-- **The characterizer stays on opencode, capped at two per context.** The user's
-  decision, 2026-09-16, taken with the alternatives in front of them. Moving it
-  to `claude/sonnet` would buy a visible meter at the cost of competing with the
-  orchestrator's own opus on a subscription that resets in 5 days with no extra
-  credits left — and `voila` runs against the same subscriptions on this machine.
-  Moving it to agy buys no meter at all. Staying put uses the brake that was
-  built for this. If the brake fires mid-context, that context is recorded as
-  half-covered and the review moves on; it is not a reason to retry elsewhere.
+- **The characterizer runs on `claude/sonnet`, capped at two per context.**
+  Revised 2026-09-16, replacing an earlier decision to keep it on opencode. The
+  roster had moved it to `claude/opus`, which was rejected on two counts: it is
+  the volume role on the same subscription as the orchestrator's own opus (57%
+  used, resets in 5 days, extra-usage credits already spent), so parallel runs
+  could starve the one context that cannot be replaced; and it collided with the
+  cartographer, also opus. Sonnet keeps the capacity gain at a fraction of the
+  cost and breaks the collision.
+  **The starvation risk is reduced, not removed** — it is still the
+  orchestrator's subscription. Cap parallelism at two, set `budget_tokens` per
+  context, and if the brake fires mid-context, record that context as
+  half-covered and move on. It is not a reason to retry elsewhere.
 - **The catalog was checked** (`check_model_catalog`, severity `none`). Every pin
   is live and every `opencode-go/*` pin is on the sanctioned $60 monthly tier.
   No repin is forced; the ones proposed are judgements, in
