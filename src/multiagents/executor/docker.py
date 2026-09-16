@@ -382,6 +382,7 @@ class DockerExecutor(Executor):
             # first spawn after upgrading — the projection IS the credential
             # and reading it is all there is. The script migrates on its first
             # run, so that window is one spawn wide.
+            root = next(iter(backing.values()))
             vault = self.vault_state(name).get(name)
             clock = vault / ".credentials.json" if vault and \
                 (vault / ".credentials.json").is_file() else root / ".credentials.json"
@@ -763,13 +764,23 @@ class DockerExecutor(Executor):
         _run(["docker", "network", "connect", "bridge", self.proxy_container])
         return {"ok": True, "created": True}
 
+    # The proxy speaks one upstream's protocol: it forwards to
+    # api.anthropic.com and swaps an Anthropic bearer header. So it serves one
+    # provider, and naming it here is more honest than taking whichever
+    # provider's vault happened to come first out of a dict — which is what
+    # this did on its first run, mounting agy's vault into a proxy that talks
+    # to Anthropic and writing an Anthropic-shaped credential into agy's
+    # profile. A second provider needs its own upstream, not a share of this.
+    AUTH_PROVIDER = "claude"
+
     def auth_proxy_enabled(self) -> bool:
         """Off unless asked for, and only where there is a vault to hold.
 
         It changes where every agent's model traffic goes, so it is not
         something to acquire by upgrading.
         """
-        return bool(self.config.get("auth_proxy")) and bool(self.vault_state())
+        return bool(self.config.get("auth_proxy")) and \
+            bool(self.vault_state(self.AUTH_PROVIDER))
 
     def ensure_auth_proxy(self) -> dict:
         """The only thing on the agents' network that can reach the model API.
@@ -783,7 +794,7 @@ class DockerExecutor(Executor):
         """
         if not self.auth_proxy_enabled():
             return {"ok": True, "skipped": "not enabled"}
-        vault = next(iter(self.vault_state().values()))
+        vault = self.vault_state(self.AUTH_PROVIDER)[self.AUTH_PROVIDER]
         vault.mkdir(parents=True, exist_ok=True)
         # The secret must exist before the container reads it, and the host
         # mints agents' tags from the same file.
@@ -798,7 +809,7 @@ class DockerExecutor(Executor):
         # worktree and no git, and mounting the package over its own deep host
         # path only invites the parent directories to be created by docker and
         # owned by root.
-        source = Path(__file__).resolve().parent            # .../multiagents
+        source = Path(__file__).resolve().parent.parent     # .../multiagents
         result = _run([
             "docker", "run", "-d", "--name", self.auth_container,
             "--network", self.network,
@@ -831,9 +842,11 @@ class DockerExecutor(Executor):
         if not self.auth_proxy_enabled():
             return
         from ..authproxy import load_secret, mint_token
-        vault = next(iter(self.vault_state().values()))
+        vault = self.vault_state(self.AUTH_PROVIDER)[self.AUTH_PROVIDER]
         tag = mint_token(self.slug, load_secret(vault))
-        for host_path, backing in self.private_state().items():
+        # Only the provider the proxy actually serves. Writing this shape into
+        # another provider's profile would be junk at best.
+        for host_path, backing in self.private_state(self.AUTH_PROVIDER).items():
             target = backing / ".credentials.json"
             if not backing.is_dir():
                 continue
@@ -922,6 +935,21 @@ class DockerExecutor(Executor):
                 return {"ok": False, "error": f"auth proxy: {auth.get('error')}"}
 
         state = self.container_state(self.container)
+        stale = self.stale_mounts()
+        if stale:
+            # A mount list is fixed when a container is CREATED. Starting an
+            # old one back up gives you the mounts it was born with, so a
+            # config change reads as "did nothing" — the toolchain is still
+            # missing, the read-only path is still writable, and nothing says
+            # why. Refusing is the only way that stops being silent.
+            return {"ok": False,
+                    "error": f"this container was created without {stale[0]}"
+                             + (f" (and {len(stale) - 1} other change(s))"
+                                if len(stale) > 1 else "")
+                             + ". A mount list is fixed at creation, so "
+                               "`docker up` cannot add it: run `multiagents "
+                               "docker rm && multiagents docker up`. That ends "
+                               "any agent still inside."}
         if state == "running":
             return {"ok": True, "container": self.container, "existed": True}
         if state in ("exited", "created", "paused"):
@@ -934,6 +962,39 @@ class DockerExecutor(Executor):
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:600]}
         return {"ok": True, "container": self.container, "created": True}
+
+    def stale_mounts(self) -> list[str]:
+        """Mounts the config asks for that this container does not have.
+
+        Only additions and read-only changes, and only for a container that
+        exists — this is about a config edit that cannot take effect, not about
+        drift in general.
+        """
+        if self.container_state(self.container) == "absent":
+            return []
+        result = _run(["docker", "inspect", "-f",
+                       "{{range .Mounts}}{{.Destination}}:{{.RW}}{{\"\\n\"}}{{end}}",
+                       self.container])
+        if result.returncode != 0:
+            return []
+        have = {}
+        for line in result.stdout.splitlines():
+            if ":" in line:
+                dest, _, rw = line.rpartition(":")
+                have[dest] = rw.strip() == "true"
+        missing = []
+        for path, read_only in self.mounts():
+            # `path` IS the destination. `private_state` maps that destination
+            # to the host directory mounted there, which is the SOURCE — look
+            # it up here and every container-private mount reads as missing,
+            # because the host path is not a destination in the container.
+            dest = str(path)
+            if dest not in have:
+                missing.append(dest)
+            elif have[dest] == read_only:
+                # Declared read-only and mounted writable, or the reverse.
+                missing.append(f"{dest} as {'read-only' if read_only else 'writable'}")
+        return missing
 
     def stop(self, remove: bool = False) -> dict:
         out = {}

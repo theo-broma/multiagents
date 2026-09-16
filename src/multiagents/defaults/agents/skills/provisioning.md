@@ -88,9 +88,22 @@ all of which run with approvals turned off.
 
 ## Restarting, which is the part that bites
 
-A mount takes effect when the container starts, so a change to `project.yaml`
-does nothing until `multiagents docker down && multiagents docker up`. **That
-restart kills every agent running inside.**
+A mount list is fixed when the container is CREATED, not when it starts. So
+`docker down && docker up` does nothing at all: `down` stops the container and
+`up` starts the same one again, with the mounts it was born with. The sequence
+that works is:
+
+```
+multiagents docker rm && multiagents docker up
+```
+
+Learned the hard way on 2026-09-16, by adding two mounts, restarting, and
+finding the toolchain still missing — the container was a day old and nothing
+said so. `multiagents docker up` now refuses a container whose mounts no longer
+match the config and tells you to recreate it, so this should announce itself
+rather than being silently ignored.
+
+**Recreating kills every agent running inside.**
 
 So: check first, and restart only when nothing is running. If agents are in
 flight, either wait for them or tell the user what is queued and let them pick

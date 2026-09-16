@@ -930,6 +930,93 @@ def test_the_container_never_gets_the_token_that_mints_tokens(tmp_path):
     assert "someFutureSecret" not in mounted, mounted
 
 
+def test_a_container_that_cannot_take_the_new_mount_says_so(tmp_path):
+    """A mount list is fixed when a container is CREATED, so `docker down &&
+    docker up` restarts the same one with the mounts it was born with. A config
+    change then reads as "did nothing": the toolchain is still missing, the
+    read-only path is still writable, and nothing says why.
+
+    Found by doing exactly that on 2026-09-16 — adding two mounts, restarting,
+    and finding the container was a day old. The written instructions said
+    `down && up`, which is the sequence that cannot work.
+    """
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    ex = DockerExecutor(config={}, providers={}, paths=paths)
+
+    # Nothing to compare against: a container that does not exist is not stale,
+    # it is about to be created with whatever the config now says.
+    assert ex.stale_mounts() == []
+
+    calls = {}
+
+    def fake_state(name):
+        return "running"
+
+    def fake_run(argv, **kw):
+        calls["argv"] = argv
+        class R:
+            returncode = 0
+            # Destinations only, as docker reports them: the config asks for
+            # the project root too, and this container has only /tmp.
+            stdout = "/tmp:true\n"
+            stderr = ""
+        return R()
+
+    ex.container_state = fake_state
+    import multiagents.executor.docker as mod
+    original, mod._run = mod._run, fake_run
+    try:
+        stale = ex.stale_mounts()
+    finally:
+        mod._run = original
+
+    assert stale, "a mount the container does not have must be reported"
+    assert any(str(paths.root) in entry for entry in stale)
+    assert "inspect" in calls["argv"], calls["argv"]
+
+
+def test_the_renewal_actually_runs(tmp_path):
+    """Reading the source is not running it.
+
+    The test below asserts on `inspect.getsource`, and it passed happily while
+    the function raised NameError on the line it was checking for — a variable
+    dropped in an edit. `docker up` was the thing that found it, which is the
+    wrong place to find it. So: call it, with a vault and without one.
+    """
+    import json
+    import time
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+
+    class Prov:
+        container_private_home = [".claude"]
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    ex = DockerExecutor(config={}, providers={"claude": Prov()}, paths=paths)
+
+    assert ex.refresh_private_credentials() == [], "nothing to do, no exception"
+
+    # With a projection and no vault yet — the one-spawn window after an
+    # upgrade, where the projection is all there is to read.
+    backing = next(iter(ex.private_state().values()))
+    backing.mkdir(parents=True, exist_ok=True)
+    (backing / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"expiresAt": int((time.time() + 6 * 3600) * 1000)}}))
+    assert ex.refresh_private_credentials() == [], "hours left: nothing renewed"
+
+    # And with a vault, whose clock is the one that counts.
+    vault = next(iter(ex.vault_state().values()))
+    vault.mkdir(parents=True, exist_ok=True)
+    (vault / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"expiresAt": int((time.time() + 6 * 3600) * 1000)}}))
+    assert ex.refresh_private_credentials() == []
+
+
 def test_the_host_does_not_take_its_cue_from_a_file_the_sandbox_can_edit():
     """The projection lives in a directory the container writes to. If the host
     read the expiry from THERE, an agent could write 1970 and have the host
