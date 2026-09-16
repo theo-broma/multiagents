@@ -700,6 +700,12 @@ class Runner:
         #
         # The commit hash does the job the path was there for: it lets whoever
         # reads the ticket open the exact code the agent could not.
+        # ...unless the project being orchestrated IS multiagents. Then the
+        # agent's worktree is a checkout of the very source the ticket is
+        # about, its file tools reach all of it, and telling it otherwise
+        # would throw away the best evidence available to any reporter this
+        # project has: a defect cited at file and line by something that just
+        # read the code and ran the suite over it.
         return (
             "## Environment (generated — include it verbatim, add nothing to it)\n\n"
             f"- multiagents commit: {commit or 'unknown (not a checkout)'}\n"
@@ -707,10 +713,41 @@ class Runner:
             f"{platform.release().split('-')[0]}\n"
             f"- executor: {self.config.project.get('executor', {}).get('kind', 'local')}\n"
             f"- providers available: {providers or 'none'}\n\n"
-            "You cannot read the multiagents source from here and are not "
-            "expected to: report what you observed, and label any cause you "
-            "infer as a hypothesis. The commit above is what locates the code.\n"
-            "\n---\n"
+            + (self._reading_its_own_source()
+               if self._is_multiagents_checkout()
+               else "You cannot read the multiagents source from here and are "
+                    "not expected to: report what you observed, and label any "
+                    "cause you infer as a hypothesis. The commit above is what "
+                    "locates the code.\n")
+            + "\n---\n"
+        )
+
+    def _is_multiagents_checkout(self) -> bool:
+        """Is the project being orchestrated multiagents' own source?
+
+        By the shape of the tree rather than its name or its remote: a fork, a
+        rename and a local clone are all still the source, and a directory that
+        merely happens to be called multiagents is not.
+        """
+        root = getattr(self.paths, "root", None)
+        if root is None:
+            return False
+        return (Path(root) / "src" / "multiagents" / "runner.py").is_file()
+
+    @staticmethod
+    def _reading_its_own_source() -> str:
+        return (
+            "**You can read the multiagents source from here.** This project "
+            "IS multiagents: your worktree is a checkout of it, so the code "
+            "the ticket is about is under `src/multiagents/` beside you, and "
+            "the suite that covers it is under `tests/`.\n\n"
+            "So do not stop at what you observed. Find the code, cite it as "
+            "`path:line`, and say which test would have caught it and why it "
+            "did not. Run the suite if it settles the question — "
+            "`uv run --frozen pytest tests/ -q -k <pattern>`.\n\n"
+            "The publishing rules above do not relax. A path under `src/` is "
+            "the tool's own layout and belongs in the ticket; a path under a "
+            "home directory is still the user's business and does not.\n"
         )
 
     def _file_ticket(self, node_id: str, text: str) -> dict | None:
