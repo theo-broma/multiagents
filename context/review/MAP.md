@@ -49,7 +49,11 @@ that cannot be taken back: a credential leaving the network. It is the sole
 egress path, it is reachable by untrusted agent output by construction, and the
 half of it that enforces the allowlist is the least-tested code in the tree. The
 3 skipped tests are all here (they shell out to `docker`), so the real coverage
-of the container path is lower than 66% reads. `docker.py:774 AUTH_PROVIDER =
+of the container path is lower than 66% reads. **Correction, 2026-09-16:** the
+C1 harness grepped every `pytest.skip`/`skipif` site and found only **one** of
+the three is docker-related and therefore C1's; the other two concern node and
+`page.html` rendering, which is C7. C1's real coverage is a little better than
+this paragraph claims, and C7's a little worse. `docker.py:774 AUTH_PROVIDER =
 "claude"` also makes this the second home of the provider-plugin invariant.
 *Suggested budget:* **180k**
 
@@ -249,11 +253,38 @@ Both commands were run on the host:
 | `uv run --frozen python -m pytest -q -p no:randomly` | **1 failed, 547 passed** in 297s |
 
 Disabling `pytest-randomly` changes nothing, so **execution order is not the
-cause** and the test-order hypothesis below is falsified. The remaining variable
-is the coverage instrumentation (`--with pytest-cov --cov=multiagents`), which is
-where the 17 `PermissionError` failures must come from. The coverage percentages
-in this map are still sound — coverage is collected per statement regardless of
-which tests fail — but anyone re-running them will hit this again.
+cause** and the test-order hypothesis below is falsified.
+
+**Nor is it the coverage instrumentation** — that was this section's first
+conclusion, and the C1 harness disproved it within the hour. Running the suite
+plain, with neither `-p no:randomly` nor `--cov`, *from inside an agent*, it got
+**17 failed / 537 passed / 3 skipped**, and every one of the 17 is
+`PermissionError: ... can_spawn is false`, in `test_core.py`'s C3/runner tests.
+
+So the real variable is **who runs the suite**. Seventeen tests exercise agent
+spawning, and they fail for any process whose `can_spawn` is false — which is
+every agent in the tree except the orchestrator. The cartographer saw 17 because
+it was an agent, not because of `--cov`.
+
+**The consequence is larger than the question that uncovered it: the suite is
+green nowhere.**
+
+| who runs it | result |
+|---|---|
+| the orchestrator, on the host | 1 failed, 547 passed, 0 skipped |
+| any agent, inside the container | 17 failed, 537 passed, 3 skipped |
+
+Two disjoint failure sets. On the host the 17 spawn tests pass and
+`claude.sh check` fails; inside an agent `claude.sh check` passes and the 17
+spawn tests fail. Nobody has seen this suite green, and the documented 545/3
+corresponds to neither environment.
+
+That matters for every remaining phase. **An agent cannot tell its own breakage
+from the environment's**: a characterizer running the suite sees 17 red tests
+that have nothing to do with its work, and the only way it can know that is to
+be told. Whoever writes a task for an agent that runs this suite must say so.
+The coverage percentages in this map are unaffected — coverage is collected per
+statement regardless of which tests fail.
 
 Two further things these runs establish, which matter more than the question they
 answered:
