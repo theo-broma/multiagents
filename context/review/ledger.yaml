@@ -13,6 +13,73 @@ findings:
     status: open
     summary: An `egress_allowlist` entry containing `|` turns the allowlist into an
       allow-all
+  F10:
+    class: security
+    context: context/review/C1-sandbox-allowlist.md
+    evidence: reproduction
+    first_seen: 765a15b3bb1e1368599876e05c4630c434be83fe
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-allowlist.md
+      sha: 765a15b3bb1e1368599876e05c4630c434be83fe
+      status: open
+    severity: high
+    status: open
+    summary: Bare or short generic suffix entries act as wildcards across unrelated
+      hosts
+  F11:
+    class: maintainability
+    context: context/review/C1-sandbox-allowlist.md
+    evidence: reproduction
+    first_seen: 765a15b3bb1e1368599876e05c4630c434be83fe
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-allowlist.md
+      sha: 765a15b3bb1e1368599876e05c4630c434be83fe
+      status: open
+    severity: medium
+    status: open
+    summary: Dead or malformed entries (leading/trailing dot, whitespace, port) silently
+      match nothing
+  F12:
+    class: security
+    context: context/review/C1-sandbox-allowlist.md
+    evidence: reproduction
+    first_seen: 765a15b3bb1e1368599876e05c4630c434be83fe
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-allowlist.md
+      sha: 765a15b3bb1e1368599876e05c4630c434be83fe
+      status: open
+    severity: medium
+    status: open
+    summary: Unescaped quantifiers `*`, `+`, `?` or interval `{n}` change match semantics
+  F13:
+    class: bug
+    context: context/review/C1-sandbox-allowlist.md
+    evidence: reproduction
+    first_seen: 765a15b3bb1e1368599876e05c4630c434be83fe
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-allowlist.md
+      sha: 765a15b3bb1e1368599876e05c4630c434be83fe
+      status: open
+    severity: high
+    status: open
+    summary: Unbalanced grouping/class metacharacters `(` or `[` crash the regex match
+  F14:
+    class: security
+    context: context/review/C1-sandbox-allowlist.md
+    evidence: reproduction
+    first_seen: 765a15b3bb1e1368599876e05c4630c434be83fe
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-allowlist.md
+      sha: 765a15b3bb1e1368599876e05c4630c434be83fe
+      status: open
+    severity: high
+    status: open
+    summary: Balanced `()`, `[]` create a silent regex match, ignoring literal meaning
   F2:
     class: correctness
     context: context/review/C1-sandbox.md
