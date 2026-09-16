@@ -37,7 +37,12 @@ agents:
   initializer:
     provider: claude
     model: opus
-    instructions: team/_initializer.md
+    instructions:
+    - team/_initializer.md
+    # A capability, not an identity: the container this project's agents
+    # run in is described by project.yaml, and the two roles that run on
+    # the HOST are the two that may change it. See agents/skills/README.md.
+    - skills/provisioning.md
     description: Shapes the project with you. Launched by `multiagents init-agent`.
     launch: true
     role: initializer
@@ -55,7 +60,12 @@ agents:
   orchestrator:
     provider: claude
     model: opus
-    instructions: team/_orchestrator.md
+    instructions:
+    - team/_orchestrator.md
+    # A capability, not an identity: the container this project's agents
+    # run in is described by project.yaml, and the two roles that run on
+    # the HOST are the two that may change it. See agents/skills/README.md.
+    - skills/provisioning.md
     description: Drives the project. Launched by `multiagents run`.
     launch: true
     role: orchestrator

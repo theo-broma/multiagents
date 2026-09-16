@@ -60,6 +60,13 @@ executor:
       - pypi.org
       - files.pythonhosted.org
       - registry.npmjs.org
+      # Dart/Flutter. pub resolves version constraints against pub.dev before
+      # fetching archives from storage.googleapis.com (already covered by
+      # googleapis.com), and it does that even with a fully warm cache — there
+      # is no offline resolve. So without this line an agent cannot run the
+      # test suite of any Dart project on a branch of its own, which is every
+      # branch it has.
+      - pub.dev
       - crates.io
       - static.crates.io
       - proxy.golang.org
@@ -173,7 +180,10 @@ teams:
     # concurrency — and the second is this team's pipeline. Split rather than
     # copied because a per-team copy of the common half drifts invisibly, which
     # is the same reason the three coder tiers share one brief.
-    orchestrator: [team/_orchestrator.md, teams/implement/pipeline.md]
+    # A team's list REPLACES the roster entry's, so a skill the
+    # orchestrator should always have belongs here too.
+    orchestrator: [team/_orchestrator.md, teams/implement/pipeline.md,
+                   skills/provisioning.md]
     roster:
       - advisor
       - dev-advisor
@@ -190,7 +200,10 @@ teams:
     description: >-
       Audits an existing codebase one bounded context at a time: map, gate,
       harness, characterize, attack, report. Builds no features.
-    orchestrator: [team/_orchestrator.md, teams/review/pipeline.md]
+    # A team's list REPLACES the roster entry's, so a skill the
+    # orchestrator should always have belongs here too.
+    orchestrator: [team/_orchestrator.md, teams/review/pipeline.md,
+                   skills/provisioning.md]
     roster:
       - advisor
       - researcher

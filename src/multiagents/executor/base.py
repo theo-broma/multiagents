@@ -159,9 +159,17 @@ def build_env(
             env[key] = value
 
     for key in passthrough:
-        if key in blocked:
+        # `KEY=value` SETS the variable; a bare `KEY` forwards this process's.
+        # Forwarding alone could not express "the toolchain cache is at this
+        # path inside the container", because that value does not exist in the
+        # host environment to be forwarded — a mounted package cache the agent
+        # cannot be told the location of is a mounted cache it does not use,
+        # and every agent then re-downloads the world into its private HOME.
+        key, sep, literal = key.partition("=")
+        key = key.strip()
+        if not key or key in blocked:
             continue                     # an explicit block always wins
-        value = os.environ.get(key)
+        value = literal if sep else os.environ.get(key)
         if value is not None:
             env[key] = value
 

@@ -3189,6 +3189,29 @@ def test_the_default_team_ships_the_expected_roles_and_nothing_spare():
             assert extra.startswith("skills/"), (name, extra)
 
 
+def test_a_literal_env_value_can_be_set_and_is_still_blockable():
+    """Forwarding alone could not say "the cache is at this path": that value
+    does not exist in the host environment to be forwarded, and a mounted cache
+    an agent cannot be told the location of is one it does not use."""
+    import os
+    from multiagents.executor.base import build_env
+
+    os.environ["MA_TEST_FWD"] = "from-host"
+    try:
+        env = build_env(
+            passthrough=["MA_TEST_FWD", "PUB_CACHE=/home/u/.pub-cache",
+                         "MA_TEST_SECRET", "MA_TEST_SECRET2=sneaky"],
+            blocked=["MA_TEST_SECRET", "MA_TEST_SECRET2"], home=None, identity={})
+    finally:
+        del os.environ["MA_TEST_FWD"]
+
+    assert env["MA_TEST_FWD"] == "from-host"
+    assert env["PUB_CACHE"] == "/home/u/.pub-cache"
+    assert "MA_TEST_SECRET" not in env
+    assert "MA_TEST_SECRET2" not in env, \
+        "a blocked NAME must not be smuggled through by carrying a literal"
+
+
 def test_the_config_that_defines_the_sandbox_is_not_writable_inside_it(tmp_path):
     """The project root is mounted writable because agents commit in it, and
     `.multiagents/config` sits inside it — so project.yaml, which carries
@@ -3210,6 +3233,47 @@ def test_the_config_that_defines_the_sandbox_is_not_writable_inside_it(tmp_path)
     # The narrow mount must come after the root it masks, so it wins.
     assert mounts.index((paths.config, True)) > \
         next(i for i, (path, _) in enumerate(mounts) if path == paths.root)
+
+
+def test_a_skill_is_attached_to_both_places_the_orchestrator_is_composed():
+    """A team's `orchestrator:` list REPLACES the roster entry's rather than
+    adding to it, so a skill named only in agents.yaml is silently absent the
+    moment a team is active — which is the normal case, not the edge one."""
+    import yaml
+    from multiagents.paths import shipped_defaults_dir
+
+    agents = _shipped_agents()
+    project = yaml.safe_load((shipped_defaults_dir() / "project.yaml").read_text())
+
+    for role in ("orchestrator", "initializer"):
+        assert "skills/provisioning.md" in agents[role]["instructions"], role
+    for team, spec in project["teams"].items():
+        assert "skills/provisioning.md" in spec["orchestrator"], team
+
+
+def test_the_provisioning_skill_is_not_handed_to_the_agents_it_constrains():
+    """It documents how to edit project.yaml, which is this container's own
+    boundary. Giving that to something running INSIDE the container would turn
+    a weakness into an instruction — so it goes to the two roles that run on
+    the host, and tells everyone else to report instead."""
+    agents = _shipped_agents()
+    for name, spec in agents.items():
+        briefs = spec.get("instructions") or []
+        briefs = [briefs] if isinstance(briefs, str) else briefs
+        if "skills/provisioning.md" not in briefs:
+            continue
+        assert spec.get("launch") is True, \
+            f"{name} runs in the container and must not be told how to widen it"
+
+    text = (_briefs_dir() / "skills" / "provisioning.md").read_text()
+    assert "Do not edit `project.yaml`" in text
+    # The invariants are stated flat. A reason attached to an absolute rule is
+    # the premise for a loophole, and these three have no mechanical backstop.
+    for rule in ("Never set `mount_docker_socket`",
+                 "Never add a wildcard",
+                 "Never mount a path outside the project's toolchain"):
+        assert rule in text, rule
+    assert "Ask the user before adding any host to `egress_allowlist`" in text
 
 
 def test_the_phase_agents_commit_their_artifacts():
