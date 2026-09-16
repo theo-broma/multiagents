@@ -961,7 +961,14 @@ def _report_agents(config, providers) -> int:
         else:
             where = spec.executor or config.executor
             tag = f"[{where}]" + ("*" if spec.executor else "")
-        print(f"  {mark} {name:18} {spec.provider}/{spec.model:30} {tag}")
+        # The composed word count, because a brief is paid for on every launch
+        # and nobody had ever measured one: two of the shipped briefs doubled
+        # in a month before this line existed. It is reported, not enforced —
+        # refusing to launch an agent because its brief grew is a worse failure
+        # than the bloat — but it is reported where somebody adding a skill
+        # will see what it cost.
+        words = len(config.instructions_for(spec).split())
+        print(f"  {mark} {name:18} {spec.provider}/{spec.model:30} {words:5}w {tag}")
         instructions = config.instructions_for(spec)
         if spec.instructions and not instructions.strip():
             print(f"    missing instructions file: {spec.instructions}")
@@ -1218,7 +1225,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if not repo_ok:
             problems += 1
         blocked = set(config.env_block)
-        leaking = [k for k in config.env_passthrough if k not in blocked]
+        # Compared on the NAME: an entry may be `KEY=value`, and matching the
+        # whole string against the block list would let a blocked name through
+        # simply by carrying a literal.
+        leaking = [k for k in config.env_passthrough
+                   if k.partition("=")[0].strip() not in blocked]
         print(f"  env        passthrough={leaking or 'none'} blocked={len(blocked)} vars")
 
     print(f"\n{'ok' if not problems else str(problems) + ' problem(s)'}")
@@ -1533,6 +1544,47 @@ def _driver_host_states(config, providers, executor_of, project_config):
             spec.provider, provider, executor, global_config_dir(),
             project_config, profile=auth_mod.HOST)
     return out
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    """List the capability fragments an agent can be given.
+
+    A skill is not a mechanism — it is a brief file under `agents/skills/`,
+    resolved and attached exactly like any other. What it needs from the CLI is
+    therefore not resolution but VISIBILITY: without a listing, a capability
+    that ships in the package is one nobody knows to attach, and the roster is
+    the wrong place to go looking because the roster is about who exists.
+    """
+    paths = _resolve(args.path) if find_project_root() else None
+    config = load_config(paths)
+
+    seen: dict[str, Path] = {}
+    for base in config.instruction_dirs:             # shipped, global, project
+        for path in sorted((base / "skills").glob("*.md")):
+            if path.name != "README.md":
+                seen[f"skills/{path.name}"] = path   # later layer wins, as ever
+
+    if not seen:
+        print("no skills. They live in agents/skills/ in any config layer.")
+        return 0
+
+    holders: dict[str, list[str]] = {}
+    for name, spec in config.agents.items():
+        for part in config.instruction_parts(spec):
+            holders.setdefault(part, []).append(name)
+    for team, spec in (config.teams or {}).items():
+        for part in spec.get("orchestrator") or []:
+            if part in seen:
+                holders.setdefault(part, []).append(f"orchestrator ({team})")
+
+    for name, path in sorted(seen.items()):
+        words = len(path.read_text().split())
+        who = ", ".join(sorted(set(holders.get(name, [])))) or "nobody"
+        print(f"  {name:28} {words:5}w  {who}")
+    print(f"\n{len(seen)} skill(s) in {config.instruction_dirs[-1].parent}")
+    print("attach one by naming it in an agent's `instructions` list — and in")
+    print("the team's `orchestrator:` list too, which replaces rather than adds.")
+    return 0
 
 
 def cmd_upgrade_config(args: argparse.Namespace) -> int:
@@ -2375,6 +2427,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--layer", choices=["global", "project", "both"], default="both",
                    help="limit to one config layer (default: both)")
     p.set_defaults(func=cmd_upgrade_config)
+
+    p = sub.add_parser("skills", help="list capability fragments agents can be given")
+    p.set_defaults(func=cmd_skills)
 
     p = sub.add_parser("auth", help="check or repair provider authentication")
     p.add_argument("action", nargs="?", default="status", choices=["status", "login"])
