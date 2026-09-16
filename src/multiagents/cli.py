@@ -682,6 +682,8 @@ def _save_interrupted(node) -> bool:
 
 def cmd_resume(args: argparse.Namespace) -> int:
     """Reconcile state after a crash or restart, then reopen the session."""
+    from . import watchdog          # local, as everywhere else here: cycle
+
     paths = _resolve(args.path)
     tree = Tree(paths.tree_file, paths.events_file)
 
@@ -692,6 +694,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
     # they keep going with their output going nowhere. So this reconciles two
     # different states: processes that are gone, and processes that should be.
     orchestrator_live = _alive_pid(paths, "orchestrator")
+    # Asked BEFORE the pass below, because the pass is what erases the evidence:
+    # once the nodes are reclaimed and the status file is rewritten by the next
+    # supervisor, nothing remembers that the last session was cut off.
+    unclean = watchdog.ended_uncleanly(paths, "orchestrator")
     reclaimed, reaped, saved = 0, 0, 0
     for node in tree.active():
         # `procs.alive`, not `os.kill(pid, 0)`. This loop runs after a restart,
@@ -723,6 +729,11 @@ def cmd_resume(args: argparse.Namespace) -> int:
         if _save_interrupted(node):
             saved += 1
 
+    # Reclaiming a node is itself proof of an ending nobody recorded: a clean
+    # teardown marks its agents cancelled, so a node still claiming to run
+    # means nothing was left to mark it.
+    unclean = unclean or bool(reclaimed or reaped or saved)
+
     print(tree.render())
     if reclaimed:
         print(f"\nreclaimed    {reclaimed} agent(s) whose process no longer exists")
@@ -730,6 +741,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         print(f"reaped       {reaped} orphaned agent process(es) still running")
     if saved:
         print(f"committed    interrupted work in {saved} worktree(s)")
+    if unclean:
+        print("\nlast session ended without recording an ending — a crash, a "
+              "kill, or\n             a power cut. The orchestrator is told so "
+              "on resume, and takes\n             stock before it carries on.")
 
     data = tree.read()
     stale = [
@@ -823,7 +838,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return driver._launch_agent(paths, config, "orchestrator", resume=args.resume,
                          force=getattr(args, "force", False),
                          unattended=getattr(args, "unattended", 0),
-                         supervise=getattr(args, "supervise", True))
+                         supervise=getattr(args, "supervise", True),
+                         unclean=unclean)
 
 
 def _refresh_container_after_login(paths, config, provider_name: str) -> None:

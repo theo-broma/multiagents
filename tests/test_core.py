@@ -4890,6 +4890,84 @@ def test_the_recorded_pid_survives_an_install_that_did_not_record_a_start(tmp_pa
     assert driver._role_alive(paths, "absent") is False
 
 
+def test_a_session_cut_off_is_told_so_when_it_comes_back(tmp_path, quiet_git,
+                                                        monkeypatch, capsys):
+    """RESUME_PROMPT existed and reached only the in-process retry loop — the
+    one path a power cut cannot take, because it takes the process too.
+
+    So `run` printed "reclaimed 3 agents" to the TERMINAL, to the person, and
+    resumed the agent that had to act on it into an empty prompt with nothing
+    said. On 2026-09-15 a seven-hour outage was recovered from entirely by the
+    LLM noticing on its own, prompted by a notification from its own CLI that
+    multiagents neither sends nor knows about.
+    """
+    import argparse
+    import multiagents.cli as cli
+    from multiagents import watchdog
+
+    monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
+    cli.cmd_init(_init_args(tmp_path))
+    paths = cli._resolve(str(tmp_path))
+
+    launched = {}
+    monkeypatch.setattr(cli.driver, "_launch_agent",
+                        lambda *a, **k: launched.update(k) or 0)
+    monkeypatch.setattr(cli, "_executor_problems", lambda *a: [])
+    monkeypatch.setattr(cli.driver, "_orchestrator_hold", lambda *a: None)
+    args = argparse.Namespace(path=str(tmp_path), no_launch=False, resume=True,
+                              wait=False, unattended=0, team="", supervise=True)
+
+    # A supervisor writes one last record saying the process is gone, so a
+    # clean ending leaves `running: false` behind it.
+    watchdog.write_status(paths, {"role": "orchestrator", "pid": 424242,
+                                  "running": False, "at": 1.0}, "orchestrator")
+    cli.cmd_resume(args)
+    assert launched["unclean"] is False, "a recorded ending is not a crash"
+    assert "without recording an ending" not in capsys.readouterr().out
+
+    # A power cut takes the supervisor too, so nothing writes that last line
+    # and the record is frozen mid-run claiming a process that is not there.
+    watchdog.write_status(paths, {"role": "orchestrator", "pid": 424242,
+                                  "running": True, "at": 2.0}, "orchestrator")
+    cli.cmd_resume(args)
+    assert launched["unclean"] is True
+    assert "without recording an ending" in capsys.readouterr().out
+
+
+def test_the_resume_notice_arrives_as_the_session_opening_message(tmp_path):
+    """The flag has to become a first user turn, or it has changed nothing.
+
+    An interactive `claude [options] [prompt]` opens WITH that turn; `-p` is
+    the headless form and belongs only to the unattended path, where the nudge
+    is the message instead.
+    """
+    import subprocess
+    from multiagents import driver
+    from multiagents.paths import shipped_defaults_dir
+
+    echo = tmp_path / "fake-claude"
+    echo.write_text('#!/bin/sh\nfor a in "$@"; do echo "$a"; done\n')
+    echo.chmod(0o755)
+    script = shipped_defaults_dir() / "providers" / "claude.sh"
+
+    def launch(**extra):
+        env = {"PATH": "/usr/bin:/bin", "MULTIAGENTS_BIN": str(echo),
+               "MULTIAGENTS_MODEL": "opus", **extra}
+        return subprocess.run(["sh", str(script), "launch"], cwd=tmp_path,
+                              capture_output=True, text=True, env=env).stdout
+
+    argv = launch(MULTIAGENTS_RESUME_PROMPT=driver.RESUME_PROMPT)
+    assert driver.RESUME_PROMPT in argv, "the notice must be the opening turn"
+
+    assert driver.RESUME_PROMPT not in launch(), \
+        "an ordinary restart opens on an empty prompt, as it always did"
+
+    unattended = launch(MULTIAGENTS_RESUME_PROMPT=driver.RESUME_PROMPT,
+                        MULTIAGENTS_UNATTENDED="1", MULTIAGENTS_NUDGE="carry on")
+    assert driver.RESUME_PROMPT not in unattended and "-p" in unattended, \
+        "headless turns carry the nudge; two opening messages is one too many"
+
+
 def test_stop_ends_the_thing_that_starts_more_agents(tmp_path, quiet_git,
                                                      monkeypatch, capsys):
     """Stopping the agents and leaving the orchestrator running would have it
