@@ -110,8 +110,34 @@ for block in d.values():
                     exit 10
                 fi
                 if [ "$access" -le "$now" ]; then
-                    echo "container profile is logged in ($PROFILE); its access token lapsed $(( (now - access) / 60 ))m ago and is renewed on first use"
-                    exit 0
+                    # A lapsed ACCESS token is renewed from the refresh token
+                    # on first use — on the HOST, where that demonstrably
+                    # happens. This branch is the CONTAINER profile, and the
+                    # container cannot do it: the refresh endpoint is
+                    # platform.claude.com and the proxy allowlist carries
+                    # api.anthropic.com only, so agents can infer and can
+                    # never renew. Verified 2026-09-16 from inside a running
+                    # container: api.anthropic.com answers, platform.claude.com
+                    # does not resolve at all, and the container credential had
+                    # not been rewritten once since the login eight hours
+                    # earlier while the host's had refreshed itself silently.
+                    #
+                    # So this says "needs a login" even though a refresh token
+                    # is sitting right there, because nothing here can spend
+                    # it. Saying otherwise reports a renewal that will not
+                    # happen and, worse, tells the runner to treat the 401
+                    # that follows as "something broke" — a thirty-minute
+                    # cooldown cleared only by waiting — rather than as the
+                    # login it actually is.
+                    #
+                    # If the refresh endpoint is allowlisted for the container,
+                    # this stops being true and this branch should go back to
+                    # reporting a login. Nothing here can tell the difference
+                    # cheaply: probing costs a round trip on every check, and
+                    # a proxy that blackholes rather than refuses makes it a
+                    # timeout. `multiagents doctor` is where that probe belongs.
+                    echo "the container profile's access token lapsed $(( (now - access) / 60 ))m ago and this container cannot renew it (the refresh endpoint is not on the egress allowlist) — run \`multiagents auth login claude\`"
+                    exit 10
                 fi
             fi
             echo "container profile is logged in ($PROFILE)"; exit 0
