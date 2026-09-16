@@ -80,6 +80,81 @@ home directory is still the user's business and is not.
 
 ---
 
+## The invariant the review must guard: providers are plugins
+
+**Stated by the user, 2026-09-16, as a point of particular vigilance.**
+
+> A provider is a plugin. All of a provider's logic lives in its config and in
+> its own script. None of it is hardcoded in the main program.
+
+This is not a preference about tidiness. It is what makes a fourth provider an
+afternoon's work instead of a refactor, and every hardcoded name is a place where
+adding one silently does nothing.
+
+### Where the seam is
+
+Both halves are tracked in the repo, so an agent in a worktree can read them:
+
+- `src/multiagents/defaults/providers.yaml` — `bin`, `auth`, `spawn`,
+  `usage_mode`, `models_cmd`, `models_parse`, `home_links`, `stream` per provider.
+- `src/multiagents/defaults/providers/{claude,agy,opencode}.sh` — the actions.
+
+The main program reaches them through `scripts.run_action()` and
+`scripts.exec_action()`, by provider **name**, never by branching on which name it
+is. `budget.read_provider()` asks the script FIRST and only then falls back;
+`budget.read_all()` is driven by the loaded providers map, and its docstring
+records that it used to be a hardcoded three-name table in which a newly added
+provider could never appear at all. That fix is the invariant in action.
+
+### The check, which is mechanical
+
+```
+grep -rnE '"(claude|opencode|agy)"|'"'"'(claude|opencode|agy)'"'"'' src/
+```
+
+**Any hit not in the baseline below is a finding.** Do not report this as a
+matter of judgement or style; it is a grep with a known answer.
+
+### The baseline — 5 known sites, already argued
+
+The invariant largely holds: ten occurrences in 16,860 lines. The review's job is
+**not to re-litigate these**, and a finding that merely restates one without new
+evidence should not be filed. The job is to judge whether each argument still
+holds, and to catch anything new.
+
+| site | what | status |
+|---|---|---|
+| `budget.py:592` | `_BUILTIN = {"claude": ..., "opencode": ..., "agy": ...}` | **argued**: a fallback used only when a script has no `budget` action. Claude's quota is an undocumented cache with several bucket shapes and an overage block; the comment argues parsing it defensively in shell would be worse code in two places. **The weakest point of the invariant — look here first.** |
+| `budget.py:663` | `builtin() if builtin is read_claude else builtin(spent)` | **not argued**: a special case keyed on the identity of one provider's function, because its signature differs. A real smell, and the mechanism by which the fallback table leaks into the dispatcher. |
+| `budget.py:509` | `~/.local/share/opencode/auth.json` hardcoded | **questionable**: a credential path in the main program, while `providers.yaml` already carries `home_links` for exactly this. Possible duplicate source of truth — verify before filing. |
+| `docker.py:774` | `AUTH_PROVIDER = "claude"` | **argued**: the auth proxy speaks one upstream's protocol and swaps an Anthropic bearer. The comment records that taking whichever vault came first out of a dict already caused a real fault — agy's vault mounted into a proxy talking to Anthropic. The honest reading is that the proxy is structurally single-provider; say so as a design finding if you think it should not be. |
+| `cli.py:2502` / `auth.py:142` | `default="agy"`; `"run 'agy' to log in"` in a generic marker list | **unargued and minor**: a UX default and one provider-specific phrase. Low severity, but they are how the invariant erodes. |
+
+### The finding worth making
+
+**No test asserts this invariant.** Two tests cover the fallback *behaviour*
+(`test_unimplemented_budget_falls_back_to_a_builtin`,
+`test_read_all_hands_the_provider_name_to_executor_for`); none asserts that no new
+provider name appears in `src/`. So the invariant is held by discipline, not
+enforced — and this project already knows that distinction, because the roster's
+$60 tier note says in as many words that a test pins the roster while the list
+itself is maintained by hand.
+
+The highest-value recommendation this review can make about providers is
+therefore a **lint test that pins the baseline above**: any provider literal in
+`src/` outside an allowlist fails the suite. That is implement-team work and does
+not get built in this phase — file it as a finding with that shape.
+
+### Who looks
+
+The `auditor`, on whichever context covers `budget.py`, `providers.py`,
+`auth.py`, `scripts.py` and `executor/docker.py` — this is exactly its remit:
+what is wrong that runs perfectly well. Ranking-wise this should raise that
+context's priority; a plugin seam that has quietly stopped being one costs the
+whole extensibility claim, and nothing fails while it happens.
+
+---
+
 ## Scope
 
 ### Branch
@@ -207,6 +282,9 @@ Recorded so nobody re-derives them.
 - **Two to three contexts in the first pass, not seven.** Budget.
 - **Rank by blast radius, not LOC.** A large parser is not a large risk.
 - **One new test file per characterizer.** Merge mechanics.
+- **Providers are plugins, and the review guards it.** The user's constraint,
+  stated 2026-09-16. It has its own section above, with a grep, a baseline of 5
+  argued sites, and the finding worth making.
 - **`security-advisor` is deliberately NOT on the roster.** It gives design-time
   advice phrased as candidate requirements, and this team builds nothing there is
   a design for. A roster nobody will use costs attention at every decision.
