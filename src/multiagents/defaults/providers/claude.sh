@@ -34,21 +34,75 @@ check)
         # or "something broke" (thirty minutes, cleared only by waiting) — so
         # the whole afternoon retried an expired token half-hourly, two spawns
         # at a time, and never once said the word.
+        #
+        # THEN IT READ THE WRONG CLOCK. Two live in this file:
+        #
+        #   expiresAt              the ACCESS token. Eight hours. It lapses
+        #                          every single night, and the CLI renews it
+        #                          from the refresh token on first use without
+        #                          anyone being asked for anything.
+        #   refreshTokenExpiresAt  the REFRESH token. Three to four weeks. When
+        #                          THIS one is past, nothing can be renewed and
+        #                          a login is genuinely the only fix.
+        #
+        # Reading the first and demanding a login was the answer from 2026-09-14
+        # to 2026-09-16, and it made every gap longer than a working day — a
+        # night, a weekend, the seven-hour power cut on 09-15 — look like a lost
+        # login. That is not merely noise: each needless login is a SECOND CLI
+        # session on the same account, which is the one thing that can revoke
+        # the host's (see the warning under `login`, and the `401 ... has been
+        # revoked` in this project's own event log on 09-09). The check was
+        # manufacturing the outage it was reporting.
+        #
+        # What neither clock can see is a token revoked before its expiry. A
+        # file cannot know that; only a request can. The runner's failure
+        # classifier is what covers it, and this says so rather than implying
+        # a completeness it does not have.
         if [ -s "$PROFILE/.credentials.json" ]; then
-            expires=$(python3 -c "
+            clocks=$(python3 -c "
 import json, sys
 try:
     d = json.load(open('$PROFILE/.credentials.json'))
 except Exception:
     sys.exit(0)                      # unreadable: fall through to 'present'
 for block in d.values():
-    if isinstance(block, dict) and block.get('expiresAt'):
-        print(int(block['expiresAt']) // 1000); break
+    if not isinstance(block, dict) or not block.get('expiresAt'):
+        continue
+    access = int(block['expiresAt']) // 1000
+    refresh = block.get('refreshTokenExpiresAt')
+    if refresh:
+        refresh = int(refresh) // 1000
+    elif block.get('refreshToken'):
+        refresh = 'unknown'          # present but undated: cannot tell, so do
+                                     # not invent a verdict from its absence
+    else:
+        refresh = access             # nothing to renew with: access is all
+    print(access, refresh)
+    break
 " 2>/dev/null)
             now=$(date +%s)
-            if [ -n "$expires" ] && [ "$expires" -le "$now" ]; then
-                echo "the container profile's token expired $(( (now - expires) / 60 ))m ago — run \`multiagents auth login claude\`"
-                exit 10
+            access=${clocks%% *}
+            refresh=${clocks##* }
+            if [ -n "$access" ]; then
+                if [ "$refresh" != "unknown" ] && [ "$refresh" -le "$now" ]; then
+                    ago=$(( now - refresh ))
+                    if [ "$ago" -ge 172800 ]; then ago="$(( ago / 86400 ))d"
+                    else ago="$(( ago / 3600 ))h"; fi
+                    # The two ways to arrive here are not the same fact, and a
+                    # message that names the wrong one sends the reader looking
+                    # for a refresh token that was never in the file.
+                    if [ "$refresh" = "$access" ]; then
+                        why="there is no refresh token to renew it with"
+                    else
+                        why="the refresh token, not just the access token"
+                    fi
+                    echo "the container profile's LOGIN expired $ago ago ($why) — run \`multiagents auth login claude\`"
+                    exit 10
+                fi
+                if [ "$access" -le "$now" ]; then
+                    echo "container profile is logged in ($PROFILE); its access token lapsed $(( (now - access) / 60 ))m ago and is renewed on first use"
+                    exit 0
+                fi
             fi
             echo "container profile is logged in ($PROFILE)"; exit 0
         fi
