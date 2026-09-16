@@ -721,6 +721,72 @@ def test_the_host_renews_a_token_the_container_cannot(tmp_path):
     assert done.returncode == 10
 
 
+def test_the_container_never_gets_the_token_that_mints_tokens(tmp_path):
+    """The whole point. A credential an agent can read is one it can copy out,
+    and agents run with approvals off — so the question is not whether one
+    could take it but how long a stolen one is worth having. The refresh token
+    is good for four weeks; the access token for eight hours.
+
+    Also covers the migration, because a profile that predates the vault still
+    has the refresh token sitting in the mount, and leaving it there is the
+    entire exposure for everybody who already has one.
+    """
+    import json, subprocess, time
+    from multiagents.paths import shipped_defaults_dir
+
+    script = shipped_defaults_dir() / "providers" / "claude.sh"
+    profile, vault = tmp_path / ".claude", tmp_path / "vault"
+    profile.mkdir()
+    full = {"accessToken": "access", "refreshToken": "REFRESH-SECRET",
+            "expiresAt": int((time.time() + 3 * 3600) * 1000),
+            "refreshTokenExpiresAt": int((time.time() + 20 * 86400) * 1000),
+            "scopes": ["a"], "subscriptionType": "max"}
+    (profile / ".credentials.json").write_text(json.dumps({"claudeAiOauth": full}))
+
+    def run(action):
+        return subprocess.run(
+            ["sh", str(script), action], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_EXECUTOR": "docker",
+                 "MULTIAGENTS_PRIVATE_BACKING": str(profile),
+                 "MULTIAGENTS_PRIVATE_VAULT": str(vault),
+                 "MULTIAGENTS_BIN": "/bin/true"})
+
+    assert run("check").returncode == 0
+
+    mounted = json.loads((profile / ".credentials.json").read_text())["claudeAiOauth"]
+    stored = json.loads((vault / ".credentials.json").read_text())["claudeAiOauth"]
+    assert "refreshToken" not in mounted, "the mount must never hold it"
+    assert "refreshTokenExpiresAt" not in mounted
+    assert stored["refreshToken"] == "REFRESH-SECRET", "and it must not be lost"
+    assert mounted["accessToken"] == "access", "agents still get a usable token"
+    assert mounted["expiresAt"] == full["expiresAt"]
+
+    # Nothing unknown travels either. An allowlist, not a blocklist: a field
+    # the vendor adds tomorrow that happens to mint tokens must not ride along
+    # because nobody updated a list of names to strip.
+    full["someFutureSecret"] = "nope"
+    (vault / ".credentials.json").write_text(json.dumps({"claudeAiOauth": full}))
+    (profile / ".credentials.json").unlink()
+    run("refresh")
+    mounted = json.loads((profile / ".credentials.json").read_text())["claudeAiOauth"]
+    assert "someFutureSecret" not in mounted, mounted
+
+
+def test_the_host_does_not_take_its_cue_from_a_file_the_sandbox_can_edit():
+    """The projection lives in a directory the container writes to. If the host
+    read the expiry from THERE, an agent could write 1970 and have the host
+    refresh in a loop until the account is rate-limited, or 2099 to stop it
+    refreshing at all and strand every later agent. An advisor's catch."""
+    import inspect
+    from multiagents.executor import docker
+
+    source = inspect.getsource(docker.DockerExecutor.refresh_private_credentials)
+    assert "vault_state" in source, \
+        "the renewal clock must come from the vault, not the projection"
+    # And the vault is unreachable from inside, or none of it means anything.
+    assert "vault" not in inspect.getsource(docker.DockerExecutor.mounts)
+
+
 def test_only_one_process_renews_the_shared_credential(tmp_path):
     """Several agents can spawn at once and every spawn passes through the
     renewal check, so without a lock of our own they would race.
