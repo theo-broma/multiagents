@@ -311,7 +311,7 @@ def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
 
 def _launch_agent(paths, config, role: str, resume: bool,
                   unattended: int = 0, supervise: bool = True,
-                  force: bool = False) -> int:
+                  force: bool = False, unclean: bool = False) -> int:
     """Launch a roster entry as an interactive MCP client.
 
     Normally execs, so the CLI owns the terminal and this process is gone.
@@ -349,6 +349,14 @@ def _launch_agent(paths, config, role: str, resume: bool,
     marker = paths.data / "launch" / f"{role}.launched"
     first_time = not marker.is_file()
     context["MULTIAGENTS_RESUME"] = "0" if (first_time or not resume) else "1"
+    # A session that was stopped without anything left to record the ending
+    # comes back knowing nothing about it: the reconciliation `run` just did is
+    # printed to the TERMINAL, to the person, while the agent that has to act
+    # on it is resumed into an empty prompt and told nothing. RESUME_PROMPT was
+    # written for exactly this and reached only the in-process retry loop —
+    # the one path a power cut cannot take, because it takes the process too.
+    if unclean and context["MULTIAGENTS_RESUME"] == "1":
+        context["MULTIAGENTS_RESUME_PROMPT"] = RESUME_PROMPT
     context["MULTIAGENTS_ROLE"] = role
     # `--fresh` means a new conversation, so it needs a new id: reusing one
     # that already has a transcript would collide with the session it names.

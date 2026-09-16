@@ -226,6 +226,29 @@ def read_all_status(paths) -> dict[str, dict]:
     return dict(sorted(out.items(), key=lambda kv: -(kv[1].get("at") or 0)))
 
 
+def ended_uncleanly(paths, role: str = "orchestrator") -> bool:
+    """Did the last session of this role stop without anyone recording an end?
+
+    A supervisor samples until the process it watches is gone and then writes
+    one last record saying so, so `running: false` is the signature of an
+    ending that something was present for — a quit, a `stop`, a crash the
+    parent outlived. A record still claiming `running: true` for a process
+    that is not there is the opposite: nothing was left to write the last line.
+    A power cut, an OOM kill, `kill -9`.
+
+    This is the only durable evidence of the difference. The pid file is not:
+    `run` execs, so on a clean quit the CLI that inherited the pid exits with
+    no `finally` left to clean up after it, and a leftover pid file means
+    nothing at all. Nor is the tree: a session can stop uncleanly with no agent
+    running — which is exactly what a power cut on 2026-09-15 did — and leave
+    an empty `active()` behind it.
+    """
+    record = read_status(paths, role)
+    if not record or not record.get("running"):
+        return False
+    return not alive(record.get("pid"), record.get("pid_start", ""))
+
+
 def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
               max_seconds: float = 0.0) -> int:
     """Sample until the watched process is gone, then record how it ended.
