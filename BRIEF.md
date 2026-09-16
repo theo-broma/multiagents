@@ -333,14 +333,67 @@ fixtures and helpers remain available with no import gymnastics.
 uv run --frozen pytest
 ```
 
-`uv` is mounted from the host at `~/.local/bin/uv`, and `~/.cache/uv` is mounted
-so dependencies resolve from `uv.lock` without hitting the network. Do **not**
-use `.venv` — it is built against the host's Python 3.13 and the container image
-carries 3.14.
+**Green is `545 passed, 3 skipped`.** Re-verified 2026-09-16 from a fresh
+worktree inside the container — that is, from exactly where you stand — rather
+than taken on trust from the commit that first claimed it.
 
-Three tests skip inside the container because they shell out to `docker`, which
-is deliberately absent there. **Three skips are the expected result, not a
-defect, and not something to chase.**
+`uv` is mounted from the host at `~/.local/bin/uv`, `~/.cache/uv` is mounted so
+`uv.lock` resolves without the network, and the executor forwards the host PATH,
+so `uv` is simply on your PATH. Your worktree has no `.venv`; `uv` builds one for
+it. That is correct — do not go looking for the project's.
+
+The 3 skips shell out to `docker`, which is deliberately absent in the container.
+**Three skips are the expected result, not a defect, and not something to chase.**
+
+If you see any other number, read the two traps below before concluding anything
+about the code. Both produce failures that look like defects and are not, and
+this project has burned a run on each of them already.
+
+#### Trap 1 — the project directory's `.venv` is poisoned (affects humans, not you)
+
+The project root is bind-mounted into the container at its own path, so the host
+and the container SHARE `.venv`. Whichever wrote it last owns it, and
+`.venv/bin/pytest` currently carries the shebang `#!/w/.venv/bin/python` — a
+container path from an older image layout. On the host that interpreter does not
+exist, so a bare `uv run --frozen pytest` in the project root silently runs a
+DIFFERENT pytest without `mcp` installed, and reports **7 failures**, three of
+them `ModuleNotFoundError: No module named 'mcp'`.
+
+`uv run --frozen python -m pytest` bypasses the console script and is correct
+everywhere. It is the safer command for anyone working in the project root.
+
+This does not reach you: you are in a worktree, `.venv` is gitignored so it is
+not in your checkout, and the one `uv` builds for you is clean. It is recorded
+because it is a finding, and because the maintainer hits it every time.
+
+#### Trap 2 — a bare `docker exec` is not an agent
+
+Two failure modes, both measured, both harness rather than code:
+
+- **No git identity** → 6 failures, all git operations
+  (`test_a_forgotten_mutation_is_reverted_rather_than_merged` and friends). A
+  real agent gets a `.gitconfig` from `prepare_home`. A bare `docker exec` does
+  not.
+- **No PATH** → `uv: not found`. The executor forwards the host PATH; `docker
+  exec` does not.
+
+`a5b7a47` records the same class of mistake being made and corrected before.
+**If a failure looks environmental, it probably is.** Say so and check, rather
+than filing it.
+
+#### The test-isolation finding, which is real
+
+`test_the_claude_script_uses_the_container_profile_only_where_it_should` builds
+its environment with `{**os.environ, ...}` and sanitises only `CLAUDE_CONFIG_DIR`.
+It leaves `MULTIAGENTS_PRIVATE_VAULT` in place, and `claude.sh` prefers the vault
+over the profile the test set up — deliberately, since the host must never take
+state from a file the sandbox can edit. So the test asserts against the real
+vault and fails with `assert 0 == 10`.
+
+It passes for you: agents have no `MULTIAGENTS_PRIVATE_VAULT`. It fails for
+anyone running the suite from inside a multiagents session on the host, which is
+precisely what dogfooding this project means. `claude.sh` is correct; the test is
+not isolated. **File it.**
 
 `.multiagents/` is gitignored, so an agent in a worktree does not see the live
 config. The agent briefs that ship with the tool are tracked, under
@@ -380,6 +433,8 @@ Recorded so nobody re-derives them.
   orchestrator's subscription. Cap parallelism at two, set `budget_tokens` per
   context, and if the brake fires mid-context, record that context as
   half-covered and move on. It is not a reason to retry elsewhere.
+- **`545 passed, 3 skipped` is green**, re-measured rather than inherited, with
+  the two traps that produce false failures written down beside it.
 - **The catalog was checked** (`check_model_catalog`, severity `none`). Every pin
   is live and every `opencode-go/*` pin is on the sanctioned $60 monthly tier.
   No repin is forced; the ones proposed are judgements, in
