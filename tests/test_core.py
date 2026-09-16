@@ -641,8 +641,9 @@ def test_the_two_credential_clocks_are_told_apart(tmp_path):
 
     lapsed = {**fresh, "expiresAt": int((now - 3 * 3600) * 1000)}
     done = check(lapsed)
-    assert done.returncode == 10
-    assert "cannot renew it" in done.stdout, done.stdout
+    assert done.returncode == 0, \
+        "the host renews this before the next spawn; see the `refresh` action"
+    assert "renews it before the next spawn" in done.stdout, done.stdout
     assert "LOGIN expired" not in done.stdout, \
         "the login is fine; it is the eight-hour token that lapsed"
 
@@ -662,6 +663,81 @@ def test_the_two_credential_clocks_are_told_apart(tmp_path):
     done = check(alone)
     assert done.returncode == 10
     assert "no refresh token" in done.stdout, done.stdout
+
+
+def test_the_host_renews_a_token_the_container_cannot(tmp_path):
+    """The container has no route to platform.claude.com and is not being given
+    one: that host also serves /settings/keys and /settings/billing, and
+    tinyproxy filters by hostname — an HTTPS CONNECT tunnel shows it nothing
+    finer, so "allow only the token endpoint" is not expressible.
+
+    It needs no route. The host has the egress and the vendor's own client, so
+    the renewal happens out here and the container reads the file afterwards.
+    """
+    import json, subprocess, time
+    from multiagents.paths import shipped_defaults_dir
+
+    script = shipped_defaults_dir() / "providers" / "claude.sh"
+    profile = tmp_path / "profile"
+    profile.mkdir()
+
+    def refresh(bin_path="/bin/true"):
+        return subprocess.run(
+            ["sh", str(script), "refresh"], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_EXECUTOR": "docker",
+                 "MULTIAGENTS_PRIVATE_BACKING": str(profile),
+                 "MULTIAGENTS_BIN": bin_path})
+
+    # Nothing to renew is not the same as a renewal that failed.
+    assert refresh().returncode == 10
+
+    (profile / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"accessToken": "x", "refreshToken": "r",
+                           "expiresAt": int((time.time() - 3600) * 1000)}}))
+
+    # A bare mkdir mutex naming no owner. One left behind by an agent that
+    # began a refresh it could not finish blocks every later refresh anywhere,
+    # the host's included — so a stale one is cleared...
+    lock = profile / ".oauth_refresh.lock"
+    lock.mkdir()
+    import os
+    old = time.time() - 300
+    os.utime(lock, (old, old))
+    done = refresh()
+    assert "cleared a stale refresh lock" in done.stdout, done.stdout
+    assert not lock.exists()
+
+    # ...and a FRESH one is not, because a refresh really may be in flight and
+    # nothing in that empty directory can say otherwise.
+    lock.mkdir()
+    done = refresh("/bin/false")
+    assert lock.is_dir(), "a lock that young may still be held"
+    assert done.returncode == 10
+
+
+def test_a_spawn_does_not_call_the_network_for_a_token_that_is_still_good(tmp_path):
+    """`refresh_private_credentials` runs from `ensure_running`, which is on the
+    path of every spawn. The expiry read is what keeps that free; without it
+    every agent start would pay for a round trip to renew a token with hours
+    left on it."""
+    import json, time
+    from multiagents.executor.docker import DockerExecutor
+
+    creds = tmp_path / ".credentials.json"
+
+    def expiring_in(seconds):
+        creds.write_text(json.dumps({"claudeAiOauth": {
+            "expiresAt": int((time.time() + seconds) * 1000)}}))
+        return DockerExecutor._expiring_soon(creds)
+
+    assert expiring_in(6 * 3600) is False, "hours left: leave it alone"
+    assert expiring_in(-3600) is True, "already lapsed"
+    assert expiring_in(5 * 60) is True, \
+        "renewed EARLY — a token that dies mid-run costs a whole run"
+    assert DockerExecutor._expiring_soon(tmp_path / "absent") is False
+    creds.write_text("{not json")
+    assert DockerExecutor._expiring_soon(creds) is False, \
+        "an unfamiliar file must not force a network call on every spawn"
 
 
 def test_the_host_profile_can_be_asked_about_under_docker(tmp_path):
