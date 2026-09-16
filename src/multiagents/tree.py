@@ -105,6 +105,10 @@ class Node:
     worktree: str = ""
     session_id: str = ""
     pid: int | None = None
+    # What makes `pid` an identity rather than a number: see
+    # :mod:`multiagents.procs`. Recorded beside it so a recovery after a reboot
+    # can tell this agent's pid from whatever now holds it.
+    pid_start: str = ""
     children: list[str] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
     steps: int = 0

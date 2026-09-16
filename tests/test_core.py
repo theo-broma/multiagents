@@ -4824,6 +4824,72 @@ def test_stop_leaves_the_state_that_makes_a_resume_possible(tmp_path, quiet_git,
     assert len(tree.read()["deferred"]) == 1
 
 
+def test_a_recycled_pid_is_not_the_process_that_recorded_it(tmp_path):
+    """After a reboot every recorded pid is stale and the low numbers have been
+    handed out again, so `os.kill(pid, 0)` answers a question nobody asked.
+
+    Both directions of the mistake are silent: a false alive on an agent sends
+    SIGTERM to a stranger's whole process group, and a false alive on
+    orchestrator.pid makes `run` skip reconciliation and strand every node.
+    """
+    import os
+    from multiagents import procs
+
+    me = os.getpid()
+    mine = procs.start_time(me)
+    assert mine, "no /proc here; the rest of this test has nothing to compare"
+
+    assert procs.alive(me, mine) is True
+    assert procs.alive(me, "1") is False, \
+        "same pid, different start time: a recycled number, not our process"
+    assert procs.alive(me) is True, "no recorded start: fall back, never refuse"
+    assert procs.alive(None) is False
+    assert procs.alive(0) is False
+
+
+def test_a_process_name_with_spaces_does_not_shift_the_start_time(tmp_path):
+    """Field 2 of /proc/<pid>/stat is the executable name in parentheses, and it
+    can contain both spaces and parentheses — Firefox ships one called
+    `(Web Content)`. Splitting on whitespace from the left puts every later
+    field at an offset that depends on the name, which is a guard that silently
+    stops guarding for exactly the processes hardest to name."""
+    from multiagents import procs
+
+    # Fields 1..22 of a real stat line, with a hostile comm in field 2.
+    fields = ["4242", "((Web Content) :-)", "S"] + [str(n) for n in range(4, 22)]
+    fields.append("987654321")               # field 22: starttime
+    line = " ".join(fields)
+
+    path = tmp_path / "stat"
+    path.write_text(line)
+    _, _, rest = line.rpartition(")")
+    assert rest.split()[19] == "987654321", \
+        "the parser must split on the LAST ')', not the first"
+    assert procs.start_time(-1) == "", "no pid, no reading, no exception"
+
+
+def test_the_recorded_pid_survives_an_install_that_did_not_record_a_start(tmp_path):
+    """A pid file written by an older install has one field. It must still read,
+    with the guard simply unavailable for it rather than the file discarded."""
+    from types import SimpleNamespace
+    from multiagents import driver
+
+    paths = SimpleNamespace(data=tmp_path)
+    (tmp_path / "launch").mkdir(parents=True)
+    (tmp_path / "launch" / "orchestrator.pid").write_text("4242\n")
+    assert driver._read_pid(paths, "orchestrator") == (4242, "")
+
+    driver._write_pid(paths, "initializer", os.getpid())
+    pid, start = driver._read_pid(paths, "initializer")
+    assert pid == os.getpid() and start, "a new file records both fields"
+    assert driver._role_alive(paths, "initializer") is True
+
+    (tmp_path / "launch" / "broken.pid").write_text("not a pid")
+    assert driver._read_pid(paths, "broken") is None
+    assert driver._role_alive(paths, "broken") is False
+    assert driver._role_alive(paths, "absent") is False
+
+
 def test_stop_ends_the_thing_that_starts_more_agents(tmp_path, quiet_git,
                                                      monkeypatch, capsys):
     """Stopping the agents and leaving the orchestrator running would have it
@@ -4837,7 +4903,7 @@ def test_stop_ends_the_thing_that_starts_more_agents(tmp_path, quiet_git,
 
     signalled = []
     cli.driver._write_pid(paths, "orchestrator", 4242)
-    monkeypatch.setattr(cli.driver, "_alive", lambda pid: True)
+    monkeypatch.setattr(cli.driver, "_alive", lambda pid, start="": True)
     monkeypatch.setattr(cli.os, "kill", lambda pid, sig: signalled.append((pid, sig)))
 
     cli.cmd_stop(argparse.Namespace(path=str(tmp_path), keep_containers=True))

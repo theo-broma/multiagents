@@ -28,6 +28,7 @@ import sys
 from typing import Any, Callable
 
 from ..config import load as load_config
+from .. import procs
 from ..tree import Tree
 
 # Actions a front end must confirm before calling. Losing an agent's work and
@@ -230,9 +231,17 @@ def signal_process(paths, pid: int = 0, **_) -> dict:
     """Send SIGTERM to a pid the tree says is ours. Never an arbitrary one."""
     pid = int(pid or 0)
     tree = Tree(paths.tree_file, paths.events_file)
-    known = {node.get("pid") for node in tree.read().get("nodes", {}).values()}
+    known = {node.get("pid"): node.get("pid_start", "")
+             for node in tree.read().get("nodes", {}).values()}
     if pid not in known or not pid:
         return {"ok": False, "message": f"pid {pid} is not an agent in this tree"}
+    # "The tree knows this pid" was the whole guard, and it is not enough after
+    # a reboot: the number is recorded, the process that earned it is not, and
+    # whatever holds the number now gets the signal. The recorded start time is
+    # what tells those two apart.
+    if not procs.alive(pid, known[pid]):
+        return {"ok": False,
+                "message": f"pid {pid} is no longer the agent that recorded it"}
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as exc:
