@@ -39,6 +39,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +170,10 @@ class DockerExecutor(Executor):
     @property
     def container(self) -> str:
         return self.config.get("container_name") or f"multiagents-{self.slug}"
+
+    @property
+    def auth_container(self) -> str:
+        return f"multiagents-auth-{self.slug}"
 
     @property
     def proxy_container(self) -> str:
@@ -758,6 +763,95 @@ class DockerExecutor(Executor):
         _run(["docker", "network", "connect", "bridge", self.proxy_container])
         return {"ok": True, "created": True}
 
+    def auth_proxy_enabled(self) -> bool:
+        """Off unless asked for, and only where there is a vault to hold.
+
+        It changes where every agent's model traffic goes, so it is not
+        something to acquire by upgrading.
+        """
+        return bool(self.config.get("auth_proxy")) and bool(self.vault_state())
+
+    def ensure_auth_proxy(self) -> dict:
+        """The only thing on the agents' network that can reach the model API.
+
+        Same shape as the egress proxy beside it, for the same reason: a
+        sidecar on the internal network, given a route out that the workspace
+        container does not have. The vault is mounted READ-ONLY and into THIS
+        container — which agents have no more access to than they have to the
+        host — so the credential is on the path of every request and inside
+        none of the places agents can read.
+        """
+        if not self.auth_proxy_enabled():
+            return {"ok": True, "skipped": "not enabled"}
+        vault = next(iter(self.vault_state().values()))
+        vault.mkdir(parents=True, exist_ok=True)
+        # The secret must exist before the container reads it, and the host
+        # mints agents' tags from the same file.
+        from ..authproxy import PORT, load_secret
+        load_secret(vault)
+
+        if self.container_state(self.auth_container) == "running":
+            return {"ok": True, "existed": True}
+        _run(["docker", "rm", "-f", self.auth_container])
+        # Neutral paths inside, unlike everywhere else here. The identical-path
+        # rule exists so git can resolve a worktree; this container has no
+        # worktree and no git, and mounting the package over its own deep host
+        # path only invites the parent directories to be created by docker and
+        # owned by root.
+        source = Path(__file__).resolve().parent            # .../multiagents
+        result = _run([
+            "docker", "run", "-d", "--name", self.auth_container,
+            "--network", self.network,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--restart", "unless-stopped",
+            "-v", f"{vault}:/vault:ro",
+            "-v", f"{source}:/opt/ma/multiagents:ro",
+            "--env", "PYTHONPATH=/opt/ma",
+            self.image,
+            "python3", "-m", "multiagents.authproxy", "/vault", "0.0.0.0", str(PORT),
+        ])
+        if result.returncode != 0:
+            return {"ok": False, "error": result.stderr.strip()[:400]}
+        _run(["docker", "network", "connect", "bridge", self.auth_container])
+        return {"ok": True, "created": True}
+
+    def project_placeholder(self) -> None:
+        """Replace the container's credential with a name-tag.
+
+        One tag per CONTAINER, not per agent, and that is the right grain for
+        two reasons. Agents in a container share one profile — their per-agent
+        HOMEs symlink to it — so a per-agent credential would mean unpicking
+        that. And an account's prompt cache is what makes a long run
+        affordable, so everything sharing a container wants to share an
+        account: pinning finer would spread one project's agents across
+        accounts and throw the cache away for no gain.
+
+        What the container ends up holding authenticates nothing anywhere.
+        """
+        if not self.auth_proxy_enabled():
+            return
+        from ..authproxy import load_secret, mint_token
+        vault = next(iter(self.vault_state().values()))
+        tag = mint_token(self.slug, load_secret(vault))
+        for host_path, backing in self.private_state().items():
+            target = backing / ".credentials.json"
+            if not backing.is_dir():
+                continue
+            payload = {"claudeAiOauth": {
+                "accessToken": tag,
+                # Far enough out that the CLI never tries to renew it. There is
+                # nothing to renew with and nothing that needs renewing: the
+                # proxy attaches the real token, and this string is only ever
+                # a name.
+                "expiresAt": int((time.time() + 365 * 86400) * 1000),
+                "scopes": ["user:inference"],
+                "subscriptionType": "max"}}
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload))
+            tmp.chmod(0o600)
+            os.replace(tmp, target)
+            del host_path
+
     # --- workspace container ----------------------------------------------
 
     def run_args(self) -> list[str]:
@@ -787,7 +881,23 @@ class DockerExecutor(Executor):
             proxy = f"http://{self.proxy_container}:{PROXY_PORT}"
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 argv += ["--env", f"{name}={proxy}"]
-            argv += ["--env", "NO_PROXY=localhost,127.0.0.1"]
+            # Built once. Two --env NO_PROXY flags work — docker takes the
+            # last — but "works because of the order they happen to be in" is
+            # not a thing to leave in a list somebody will append to.
+            no_proxy = ["localhost", "127.0.0.1"]
+            if self.auth_proxy_enabled():
+                # The hop to the sidecar is inside the network. Sending it out
+                # through the egress proxy would be a loop, and the egress
+                # allowlist would refuse it anyway.
+                no_proxy.append(self.auth_container)
+            argv += ["--env", "NO_PROXY=" + ",".join(no_proxy)]
+
+        if self.auth_proxy_enabled():
+            from ..authproxy import PORT
+            # The model API is reached through something that decides what
+            # agents may send with, or it is not reached at all.
+            argv += ["--env",
+                     f"ANTHROPIC_BASE_URL=http://{self.auth_container}:{PORT}"]
 
         return argv + [self.image, "sleep", "infinity"]
 
@@ -796,6 +906,7 @@ class DockerExecutor(Executor):
             return {"ok": False, "error": "docker is not on PATH"}
         self.seed_private_state()
         self.refresh_private_credentials()
+        self.project_placeholder()
         if not self.image_exists(self.image):
             return {"ok": False, "error": f"image {self.image} not built — run `multiagents docker build`"}
 
@@ -806,6 +917,9 @@ class DockerExecutor(Executor):
             proxy = self.ensure_proxy()
             if not proxy.get("ok"):
                 return {"ok": False, "error": f"proxy: {proxy.get('error')}"}
+            auth = self.ensure_auth_proxy()
+            if not auth.get("ok"):
+                return {"ok": False, "error": f"auth proxy: {auth.get('error')}"}
 
         state = self.container_state(self.container)
         if state == "running":

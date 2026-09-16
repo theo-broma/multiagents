@@ -117,6 +117,8 @@ def build_env(provider_name: str, provider: Any, executor: Any,
         vault = getattr(executor, "vault_state", lambda _n="": {})(provider_name)
         if vault:
             env["MULTIAGENTS_PRIVATE_VAULT"] = str(next(iter(vault.values())))
+        if getattr(executor, "auth_proxy_enabled", lambda: False)():
+            env["MULTIAGENTS_AUTH_PROXY"] = "1"
     # The instance's own environment, expanded. This is what separates two
     # accounts on one CLI, so it is applied to EVERY action: a `check` that
     # inspects profile A while `launch` runs as profile B would report on an
