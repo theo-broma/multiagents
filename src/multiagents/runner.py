@@ -829,7 +829,48 @@ class Runner:
         # stopping and relaunching it, which a task belonging to that same run
         # cannot safely do to itself.
         asyncio.create_task(self._wrap_up_watch(node_id))
+        self._start_credential_watch()
         return run
+
+    def _start_credential_watch(self) -> None:
+        """Keep the container's access token fresh while runs are in flight.
+
+        The token is renewed before each spawn, which is enough for an agent
+        that finishes inside eight hours and no use at all to one that does
+        not. A long run started with seven hours left dies mid-turn — and a run
+        that dies mid-turn costs its worktree, its session, and the whole
+        conversation that would have to be re-derived.
+
+        One task for the Runner, not one per run: the work is per-machine, the
+        renewal is behind a host-side lock anyway, and N agents each polling
+        would contend on that lock for no gain.
+        """
+        if getattr(self, "_credential_task", None) is not None:
+            return
+        self._credential_task = asyncio.create_task(self._credential_watch())
+
+    async def _credential_watch(self) -> None:
+        interval = float(self.config.limits.get("credential_poll_seconds", 300))
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if not any(not r.done.is_set() for r in self.runs.values()):
+                    return                # nothing running; the next spawn renews
+                executor = self.executor()
+                renew = getattr(executor, "refresh_private_credentials", None)
+                if renew is None:
+                    return                # local executor: no projection to keep
+                # Cheap unless something is actually near expiry: the check is
+                # a file read, and the renewal is skipped entirely outside the
+                # margin. In a thread because both are blocking.
+                for note in await asyncio.to_thread(renew):
+                    self.tree.emit("-", "credential", detail=note[:200])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return                        # never take the event loop down with it
+        finally:
+            self._credential_task = None
 
     async def _wrap_up_watch(self, node_id: str) -> None:
         """Ask an agent to land what it has, once, before the window closes.

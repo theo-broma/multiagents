@@ -112,6 +112,11 @@ def build_env(provider_name: str, provider: Any, executor: Any,
             env["MULTIAGENTS_PRIVATE_HOME"] = str(container_path)
             env["MULTIAGENTS_PRIVATE_BACKING"] = str(host_path)
             break
+        # Where the REAL credential lives: a host-only profile the container
+        # cannot see. BACKING is what agents read; VAULT is what can mint it.
+        vault = getattr(executor, "vault_state", lambda _n="": {})(provider_name)
+        if vault:
+            env["MULTIAGENTS_PRIVATE_VAULT"] = str(next(iter(vault.values())))
     # The instance's own environment, expanded. This is what separates two
     # accounts on one CLI, so it is applied to EVERY action: a `check` that
     # inspects profile A while `launch` runs as profile B would report on an

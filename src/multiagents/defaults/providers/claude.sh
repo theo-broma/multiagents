@@ -29,6 +29,62 @@ if [ "${MULTIAGENTS_PROFILE:-}" = "host" ]; then
     PROFILE=""
 fi
 
+# Where the REAL credential lives, when there is a container profile at all: a
+# host-only directory the container has no mount for. The mounted profile gets
+# a PROJECTION — the eight-hour access token and nothing else — so a rogue
+# agent that copies the credential file out gets a window that closes on its
+# own instead of twenty-eight days of account access.
+VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
+
+# Write the vault's access token into the mounted profile, dropping everything
+# that could mint another one. Atomic, because an agent may be starting while
+# this runs and half a credential file is worse than an old one.
+project_token() {
+    [ -n "$VAULT" ] && [ -n "$PROFILE" ] || return 0
+    [ -s "$VAULT/.credentials.json" ] || return 1
+    mkdir -p "$PROFILE"
+    python3 -c "
+import json, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+keep = ('accessToken', 'expiresAt', 'scopes', 'subscriptionType', 'rateLimitTier')
+try:
+    data = json.load(open(src))
+except Exception:
+    sys.exit(1)
+out = {}
+for name, block in data.items():
+    if isinstance(block, dict):
+        # An allowlist, not a blocklist. A field the vendor adds tomorrow that
+        # happens to mint tokens must not travel because nobody updated a list
+        # of names to strip.
+        out[name] = {k: v for k, v in block.items() if k in keep}
+tmp = dst + '.tmp'
+with open(tmp, 'w') as fh:
+    json.dump(out, fh)
+os.chmod(tmp, 0o600)
+os.replace(tmp, dst)
+" "$VAULT/.credentials.json" "$PROFILE/.credentials.json" || return 1
+    return 0
+}
+
+# One-time move for a profile that predates the vault: its mounted credential
+# still carries the refresh token, and leaving it there is the whole exposure.
+#
+# Vault FIRST, project second. Interrupted after the copy, the vault holds a
+# good credential and the mount holds an old complete one — no worse than
+# before, and the next call finishes the job. Interrupted the other way round
+# would destroy the only copy of the refresh token.
+migrate_to_vault() {
+    [ -n "$VAULT" ] && [ -n "$PROFILE" ] || return 0
+    [ -s "$VAULT/.credentials.json" ] && return 0      # already done
+    [ -s "$PROFILE/.credentials.json" ] || return 0    # nothing to move
+    mkdir -p "$VAULT"
+    chmod 700 "$VAULT" 2>/dev/null
+    cp "$PROFILE/.credentials.json" "$VAULT/.credentials.json" || return 1
+    chmod 600 "$VAULT/.credentials.json" 2>/dev/null
+    project_token && echo "moved the refresh token out of the container's reach"
+}
+
 case "${1:-check}" in
 check)
     if [ -n "$PROFILE" ]; then
@@ -68,11 +124,21 @@ check)
         # file cannot know that; only a request can. The runner's failure
         # classifier is what covers it, and this says so rather than implying
         # a completeness it does not have.
-        if [ -s "$PROFILE/.credentials.json" ]; then
+        migrate_to_vault >/dev/null 2>&1
+        # Read the VAULT, not the projection. The projection lives in a
+        # directory the container writes to, so an agent can put any expiry it
+        # likes in there — 1970 to make the host refresh in a loop until the
+        # account is rate-limited, 2099 to stop it refreshing at all. The host
+        # must never take state from a file the sandbox can edit. The vault is
+        # also the only place the refresh token is, which is the clock that
+        # decides whether a login is needed.
+        SOURCE="$PROFILE"
+        [ -n "$VAULT" ] && [ -s "$VAULT/.credentials.json" ] && SOURCE="$VAULT"
+        if [ -s "$SOURCE/.credentials.json" ]; then
             clocks=$(python3 -c "
 import json, sys
 try:
-    d = json.load(open('$PROFILE/.credentials.json'))
+    d = json.load(open('$SOURCE/.credentials.json'))
 except Exception:
     sys.exit(0)                      # unreadable: fall through to 'present'
 for block in d.values():
@@ -168,7 +234,15 @@ login)
             *) echo "nothing was changed."; exit 1 ;;
         esac
         echo
-        CLAUDE_CONFIG_DIR="$PROFILE" "$BIN" auth login || exit $?
+        mkdir -p "${VAULT:-$PROFILE}"
+        chmod 700 "${VAULT:-$PROFILE}" 2>/dev/null
+        CLAUDE_CONFIG_DIR="${VAULT:-$PROFILE}" "$BIN" auth login || exit $?
+        # The sign-in lands in the vault; agents get the access token only.
+        if [ -n "$VAULT" ]; then
+            project_token || { echo "signed in, but could not write the container's copy"; exit 1; }
+            echo "the refresh token stays here on the host; the container gets"
+            echo "an eight-hour access token, replaced before each agent starts."
+        fi
         # Host-pid state, meaningless inside a container and confusing to the
         # CLI that finds it.
         rm -rf "$PROFILE/daemon" "$PROFILE/daemon.lock" "$PROFILE/daemon.status.json"
@@ -207,7 +281,10 @@ refresh)
     # There is no `claude auth refresh`, so the trigger is the cheapest real
     # call there is. At most once per token lifetime, on the cheapest model.
     [ -z "$PROFILE" ] && exit 64          # no container profile; nothing to do
-    if [ ! -s "$PROFILE/.credentials.json" ]; then
+    migrate_to_vault
+    RENEW="${VAULT:-$PROFILE}"
+    [ -n "$VAULT" ] && [ -s "$VAULT/.credentials.json" ] || RENEW="$PROFILE"
+    if [ ! -s "$RENEW/.credentials.json" ]; then
         echo "no container credentials to refresh"; exit 10
     fi
     # `.oauth_refresh.lock` is a bare mkdir mutex — an empty DIRECTORY naming
@@ -219,7 +296,7 @@ refresh)
     #
     # Removed only when old enough that no refresh could still be running. A
     # refresh takes seconds; a minute is not a close call.
-    lock="$PROFILE/.oauth_refresh.lock"
+    lock="$RENEW/.oauth_refresh.lock"
     if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
         rmdir "$lock" 2>/dev/null && echo "cleared a stale refresh lock"
     fi
@@ -227,7 +304,7 @@ refresh)
         python3 -c "
 import json, sys
 try:
-    d = json.load(open('$PROFILE/.credentials.json'))
+    d = json.load(open('$RENEW/.credentials.json'))
 except Exception:
     print(0); sys.exit(0)
 for b in d.values():
@@ -242,15 +319,15 @@ else:
     # CWD's name, so invoking this from wherever the caller happened to stand
     # littered the container profile with a project entry per directory. One
     # fixed entry, emptied afterwards, instead of a growing pile of them.
-    probe="$PROFILE/.refresh-probe"
+    probe="$RENEW/.refresh-probe"
     mkdir -p "$probe"
-    out=$(cd "$probe" && CLAUDE_CONFIG_DIR="$PROFILE" "$BIN" -p "ok" --model haiku 2>&1) || {
+    out=$(cd "$probe" && CLAUDE_CONFIG_DIR="$RENEW" "$BIN" -p "ok" --model haiku 2>&1) || {
         echo "refresh failed: $(printf '%s' "$out" | tail -1 | head -c 200)"
         exit 10
     }
-    rm -rf "$PROFILE/projects/$(printf '%s' "$probe" | sed 's|[/._]|-|g')" 2>/dev/null
+    rm -rf "$RENEW/projects/$(printf '%s' "$probe" | sed 's|[/._]|-|g')" 2>/dev/null
     # Host-pid state is meaningless inside a container, same as after `login`.
-    rm -rf "$PROFILE/daemon" "$PROFILE/daemon.lock" "$PROFILE/daemon.status.json"
+    rm -rf "$RENEW/daemon" "$RENEW/daemon.lock" "$RENEW/daemon.status.json"
     # SAY WHAT HAPPENED, not what was attempted. There is no `claude auth
     # refresh`, so this forces a renewal by making a real call — and a real
     # call succeeds whether or not the token needed renewing. Announcing a
@@ -258,6 +335,11 @@ else:
     # something never looked at, and this file has already shipped two of those
     # today. The expiry moving is the only evidence there is.
     after=$(expiry)
+    # Whatever the vault now holds, the container gets the access half of it.
+    # Done even when nothing was renewed: this is also what repairs a
+    # projection an agent overwrote, and what completes a migration that was
+    # interrupted between the copy and the strip.
+    [ -n "$VAULT" ] && [ "$RENEW" = "$VAULT" ] && { project_token || echo "could not write the container's copy"; }
     if [ "$after" -gt "$before" ]; then
         echo "refreshed the container profile's token (valid $(( (after - $(date +%s)) / 3600 ))h)"
     else

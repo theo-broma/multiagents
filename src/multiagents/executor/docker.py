@@ -366,8 +366,21 @@ class DockerExecutor(Executor):
             backing = self.private_state(name)
             if not backing:
                 continue
-            root = next(iter(backing.values()))
-            if not self._expiring_soon(root / ".credentials.json"):
+            # The VAULT's clock, never the projection's. The projection sits
+            # in a directory the container writes to, so an agent can put any
+            # expiry it likes in there: 1970 to make this refresh in a loop
+            # until the account is rate-limited, 2099 to stop it refreshing at
+            # all and strand every later agent. The host must not take state
+            # from a file the sandbox can edit.
+            #
+            # Before the vault exists — a profile from an older install, or the
+            # first spawn after upgrading — the projection IS the credential
+            # and reading it is all there is. The script migrates on its first
+            # run, so that window is one spawn wide.
+            vault = self.vault_state(name).get(name)
+            clock = vault / ".credentials.json" if vault and \
+                (vault / ".credentials.json").is_file() else root / ".credentials.json"
+            if not self._expiring_soon(clock):
                 continue
             with self._refresh_lock(name) as held:
                 # Somebody else got there first. Not worth waiting for: the
@@ -381,7 +394,7 @@ class DockerExecutor(Executor):
                 # would be a wasted call at best — and at worst, if this
                 # provider rotates refresh tokens, two renewals racing on one
                 # token is how a provider decides it has been stolen.
-                if not self._expiring_soon(root / ".credentials.json"):
+                if not self._expiring_soon(clock):
                     continue
                 code, out, err = scripts.run_action(
                     name, provider, self, "refresh", global_config_dir(),
@@ -600,6 +613,33 @@ class DockerExecutor(Executor):
                 continue
             for relative in getattr(entry, "container_private_home", []) or []:
                 out[Path.home() / relative] = root / name / relative
+        return out
+
+    def vault_state(self, provider: str = "") -> dict[str, Path]:
+        """{provider: the host-only profile holding its REAL credential}.
+
+        A sibling of the mounted profile and deliberately NOT in `mounts()`, so
+        nothing inside the container can reach it. The refresh token lives here
+        and only here; what the container gets is a projection carrying the
+        eight-hour access token and nothing else.
+
+        The point is the blast radius. A credential an agent can read is one it
+        can copy out, and agents run with approvals off — so the question is
+        not whether one could take it but how long a stolen one is worth
+        having. Twenty-eight days of account access is persistence; eight hours
+        is a window that closes on its own.
+        """
+        if self.paths is None:
+            return {}
+        base = state_root() / "container-state"
+        root = base / (self.slug if self.config.get("credential_scope") == "project"
+                       else "shared")
+        out = {}
+        for name, entry in self.providers.items():
+            if provider and name != provider:
+                continue
+            if getattr(entry, "container_private_home", None):
+                out[name] = root / name / "vault"
         return out
 
     # ----------------------------------------------------------- lifecycle --
