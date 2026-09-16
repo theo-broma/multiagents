@@ -203,6 +203,27 @@ file is the reason and the rest can be skimmed.
   be silently ignored — **it is worth filing as a finding on its own** (repo
   hygiene: every clone pays 64 MB for a typo). Flagging rather than filing,
   because writing findings is not my job.
+
+  **Established 2026-09-16 by the orchestrator, and it is worse than "nobody
+  noticed":** the file is 64,713,591 bytes. It was introduced by `ba25c7c`
+  ("Move the driver runtime out of the file named after argument parsing"), a
+  refactor moving 924 lines out of `cli.py` into a new `driver.py` — 820,435
+  insertions in total, of which `sys` is 819,386. It was swept in by a large
+  commit nobody could read line by line. Two days later, `a5b7a47` added
+  `/advisor` and `/sys` to `.gitignore` with the comment *"A shell redirection
+  that lands on `advisor` or `sys` instead of a flag is easy to make and easy to
+  commit without noticing — one 62 MB PostScript file got in that way already."*
+  So the accident **was** noticed and a guard rail **was** added. But
+  `git check-ignore -v sys` returns nothing: an ignore rule has no effect on an
+  already-tracked file. The guard rail prevents the next accident and does
+  nothing about this one, while reading as though the matter were closed. That
+  is the finding — a fix that looks like a fix.
+
+  Two corrections to the figures above: nothing references the path (only the
+  `.gitignore` comment names it), so removing it breaks nothing; and the packed
+  repository is 24.16 MiB, not 64 MB — PostScript is text and compresses well.
+  "Every clone pays 64 MB" overstates it. The real cost is ~24 MB and a working
+  tree that is 99.6% one stray file.
 - **`.multiagents/`** is gitignored, so the live roster and config are invisible
   from a worktree. The BRIEF's finding about the live `agents.yaml` being
   asserted by nothing **cannot be verified by any agent working in a worktree** —
