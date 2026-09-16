@@ -605,6 +605,65 @@ def test_a_present_but_expired_credential_is_not_a_login(tmp_path):
     assert "expired" in done.stdout and "auth login claude" in done.stdout, done.stdout
 
 
+def test_a_lapsed_access_token_is_still_a_login(tmp_path):
+    """The fix above read the wrong clock for two days.
+
+    `expiresAt` is the ACCESS token: eight hours, lapses every night, renewed
+    from the refresh token on first use with nobody asked for anything.
+    `refreshTokenExpiresAt` is three to four weeks, and only when THAT is past
+    does anyone have to log in. Demanding a login for the first made every gap
+    longer than a working day — a night, a weekend, a seven-hour power cut —
+    look like a lost login, and each needless login is a second CLI session on
+    one account, which is the one thing that revokes the other's.
+    """
+    import json, subprocess, time
+    from multiagents.paths import shipped_defaults_dir
+
+    script = shipped_defaults_dir() / "providers" / "claude.sh"
+    now = time.time()
+
+    def check(block):
+        profile = tmp_path / str(abs(hash(json.dumps(block, sort_keys=True))))
+        profile.mkdir()
+        (profile / ".credentials.json").write_text(json.dumps({"claudeAiOauth": block}))
+        return subprocess.run(
+            ["sh", str(script), "check"], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_EXECUTOR": "docker",
+                 "MULTIAGENTS_PRIVATE_BACKING": str(profile),
+                 "MULTIAGENTS_BIN": "/bin/true"})
+
+    fresh = {"accessToken": "x", "refreshToken": "r",
+             "expiresAt": int((now + 3 * 3600) * 1000),
+             "refreshTokenExpiresAt": int((now + 20 * 86400) * 1000)}
+    done = check(fresh)
+    assert done.returncode == 0, done.stdout
+
+    lapsed = {**fresh, "expiresAt": int((now - 3 * 3600) * 1000)}
+    done = check(lapsed)
+    assert done.returncode == 0, \
+        "an eight-hour access token lapses overnight; that is not a lost login"
+    assert "logged in" in done.stdout and "renewed on first use" in done.stdout
+
+    dead = {**lapsed, "refreshTokenExpiresAt": int((now - 9 * 86400) * 1000)}
+    done = check(dead)
+    assert done.returncode == 10, "an expired REFRESH token does need a login"
+    assert "LOGIN expired 9d ago" in done.stdout, done.stdout
+    assert "auth login claude" in done.stdout
+
+    # A refresh token with no recorded expiry cannot be judged, and inventing a
+    # verdict from its absence is how this went wrong the first time.
+    undated = {"accessToken": "x", "refreshToken": "r",
+               "expiresAt": int((now - 3 * 3600) * 1000)}
+    assert check(undated).returncode == 0
+
+    # No refresh token at all: nothing to renew with, so the access token's own
+    # expiry is the login's after all — and the message must say which it is.
+    alone = {"accessToken": "x", "expiresAt": int((now - 3 * 3600) * 1000)}
+    done = check(alone)
+    assert done.returncode == 10
+    assert "no refresh token" in done.stdout, done.stdout
+
+
 def test_an_option_a_fallback_clears_is_actually_dropped(tmp_path):
     """`fallback_for`'s docstring tells people to write `effort: ""` to stop an
     option travelling to another provider, and it produced `--effort ""`.
