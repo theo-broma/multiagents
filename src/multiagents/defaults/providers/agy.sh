@@ -15,6 +15,14 @@ BIN="${MULTIAGENTS_BIN:-agy}"
 EXECUTOR="${MULTIAGENTS_EXECUTOR:-local}"
 TOKEN_REL=".gemini/antigravity-cli/antigravity-oauth-token"
 
+# Asking about the HOST profile means asking about the keyring, which is the
+# non-docker path below — so the cheapest way to answer is to stop being a
+# docker run for the length of this call. The orchestrator runs on the host
+# whatever the executor is, so somebody has to be able to ask.
+if [ "${MULTIAGENTS_PROFILE:-}" = "host" ]; then
+    EXECUTOR="local"
+fi
+
 case "${1:-check}" in
 check)
     if [ "$EXECUTOR" = "docker" ] && [ -n "${MULTIAGENTS_PRIVATE_BACKING:-}" ]; then

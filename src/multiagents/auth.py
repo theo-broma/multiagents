@@ -29,6 +29,18 @@ NOT_AUTHENTICATED = 10
 CHECK_TIMEOUT = 90
 
 
+# Which stored login a check is asking about. Under the docker executor there
+# are two of them and they are different accounts' worth of different: agents
+# run inside the container against a container-private profile, and the
+# ORCHESTRATOR runs on the host against the user's own — `run` execs the CLI
+# locally whatever the executor is. A check that only ever saw one of them
+# reported "logged in" for a profile the thing being launched does not use.
+#
+# "" means whichever one the executor implies, which is what every caller
+# wanted before there were two and is still right for agents.
+HOST = "host"
+
+
 @dataclass
 class AuthState:
     provider: str
@@ -36,6 +48,7 @@ class AuthState:
     detail: str = ""
     script: str = ""
     fix: str = ""
+    profile: str = ""              # "" | "host"
 
     @property
     def ok(self) -> bool:
@@ -43,6 +56,8 @@ class AuthState:
 
     def to_dict(self) -> dict[str, Any]:
         out = {"provider": self.provider, "status": self.status, "authenticated": self.ok}
+        if self.profile:
+            out["profile"] = self.profile
         if self.detail:
             out["detail"] = self.detail
         if not self.ok and self.fix:
@@ -57,26 +72,42 @@ build_env = _scripts.build_env
 
 
 def check(provider_name: str, provider: Any, executor: Any,
-          config_dir: Path, project_config: Path | None = None) -> AuthState:
-    """Run a provider's `check` action. Never raises."""
+          config_dir: Path, project_config: Path | None = None,
+          profile: str = "") -> AuthState:
+    """Run a provider's `check` action. Never raises.
+
+    `profile` names which stored login to ask about; see HOST above. It is
+    passed to the script rather than interpreted here, because which profiles
+    a provider even has is the script's business — the same reason `check`
+    itself is a script and not a branch in this file.
+    """
     script = _scripts.resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return AuthState(provider_name, "no_script",
                          detail=f"no script for provider {provider_name!r}",
-                         script=getattr(provider, "script_name", ""))
+                         script=getattr(provider, "script_name", ""),
+                         profile=profile)
 
     code, out, err = _scripts.run_action(
         provider_name, provider, executor, "check", config_dir, project_config,
         timeout=CHECK_TIMEOUT,
+        extra_env={"MULTIAGENTS_PROFILE": profile} if profile else None,
     )
     detail = (out.strip() or err.strip()).splitlines()
     line = detail[-1][:300] if detail else ""
-    fix = f"multiagents auth login {provider_name}"
+    # The host profile is not repaired by the same command: under docker
+    # `auth login <p>` signs into the CONTAINER, which is the whole confusion
+    # this is here to end, so the fix has to name the other one.
+    fix = (f"multiagents auth login {provider_name}"
+           + (" --host" if profile == HOST else ""))
     if code == AUTHENTICATED:
-        return AuthState(provider_name, "authenticated", line, str(script))
+        return AuthState(provider_name, "authenticated", line, str(script),
+                         profile=profile)
     if code == NOT_AUTHENTICATED:
-        return AuthState(provider_name, "not_authenticated", line, str(script), fix)
-    return AuthState(provider_name, "unknown", line or f"exit {code}", str(script), fix)
+        return AuthState(provider_name, "not_authenticated", line, str(script),
+                         fix, profile)
+    return AuthState(provider_name, "unknown", line or f"exit {code}", str(script),
+                     fix, profile)
 
 
 def check_all(providers: dict[str, Any], executor_for: Any,
@@ -88,14 +119,17 @@ def check_all(providers: dict[str, Any], executor_for: Any,
 
 
 def login_command(provider_name: str, provider: Any, executor: Any,
-                  config_dir: Path, project_config: Path | None = None):
+                  config_dir: Path, project_config: Path | None = None,
+                  profile: str = ""):
     """(argv, env) for the login action, or None if there is no script.
 
     Returned rather than run, because login may need the terminal and the
     caller should hand it over with execvpe rather than capture it.
     """
     return _scripts.exec_action(provider_name, provider, executor, "login",
-                                config_dir, project_config)
+                                config_dir, project_config,
+                                extra_env={"MULTIAGENTS_PROFILE": profile}
+                                if profile else None)
 
 
 # --------------------------------------------------------------------------

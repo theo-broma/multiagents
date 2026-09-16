@@ -126,6 +126,10 @@ def _ensure_authenticated(paths, config, providers, interactive: bool = True) ->
     project_config = paths.config if paths else None
     enabled = {n: p for n, p in providers.items() if p.enabled}
 
+    # (name, provider, profile). The profile is carried because under docker a
+    # provider has two stored logins and they are repaired by two different
+    # commands — offering the container's login for a signed-out host is how
+    # `build` could end on "ready: multiagents run" and have run fail at once.
     broken = []
     for name, provider in sorted(enabled.items()):
         state = auth_mod.check(name, provider, executor_of(name),
@@ -133,31 +137,44 @@ def _ensure_authenticated(paths, config, providers, interactive: bool = True) ->
         mark = "ok " if state.ok else "!! "
         print(f"  {mark}{name:10} {state.detail[:70]}")
         if not state.ok:
-            broken.append((name, provider))
+            broken.append((name, provider, ""))
+
+    for name, state in sorted(_driver_host_states(
+            config, providers, executor_of, project_config).items()):
+        mark = "ok " if state.ok else "!! "
+        print(f"  {mark}{name:10} {state.detail[:70]}   ← host, where run execs")
+        if not state.ok:
+            broken.append((name, providers[name], auth_mod.HOST))
 
     if not broken:
         return 0
+
+    def _fix(name: str, profile: str) -> str:
+        return f"multiagents auth login {name}" + (" --host" if profile else "")
+
     if not interactive:
-        for name, _ in broken:
-            print(f"  fix: multiagents auth login {name}")
+        for name, _, profile in broken:
+            print(f"  fix: {_fix(name, profile)}")
         return len(broken)
 
     still_broken = 0
-    for name, provider in broken:
-        print(f"\n{name} needs authenticating.")
+    for name, provider, profile in broken:
+        where = " (this machine's own profile)" if profile else ""
+        print(f"\n{name} needs authenticating{where}.")
         try:
-            answer = input(f"  run `auth login {name}` now? [Y/n] ").strip().lower()
+            answer = input(f"  run `{_fix(name, profile)}` now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             answer = "n"
         if answer in ("n", "no"):
-            print(f"  skipped — agents on {name} will fail until you run "
-                  f"`multiagents auth login {name}`")
+            print(f"  skipped — {'the orchestrator' if profile else f'agents on {name}'}"
+                  f" will fail until you run `{_fix(name, profile)}`")
             still_broken += 1
             continue
 
         built = auth_mod.login_command(name, provider, executor_of(name),
-                                       global_config_dir(), project_config)
+                                       global_config_dir(), project_config,
+                                       profile=profile)
         if built is None:
             print(f"  no script for {name!r}")
             still_broken += 1
@@ -168,11 +185,15 @@ def _ensure_authenticated(paths, config, providers, interactive: bool = True) ->
         subprocess.run(argv, env=env)
 
         recheck = auth_mod.check(name, provider, executor_of(name),
-                                 global_config_dir(), project_config)
+                                 global_config_dir(), project_config,
+                                 profile=profile)
         print(f"  {name}: {recheck.status}")
         if not recheck.ok:
             still_broken += 1
-        elif paths is not None:
+        elif paths is not None and not profile:
+            # Only the container's credential is behind an inode-pinned mount.
+            # Restarting the container over a HOST login would interrupt agents
+            # to re-resolve a file that did not change.
             _refresh_container_after_login(paths, config, name)
     return still_broken
 
@@ -1111,11 +1132,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("\nauth")
     providers_map = load_providers(config.providers)
     executor_of = executor_for(paths, config, providers_map)
+    project_config = paths.config if paths else None
     for name, state in sorted(auth_mod.check_all(
             providers_map, executor_of, global_config_dir(),
-            paths.config if paths else None).items()):
+            project_config).items()):
         mark = " " if state.ok else "!"
         print(f"  {mark} {name:10} {state.status:18} {state.detail[:60]}")
+        if not state.ok:
+            problems += 1
+    for name, state in sorted(_driver_host_states(
+            config, providers_map, executor_of, project_config).items()):
+        mark = " " if state.ok else "!"
+        print(f"  {mark} {name:10} {state.status:18} {state.detail[:60]}")
+        print(f"    host profile — where the orchestrator itself runs")
         if not state.ok:
             problems += 1
             if state.fix:
@@ -1476,6 +1505,36 @@ def _auth_scope(provider, executor) -> str:
     return "host"
 
 
+def _driver_host_states(config, providers, executor_of, project_config):
+    """The HOST login for every provider that launches a driver, when that is
+    a second profile nobody was checking.
+
+    `run` and `init-agent` exec a CLI on this machine, so a driver's provider
+    is authenticated here no matter where its agents run. Under docker that is
+    a different stored login from the one `check` reports by default, and it
+    was invisible: `multiagents auth` said claude was fine while the profile
+    the orchestrator runs on could be signed out entirely.
+
+    Only driver providers, and only under docker. Checking every provider's
+    host profile would cost an API call apiece for the ones with no file to
+    read, to answer a question about agents that never run here.
+    """
+    out = {}
+    for spec in config.agents.values():
+        if not getattr(spec, "launch", False) or spec.provider in out:
+            continue
+        provider = providers.get(spec.provider)
+        if provider is None:
+            continue
+        executor = executor_of(spec.provider)
+        if _auth_scope(provider, executor) != "container":
+            continue                  # one profile; the ordinary row IS the host
+        out[spec.provider] = auth_mod.check(
+            spec.provider, provider, executor, global_config_dir(),
+            project_config, profile=auth_mod.HOST)
+    return out
+
+
 def cmd_upgrade_config(args: argparse.Namespace) -> int:
     """Refresh config copies that were never edited.
 
@@ -1530,7 +1589,8 @@ def cmd_auth(args: argparse.Namespace) -> int:
             print(f"unknown provider {name!r}; known: {sorted(providers)}", file=sys.stderr)
             return 2
         built = auth_mod.login_command(
-            name, provider, executor_of(name), global_config_dir(), project_config)
+            name, provider, executor_of(name), global_config_dir(), project_config,
+            profile=auth_mod.HOST if getattr(args, "host", False) else "")
         if built is None:
             print(f"no auth script for {name!r}. Add one to "
                   f"{global_config_dir()}/auth/{name}.sh — see auth/README.md.",
@@ -1547,6 +1607,18 @@ def cmd_auth(args: argparse.Namespace) -> int:
         where = _auth_scope(providers[name], executor_of(name))
         mark = "ok " if state.ok else ("!! " if state.status == "not_authenticated" else "?  ")
         print(f"  {mark}{name:10} [{where:9}] {state.detail}")
+        if not state.ok:
+            broken += 1
+            if state.fix:
+                print(f"      fix: {state.fix}")
+    # A second row rather than a footnote on the first: it is a different
+    # login, of a different account potentially, fixed by a different command.
+    # Folding it into one line is how it stayed invisible.
+    for name, state in sorted(_driver_host_states(
+            config, providers, executor_of, project_config).items()):
+        mark = "ok " if state.ok else ("!! " if state.status == "not_authenticated" else "?  ")
+        print(f"  {mark}{name:10} [host     ] {state.detail}"
+              f"   ← the orchestrator runs here")
         if not state.ok:
             broken += 1
             if state.fix:
@@ -2307,6 +2379,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("auth", help="check or repair provider authentication")
     p.add_argument("action", nargs="?", default="status", choices=["status", "login"])
     p.add_argument("provider", nargs="?", default="", help="provider to log in")
+    p.add_argument("--host", action="store_true",
+                   help="sign in to THIS machine's profile rather than the "
+                        "container's — the one the orchestrator runs on")
     p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("ask", help="answer questions agents are parked on")

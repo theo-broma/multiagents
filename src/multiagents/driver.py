@@ -679,6 +679,13 @@ def _auth_problem(paths, config, spec) -> str:
     2026-09-14 it launched against an expired claude token and the only sign
     was every delegation coming back `401 OAuth access token has expired` —
     which reads as a broken install, not an expired login.
+
+    Asks about the HOST profile, because that is the one being launched. This
+    function hands the terminal to a CLI on this machine — `_launch_agent`
+    execs it here — and it does so whether or not agents run in a container.
+    Without naming the profile, a docker project asked about the CONTAINER's
+    login and cleared a launch that then 401'd on its first turn: the check
+    was satisfied about an account the orchestrator was never going to use.
     """
     from . import auth as auth_mod
 
@@ -688,11 +695,12 @@ def _auth_problem(paths, config, spec) -> str:
         return ""                             # a different check already says so
     executor = executor_for(paths, config, providers)(spec.provider)
     state = auth_mod.check(spec.provider, provider, executor,
-                           global_config_dir(), paths.config)
+                           global_config_dir(), paths.config,
+                           profile=auth_mod.HOST)
     if state.status != "not_authenticated":
         return ""                             # authenticated, or it would not say
-    return (f"{spec.provider} is not authenticated — {state.detail}. "
-            f"Run `multiagents auth login {spec.provider}`.")
+    return (f"{spec.provider} is not authenticated on this machine, where the "
+            f"orchestrator runs — {state.detail}. Run `{state.fix}`.")
 
 
 def _pid_file(paths, role: str) -> Path:
