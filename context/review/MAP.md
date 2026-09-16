@@ -217,7 +217,42 @@ file is the reason and the rest can be skimmed.
   split C2. Likewise C3 folds `gitops.py` (merge correctness, 77%) in with
   lifecycle, and it will lose the same way against `runner.py`'s 2,601 lines.
 
-## A measurement I could not complete
+## A measurement I could not complete — now settled
+
+**SETTLED 2026-09-16 by the orchestrator, and the hypothesis below was wrong.**
+Both commands were run on the host:
+
+| command | result |
+|---|---|
+| `uv run --frozen python -m pytest -q` | **1 failed, 547 passed** in 299s |
+| `uv run --frozen python -m pytest -q -p no:randomly` | **1 failed, 547 passed** in 297s |
+
+Disabling `pytest-randomly` changes nothing, so **execution order is not the
+cause** and the test-order hypothesis below is falsified. The remaining variable
+is the coverage instrumentation (`--with pytest-cov --cov=multiagents`), which is
+where the 17 `PermissionError` failures must come from. The coverage percentages
+in this map are still sound — coverage is collected per statement regardless of
+which tests fail — but anyone re-running them will hit this again.
+
+Two further things these runs establish, which matter more than the question they
+answered:
+
+- **The documented baseline of 545 passed / 3 skipped is not what the suite does.**
+  On a host where `docker` is available, nothing skips and 548 tests run. The 3
+  "skipped" tests are only skipped where they cannot run, which is inside the
+  container every agent works in.
+- **Trunk is red, by one test**, and it is not a flake:
+  `tests/test_core.py::test_the_claude_script_uses_the_container_profile_only_where_it_should`
+  fails at `tests/test_core.py:8892` with `assert (0 == 10)`. `claude.sh check`,
+  pointed at a container profile directory that has just been created and is
+  **empty**, returns 0 and prints `container profile is logged in`. It concludes a
+  profile is authenticated from the directory existing. That belongs to **C2**, and
+  it raises C2's value: the seam is not merely under-tested, it has a failing test
+  on trunk that nobody is reading.
+
+The original note follows, kept for the record.
+
+## A measurement I could not complete (original note, hypothesis now falsified)
 
 Running the suite with coverage instrumentation and fixed ordering
 (`-p no:randomly --cov=multiagents`) produced **17 failures, 528 passed, 3
