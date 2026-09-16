@@ -34,6 +34,7 @@ root, and a matching uid also avoids git's "dubious ownership" refusal.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -368,14 +369,65 @@ class DockerExecutor(Executor):
             root = next(iter(backing.values()))
             if not self._expiring_soon(root / ".credentials.json"):
                 continue
-            code, out, err = scripts.run_action(
-                name, provider, self, "refresh", global_config_dir(),
-                self.paths.config if self.paths else None, timeout=120)
+            with self._refresh_lock(name) as held:
+                # Somebody else got there first. Not worth waiting for: the
+                # margin means the token is still good for half an hour, so
+                # this spawn proceeds on it and the other process's result
+                # lands long before it matters.
+                if not held:
+                    continue
+                # Re-read inside the lock. Between the check above and the lock
+                # the other process may have finished, and a second renewal
+                # would be a wasted call at best — and at worst, if this
+                # provider rotates refresh tokens, two renewals racing on one
+                # token is how a provider decides it has been stolen.
+                if not self._expiring_soon(root / ".credentials.json"):
+                    continue
+                code, out, err = scripts.run_action(
+                    name, provider, self, "refresh", global_config_dir(),
+                    self.paths.config if self.paths else None, timeout=120)
             line = (out.strip() or err.strip()).splitlines()
             if code == scripts.UNIMPLEMENTED:
                 continue                  # provider has no container profile
             notes.append(f"{name}: {line[-1][:200] if line else f'refresh exit {code}'}")
         return notes
+
+    @contextlib.contextmanager
+    def _refresh_lock(self, provider: str):
+        """Serialise renewals on OUR side, non-blocking. Yields whether held.
+
+        The vendor ships a lock for this and it is the reason any of it was
+        found: a bare mkdir mutex, an empty directory naming no owner, which
+        cannot be asked whether its holder is alive and which a process that
+        dies mid-refresh leaves behind forever. Depending on it to serialise
+        our own concurrency — several agents can spawn at once, and each spawn
+        passes through here — would be building on the thing that broke.
+        """
+        import fcntl
+
+        # Beside the credential it guards, which is shared across projects by
+        # default, so a second project spawning at the same moment contends on
+        # the same lock rather than racing it.
+        path = state_root() / "container-state" / f"{provider}.refresh.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = None
+        try:
+            handle = path.open("w")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                yield False
+                return
+            yield True
+        except OSError:
+            # A lock we cannot take is not a reason to refuse to spawn; it is a
+            # reason not to be the one refreshing.
+            yield False
+        finally:
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
 
     @classmethod
     def _expiring_soon(cls, credentials: Path) -> bool:

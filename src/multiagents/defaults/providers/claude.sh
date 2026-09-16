@@ -223,13 +223,46 @@ refresh)
     if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
         rmdir "$lock" 2>/dev/null && echo "cleared a stale refresh lock"
     fi
-    out=$(CLAUDE_CONFIG_DIR="$PROFILE" "$BIN" -p "ok" --model haiku 2>&1) || {
+    expiry() {
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open('$PROFILE/.credentials.json'))
+except Exception:
+    print(0); sys.exit(0)
+for b in d.values():
+    if isinstance(b, dict) and b.get('expiresAt'):
+        print(int(b['expiresAt']) // 1000); break
+else:
+    print(0)
+" 2>/dev/null || echo 0
+    }
+    before=$(expiry)
+    # Run from a directory of our own. `-p` records a conversation under the
+    # CWD's name, so invoking this from wherever the caller happened to stand
+    # littered the container profile with a project entry per directory. One
+    # fixed entry, emptied afterwards, instead of a growing pile of them.
+    probe="$PROFILE/.refresh-probe"
+    mkdir -p "$probe"
+    out=$(cd "$probe" && CLAUDE_CONFIG_DIR="$PROFILE" "$BIN" -p "ok" --model haiku 2>&1) || {
         echo "refresh failed: $(printf '%s' "$out" | tail -1 | head -c 200)"
         exit 10
     }
+    rm -rf "$PROFILE/projects/$(printf '%s' "$probe" | sed 's|[/._]|-|g')" 2>/dev/null
     # Host-pid state is meaningless inside a container, same as after `login`.
     rm -rf "$PROFILE/daemon" "$PROFILE/daemon.lock" "$PROFILE/daemon.status.json"
-    echo "refreshed the container profile's token"
+    # SAY WHAT HAPPENED, not what was attempted. There is no `claude auth
+    # refresh`, so this forces a renewal by making a real call — and a real
+    # call succeeds whether or not the token needed renewing. Announcing a
+    # refresh on the strength of the call exiting zero is a claim about
+    # something never looked at, and this file has already shipped two of those
+    # today. The expiry moving is the only evidence there is.
+    after=$(expiry)
+    if [ "$after" -gt "$before" ]; then
+        echo "refreshed the container profile's token (valid $(( (after - $(date +%s)) / 3600 ))h)"
+    else
+        echo "token already current; nothing to renew"
+    fi
     exit 0
     ;;
 budget)
