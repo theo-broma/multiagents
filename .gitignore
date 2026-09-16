@@ -6,5 +6,18 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+# Written by the orchestrator and its agents while this project reviews
+# itself. `context/` is the exception and IS tracked: interface contracts and
+# specs are the durable half of what a run produces, and losing them to an
+# ignore rule would throw away the reason for delegating in the first place.
+*.bak-[0-9]*
+*.pre-*.bak
+
+# Stray single-word files in the repo root. A shell redirection that lands on
+# `advisor` or `sys` instead of a flag is easy to make and easy to commit
+# without noticing — one 62 MB PostScript file got in that way already.
+/advisor
+/sys
+
 # Scratch notes and agent-written suggestions kept locally, not shipped.
 suggestions.md

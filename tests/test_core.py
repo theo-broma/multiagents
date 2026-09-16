@@ -7,6 +7,7 @@ it only proves itself on the day something secret reaches a log.
 
 import json
 import os
+import shutil
 import time
 import sys, time
 
@@ -358,6 +359,12 @@ def _docker(tmp_path, **overrides):
 def test_docker_refuses_to_mount_the_socket(tmp_path):
     """Rootful docker + the docker group means the socket is host root.
     Setting this must be refused, not honoured."""
+    if shutil.which("docker") is None:
+        # `preflight` asks docker about images before it reaches the socket
+        # check. Agents reviewing this project run INSIDE a container, which
+        # has no docker CLI — and a suite that cannot be green where the
+        # reviewer stands sends it hunting a defect that is not there.
+        pytest.skip("docker is not on PATH")
     ex = _docker(tmp_path, mount_docker_socket=True)
     assert any("socket" in p for p in ex.preflight())
     assert not any("docker.sock" in str(a) for a in ex.run_args())
@@ -930,6 +937,38 @@ def test_the_container_never_gets_the_token_that_mints_tokens(tmp_path):
     assert "someFutureSecret" not in mounted, mounted
 
 
+def test_the_bug_reporter_is_told_it_can_read_source_only_when_it_can(tmp_path):
+    """Its brief used to send it after source it could not reach: it runs in a
+    worktree of the USER's project, and under docker multiagents is not mounted
+    in the container at all. Two blocking tickets ended with a paragraph
+    apologising for that instead of describing the bug.
+
+    But when the project being orchestrated IS multiagents, the worktree is a
+    checkout of the very source the ticket is about — which is the best
+    evidence any reporter here can have, and telling it otherwise throws that
+    away.
+    """
+    runner = _runner(tmp_path)
+    assert runner._is_multiagents_checkout() is False
+    context = runner._bug_context()
+    assert "cannot read the multiagents source" in context
+    assert "multiagents commit:" in context, "the commit locates the code instead"
+
+    # Recognised by the SHAPE of the tree, not its name or its remote: a fork,
+    # a rename and a local clone are all still the source.
+    (tmp_path / "src" / "multiagents").mkdir(parents=True)
+    (tmp_path / "src" / "multiagents" / "runner.py").write_text("")
+    assert runner._is_multiagents_checkout() is True
+
+    context = runner._bug_context()
+    assert "You can read the multiagents source from here" in context
+    assert "cannot read the multiagents source" not in context
+    assert "path:line" in context, "a citation is the point of being able to read it"
+    assert "pytest" in context, "and running the suite settles questions"
+    # The publishing rules do not relax just because it can see more.
+    assert "home directory is still the user's business" in context
+
+
 def test_a_container_that_cannot_take_the_new_mount_says_so(tmp_path):
     """A mount list is fixed when a container is CREATED, so `docker down &&
     docker up` restarts the same one with the mounts it was born with. A config
@@ -948,8 +987,11 @@ def test_a_container_that_cannot_take_the_new_mount_says_so(tmp_path):
     ex = DockerExecutor(config={}, providers={}, paths=paths)
 
     # Nothing to compare against: a container that does not exist is not stale,
-    # it is about to be created with whatever the config now says.
-    assert ex.stale_mounts() == []
+    # it is about to be created with whatever the config now says. Asking that
+    # needs the docker CLI, which is absent inside the container agents review
+    # this project from.
+    if shutil.which("docker") is not None:
+        assert ex.stale_mounts() == []
 
     calls = {}
 
