@@ -120,16 +120,17 @@ def check_all(providers: dict[str, Any], executor_for: Any,
 
 def login_command(provider_name: str, provider: Any, executor: Any,
                   config_dir: Path, project_config: Path | None = None,
-                  profile: str = ""):
+                  profile: str = "", extra_env: dict[str, str] | None = None):
     """(argv, env) for the login action, or None if there is no script.
 
     Returned rather than run, because login may need the terminal and the
     caller should hand it over with execvpe rather than capture it.
     """
+    env = dict(extra_env or {})
+    if profile:
+        env["MULTIAGENTS_PROFILE"] = profile
     return _scripts.exec_action(provider_name, provider, executor, "login",
-                                config_dir, project_config,
-                                extra_env={"MULTIAGENTS_PROFILE": profile}
-                                if profile else None)
+                                config_dir, project_config, extra_env=env or None)
 
 
 # --------------------------------------------------------------------------

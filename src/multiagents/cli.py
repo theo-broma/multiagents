@@ -1640,9 +1640,15 @@ def cmd_auth(args: argparse.Namespace) -> int:
         if provider is None:
             print(f"unknown provider {name!r}; known: {sorted(providers)}", file=sys.stderr)
             return 2
+        extra = {}
+        if getattr(args, "account", ""):
+            # Passed to the script rather than resolved here: only it knows
+            # what a profile for this provider is shaped like.
+            extra["MULTIAGENTS_ACCOUNT"] = args.account
         built = auth_mod.login_command(
             name, provider, executor_of(name), global_config_dir(), project_config,
-            profile=auth_mod.HOST if getattr(args, "host", False) else "")
+            profile=auth_mod.HOST if getattr(args, "host", False) else "",
+            extra_env=extra)
         if built is None:
             print(f"no auth script for {name!r}. Add one to "
                   f"{global_config_dir()}/auth/{name}.sh — see auth/README.md.",
@@ -2437,6 +2443,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", action="store_true",
                    help="sign in to THIS machine's profile rather than the "
                         "container's — the one the orchestrator runs on")
+    p.add_argument("--account", default="",
+                   help="label a second (or third) login for this provider, so "
+                        "work moves to a rested one when the first runs out")
     p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("ask", help="answer questions agents are parked on")

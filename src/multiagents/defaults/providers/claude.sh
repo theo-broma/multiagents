@@ -41,6 +41,10 @@ VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
 # this runs and half a credential file is worse than an old one.
 project_token() {
     [ -n "$VAULT" ] && [ -n "$PROFILE" ] || return 0
+    # With the auth proxy in front, the container holds a name-tag instead and
+    # the real token never leaves the host at all. Writing an access token here
+    # would undo that quietly, and the window would be invisible.
+    [ "${MULTIAGENTS_AUTH_PROXY:-0}" = "1" ] && return 0
     [ -s "$VAULT/.credentials.json" ] || return 1
     mkdir -p "$PROFILE"
     python3 -c "
@@ -234,10 +238,30 @@ login)
             *) echo "nothing was changed."; exit 1 ;;
         esac
         echo
-        mkdir -p "${VAULT:-$PROFILE}"
-        chmod 700 "${VAULT:-$PROFILE}" 2>/dev/null
-        CLAUDE_CONFIG_DIR="${VAULT:-$PROFILE}" "$BIN" auth login || exit $?
+        # A labelled login is a SECOND account, kept beside the first rather
+        # than replacing it: that is the whole point of labelling it. Work
+        # moves onto it when the first runs out of window, and the proxy is
+        # what does the moving.
+        TARGET="${VAULT:-$PROFILE}"
+        if [ -n "${MULTIAGENTS_ACCOUNT:-}" ]; then
+            if [ -z "$VAULT" ]; then
+                echo "several accounts need the auth proxy (executor.docker.auth_proxy: true);"
+                echo "without it there is nowhere to hold more than one credential."
+                exit 64
+            fi
+            TARGET="$VAULT/accounts/$MULTIAGENTS_ACCOUNT"
+            echo "signing in as account '$MULTIAGENTS_ACCOUNT'."
+            echo
+        fi
+        mkdir -p "$TARGET"
+        chmod 700 "$TARGET" 2>/dev/null
+        CLAUDE_CONFIG_DIR="$TARGET" "$BIN" auth login || exit $?
         # The sign-in lands in the vault; agents get the access token only.
+        if [ -n "${MULTIAGENTS_ACCOUNT:-}" ]; then
+            echo "account '$MULTIAGENTS_ACCOUNT' added. Agents move onto it when"
+            echo "the others are out of window; nothing else changes."
+            exit 0
+        fi
         if [ -n "$VAULT" ]; then
             project_token || { echo "signed in, but could not write the container's copy"; exit 1; }
             echo "the refresh token stays here on the host; the container gets"

@@ -7,6 +7,7 @@ it only proves itself on the day something secret reaches a log.
 
 import json
 import os
+import time
 import sys, time
 
 import pytest
@@ -719,6 +720,163 @@ def test_the_host_renews_a_token_the_container_cannot(tmp_path):
     done = refresh("/bin/false")
     assert lock.is_dir(), "a lock that young may still be held"
     assert done.returncode == 10
+
+
+def test_the_container_is_given_a_name_tag_instead_of_a_credential(tmp_path):
+    """The end of the line this project has been walking all along: private
+    profile, then a vault, then an eight-hour projection, each shrinking the
+    blast radius without closing it. With the proxy in front there is nothing
+    in the container worth stealing at all."""
+    import json
+    from multiagents.authproxy import read_token, load_secret
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+
+    class Prov:
+        container_private_home = [".claude"]
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    ex = DockerExecutor(config={"auth_proxy": True}, providers={"claude": Prov()},
+                        paths=paths)
+    backing = next(iter(ex.private_state().values()))
+    backing.mkdir(parents=True, exist_ok=True)
+    (backing / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"accessToken": "REAL-TOKEN", "refreshToken": "REAL-REFRESH"}}))
+
+    ex.project_placeholder()
+
+    written = json.loads((backing / ".credentials.json").read_text())["claudeAiOauth"]
+    assert "REAL" not in json.dumps(written), "no part of the credential remains"
+    vault = next(iter(ex.vault_state().values()))
+    assert read_token(written["accessToken"], load_secret(vault)) == ex.slug, \
+        "what is left is a signed name, and it names this container"
+
+    # And the agents are pointed at the proxy rather than the API.
+    argv = " ".join(ex.run_args())
+    assert f"ANTHROPIC_BASE_URL=http://{ex.auth_container}" in argv
+    assert ex.auth_container in argv.split("NO_PROXY=")[1].split()[0], \
+        "the hop to the sidecar must not loop back out through the egress proxy"
+
+
+def test_the_proxy_stays_off_unless_it_is_asked_for(tmp_path):
+    """It changes where every agent's model traffic goes. That is not something
+    to acquire by upgrading."""
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+
+    class Prov:
+        container_private_home = [".claude"]
+
+    paths = ProjectPaths(tmp_path)
+    off = DockerExecutor(config={}, providers={"claude": Prov()}, paths=paths)
+    assert off.auth_proxy_enabled() is False
+    assert "ANTHROPIC_BASE_URL" not in " ".join(off.run_args())
+    assert off.ensure_auth_proxy() == {"ok": True, "skipped": "not enabled"}
+
+    # And it needs something to hold: no vault, no proxy.
+    bare = DockerExecutor(config={"auth_proxy": True}, providers={}, paths=paths)
+    assert bare.auth_proxy_enabled() is False
+
+
+def test_an_agents_token_authenticates_nothing_and_names_who_is_calling(tmp_path):
+    """The point of the proxy: what goes into the container is a name-tag, not
+    a credential. Steal it and you have a string that works on one host against
+    one process and tells it which agent you are pretending to be.
+
+    Signed anyway, for one narrow reason — without it a container could name
+    itself another agent to inherit that agent's account, or invent agents
+    endlessly and walk the pool.
+    """
+    from multiagents import authproxy
+
+    secret = authproxy.load_secret(tmp_path)
+    tag = authproxy.mint_token("ag-abc123", secret)
+
+    assert authproxy.read_token(tag, secret) == "ag-abc123"
+    assert authproxy.read_token(f"Bearer {tag}", secret) == "ag-abc123"
+
+    assert authproxy.read_token("mxa_ag-evil_" + "0" * 32, secret) == "", \
+        "a forged name must not be served"
+    assert authproxy.read_token(tag, "a-different-secret") == ""
+    assert authproxy.read_token("sk-ant-<redacted>", secret) == ""
+    assert authproxy.read_token("", secret) == ""
+
+    # The secret is generated once and kept, or every restart would invalidate
+    # every running agent's tag.
+    assert authproxy.load_secret(tmp_path) == secret
+    assert (tmp_path / "proxy-secret").stat().st_mode & 0o077 == 0
+
+
+def test_an_agent_stays_on_one_account_because_its_cache_lives_there(tmp_path):
+    """Switching accounts is a last resort, not load balancing. A cache is
+    per-account, one agent here has been measured reading thirteen million
+    cached tokens, and moving it to a rested account throws all of that away —
+    which costs far more than the headroom is worth."""
+    import json
+    from multiagents.authproxy import Accounts
+
+    for label in ("one", "two"):
+        d = tmp_path / "accounts" / label
+        d.mkdir(parents=True)
+        (d / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": f"token-{label}"}}))
+
+    pool = Accounts(tmp_path)
+    assert pool.labels() == ["one", "two"]
+
+    first = pool.for_agent("ag-1")
+    assert pool.for_agent("ag-1") == first, "pinned for the agent's whole life"
+    assert pool.token(first) == f"token-{first}"
+
+    # A second agent goes to the OTHER account, or a second login would sit
+    # idle until the first was exhausted.
+    assert pool.for_agent("ag-2") != first
+
+    # A limit moves everyone off — but only for their NEXT request, which is
+    # the only moment a switch is possible at all.
+    pool.mark_limited(first, 600)
+    assert pool.for_agent("ag-1") != first
+    assert pool.for_agent("ag-1") == pool.for_agent("ag-1"), "and re-pins once"
+
+    # Every account limited is not a silent fallback to a dead one.
+    for label in pool.labels():
+        pool.mark_limited(label, 600)
+    assert pool.for_agent("ag-3") == ""
+
+
+def test_a_vault_from_before_multiple_accounts_still_serves(tmp_path):
+    """Its credential sits at the top level rather than under accounts/.
+    Migrating it would mean moving a file the refresh loop may be writing."""
+    import json
+    from multiagents.authproxy import Accounts
+
+    (tmp_path / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"accessToken": "legacy"}}))
+    pool = Accounts(tmp_path)
+    assert pool.labels() == ["default"]
+    assert pool.token("default") == "legacy"
+    assert pool.for_agent("ag-1") == "default"
+
+
+def test_the_token_is_re_read_when_the_refresh_loop_rewrites_it(tmp_path):
+    """The proxy holds no token: it reads whatever is on disk, so the existing
+    host-side renewal keeps it current without the proxy knowing anything about
+    OAuth. Caching it forever would serve a token eight hours after it died."""
+    import json
+    import os
+    from multiagents.authproxy import Accounts
+
+    creds = tmp_path / ".credentials.json"
+    creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "old"}}))
+    pool = Accounts(tmp_path)
+    assert pool.token("default") == "old"
+
+    creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "new"}}))
+    os.utime(creds, (time.time() + 5, time.time() + 5))
+    assert pool.token("default") == "new"
+
+    assert Accounts(tmp_path / "nowhere").token("default") == ""
 
 
 def test_the_container_never_gets_the_token_that_mints_tokens(tmp_path):

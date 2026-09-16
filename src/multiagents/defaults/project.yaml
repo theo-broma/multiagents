@@ -28,6 +28,25 @@ executor:
     # in providers.yaml, so it cannot drift from what a per-agent HOME expects.
     mount_cli_from_host: true
 
+    # Keep the credential out of the container entirely.
+    #
+    # Off by default because it changes where every agent's model traffic goes,
+    # and that is not something to acquire by upgrading. On, agents hold a
+    # signed name-tag that authenticates nothing and reach the model API only
+    # through a sidecar which attaches a real token read from a vault they have
+    # no mount for. A credential stolen out of a container is then a string
+    # that works on one host against one process.
+    #
+    # It is also what makes several accounts usable: the sidecar is the one
+    # place that sees every request, so it is the only place that can move a
+    # project onto a rested account when one runs out. Add accounts with
+    # `multiagents auth login claude --account <name>`.
+    #
+    # It does NOT stop an agent SPENDING the credential. Nothing here refuses
+    # an expensive request; the proxy makes the spending visible, which is not
+    # the same thing.
+    auth_proxy: false
+
     # Anything else agents need visible. Mounted at the identical host path.
     extra_mounts: []
     #  - path: ~/.cache/uv
