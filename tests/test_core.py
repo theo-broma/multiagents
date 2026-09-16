@@ -664,6 +664,114 @@ def test_a_lapsed_access_token_is_still_a_login(tmp_path):
     assert "no refresh token" in done.stdout, done.stdout
 
 
+def test_the_host_profile_can_be_asked_about_under_docker(tmp_path):
+    """Under docker a provider has TWO stored logins and only one was reachable.
+
+    Agents run in the container against a container-private profile; the
+    orchestrator runs HERE, because `run` execs the CLI on this machine
+    whatever the executor is. `check` reported the container's, so
+    `multiagents auth` could say claude was fine while the profile being
+    launched was signed out, and the only symptom was every turn coming back
+    401 from a CLI the user had just been told was healthy.
+    """
+    import json, subprocess, time
+    from multiagents.paths import shipped_defaults_dir
+
+    script = shipped_defaults_dir() / "providers" / "claude.sh"
+
+    # A healthy CONTAINER profile...
+    profile = tmp_path / "container"
+    profile.mkdir()
+    (profile / ".credentials.json").write_text(json.dumps(
+        {"claudeAiOauth": {"accessToken": "x", "refreshToken": "r",
+                           "expiresAt": int((time.time() + 3600) * 1000),
+                           "refreshTokenExpiresAt": int((time.time() + 20 * 86400) * 1000)}}))
+    # ...and a HOST CLI that is signed out.
+    fake = tmp_path / "claude"
+    fake.write_text('#!/bin/sh\necho \'{"loggedIn": false}\'\n')
+    fake.chmod(0o755)
+
+    def check(**extra):
+        return subprocess.run(
+            ["sh", str(script), "check"], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "MULTIAGENTS_EXECUTOR": "docker",
+                 "MULTIAGENTS_PRIVATE_BACKING": str(profile),
+                 "MULTIAGENTS_BIN": str(fake), **extra})
+
+    default = check()
+    assert default.returncode == 0 and "container profile" in default.stdout
+
+    host = check(MULTIAGENTS_PROFILE="host")
+    assert host.returncode == 10, \
+        "the host profile is signed out and nothing could say so"
+    assert "not logged in" in host.stdout, host.stdout
+
+
+def test_asking_for_the_host_profile_reaches_the_script(tmp_path):
+    """auth.check passes the profile down rather than interpreting it: which
+    profiles a provider even has is the script's business, which is the same
+    reason `check` is a script at all."""
+    from multiagents import auth as auth_mod
+
+    seen = tmp_path / "seen"
+    _auth_script(tmp_path, "prof.sh",
+                 f'echo "${{MULTIAGENTS_PROFILE:-none}}" > {seen}\necho fine\nexit 0\n')
+    prov = _Prov({"script": "prof.sh"})
+
+    auth_mod.check("claude", prov, _Exec(), tmp_path)
+    assert seen.read_text().strip() == "none", "unasked means unchanged"
+
+    state = auth_mod.check("claude", prov, _Exec(), tmp_path,
+                           profile=auth_mod.HOST)
+    assert seen.read_text().strip() == "host"
+    assert state.profile == "host"
+
+
+def test_a_host_failure_is_fixed_by_a_different_command(tmp_path):
+    """`auth login <p>` under docker signs into the CONTAINER, which is the
+    confusion this exists to end — so a host failure must not name it."""
+    from multiagents import auth as auth_mod
+
+    _auth_script(tmp_path, "out.sh", 'echo "not logged in"\nexit 10\n')
+    prov = _Prov({"script": "out.sh"})
+
+    assert auth_mod.check("claude", prov, _Exec(), tmp_path).fix == \
+        "multiagents auth login claude"
+    assert auth_mod.check("claude", prov, _Exec(), tmp_path,
+                          profile=auth_mod.HOST).fix == \
+        "multiagents auth login claude --host"
+
+
+def test_a_signed_out_host_stops_the_launch_it_would_break(tmp_path, monkeypatch):
+    """`_auth_problem` is the gate `run` passes through, and under docker it was
+    satisfied about an account the orchestrator was never going to use."""
+    from types import SimpleNamespace
+    import multiagents.auth
+    from multiagents import driver
+
+    asked = []
+
+    def fake_check(name, provider, executor, config_dir, project_config=None,
+                   profile=""):
+        asked.append(profile)
+        return multiagents.auth.AuthState(
+            name, "not_authenticated", "not logged in",
+            fix=f"multiagents auth login {name} --host", profile=profile)
+
+    monkeypatch.setattr(multiagents.auth, "check", fake_check)
+    monkeypatch.setattr(driver, "load_providers", lambda *a: {"claude": _Prov()})
+    monkeypatch.setattr(driver, "executor_for", lambda *a: (lambda n: _Exec()))
+
+    config = SimpleNamespace(providers={}, agents={}, executor="docker")
+    paths = SimpleNamespace(config=tmp_path)
+    problem = driver._auth_problem(paths, config,
+                                   SimpleNamespace(provider="claude"))
+
+    assert asked == ["host"], "the gate must ask about the profile it launches"
+    assert "--host" in problem
+    assert "where the orchestrator runs" in problem
+
+
 def test_an_option_a_fallback_clears_is_actually_dropped(tmp_path):
     """`fallback_for`'s docstring tells people to write `effort: ""` to stop an
     option travelling to another provider, and it produced `--effort ""`.

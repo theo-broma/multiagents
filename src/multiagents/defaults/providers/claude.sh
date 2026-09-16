@@ -19,6 +19,16 @@ if [ "${MULTIAGENTS_EXECUTOR:-local}" = "docker" ] \
     PROFILE="$MULTIAGENTS_PRIVATE_BACKING"
 fi
 
+# ...unless the caller is asking about the HOST one specifically. There are two
+# stored logins under docker and only one of them was reachable: `check` saw
+# the container's, so `multiagents auth` cheerfully reported claude logged in
+# while the profile the ORCHESTRATOR actually runs on — this one, per the note
+# above — could be signed out, and the only symptom was every turn coming back
+# 401 from a CLI the user had just been told was fine.
+if [ "${MULTIAGENTS_PROFILE:-}" = "host" ]; then
+    PROFILE=""
+fi
+
 case "${1:-check}" in
 check)
     if [ -n "$PROFILE" ]; then
