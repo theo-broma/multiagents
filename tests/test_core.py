@@ -2090,6 +2090,38 @@ def test_a_driver_is_in_the_tree_without_being_an_agent(tmp_path):
     assert tree.get("ag-1").session == "s-1", "the agent records which session asked"
 
 
+def test_a_resumed_driver_node_follows_the_roster(tmp_path):
+    """The node is reused across resumes, so it has to be re-read from the spec.
+
+    Carrying only status and started_at froze provider and model at whatever
+    they were the day the node was created. Since the driver node is the only
+    place `multiagents monitor` gets the orchestrator's model from, editing the
+    roster and restarting then ran the new model while the panel kept naming
+    the old one — a roster change that looks ignored when it was applied.
+    """
+    from types import SimpleNamespace
+    from multiagents.driver import _driver_node
+    from multiagents.tree import Tree
+
+    paths = SimpleNamespace(tree_file=tmp_path / "tree.json",
+                            events_file=tmp_path / "events.jsonl")
+    session = "6fa34e17-61cc-4643-9372-f492fc3d4d21"
+
+    first = _driver_node(paths, "orchestrator",
+                         SimpleNamespace(provider="claude", model="sonnet"),
+                         session)
+    second = _driver_node(paths, "orchestrator",
+                          SimpleNamespace(provider="agy", model="opus"),
+                          session)
+
+    assert second == first, "one session is one node, however often it resumes"
+    tree = Tree(paths.tree_file, paths.events_file)
+    assert len(tree.drivers()) == 1
+    node = tree.get(first)
+    assert node.model == "opus"
+    assert node.provider == "agy"
+
+
 def test_the_session_is_recorded_without_touching_parent(tmp_path):
     """`parent` is load-bearing in five guards and two of them fail badly if it
     is repurposed for grouping.

@@ -639,11 +639,20 @@ def _driver_node(paths, role: str, spec, session: str) -> str:
     Reused across resumes rather than added per launch. A session id is stable
     for the life of the role unless `--fresh` rotates it, so a project that has
     been resumed thirty times gets one node and not thirty.
+
+    Which means the spec is re-read on every resume and the node must be too.
+    It used to carry only status and started_at, so provider and model stayed
+    as they were the day the node was created: edit the roster, restart, and
+    the orchestrator genuinely runs on the new model while `multiagents
+    monitor` — the one place that prints it — keeps naming the old one. The
+    roster change looks like it was ignored when it was in fact applied, which
+    is the expensive direction for this to be wrong in.
     """
     tree = Tree(paths.tree_file, paths.events_file)
     existing = next((n for n in tree.drivers() if n.session == session), None)
     if existing is not None:
-        tree.update(existing.id, status="running", started_at=tree_now())
+        tree.update(existing.id, status="running", started_at=tree_now(),
+                    provider=spec.provider, model=spec.model)
         return existing.id
 
     node = Node(
