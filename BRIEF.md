@@ -210,6 +210,14 @@ Recorded so nobody re-derives them.
 - **`security-advisor` is deliberately NOT on the roster.** It gives design-time
   advice phrased as candidate requirements, and this team builds nothing there is
   a design for. A roster nobody will use costs attention at every decision.
+- **The characterizer stays on opencode, capped at two per context.** The user's
+  decision, 2026-09-16, taken with the alternatives in front of them. Moving it
+  to `claude/sonnet` would buy a visible meter at the cost of competing with the
+  orchestrator's own opus on a subscription that resets in 5 days with no extra
+  credits left — and `voila` runs against the same subscriptions on this machine.
+  Moving it to agy buys no meter at all. Staying put uses the brake that was
+  built for this. If the brake fires mid-context, that context is recorded as
+  half-covered and the review moves on; it is not a reason to retry elsewhere.
 - **The catalog was checked** (`check_model_catalog`, severity `none`). Every pin
   is live and every `opencode-go/*` pin is on the sanctioned $60 monthly tier.
   No repin is forced; the ones proposed are judgements, in
