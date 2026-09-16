@@ -1,0 +1,29 @@
+findings:
+  F1:
+    class: security
+    context: context/review/C1-sandbox.md
+    evidence: 'confirmed twice: (1) a standalone `re` simulation of the generated'
+    first_seen: bfdc29317eebdef5ce71b0e084c295f897c9a8b5
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: bfdc29317eebdef5ce71b0e084c295f897c9a8b5
+      status: open
+    severity: critical
+    status: open
+    summary: An `egress_allowlist` entry containing `|` turns the allowlist into an
+      allow-all
+  F2:
+    class: correctness
+    context: context/review/C1-sandbox.md
+    evidence: '`tests/test_c1_sandbox_harness.py::test_allowlist_admits_exact_and_subdomain_hosts_and_refuses_others`'
+    first_seen: bfdc29317eebdef5ce71b0e084c295f897c9a8b5
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: bfdc29317eebdef5ce71b0e084c295f897c9a8b5
+      status: open
+    severity: medium
+    status: open
+    summary: A non-string `egress_allowlist` entry crashes container config generation
+      with an uncaught `AttributeError`
