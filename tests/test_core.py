@@ -1935,13 +1935,18 @@ def test_both_launched_roles_ship_and_are_distinguishable():
     assert agents["initializer"]["role"] == "initializer"
     for name in ("orchestrator", "initializer"):
         assert agents[name]["launch"] is True
-        brief = agents[name]["instructions"]
-        # The file the config names, not one guessed from the agent's name:
+        briefs = agents[name]["instructions"]
+        briefs = [briefs] if isinstance(briefs, str) else briefs
+        # Every file the config names, not one guessed from the agent's name:
         # the entry may be renamed, and only `role` is load-bearing.
-        assert (shipped_defaults_dir() / "agents" / brief).is_file()
-        # Leading underscore marks the briefs a project must not delete. The
-        # briefs live in folders now, so the convention is about the filename.
-        assert Path(brief).name.startswith("_"), brief
+        for brief in briefs:
+            assert (shipped_defaults_dir() / "agents" / brief).is_file(), brief
+        # Leading underscore marks the briefs a project must not delete. A
+        # launched role names exactly one of those — its identity — and may
+        # name any number of skills alongside it, which are capabilities and
+        # are removable by definition.
+        mandatory = [b for b in briefs if Path(b).name.startswith("_")]
+        assert len(mandatory) == 1, briefs
 
 
 def test_only_the_mandatory_briefs_are_underscored():
@@ -1951,8 +1956,16 @@ def test_only_the_mandatory_briefs_are_underscored():
     agents = _shipped_agents()
     root = shipped_defaults_dir() / "agents"
     underscored = {p.relative_to(root).as_posix() for p in root.rglob("_*.md")}
-    required = {spec["instructions"] for spec in agents.values()
-                if spec.get("launch") and spec.get("instructions")}
+    required = set()
+    for spec in agents.values():
+        if not (spec.get("launch") and spec.get("instructions")):
+            continue
+        briefs = spec["instructions"]
+        required.update([briefs] if isinstance(briefs, str) else briefs)
+    # Skills sit in the same list and are deliberately NOT underscored: the
+    # convention means "deleting this breaks a command", and deleting a
+    # capability leaves a working agent that can do one thing less.
+    required = {b for b in required if Path(b).name.startswith("_")}
     assert underscored == required, (underscored, required)
 
 
@@ -3161,13 +3174,42 @@ def test_the_default_team_ships_the_expected_roles_and_nothing_spare():
     }, sorted(agents)
 
     for name, spec in agents.items():
-        brief = spec.get("instructions")
-        assert brief, name
-        assert (_briefs_dir() / brief).is_file(), brief
+        briefs = spec.get("instructions")
+        assert briefs, name
+        briefs = [briefs] if isinstance(briefs, str) else list(briefs)
+        for brief in briefs:
+            assert (_briefs_dir() / brief).is_file(), brief
         # Everything in the default roster is a team brief, except the one
-        # agent that reports bugs in multiagents itself.
+        # agent that reports bugs in multiagents itself. Skills are held to a
+        # different rule — they are capabilities, attachable to anyone — so the
+        # folder test is about the identity brief, which is the first one.
         folder = "" if name == "bug-reporter" else "team/"
-        assert brief.startswith(folder), (name, brief)
+        assert briefs[0].startswith(folder), (name, briefs)
+        for extra in briefs[1:]:
+            assert extra.startswith("skills/"), (name, extra)
+
+
+def test_the_config_that_defines_the_sandbox_is_not_writable_inside_it(tmp_path):
+    """The project root is mounted writable because agents commit in it, and
+    `.multiagents/config` sits inside it — so project.yaml, which carries
+    egress_allowlist and extra_mounts and mount_docker_socket, was writable by
+    every agent. Not an immediate escape, because nothing in there can restart
+    the container; the change lands on a later run, under a user who did not
+    make it."""
+    from multiagents.executor.docker import DockerExecutor
+    from multiagents.paths import ProjectPaths
+
+    paths = ProjectPaths(tmp_path)
+    paths.config.mkdir(parents=True, exist_ok=True)
+    ex = DockerExecutor(config={}, providers={}, paths=paths)
+
+    mounts = ex.mounts()
+    assert (paths.config, True) in mounts, "config must be mounted read-only"
+    root = [ro for path, ro in mounts if path == paths.root]
+    assert root == [False], "the project root stays writable; agents commit there"
+    # The narrow mount must come after the root it masks, so it wins.
+    assert mounts.index((paths.config, True)) > \
+        next(i for i, (path, _) in enumerate(mounts) if path == paths.root)
 
 
 def test_the_phase_agents_commit_their_artifacts():
@@ -9826,8 +9868,13 @@ def test_the_orchestrator_brief_is_composed_from_core_plus_pipeline():
     project = yaml.safe_load((shipped_defaults_dir() / "project.yaml").read_text())
     briefs = project["teams"]["implement"]["orchestrator"]
 
-    assert isinstance(briefs, list) and len(briefs) == 2, briefs
-    core, pipeline = briefs
+    assert isinstance(briefs, list) and len(briefs) >= 2, briefs
+    # Core first, pipeline second, anything after is a skill. The order is the
+    # composition order, so identity precedes capability.
+    core, pipeline = briefs[0], briefs[1]
+    assert Path(core).name.startswith("_") and "pipeline" in pipeline, briefs
+    for rel in briefs[2:]:
+        assert rel.startswith("skills/"), rel
     for rel in briefs:
         assert (shipped_defaults_dir() / "agents" / rel).is_file(), rel
 
@@ -9878,8 +9925,11 @@ def test_the_initializer_is_exempt_from_teams():
                     agents=agents, models={}, instruction_dirs=[])
 
     init = driver._launched_spec(config, "initializer", "review")
-    assert init.instructions == "team/_initializer.md", \
+    other = driver._launched_spec(config, "initializer", "implement")
+    assert init.instructions == other.instructions == \
+        agents["initializer"].instructions, \
         "the initializer's brief must not vary with the team it is choosing"
+    assert "team/_initializer.md" in config.instruction_parts(init)
     boss = driver._launched_spec(config, "orchestrator", "review")
     assert boss.instructions == ["teams/review/pipeline.md"], \
         "the orchestrator's brief is most of what a team IS"

@@ -249,6 +249,24 @@ class DockerExecutor(Executor):
         for host_path, private_path in self.private_state().items():
             private_path.mkdir(parents=True, exist_ok=True)
             mounts.append((host_path, False))
+
+        # Same trick, for the opposite reason: the project root is mounted
+        # writable because agents commit in it, and `.multiagents/config` sits
+        # inside it — so `project.yaml` was writable by every agent in here.
+        # That file IS this container's boundary: egress_allowlist, extra_mounts,
+        # mount_docker_socket. An agent could widen its own sandbox.
+        #
+        # Not an immediate escape, because none of it takes effect until the
+        # container restarts and nothing in here can restart it. That makes it
+        # worse to reason about rather than better: the damage lands on a later
+        # run, under a user who did not make the change and has no reason to
+        # re-read a config file they already wrote.
+        #
+        # Mounted read-only OVER the writable root, after it, so the narrower
+        # mount wins. The rest of `.multiagents` — run dirs, the event stream,
+        # tree.json — stays writable, because agents genuinely do write there.
+        if self.paths.config.is_dir():
+            mounts.append((self.paths.config, True))
         return mounts
 
     # Keys never carried into a container-private profile. `env` and an
