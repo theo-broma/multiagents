@@ -6867,8 +6867,13 @@ def test_steer_confirms_on_the_first_event_not_a_fixed_sleep(tmp_path):
 # happens. The helpers below exist to break those two habits.
 
 
-def _recording_provider(name, probe):
+def _recording_provider(name, probe, linger="sleep 30"):
     """A fake CLI that writes down the argv it was handed, then idles.
+
+    `linger` is what it does afterwards. `consult()` blocks until its turn is
+    over, so its tests hand it something that answers and exits rather than a
+    sleep to wait out. It has to *say* something: a run that dies having
+    produced nothing is a silent failure, and the runner retries those.
 
     The argv is the only place a resume's provider, model, options and working
     directory are all observable from outside the runner — which is the point:
@@ -6880,7 +6885,7 @@ def _recording_provider(name, probe):
     """
     target = str(probe)
     script = (f'printf "%s\\n" "$@" > "{target}.part"; '
-              f'mv "{target}.part" "{target}"; sleep 30')
+              f'mv "{target}.part" "{target}"; {linger}')
     return {
         "bin": "sh",
         "spawn": {
@@ -6984,6 +6989,217 @@ def test_r7_an_unrouted_run_resumes_exactly_as_it_does_today(tmp_path):
     assert _flag(argv, "--model") == "opencode-go/qwen3.7-plus"
     assert _flag(argv, "--effort") == "high", (
         f"nothing disagreed here, so nothing should have been dropped: {argv}")
+
+
+def test_r7_a_consulted_advisor_keeps_the_model_it_is_actually_running(tmp_path):
+    """The same defect as the steer, one function away, and in scope for R7 by
+    the 2026-09-17 amendment.
+
+    `consult()` resumes a standing conversation from `config.agent(name)` and
+    never looks at the node it just found, so an advisor that was routed to a
+    fallback at spawn time is resumed under the preference it was routed away
+    from — with the preference's options attached to the fallback's model,
+    which is the pair the CLI refuses. A steer at least ends a task run; an
+    advisor is consulted repeatedly, so this one fails every turn."""
+    import asyncio
+    from multiagents.tree import Node
+
+    probe = tmp_path / "argv.txt"
+    spec = AgentSpec("advisor", "opencode", "opencode-go/qwen3.7-plus",
+                     effort="high", conversational=True,
+                     models={"agy": {"model": "gemini-3.8-flash-high",
+                                     "effort": ""}})
+    r = _runner(tmp_path, {"advisor": spec},
+                {"opencode": _recording_provider(
+                     "opencode", probe, "echo answered; exit 0"),
+                 "agy": _recording_provider(
+                     "agy", probe, "echo answered; exit 0")})
+    # The standing conversation, as routing left it: on agy, with agy's model.
+    r.tree.add(Node(id="ag-1", agent="advisor", provider="agy",
+                    model="gemini-3.8-flash-high", parent=None, depth=1,
+                    status="idle", session_id="s-1", worktree=str(tmp_path),
+                    conversation=True, turns=1,
+                    routed_from="opencode",
+                    routed_why="opencode is constrained; falling back to agy"))
+
+    result = asyncio.run(r.consult("advisor", "second question"))
+
+    assert probe.exists(), f"nothing was resumed: {result}"
+    argv = _recorded_argv(probe)
+    assert _flag(argv, "--provider") == "agy", (
+        f"the conversation lives in agy's session; resuming it anywhere else "
+        f"loses the context consult() exists to keep: {argv}")
+    assert _flag(argv, "--model") == "gemini-3.8-flash-high", (
+        f"resumed with the configured preference, not the running model: {argv}")
+    assert "opencode-go/qwen3.7-plus" not in argv
+    assert "--effort" not in argv, (
+        f"effort belongs to the opencode namespace and must not travel onto "
+        f"an agy model: {argv}")
+    assert _flag(argv, "--resume") == "s-1", "and it is still the same session"
+
+
+def test_r9_a_reader_never_sees_a_steered_run_as_terminally_ended(tmp_path):
+    """bug-8195f2. `steer()` stops the run before it respawns it, and `stop()`
+    is the same function a genuine cancellation uses: it writes
+    `cancelled` / "stopped by parent" unconditionally. The corrective write back
+    to `running` lands only after the respawn. Anyone reading the tree in
+    between is told the run is over, and the reason names a parent that called
+    nothing.
+
+    Observed five times during the review, and it is not a race that needs
+    luck to hit: the respawn has to await, so a reader that yields is scheduled
+    inside the window every time. A polling reader — `wait_for_any` sleeps a
+    second between looks — may or may not land in it, which is exactly why the
+    tight reader below is the honest test. If no terminal status is ever
+    written, no reader of any cadence can see one."""
+    import asyncio
+    from multiagents.tree import Node
+
+    probe = tmp_path / "argv.txt"
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": _recording_provider("p", probe)})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
+                    parent=None, depth=1, status="running", session_id="s-1",
+                    worktree=str(tmp_path)))
+
+    async def scenario():
+        seen = []
+        finished = asyncio.Event()
+
+        async def reader():
+            # What a concurrent watcher does, at the only cadence that cannot
+            # miss anything. Consecutive duplicates are collapsed so the record
+            # is the sequence of states, not a count of reads.
+            while not finished.is_set():
+                node = r.tree.get("ag-1")
+                if node is not None:
+                    state = (node.status, node.reason)
+                    if not seen or seen[-1] != state:
+                        seen.append(state)
+                await asyncio.sleep(0)
+
+        watcher = asyncio.ensure_future(reader())
+        try:
+            result = await _steer_recording(r, "ag-1", "change course", probe)
+        finally:
+            finished.set()
+            await watcher
+        return result, seen
+
+    result, seen = asyncio.run(scenario())
+
+    assert probe.exists(), f"nothing was respawned, so nothing was observed: {result}"
+    terminal = [state for state in seen if state[0] not in ("pending", "running")]
+    assert not terminal, (
+        f"a reader watching this steer saw {terminal} — a run that was being "
+        f"resumed reported as ended, and the reason blames a parent that "
+        f"called nothing. Full sequence: {seen}")
+
+
+def test_r9_a_genuine_stop_still_reports_cancelled_by_the_parent(tmp_path):
+    """The other half, and the one a blunt fix breaks: `stop_agent`'s own path
+    is correct and other things depend on it. Whatever makes the steer window
+    invisible must not also make a real cancellation invisible — the two cases
+    have to stay distinguishable from outside, because acting on the wrong one
+    costs a branch."""
+    import asyncio
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "sleep 30"]}}})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
+                    parent=None, depth=1, status="running", session_id="s-1",
+                    worktree=str(tmp_path)))
+
+    result = asyncio.run(r.stop("ag-1"))
+
+    assert result["status"] == "cancelled", result
+    node = r.tree.get("ag-1")
+    assert node.status == "cancelled"
+    assert "parent" in node.reason.lower(), (
+        f"a parent-initiated stop must still say so; got {node.reason!r}")
+
+
+def test_r8_a_truncated_read_only_run_resumes_in_a_real_working_directory(tmp_path):
+    """bug-97a0c7. `steer_agent` on a truncated run died before the model was
+    reached:
+
+        OCI runtime exec failed: exec failed: Cwd must be an absolute path
+
+    The mechanism is narrower than the ticket guessed. `_drop_if_empty`
+    reclaims the worktree of a `writes: false` agent whose branch has no
+    commits and writes `branch=""` / `worktree=""` onto the node — which is
+    exactly the population this cost: read-only agents that produced nothing.
+    `steer()` then resumes into `Path("")`, which is `.`, and docker refuses a
+    relative Cwd.
+
+    Two things this must assert, because one of them alone is passed by a fix
+    that fixes nothing. Under the local executor a relative cwd silently
+    resolves to wherever the server happens to be, so `is_absolute()` on its
+    own goes green for `Path(node.worktree).resolve()` — which turns `.` into
+    the server's cwd and resumes the agent in somebody else's checkout. Hence
+    the second assertion.
+
+    And it deliberately does NOT require the directory to be under the project
+    root: `ProjectPaths.worktree()` lives under `state_root()`, which is
+    outside it. Somewhere real and somewhere specific is the whole
+    requirement."""
+    import asyncio
+    from multiagents.tree import Node
+
+    probe = tmp_path / "argv.txt"
+    spec = AgentSpec("reader", "p", "m", writes=False)
+    r = _runner(tmp_path, {"reader": spec}, {"p": _recording_provider("p", probe)})
+    # The node as `_drop_if_empty` leaves it: the checkout is gone and both
+    # fields are empty strings, not None.
+    r.tree.add(Node(id="ag-1", agent="reader", provider="p", model="m",
+                    parent=None, depth=1, status="truncated",
+                    reason="the run was cut off; RESUMABLE: steer_agent(...)",
+                    session_id="s-1", branch="", worktree=""))
+
+    result = asyncio.run(_steer_recording(r, "ag-1", "carry on", probe))
+
+    assert probe.exists(), (
+        f"the truncated run was never respawned, so the advice its own status "
+        f"string gives the caller cannot be followed: {result}")
+    cwd = _flag(_recorded_argv(probe), "--cwd")
+    assert Path(cwd).is_absolute(), (
+        f"resumed into {cwd!r} — a relative path, which is what docker "
+        f"rejects with 'Cwd must be an absolute path'")
+    assert Path(cwd).resolve() != Path.cwd().resolve(), (
+        f"resumed into {cwd!r}, which resolves to the server's own working "
+        f"directory. Making `.` absolute is not resolving it: the agent has "
+        f"to get a directory of its own back, not whatever the runner "
+        f"happened to be standing in")
+
+
+def test_r8_a_steer_that_did_not_happen_does_not_claim_it_was_delivered(tmp_path):
+    """The second half of R8, widened by the 2026-09-17 amendment: not just the
+    unresolvable-cwd path, but any of them. `steered: false` alongside "the
+    steer was delivered" is self-contradictory whatever caused it, and a caller
+    cannot act on a result that asserts both — it costs a turn to disbelieve.
+
+    Driven here through the easiest failure to reach from outside, a run that
+    dies the moment it is respawned. Which path produced it is not the point;
+    the pairing is."""
+    import asyncio
+    import re
+    from multiagents.tree import Node
+
+    r = _runner(tmp_path, {"worker": AgentSpec("worker", "p", "m")},
+                {"p": {"bin": "sh", "spawn": {"args": ["-c", "exit 1"],
+                                              "resume": ["-c", "exit 1"]}}})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
+                    parent=None, depth=1, status="running", session_id="s-1",
+                    worktree=str(tmp_path)))
+
+    result = asyncio.run(r.steer("ag-1", "change course"))
+
+    assert result["steered"] is False, result
+    text = " ".join(str(v) for v in result.values())
+    claimed = re.findall(r"(?:was|were|has been|have been)\s+delivered", text)
+    assert not claimed, (
+        f"reports steered=False and {claimed[0]!r} in the same result: {result}")
 
 
 def test_the_bug_reporter_is_told_where_to_stop_guessing():
