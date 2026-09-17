@@ -1,462 +1,254 @@
-# BRIEF — multiagents reviews itself
+# BRIEF — multiagents repairs itself
 
-**Phase: review.** This project builds no features in this phase. The product is
-findings, a characterization suite, and a report. Both the findings and the
-suite are committed and merged.
+**Phase: implement.** The review is done. `context/review/REPORT.md` has the
+findings, the ledger has their state, and ~380 characterization tests are merged.
+This phase turns the chosen findings into work.
 
-`team: review` is already set in `.multiagents/config/project.yaml`.
+`team: implement` is already set in `.multiagents/config/project.yaml`.
+
+The review phase's brief is kept at
+`context/review/BRIEF-review-phase.md` — read it for the two invariants
+(providers are plugins, agy carries Gemini only), which still hold.
 
 ---
 
 ## What this project is
 
-`multiagents` is an orchestration tool. It runs a tree of LLM agents against a
-codebase: a root orchestrator delegates to specialist subagents, each of which
-works in its own git worktree on its own branch, and the parent merges what it
-accepts. Agents run either as local subprocesses or — as here — inside one
-Docker container per project, on an internal network with no route out except
-through a filtering proxy.
+`multiagents` is an orchestration tool: a root orchestrator delegates to
+specialist subagents, each in its own git worktree on its own branch, and the
+parent merges what it accepts. Agents run inside one Docker container per
+project, on an internal network whose only route out is a filtering proxy.
 
-16,860 lines of Python across 33 modules under `src/multiagents/`. The suite is
-547 tests in a single file, `tests/test_core.py` (10,945 lines).
+The thing that shapes every task here:
 
-The thing that makes this review unusual is the only thing an agent needs to
-understand before it starts:
+> **The codebase you are changing is multiagents itself.** You are running
+> inside it. Your worktree is a checkout of the source that spawned you, merged
+> your branch, and metered your tokens.
 
-> **The codebase under review is multiagents itself.** The agent reading it is
-> running inside it. Its worktree is a checkout of the very source that spawned
-> it, merged its branch, and metered its tokens.
-
-Everything below that is surprising follows from that sentence.
+So a defect you fix is a defect in the machine you are standing on. That is why
+phase 1 exists and why it comes first.
 
 ---
 
-## The two channels, and which one to use
-
-This is the decision most likely to be got wrong, because the review pipeline's
-own wording assumes it can never happen.
-
-The pipeline says every defect in the reviewed code becomes an `F<n>` finding,
-and says `bug-reporter` is for defects in **multiagents itself** — "never for
-the code you are reviewing." Here those are the same code, so that sentence
-cannot be followed as written. The rule for this project replaces it:
-
-- **A defect found by READING the code is an `F<n>` finding.** It goes in
-  `context/review/<context>.md`, into the ledger via `record_findings`, into the
-  report, and comes back as work for the implement team. This is the default and
-  it covers the overwhelming majority of what the review produces.
-
-- **A defect OBSERVED in multiagents' runtime behaviour during this review run
-  is a `TICKET`**, written by `bug-reporter`. A tool returning a shape its own
-  description does not describe; a `merge_agent` reporting success having merged
-  nothing; a status contradicting the events; an agent failing in a way the
-  orchestrator cannot explain.
-
-The cut is **read it** versus **it happened to me**. It is unambiguous in
-practice: a tool failing under you is a visceral event, not a judgement call.
-
-### Why the ticket channel is worth more here than usual
-
-`bug-reporter` is normally told, truthfully, that it cannot read the multiagents
-source: it works in a worktree of the *user's* project, and under docker the tool
-is not mounted in the container at all. Commit `95beb2a` stopped sending it after
-code it could not reach, because both blocking tickets this project had received
-ended with a paragraph apologising for the restriction instead of a paragraph
-about the bug.
-
-Commit `a5b7a47` inverted that for this case. The runner detects a multiagents
-checkout by the shape of the tree — so a fork or a rename still counts, and a
-directory that merely shares the name does not — and tells the reporter that it
-**can** read the source, asking it for `path:line` and for **which test should
-have caught the defect**.
-
-So a ticket here carries something no static reader can produce: live runtime
-evidence *and* a source citation. That is the combination worth having, and it is
-why this channel stays open rather than being folded into `F<n>`.
-
-**The publishing rules do not relax.** A ticket is still written to be published
-unread. A path under `src/` is the tool's own layout and is fine. A path under a
-home directory is still the user's business and is not.
-
----
-
-## The invariant the review must guard: providers are plugins
-
-**Stated by the user, 2026-09-16, as a point of particular vigilance.**
-
-> A provider is a plugin. All of a provider's logic lives in its config and in
-> its own script. None of it is hardcoded in the main program.
-
-This is not a preference about tidiness. It is what makes a fourth provider an
-afternoon's work instead of a refactor, and every hardcoded name is a place where
-adding one silently does nothing.
-
-### Where the seam is
-
-Both halves are tracked in the repo, so an agent in a worktree can read them:
-
-- `src/multiagents/defaults/providers.yaml` — `bin`, `auth`, `spawn`,
-  `usage_mode`, `models_cmd`, `models_parse`, `home_links`, `stream` per provider.
-- `src/multiagents/defaults/providers/{claude,agy,opencode}.sh` — the actions.
-
-The main program reaches them through `scripts.run_action()` and
-`scripts.exec_action()`, by provider **name**, never by branching on which name it
-is. `budget.read_provider()` asks the script FIRST and only then falls back;
-`budget.read_all()` is driven by the loaded providers map, and its docstring
-records that it used to be a hardcoded three-name table in which a newly added
-provider could never appear at all. That fix is the invariant in action.
-
-### The check, which is mechanical
-
-```
-grep -rnE '"(claude|opencode|agy)"|'"'"'(claude|opencode|agy)'"'"'' src/
-```
-
-**Any hit not in the baseline below is a finding.** Do not report this as a
-matter of judgement or style; it is a grep with a known answer.
-
-### The baseline — 5 known sites, already argued
-
-The invariant largely holds: ten occurrences in 16,860 lines. The review's job is
-**not to re-litigate these**, and a finding that merely restates one without new
-evidence should not be filed. The job is to judge whether each argument still
-holds, and to catch anything new.
-
-| site | what | status |
-|---|---|---|
-| `budget.py:592` | `_BUILTIN = {"claude": ..., "opencode": ..., "agy": ...}` | **argued**: a fallback used only when a script has no `budget` action. Claude's quota is an undocumented cache with several bucket shapes and an overage block; the comment argues parsing it defensively in shell would be worse code in two places. **The weakest point of the invariant — look here first.** |
-| `budget.py:663` | `builtin() if builtin is read_claude else builtin(spent)` | **not argued**: a special case keyed on the identity of one provider's function, because its signature differs. A real smell, and the mechanism by which the fallback table leaks into the dispatcher. |
-| `budget.py:509` | `~/.local/share/opencode/auth.json` hardcoded | **questionable**: a credential path in the main program, while `providers.yaml` already carries `home_links` for exactly this. Possible duplicate source of truth — verify before filing. |
-| `docker.py:774` | `AUTH_PROVIDER = "claude"` | **argued**: the auth proxy speaks one upstream's protocol and swaps an Anthropic bearer. The comment records that taking whichever vault came first out of a dict already caused a real fault — agy's vault mounted into a proxy talking to Anthropic. The honest reading is that the proxy is structurally single-provider; say so as a design finding if you think it should not be. |
-| `cli.py:2502` / `auth.py:142` | `default="agy"`; `"run 'agy' to log in"` in a generic marker list | **unargued and minor**: a UX default and one provider-specific phrase. Low severity, but they are how the invariant erodes. |
-
-### The finding worth making
-
-**No test asserts this invariant.** Two tests cover the fallback *behaviour*
-(`test_unimplemented_budget_falls_back_to_a_builtin`,
-`test_read_all_hands_the_provider_name_to_executor_for`); none asserts that no new
-provider name appears in `src/`. So the invariant is held by discipline, not
-enforced — and this project already knows that distinction, because the roster's
-$60 tier note says in as many words that a test pins the roster while the list
-itself is maintained by hand.
-
-The highest-value recommendation this review can make about providers is
-therefore a **lint test that pins the baseline above**: any provider literal in
-`src/` outside an allowlist fails the suite. That is implement-team work and does
-not get built in this phase — file it as a finding with that shape.
-
-### Who looks
-
-The `auditor`, on whichever context covers `budget.py`, `providers.py`,
-`auth.py`, `scripts.py` and `executor/docker.py` — this is exactly its remit:
-what is wrong that runs perfectly well. Ranking-wise this should raise that
-context's priority; a plugin seam that has quietly stopped being one costs the
-whole extensibility claim, and nothing fails while it happens.
-
----
-
-## Scope
-
-### Branch
-
-**The review runs on `refactor/split-consume` at HEAD.** That branch is 40
-commits ahead of `main` and nothing is behind it; it is the de-facto trunk.
-`base_branch` in `project.yaml` is empty, so agents branch from HEAD at spawn,
-which is already correct — no configuration change is needed.
-
-Considered and rejected: merging the branch to `main` first. Forty commits of
-unreviewed refactor is precisely the surface the review exists to look at, and
-merging it before review would land it unexamined to make the review tidier.
-
-### Contexts
-
-The cartographer's ceiling is seven bounded contexts. **The first pass covers the
-top two or three, not seven.** The reason is budget and it is stated below.
-
-**Rank by blast radius, not by line count.** This is an explicit instruction to
-the cartographer and it overrides the instinct to start with the biggest file.
-`cli.py` is 2,524 lines of mostly low-risk argument-parsing glue. The danger is
-concentrated where being wrong costs a credential, a lost branch, or a quota:
-
-- `executor/docker.py` + `authproxy.py` — the sandbox and the egress boundary.
-  This is where multiagents' entire security claim lives: the allowlist proxy,
-  the per-agent HOME, the refused docker socket, credential isolation. Agents
-  inside it hold real credentials.
-- `runner.py` + `driver.py` — agent lifecycle, stream interpretation, the prompt
-  and environment block handed to each agent.
-- `budget.py` + `providers.py` — quota reading, failover, the circuit breaker.
-- `tree.py` — concurrent state. Where being wrong costs work already done.
-
-That is a suggestion to rank against, not the answer. The cartographer measures
-and decides; the map then goes to the user.
-
----
-
-## The second invariant: agy carries Gemini only
-
-**Stated by the user, 2026-09-16.**
-
-> `agy` is for Gemini models. Its resold Claude and GPT models are not to be
-> pinned.
-
-The reason is measurement, and it is the same reason the budget section gives
-for distrusting failover. agy resells `claude-sonnet-4-6` and
-`claude-opus-4-6-thinking` from a pool that `budget_status` reports with
-`counted: false` — separate from the Gemini pool and readable by nothing. A pin
-there trades a provider whose spend can be seen for one whose cannot.
-
-**The live project roster now complies.** Three fallbacks were repinned:
-`implementer` and `harness` and `characterizer` all carried
-`agy: claude-sonnet-4-6`.
-
-### The finding to file
-
-**The shipped defaults do not comply**, and they are what every new project
-starts from — so `multiagents init` reintroduces the violation on each one:
-
-| site | pin |
-|---|---|
-| `src/multiagents/defaults/agents.yaml:225` | `agy: claude-sonnet-4-6` |
-| `src/multiagents/defaults/agents.yaml:245` | `agy: claude-opus-4-6-thinking` |
-| `src/multiagents/defaults/agents.yaml:421` | `agy: claude-sonnet-4-6` |
-| `src/multiagents/defaults/agents.yaml:447` | `agy: claude-sonnet-4-6` |
-| `src/multiagents/defaults/agents/library/README.md:86,146` | both, in paste-ready blocks |
-
-These were **not** changed during initialisation: they are production source, and
-this phase builds nothing. File them as a finding, with the same shape as the
-provider-plugin one — the fix is a lint assertion that no `agy:` pin names a
-non-Gemini model, so the rule is enforced rather than remembered.
-
-Note the second-order effect before judging severity: the library README blocks
-are *copied by the initializer into proposals*, so one stale block propagates
-into projects that never read the defaults file.
-
-## The roster's own guard rail does not cover this project
-
-`test_a_checking_pair_never_collapses_onto_one_model` reads `_shipped_agents()` —
-the defaults. **The live `.multiagents/config/agents.yaml` is asserted by
-nothing**, and the pair list it checks contains only implement-team pairs
-(`tester`/`adversary`/`reviewer` against the three implementer tiers). No review
-team pair is in it.
-
-That is how this roster arrived at a real collision that nothing caught: the
-cartographer and the characterizer were both pinned to `claude/opus`, primary,
-so they collided always rather than only during an outage. Found by hand,
-2026-09-16, and fixed by moving the characterizer to sonnet.
-
-**Another finding to file**, and the most valuable of the three, because it is
-the one that would have caught the other two: extend the property to the live
-roster and to the review team's pairs.
-
-### One known exception, recorded so it stays deliberate
-
-`harness` and `characterizer` are both `claude/sonnet`, and both fall to
-`opencode-go/kimi-k2.7-code`. They collide in every direction, and it is
-accepted rather than fixed:
-
-- They are a funnel, not a checking pair. The characterizer never judges the
-  harness; it consumes the API the harness reports.
-- The dangerous case is already surfaced to a human. When the harness finds a
-  context cannot be exercised without changing production code, the pipeline
-  stops that context and the harness files it as a `critical` architecture
-  finding — so its judgement is read, not silently applied.
-- **In this project specifically it bounds almost nothing.** The suite is
-  already green at 547 tests, so phase 3 has little to build. See below.
-
-Revisit it on a project where the harness has real work to do.
-
----
-
-## Constraints that are real
-
-### Budget is the binding constraint on this review
-
-Measured 2026-09-16:
-
-| provider | used | resets | measurable? |
-|---|---|---|---|
-| opencode | **85% of the monthly window** | Oct 5 — 19 days out | yes |
-| claude | 57% | in 5 days; extra-usage credits already exhausted | yes |
-| agy (Gemini pool) | unknown — its budget script times out | unknown | **no** |
-
-opencode is where four review roles are pinned, including `characterizer`, which
-is the volume role: several run in parallel per context, at 1800s each. Roughly
-15% of a monthly window is the budget for this entire review.
-
-Two consequences, both binding:
-
-1. **Set `budget_tag` (`ctx-<name>`) and `budget_tokens` on every spawn for a
-   context**, as the pipeline requires, and set them low enough that the brake
-   fires early rather than as the window empties. Check `budget_tag_status`
-   before each stage rather than discovering the ceiling when `start_agent`
-   refuses.
-2. **Cap parallelism.** Two characterizers per context, not four. When a budget
-   runs out, that is the mechanism working: record what the context did not get
-   and move on. Do not carry on under a different tag.
-
-The configured fallback chain is `opencode → agy → defer`. Note what that means
-honestly: failing over moves a high-volume load onto the **one pool nobody can
-measure**. That is a degradation, not a safety net. Prefer letting the per-context
-brake fire over relying on failover.
-
-### The suite already exists, and that changes phase 3 and phase 4
-
-547 tests, green inside the agent container at HEAD: **545 passed, 3 skipped**.
-
-- **Phase 3 (harness) is nearly free here.** There is little to build. If the
-  harness reports it has nothing substantial to add for a context, that is the
-  correct result — merge it and move on, do not manufacture work for it.
-- **Phase 4 (characterizers) shifts from pinning to gap-hunting.** With a green
-  547-test suite, the valuable job is not recording what the code does from
-  scratch; it is reading the existing tests for the assigned context and pinning
-  the **untested edge cases**. The flagged half of their output — behaviours they
-  had to pin that look wrong, tests that passed where they expected failure —
-  remains the most valuable thing they produce.
-- **The value of this review concentrates in phase 5**, the auditor and the
-  adversary, and in mutation testing against a suite that already claims to
-  cover this code.
-
-### Characterizers must each write their own file
-
-`tests/` holds one test module of 10,945 lines. Characterizers are add-only by
-configuration, and the pipeline reads that as "so they cannot collide" — which is
-**false when every one of them appends to the same file**. They would conflict at
-the same end-of-file hunk on merge.
-
-**Each characterizer writes to its own new file, `tests/test_char_<context>.py`.**
-Pytest discovers `conftest.py` fixtures anywhere in the tree, so the existing
-fixtures and helpers remain available with no import gymnastics.
-
-### Running the suite
+## Running the suite
 
 ```
 uv run --frozen pytest
 ```
 
-**Green is `545 passed, 3 skipped`.** Re-verified 2026-09-16 from a fresh
-worktree inside the container — that is, from exactly where you stand — rather
-than taken on trust from the commit that first claimed it.
+**Green is `949 passed, 1 failed, 3 skipped`** — measured 2026-09-17 from a
+fresh worktree in the container with an agent's environment. The suite grew from
+548 to 953 tests when the review's characterization work merged.
 
-`uv` is mounted from the host at `~/.local/bin/uv`, `~/.cache/uv` is mounted so
-`uv.lock` resolves without the network, and the executor forwards the host PATH,
-so `uv` is simply on your PATH. Your worktree has no `.venv`; `uv` builds one for
-it. That is correct — do not go looking for the project's.
+**The 1 failure is expected, and it is `F100`.**
+`tests/test_c2_provider_harness.py::test_read_provider_caches_until_invalidated`
+passes in isolation and fails in the full suite, because `budget._cache` is
+keyed only by provider name and tests bleed state through it. It is scheduled as
+phase 1 item 8. **Until that lands, one red test is the baseline, not a
+regression you caused.** After it lands, green means green and the number is 953.
 
-The 3 skips shell out to `docker`, which is deliberately absent in the container.
-**Three skips are the expected result, not a defect, and not something to chase.**
+The 3 skips shell out to `docker`, deliberately absent in the container.
 
-If you see any other number, read the two traps below before concluding anything
-about the code. Both produce failures that look like defects and are not, and
-this project has burned a run on each of them already.
+`REPORT.md` states the suite fails 17 tests in an agent container with
+`PermissionError: can_spawn is false`. That did not reproduce on 2026-09-17 with
+`MULTIAGENTS_CAN_SPAWN=false` set — one failure, not seventeen. Treat the 17 as
+unconfirmed. If you see them, say so and say what your environment had that this
+measurement did not.
 
-#### Trap 1 — the project directory's `.venv` is poisoned (affects humans, not you)
+Two traps that produce failures which are not defects:
 
-The project root is bind-mounted into the container at its own path, so the host
-and the container SHARE `.venv`. Whichever wrote it last owns it, and
-`.venv/bin/pytest` currently carries the shebang `#!/w/.venv/bin/python` — a
-container path from an older image layout. On the host that interpreter does not
-exist, so a bare `uv run --frozen pytest` in the project root silently runs a
-DIFFERENT pytest without `mcp` installed, and reports **7 failures**, three of
-them `ModuleNotFoundError: No module named 'mcp'`.
+- **Running from the project root on the host.** The root is bind-mounted into
+  the container, so host and container share `.venv`, and `.venv/bin/pytest`
+  carries a stale container-path shebang. A bare `uv run --frozen pytest` there
+  runs a different pytest without `mcp` and reports 7 phantom failures. Use
+  `uv run --frozen python -m pytest` in the project root. This does not reach
+  you: your worktree has no `.venv` and `uv` builds you a clean one.
+- **A bare `docker exec` is not an agent.** No git identity → 6 git tests fail.
+  No forwarded PATH → `uv: not found`. Both are the harness.
 
-`uv run --frozen python -m pytest` bypasses the console script and is correct
-everywhere. It is the safer command for anyone working in the project root.
-
-This does not reach you: you are in a worktree, `.venv` is gitignored so it is
-not in your checkout, and the one `uv` builds for you is clean. It is recorded
-because it is a finding, and because the maintainer hits it every time.
-
-#### Trap 2 — a bare `docker exec` is not an agent
-
-Two failure modes, both measured, both harness rather than code:
-
-- **No git identity** → 6 failures, all git operations
-  (`test_a_forgotten_mutation_is_reverted_rather_than_merged` and friends). A
-  real agent gets a `.gitconfig` from `prepare_home`. A bare `docker exec` does
-  not.
-- **No PATH** → `uv: not found`. The executor forwards the host PATH; `docker
-  exec` does not.
-
-`a5b7a47` records the same class of mistake being made and corrected before.
-**If a failure looks environmental, it probably is.** Say so and check, rather
-than filing it.
-
-#### The test-isolation finding, which is real
-
-`test_the_claude_script_uses_the_container_profile_only_where_it_should` builds
-its environment with `{**os.environ, ...}` and sanitises only `CLAUDE_CONFIG_DIR`.
-It leaves `MULTIAGENTS_PRIVATE_VAULT` in place, and `claude.sh` prefers the vault
-over the profile the test set up — deliberately, since the host must never take
-state from a file the sandbox can edit. So the test asserts against the real
-vault and fails with `assert 0 == 10`.
-
-It passes for you: agents have no `MULTIAGENTS_PRIVATE_VAULT`. It fails for
-anyone running the suite from inside a multiagents session on the host, which is
-precisely what dogfooding this project means. `claude.sh` is correct; the test is
-not isolated. **File it.**
-
-`.multiagents/` is gitignored, so an agent in a worktree does not see the live
-config. The agent briefs that ship with the tool are tracked, under
-`src/multiagents/defaults/agents/`.
+**If a failure looks environmental, it probably is.** Check before filing.
 
 ---
 
-## Decisions already taken, and why
+## Phase 1 — repair the tool, before using it
 
-Recorded so nobody re-derives them.
+**This is the whole first phase and nothing else starts until it lands.**
 
-- **Review runs on `refactor/split-consume`, not `main`.** See Scope.
-- **Two channels, split by read-it vs it-happened-to-me.** See above.
-- **Two to three contexts in the first pass, not seven.** Budget.
-- **Rank by blast radius, not LOC.** A large parser is not a large risk.
-- **One new test file per characterizer.** Merge mechanics.
-- **agy carries Gemini only.** The user's constraint, 2026-09-16. The live
-  roster complies; the shipped defaults do not, and that is a finding. Its own
-  section above.
-- **The characterizer is `claude/sonnet`, not opus.** See the revised budget
-  decision below.
-- **Providers are plugins, and the review guards it.** The user's constraint,
-  stated 2026-09-16. It has its own section above, with a grep, a baseline of 5
-  argued sites, and the finding worth making.
-- **`security-advisor` is deliberately NOT on the roster.** It gives design-time
-  advice phrased as candidate requirements, and this team builds nothing there is
-  a design for. A roster nobody will use costs attention at every decision.
-- **The characterizer runs on `claude/sonnet`, capped at two per context.**
-  Revised 2026-09-16, replacing an earlier decision to keep it on opencode. The
-  roster had moved it to `claude/opus`, which was rejected on two counts: it is
-  the volume role on the same subscription as the orchestrator's own opus (57%
-  used, resets in 5 days, extra-usage credits already spent), so parallel runs
-  could starve the one context that cannot be replaced; and it collided with the
-  cartographer, also opus. Sonnet keeps the capacity gain at a fraction of the
-  cost and breaks the collision.
-  **The starvation risk is reduced, not removed** — it is still the
-  orchestrator's subscription. Cap parallelism at two, set `budget_tokens` per
-  context, and if the brake fires mid-context, record that context as
-  half-covered and move on. It is not a reason to retry elsewhere.
-- **`545 passed, 3 skipped` is green**, re-measured rather than inherited, with
-  the two traps that produce false failures written down beside it.
-- **The catalog was checked** (`check_model_catalog`, severity `none`). Every pin
-  is live and every `opencode-go/*` pin is on the sanctioned $60 monthly tier.
-  No repin is forced; the ones proposed are judgements, in
-  `.multiagents/proposals/agents.yaml`.
+The review filed **7 blocking tickets** against multiagents itself. They are not
+an upstream queue here — the user is the maintainer, and three of them actively
+break the tool this team is running on. Fixing the allowlist while the container
+is killing its own agents is work you will do twice.
+
+Read each with `list_tickets`. **Every one carries a proposed fix and names the
+test that should have caught it** — write that test, not merely a test.
+
+| # | ticket | what it costs |
+|---|---|---|
+| 1 | `bug-cfdc71` | The workspace container has no PID 1 reaper. Fork-heavy work — running this suite, i.e. your normal job — leaves zombies until `pids_limit: 512` is exhausted. Measured: 509 processes, 505 zombies, then every agent dies with signal-shaped exits whose text blames Bun and innocent providers. Proposed fix: add `--init` to `run_args()`. **Do this one first.** |
+| 2 | `bug-565863` | `budget_tag` enforcement and reporting sum raw usage keys instead of `token_count()`, which already exists and fixes exactly this elsewhere. Claude spend counts as zero. **This is why the review covered 2 of 7 contexts.** |
+| 3 | `bug-08f9b3` | `harness` and `reporter` cannot revise their own output. `harness` omits `readonly_paths` where it needed `[]` — omission inherits the list rather than clearing it. A test encodes the bug by asserting the key is absent. |
+| 4 | `bug-ad011c` | Steering a fallback-routed run rebuilds the command with the *preferred* provider's model and effort flag, killing the run. |
+| 5 | `bug-97a0c7` | The documented recovery for a truncated run (`steer_agent`) fails with `Cwd must be an absolute path`, turning a truncated run into a permanent loss. |
+| 6 | `bug-8195f2` | `wait_for_agents` reports a live, being-resumed agent as terminally `cancelled: "stopped by parent"`, because `steer()` reuses the user-facing `stop()` path. |
+| 7 | `bug-e1cb10` | `budget_status` omits claude's short rolling window, reporting `severity: normal` and "all providers have headroom" while the quota guard sees minutes to empty. |
+| 8 | **`F100`** | `budget._cache` keyed only by provider name; tests bleed state. The one live red test. Scheduled here because it is what makes the suite trustworthy for everyone after it. |
+
+**Close each ticket with `resolve_ticket` when its fix merges.** A ticket whose
+fix landed and which still reads `awaiting_user` will be refiled by the next
+review.
+
+---
+
+## Phase 2 — the three rewrites
+
+Accepted by the user, 2026-09-17, as rewrites rather than fixes. They are the
+expensive decisions and they were taken deliberately rather than sliding past
+inside a list.
+
+All three live in `write_proxy_config`. Ten of the review's findings come from
+one line: `host.replace(".", r"\.")` as the entire escaping strategy.
+
+**1. Escape every ERE metacharacter** — `F13`, and with it `F1`, `F12`, `F14`.
+
+Today only the literal dot is escaped. POSIX ERE alternation has the lowest
+precedence of any operator, so an entry `evil.com|.*` produces a pattern
+matching any host — `F1`, and it is critical. Unbalanced `(` or `[` produce an
+invalid line that crashes tinyproxy's evaluation on every request — `F13`.
+
+One change to a complete escape resolves all four. **Verify each id explicitly
+against its own reproduction; do not assume three went green because the fourth
+did.**
+
+**2. Make the proxy suite load-bearing** — `F50`, and with it `F51`–`F54`.
+
+`F50` is the review's most consequential finding: deleting one line,
+`FilterDefaultDeny Yes`, inverts the proxy from allow-list to open relay, and
+**all 48 characterization tests still pass**. The suite validates pattern
+generation and never validates the directives that decide what those patterns
+mean.
+
+Rewrite the function and its suite together. The tests must assert
+`FilterDefaultDeny Yes`, `FilterType ere`, `FilterCaseSensitive Off`,
+`FilterURLs Off` and the `FilterFile` path are each present and correct.
+`F51`–`F54` are the same work: each is a directive mutation nothing catches.
+
+**3. Reject bare generic suffixes** — `F10`.
+
+An entry like `com` acts as a wildcard across unrelated hosts, because the regex
+anchors on `(^|\.)` and accepts any prefix. Separate from item 1 on purpose:
+escaping metacharacters does not make `com` safe — the defect is the anchor, not
+the escaping. Either validate each entry as a plausible hostname, or require a
+dot-separated structure.
+
+---
+
+## Phase 3 — the rest of the six the report led with
+
+**1. The cache that defends its own defect** — `F150`, `F122`, `F154`.
+
+`F150` first, and as the opening move rather than a surprise:
+`test_cache_hit_overwrites_spent_instead_of_merging_and_mutates_the_cached_object`
+asserts the broken behaviour under a name that reads like a deliberate
+invariant. Whoever fixes `F122` without knowing this sees a red test and
+reverts. Delete or invert it, then fix `F122`, then pin `F154` — the correct
+fresh-read merge is itself untested, so a fix matched against it leaves the
+thing it was matched against undefended.
+
+`F50` and `F150` together are the review's real lesson: a characterization suite
+can fail in both directions, by not noticing a defect and by protecting one.
+
+**2. Unreachable multi-account quota** — `F120`, critical and cheap.
+
+`read_claude(config_dir=...)` exists to read per-account credential files, but
+the builtin branch calls `builtin()` with no arguments and silently discards the
+caller's `config_dir`. The `builtin is read_claude` identity check that causes it
+is the same wart the review-phase brief flagged as where the fallback table leaks
+into the dispatcher.
+
+**3. `build_env` hands out the ambient environment** — `F112`, with `F33`.
+
+`scripts.build_env` copies `dict(os.environ)` into every provider script call,
+so a project-local script — which wins by precedence — receives the calling
+process's live credentials. `F33` is the same shape in `base.build_env`: the
+`blocked` list guards only the passthrough loop, so `BASE_ENV_KEYS` are
+forwarded even when explicitly blocked.
+
+**Treat `F33` at `F73`'s severity (medium/security), not its own
+(low/correctness).** The review recorded that disagreement deliberately rather
+than resolving it; forwarding a variable the configuration blocked is the
+security reading, and that is the one to act on.
+
+**4. Presence is not validity** — `F130`, `F131`, `F132`, `F140`.
+
+All three shipped provider scripts and the Python `_claude_token` treat "the
+file exists and I could not read a clock from it" as "authenticated". The runner
+finds out when the agent's first turn 401s. One pattern, four sites, one change.
+
+**`F131` overrides its author's proposed `accept`**, and that answers the report's
+open question. The author's reasoning is that agy's token format may carry no
+expiry — a claim about the format, so establish what the token actually contains.
+If it genuinely has no expiry, the honest result is `cannot verify`, not
+`authenticated`.
+
+---
+
+## What is NOT scheduled
+
+**54 findings remain `open`. That is honest: nobody has decided about them yet**
+— not "rejected", and not "unimportant". Do not treat the ledger's silence as
+permission to skip them, and do not pick them up opportunistically either.
+
+`list_findings` is the index. `read_finding(F12)` gets one. **Never open a
+findings file to browse**: each holds every finding for a whole context, and
+reading it to answer a question about one loads all of them.
+
+Two are already `accepted` with reasons recorded — `F71` and `F73`, both
+duplicates (of `F24` and `F33`). The report's "Defects in the review itself"
+section resolves `F74` (withdrawn, never existed as a distinct defect) and
+`F134` (a skipped number, nothing retracted).
+
+---
+
+## What the review did not cover
+
+Not a criticism of the review — a statement of what is unknown, so nobody reads
+a clean ledger as a clean codebase.
+
+| context | state |
+|---|---|
+| C1 sandbox & egress | full review — 38 findings |
+| C2 provider seam | full review; adversary hit `budget.py` only, 70 of 188 tests. **The seam and auth surfaces have never been attacked.** |
+| C3 agent lifecycle | harness merged and proven, 7 green proof tests. **No characterization, no audit, no adversary, no findings.** `runner.py` is 61% covered with 435 uncovered statements — the largest block of untested logic in the codebase. |
+| C4–C7 | mapped and ranked, never started. C5 (MCP server) has the lowest coverage at 36%. |
+
+Both gaps were caused by `bug-565863`, not by the work being too large. Fixing it
+in phase 1 is what makes finishing the review affordable.
+
+---
+
+## Housekeeping
+
+Eleven agent worktrees from the review are still on disk with unmerged branches
+(`git worktree list`). One is named in the report: `agents/reporter/15f9e7`
+carries a REPORT.md amendment reverted by `bug-08f9b3`. **Check it before
+deleting anything** — the rest are spent, but that one holds work.
 
 ---
 
 ## Where things are
 
-- `context/README.md` — index of this directory.
-- `context/review/MAP.md` — written by the cartographer in phase 1.
-- `context/review/<context>.md` — findings, one file per context.
-- `context/review/REPORT.md` — written by the reporter, last.
-- `docs/open-questions.md` — what this project believes, is waiting to find out,
-  or decided against, each entry with its evidence and how to check it. **Read
-  the entries for your context before filing a finding against it**; several
-  beliefs in there were wrong the first time and the corrections are recorded.
-- `docs/rewrite-plan.md`, `docs/superpowers-review.md` — prior design decisions.
-- `README.md` — 153 KB. It is the reference manual, not an introduction. Send
-  `researcher` at it rather than reading it.
+- `context/review/REPORT.md` — the review. **The index; read it first.**
+- `context/review/MAP.md` — the seven contexts, ranked with measurements.
+- `context/review/ledger.yaml` — finding state. Prefer `list_findings`.
+- `context/review/BRIEF-review-phase.md` — the review phase's brief. The two
+  invariants in it still hold.
+- `docs/open-questions.md` — what this project believes, with the evidence and
+  how to check it. **Read the entries for your area before filing anything**;
+  several were wrong the first time and the corrections are recorded in place.
+- `README.md` — 153 KB of reference manual. Send `researcher` at it.
 
 ## This project does not specify before it builds
 
-No `context/specs/`. Requirements here are expressed as tests and as the entries
-in `docs/open-questions.md`. Nothing in this phase changes that.
+No `context/specs/`. Requirements are expressed as tests, as findings, and as
+`docs/open-questions.md`. The interface contract for each phase is the
+orchestrator's to write.
