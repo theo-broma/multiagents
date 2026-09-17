@@ -1,0 +1,549 @@
+"""Characterization of C2's plugin seam: `scripts.py`'s invocation of provider
+scripts — `run_action`, `exec_action`, `build_env`, `resolve`, `find_script`,
+`script_argv`.
+
+This pins what the seam DOES, including behaviour that looks wrong. Findings
+for anything surprising are filed in `context/review/C2-seam.md` as F110+.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
+
+import c2_harness as h  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# run_action — exit codes
+# ---------------------------------------------------------------------------
+
+def test_run_action_returns_exit_0_and_both_streams_on_success(tmp_path):
+    provider = h.make_provider("p")
+    h.case_script(tmp_path, "p.sh", 'check) echo out1; echo err1 >&2; exit 0 ;;')
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert (code, out, err) == (0, "out1\n", "err1\n")
+
+
+def test_run_action_passes_through_an_arbitrary_nonzero_exit_code(tmp_path):
+    provider = h.make_provider("p")
+    h.case_script(tmp_path, "p.sh", "check) exit 7 ;;")
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert (code, out, err) == (7, "", "")
+
+
+def test_run_action_returns_64_for_an_action_the_script_does_not_implement(tmp_path):
+    """`case_script`'s fallthrough `*) exit 64` — matches scripts.UNIMPLEMENTED."""
+    provider = h.make_provider("p")
+    h.case_script(tmp_path, "p.sh", "check) exit 0 ;;")
+    code, _, _ = h.run_action("p", provider, h.FakeExecutor(), "budget", tmp_path)
+    assert code == 64  # scripts.UNIMPLEMENTED
+
+
+def test_run_action_returns_127_with_a_named_provider_when_no_script_exists(tmp_path):
+    provider = h.make_provider("nope")
+    code, out, err = h.run_action("nope", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 127
+    assert out == ""
+    assert err == "no script for provider 'nope'"
+
+
+# ---------------------------------------------------------------------------
+# run_action — stdout / stderr content
+# ---------------------------------------------------------------------------
+
+def test_run_action_does_not_strip_trailing_newlines_or_lack_thereof(tmp_path):
+    provider = h.make_provider("p")
+    h.case_script(tmp_path, "p.sh", 'check) printf "no-newline"; exit 0 ;;')
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert out == "no-newline"  # no trailing \n appended or stripped
+
+
+def test_run_action_captures_a_large_stdout_payload_in_full(tmp_path):
+    provider = h.make_provider("p")
+    h.case_script(
+        tmp_path, "p.sh",
+        'check) python3 -c "import sys; sys.stdout.write(\'x\' * 2000000)"; exit 0 ;;',
+    )
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 0
+    assert len(out) == 2_000_000
+    assert out == "x" * 2_000_000
+
+
+def test_run_action_does_not_deadlock_on_simultaneous_large_stdout_and_stderr(tmp_path):
+    """Both streams are read via `communicate()`, which uses a selector rather
+    than reading stdout then stderr in sequence — a script that fills BOTH
+    pipe buffers before either is drained would deadlock a naive sequential
+    reader. Pin that this one does not."""
+    provider = h.make_provider("p")
+    h.case_script(
+        tmp_path, "p.sh",
+        'check) python3 -c "'
+        'import sys; sys.stdout.write(\'a\' * 500000); sys.stderr.write(\'b\' * 500000)"; '
+        'exit 3 ;;',
+    )
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path, timeout=10)
+    assert code == 3
+    assert out == "a" * 500000
+    assert err == "b" * 500000
+
+
+def test_run_action_raises_uncaught_on_non_utf8_stdout(tmp_path):
+    """F110 — the docstring says `run_action` "Never raises": a missing
+    script, a timeout, and an OSError all come back as a status tuple. A
+    script that writes bytes that are not valid UTF-8 is a fourth way for the
+    child to misbehave, and it is NOT caught: `subprocess.run(..., text=True)`
+    decodes with the process's default encoding and strict error handling, so
+    an invalid byte raises `UnicodeDecodeError` straight out of `run_action`,
+    past every caller that trusts the "never raises" contract."""
+    provider = h.make_provider("p")
+    h.write_script(
+        tmp_path, "p.sh",
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "check) printf '\\377\\376\\200\\201' ;;\n"
+        "esac\n",
+    )
+    with pytest.raises(UnicodeDecodeError):
+        h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# run_action — timeout
+# ---------------------------------------------------------------------------
+
+def test_run_action_returns_124_on_timeout_with_the_reason_in_stderr(tmp_path):
+    provider = h.make_provider("p")
+    h.case_script(tmp_path, "p.sh", "check) sleep 5 ;;")
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path, timeout=1)
+    assert code == 124
+    assert out == ""
+    assert "TimeoutExpired" in err
+    assert "timed out after 1 seconds" in err
+
+
+def test_run_action_timeout_kills_the_direct_child_but_not_a_backgrounded_grandchild(tmp_path):
+    """F111 — on timeout, `subprocess.run` kills the process it started (the
+    `sh script.sh` invocation) but has no process-group handle on anything
+    THAT process forked into the background. A script that backgrounds work
+    and `wait`s on it blocks the direct child for the full timeout window (so
+    the timeout fires as expected), but the backgrounded grandchild is
+    reparented and keeps running to completion after `run_action` has already
+    told its caller the action timed out and returned."""
+    provider = h.make_provider("p")
+    marker = tmp_path / "marker"
+    h.case_script(
+        tmp_path, "p.sh",
+        f'check) ( sleep 2; echo done > "{marker}" ) & wait ;;',
+    )
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path, timeout=1)
+    assert code == 124
+    assert not marker.exists()  # not yet — the grandchild is still running
+    time.sleep(2.5)
+    assert marker.exists()      # but it was never actually killed
+    assert marker.read_text() == "done\n"
+
+
+# ---------------------------------------------------------------------------
+# run_action — a script that cannot be exec'd
+# ---------------------------------------------------------------------------
+
+def test_run_action_on_a_dot_sh_script_ignores_the_executable_bit(tmp_path):
+    """`.sh` runs as `sh <path>` — an argument to sh, not an exec target — so
+    a missing +x has no effect at all, unlike every other script kind."""
+    provider = h.make_provider("p")
+    script = h.case_script(tmp_path, "p.sh", "check) exit 0 ;;")
+    script.chmod(0o644)
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert (code, err) == (0, "")
+
+
+def test_run_action_on_a_non_sh_script_without_exec_bit_is_an_oserror_reported_as_124(tmp_path):
+    provider = h.make_provider("p", script="p")
+    script = h.write_script(tmp_path, "p", "#!/bin/sh\nexit 0\n")
+    script.chmod(0o644)
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 124
+    assert "not executable" in err
+    assert "chmod +x" in err
+
+
+def test_run_action_on_an_executable_non_sh_script_with_no_shebang_is_enoexec(tmp_path):
+    provider = h.make_provider("p", script="p")
+    script = h.write_script(tmp_path, "p", "#!/bin/sh\necho x\n")
+    # overwrite without a shebang line, still executable
+    script.write_text("echo x\n")
+    script.chmod(0o755)
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 124
+    assert "cannot tell how to run it" in err
+    assert "shebang" in err
+
+
+def test_run_action_skips_a_directory_with_the_scripts_name(tmp_path):
+    """`find_script` filters candidates with `.is_file()`, so a directory that
+    happens to share the script's name is treated as "not found", not as an
+    exec attempt that would raise IsADirectoryError."""
+    provider = h.make_provider("p")
+    (tmp_path / "providers").mkdir()
+    (tmp_path / "providers" / "p.sh").mkdir()
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 127
+    assert err == "no script for provider 'p'"
+
+
+def test_run_action_skips_a_dangling_symlink(tmp_path):
+    provider = h.make_provider("p")
+    d = tmp_path / "providers"
+    d.mkdir()
+    (d / "p.sh").symlink_to(d / "does-not-exist")
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 127
+    assert err == "no script for provider 'p'"
+
+
+# ---------------------------------------------------------------------------
+# exec_action
+# ---------------------------------------------------------------------------
+
+def test_exec_action_returns_none_when_no_script_resolves(tmp_path):
+    provider = h.make_provider("nope")
+    assert h.exec_action("nope", provider, h.FakeExecutor(), "login", tmp_path) is None
+
+
+def test_exec_action_builds_argv_for_a_dot_sh_script(tmp_path):
+    provider = h.make_provider("p")
+    h.case_script(tmp_path, "p.sh", "login) exit 0 ;;")
+    argv, env = h.exec_action("p", provider, h.FakeExecutor(), "login", tmp_path)
+    assert argv == ["sh", str(tmp_path / "providers" / "p.sh"), "login"]
+    assert env["MULTIAGENTS_PROVIDER"] == "p"
+
+
+def test_exec_action_builds_argv_for_a_non_sh_script_as_running_itself(tmp_path):
+    provider = h.make_provider("p", script="p.py")
+    script = h.write_script(tmp_path, "p.py", "#!/usr/bin/env python3\nprint('hi')\n")
+    argv, env = h.exec_action("p", provider, h.FakeExecutor(), "login", tmp_path)
+    assert argv == [str(script), "login"]
+
+
+def test_exec_action_never_runs_the_script_it_describes(tmp_path):
+    provider = h.make_provider("p")
+    marker = tmp_path / "ran"
+    h.case_script(tmp_path, "p.sh", f'login) echo ran > "{marker}"; exit 0 ;;')
+    argv, env = h.exec_action("p", provider, h.FakeExecutor(), "login", tmp_path)
+    assert not marker.exists()
+
+
+# ---------------------------------------------------------------------------
+# A provider whose script identity and `provider_name` argument diverge
+# ---------------------------------------------------------------------------
+
+def test_run_action_uses_provider_dot_script_name_not_the_provider_name_argument(tmp_path):
+    """Script resolution keys off `provider.script_name` (derived from the
+    `Provider` object's OWN `name`/`script` fields), never off the
+    `provider_name` string a caller happens to pass as the first argument to
+    `run_action`/`resolve`. Here the two are made to disagree, and the script
+    tied to `provider.name` is the one that runs."""
+    provider = h.make_provider("realname")
+    h.case_script(tmp_path, "realname.sh", "check) echo ran; exit 0 ;;")
+    code, out, err = h.run_action("calledas", provider, h.FakeExecutor(), "check", tmp_path)
+    assert (code, out) == (0, "ran\n")
+
+
+def test_build_env_provider_identity_env_var_comes_from_the_argument_not_provider_dot_name(tmp_path):
+    """F113 — companion to the test above. The script that runs is chosen by
+    `provider.name`/`provider.script_name`; the identity that script is TOLD
+    it is running as (`MULTIAGENTS_PROVIDER`) comes from the separate
+    `provider_name` argument. When a caller passes a `provider_name` that
+    does not match `provider.name`, the running script sees an environment
+    that names a different provider than the one whose script actually
+    executed it."""
+    provider = h.make_provider("realname")
+    env = h.build_env("calledas", provider, h.FakeExecutor())
+    assert env["MULTIAGENTS_PROVIDER"] == "calledas"
+    assert provider.name == "realname"
+    assert env["MULTIAGENTS_PROVIDER"] != provider.name
+
+
+# ---------------------------------------------------------------------------
+# build_env — base keys, every kind
+# ---------------------------------------------------------------------------
+
+def test_build_env_sets_the_base_keys_for_local_kind(tmp_path):
+    provider = h.make_provider("p")
+    env = h.build_env("p", provider, h.FakeExecutor(kind="local"))
+    assert env["MULTIAGENTS_PROVIDER"] == "p"
+    assert env["MULTIAGENTS_EXECUTOR"] == "local"
+    assert env["MULTIAGENTS_UID"] == str(os.getuid())
+    assert env["MULTIAGENTS_GID"] == str(os.getgid())
+    for docker_only in ("MULTIAGENTS_CONTAINER", "MULTIAGENTS_PRIVATE_HOME",
+                        "MULTIAGENTS_PRIVATE_BACKING", "MULTIAGENTS_PRIVATE_VAULT",
+                        "MULTIAGENTS_AUTH_PROXY"):
+        assert docker_only not in env
+
+
+def test_build_env_docker_keys_only_appear_for_docker_kind(tmp_path):
+    provider = h.make_provider("p")
+    executor = h.FakeExecutor(
+        kind="docker", container="cty",
+        private={"/c/path": "/h/path"}, vault={"/c/vault": "/h/vault"},
+        auth_proxy=True,
+    )
+    env = h.build_env("p", provider, executor)
+    assert env["MULTIAGENTS_CONTAINER"] == "cty"
+    assert env["MULTIAGENTS_PRIVATE_HOME"] == "/c/path"
+    assert env["MULTIAGENTS_PRIVATE_BACKING"] == "/h/path"
+    assert env["MULTIAGENTS_PRIVATE_VAULT"] == "/h/vault"
+    assert env["MULTIAGENTS_AUTH_PROXY"] == "1"
+
+
+def test_build_env_auth_proxy_key_is_absent_not_zero_when_disabled(tmp_path):
+    provider = h.make_provider("p")
+    executor = h.FakeExecutor(kind="docker", container="cty", auth_proxy=False)
+    env = h.build_env("p", provider, executor)
+    assert "MULTIAGENTS_AUTH_PROXY" not in env
+
+
+def test_build_env_private_state_with_multiple_entries_uses_only_the_first_inserted(tmp_path):
+    """`build_env` breaks after the first `dict.items()` pair. Python dicts
+    preserve insertion order, so this is whichever entry the executor happened
+    to put first, not one selected by matching key/value to the provider."""
+    provider = h.make_provider("p")
+    executor = h.FakeExecutor(
+        kind="docker", container="c",
+        private={"/first": "/host-first", "/second": "/host-second"},
+    )
+    env = h.build_env("p", provider, executor)
+    assert env["MULTIAGENTS_PRIVATE_HOME"] == "/first"
+    assert env["MULTIAGENTS_PRIVATE_BACKING"] == "/host-first"
+
+
+def test_build_env_vault_state_with_multiple_entries_uses_the_first_value_not_key(tmp_path):
+    """Asymmetric with the private-home case above: for vault, `build_env`
+    takes `next(iter(vault.values()))` — the first VALUE — while for private
+    it takes both the key and the value of the first pair."""
+    provider = h.make_provider("p")
+    executor = h.FakeExecutor(
+        kind="docker", container="c",
+        vault={"/container/vault/key": "/host/vault/value"},
+    )
+    env = h.build_env("p", provider, executor)
+    assert env["MULTIAGENTS_PRIVATE_VAULT"] == "/host/vault/value"
+
+
+def test_build_env_private_state_typeerror_falls_back_to_no_arg_call(tmp_path):
+    """`build_env` calls `executor.private_state(provider_name)` inside a
+    `try/except TypeError`, falling back to `executor.private_state()` for
+    "an executor from before the filter" — an executor whose `private_state`
+    takes no arguments at all."""
+    class NoArgExecutor:
+        kind = "docker"
+        container = "c"
+
+        def private_state(self):
+            return {"/legacy/path": "/legacy/host"}
+
+        def vault_state(self, name=""):
+            return {}
+
+        def auth_proxy_enabled(self):
+            return False
+
+    provider = h.make_provider("p")
+    env = h.build_env("p", provider, NoArgExecutor())
+    assert env["MULTIAGENTS_PRIVATE_HOME"] == "/legacy/path"
+    assert env["MULTIAGENTS_PRIVATE_BACKING"] == "/legacy/host"
+
+
+# ---------------------------------------------------------------------------
+# build_env — provider.env, precedence, and expansion
+# ---------------------------------------------------------------------------
+
+def test_build_env_with_no_env_block_adds_nothing_beyond_ambient_and_base_keys(tmp_path):
+    provider = h.make_provider("p")
+    env = h.build_env("p", provider, h.FakeExecutor())
+    base_keys = {"MULTIAGENTS_PROVIDER", "MULTIAGENTS_BIN", "MULTIAGENTS_EXECUTOR",
+                 "MULTIAGENTS_UID", "MULTIAGENTS_GID"}
+    extra = set(env) - set(os.environ) - base_keys
+    assert extra == set()
+
+
+def test_build_env_providers_env_block_is_applied_and_can_override_protocol_keys(tmp_path):
+    """F112 (context) — a provider's own `env:` block is applied AFTER the
+    `MULTIAGENTS_*` keys `build_env` itself computed, with no protection: a
+    provider config can overwrite `MULTIAGENTS_PROVIDER` (or any other
+    protocol variable) for every action run against it, not just the ones it
+    plausibly needs to change."""
+    provider = h.make_provider("p", env={"MULTIAGENTS_PROVIDER": "hijacked", "CUSTOM": "1"})
+    env = h.build_env("p", provider, h.FakeExecutor())
+    assert env["MULTIAGENTS_PROVIDER"] == "hijacked"
+    assert env["CUSTOM"] == "1"
+
+
+def test_build_env_expands_provider_env_vars_and_user_against_the_real_process_environment(
+    tmp_path, monkeypatch,
+):
+    """F115 — `provider.env` values go through
+    `os.path.expanduser(os.path.expandvars(value))`, and `expandvars` reads
+    the REAL `os.environ` at call time — not the `env` dict `build_env` is in
+    the middle of assembling. A provider's `env:` block can reach a variable
+    that was already on the host process's environment before `build_env`
+    ran, but NOT one of the `MULTIAGENTS_*` values `build_env` just computed
+    for this very call: those look like they ought to be interpolatable and
+    silently are not — the reference is left as a literal, unexpanded
+    string."""
+    monkeypatch.setenv("MULTIAGENTS_SEAM_TEST_HOST_VAR", "from-host-environ")
+    provider = h.make_provider(
+        "p",
+        env={
+            "FROM_HOST": "$MULTIAGENTS_SEAM_TEST_HOST_VAR",
+            "FROM_JUST_COMPUTED": "$MULTIAGENTS_PROVIDER",
+            "HOME_EXPANDED": "~/subdir",
+        },
+    )
+    env = h.build_env("p", provider, h.FakeExecutor())
+    assert env["FROM_HOST"] == "from-host-environ"
+    assert env["FROM_JUST_COMPUTED"] == "$MULTIAGENTS_PROVIDER"  # NOT "p" — left literal
+    assert env["HOME_EXPANDED"] == os.path.expanduser("~/subdir")
+
+
+def test_build_env_extra_overrides_everything_including_providers_env_block(tmp_path):
+    provider = h.make_provider("p", env={"X": "from-env-block"})
+    env = h.build_env("p", provider, h.FakeExecutor(), extra={"X": "from-extra"})
+    assert env["X"] == "from-extra"
+
+
+def test_build_env_copies_the_full_ambient_process_environment(tmp_path, monkeypatch):
+    """F112 — `build_env` starts from `env = dict(os.environ)`, the real
+    ambient environment of whatever process is calling it, with no
+    allowlist or scrubbing. Anything sensitive already in that process's
+    environment (this test suite's own harness has to work around exactly
+    this for `run_shipped_script`, stripping a fixed key list before every
+    call — see `c2_harness.py`'s `_SCRIPT_ENV_KEYS`) is handed to the
+    provider's script verbatim, including a script sourced from
+    `project_config` — i.e., from inside the project being orchestrated,
+    not from the user's own trusted global config."""
+    monkeypatch.setenv("MULTIAGENTS_SEAM_TEST_AMBIENT_SECRET", "should-not-leak-but-does")
+    provider = h.make_provider("p")
+    env = h.build_env("p", provider, h.FakeExecutor())
+    assert env["MULTIAGENTS_SEAM_TEST_AMBIENT_SECRET"] == "should-not-leak-but-does"
+
+
+# ---------------------------------------------------------------------------
+# build_env — MULTIAGENTS_BIN via provider.available() / shutil.which
+# ---------------------------------------------------------------------------
+
+def test_build_env_bin_resolves_to_an_absolute_path_when_the_binary_is_on_path(tmp_path):
+    """`build_env` calls `provider.available()`, which does a live
+    `shutil.which(provider.bin)` lookup against the REAL process PATH every
+    time — not a stored/configured value. `sh` is guaranteed present, so this
+    resolves to an absolute path rather than the literal string "sh"."""
+    provider = h.make_provider("p", bin="sh")
+    env = h.build_env("p", provider, h.FakeExecutor())
+    assert env["MULTIAGENTS_BIN"] != "sh"
+    assert os.path.isabs(env["MULTIAGENTS_BIN"])
+    assert env["MULTIAGENTS_BIN"].endswith("/sh")
+
+
+def test_build_env_bin_falls_back_to_the_configured_name_when_not_on_path(tmp_path):
+    provider = h.make_provider("p", bin="definitely-not-a-real-binary-c2-seam-test")
+    env = h.build_env("p", provider, h.FakeExecutor())
+    assert env["MULTIAGENTS_BIN"] == "definitely-not-a-real-binary-c2-seam-test"
+
+
+# ---------------------------------------------------------------------------
+# resolve / find_script — precedence
+# ---------------------------------------------------------------------------
+
+def _put_script(base: Path, layer: str, marker: str):
+    d = base / layer
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "p.sh"
+    f.write_text(f'#!/bin/sh\ncase "$1" in\ncheck) echo {marker}; exit 0 ;;\nesac\n')
+    f.chmod(0o755)
+    return f
+
+
+def test_resolve_precedence_config_providers_beats_config_auth(tmp_path):
+    provider = h.make_provider("p")
+    config_dir = tmp_path / "config"
+    _put_script(config_dir, "auth", "from-auth")
+    _put_script(config_dir, "providers", "from-providers")
+    resolved = h.resolve("p", provider, config_dir, None)
+    assert resolved == config_dir / "providers" / "p.sh"
+
+
+def test_resolve_precedence_project_layer_beats_config_layer_entirely(tmp_path):
+    """Even `project_config/auth` (the legacy dir, lower-priority WITHIN its
+    own layer) beats `config_dir/providers` — the layers are compared as a
+    whole before `providers/` vs `auth/` is considered within one."""
+    provider = h.make_provider("p")
+    config_dir = tmp_path / "config"
+    project_dir = tmp_path / "project"
+    _put_script(config_dir, "providers", "from-config-providers")
+    _put_script(project_dir, "auth", "from-project-auth")
+    resolved = h.resolve("p", provider, config_dir, project_dir)
+    assert resolved == project_dir / "auth" / "p.sh"
+
+
+def test_resolve_precedence_project_providers_beats_project_auth(tmp_path):
+    provider = h.make_provider("p")
+    config_dir = tmp_path / "config"
+    project_dir = tmp_path / "project"
+    _put_script(project_dir, "auth", "from-project-auth")
+    _put_script(project_dir, "providers", "from-project-providers")
+    resolved = h.resolve("p", provider, config_dir, project_dir)
+    assert resolved == project_dir / "providers" / "p.sh"
+
+
+def test_resolve_falls_back_to_the_shipped_script_when_nothing_else_matches(tmp_path):
+    providers = h.shipped_providers()
+    claude = providers["claude"]
+    resolved = h.resolve("claude", claude, tmp_path, None)
+    assert resolved == h.shipped_script_path("claude")
+
+
+def test_resolve_tolerates_a_project_config_directory_that_does_not_exist_on_disk(tmp_path):
+    providers = h.shipped_providers()
+    claude = providers["claude"]
+    resolved = h.resolve("claude", claude, tmp_path, tmp_path / "no-such-project")
+    assert resolved == h.shipped_script_path("claude")
+
+
+def test_resolve_uses_the_providers_custom_script_name_verbatim(tmp_path):
+    """`provider.script_name` is `provider.script` when set, with no implicit
+    `.sh` suffix added — a provider can name a non-shell script."""
+    provider = h.make_provider("p", script="totally-different-name.py")
+    h.write_script(tmp_path, "totally-different-name.py", "#!/usr/bin/env python3\n")
+    resolved = h.resolve("p", provider, tmp_path, None)
+    assert resolved == tmp_path / "providers" / "totally-different-name.py"
+
+
+def test_find_script_returns_none_for_an_unknown_name(tmp_path):
+    assert h.find_script("nothing-here.sh", tmp_path, None) is None
+
+
+# ---------------------------------------------------------------------------
+# script_argv
+# ---------------------------------------------------------------------------
+
+def test_script_argv_dot_sh_runs_under_sh(tmp_path):
+    script = h.write_script(tmp_path, "p.sh", "#!/bin/sh\n")
+    assert h.script_argv(script) == ["sh", str(script)]
+
+
+def test_script_argv_non_dot_sh_runs_itself(tmp_path):
+    script = h.write_script(tmp_path, "p.py", "#!/usr/bin/env python3\n")
+    assert h.script_argv(script) == [str(script)]
+
+
+def test_script_argv_extensionless_name_also_runs_itself(tmp_path):
+    script = h.write_script(tmp_path, "p", "#!/bin/sh\n")
+    assert h.script_argv(script) == [str(script)]
