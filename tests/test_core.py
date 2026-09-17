@@ -6857,6 +6857,135 @@ def test_steer_confirms_on_the_first_event_not_a_fixed_sleep(tmp_path):
         f"returned in {elapsed:.1f}s; it must not wait out the ceiling")
 
 
+# --------------------------------------------------------------------------
+# Resuming a run — phase 1 items 4, 5 and 6 (`context/specs/phase1-resume-path.md`).
+#
+# Every steer test above builds a node whose provider and model MATCH the agent
+# spec, and none of them drives a second reader. Both habits hide a defect:
+# a resume is built from the agent's static configuration rather than from what
+# the run is actually doing, and the tree briefly says `cancelled` while it
+# happens. The helpers below exist to break those two habits.
+
+
+def _recording_provider(name, probe):
+    """A fake CLI that writes down the argv it was handed, then idles.
+
+    The argv is the only place a resume's provider, model, options and working
+    directory are all observable from outside the runner — which is the point:
+    the contract is about what the resumed process is actually run as, not
+    about how the runner decided it.
+
+    Written to a temporary name and moved into place, so the file existing
+    means the whole argv is in it.
+    """
+    target = str(probe)
+    script = (f'printf "%s\\n" "$@" > "{target}.part"; '
+              f'mv "{target}.part" "{target}"; sleep 30')
+    return {
+        "bin": "sh",
+        "spawn": {
+            "args": ["-c", script, name, "--provider", name,
+                     "--model", "{model}", "--cwd", "{workdir}"],
+            "resume": ["--resume", "{session_id}"],
+            "optional": {"effort": ["--effort", "{effort}"]},
+        },
+    }
+
+
+async def _steer_recording(r, agent_id, message, probe):
+    """Steer, wait for the respawned process to record its argv, then let the
+    confirmation loop end early the way a live agent showing signs of life
+    would. Without the injected event every one of these tests would sit out
+    STEER_CONFIRM_SECONDS for nothing."""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(r.steer(agent_id, message))
+    deadline = loop.time() + 15
+    while not probe.exists() and not task.done() and loop.time() < deadline:
+        await asyncio.sleep(0.01)
+    run = r.runs.get(agent_id)
+    if run is not None:
+        run.events.append({"kind": "step"})
+    return await task
+
+
+def _recorded_argv(probe):
+    return [line for line in probe.read_text().split("\n") if line]
+
+
+def _flag(argv, flag):
+    assert flag in argv, f"{flag} missing from {argv}"
+    return argv[argv.index(flag) + 1]
+
+
+def test_r7_a_steered_fallback_run_keeps_the_model_it_is_actually_running(tmp_path):
+    """bug-ad011c. The run was executing on agy as gemini-3.8-flash-high; the
+    steer respawned it naming the *preferred* provider's model and effort, and
+    the CLI refused the pair in 94 seconds:
+
+        error: invalid model selection (--model "opencode-go/qwen3.7-plus"
+        --effort "high"): --effort is not supported for model ...
+
+    Two sources, one command line, nothing checking the pair."""
+    import asyncio
+    from multiagents.tree import Node
+
+    probe = tmp_path / "argv.txt"
+    spec = AgentSpec("worker", "opencode", "opencode-go/qwen3.7-plus",
+                     effort="high",
+                     models={"agy": {"model": "gemini-3.8-flash-high",
+                                     "effort": ""}})
+    r = _runner(tmp_path, {"worker": spec},
+                {"opencode": _recording_provider("opencode", probe),
+                 "agy": _recording_provider("agy", probe)})
+    # What routing made of it: agy, with agy's model, and no effort — exactly
+    # the spec `start()` builds at spawn time for this `models:` entry.
+    r.tree.add(Node(id="ag-1", agent="worker", provider="agy",
+                    model="gemini-3.8-flash-high", parent=None, depth=1,
+                    status="running", session_id="s-1", worktree=str(tmp_path),
+                    routed_from="opencode",
+                    routed_why="opencode is constrained; falling back to agy"))
+
+    result = asyncio.run(_steer_recording(r, "ag-1", "change course", probe))
+
+    assert probe.exists(), f"nothing was respawned: {result}"
+    argv = _recorded_argv(probe)
+    assert _flag(argv, "--provider") == "agy"
+    assert _flag(argv, "--model") == "gemini-3.8-flash-high", (
+        f"resumed with the configured preference, not the running model: {argv}")
+    assert "opencode-go/qwen3.7-plus" not in argv
+    assert "--effort" not in argv, (
+        f"effort belongs to the opencode namespace and must not travel onto "
+        f"an agy model: {argv}")
+    assert _flag(argv, "--resume") == "s-1", "and it is still the same session"
+
+
+def test_r7_an_unrouted_run_resumes_exactly_as_it_does_today(tmp_path):
+    """The other half of the requirement, and the one a blunt fix breaks:
+    where preference and actual agree there is nothing to correct, and an
+    agent that exists BECAUSE it reasons deeply must keep its effort."""
+    import asyncio
+    from multiagents.tree import Node
+
+    probe = tmp_path / "argv.txt"
+    spec = AgentSpec("worker", "opencode", "opencode-go/qwen3.7-plus",
+                     effort="high")
+    r = _runner(tmp_path, {"worker": spec},
+                {"opencode": _recording_provider("opencode", probe)})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="opencode",
+                    model="opencode-go/qwen3.7-plus", parent=None, depth=1,
+                    status="running", session_id="s-1", worktree=str(tmp_path)))
+
+    result = asyncio.run(_steer_recording(r, "ag-1", "change course", probe))
+
+    assert probe.exists(), f"nothing was respawned: {result}"
+    argv = _recorded_argv(probe)
+    assert _flag(argv, "--provider") == "opencode"
+    assert _flag(argv, "--model") == "opencode-go/qwen3.7-plus"
+    assert _flag(argv, "--effort") == "high", (
+        f"nothing disagreed here, so nothing should have been dropped: {argv}")
+
+
 def test_the_bug_reporter_is_told_where_to_stop_guessing():
     """It got the evidence and the fix right and the cause wrong, guessing at a
     mechanism it could not see. A confident wrong hypothesis reads as a finding
