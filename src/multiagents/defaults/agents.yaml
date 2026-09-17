@@ -409,10 +409,11 @@ agents:
     silence_timeout: 300
 
   # Makes a context observable, alone, before the characterizers fan out. The
-  # ONLY agent in this team without readonly_paths: it must be able to modify
-  # shared test infrastructure, and that is exactly why it runs by itself.
-  # Characterizers are add-only so they cannot collide; the cost of that is
-  # that somebody has to build the thing they share, first.
+  # only agent in this team with an explicit `readonly_paths: []`: it must be
+  # able to modify shared test infrastructure, and that is exactly why it runs
+  # by itself. Characterizers are add-only so they cannot collide; the cost of
+  # that is that somebody has to build the thing they share, first. Omitting
+  # the key would inherit the project default rather than opt out of it.
   harness:
     provider: claude
     model: sonnet
@@ -428,6 +429,7 @@ agents:
     timeout: 2400
     silence_timeout: 300
     max_steps: 1000
+    readonly_paths: []
 
   # Pins what the code currently does, including the parts that are wrong —
   # an unpinned bug is indistinguishable from an unpinned feature. Green is
@@ -501,7 +503,9 @@ agents:
     can_spawn: false
     timeout: 1200
     silence_timeout: 240
-    readonly_paths: ["**"]
+    # It must be able to revise the one file it exists to produce, while the
+    # product source and the test suite stay protected.
+    readonly_paths: ["src/**", "tests/**"]
 
   # ------------------------------------------------------------ infrastructure
   # Writes up defects in multiagents ITSELF — not bugs in your project, which
