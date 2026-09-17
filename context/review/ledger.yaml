@@ -164,3 +164,88 @@ findings:
     status: open
     summary: '`_scrub` is a complete no-op on a non-JSON error body, bypassing even
       its shape-based patterns'
+  F30:
+    class: security
+    context: context/review/C1-sandbox-executor.md
+    evidence: '`tests/test_c1_executor_characterization.py::test_extra_mounts_read_only_is_silently_dropped_when_path_collides_with_root`
+      —'
+    first_seen: ad571a703d0407ddcccb603ac76baefe46ed384c
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-executor.md
+      sha: ad571a703d0407ddcccb603ac76baefe46ed384c
+      status: open
+    severity: high
+    status: open
+    summary: A read-only `extra_mounts` entry naming the project root is silently
+      downgraded to writable
+  F31:
+    class: correctness
+    context: context/review/C1-sandbox-executor.md
+    evidence: '`tests/test_c1_executor_characterization.py::test_mounts_with_no_extra_config_and_nonexistent_worktrees_homes_is_root_only`'
+    first_seen: ad571a703d0407ddcccb603ac76baefe46ed384c
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-executor.md
+      sha: ad571a703d0407ddcccb603ac76baefe46ed384c
+      status: open
+    severity: medium
+    status: open
+    summary: Built-in mounts (root, worktrees, homes) are dropped with no warning
+      if the directory doesn't exist yet when `mounts()` runs
+  F32:
+    class: correctness
+    context: context/review/C1-sandbox-executor.md
+    evidence: '`tests/test_c1_executor_characterization.py::test_run_args_pids_limit_zero_is_silently_omitted`'
+    first_seen: ad571a703d0407ddcccb603ac76baefe46ed384c
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-executor.md
+      sha: ad571a703d0407ddcccb603ac76baefe46ed384c
+      status: open
+    severity: low
+    status: open
+    summary: '`pids_limit`/`cpus`/`memory` of `0` is indistinguishable from "not set";
+      a negative value is passed to docker unvalidated'
+  F33:
+    class: correctness
+    context: context/review/C1-sandbox-executor.md
+    evidence: '`tests/test_c1_executor_characterization.py::test_build_env_base_keys_are_forwarded_even_if_named_in_blocked`'
+    first_seen: ad571a703d0407ddcccb603ac76baefe46ed384c
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-executor.md
+      sha: ad571a703d0407ddcccb603ac76baefe46ed384c
+      status: open
+    severity: low
+    status: open
+    summary: '`build_env`''s `blocked` list only guards the `passthrough` loop; the
+      always-on base environment (`PATH`, `USER`, `TERM`, ...) is forwarded regardless'
+  F34:
+    class: correctness
+    context: context/review/C1-sandbox-executor.md
+    evidence: '`tests/test_c1_executor_characterization.py::test_prepare_home_target_already_a_file_raises_file_exists_error`'
+    first_seen: ad571a703d0407ddcccb603ac76baefe46ed384c
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-executor.md
+      sha: ad571a703d0407ddcccb603ac76baefe46ed384c
+      status: open
+    severity: medium
+    status: open
+    summary: '`prepare_home` raises an uncaught `FileExistsError`/`PermissionError`
+      if the target path is a pre-existing file, or its parent isn''t writable'
+  F35:
+    class: correctness
+    context: context/review/C1-sandbox-executor.md
+    evidence: '`tests/test_c1_executor_characterization.py::test_extra_mounts_string_form_can_never_be_read_only`'
+    first_seen: ad571a703d0407ddcccb603ac76baefe46ed384c
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-executor.md
+      sha: ad571a703d0407ddcccb603ac76baefe46ed384c
+      status: open
+    severity: low
+    status: open
+    summary: '`extra_mounts` string-form entries can never be marked read-only, and
+      relative paths are never resolved'
