@@ -238,6 +238,104 @@ findings:
     severity: high
     status: open
     summary: Unbalanced grouping/class metacharacters `(` or `[` crash the regex match
+  F130:
+    class: bug
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: high
+    status: open
+    summary: '`claude.sh check` reports "logged in" for a credentials file that is
+      corrupt, or present but missing the one field it reads'
+  F131:
+    class: bug
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: high
+    status: open
+    summary: '`agy.sh check` (container branch) authenticates on ANY non-empty token
+      file, with no format or expiry check at all'
+  F132:
+    class: bug
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: high
+    status: open
+    summary: '`opencode.sh check` defaults to "1 stored credential(s)" (authenticated)
+      for ANY CLI output it cannot parse, including no output at all'
+  F133:
+    class: correctness
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: low
+    status: open
+    summary: a provider whose `extends:` names a nonexistent parent is grouped into
+      a "family" that does not exist, named after the missing parent
+  F135:
+    class: bug
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: medium
+    status: open
+    summary: '`opencode.sh`''s credential-count extraction silently fails when the
+      digit count opens the CLI''s line, reporting 1 instead of the real number'
+  F136:
+    class: bug
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: medium
+    status: open
+    summary: '`looks_like_auth_failure`''s `"401"` marker is an unanchored substring
+      match, not an HTTP-status match'
+  F137:
+    class: bug
+    context: context/review/C2-auth.md
+    evidence: reproduction
+    first_seen: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+    history:
+    - by: auditor
+      note: filed in context/review/C2-auth.md
+      sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
+      status: open
+    severity: medium
+    status: open
+    summary: '`looks_like_auth_failure` does not recognize several plausible real-world
+      authentication-failure phrasings'
   F14:
     class: security
     context: context/review/C1-sandbox-allowlist.md
