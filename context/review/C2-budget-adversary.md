@@ -1,4 +1,101 @@
-# Adversary Findings — budget.py
+# C2 — Adversarial attack on quota reading and provider choice
+
+Mutation and fuzzing against `src/multiagents/budget.py`, run against the 70-test
+characterization suite in `tests/test_c2_budget_characterization.py`.
+Reproductions are in `tests/test_budget_adversary.py` (24 tests, green).
+
+**Verdict: the suite is not load-bearing for routing or accounting correctness.**
+Seven mutations were applied; **four survived**. The survivors are boundary
+comparisons and merge logic — exactly the places where being wrong costs money
+rather than crashing.
+
+The ids below are the orchestrator's renumbering of the run's own `F-A1`–`F-A7`
+into the ledger's format; the run's original write-up is kept verbatim further
+down, including its mutation table.
+
+**Two of the run's findings (`F-A1`, `F-A2`) are not new.** Both point at
+`budget.py:657` and restate **F122**, already filed from characterization: a cache
+hit mutates the shared `Budget` in place and overwrites `spent` rather than
+merging it. They are not refiled. What *is* new is F150 — what the suite does
+about that defect.
+
+**F150** — The characterization suite pins F122's defect as correct, so fixing the code will fail the test
+*Class:* correctness
+*Severity:* high
+*Where:* `tests/test_c2_budget_characterization.py:337-356`, against `src/multiagents/budget.py:657`
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py`
+*What happens:* `test_cache_hit_overwrites_spent_instead_of_merging_and_mutates_the_cached_object` asserts the overwrite behaviour. A mutation changing the cache path to merge — which is what the fresh-read path at line 672 already does, and what F122 says it should do — **fails that test**. The suite does not merely miss the defect; it defends it.
+*Disposition:* fix
+*Reasoning:* Pinning wrong behaviour is correct characterization practice and F122 flags it properly, so the suite is not at fault for recording it. The hazard is what happens next: whoever fixes F122 will see a red test, and the test's name reads like an intentional invariant rather than a pinned defect. Any test that pins a behaviour a finding calls wrong should say so in its own name or docstring and cite the finding id, or the fix gets reverted by the next person to run the suite.
+
+**F151** — The `reserve` boundary is not pinned: a mutation from `>=` to `>` survives all 70 tests
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/budget.py:763`
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py::test_mutation_reserve_boundary_at_exactly_reserve_is_caught`
+*What happens:* `candidate.headroom >= reserve` admits a provider whose headroom sits exactly at the reserve. Changing it to `>` blocks that provider and no existing test notices.
+*Disposition:* fix
+*Reasoning:* `reserve` exists to keep the orchestrator's own last slice from being spent on delegation. A silent off-by-one here either spends the reserve or refuses a usable provider, and neither failure announces itself.
+
+**F152** — Severity thresholds at 75 and 90 are not pinned, in two separate derivations
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/budget.py:462-464` (`read_claude`) and `src/multiagents/budget.py:634` (script derivation)
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py::test_mutation_severity_warning_boundary_at_75_is_caught` and three siblings
+*What happens:* Mutating `>= 75` to `> 75`, and `>= 90` to `> 90`, survives all 70 tests in **both** derivations. The exact boundary is untested on either path.
+*Disposition:* fix
+*Reasoning:* Severity is what drives routing away from a provider and what a caller reads to decide whether to start expensive work. Two independent code paths compute it and neither has its boundary pinned.
+
+**F153** — The cache TTL boundary is not pinned: `<` to `<=` survives all 70 tests
+*Class:* correctness
+*Severity:* low
+*Where:* `src/multiagents/budget.py:655`
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py`
+*What happens:* The exact moment an entry expires is untested, so a mutation shifting it by one tick passes.
+*Disposition:* fix
+*Reasoning:* Low on its own. It compounds with F122 and F150: a cache whose expiry is imprecise and whose hit path corrupts `spent` is harder to reason about than either defect alone.
+
+**F154** — The fresh-read `spent` merge is not pinned: replacing the merge with an overwrite survives all 70 tests
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/budget.py:672`
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py`
+*What happens:* Line 672 does `{**budget.spent, **spent}`, correctly merging what the script reported with what the caller passed. Changing it to `spent` alone — the same defect F122 describes on the cache path — passes every test. No test exercises both sources reporting spend at once.
+*Disposition:* fix
+*Reasoning:* This is the correct path, and it is undefended. If the fix for F122 is written by making the cache path match line 672, nothing in the suite would notice line 672 itself later regressing to the broken shape.
+
+**F155** — The `usable` headroom boundary is pinned loosely enough that a shift from 0.02 to 0.021 passes
+*Class:* correctness
+*Severity:* low
+*Where:* `src/multiagents/budget.py:114`
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py::test_mutation_usable_boundary_at_exactly_0_021_is_caught`
+*What happens:* The suite tests 0.02 as not usable and 0.021 as usable, but a mutation moving the threshold to `> 0.021` satisfies both.
+*Disposition:* accept
+*Reasoning:* The window is a thousandth of a percent of headroom and the mutation that exploits it is not a realistic edit. Recorded for completeness because it is the same class as F151-F153 and should be fixed alongside them if boundary pinning is done systematically.
+
+**F156** — Two `usable` behaviours are correct and completely untested
+*Class:* maintainability
+*Severity:* low
+*Where:* `src/multiagents/budget.py:113-115`
+*Evidence:* reproduction
+*Proof:* `tests/test_budget_adversary.py::test_hardcoding_headroom_exactly_zero_is_not_usable` and `::test_hardcoding_headroom_negative_is_not_usable`
+*What happens:* A provider with `known=False, headroom=0.0` is usable — unknown headroom is correctly not treated as no headroom — and a provider with `known=True, headroom=-0.5` is correctly not usable. Neither is exercised by the 70 tests.
+*Disposition:* fix
+*Reasoning:* Both behaviours are right, and the first is a distinction the review has already found the code getting wrong elsewhere (F121, where "never read" means opposite things depending on argument position). An untested correct behaviour next to a tested incorrect one is exactly where a well-meaning refactor does damage.
+
+---
+
+## The run's own write-up
+
+Kept verbatim below, including its mutation table, because the table is the
+evidence and the run's framing of the verdict is clearer than a summary of it.
+
 
 ## Attack Summary
 
