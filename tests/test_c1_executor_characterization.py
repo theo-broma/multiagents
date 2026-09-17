@@ -307,14 +307,16 @@ def test_config_dir_is_mounted_read_only_after_root_and_wins_at_its_own_path(tmp
 # DockerExecutor.run_args() — argv construction
 # ---------------------------------------------------------------------------
 
-def test_run_args_never_emits_init_flag(tmp_path):
-    # Pinning a specific, ticket-driving fact: `--init` never appears in
-    # run_args()'s argv, for any config exercised here. Not a judgement on
+def test_run_args_always_emits_init_flag(tmp_path):
+    # Pinning a specific, ticket-driving fact: `--init` IS present in
+    # run_args()'s argv, for any config exercised here. This changed because
+    # of bug-cfdc71 — the container had no PID 1 reaper, so fork-heavy work
+    # left zombies until the 512-pid limit was exhausted. Not a judgement on
     # whether it should — just what the code does today.
     for config in ({}, {"network": "bridge"}, {"network": "none"},
                    {"cpus": 2, "memory": "4g", "pids_limit": 100}):
         ex = h.make_docker_executor(tmp_path, **config)
-        assert "--init" not in ex.run_args()
+        assert "--init" in ex.run_args()
 
 
 def test_run_args_network_none_uses_docker_network_none(tmp_path):
