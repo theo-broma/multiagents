@@ -7,33 +7,35 @@ Seven bounded contexts were mapped (`context/review/MAP.md`). Two were reviewed 
 | Context | Harness | Characterization | Audit | Adversary | Findings |
 |---|---|---|---|---|---|
 | **C1** sandbox & egress | done | 3 surfaces | done | done | 38 |
-| **C2** provider seam | done | 3 surfaces | done | **not covered** | 23 |
+| **C2** provider seam | done | 3 surfaces | done | **budget.py only** | 30 |
 | **C3** agent lifecycle | done | **not covered** | **not covered** | **not covered** | 0 |
 | C4–C7 | mapped, not started | — | — | — | — |
 
-**61 distinct findings** across C1 and C2. C3's harness is merged and proven (7 green proof tests) but nothing beyond that ran. C4–C7 were ranked and budgeted but never reached.
+**68 distinct findings** across C1 and C2 (61 + 7 from C2's adversary). C3's harness is merged and proven (7 green proof tests) but nothing beyond that ran. C4–C7 were ranked and budgeted but never reached.
 
 **What was NOT reviewed and why.** C2's adversary and C3's characterization/audit/adversary were planned and budgeted. Both hit their budget ceiling — but not from the volume of work. Every ceiling here was exhausted by **cache-read token accounting on single runs**: `ctx-lifecycle` recorded 2,043,007 tokens against a 400,000 ceiling from **one** harness run, of which 1,939,456 were cache reads at a real cost of $0.51. Meanwhile the `claude` provider reports no token total at all and counted as zero against its tags throughout. This is a defect in the tooling (`bug-565863`), not a statement about the reviewed code. The brake is absent where the money is and overwhelming where it is not.
 
-**The gap worth naming.** On C1, the adversary produced the review's most consequential single finding — F50, that deleting one line from `write_proxy_config` inverts the proxy from allow-list to open relay while all 48 characterization tests continue to pass. C2 now carries 188 characterization tests that **nobody has asked the same question of**. Whether C2's suite is load-bearing is unknown. A reader deciding what to do next should know this specific question is open rather than answered in the negative.
+**The gap worth naming — now answered, and the answer is no.** On C1, the adversary produced the review's most consequential single finding — F50, that deleting one line from `write_proxy_config` inverts the proxy from allow-list to open relay while all 48 characterization tests continue to pass. C2's 188 characterization tests were the open question; someone has now asked it of the 70 that cover `budget.py`, and the answer is that **they are not load-bearing for routing or accounting correctness**. Seven mutations were applied; four survived — the `reserve` boundary, the severity thresholds at 75 and 90 in both derivations, the cache TTL boundary, and the fresh-read `spent` merge. The seam and auth surfaces (the other 118 tests) have not been attacked. The seven new findings are F150–F156.
 
 **Two facts about the test suite.** The repository's suite is green in no environment: on a host with docker it fails one test (`test_the_claude_script_uses_the_container_profile_only_where_it_should`), and inside an agent container it fails seventeen different ones (`PermissionError: ... can_spawn is false`). The documented baseline of "545 passed / 3 skipped" describes neither. One test is deliberately red as standing evidence for F100. The review added roughly 380 characterization tests across C1 and C2, and they pass.
 
 ---
 
-## The five that matter
+## The six that matter
 
 These are the findings that would change what someone does this week. Ranked by consequence, not severity label.
 
 1. **F50** (critical, rewrite) — Deleting `FilterDefaultDeny Yes` from `write_proxy_config` inverts the proxy from allow-list to deny-list (open relay). All 48 characterization tests pass. The suite is not load-bearing for the security-critical directive it generates.
 
-2. **F1** (critical) — An `egress_allowlist` entry containing `|` turns the allowlist into an allow-all. The regex escapes only the literal dot; POSIX ERE alternation has the lowest precedence of any operator, so `evil.com|.*` produces a pattern that matches any host. Confirmed by reproduction against the real `write_proxy_config`.
+2. **F150** (high) — The C2 characterization suite *defends* F122's defect: `test_cache_hit_overwrites_spent_instead_of_merging_and_mutates_the_cached_object` asserts the broken cache behaviour, so fixing the code fails the test. The test's name reads like an intentional invariant; whoever fixes F122 sees a red test and reverts. F50 and F150 together say something neither could alone: a characterization suite can fail in both directions, by not noticing a defect and by protecting one.
 
-3. **F112** (high) — `scripts.build_env` copies the full ambient process environment (`dict(os.environ)`) into every provider script invocation, unfiltered. Inside an agent container this includes `CLAUDE_CODE_MESSAGING_TOKEN`, `ANTHROPIC_BASE_URL`, sandbox proxy URLs, and `MULTIAGENTS_ROOT`. A project-local provider script (which wins by precedence) receives the calling process's live credentials.
+3. **F1** (critical) — An `egress_allowlist` entry containing `|` turns the allowlist into an allow-all. The regex escapes only the literal dot; POSIX ERE alternation has the lowest precedence of any operator, so `evil.com|.*` produces a pattern that matches any host. Confirmed by reproduction against the real `write_proxy_config`.
 
-4. **F120** (critical) — Multi-account claude quota reading is unreachable. `read_claude(config_dir=...)` exists specifically to read per-account credential files, but every real invocation goes through `claude.sh`'s `exit 64` fallback to `builtin()` called with **zero arguments**, silently discarding the caller's `config_dir`. The `config_dir` parameter is dead code from every real caller today.
+4. **F112** (high) — `scripts.build_env` copies the full ambient process environment (`dict(os.environ)`) into every provider script invocation, unfiltered. Inside an agent container this includes `CLAUDE_CODE_MESSAGING_TOKEN`, `ANTHROPIC_BASE_URL`, sandbox proxy URLs, and `MULTIAGENTS_ROOT`. A project-local provider script (which wins by precedence) receives the calling process's live credentials.
 
-5. **F130 + F131 + F132 + F140** (high/high/high/medium) — All three shipped provider scripts and the Python `_claude_token` function treat credential-file presence as validity. A corrupt, truncated, or format-changed credentials file that the code cannot read a clock from is reported as "logged in" / "valid token." The runner discovers the truth only when the agent's first turn 401s.
+5. **F120** (critical) — Multi-account claude quota reading is unreachable. `read_claude(config_dir=...)` exists specifically to read per-account credential files, but every real invocation goes through `claude.sh`'s `exit 64` fallback to `builtin()` called with **zero arguments**, silently discarding the caller's `config_dir`. The `config_dir` parameter is dead code from every real caller today.
+
+6. **F130 + F131 + F132 + F140** (high/high/high/medium) — All three shipped provider scripts and the Python `_claude_token` function treat credential-file presence as validity. A corrupt, truncated, or format-changed credentials file that the code cannot read a clock from is reported as "logged in" / "valid token." The runner discovers the truth only when the agent's first turn 401s.
 
 ---
 
@@ -88,7 +90,7 @@ C1 is the only context where being wrong costs something that cannot be taken ba
 
 ### C2 — Provider seam, quota and failover
 
-Complete except adversary: harness, three characterization surfaces (provider, seam, budget + auth), and structural audit. 23 findings. **No mutation testing was done on C2.**
+Harness, three characterization surfaces (provider, seam, budget + auth), structural audit, and adversary against `budget.py` only (70 of 188 tests). 30 findings (23 + 7 from the adversary run: F150–F156). The seam and auth surfaces have not been attacked.
 
 C2 has the highest aggregate fan-in in the codebase and holds the invariant the user named: provider literals must not be hardcoded. The review found the seam is not merely under-tested — it has a failing test on trunk that nobody is reading (the deliberately-red test for F100). The provider scripts' `build_env` copies the full ambient process environment into every script invocation (F112), handing live credentials to project-local scripts. Multi-account claude quota reading is completely unreachable (F120). All three shipped provider scripts treat credential-file presence as validity (F130, F131, F132). The budget cache is keyed only by provider name, causing test-state bleed (F100), and cache hits mutate the shared cached object (F122). `run_action`'s "never raises" contract is violated by non-UTF-8 output (F110). `choose_provider` treats an unread provider as usable when preferred but unusable when fallback (F121).
 
@@ -118,6 +120,13 @@ C2 has the highest aggregate fan-in in the codebase and holds the invariant the 
 | F141 | low | performance | trace | `detect_opencode_subscription` reads disk on every call with no caching | accept |
 | F142 | low | maintainability | trace | `read_claude` sets source before cache read; misleading when both fail | accept |
 | F143 | low | bug | trace | `refresh_models` writes non-atomically; crash mid-write leaves corrupt file | fix |
+| F150 | high | correctness | reproduction | Suite pins F122's defect as correct; fixing the cache path fails the test | fix |
+| F151 | medium | correctness | reproduction | `reserve` boundary (`>=` → `>`) survives all 70 tests | fix |
+| F152 | medium | correctness | reproduction | Severity thresholds at 75 and 90 unpinned in both `read_claude` and script derivation | fix |
+| F153 | low | correctness | reproduction | Cache TTL boundary (`<` → `<=`) survives all 70 tests | fix |
+| F154 | medium | correctness | reproduction | Fresh-read `spent` merge at line 672 is correct but unpinned; undefended against regression | fix |
+| F155 | low | correctness | reproduction | `usable` headroom boundary pinned loosely enough that a shift from 0.02 to 0.021 passes | accept |
+| F156 | low | maintainability | reproduction | Two correct `usable` behaviours (unknown headroom, negative headroom) completely untested | fix |
 
 ### C3 — Agent lifecycle and concurrent tree state
 
@@ -157,6 +166,10 @@ Recurring shapes across contexts — the same defect seen from different angles.
 
 **5. Cache and mutable-state aliasing.** F100 (`budget._cache` keyed only by provider name, causing test-state bleed) and F122 (cache hit mutates the shared cached `Budget` object, overwriting `spent` instead of merging). Module-level mutable state shared across callers without isolation or copy-on-read.
 
+**6. A characterization suite can fail in both directions.** F50 (C1: the suite does not notice the proxy directive is removed) and F150 (C2: the suite defends the broken cache behaviour, so a fix fails the test). Two contexts, two opposite failure modes, same conclusion — the suite is not load-bearing for the correctness it claims.
+
+**7. The same missing boundary in two independent derivations.** F152: severity thresholds at 75 and 90 are unpinned in both `read_claude` (line 462-464) and the script derivation (line 634). Two independent code paths, same gap. F154 compounds this: the *correct* merge at line 672 is itself unpinned, so a fix that makes the cache path match line 672 leaves line 672 undefended against later regression.
+
 ---
 
 ## Health
@@ -167,7 +180,7 @@ Recurring shapes across contexts — the same defect seen from different angles.
 
 **Behaviours pinned as WRONG.** F100 has a deliberately-red test (`test_two_unrelated_tests_sharing_a_provider_name_bleed_through_the_cache`) as standing evidence. The C1 adversary's mutation tests (F50–F54) pin the gap between pattern generation and directive enforcement. The C2 auth characterization pins all three shipped scripts' "presence = validity" pattern (F130, F131, F132).
 
-**What could not be characterized at all.** C3's lifecycle (runner, driver, tree, watchdog, gitops) — the harness exists and is proven but no characterization ran. C2's adversary — whether C2's 188 tests are load-bearing in the same sense as C1's 48 is unknown. C4–C7 entirely.
+**What could not be characterized at all.** C3's lifecycle (runner, driver, tree, watchdog, gitops) — the harness exists and is proven but no characterization ran. C2's adversary covered `budget.py`'s 70 tests only; the seam and auth surfaces (118 tests) have not been attacked. C4–C7 entirely.
 
 ---
 
@@ -175,14 +188,14 @@ Recurring shapes across contexts — the same defect seen from different angles.
 
 | Evidence tier | Count | Share |
 |---|---|---|
-| reproduction | 50 | 82% |
-| trace | 9 | 15% |
+| reproduction | 57 | 84% |
+| trace | 9 | 13% |
 | opinion | 2 | 3% |
-| **total** | **61** | |
+| **total** | **68** | |
 
-50 of 61 findings (82%) are reproduced: the real production code was called against a temp directory or fake upstream, and the asserted behaviour was observed. 9 (15%) are traced: the code path is unambiguous from reading but a reproduction would require a cooperative upstream or conditions not available in the test environment. 2 (3%) are opinion: the auditor judged the shape of the code without confirming behaviour.
+57 of 68 findings (84%) are reproduced: the real production code was called against a temp directory or fake upstream, and the asserted behaviour was observed. 9 (13%) are traced: the code path is unambiguous from reading but a reproduction would require a cooperative upstream or conditions not available in the test environment. 2 (3%) are opinion: the auditor judged the shape of the code without confirming behaviour.
 
-The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F72) and C2's audit pass (F141, F142, F143).
+The seven adversary findings (F150–F156) are all reproduction — mutations applied to the real code and tested against the real suite. The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F72) and C2's audit pass (F141, F142, F143).
 
 ---
 
@@ -190,15 +203,15 @@ The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F72)
 
 **Path:** `context/review/REPORT.md`
 
-**Total findings:** 61 distinct (was 62; F71 collapsed into F24 as its accepted duplicate. F33/F73 were already counted as one finding in the previous total, but that total used F73's severity (medium); F33 is now the entry to act on and carries its original severity (low), shifting one finding from medium to low. F74, which appeared only in C1's severity tables, was withdrawn by its author as a restatement of F33 and was never in this count. F134 was never assigned.)
+**Total findings:** 68 distinct. Reconciliation: was 61; C2's adversary produced 7 mutations yielding 7 findings (F150–F156), of which two (F-A1, F-A2) restated F122 and were not refiled, so 7 new ids from 7 distinct defects. 61 + 7 = 68.
 
-**By severity:** 3 critical, 15 high, 22 medium, 21 low.
+**By severity:** 3 critical, 16 high, 25 medium, 24 low. (Was 3/15/22/21; +1 high from F150, +3 medium from F151/F152/F154, +3 low from F153/F155/F156.)
 
-**By evidence tier:** 50 reproduction, 9 trace, 2 opinion.
+**By evidence tier:** 57 reproduction, 9 trace, 2 opinion. (Was 50/9/2; +7 reproduction from F150–F156.)
 
-**By context:** C1: 38, C2: 23, C3: 0, C4–C7: not reviewed.
+**By context:** C1: 38, C2: 30 (23 + 7 from adversary), C3: 0, C4–C7: not reviewed.
 
-**The five led with:** F50, F1, F112, F120, F130+F131+F132+F140.
+**The six led with:** F50, F150, F1, F112, F120, F130+F131+F132+F140.
 
 **Rewrites proposed:** 3 (F50, F10, F13).
 
@@ -215,3 +228,7 @@ The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F72)
 ### Open question
 
 5. **F131 — high severity, disposition accept.** `agy.sh check` authenticates on any non-empty token file, with no format or expiry check. The finding is high, its author proposed accepting it, and the reasoning offered (a token format that may not carry an expiry) is a judgement about the product, not about the code. The ledger keeps it `open`. Whether to accept a high-severity credential-validity defect is a decision for whoever owns this system, not something this review settles.
+
+### Note on permissions
+
+This reporter's `readonly_paths` was corrected to permit revision of `REPORT.md`, but the change may not be live in the running process yet. If this edit is reverted at the merge gate, that is the reason and not a mistake in the edit itself. The work is committed on branch `agents/reporter/15f9e7` and can be taken off by hand.
