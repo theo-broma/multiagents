@@ -12,7 +12,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ## Findings
 
-### F1 (CRITICAL): FilterDefaultDeny directive is untested
+### F50 (CRITICAL): FilterDefaultDeny directive is untested
 
 **Input:** Remove line 719 from `src/multiagents/executor/docker.py`:
 ```python
@@ -27,7 +27,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-### F2: FilterType directive is untested
+### F51: FilterType directive is untested
 
 **Input:** Change line 721 from `"FilterType ere\n"` to `"FilterType regex\n"` (BRE instead of ERE).
 
@@ -39,7 +39,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-### F3: FilterCaseSensitive directive is untested
+### F52: FilterCaseSensitive directive is untested
 
 **Input:** Change line 722 from `"FilterCaseSensitive Off\n"` to `"FilterCaseSensitive On\n"`.
 
@@ -51,7 +51,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-### F4: FilterURLs directive is untested
+### F53: FilterURLs directive is untested
 
 **Input:** Change line 723 from `"FilterURLs Off\n"` to `"FilterURLs On\n"`.
 
@@ -63,7 +63,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-### F5: Filter file path is untested
+### F54: Filter file path is untested
 
 **Input:** Change line 720 from `'Filter "/etc/tinyproxy/filter"\n'` to `'Filter "/etc/tinyproxy/filters"\n'` (note the trailing 's').
 
@@ -75,7 +75,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-### F6: Null allowlist handling is untested
+### F55: Null allowlist handling is untested
 
 **Input:** Set `egress_allowlist: null` in the project config (instead of omitting it or setting it to `[]`).
 
@@ -87,7 +87,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-### F7 (minor): Filter file trailing newline is untested
+### F56 (minor): Filter file trailing newline is untested
 
 **Input:** Remove the `+ "\n"` from line 708.
 
@@ -104,7 +104,7 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 Two new test files:
 
 1. **tests/test_adversary_allowlist_mutation.py** (13 tests)
-   - Tests for each surviving mutation (F1-F7)
+   - Tests for each surviving mutation (F50-F56)
    - Tests for edge cases: None entries, integer entries, boolean entries
    - Tests for harness function return types
 
