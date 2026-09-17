@@ -349,6 +349,79 @@ findings:
     severity: high
     status: open
     summary: Balanced `()`, `[]` create a silent regex match, ignoring literal meaning
+  F140:
+    class: bug
+    context: context/review/C2-audit.md
+    evidence: reproduction
+    first_seen: 0a8120ae3914bc25d207193d11242e111d50f92a
+    history:
+    - by: auditor
+      note: filed in context/review/C2-audit.md
+      sha: 0a8120ae3914bc25d207193d11242e111d50f92a
+      status: open
+    severity: medium
+    status: open
+    summary: '`_claude_token` returns a token as valid when `expiresAt` is present
+      but non-numeric, because the `isinstance` guard skips the expiry check entirely'
+  F141:
+    class: performance
+    context: context/review/C2-audit.md
+    evidence: trace — `read_opencode` (budget.py:550) calls `probe_opencode()` (always
+      returns none, budget.py:547), then unconditionally calls `detect_opencode_subscription()`
+      (budget.py:555), which opens and parses `~/.local/share/opencode/auth.json`
+      (budget.py:509-512) and registers every secret-bearing string as a redaction
+      literal (budget.py:519-522). this happens on every `read_provider` call for
+      opencode, which happens on every agent spawn.
+    first_seen: 0a8120ae3914bc25d207193d11242e111d50f92a
+    history:
+    - by: auditor
+      note: filed in context/review/C2-audit.md
+      sha: 0a8120ae3914bc25d207193d11242e111d50f92a
+      status: open
+    severity: low
+    status: open
+    summary: '`detect_opencode_subscription` reads the auth.json file from disk on
+      every call with no caching, doing redundant I/O and `register_literal` work
+      on every `read_opencode` invocation'
+  F142:
+    class: maintainability
+    context: context/review/C2-audit.md
+    evidence: trace — `budget.py:408` creates the budget with `source="cachedusageutilization"`
+      before any file is read; `budget.py:417-420` reads the state file (may fail,
+      setting only `note`); `budget.py:428-434` attempts the api fetch (may fail,
+      sets `note` if no cached data); `budget.py:435-437` returns the budget with
+      `known=false`, `source="cachedusageutilization"`, and a note — even though neither
+      the cache nor the api provided data.
+    first_seen: 0a8120ae3914bc25d207193d11242e111d50f92a
+    history:
+    - by: auditor
+      note: filed in context/review/C2-audit.md
+      sha: 0a8120ae3914bc25d207193d11242e111d50f92a
+      status: open
+    severity: low
+    status: open
+    summary: '`read_claude` sets `source="cachedUsageUtilization"` at construction
+      time, so when the cache file is missing AND the API fetch fails the returned
+      Budget claims a source that never existed'
+  F143:
+    class: bug
+    context: context/review/C2-audit.md
+    evidence: trace — `models.py:66` opens the target file for writing (truncating
+      it immediately); `models.py:67-71` writes the header and yaml dump; if the process
+      is killed between truncate and completion, the file on disk is empty or partial.
+      a subsequent `load_local` in `catalog.py` or a manual reader would get a parse
+      error or partial data.
+    first_seen: 0a8120ae3914bc25d207193d11242e111d50f92a
+    history:
+    - by: auditor
+      note: filed in context/review/C2-audit.md
+      sha: 0a8120ae3914bc25d207193d11242e111d50f92a
+      status: open
+    severity: low
+    status: open
+    summary: '`refresh_models` writes `models.yaml` directly to the target path with
+      no atomic rename, so a crash or kill mid-write leaves a corrupt or truncated
+      file that the next reader will see'
   F2:
     class: correctness
     context: context/review/C1-sandbox.md
