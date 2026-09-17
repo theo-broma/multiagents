@@ -98,3 +98,48 @@ That green is new, as of this phase. Do not be the change that breaks it.
 Run the suite as `uv run --frozen python -m pytest`.
 
 R11 is done when its test is green and that baseline is otherwise unchanged.
+
+---
+
+# Amendment — after the R11 test landed
+
+`tests/test_c2_budget_characterization.py::test_r11_read_claude_reports_every_window_not_only_the_worst`
+is written, merged and verified red on `assert len(b.windows) == 2` → `0 == 2`.
+The four assertions above it — `known`, `severity == "critical"`,
+`headroom == approx(0.05)`, and `resets_at` taken from the session bucket — pass
+today, which is what proves the test is wired to real behaviour rather than
+failing for an incidental reason. **An implementer can pick this up cold.**
+
+## Answer to `NEED_INFO(ticket)`
+
+The test engineer asked whether the ticket constrains the naming of the keys in
+`windows`. **It does not, and neither do I.** The key name is the implementer's
+choice. What carries the meaning is the reset time attached to each entry —
+which is exactly what the test asserts on, and it was right not to pin the names.
+
+## A gap this contract has, named by the test engineer rather than by me
+
+R11's third bullet says a provider reporting a single window is unaffected.
+**That is not covered by the test**, and it is not the test engineer's fault: the
+task was one requirement and one test, correctly scoped.
+
+So nothing currently stops an implementer from populating `windows` for a
+single-bucket profile as well, which this contract forbids in prose and does not
+forbid in code. Whoever implements R11 should either add that case or say why it
+does not matter — and whoever reviews the fix should check for it, because the
+suite will not.
+
+## A mistake in how these tasks were written, worth not repeating
+
+Every task in this phase told its agent to *"read the ticket with
+`list_tickets`"*. **Agents cannot do that.** `list_tickets` is an MCP tool of the
+running server, available to the orchestrator and not to a subagent, and the
+tickets are not on disk in a worktree either.
+
+Nothing was lost, because each task restated the ticket's content — which is why
+it took until the last run of the phase for anyone to notice. But every agent
+that tried it wasted steps discovering the instruction was false, and the one
+that said so was the first to be explicit rather than to quietly work around it.
+
+For any later phase: put the ticket's substance in the task, or point at a file
+in the tree. Do not send an agent at a tool it does not have.
