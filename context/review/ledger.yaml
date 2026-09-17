@@ -668,6 +668,19 @@ findings:
     severity: low
     status: open
     summary: '`render()`''s per-node token label is blank for a claude run'
+  F170:
+    class: bug
+    context: context/review/C3-consult.md
+    evidence: reproduction
+    first_seen: 9fd62e673d2e291e6c1af34d54a3568c8f2e7ad3
+    history:
+    - by: auditor
+      note: filed in context/review/C3-consult.md
+      sha: 9fd62e673d2e291e6c1af34d54a3568c8f2e7ad3
+      status: open
+    severity: high
+    status: open
+    summary: '`consult()` never returns when its run is silently retried'
   F2:
     class: correctness
     context: context/review/C1-sandbox.md
