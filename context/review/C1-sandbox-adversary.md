@@ -1,3 +1,99 @@
+# C1 — Adversarial attack on the egress allowlist
+
+Mutation and fuzzing against `write_proxy_config` in
+`src/multiagents/executor/docker.py`, run against the 48-test allowlist
+characterization suite. Reproductions are in
+`tests/test_adversary_allowlist_mutation.py` (13 tests) and
+`tests/test_adversary_allowlist_fuzz.py` (23 tests), both green.
+
+**Verdict: the suite is not load-bearing.** It validates the generated filter
+*patterns* thoroughly — every mutation to the regex construction is caught by
+between 9 and 43 tests — and never validates the tinyproxy directives that
+decide what those patterns mean. A mutation that turns the proxy into an open
+relay passes all 48.
+
+IDs continue from the other C1 findings files; F50 onward is this run's range.
+
+
+**F50** — Removing `FilterDefaultDeny Yes` inverts the proxy from allow-list to deny-list, and every test still passes
+*Class:* security
+*Severity:* critical
+*Where:* `src/multiagents/executor/docker.py:719`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_mutation.py`
+*What happens:* Deleting the line `"FilterDefaultDeny Yes\n"` leaves all 48 characterization tests passing. That directive is the one that makes tinyproxy deny by default; without it tinyproxy allows by default and the generated filter file becomes a deny-list instead of an allow-list. The proxy stops being a security boundary and becomes an open relay, and nothing in the suite notices.
+*Disposition:* rewrite
+*Reasoning:* This is the single directive separating a sandbox from an open relay, and it is the one thing the suite does not check. Every other finding in this context concerns which hosts a correct allow-list admits; this one concerns whether there is an allow-list at all.
+
+**F51** — `FilterType ere` can be changed to `regex` with no test failing
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/executor/docker.py`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_mutation.py`
+*What happens:* Switching the directive from `ere` to `regex` selects BRE rather than ERE. The generated patterns are written in ERE syntax, so their meaning changes silently. All 48 tests pass.
+*Disposition:* fix
+*Reasoning:* The patterns and the dialect that interprets them are generated in the same function and validated separately, so a mismatch between them is invisible.
+
+**F52** — `FilterCaseSensitive Off` can be changed to `On` with no test failing
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/executor/docker.py`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_mutation.py`
+*What happens:* Flipping the directive to `On` makes matching case-sensitive. DNS is case-insensitive, so a host differing only in case would be refused. All 48 tests pass.
+*Disposition:* fix
+*Reasoning:* An allow-list that silently stops matching a host because of letter case fails closed rather than open, but it fails without explanation.
+
+**F53** — `FilterURLs Off` can be changed to `On` with no test failing
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/executor/docker.py`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_mutation.py`
+*What happens:* The generated patterns match a host, not a full URL. Turning `FilterURLs` on changes what tinyproxy matches them against. All 48 tests pass.
+*Disposition:* fix
+*Reasoning:* Same shape as F51: the patterns and the thing they are matched against are decided in one place and checked in another.
+
+**F54** — The filter file path in `tinyproxy.conf` can be changed with no test failing
+*Class:* correctness
+*Severity:* medium
+*Where:* `src/multiagents/executor/docker.py`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_mutation.py`
+*What happens:* Nothing verifies that the `FilterFile` directive names the file the patterns are actually written to. Pointing it elsewhere leaves tinyproxy with no filter file at all. All 48 tests pass.
+*Disposition:* fix
+*Reasoning:* A filter file that is written correctly and never read is indistinguishable, from the suite's point of view, from one that is enforced.
+
+**F55** — `egress_allowlist: null` raises an uncaught `TypeError`
+*Class:* correctness
+*Severity:* low
+*Where:* `src/multiagents/executor/docker.py`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_fuzz.py`
+*What happens:* A `null` allowlist in the config reaches `write_proxy_config` and raises `TypeError`. The code handles the case in the sense that it fails rather than misbehaves, but no test covers it.
+*Disposition:* fix
+*Reasoning:* Adjacent to F2, which covers a non-string *entry*; this one is the whole list being null.
+
+**F56** — The filter file's trailing newline is untested
+*Class:* maintainability
+*Severity:* low
+*Where:* `src/multiagents/executor/docker.py`
+*Evidence:* reproduction
+*Proof:* `tests/test_adversary_allowlist_fuzz.py`
+*What happens:* Removing the trailing newline from the generated filter file breaks no test. Whether tinyproxy tolerates a file with no final newline is not established here.
+*Disposition:* accept
+*Reasoning:* Filed for completeness. Worth knowing only if the others are fixed and someone is tightening the file format.
+
+---
+
+## The original run's own write-up
+
+Kept verbatim below, because its framing of the gap is clearer than the
+reformatting above and because the reproduction steps are stated in the
+adversary's own words.
+
+
 # Adversary Findings — write_proxy_config Allowlist Enforcement
 
 ## Verdict
@@ -10,153 +106,3 @@ This is a critical gap: the suite would not notice if the proxy became an open r
 
 ---
 
-## Findings
-
-### F50 (CRITICAL): FilterDefaultDeny directive is untested
-
-**Input:** Remove line 719 from `src/multiagents/executor/docker.py`:
-```python
-"FilterDefaultDeny Yes\n"
-```
-
-**Location:** `src/multiagents/executor/docker.py:719`
-
-**Outcome:** All 48 tests pass. The suite does not verify that the generated tinyproxy.conf contains the directive that makes the proxy deny-by-default. Without this directive, tinyproxy defaults to allow-by-default, inverting the security model. The filter file becomes a deny-list instead of an allow-list.
-
-**Severity:** Critical. This is the single directive that determines whether the proxy operates as a security boundary or an open relay.
-
----
-
-### F51: FilterType directive is untested
-
-**Input:** Change line 721 from `"FilterType ere\n"` to `"FilterType regex\n"` (BRE instead of ERE).
-
-**Location:** `src/multiagents/executor/docker.py:721`
-
-**Outcome:** All 48 tests pass. The generated filter patterns use ERE syntax (`|`, `+`, `?`, `()`), but the suite does not verify that tinyproxy is configured to interpret them as ERE. With BRE mode, these patterns would be interpreted differently or fail to compile.
-
-**Severity:** High. The patterns would not work as intended.
-
----
-
-### F52: FilterCaseSensitive directive is untested
-
-**Input:** Change line 722 from `"FilterCaseSensitive Off\n"` to `"FilterCaseSensitive On\n"`.
-
-**Location:** `src/multiagents/executor/docker.py:722`
-
-**Outcome:** All 48 tests pass. DNS is case-insensitive, so the proxy must match hosts case-insensitively. The suite tests case-insensitive matching via the harness but does not verify the config directive that enables it.
-
-**Severity:** Medium. Would cause legitimate hosts to be refused if their case differs from the allowlist.
-
----
-
-### F53: FilterURLs directive is untested
-
-**Input:** Change line 723 from `"FilterURLs Off\n"` to `"FilterURLs On\n"`.
-
-**Location:** `src/multiagents/executor/docker.py:723`
-
-**Outcome:** All 48 tests pass. The generated patterns match against the bare host (e.g., `example.com`), not the full URL. With `FilterURLs On`, tinyproxy would match against `http://example.com/path`, causing all patterns to fail.
-
-**Severity:** High. All allowlist entries would silently stop working.
-
----
-
-### F54: Filter file path is untested
-
-**Input:** Change line 720 from `'Filter "/etc/tinyproxy/filter"\n'` to `'Filter "/etc/tinyproxy/filters"\n'` (note the trailing 's').
-
-**Location:** `src/multiagents/executor/docker.py:720`
-
-**Outcome:** All 48 tests pass. The suite does not verify that the path in the Filter directive matches the actual location where the filter file is written. tinyproxy would fail to load the filter rules, resulting in an empty allowlist (deny-all).
-
-**Severity:** High. The proxy would deny all outbound traffic.
-
----
-
-### F55: Null allowlist handling is untested
-
-**Input:** Set `egress_allowlist: null` in the project config (instead of omitting it or setting it to `[]`).
-
-**Location:** `src/multiagents/executor/docker.py:699`
-
-**Outcome:** The code raises `TypeError: 'NoneType' object is not iterable` at `list(None)`. The `or []` guard on line 699 handles this case, but no test exercises it.
-
-**Severity:** Low. The code handles it correctly, but the lack of test coverage means a regression would go unnoticed.
-
----
-
-### F56 (minor): Filter file trailing newline is untested
-
-**Input:** Remove the `+ "\n"` from line 708.
-
-**Location:** `src/multiagents/executor/docker.py:708`
-
-**Outcome:** All 48 tests pass. The filter file would not end with a newline. This is unlikely to cause issues (tinyproxy likely handles both cases), but POSIX text files should end with a newline.
-
-**Severity:** Low. Cosmetic issue.
-
----
-
-## Tests Committed
-
-Two new test files:
-
-1. **tests/test_adversary_allowlist_mutation.py** (13 tests)
-   - Tests for each surviving mutation (F50-F56)
-   - Tests for edge cases: None entries, integer entries, boolean entries
-   - Tests for harness function return types
-
-2. **tests/test_adversary_allowlist_fuzz.py** (23 tests)
-   - Boundary values: consecutive dots, IPv6, very long hostnames, empty hosts
-   - Unicode edge cases: NFC vs NFD normalization, zero-width characters, mixed scripts
-   - Property-based checks: roundtrip, monotonicity, empty allowlist behavior
-   - Random fuzzing with seed 42 (100 iterations)
-
-**Command to run all adversary tests:**
-```bash
-uv run --frozen python -m pytest -q tests/test_adversary_allowlist_mutation.py tests/test_adversary_allowlist_fuzz.py
-```
-
-**All 36 adversary tests pass against the current code.**
-
----
-
-## What the Suite Does Well
-
-The existing 48-test suite thoroughly validates:
-- Filter pattern generation logic (regex escaping, anchoring, subdomain matching)
-- Allow/refuse decision correctness for various host patterns
-- Edge cases in pattern matching (quantifiers, character classes, alternation)
-- Malformed entries (unbalanced brackets, non-string entries)
-
-The suite would catch any regression in the pattern generation logic itself.
-
----
-
-## What the Suite Does Not Validate
-
-The suite treats `write_proxy_config` as a black box that produces filter patterns, but does not validate:
-- The tinyproxy.conf directives that determine the proxy's security posture
-- The consistency between the Filter directive path and the actual filter file location
-- The interaction between the generated patterns and the proxy configuration
-
-This is a critical gap: the patterns are useless without the correct proxy configuration.
-
----
-
-## Recommendation
-
-Add tests that validate the complete tinyproxy.conf output, not just the filter patterns. Specifically:
-- Assert that `FilterDefaultDeny Yes` is present
-- Assert that `FilterType ere` is present
-- Assert that `FilterCaseSensitive Off` is present
-- Assert that `FilterURLs Off` is present
-- Assert that the Filter directive path matches the actual filter file location
-
-These tests would make the suite load-bearing for the security boundary it claims to test.
-
----
-
-**VERDICT(rejected, 1): One critical defect — the suite would not notice if the proxy became an open relay.**
