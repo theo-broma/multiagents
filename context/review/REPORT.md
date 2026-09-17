@@ -6,12 +6,12 @@ Seven bounded contexts were mapped (`context/review/MAP.md`). Two were reviewed 
 
 | Context | Harness | Characterization | Audit | Adversary | Findings |
 |---|---|---|---|---|---|
-| **C1** sandbox & egress | done | 3 surfaces | done | done | 39 |
+| **C1** sandbox & egress | done | 3 surfaces | done | done | 38 |
 | **C2** provider seam | done | 3 surfaces | done | **not covered** | 23 |
 | **C3** agent lifecycle | done | **not covered** | **not covered** | **not covered** | 0 |
 | C4–C7 | mapped, not started | — | — | — | — |
 
-**62 distinct findings** across C1 and C2. C3's harness is merged and proven (7 green proof tests) but nothing beyond that ran. C4–C7 were ranked and budgeted but never reached.
+**61 distinct findings** across C1 and C2. C3's harness is merged and proven (7 green proof tests) but nothing beyond that ran. C4–C7 were ranked and budgeted but never reached.
 
 **What was NOT reviewed and why.** C2's adversary and C3's characterization/audit/adversary were planned and budgeted. Both hit their budget ceiling — but not from the volume of work. Every ceiling here was exhausted by **cache-read token accounting on single runs**: `ctx-lifecycle` recorded 2,043,007 tokens against a 400,000 ceiling from **one** harness run, of which 1,939,456 were cache reads at a real cost of $0.51. Meanwhile the `claude` provider reports no token total at all and counted as zero against its tags throughout. This is a defect in the tooling (`bug-565863`), not a statement about the reviewed code. The brake is absent where the money is and overwhelming where it is not.
 
@@ -41,7 +41,7 @@ These are the findings that would change what someone does this week. Ranked by 
 
 ### C1 — Sandbox and egress boundary
 
-Complete review: harness, three characterization surfaces (allowlist, auth-proxy, executor), adversary (mutation + fuzzing), and structural audit. 39 findings.
+Complete review: harness, three characterization surfaces (allowlist, auth-proxy, executor), adversary (mutation + fuzzing), and structural audit. 38 findings.
 
 C1 is the only context where being wrong costs something that cannot be taken back: a credential leaving the network. It is the sole egress path, reachable by untrusted agent output by construction. The review confirmed the risk is real and concentrated in `write_proxy_config` and the auth proxy's `_scrub` function. The allowlist regex escapes only the literal dot, which is the root cause of ten findings (F1, F10, F12, F13, F14, F50, F51, F52, F53, F54). The adversary proved the 48-test suite does not validate the tinyproxy directives that decide what those patterns mean — a mutation that turns the proxy into an open relay passes all of them. The auth proxy's `_scrub` is a complete no-op on non-JSON error bodies (F24), bypassing even its own shape-based patterns. The executor's `mounts()` dedup silently downgrades read-only to writable on path collision (F30). Three high-severity bugs in lifecycle management (F60, F61, F62) leave containers running after stop and swallow network-connect failures as success.
 
@@ -72,12 +72,10 @@ C1 is the only context where being wrong costs something that cannot be taken ba
 | F64 | medium | architecture | trace | `ensure_running` performs side effects before verifying image exists | fix |
 | F66 | medium | maintainability | reproduction | `Handler._event` silently swallows all exceptions from callback | fix |
 | F67 | medium | performance | reproduction | `do_POST` retries rate-limited accounts with zero backoff | fix |
-| F71 | medium | security | trace | `_scrub` returns non-JSON error bodies completely unredacted | fix |
-| F73 | medium | security | trace | `build_env` forwards BASE_ENV_KEYS even when named in `blocked` | fix |
 | F22 | low | correctness | reproduction | Error passthrough drops all upstream response headers | fix |
 | F23 | low | bug | reproduction | Every HTTP verb forwarded upstream as POST, including literal GET | fix |
 | F32 | low | correctness | reproduction | `pids_limit`/`cpus`/`memory` of 0 silently omitted; negative passed unvalidated | fix |
-| F33 | low | correctness | reproduction | `build_env` blocked list doesn't guard base keys (same defect as F73) | fix |
+| F33 | low | correctness | reproduction | `build_env` blocked list doesn't guard base keys (same defect as F73; severity and class contested — F73 reads medium/security) | fix |
 | F35 | low | correctness | reproduction | String-form extra_mounts always writable; relative paths unresolved | fix |
 | F55 | low | correctness | reproduction | `egress_allowlist: null` raises uncaught TypeError | fix |
 | F56 | low | maintainability | reproduction | Filter file trailing newline untested | accept |
@@ -155,7 +153,7 @@ Recurring shapes across contexts — the same defect seen from different angles.
 
 **3. Silent success on failure.** F61, F62 (network-connect failure returns `ok: True`), F130, F132 (unreadable credentials → "logged in"), F20 (upstream errors invisible to monitoring via `on_event`). The system prefers to report success than to admit it cannot tell. An operator watching events sees rate-limit churn and rejected tokens but is completely blind to the upstream itself returning errors.
 
-**4. build_env inconsistencies across C1 and C2.** F33/F73 (C1: `build_env` in `base.py` forwards BASE_ENV_KEYS even when named in `blocked`) and F112 (C2: `build_env` in `scripts.py` copies the full ambient environment to provider scripts). Two different `build_env` functions in two different contexts, both with the same shape: the environment construction does not enforce the boundary its docstring or contract claims.
+**4. build_env inconsistencies across C1 and C2.** F33 (C1: `build_env` in `base.py` forwards BASE_ENV_KEYS even when named in `blocked`) and F112 (C2: `build_env` in `scripts.py` copies the full ambient environment to provider scripts). Two different `build_env` functions in two different contexts, both with the same shape: the environment construction does not enforce the boundary its docstring or contract claims. F33 was filed twice (as F33 low/`correctness` and F73 medium/`security`); F73 is accepted as the duplicate. The severity disagreement is recorded but not resolved — forwarding a variable the configuration explicitly blocked is arguably the security reading, and that is the one the reader should weigh.
 
 **5. Cache and mutable-state aliasing.** F100 (`budget._cache` keyed only by provider name, causing test-state bleed) and F122 (cache hit mutates the shared cached `Budget` object, overwriting `spent` instead of merging). Module-level mutable state shared across callers without isolation or copy-on-read.
 
@@ -177,14 +175,14 @@ Recurring shapes across contexts — the same defect seen from different angles.
 
 | Evidence tier | Count | Share |
 |---|---|---|
-| reproduction | 50 | 81% |
-| trace | 10 | 16% |
+| reproduction | 50 | 82% |
+| trace | 9 | 15% |
 | opinion | 2 | 3% |
-| **total** | **62** | |
+| **total** | **61** | |
 
-50 of 62 findings (81%) are reproduced: the real production code was called against a temp directory or fake upstream, and the asserted behaviour was observed. 10 (16%) are traced: the code path is unambiguous from reading but a reproduction would require a cooperative upstream or conditions not available in the test environment. 2 (3%) are opinion: the auditor judged the shape of the code without confirming behaviour.
+50 of 61 findings (82%) are reproduced: the real production code was called against a temp directory or fake upstream, and the asserted behaviour was observed. 9 (15%) are traced: the code path is unambiguous from reading but a reproduction would require a cooperative upstream or conditions not available in the test environment. 2 (3%) are opinion: the auditor judged the shape of the code without confirming behaviour.
 
-The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F71, F72, F73) and C2's audit pass (F141, F142, F143). F71 is justified as trace: non-JSON bodies with embedded secrets cannot be reproduced without a cooperative upstream, and the code path at `authproxy.py:367` is unambiguous.
+The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F72) and C2's audit pass (F141, F142, F143).
 
 ---
 
@@ -192,26 +190,28 @@ The trace findings are concentrated in C1's audit pass (F61, F62, F64, F70, F71,
 
 **Path:** `context/review/REPORT.md`
 
-**Total findings:** 62 distinct (after deduplication of F33/F73, which are the same defect).
+**Total findings:** 61 distinct (was 62; F71 collapsed into F24 as its accepted duplicate. F33/F73 were already counted as one finding in the previous total, but that total used F73's severity (medium); F33 is now the entry to act on and carries its original severity (low), shifting one finding from medium to low. F74, which appeared only in C1's severity tables, was withdrawn by its author as a restatement of F33 and was never in this count. F134 was never assigned.)
 
-**By severity:** 3 critical, 15 high, 24 medium, 20 low.
+**By severity:** 3 critical, 15 high, 22 medium, 21 low.
 
-**By evidence tier:** 50 reproduction, 10 trace, 2 opinion.
+**By evidence tier:** 50 reproduction, 9 trace, 2 opinion.
 
-**By context:** C1: 39, C2: 23, C3: 0, C4–C7: not reviewed.
+**By context:** C1: 38, C2: 23, C3: 0, C4–C7: not reviewed.
 
 **The five led with:** F50, F1, F112, F120, F130+F131+F132+F140.
 
 **Rewrites proposed:** 3 (F50, F10, F13).
 
-### Defects in the review itself
+### Defects in the review itself — resolved
 
-1. **F74 is referenced but missing.** `C1-sandbox.md`'s severity table lists F74 among the 7 medium findings (F63, F64, F66, F67, F71, F73, F74), but the finding itself does not appear in the file. The file jumps from F73 to F75. Either F74 was lost during writing or the severity table is wrong.
+1. **F74 — resolved.** Withdrawn by its own author during the audit run as a restatement of F33. The id was left behind in `C1-sandbox.md`'s severity and evidence tables (lines 249 and 257), where it still appears as a `medium`/`trace` entry; those two counts are each one too high. There is no F74.
 
-2. **F134 is missing from C2-auth.md.** The IDs jump from F133 to F135. Either F134 was never filed or was retracted without recording the retraction.
+2. **F134 — resolved.** Never existed. The findings in `C2-auth.md` were written in the order F130, F131, F132, F135, F133, F136, F137; 134 was simply skipped. Nothing was retracted.
 
-3. **F33 and F73 are the same defect.** Both describe `build_env` in `base.py` forwarding BASE_ENV_KEYS even when named in `blocked`. F33 (C1-sandbox-executor.md, low, reproduction) and F73 (C1-sandbox.md, medium, trace) are the same finding filed twice by two different agents with different severity assessments. The report carries both IDs and notes the duplication; the implement team should fix one.
+3. **F33 / F73 — resolved as one defect.** F73 is marked `accepted` as the duplicate. F33 is the entry to act on; it has the named reproduction. The two disagree on both severity and class — F33 low/`correctness`, F73 medium/`security` — and that disagreement is deliberately recorded rather than resolved. Forwarding a variable the configuration explicitly blocked is arguably the security reading, and that is the one the reader should weigh.
 
-4. **F71 and F24 overlap.** F71 (C1-sandbox.md, medium, security, trace) describes the security consequence of `_scrub` returning non-JSON bodies unredacted. F24 (C1-sandbox-authproxy.md, high, security, reproduction) describes the mechanism by which `_scrub` is a no-op on non-JSON. Same root cause, different angles, different severity. Both are carried; the implement team should treat them as one fix.
+4. **F71 / F24 — resolved as one defect.** F71 is marked `accepted` as the duplicate. F24 is the entry to act on: it carries a reproduction showing an HTML body containing an `sk-live-…` string passing through untouched, where F71 is only a trace. They disagree on severity (F24 high, F71 medium); the reproduction is the stronger evidence.
 
-5. **F131 has severity high but disposition accept.** `agy.sh check` authenticates on any non-empty token file — filed as high severity but the auditor downgraded the disposition to `accept` because the token format may not carry an expiry. This is internally consistent (the finding is real, but unfixable without format changes) but worth flagging: a high-severity finding with disposition `accept` is unusual and the reader should know the auditor's reasoning.
+### Open question
+
+5. **F131 — high severity, disposition accept.** `agy.sh check` authenticates on any non-empty token file, with no format or expiry check. The finding is high, its author proposed accepting it, and the reasoning offered (a token format that may not carry an expiry) is a judgement about the product, not about the code. The ledger keeps it `open`. Whether to accept a high-severity credential-validity defect is a decision for whoever owns this system, not something this review settles.
