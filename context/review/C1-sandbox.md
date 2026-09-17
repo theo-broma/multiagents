@@ -273,3 +273,32 @@ unrelated `AttributeError` from `write_proxy_config`.
 - `_expiring_soon` (docker.py:451-469) correctly handles unreadable/malformed credentials by returning False (no false-positive refreshes).
 - `Accounts.for_agent` (authproxy.py:183-206) correctly implements least-loaded pinning with tie-breaking, and the re-read-inside-lock pattern in `refresh_private_credentials` correctly avoids double-renewal.
 - `Handle.lines` (base.py:34-63) correctly salvages over-long lines rather than dropping the stream.
+
+---
+
+## Retractions and duplicate resolutions
+
+Added by the orchestrator after the report pass flagged them. The findings above
+are evidence written against a commit and are left untouched; this section
+records what became of two ids rather than editing the entries.
+
+- **F74 was withdrawn by its own author** during the audit run that filed it: it
+  restated **F33** (`build_env` forwards `BASE_ENV_KEYS` even when they are named
+  in `blocked`). The finding text was removed but the id was left behind in this
+  file's severity and evidence tables at lines 249 and 257, where it still
+  appears as a `medium`/`trace` entry. **Those two counts are each one too high.**
+  There is no F74 to read.
+
+- **F71 duplicates F24** and is marked `accepted` in the ledger for that reason,
+  not because anyone decided to live with the defect. Both describe `_scrub`
+  being a no-op on a non-JSON error body. F24 is the entry to act on: it carries
+  a reproduction, showing an HTML body containing an `sk-live-…` string passing
+  through untouched, where F71 is a trace. The two also disagree on severity —
+  F24 high, F71 medium. Fixing F24 fixes both.
+
+- **F73 duplicates F33**, marked `accepted` in the ledger on the same basis. F33
+  has the named reproduction. The two disagree on severity *and* class — F33 low
+  and `correctness`, F73 medium and `security`. That disagreement is recorded
+  rather than resolved, and is worth settling when the finding is scheduled:
+  forwarding a variable the configuration explicitly blocked is arguably the
+  security reading.
