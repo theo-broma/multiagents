@@ -211,6 +211,39 @@ and a wedged process look identical from here.
 
 **Check:** `tests/test_core.py::test_a_steer_says_whether_anything_answered`.
 
+### The 17 `can_spawn` failures are real, and the flag is not what gates them — 2026-09-17
+
+`REPORT.md` recorded that the suite fails 17 runner tests inside an agent with
+`PermissionError: can_spawn is false`. A later measurement set
+`MULTIAGENTS_CAN_SPAWN=false` from a plain shell, saw one failure rather than
+seventeen, and the finding was marked unconfirmed.
+
+Both measurements were correct and the second did not test what it thought. The
+gate is:
+
+```python
+Runner.can_spawn() -> self.self_id() is None or os.environ.get("MULTIAGENTS_CAN_SPAWN", "0") == "1"
+```
+
+`self_id()` reads `MULTIAGENTS_AGENT_ID`. From a plain shell that variable is
+unset, so `self_id()` is `None`, the **first** disjunct is already true, and the
+value of `MULTIAGENTS_CAN_SPAWN` never matters. Setting the flag alone cannot
+reproduce the failure; only being an agent can.
+
+Confirmed 2026-09-17 by a `tester` run, which saw exactly 21 failures in its own
+worktree — the documented baseline of 1, plus its own 3 deliberately-red new
+tests, plus the 17 — and named the mechanism.
+
+**Check:** run the suite twice, once with `MULTIAGENTS_CAN_SPAWN=0` alone and
+once with `MULTIAGENTS_AGENT_ID=ag-test MULTIAGENTS_CAN_SPAWN=0`. Only the second
+produces the 17.
+
+**Why it matters beyond the count.** Anything an agent measures about this
+project is measured from inside an agent, and this is the first confirmed case
+where that changes the answer. A task sent to an agent that says "the baseline is
+one failure" is telling it something false about its own environment, which is
+why every task in this phase carries the 17 as a known artefact instead.
+
 ### Providers describe usage in words that do not overlap — 2026-09-10
 
 opencode sends `total`, agy sends `total_tokens`, claude sends neither and only
