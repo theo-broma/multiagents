@@ -249,3 +249,96 @@ findings:
     status: open
     summary: '`extra_mounts` string-form entries can never be marked read-only, and
       relative paths are never resolved'
+  F50:
+    class: security
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: critical
+    status: open
+    summary: Removing `FilterDefaultDeny Yes` inverts the proxy from allow-list to
+      deny-list, and every test still passes
+  F51:
+    class: correctness
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: medium
+    status: open
+    summary: '`FilterType ere` can be changed to `regex` with no test failing'
+  F52:
+    class: correctness
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: medium
+    status: open
+    summary: '`FilterCaseSensitive Off` can be changed to `On` with no test failing'
+  F53:
+    class: correctness
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: medium
+    status: open
+    summary: '`FilterURLs Off` can be changed to `On` with no test failing'
+  F54:
+    class: correctness
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: medium
+    status: open
+    summary: The filter file path in `tinyproxy.conf` can be changed with no test
+      failing
+  F55:
+    class: correctness
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: low
+    status: open
+    summary: '`egress_allowlist: null` raises an uncaught `TypeError`'
+  F56:
+    class: maintainability
+    context: context/review/C1-sandbox-adversary.md
+    evidence: reproduction
+    first_seen: de6722df20deb0b32995493eb4a81056594660ea
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-adversary.md
+      sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    severity: low
+    status: open
+    summary: The filter file's trailing newline is untested
