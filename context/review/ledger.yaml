@@ -500,8 +500,17 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: orchestrator
+      note: 'Duplicate of F24, not a decision to leave the defect alone. The auditor
+        refiled it under a new id despite being given F24 in its index. F24 is the
+        entry to act on: it carries the stronger evidence tier (reproduction, with
+        a test showing an HTML body containing an sk-live-... string passing through
+        _scrub untouched), where F71 is a trace. Closing this id so the defect is
+        counted once; fixing F24 fixes both.'
+      sha: 9030cdac2f454ef1fb56c730d47ea14159fbe60f
+      status: accepted
     severity: medium
-    status: open
+    status: accepted
     summary: '`_scrub` returns non-JSON error bodies completely unredacted'
   F72:
     class: performance
@@ -526,8 +535,17 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: orchestrator
+      note: 'Duplicate of F33, not a decision to leave the defect alone. Same refiling
+        as F71. F33 is the entry to act on — it has a named reproduction (test_build_env_base_keys_are_forwarded_even_if_named_in_blocked)
+        where this one is a trace. Note the two runs disagree on severity: F33 says
+        low, F73 says medium and classes it security rather than correctness. That
+        disagreement is worth a second look when the finding is scheduled, since forwarding
+        an explicitly blocked variable is arguably the security reading.'
+      sha: 9030cdac2f454ef1fb56c730d47ea14159fbe60f
+      status: accepted
     severity: medium
-    status: open
+    status: accepted
     summary: '`build_env` forwards BASE_ENV_KEYS even when named in `blocked`'
   F75:
     class: security
