@@ -94,3 +94,73 @@ findings:
     status: open
     summary: A non-string `egress_allowlist` entry crashes container config generation
       with an uncaught `AttributeError`
+  F20:
+    class: correctness
+    context: context/review/C1-sandbox-authproxy.md
+    evidence: reproduction
+    first_seen: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-authproxy.md
+      sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+      status: open
+    severity: medium
+    status: open
+    summary: Ordinary upstream errors (anything but 429/529) emit no `on_event` at
+      all
+  F21:
+    class: security
+    context: context/review/C1-sandbox-authproxy.md
+    evidence: reproduction
+    first_seen: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-authproxy.md
+      sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+      status: open
+    severity: medium
+    status: open
+    summary: '`_scrub` only removes secret-*shaped* content; plain PII (organisation,
+      email) in an upstream error body passes through completely unredacted'
+  F22:
+    class: correctness
+    context: context/review/C1-sandbox-authproxy.md
+    evidence: reproduction
+    first_seen: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-authproxy.md
+      sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+      status: open
+    severity: low
+    status: open
+    summary: The error-passthrough branch of `_forward` drops every upstream response
+      header except a proxy-generated `content-type`/`content-length`
+  F23:
+    class: bug
+    context: context/review/C1-sandbox-authproxy.md
+    evidence: reproduction
+    first_seen: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-authproxy.md
+      sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+      status: open
+    severity: low
+    status: open
+    summary: Every HTTP verb reaching the proxy is forwarded upstream as `POST`, including
+      a literal `GET`
+  F24:
+    class: security
+    context: context/review/C1-sandbox-authproxy.md
+    evidence: reproduction
+    first_seen: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox-authproxy.md
+      sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
+      status: open
+    severity: high
+    status: open
+    summary: '`_scrub` is a complete no-op on a non-JSON error body, bypassing even
+      its shape-based patterns'
