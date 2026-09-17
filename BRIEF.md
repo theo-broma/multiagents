@@ -70,6 +70,39 @@ Two traps that produce failures which are not defects:
 
 ---
 
+## Before anything: who may touch a test
+
+`project.yaml` ships a default `readonly_paths` list — `tests/**`,
+`**/test_*.py`, `conftest.py` and friends. **An agent's own list REPLACES this
+one rather than adding to it.** So `tester` is exempt with `[]`, and all three
+implementer tiers, which omit the key, INHERIT it.
+
+Creating a **new** file under those globs is allowed. Modifying an **existing**
+one is reverted at the merge gate. Your run still reports success. `merge_agent`
+reports the loss in `readonly_reverted` and `server.py:863` documents reading it
+— **read it**, and treat a non-empty value as a failed merge for those paths,
+not a footnote. Two runs were lost this way during the review and one left a red
+test behind; that is `bug-08f9b3`.
+
+**Three scheduled items require changing existing tests** and cannot be done by
+a restricted agent: `bug-08f9b3`'s own test fix, `F50`'s suite rewrite, and
+`F150`'s wrong assertion.
+
+**The obvious workaround does not work.** A new test file that supersedes the old
+one leaves the old one in the suite, where it runs against the fixed code, goes
+red, and strands the agent holding a failure it may not touch.
+
+So: `.multiagents/proposals/agents.yaml` proposes `readonly_paths: []` on
+**`implementer-deep` only**, scoped to this phase and given back when the three
+rewrites merge. **It must be accepted before phase 1 starts** — the work that
+fixes the `readonly_paths` defect is itself blocked by it.
+
+Everything else keeps the separation. `tester` writes the NEW tests each ticket
+names, red, and an implementer makes them green. That is the normal loop and it
+needs no exemption.
+
+---
+
 ## Phase 1 — repair the tool, before using it
 
 **This is the whole first phase and nothing else starts until it lands.**
@@ -86,7 +119,7 @@ test that should have caught it** — write that test, not merely a test.
 |---|---|---|
 | 1 | `bug-cfdc71` | The workspace container has no PID 1 reaper. Fork-heavy work — running this suite, i.e. your normal job — leaves zombies until `pids_limit: 512` is exhausted. Measured: 509 processes, 505 zombies, then every agent dies with signal-shaped exits whose text blames Bun and innocent providers. Proposed fix: add `--init` to `run_args()`. **Do this one first.** |
 | 2 | `bug-565863` | `budget_tag` enforcement and reporting sum raw usage keys instead of `token_count()`, which already exists and fixes exactly this elsewhere. Claude spend counts as zero. **This is why the review covered 2 of 7 contexts.** |
-| 3 | `bug-08f9b3` | `harness` and `reporter` cannot revise their own output. `harness` omits `readonly_paths` where it needed `[]` — omission inherits the list rather than clearing it. A test encodes the bug by asserting the key is absent. |
+| 3 | `bug-08f9b3` | **Do this second, right after `--init`.** `harness` and `reporter` cannot revise their own output. Already fixed in the LIVE config during the review (`harness: []`, `reporter: ['src/**','tests/**']`) — so the fix is proven and the work is landing it in `src/multiagents/defaults/agents.yaml`, plus correcting `tests/test_core.py:10592`, which asserts `"readonly_paths" not in harness` and so encodes the bug. **That last part needs the exempt `implementer-deep`.** |
 | 4 | `bug-ad011c` | Steering a fallback-routed run rebuilds the command with the *preferred* provider's model and effort flag, killing the run. |
 | 5 | `bug-97a0c7` | The documented recovery for a truncated run (`steer_agent`) fails with `Cwd must be an absolute path`, turning a truncated run into a permanent loss. |
 | 6 | `bug-8195f2` | `wait_for_agents` reports a live, being-resumed agent as terminally `cancelled: "stopped by parent"`, because `steer()` reuses the user-facing `stop()` path. |
