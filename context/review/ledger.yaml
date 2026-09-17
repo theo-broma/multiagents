@@ -342,3 +342,204 @@ findings:
     severity: low
     status: open
     summary: The filter file's trailing newline is untested
+  F60:
+    class: bug
+    context: context/review/C1-sandbox.md
+    evidence: reproduction
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: high
+    status: open
+    summary: '`stop()` never stops or removes the auth container'
+  F61:
+    class: bug
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: high
+    status: open
+    summary: '`ensure_proxy` returns success when bridge-network connect fails, leaving
+      proxy isolated'
+  F62:
+    class: bug
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: high
+    status: open
+    summary: '`ensure_auth_proxy` returns success when bridge-network connect fails,
+      leaving auth proxy isolated'
+  F63:
+    class: security
+    context: context/review/C1-sandbox.md
+    evidence: reproduction
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: medium
+    status: open
+    summary: '`credential_drift` interpolates paths into shell command without quoting'
+  F64:
+    class: architecture
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: medium
+    status: open
+    summary: '`ensure_running` performs filesystem and network side effects before
+      verifying the image exists'
+  F65:
+    class: bug
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: low
+    status: open
+    summary: '`project_placeholder` leaves credential temp file on disk if interrupted'
+  F66:
+    class: maintainability
+    context: context/review/C1-sandbox.md
+    evidence: reproduction
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: medium
+    status: open
+    summary: '`Handler._event` silently swallows all exceptions from the event callback'
+  F67:
+    class: performance
+    context: context/review/C1-sandbox.md
+    evidence: reproduction
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: medium
+    status: open
+    summary: '`do_POST` retries rate-limited accounts with zero backoff'
+  F68:
+    class: performance
+    context: context/review/C1-sandbox.md
+    evidence: reproduction
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: low
+    status: open
+    summary: '`mark_limited` unpins all agents simultaneously, causing thundering
+      herd'
+  F69:
+    class: bug
+    context: context/review/C1-sandbox.md
+    evidence: reproduction
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: low
+    status: open
+    summary: '`seed_private_state` deletes lock files based on a TOCTOU-vulnerable
+      PID check'
+  F70:
+    class: bug
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: low
+    status: open
+    summary: '`Handle.stop` may SIGKILL a reassigned process group after timeout'
+  F71:
+    class: security
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: medium
+    status: open
+    summary: '`_scrub` returns non-JSON error bodies completely unredacted'
+  F72:
+    class: performance
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: low
+    status: open
+    summary: '`Accounts.token` cache has no eviction and grows unbounded'
+  F73:
+    class: security
+    context: context/review/C1-sandbox.md
+    evidence: trace
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: medium
+    status: open
+    summary: '`build_env` forwards BASE_ENV_KEYS even when named in `blocked`'
+  F75:
+    class: security
+    context: context/review/C1-sandbox.md
+    evidence: opinion
+    first_seen: 1d9f4c5f054d177511464d385298c1e744b6a753
+    history:
+    - by: auditor
+      note: filed in context/review/C1-sandbox.md
+      sha: 1d9f4c5f054d177511464d385298c1e744b6a753
+      status: open
+    severity: low
+    status: open
+    summary: '`_copy_settings` copies symlink targets as regular files without checking
+      source is a symlink'
