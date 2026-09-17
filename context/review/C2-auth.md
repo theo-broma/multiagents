@@ -84,3 +84,12 @@ in `looks_like_auth_failure` and one in config folding.
 *What happens:* `_AUTH_MARKERS` catches `"token expired"` but not `"session ... expired"` or `"session expired"`; it catches `"please log in"`/`"please login"` but not `"please sign in"`; it has nothing for a missing API key phrased as `"API key missing"` or `"missing api key"` (as opposed to `"invalid api key"`, which IS caught). None of `"your session has expired, please sign in again"`, `"Error: session expired"`, `"API key missing"`, or `"missing api key"` share a substring with any entry in the list, so all four — each a phrasing a real CLI plausibly uses — are classified as an ordinary failure rather than an authentication one. The consequence is the mirror of F136: a real auth failure, worded slightly differently than the list anticipates, is NOT given the auth-specific treatment (the fix suggestion, the cooldown-vs-retry distinction the module docstring describes) and is instead treated as a generic, retryable failure.
 *Disposition:* fix
 *Reasoning:* Add `"session expired"`, `"sign in"` (alongside the existing `"log in"`/`"login"`), and an API-key-missing phrase to `_AUTH_MARKERS`. This is a coverage gap in a fixed list, not a design flaw — the list is exactly as complete as whoever wrote it anticipated, and both this and F136 are evidence the list has not been kept in sync with the CLIs it classifies.
+
+---
+
+## A note on numbering
+
+**There is no F134.** This file's findings were written in the order F130, F131,
+F132, F135, F133, F136, F137, and 134 was simply never used. Nothing was
+retracted and nothing is missing — recorded here because the gap otherwise reads
+as a withdrawn finding.
