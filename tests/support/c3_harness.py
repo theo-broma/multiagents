@@ -1,9 +1,17 @@
 """Shared test harness for C3 — agent lifecycle and concurrent tree state.
 
-Builders and seams for `runner.py`, `driver.py`, `tree.py`, `watchdog.py`,
-`gitops.py` and `procs.py`, so a characterizer can construct a `Runner`, drive
-it through a real (but fake-CLI) spawn/consume/merge cycle, and exercise the
-tree, git and watchdog layers directly against throwaway state.
+Builders and seams for `runner.py`, `tree.py`, `watchdog.py`, `gitops.py` and
+`procs.py`, so a characterizer can construct a `Runner`, drive it through a
+real (but fake-CLI) spawn/consume/merge cycle, and exercise the tree, git and
+watchdog layers directly against throwaway state.
+
+`driver.py` is in the C3 context but is intentionally not abstracted here:
+its entry points (`run_orchestrator`, `_run_attached`, `_run_supervised`)
+are interactive terminal/exec paths that launch a real provider CLI. They are
+not unit-testable without either changing production code or running inside an
+interactive session. A characterizer assigned to driver.py should test its
+logic through the CLI integration surface or by direct, careful imports, not
+through this harness.
 
 **Read this before writing a test against `runner.start()` or `consult()` —
 it is the one thing in this harness that is not optional.**
@@ -263,7 +271,15 @@ def fake_cli(tmp_path: Path, name: str = "fake",
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return {"bin": str(script), "spawn": {"args": ["--fake-cli"]},
-            "stream": {"format": "ndjson"}}
+            "stream": {"format": "ndjson",
+                       "rules": [
+                           {"match": {"type": "result"},
+                            "as": "result",
+                            "fields": {"status": "subtype", "text": "result"}},
+                           {"match": {"type": "text"},
+                            "as": "text",
+                            "fields": {"text": "text"}},
+                       ]}}
 
 
 def fake_provider_double(name: str = "p", **kw: Any) -> Provider:
