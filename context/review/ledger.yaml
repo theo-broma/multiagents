@@ -152,6 +152,79 @@ findings:
     severity: medium
     status: open
     summary: Unescaped quantifiers `*`, `+`, `?` or interval `{n}` change match semantics
+  F120:
+    class: bug
+    context: context/review/C2-budget.md
+    evidence: reproduction
+    first_seen: 7d0b747bdcd709258babb4f5c64569320f76e298
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget.md
+      sha: 7d0b747bdcd709258babb4f5c64569320f76e298
+      status: open
+    severity: critical
+    status: open
+    summary: 'Multi-account claude quota reading is unreachable: the built-in fallback
+      always calls `read_claude()` with no arguments, dropping the caller''s `config_dir`'
+  F121:
+    class: bug
+    context: context/review/C2-budget.md
+    evidence: reproduction
+    first_seen: 7d0b747bdcd709258babb4f5c64569320f76e298
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget.md
+      sha: 7d0b747bdcd709258babb4f5c64569320f76e298
+      status: open
+    severity: high
+    status: open
+    summary: '`choose_provider` treats "this provider was never read" as usable when
+      it''s the preferred slot, but as unusable when it''s a fallback — the same missing-entry
+      state means opposite things depending on argument position'
+  F122:
+    class: bug
+    context: context/review/C2-budget.md
+    evidence: reproduction
+    first_seen: 7d0b747bdcd709258babb4f5c64569320f76e298
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget.md
+      sha: 7d0b747bdcd709258babb4f5c64569320f76e298
+      status: open
+    severity: medium
+    status: open
+    summary: A cache hit mutates the shared cached `Budget` in place and *overwrites*
+      `spent` instead of merging it, while a fresh (uncached) read merges correctly
+  F123:
+    class: bug
+    context: context/review/C2-budget.md
+    evidence: reproduction
+    first_seen: 7d0b747bdcd709258babb4f5c64569320f76e298
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget.md
+      sha: 7d0b747bdcd709258babb4f5c64569320f76e298
+      status: open
+    severity: low
+    status: open
+    summary: A script's reported `headroom` is accepted with no range validation,
+      so an out-of-range value (e.g. `1.5` or `-0.5`) produces a `Budget` with an
+      internally inverted-looking severity
+  F124:
+    class: maintainability
+    context: context/review/C2-budget.md
+    evidence: reproduction
+    first_seen: 7d0b747bdcd709258babb4f5c64569320f76e298
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget.md
+      sha: 7d0b747bdcd709258babb4f5c64569320f76e298
+      status: open
+    severity: low
+    status: open
+    summary: An empty or field-less script response and a genuine parse failure both
+      produce `known=False, severity="unknown"`, but only the parse failure carries
+      an explanatory note
   F13:
     class: bug
     context: context/review/C1-sandbox-allowlist.md
