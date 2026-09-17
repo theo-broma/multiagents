@@ -596,9 +596,19 @@ _BUILTIN = {"claude": read_claude, "opencode": read_opencode, "agy": read_agy}
 _CACHE_TTL = 60.0
 _cache: dict[str, tuple[float, Budget]] = {}
 
+# What a cached entry was actually read from. A cache hit used to be judged on
+# provider name alone, so a second caller sharing a name with an unrelated
+# first one — genuinely different config_dir, provider, whatever actually
+# varies the answer — silently got the first one's Budget back without its
+# own script ever running (F100). Kept as a side table rather than folded
+# into `_cache`'s value tuple, so the two things a cache hit is judged against
+# — freshness and identity — stay independently checkable.
+_cache_source: dict[str, str] = {}
+
 
 def invalidate_cache() -> None:
     _cache.clear()
+    _cache_source.clear()
 
 
 def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
@@ -650,9 +660,11 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
                   spent: dict[str, int] | None = None,
                   use_cache: bool = True) -> Budget:
     now_ = time.time()
+    source = str(config_dir)
     if use_cache:
         cached = _cache.get(name)
-        if cached and now_ - cached[0] < _CACHE_TTL:
+        if (cached and now_ - cached[0] < _CACHE_TTL
+                and _cache_source.get(name) == source):
             budget = cached[1]
             budget.spent = spent or budget.spent
             return budget
@@ -671,6 +683,7 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     if spent:
         budget.spent = {**budget.spent, **spent}
     _cache[name] = (now_, budget)
+    _cache_source[name] = source
     return budget
 
 
