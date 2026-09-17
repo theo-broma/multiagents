@@ -393,6 +393,16 @@ def test_docker_applies_resource_ceilings(tmp_path):
         assert argv[argv.index(flag) + 1] == value
 
 
+def test_docker_run_args_includes_init_flag(tmp_path):
+    """R1 — the workspace container reaps its orphaned children.
+
+    Without an init process, sleep infinity never calls wait(), and every
+    orphaned grandchild becomes a permanent zombie holding a pid slot.
+    """
+    argv = _docker(tmp_path).run_args()
+    assert "--init" in argv
+
+
 def test_allowlist_mode_isolates_the_network_and_sets_the_proxy(tmp_path):
     ex = _docker(tmp_path, network="allowlist")
     argv = ex.run_args()
@@ -10589,13 +10599,32 @@ def test_the_harness_runs_alone_and_the_characterizers_cannot_collide():
     agents = _shipped_agents()
     harness, char = agents["harness"], agents["characterizer"]
 
-    assert "readonly_paths" not in harness, \
+    assert harness.get("readonly_paths") == [], \
         "the harness builder is the one review agent that may edit shared files"
     assert char["readonly_paths"] == ["**"], "characterizers are add-only"
 
     flat = " ".join(_orchestrator_brief("review").split())
     assert "Spawn **`harness`**, alone" in flat
     assert "Merge its branch before going on" in flat
+
+
+def test_reporter_may_revise_its_own_output():
+    """R2 — an agent that owns a file may revise it.
+
+    reporter exists to produce context/review/REPORT.md; it must be able
+    to modify that file, while remaining unable to change product source
+    or tests.
+    """
+    from multiagents.config import matches_any
+    agents = _shipped_agents()
+    reporter = agents["reporter"]
+    readonly = reporter.get("readonly_paths", [])
+    assert not matches_any(readonly, "context/review/REPORT.md"), \
+        "reporter must be able to modify its own output"
+    assert matches_any(readonly, "src/foo.py"), \
+        "reporter must not modify product source"
+    assert matches_any(readonly, "tests/test_foo.py"), \
+        "reporter must not modify test suite"
 
 
 def test_an_untestable_context_is_a_finding_not_a_failure():
