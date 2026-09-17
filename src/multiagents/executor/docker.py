@@ -869,7 +869,7 @@ class DockerExecutor(Executor):
 
     def run_args(self) -> list[str]:
         argv = [
-            "docker", "run", "-d", "--name", self.container,
+            "docker", "run", "-d", "--init", "--name", self.container,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--workdir", str(self.paths.root) if self.paths else "/workspace",
             "--restart", "unless-stopped",
