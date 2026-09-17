@@ -94,8 +94,26 @@ red, and strands the agent holding a failure it may not touch.
 
 So: `.multiagents/proposals/agents.yaml` proposes `readonly_paths: []` on
 **`implementer-deep` only**, scoped to this phase and given back when the three
-rewrites merge. **It must be accepted before phase 1 starts** — the work that
-fixes the `readonly_paths` defect is itself blocked by it.
+rewrites merge.
+
+**It is needed before phase 2, not before phase 1.** Phase 1 can start without
+it, because `tester` already carries `readonly_paths: []` and the one assertion
+phase 1 has to change is a *contract* error, which is tester's job by
+definition:
+
+```python
+assert "readonly_paths" not in harness, \
+    "the harness builder is the one review agent that may edit shared files"
+```
+
+The message claims the agent may edit shared files while the check asserts the
+key is absent — which produces the opposite. Send that to `tester`. The other
+half of `bug-08f9b3`, landing the fix in
+`src/multiagents/defaults/agents.yaml`, is not a test file and blocks nobody.
+
+The exemption earns itself at **`F50`**, where the function and its 48 tests
+change together and splitting them across two agents costs a handoff per
+iteration.
 
 Everything else keeps the separation. `tester` writes the NEW tests each ticket
 names, red, and an implementer makes them green. That is the normal loop and it
@@ -119,7 +137,7 @@ test that should have caught it** — write that test, not merely a test.
 |---|---|---|
 | 1 | `bug-cfdc71` | The workspace container has no PID 1 reaper. Fork-heavy work — running this suite, i.e. your normal job — leaves zombies until `pids_limit: 512` is exhausted. Measured: 509 processes, 505 zombies, then every agent dies with signal-shaped exits whose text blames Bun and innocent providers. Proposed fix: add `--init` to `run_args()`. **Do this one first.** |
 | 2 | `bug-565863` | `budget_tag` enforcement and reporting sum raw usage keys instead of `token_count()`, which already exists and fixes exactly this elsewhere. Claude spend counts as zero. **This is why the review covered 2 of 7 contexts.** |
-| 3 | `bug-08f9b3` | **Do this second, right after `--init`.** `harness` and `reporter` cannot revise their own output. Already fixed in the LIVE config during the review (`harness: []`, `reporter: ['src/**','tests/**']`) — so the fix is proven and the work is landing it in `src/multiagents/defaults/agents.yaml`, plus correcting `tests/test_core.py:10592`, which asserts `"readonly_paths" not in harness` and so encodes the bug. **That last part needs the exempt `implementer-deep`.** |
+| 3 | `bug-08f9b3` | **Do this second, right after `--init`.** `harness` and `reporter` cannot revise their own output. Already fixed in the LIVE config during the review (`harness: []`, `reporter: ['src/**','tests/**']`) — so the fix is proven and the work is landing it in `src/multiagents/defaults/agents.yaml`, plus correcting `tests/test_core.py:10592`, which asserts `"readonly_paths" not in harness` and so encodes the bug. **Send that last part to `tester`**, which is already exempt and for which a wrong contract is its own remit. |
 | 4 | `bug-ad011c` | Steering a fallback-routed run rebuilds the command with the *preferred* provider's model and effort flag, killing the run. |
 | 5 | `bug-97a0c7` | The documented recovery for a truncated run (`steer_agent`) fails with `Cwd must be an absolute path`, turning a truncated run into a permanent loss. |
 | 6 | `bug-8195f2` | `wait_for_agents` reports a live, being-resumed agent as terminally `cancelled: "stopped by parent"`, because `steer()` reuses the user-facing `stop()` path. |
