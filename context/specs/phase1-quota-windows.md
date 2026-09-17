@@ -1,0 +1,100 @@
+# Phase 1 contract — the quota window nobody can see
+
+The interface contract for `BRIEF.md` phase 1 item 7, ticket `bug-e1cb10`.
+Written by the orchestrator.
+
+**Read the ticket with `list_tickets`.** It carries the root cause with line
+numbers and names the missing test.
+
+This is the last item of phase 1, and it is the one that cost this session most.
+Every routing decision made today was made against a number that does not
+describe the bucket that actually stops work.
+
+---
+
+## R11 — `budget_status` shows every window a provider reports
+
+**Observable behaviour required.** When a provider reports several quota windows,
+all of them appear under `windows`, and `headroom` and `severity` derive from the
+worst.
+
+That is not an aspiration. It is what `budget_status`'s own documentation already
+promises:
+
+> *"Where a provider reports several windows they are listed under `windows`, and
+> `headroom` is the worst of them, because the fullest bucket is what will
+> actually stop a run — but which one it is changes what to do: a rolling or
+> 5-hour window clears in hours, a weekly or monthly one does not."*
+
+`opencode` and `agy` keep that promise — their scripts return a `windows` dict
+which `_from_script()` passes through. **`claude` does not.** `read_claude()`
+computes `worst_percent` across the `limits` array (or the `five_hour` /
+`seven_day` fallbacks), sets `headroom` and `resets_at` from the worst, and never
+populates `budget.windows`. `Budget.to_dict()` only emits the key when it is
+truthy, so it is silently absent.
+
+**What must be true afterwards.**
+
+- A claude profile reporting more than one window produces a `windows` dict
+  containing all of them, each with its percent and reset time.
+- `headroom` and `severity` derive from the worst bucket, as today. That part of
+  `read_claude()` is correct and must not change behaviour.
+- A provider reporting a single window is unaffected.
+
+**The test the ticket names, and it does not exist:** a claude profile whose
+short window is at 95% and long window at 30% returns `severity: "critical"` and
+includes the short window in `budget.windows`. Existing coverage
+(`test_read_claude_picks_the_worst_of_multiple_limit_buckets`) asserts `headroom`
+and `resets_at` from the worst bucket and never looks at `windows` — which is
+exactly why two tests that appear to cover this do not.
+
+---
+
+## Why this one is not cosmetic
+
+`budget_status` exists to route. Its own docstring says so: *"Use this to route:
+when your own five-hour bucket is tight, delegating to an unrationed provider is
+the highest-value thing you can do."* So routing on it is the correct behaviour,
+and routing on it is what fails.
+
+Observed twice in one session, hours apart. `budget_status` reported
+`severity: normal`, `headroom: 0.4`, reset in four days, and
+`advice: ["all providers have headroom"]`. At that same moment the quota guard
+was interrupting agents with *"claude is about to run out of quota — roughly 1
+minute(s) of it left"*. Two components reading the same provider, reporting
+thirty percent headroom and one minute.
+
+The failure is in the permissive direction and it is confidently worded. An
+orchestrator that believes it commits an expensive long-running agent and is cut
+off mid-run — which happened, repeatedly, and cost several runs their work.
+
+---
+
+## What is NOT in scope
+
+- **Do not change how `headroom`, `severity` or `resets_at` are computed.** That
+  logic is correct; only the intermediate data is missing.
+- **Do not change the `opencode` or `agy` scripts**, which already do this right
+  and are the shape to match.
+- **Do not reconcile `budget_status` with the quota guard's own sampling.** The
+  ticket raises it as a possibility and it is a larger question: the guard
+  extrapolates from a headroom time-series via `tree.burn`, which is a different
+  mechanism, not a different reading of the same number. Once `windows` is
+  populated the two should agree about the facts; whether they should share a
+  code path is a separate decision.
+
+---
+
+## What "done" looks like
+
+The suite is now **green**: 966 passed, 0 failed, 3 skipped in a container, and
+968 passed with 1 failed on a host — the one host failure being
+`test_the_claude_script_uses_the_container_profile_only_where_it_should`, which
+is finding F130, scheduled in phase 3, and manifests only where `docker` is
+present.
+
+That green is new, as of this phase. Do not be the change that breaks it.
+
+Run the suite as `uv run --frozen python -m pytest`.
+
+R11 is done when its test is green and that baseline is otherwise unchanged.
