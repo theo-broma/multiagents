@@ -190,6 +190,46 @@ and kills processes at 41% coverage; if this context is reviewed at all, that
 file is the reason and the rest can be skimmed.
 *Suggested budget:* **50k**
 
+## What this review actually covered
+
+Recorded 2026-09-17 by the orchestrator, against the budgets that stopped it.
+
+| Context | Map | Harness | Characterization | Audit | Adversary |
+|---|---|---|---|---|---|
+| **C1** sandbox & egress | done | done | 3 surfaces | done | done |
+| **C2** provider seam | done | done | 3 surfaces | done | **not covered** |
+| **C3** agent lifecycle | done | done | **not covered** | **not covered** | **not covered** |
+| C4–C7 | done | not started | — | — | — |
+
+**Why C2 has no adversary and C3 has almost nothing.** Both slices hit their
+budget ceiling, which is the mechanism working — but not for the reason the
+mechanism is designed around. Every ceiling here was exhausted by **cache-read
+accounting on a single run**, not by the volume of work:
+
+- `ctx-provider`: 1,670,589 spent against 180,000
+- `ctx-lifecycle`: 2,043,007 against 400,000 — from **one** harness run, of
+  which 1,939,456 were cache reads, at a real cost of $0.51
+
+Meanwhile the expensive runs did not count at all: claude reports no token
+total, so every claude agent in this review spent against its tag as zero. That
+is finding `bug-565863` in the tooling ledger. The net effect is a brake that is
+absent where the money is and overwhelming where it is not, and it is why two
+phases that were planned and budgeted did not happen.
+
+**What is missing, specifically, and what it would have told us.** For C1, the
+adversary produced the single most consequential finding in this review — F50,
+that deleting one line from `write_proxy_config` turns the proxy into an open
+relay while all 48 characterization tests keep passing. C2 has 188 tests and
+**no one has established whether they are load-bearing in the same sense**. That
+is the known unknown to weigh first if this review is resumed.
+
+C3's harness is merged and proven (`tests/support/c3_harness.py`, 7 green proof
+tests), and it establishes something worth keeping: the lifecycle **is** drivable
+from inside an agent. `runner`, `tree`, `gitops`, `watchdog` and `procs` are all
+reachable; only `driver.py` is not, because its entry points launch an
+interactive CLI and abstracting that would need production changes. So C3's
+characterization is cheap to start — the wall everyone expected is not there.
+
 ## Not covered
 
 - **`tests/test_core.py` (10,945 lines) is not a context.** It is the subject of
