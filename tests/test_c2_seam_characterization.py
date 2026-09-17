@@ -276,16 +276,24 @@ def test_build_env_provider_identity_env_var_comes_from_the_argument_not_provide
 # build_env — base keys, every kind
 # ---------------------------------------------------------------------------
 
-def test_build_env_sets_the_base_keys_for_local_kind(tmp_path):
+def test_build_env_sets_the_base_keys_for_local_kind(tmp_path, monkeypatch):
+    docker_only_keys = ("MULTIAGENTS_CONTAINER", "MULTIAGENTS_PRIVATE_HOME",
+                        "MULTIAGENTS_PRIVATE_BACKING", "MULTIAGENTS_PRIVATE_VAULT",
+                        "MULTIAGENTS_AUTH_PROXY")
+    # build_env copies the ambient environment verbatim (F112), so on a host
+    # that already has one of these set, its mere presence — not anything
+    # build_env did — would make the "absent for local kind" assertion below
+    # pass or fail by accident. Clear them first so the absence is a fact
+    # about build_env, not about the machine running the test.
+    for key in docker_only_keys:
+        monkeypatch.delenv(key, raising=False)
     provider = h.make_provider("p")
     env = h.build_env("p", provider, h.FakeExecutor(kind="local"))
     assert env["MULTIAGENTS_PROVIDER"] == "p"
     assert env["MULTIAGENTS_EXECUTOR"] == "local"
     assert env["MULTIAGENTS_UID"] == str(os.getuid())
     assert env["MULTIAGENTS_GID"] == str(os.getgid())
-    for docker_only in ("MULTIAGENTS_CONTAINER", "MULTIAGENTS_PRIVATE_HOME",
-                        "MULTIAGENTS_PRIVATE_BACKING", "MULTIAGENTS_PRIVATE_VAULT",
-                        "MULTIAGENTS_AUTH_PROXY"):
+    for docker_only in docker_only_keys:
         assert docker_only not in env
 
 
@@ -304,7 +312,10 @@ def test_build_env_docker_keys_only_appear_for_docker_kind(tmp_path):
     assert env["MULTIAGENTS_AUTH_PROXY"] == "1"
 
 
-def test_build_env_auth_proxy_key_is_absent_not_zero_when_disabled(tmp_path):
+def test_build_env_auth_proxy_key_is_absent_not_zero_when_disabled(tmp_path, monkeypatch):
+    # As above: clear the ambient value first so the absence pins build_env's
+    # behaviour rather than whatever this process happened to inherit.
+    monkeypatch.delenv("MULTIAGENTS_AUTH_PROXY", raising=False)
     provider = h.make_provider("p")
     executor = h.FakeExecutor(kind="docker", container="cty", auth_proxy=False)
     env = h.build_env("p", provider, executor)
@@ -400,6 +411,12 @@ def test_build_env_expands_provider_env_vars_and_user_against_the_real_process_e
     silently are not — the reference is left as a literal, unexpanded
     string."""
     monkeypatch.setenv("MULTIAGENTS_SEAM_TEST_HOST_VAR", "from-host-environ")
+    # If the ambient process already had MULTIAGENTS_PROVIDER set (e.g. from
+    # a real orchestration run on this host), `expandvars` would resolve
+    # $MULTIAGENTS_PROVIDER from THAT value instead of leaving it literal,
+    # which is a fact about the host, not about build_env. Clear it so the
+    # "left as a literal string" assertion below pins build_env's behaviour.
+    monkeypatch.delenv("MULTIAGENTS_PROVIDER", raising=False)
     provider = h.make_provider(
         "p",
         env={
