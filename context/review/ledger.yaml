@@ -61,8 +61,52 @@ findings:
         it is green.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Fixed in `src/multiagents/budget.py` under `context/specs/phase1-budget-cache.md`
+        (R10), phase 1 item 8.
+
+
+        `read_provider`''s cache was keyed on provider name alone, so a second caller
+        sharing a name but with a different `config_dir` silently received the first
+        one''s cached `Budget`. A parallel table `_cache_source` now records which
+        `config_dir` each entry came from, and a hit is served only when both the
+        TTL and that source match the caller''s. `invalidate_cache()` clears both.
+
+
+        **The finding''s own proposed fix was not taken, for a reason worth recording.**
+        It suggested folding `config_dir` into `_cache`''s key. Two existing tests
+        read `_cache[name]` directly as a plain `(timestamp, Budget)` 2-tuple, and
+        changing the key or the value shape breaks both for reasons unrelated to this
+        defect — they use one `config_dir` each and do not care about cross-config
+        collision. The side table leaves `_cache`''s shape alone and fixes the actual
+        behaviour.
+
+
+        **This finding''s own proof test had to be retired, and that is the part to
+        remember.** `test_two_unrelated_tests_sharing_a_provider_name_bleed_through_the_cache`
+        existed to demonstrate the bleed and asserted the contaminated value; a second
+        test pinned the same root cause more narrowly. No fix satisfying R10 could
+        leave either true. The implementer raised it as `NEED_INFO` rather than touching
+        them, and the test engineer inverted both — renamed to state what is now true,
+        with comments naming F100 and saying the inversion is deliberate rather than
+        a weakening. The first also gained a read in the opposite direction, so it
+        now rules out bleeding both ways rather than only the one originally reproduced.
+
+
+        That is the third time in this project that fixing a defect turned a test
+        red because the test pinned the defect — after F150 and the `--init` characterization
+        test. It is the same lesson each time and the cost is entirely in whether
+        the reader can tell.
+
+
+        **The suite is green.** 966 passed, 0 failed, 3 skipped, agreeing across three
+        full runs in different `pytest-randomly` orderings. This was the repository''s
+        one deliberate red test since the review, and `BRIEF.md` scheduled it into
+        phase 1 precisely so that green would start meaning green.'
+      sha: 39e721652911dbeaf8740b0830d114f85c6cc926
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`budget._cache` is a plain module-level dict keyed only by provider
       name, so unrelated tests reading the same provider name bleed state through
       it'
