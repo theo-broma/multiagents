@@ -24,7 +24,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from .redact import depersonalise, scrub
 
@@ -80,6 +80,32 @@ def token_count(usage: dict[str, Any] | None) -> int:
 
 def cost_of(usage: dict[str, Any] | None) -> float:
     return float((usage or {}).get("cost_usd") or 0.0)
+
+
+def sum_usage(nodes: Iterable[dict[str, Any]]) -> dict[str, float]:
+    """Spend across runs, with ``total`` normalised per run by token_count().
+
+    The raw per-key sum this replaces had two failures, both observed on the
+    review's budget tags: a provider that sends no total-shaped key (claude)
+    contributed nothing to ``total``, and a later run that did have one
+    replaced the figure the others had built up, because only providers
+    using that key name fed it. Summing token_count() per run makes spend
+    monotonic and mixed-provider honest.
+
+    The remaining keys are raw per-key sums, kept for detail — except the
+    total-shaped ones, which token_count() has already folded into
+    ``total``. Summing them beside it would double-count every agy and
+    opencode run, which is what the old `total + total_tokens` read did.
+    """
+    total: dict[str, float] = {}
+    for node in nodes:
+        usage = node.get("usage") or {}
+        total["total"] = total.get("total", 0) + token_count(usage)
+        for key, value in usage.items():
+            if key in TOKEN_TOTALS or not isinstance(value, (int, float)):
+                continue
+            total[key] = total.get(key, 0) + value
+    return total
 
 
 def new_id() -> str:
@@ -475,15 +501,13 @@ class Tree:
         return out
 
     def usage_for_tag(self, tag: str) -> dict[str, float]:
-        """Total spend across every run tagged with this slice of work."""
-        total: dict[str, float] = {}
-        for node in self.read()["nodes"].values():
-            if node.get("budget_tag") != tag:
-                continue
-            for key, value in (node.get("usage") or {}).items():
-                if isinstance(value, (int, float)):
-                    total[key] = total.get(key, 0) + value
-        return total
+        """Total spend across every run tagged with this slice of work.
+
+        ``total`` is each run's `token_count()` summed, so a provider that
+        reports no total-shaped key still spends its tag; see `sum_usage`.
+        """
+        return sum_usage(n for n in self.read()["nodes"].values()
+                         if n.get("budget_tag") == tag)
 
     def budget_for_tag(self, tag: str) -> int:
         return int((self.read().get("budgets") or {}).get(tag, {}).get("tokens", 0) or 0)
@@ -511,7 +535,11 @@ class Tree:
         return result
 
     def rollup_usage(self, agent_id: str | None = None) -> dict[str, int]:
-        """Total token usage for the whole tree, or one subtree."""
+        """Total token usage for the whole tree, or one subtree.
+
+        ``total`` is each run's `token_count()` summed, so every provider's
+        shape counts; see `sum_usage`.
+        """
         nodes = self.read()["nodes"]
         if agent_id is None:
             selected = list(nodes.values())
@@ -522,11 +550,7 @@ class Tree:
                 if current in nodes:
                     selected.append(nodes[current])
                     stack.extend(nodes[current].get("children", []))
-        total: dict[str, float] = {}
-        for node in selected:
-            for key, value in (node.get("usage") or {}).items():
-                if isinstance(value, (int, float)):
-                    total[key] = total.get(key, 0) + value
+        total = sum_usage(selected)
         # Token counts are whole; cost is dollars and must keep its fraction —
         # rounding it to int silently reported every run as free.
         return {
@@ -1064,7 +1088,10 @@ class Tree:
 
         rollup = self.rollup_usage()
         total_cost = rollup.get("cost_usd", 0)
-        total_tokens = rollup.get("total", 0) + rollup.get("total_tokens", 0)
+        # rollup's `total` is already normalised across every provider's
+        # usage shape (see sum_usage), so agy's spend is inside it — adding
+        # a `total_tokens` term here counted those runs twice.
+        total_tokens = rollup.get("total", 0)
         if total_tokens or total_cost:
             lines.append(f"\ntotal: {int(total_tokens):,} tokens, ${total_cost:.4f}")
         pending = len(data.get("deferred", []))
