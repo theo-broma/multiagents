@@ -437,19 +437,31 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Bud
         return budget
 
     # The normalised `limits` array is the friendliest surface; fall back to the
-    # individual buckets if it is absent.
+    # individual buckets if it is absent. Every readable bucket is collected
+    # into `windows` as we go, keyed by whatever names it (falling back to its
+    # position) — the worst-of-them logic below is unchanged, `windows` is
+    # purely additional bookkeeping.
     worst_percent, worst_reset = None, None
-    for entry in utilization.get("limits") or []:
+    windows: dict[str, Any] = {}
+    for i, entry in enumerate(utilization.get("limits") or []):
         percent = entry.get("percent")
-        if isinstance(percent, (int, float)) and (worst_percent is None or percent > worst_percent):
-            worst_percent, worst_reset = float(percent), entry.get("resets_at")
+        if not isinstance(percent, (int, float)):
+            continue
+        resets_at = entry.get("resets_at")
+        windows[str(entry.get("kind") or i)] = {"percent": float(percent), "resets_at": resets_at}
+        if worst_percent is None or percent > worst_percent:
+            worst_percent, worst_reset = float(percent), resets_at
 
     if worst_percent is None:
         for key in ("five_hour", "seven_day"):
             bucket = utilization.get(key) or {}
             percent = bucket.get("utilization")
-            if isinstance(percent, (int, float)) and (worst_percent is None or percent > worst_percent):
-                worst_percent, worst_reset = float(percent), bucket.get("resets_at")
+            if not isinstance(percent, (int, float)):
+                continue
+            resets_at = bucket.get("resets_at")
+            windows[key] = {"percent": float(percent), "resets_at": resets_at}
+            if worst_percent is None or percent > worst_percent:
+                worst_percent, worst_reset = float(percent), resets_at
 
     if worst_percent is None:
         budget.note = "utilisation present but no readable bucket"
@@ -463,6 +475,8 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Bud
         else "warning" if worst_percent >= 75
         else "normal"
     )
+    if len(windows) > 1:
+        budget.windows = windows          # a single-window profile is unaffected
     if budget.stale_seconds and budget.stale_seconds > STALE_AFTER:
         budget.note = (
             f"cache is {budget.stale_seconds / 60:.0f} min old; treat as advisory "
