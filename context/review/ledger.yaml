@@ -27,6 +27,21 @@ findings:
     status: open
     summary: Bare or short generic suffix entries act as wildcards across unrelated
       hosts
+  F100:
+    class: correctness
+    context: context/review/C2-provider.md
+    evidence: reproduction
+    first_seen: 69b0f93de1b2b19a38e6b71cf427433255c6480e
+    history:
+    - by: auditor
+      note: filed in context/review/C2-provider.md
+      sha: 69b0f93de1b2b19a38e6b71cf427433255c6480e
+      status: open
+    severity: high
+    status: open
+    summary: '`budget._cache` is a plain module-level dict keyed only by provider
+      name, so unrelated tests reading the same provider name bleed state through
+      it'
   F11:
     class: maintainability
     context: context/review/C1-sandbox-allowlist.md
