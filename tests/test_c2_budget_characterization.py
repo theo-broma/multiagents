@@ -316,11 +316,15 @@ def test_cache_entry_expires_after_the_ttl_elapses(tmp_path):
     assert calls.read_text() == "xx"
 
 
-def test_cache_is_keyed_by_provider_name_alone_ignoring_config_dir(tmp_path):
-    # A narrower pin of the same root cause as F100
-    # (context/review/C2-provider.md) — recorded there already with its own
-    # reproduction; this just confirms the key shape from this suite's own
-    # surface without re-litigating it.
+def test_cache_distinguishes_two_config_dirs_for_one_provider_name(tmp_path):
+    # Was a narrower pin of the same root cause as F100
+    # (context/review/C2-provider.md): the cache was keyed on provider name
+    # alone, so dir_b's read returned dir_a's cached Budget and dir_b's script
+    # never ran. F100 was fixed under context/specs/phase1-budget-cache.md
+    # (R10), so this fact changed and the assertion is deliberately inverted —
+    # same two config_dirs, same two scripts, opposite expectation. The name
+    # now states what is true: one provider name, two config_dirs, two
+    # answers.
     h.invalidate_cache()
     provider = h.make_provider("p")
     dir_a = tmp_path / "a"
@@ -330,7 +334,7 @@ def test_cache_is_keyed_by_provider_name_alone_ignoring_config_dir(tmp_path):
     first = h.read_provider("p", provider, h.FakeExecutor(), dir_a)
     second = h.read_provider("p", provider, h.FakeExecutor(), dir_b)
     assert first.headroom == 0.9
-    assert second.headroom == 0.9        # dir_b's script never ran
+    assert second.headroom == 0.1        # dir_b's own script ran
     h.invalidate_cache()
 
 

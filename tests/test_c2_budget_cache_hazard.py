@@ -1,17 +1,25 @@
-"""Reproduction for F100 (context/review/C2-provider.md).
+"""F100's proof test (context/review/C2-provider.md), inverted now it is fixed.
 
-`budget._cache` is a plain module-level dict keyed by provider NAME alone —
-not by config_dir, executor, or anything else that distinguishes one test's
-provider from another's. Two tests that both happen to use the provider name
-"claude" (a very likely collision, since it is the name every real characterizer
-will reach for) can therefore read each other's cached `Budget`, entirely by
-accident of collection order. `pytest-randomly` is active in this suite, so
-that order is not even stable across runs.
+This file was written to demonstrate the finding: `budget._cache` was keyed on
+provider NAME alone — not on config_dir, executor, or anything else that
+distinguishes one caller's provider from another's — so two callers that both
+happened to use the name "claude" (a very likely collision, since it is the
+name every real characterizer will reach for) read each other's cached
+`Budget`, entirely by accident of collection order. `pytest-randomly` is active
+in this suite, so that order is not even stable across runs.
 
-This file clears the cache itself on the way in and out (see
+F100 was fixed under context/specs/phase1-budget-cache.md (R10), so the fact
+this file records has changed: the bleed no longer happens, and the test below
+now asserts the opposite of what it originally did. Same provider name, same
+two config_dirs, same two scripts — inverted assertion, and renamed to say what
+is now true. This is a deliberate inversion, not a weakened test: the second
+caller is checked to get its OWN config's value, which is a strictly stronger
+claim than the contaminated one it used to make.
+
+This file still clears the cache itself on the way in and out (see
 tests/test_c2_provider_harness.py::test_read_provider_caches_until_invalidated
-for the same pattern) precisely BECAUSE nothing else does — that absence is
-the finding.
+for the same pattern), because that is this suite's convention, not because the
+key is still wrong.
 """
 
 from __future__ import annotations
@@ -24,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 import c2_harness as h  # noqa: E402
 
 
-def test_two_unrelated_tests_sharing_a_provider_name_bleed_through_the_cache(tmp_path):
+def test_two_unrelated_tests_sharing_a_provider_name_each_read_their_own_config(tmp_path):
     h.invalidate_cache()
     try:
         # "Test one": some earlier test in the suite reads budget for a
@@ -50,13 +58,17 @@ def test_two_unrelated_tests_sharing_a_provider_name_bleed_through_the_cache(tmp
         )
         second = h.read_provider("claude", provider, h.FakeExecutor(), second_dir)
 
-        # What SHOULD happen: test two's own script runs and reports 0.1.
-        # What ACTUALLY happens: budget.read_provider's cache is keyed only
-        # on the string "claude", so test two silently receives test one's
-        # cached Budget instead of ever invoking its own script.
-        assert second.headroom == 0.9, (
-            "reproduced the hazard: read_provider served test one's cached "
-            "Budget to test two, which never ran its own script"
+        # Test two's own script runs and reports 0.1. Before F100 was fixed
+        # this was 0.9 — test one's cached Budget, served to a caller whose
+        # own script never ran.
+        assert second.headroom == 0.1, (
+            "a second caller sharing a provider name but reading a different "
+            "config_dir must get its own script's answer, not the first "
+            "caller's cached Budget"
         )
+        # And test one's value is not clobbered either: going back to the
+        # first config_dir still reports what that config says.
+        again = h.read_provider("claude", provider, h.FakeExecutor(), first_dir)
+        assert again.headroom == 0.9
     finally:
         h.invalidate_cache()
