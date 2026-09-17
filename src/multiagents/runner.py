@@ -228,6 +228,7 @@ class Run:
     text_parts: list[str] = field(default_factory=list)
     final_status: str = ""
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
+    internal_stop: bool = False       # steer() ending this turn to respawn it, not a real cancel
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     ticket: dict | None = None        # a TICKET filed from the final message
     wrap_up_asked: bool = False       # asked once to land its work before a wall
@@ -1284,17 +1285,26 @@ class Runner:
             # "cancelled by parent" makes a session ending look like a
             # deliberate kill, which is genuinely misleading when reading back
             # a log later.
-            reason = ("stopped by parent" if run.stop_requested
-                      else "interrupted: the server exited while this agent was running")
-            # Deliberately NOT committing here. gitops shells out with a
-            # two-minute timeout, and a git call in a teardown running on a
-            # closing event loop can hang the shutdown it is part of. The work
-            # is preserved instead by whoever cleans up afterwards — `run`
-            # reconciles interrupted agents and `multiagents stop` commits
-            # before it ends them — both with time, a live loop, and enough
-            # information to label the commit as an interruption rather than a
-            # result.
-            self.tree.set_status(node_id, "cancelled", reason)
+            #
+            # A third case arrives here too: steer() ends the current turn to
+            # respawn the same run under the same id, and `run.internal_stop`
+            # is how it is told apart from the other two. Writing "cancelled"
+            # for that case — even briefly, before steer's own corrective
+            # write lands — is bug-8195f2: a reader polling in the gap sees a
+            # run that is being resumed reported as terminally ended, with a
+            # reason blaming a parent that called nothing.
+            if not run.internal_stop:
+                reason = ("stopped by parent" if run.stop_requested
+                          else "interrupted: the server exited while this agent was running")
+                # Deliberately NOT committing here. gitops shells out with a
+                # two-minute timeout, and a git call in a teardown running on a
+                # closing event loop can hang the shutdown it is part of. The work
+                # is preserved instead by whoever cleans up afterwards — `run`
+                # reconciles interrupted agents and `multiagents stop` commits
+                # before it ends them — both with time, a live loop, and enough
+                # information to label the commit as an interruption rather than a
+                # result.
+                self.tree.set_status(node_id, "cancelled", reason)
             raise
         except Exception as exc:
             self.tree.set_status(node_id, "failed", f"{type(exc).__name__}: {exc}")
@@ -1979,10 +1989,19 @@ class Runner:
             return True
         return False
 
-    async def stop(self, agent_id: str) -> dict[str, Any]:
+    async def stop(self, agent_id: str, *, internal: bool = False) -> dict[str, Any]:
+        """End this run's current turn.
+
+        `internal=True` is steer()'s own use: it ends the turn so the same run
+        can be respawned under the same id, and must not report the run as
+        cancelled while that is happening — see `run.internal_stop` in
+        `_consume`. A genuine parent-initiated stop (the default, and the only
+        thing `stop_agent` ever asks for) still writes `cancelled` here.
+        """
         run = self.runs.get(agent_id)
         if run is not None:
             run.stop_requested = True     # recorded before the cancel lands
+            run.internal_stop = internal
         if run and run.task and not run.task.done():
             run.task.cancel()
             try:
@@ -2008,6 +2027,8 @@ class Runner:
                         os.killpg(os.getpgid(node.pid), 15)
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
+        if internal:
+            return {"agent_id": agent_id, "status": "stopping"}
         self.tree.set_status(agent_id, "cancelled", "stopped by parent")
         return {"agent_id": agent_id, "status": "cancelled"}
 
@@ -2029,13 +2050,62 @@ class Runner:
                          "enough of its stream to be resumable. Try again shortly, "
                          "or stop it and start a fresh run.",
             }
-        await self.stop(agent_id)
-        spec = self.config.agent(node.agent)
-        provider = self.providers[node.provider]
+        # Resume as the run is actually executing, not as the agent is
+        # configured: a run routed to a fallback at spawn time has a spec and
+        # provider that disagree with the static config, and building the
+        # resume from the wrong one hands `_launch` the preferred provider's
+        # model with the fallback's options still attached (bug-ad011c). The
+        # in-process Run carries the mutated spec from spawn, the same pair
+        # `_handle_finish`'s silent-failure retry uses; when no Run survives
+        # (a restart, or a node this server never itself launched), rebuild it
+        # from the live node the same way `start()` built it in the first
+        # place.
+        run = self.runs.get(agent_id)
+        if run is not None:
+            spec, provider = run.spec, run.provider
+        else:
+            spec = self.config.agent(node.agent)
+            if node.provider != spec.provider:
+                alternative, overrides = spec.fallback_for(node.provider)
+                spec = AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
+            provider = self.providers[node.provider]
+
+        # A truncated `writes: false` agent may have had its worktree reclaimed
+        # by `_drop_if_empty` once its empty branch made it look worth nothing
+        # (bug-97a0c7): `branch` and `worktree` are both written as "", and
+        # `Path("")` is `.` — a relative Cwd docker refuses outright. Cut a
+        # fresh worktree the same way a pruned conversation gets one back in
+        # `consult()`.
+        workdir = Path(node.worktree) if node.worktree else None
+        if workdir is not None and (not workdir.is_absolute() or not workdir.is_dir()):
+            workdir = None
+        branch = node.branch
+        if workdir is None:
+            if not gitops.is_repo(self.paths.root):
+                return {
+                    "agent_id": agent_id, "steered": False,
+                    "error": "this run has no working directory left and the "
+                             "project is not a git repository, so a new one "
+                             "cannot be cut.",
+                }
+            base = self.config.base_branch or gitops.current_branch(self.paths.root)
+            workdir = self.paths.worktree(agent_id)
+            branch = gitops.create_worktree(
+                self.paths.root, workdir,
+                f"{self.config.branch_prefix}/{node.agent}/"
+                f"{agent_id.removeprefix('ag-')}",
+                base,
+            )
+            self.tree.update(agent_id, worktree=str(workdir), branch=branch)
+
+        # `internal=True`: this ends the turn to respawn the very same run, not
+        # a cancellation, and must not report the run as `cancelled` while
+        # that is in flight (bug-8195f2) — see `run.internal_stop`.
+        await self.stop(agent_id, internal=True)
         try:
             await self._launch(
                 node_id=agent_id, spec=spec, provider=provider, prompt=message,
-                workdir=Path(node.worktree), branch=node.branch,
+                workdir=workdir, branch=branch,
                 parent=node.parent, depth=node.depth, session_id=node.session_id,
             )
         except RuntimeError as exc:
@@ -2067,7 +2137,7 @@ class Runner:
         if node is not None and node.status not in ("running", "pending"):
             return {
                 "agent_id": agent_id, "steered": False, "status": node.status,
-                "error": f"the steer was delivered but the run ended immediately "
+                "error": f"the respawned run ended immediately "
                          f"({node.status}: {node.reason or 'no reason recorded'}). "
                          f"The message was not acted on.",
             }
@@ -2127,14 +2197,13 @@ class Runner:
                 f"Agent {agent_name!r} is not conversational. Use start_agent for "
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
-        provider = self.providers.get(spec.provider)
-        if provider is None or not provider.available():
-            raise FileNotFoundError(f"provider {spec.provider!r} is unavailable")
-
         node = self._find_conversation(agent_name)
         turn = 1
 
         if node is None:
+            provider = self.providers.get(spec.provider)
+            if provider is None or not provider.available():
+                raise FileNotFoundError(f"provider {spec.provider!r} is unavailable")
             self._preflight(spec)
             parent = self.self_id()
             depth = self.self_depth() + 1
@@ -2161,6 +2230,26 @@ class Runner:
             worktree_path = Path(node.worktree)
             prompt = message
             session_id = node.session_id
+            # Resume as the conversation is actually running, not as the agent
+            # is configured — the same defect and the same fix as steer()'s
+            # (bug-ad011c): a conversation routed to a fallback at an earlier
+            # turn has a spec and provider that disagree with the static
+            # config, and resuming from the wrong one hands `_launch` the
+            # preferred provider's model with the fallback's options still
+            # attached. Prefer the in-process Run's mutated spec when one
+            # survives; otherwise rebuild it from the live node the way
+            # `start()` built it originally.
+            run = self.runs.get(node_id)
+            if run is not None:
+                spec, provider = run.spec, run.provider
+            else:
+                if node.provider != spec.provider:
+                    alternative, overrides = spec.fallback_for(node.provider)
+                    spec = AgentSpec(**{**spec.__dict__, "model": alternative,
+                                        **overrides})
+                provider = self.providers.get(node.provider)
+            if provider is None or not provider.available():
+                raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
             # A conversation outlives its worktree: `clean` prunes worktrees,
             # and a standing advisor keeps its idle node and its session id
             # across all of that. Resuming into a directory that is gone made
