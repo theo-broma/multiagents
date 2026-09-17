@@ -440,6 +440,101 @@ findings:
     summary: '`refresh_models` writes `models.yaml` directly to the target path with
       no atomic rename, so a crash or kill mid-write leaves a corrupt or truncated
       file that the next reader will see'
+  F150:
+    class: correctness
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: high
+    status: open
+    summary: The characterization suite pins F122's defect as correct, so fixing the
+      code will fail the test
+  F151:
+    class: correctness
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: medium
+    status: open
+    summary: 'The `reserve` boundary is not pinned: a mutation from `>=` to `>` survives
+      all 70 tests'
+  F152:
+    class: correctness
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: medium
+    status: open
+    summary: Severity thresholds at 75 and 90 are not pinned, in two separate derivations
+  F153:
+    class: correctness
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: low
+    status: open
+    summary: 'The cache TTL boundary is not pinned: `<` to `<=` survives all 70 tests'
+  F154:
+    class: correctness
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: medium
+    status: open
+    summary: 'The fresh-read `spent` merge is not pinned: replacing the merge with
+      an overwrite survives all 70 tests'
+  F155:
+    class: correctness
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: low
+    status: open
+    summary: The `usable` headroom boundary is pinned loosely enough that a shift
+      from 0.02 to 0.021 passes
+  F156:
+    class: maintainability
+    context: context/review/C2-budget-adversary.md
+    evidence: reproduction
+    first_seen: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-adversary.md
+      sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
+      status: open
+    severity: low
+    status: open
+    summary: Two `usable` behaviours are correct and completely untested
   F2:
     class: correctness
     context: context/review/C1-sandbox.md
