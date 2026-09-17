@@ -642,6 +642,32 @@ findings:
     severity: low
     status: open
     summary: Two `usable` behaviours are correct and completely untested
+  F160:
+    class: correctness
+    context: context/review/C2-budget-implementation.md
+    evidence: inspection
+    first_seen: 44585c13c19ba561c966d9e7fc823d8965112d15
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-implementation.md
+      sha: 44585c13c19ba561c966d9e7fc823d8965112d15
+      status: open
+    severity: medium
+    status: open
+    summary: '`budget_status`''s per-provider spend table cannot see claude spend'
+  F161:
+    class: maintainability
+    context: context/review/C2-budget-implementation.md
+    evidence: inspection
+    first_seen: 44585c13c19ba561c966d9e7fc823d8965112d15
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget-implementation.md
+      sha: 44585c13c19ba561c966d9e7fc823d8965112d15
+      status: open
+    severity: low
+    status: open
+    summary: '`render()`''s per-node token label is blank for a claude run'
   F2:
     class: correctness
     context: context/review/C1-sandbox.md
