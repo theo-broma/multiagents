@@ -9,8 +9,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: bfdc29317eebdef5ce71b0e084c295f897c9a8b5
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 2, item 1 — covered by the F13 ERE-escaping rewrite. Kept
+        as its own id rather than folded in: it is the critical one of the cluster
+        and the fix must be verified against it specifically, not assumed from F13
+        going green.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: critical
-    status: open
+    status: scheduled
     summary: An `egress_allowlist` entry containing `|` turns the allowlist into an
       allow-all
   F10:
@@ -23,8 +30,15 @@ findings:
       note: filed in context/review/C1-sandbox-allowlist.md
       sha: 765a15b3bb1e1368599876e05c4630c434be83fe
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 2, item 3 — "Reject bare generic suffixes". User accepted
+        the rewrite, 2026-09-17. Separate from F13 on purpose: escaping metacharacters
+        does not make `com` a safe entry, because the defect is the (^|\.) anchor
+        accepting any prefix, not the escaping.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: Bare or short generic suffix entries act as wildcards across unrelated
       hosts
   F100:
@@ -37,8 +51,18 @@ findings:
       note: filed in context/review/C2-provider.md
       sha: 69b0f93de1b2b19a38e6b71cf427433255c6480e
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 1, item 8 — scheduled with the tickets rather than the
+        findings, because it is what makes the suite trustworthy for everyone after
+        it. budget._cache is a plain module-level dict keyed only by provider name,
+        so tests bleed state through it. Verified 2026-09-17: tests/test_c2_provider_harness.py::test_read_provider_caches_until_invalidated
+        passes in isolation and fails in the full suite. It is the single live red
+        test, and an implement team cannot tell a regression from the baseline until
+        it is green.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`budget._cache` is a plain module-level dict keyed only by provider
       name, so unrelated tests reading the same provider name bleed state through
       it'
@@ -93,8 +117,16 @@ findings:
       note: filed in context/review/C2-seam.md
       sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 3, item 3. scripts.build_env copies dict(os.environ) into
+        every provider script invocation, so a project-local script — which wins by
+        precedence — receives the calling process''s live credentials. Fix with F33
+        in the same change: both are build_env functions whose environment construction
+        does not enforce the boundary its own contract claims.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`build_env` copies the full ambient process environment into every provider
       script invocation'
   F113:
@@ -149,8 +181,13 @@ findings:
       note: filed in context/review/C1-sandbox-allowlist.md
       sha: 765a15b3bb1e1368599876e05c4630c434be83fe
       status: open
+    - by: initializer
+      note: BRIEF.md phase 2, item 1 — covered by the F13 ERE-escaping rewrite. Verify
+        explicitly; do not assume.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: Unescaped quantifiers `*`, `+`, `?` or interval `{n}` change match semantics
   F120:
     class: bug
@@ -162,8 +199,16 @@ findings:
       note: filed in context/review/C2-budget.md
       sha: 7d0b747bdcd709258babb4f5c64569320f76e298
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 3, item 2. Critical, and cheap: read_provider''s builtin
+        branch calls read_claude() with no arguments, dropping the caller''s config_dir,
+        so multi-account claude quota reading is unreachable. The special-case `builtin
+        is read_claude` identity check is the same wart the pre-review BRIEF flagged
+        as the place the fallback table leaks into the dispatcher.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: critical
-    status: open
+    status: scheduled
     summary: 'Multi-account claude quota reading is unreachable: the built-in fallback
       always calls `read_claude()` with no arguments, dropping the caller''s `config_dir`'
   F121:
@@ -191,8 +236,15 @@ findings:
       note: filed in context/review/C2-budget.md
       sha: 7d0b747bdcd709258babb4f5c64569320f76e298
       status: open
+    - by: initializer
+      note: BRIEF.md phase 3, item 1 — paired with F150. A cache hit mutates the shared
+        Budget in place and overwrites `spent` instead of merging. F154 says the correct
+        merge on the fresh-read path is itself unpinned, so pin it in the same change
+        or the fix is undefended.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: A cache hit mutates the shared cached `Budget` in place and *overwrites*
       `spent` instead of merging it, while a fresh (uncached) read merges correctly
   F123:
@@ -235,8 +287,16 @@ findings:
       note: filed in context/review/C1-sandbox-allowlist.md
       sha: 765a15b3bb1e1368599876e05c4630c434be83fe
       status: open
+    - by: initializer
+      note: BRIEF.md phase 2, item 1 — "Escape the allowlist properly". User accepted
+        the rewrite disposition, 2026-09-17. Escape every ERE metacharacter rather
+        than only the literal dot; this one change is expected to resolve F1, F12
+        and F14 as a side effect, which is why it is scheduled first of the three
+        rewrites.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: Unbalanced grouping/class metacharacters `(` or `[` crash the regex match
   F130:
     class: bug
@@ -248,8 +308,14 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: initializer
+      note: BRIEF.md phase 3, item 4 — the credential-validity cluster, fixed as one
+        pattern across all four sites. claude.sh check reports "logged in" for a credentials
+        file it cannot read a clock from.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`claude.sh check` reports "logged in" for a credentials file that is
       corrupt, or present but missing the one field it reads'
   F131:
@@ -280,8 +346,18 @@ findings:
         whether to escalate to `fix` is the user''s call, not this record''s.'
       sha: 3d05a2b4016dbc3c83b82f9c9427c6b7121b754d
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 3, item 4. This overrides the finding author''s proposed
+        `accept` and answers the report''s open question: the user chose, 2026-09-17,
+        to treat presence-as-validity as one defect across all four sites rather than
+        accept it in agy.sh alone. The author''s reasoning — that agy''s token format
+        may carry no expiry — is a claim about the format, so the work must establish
+        what agy''s token actually contains; if it genuinely has no expiry, the honest
+        fix is to say "cannot verify" rather than "authenticated".'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`agy.sh check` (container branch) authenticates on ANY non-empty token
       file, with no format or expiry check at all'
   F132:
@@ -294,8 +370,14 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: initializer
+      note: BRIEF.md phase 3, item 4. opencode.sh check defaults to "1 stored credential(s)"
+        for any CLI output it cannot parse, including no output at all — failing open,
+        in the permissive direction. Fix F135 in the same pass; it is the same extraction.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`opencode.sh check` defaults to "1 stored credential(s)" (authenticated)
       for ANY CLI output it cannot parse, including no output at all'
   F133:
@@ -364,8 +446,13 @@ findings:
       note: filed in context/review/C1-sandbox-allowlist.md
       sha: 765a15b3bb1e1368599876e05c4630c434be83fe
       status: open
+    - by: initializer
+      note: BRIEF.md phase 2, item 1 — covered by the F13 ERE-escaping rewrite. Verify
+        explicitly; do not assume.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: Balanced `()`, `[]` create a silent regex match, ignoring literal meaning
   F140:
     class: bug
@@ -377,8 +464,14 @@ findings:
       note: filed in context/review/C2-audit.md
       sha: 0a8120ae3914bc25d207193d11242e111d50f92a
       status: open
+    - by: initializer
+      note: BRIEF.md phase 3, item 4 — the Python half of the same pattern. _claude_token's
+        isinstance guard skips the expiry check entirely when expiresAt is present
+        but non-numeric, so the token is returned as valid.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`_claude_token` returns a token as valid when `expiresAt` is present
       but non-numeric, because the `isinstance` guard skips the expiry check entirely'
   F141:
@@ -450,8 +543,16 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: BRIEF.md phase 3, item 1 — fixed together with F122, and before it. The
+        suite asserts F122's broken cache behaviour under a name that reads like a
+        deliberate invariant, so whoever fixes F122 first sees a red test and reverts.
+        Delete or invert the test as the first step of that work, not as a surprise
+        discovered during it.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: The characterization suite pins F122's defect as correct, so fixing the
       code will fail the test
   F151:
@@ -504,8 +605,14 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: BRIEF.md phase 3, item 1 — pinned in the same change as F122/F150. The
+        fresh-read `spent` merge is correct today and untested, so a fix that makes
+        the cache path match it leaves the thing it was matched against undefended.
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: 'The fresh-read `spent` merge is not pinned: replacing the merge with
       an overwrite survives all 70 tests'
   F155:
@@ -672,8 +779,16 @@ findings:
       note: filed in context/review/C1-sandbox-executor.md
       sha: ad571a703d0407ddcccb603ac76baefe46ed384c
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 3, item 3 — paired with F112. base.build_env''s `blocked`
+        list guards only the passthrough loop, so BASE_ENV_KEYS are forwarded even
+        when explicitly blocked. Treat this at F73''s severity (medium/security),
+        not F33''s (low/correctness): the review recorded the disagreement deliberately
+        and forwarding a variable the configuration blocked is the security reading.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: '`build_env`''s `blocked` list only guards the `passthrough` loop; the
       always-on base environment (`PATH`, `USER`, `TERM`, ...) is forwarded regardless'
   F34:
@@ -714,8 +829,17 @@ findings:
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
       status: open
+    - by: initializer
+      note: 'BRIEF.md phase 2, item 2 — "Make the proxy suite load-bearing". User
+        accepted the rewrite, 2026-09-17. write_proxy_config and its 48 tests are
+        rewritten together: the tests must assert FilterDefaultDeny Yes, FilterType
+        ere, FilterCaseSensitive Off, FilterURLs Off and the FilterFile path. Closing
+        F51-F54 is the same work, since each is a directive mutation the suite does
+        not catch.'
+      sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
+      status: scheduled
     severity: critical
-    status: open
+    status: scheduled
     summary: Removing `FilterDefaultDeny Yes` inverts the proxy from allow-list to
       deny-list, and every test still passes
   F51:
