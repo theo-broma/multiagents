@@ -10539,6 +10539,194 @@ def test_a_spent_budget_refuses_the_next_spawn(tmp_path):
         assert "Budget for" not in str(exc), exc
 
 
+def test_r4_claude_shaped_usage_moves_tag_spend(tmp_path, monkeypatch):
+    """R4 — a provider that reports no total key must still count against its tag.
+
+    The existing tests use {"total": used}, a synthetic shape no provider
+    actually sends.  A claude-shaped dict carries input_tokens, output_tokens,
+    cache_creation_input_tokens, cache_read_input_tokens and cost_usd, with
+    no total or total_tokens key at all.
+    """
+    from multiagents.tree import Node
+    import multiagents.server as srv
+
+    r = _runner(tmp_path)
+    monkeypatch.setattr(srv, "runner", lambda: r)
+
+    claude_usage = {
+        "input_tokens": 55_203,
+        "output_tokens": 5_145,
+        "cache_creation_input_tokens": 1_000,
+        "cache_read_input_tokens": 5_145_978,
+        "cost_usd": 2.80,
+    }
+    expected = 55_203 + 5_145 + 1_000 + 5_145_978  # token_count
+
+    r.tree.add(Node(id="ag-1", agent="worker", provider="claude", model="sonnet",
+                    parent=None, depth=1, budget_tag="ctx-claude"))
+    r.tree.update("ag-1", usage=claude_usage)
+
+    status = srv.budget_tag_status("ctx-claude")
+    assert status["tokens_spent"] > 0, (
+        "claude-shaped usage with no total key must still move the tag's spend"
+    )
+    assert status["tokens_spent"] == expected, (
+        f"spend must equal token_count of the claude-shaped dict; "
+        f"expected {expected}, got {status['tokens_spent']}"
+    )
+
+
+def test_r5_mixed_provider_spend_is_monotonic_and_accounts_for_all(tmp_path, monkeypatch):
+    """R5 — spend is monotonic in the runs recorded against a tag, and a tag
+    carrying runs from mixed providers reports a figure that accounts for all
+    of them.
+
+    The defect is replacement, not mere undercounting: a later run that happens
+    to use the 'total' key can overwrite the visible figure when earlier runs
+    used a different shape.  The property that must hold is that adding a run
+    never decreases reported spend, and the final figure is the sum of every
+    run's token_count.
+    """
+    from multiagents.tree import Node
+    import multiagents.server as srv
+
+    r = _runner(tmp_path)
+    monkeypatch.setattr(srv, "runner", lambda: r)
+
+    # claude-shaped — no total, no total_tokens
+    claude_usage = {
+        "input_tokens": 500_000,
+        "output_tokens": 50_000,
+        "cache_read_input_tokens": 1_000_000,
+        "cost_usd": 1.0,
+    }
+    claude_tokens = 500_000 + 50_000 + 1_000_000
+
+    r.tree.add(Node(id="ag-1", agent="a", provider="claude", model="m",
+                    parent=None, depth=1, budget_tag="ctx-mixed"))
+    r.tree.update("ag-1", usage=claude_usage)
+
+    status1 = srv.budget_tag_status("ctx-mixed")
+    spent1 = status1["tokens_spent"]
+
+    # opencode-shaped — carries total
+    opencode_usage = {"total": 100_000}
+    r.tree.add(Node(id="ag-2", agent="a", provider="opencode", model="m",
+                    parent=None, depth=1, budget_tag="ctx-mixed"))
+    r.tree.update("ag-2", usage=opencode_usage)
+
+    status2 = srv.budget_tag_status("ctx-mixed")
+    spent2 = status2["tokens_spent"]
+
+    # agy-shaped — carries total_tokens
+    agy_usage = {"total_tokens": 50_000}
+    r.tree.add(Node(id="ag-3", agent="a", provider="agy", model="m",
+                    parent=None, depth=1, budget_tag="ctx-mixed"))
+    r.tree.update("ag-3", usage=agy_usage)
+
+    status3 = srv.budget_tag_status("ctx-mixed")
+    spent3 = status3["tokens_spent"]
+
+    # Monotonicity: adding a run never decreases reported spend.
+    assert spent2 >= spent1, (
+        f"adding an opencode run decreased spend from {spent1} to {spent2}"
+    )
+    assert spent3 >= spent2, (
+        f"adding an agy run decreased spend from {spent2} to {spent3}"
+    )
+
+    expected_total = claude_tokens + 100_000 + 50_000
+    assert spent3 == expected_total, (
+        f"mixed-provider tag must sum all runs via token_count; "
+        f"expected {expected_total}, got {spent3}"
+    )
+
+
+def test_r6_enforcement_and_reporting_agree_before_and_after_ceiling(tmp_path, monkeypatch):
+    """R6 — the figure start_agent refuses on and budget_tag_status reports must
+    agree, both before and after a ceiling is crossed, and claude-shaped spend
+    must trigger refusal once the ceiling is exceeded."""
+    import asyncio
+    from multiagents.tree import Node
+    import multiagents.server as srv
+
+    spec = AgentSpec("worker", "p", "m")
+    r = _runner(tmp_path, {"worker": spec})
+    monkeypatch.setattr(srv, "runner", lambda: r)
+
+    r.tree.set_budget("ctx-enforce", 1_000)
+
+    # --- before the ceiling is crossed ---
+    claude_usage = {
+        "input_tokens": 400,
+        "output_tokens": 100,
+        "cache_read_input_tokens": 200,
+    }
+    spent_before = 400 + 100 + 200  # 700
+
+    r.tree.add(Node(id="ag-1", agent="worker", provider="claude", model="m",
+                    parent=None, depth=1, budget_tag="ctx-enforce", status="done"))
+    r.tree.update("ag-1", usage=claude_usage)
+
+    status_before = srv.budget_tag_status("ctx-enforce")
+    assert status_before["tokens_spent"] == spent_before, (
+        f"expected {spent_before} tokens spent before ceiling, "
+        f"got {status_before['tokens_spent']}"
+    )
+    assert status_before["exhausted"] is False, (
+        "tag must not be exhausted before ceiling is crossed"
+    )
+
+    # start_agent should NOT refuse for budget reasons
+    try:
+        asyncio.run(r.start("worker", "go", budget_tag="ctx-enforce"))
+    except RuntimeError as exc:
+        assert "Budget for" not in str(exc), (
+            f"start_agent refused before ceiling was crossed: {exc}"
+        )
+    except Exception:
+        pass  # non-budget failure is expected (no real provider configured)
+
+    # --- after the ceiling is crossed ---
+    claude_usage2 = {
+        "input_tokens": 500,
+        "output_tokens": 100,
+        "cache_read_input_tokens": 200,
+    }
+    spent_after = spent_before + 500 + 100 + 200  # 1_500
+
+    r.tree.add(Node(id="ag-2", agent="worker", provider="claude", model="m",
+                    parent=None, depth=1, budget_tag="ctx-enforce", status="done"))
+    r.tree.update("ag-2", usage=claude_usage2)
+
+    status_after = srv.budget_tag_status("ctx-enforce")
+    assert status_after["tokens_spent"] == spent_after, (
+        f"expected {spent_after} tokens spent after ceiling, "
+        f"got {status_after['tokens_spent']}"
+    )
+    assert status_after["exhausted"] is True, (
+        "tag must be exhausted once ceiling is crossed"
+    )
+
+    # start_agent MUST refuse for budget reasons, and the figure must match
+    try:
+        asyncio.run(r.start("worker", "go", budget_tag="ctx-enforce"))
+        pytest.fail("start_agent should have refused after ceiling was crossed")
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Budget for" in message, (
+            f"expected budget refusal, got: {message}"
+        )
+        assert f"{spent_after:,}" in message, (
+            f"refusal message must contain the same spent figure as "
+            f"budget_tag_status ({spent_after}), got: {message}"
+        )
+    except Exception as exc:
+        pytest.fail(
+            f"start_agent raised {type(exc).__name__} instead of RuntimeError: {exc}"
+        )
+
+
 def test_a_budget_cannot_be_raised_by_whoever_is_spending_it(tmp_path):
     """The agent asking to raise a ceiling is the one that has just run out,
     which is exactly when it is least able to judge. First value wins."""
