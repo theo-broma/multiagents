@@ -195,3 +195,107 @@ Run the suite as `uv run --frozen python -m pytest`.
 
 R7, R8 and R9 are done when their tests are green and that baseline is otherwise
 unchanged.
+
+---
+
+# Amendment — 2026-09-17, after the first tester run
+
+The first tester wrote and committed R7 and ran out of budget before R8 and R9.
+Its findings are folded in here rather than left in a run summary. **R7's two
+tests are merged and verified**: `test_r7_a_steered_fallback_run_keeps_the_model_it_is_actually_running`
+fails on `- gemini-3.8-flash-high / + opencode-go/qwen3.7-plus`, and the
+regression guard `test_r7_an_unrouted_run_resumes_exactly_as_it_does_today`
+passes, as the contract requires.
+
+## R8's root cause is not what the ticket guessed
+
+The ticket hypothesised that the resume path derives its working directory from a
+null branch field. The real mechanism is narrower and more interesting.
+
+`_drop_if_empty` (`runner.py:1619-1635`) removes the worktree of a
+`writes: false` agent whose branch has no commits, and writes `branch=""` and
+`worktree=""` onto the node. `steer()` then does `workdir=Path(node.worktree)` —
+`Path("")` is `.` — and `docker exec` rejects a relative `Cwd`.
+
+That explains the observed population exactly: the four runs this cost during the
+review were all read-only agents that produced nothing, which is precisely the
+set `_drop_if_empty` acts on.
+
+## A trap in R8's test, which would otherwise pass a fake fix
+
+**Under the local executor a relative cwd silently resolves** to wherever the
+server happens to be. So `is_absolute()` alone goes red locally, and a lazy fix —
+`Path(node.worktree).resolve()` — turns `.` into the server's cwd and makes it
+green while fixing nothing.
+
+The test must also assert `Path(cwd).resolve() != Path.cwd().resolve()`.
+
+And it must **not** assert the cwd is under the project root: `ProjectPaths.worktree()`
+lives under `state_root()`, which is outside it.
+
+## R9 is deterministic, and not through `wait_for_any`
+
+A reader task looping `node = r.tree.get(id); await asyncio.sleep(0)` is
+scheduled at every suspension point of `steer()`, and `_launch` →
+`executor.start` → `create_subprocess_exec` is guaranteed to yield inside the
+window between `stop()`'s write (`runner.py:2011`) and `steer()`'s corrective
+write (`runner.py:2044`). The reader cannot miss the window; no timing luck is
+involved.
+
+`wait_for_any`'s own one-second sleep is what makes the realistic version flaky.
+The tight reader is strictly stronger: if no terminal status is ever written,
+no reader can see one.
+
+Assert that no status outside `{pending, running}` appears in the recorded
+sequence.
+
+## Answer to `NEED_INFO(steer error wording)`
+
+The tester asked whether a result carrying `"steered": false` may ever also claim
+*"the steer was delivered"*, or whether that wording is wrong on every failure
+path rather than only the unresolvable-cwd one.
+
+**It is wrong on every failure path**, and R8's second bullet is hereby widened to
+say so. `"steered": false` alongside "the steer was delivered" is
+self-contradictory whatever caused it, and the caller cannot act on a result that
+asserts both.
+
+The tester was also right that the narrow version was untestable: once the
+implementer adds any working fallback, no input from the public surface makes
+resolution genuinely fail, so a test scoped to that one cause is unreachable by
+construction. The widened version is testable through any failure path at all.
+
+**Revised R8 second bullet:** a result reporting `"steered": false` does not
+contain text claiming the steer was delivered.
+
+## Decision on `consult()`
+
+The R7 ticket flagged `consult()` (`runner.py:2120`) as possibly sharing R7's
+pattern, and the contract reserved the decision. The tester confirmed it does:
+`consult()` reads `self.config.agent(agent_name)` and never consults the live
+node.
+
+**It is in scope for R7.** It is the same defect, in the same shape, one function
+away. Splitting it means a second contract, a second tester and a second
+implementer for what is one line of reasoning, and leaving it means the next
+fallback-routed consult dies exactly as the steer did.
+
+R7's tests do not currently cover it. Whoever writes R8 and R9 should add the
+`consult()` case alongside them.
+
+## Read this before re-deriving anything
+
+The first tester spent most of its budget establishing where a resume is
+observable from outside, and that is worth inheriting rather than repeating:
+
+- The argv is the only place a resumed run's provider, model, options **and**
+  working directory are all observable together, which is what keeps these tests
+  black box.
+- `command.json` has no consumers and is therefore not a contract surface.
+- Its probe helper writes to `<probe>.part` and moves it into place, so the file
+  existing means the whole argv is in it.
+- `_steer_recording(r, id, msg, probe)` starts `steer()`, waits for the probe
+  file, then appends an event so the confirmation loop ends early instead of
+  sitting out `STEER_CONFIRM_SECONDS`.
+
+Both helpers are already merged in `tests/test_core.py` beside the R7 tests.
