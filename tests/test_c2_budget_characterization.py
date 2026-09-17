@@ -489,6 +489,54 @@ def test_read_claude_picks_the_worst_of_multiple_limit_buckets(tmp_path):
     assert b.severity == "warning"
 
 
+def test_r11_read_claude_reports_every_window_not_only_the_worst(tmp_path):
+    # R11 of context/specs/phase1-quota-windows.md (ticket bug-e1cb10). The
+    # test above is this one's other half: it pins that the WORST bucket drives
+    # headroom/resets_at and never looks at `windows`, which is how a provider
+    # that reports none of its buckets passed for a provider that reports all
+    # of them. `budget_status`'s documented promise is that every window a
+    # provider reports is listed, because which bucket is binding decides what
+    # to do: a session window clears in hours, a weekly one does not. A caller
+    # told only "5% left, resets Sep 9" cannot tell those two apart, and routing
+    # on that is what committed long agents against a five-hour wall.
+    #
+    # The `kind`/`percent`/`resets_at` limits shape is the real one — see
+    # USAGE_PAYLOAD in test_core.py, trimmed from GET /api/oauth/usage. The
+    # per-window shape asserted here is the one opencode.sh and agy.sh already
+    # emit and `Budget.to_dict` already labels: {"percent": ..., "resets_at": ...}.
+    session_reset = "2026-09-09T16:50:00+00:00"        # hours away
+    weekly_reset = "2026-09-14T14:00:00+00:00"         # days away
+    profile = h.claude_profile_dir(tmp_path, cached_usage={"limits": [
+        {"kind": "session", "percent": 95.0, "resets_at": session_reset},
+        {"kind": "weekly_all", "percent": 30.0, "resets_at": weekly_reset},
+    ]})
+    b = h.budget_mod.read_claude(fetch=False, config_dir=profile)
+
+    # Unchanged by R11 and asserted here so a fix cannot quietly move them:
+    # the headline numbers still come from the fullest bucket.
+    assert b.known is True
+    assert b.severity == "critical"
+    assert b.headroom == pytest.approx(0.05)
+    assert b.resets_at == session_reset
+
+    # The requirement: BOTH buckets are reported, each carrying its own percent
+    # and its own reset time. Keyed here by reset time rather than by name —
+    # what a window is called is the implementation's business, but which clock
+    # it runs on is the whole point of reporting it.
+    assert len(b.windows) == 2, "both reported buckets, not only the worst"
+    by_clock = {w["resets_at"]: w for w in b.windows.values()}
+    assert set(by_clock) == {session_reset, weekly_reset}
+    assert by_clock[session_reset]["percent"] == pytest.approx(95.0)
+    assert by_clock[weekly_reset]["percent"] == pytest.approx(30.0)
+
+    # And it reaches the caller. `to_dict` omits `windows` entirely when it is
+    # falsy, which is why its absence was silent for so long — so assert the
+    # contents, not the key.
+    emitted = b.to_dict().get("windows") or {}
+    assert {round(w["percent"]) for w in emitted.values()} == {95, 30}
+    assert {w["resets_at"] for w in emitted.values()} == {session_reset, weekly_reset}
+
+
 def test_read_claude_falls_back_to_five_hour_seven_day_when_limits_is_absent(tmp_path):
     profile = h.claude_profile_dir(tmp_path, cached_usage={
         "five_hour": {"utilization": 30.0, "resets_at": "X"},
