@@ -262,6 +262,24 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: orchestrator
+      note: 'Verification requested by the user, 2026-09-17: the `accept` rationale
+        is refuted by the format. The token file at `.gemini/antigravity-cli/antigravity-oauth-token`
+        (1667 bytes, mode 0600) is structured JSON carrying keys `token` (with `access_token`,
+        `token_type`, `refresh_token`, `expiry`), `auth_method` and `id_token`. **`token.expiry`
+        exists**, ISO 8601 / RFC 3339 with nanoseconds. So the finding''s stated ground
+        for accepting — "there may genuinely be no expiry field in agy''s on-disk
+        token to check" — is false, and `[ -s file ]` is strictly weaker than what
+        the format supports. A check could at minimum verify the file parses as JSON
+        and carries `token.expiry`, which distinguishes the reproduction''s garbage
+        file from a real token. Two caveats the researcher flagged: it inspected the
+        host copy, no container-side copy existed in its sandbox, so format identity
+        across the two is inference from "the same CLI writes both" rather than measurement;
+        and `agy --help` exposes no auth or status subcommand, so there is no CLI
+        surface to ask instead. Kept `open`: the ground for accepting is gone, but
+        whether to escalate to `fix` is the user''s call, not this record''s.'
+      sha: 3d05a2b4016dbc3c83b82f9c9427c6b7121b754d
+      status: open
     severity: high
     status: open
     summary: '`agy.sh check` (container branch) authenticates on ANY non-empty token
