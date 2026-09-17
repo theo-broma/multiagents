@@ -56,6 +56,89 @@ findings:
     status: open
     summary: Dead or malformed entries (leading/trailing dot, whitespace, port) silently
       match nothing
+  F110:
+    class: correctness
+    context: context/review/C2-seam.md
+    evidence: reproduction
+    first_seen: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+    history:
+    - by: auditor
+      note: filed in context/review/C2-seam.md
+      sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+      status: open
+    severity: high
+    status: open
+    summary: '`run_action` raises `UnicodeDecodeError` on non-UTF-8 script output,
+      contradicting its own "never raises" contract'
+  F111:
+    class: correctness
+    context: context/review/C2-seam.md
+    evidence: reproduction
+    first_seen: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+    history:
+    - by: auditor
+      note: filed in context/review/C2-seam.md
+      sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+      status: open
+    severity: medium
+    status: open
+    summary: a script's background children outlive `run_action`'s timeout
+  F112:
+    class: security
+    context: context/review/C2-seam.md
+    evidence: reproduction
+    first_seen: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+    history:
+    - by: auditor
+      note: filed in context/review/C2-seam.md
+      sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+      status: open
+    severity: high
+    status: open
+    summary: '`build_env` copies the full ambient process environment into every provider
+      script invocation'
+  F113:
+    class: correctness
+    context: context/review/C2-seam.md
+    evidence: reproduction
+    first_seen: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+    history:
+    - by: auditor
+      note: filed in context/review/C2-seam.md
+      sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+      status: open
+    severity: medium
+    status: open
+    summary: '`MULTIAGENTS_PROVIDER` in a script''s environment can name a different
+      provider than the one whose script actually ran'
+  F114:
+    class: maintainability
+    context: context/review/C2-seam.md
+    evidence: reproduction
+    first_seen: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+    history:
+    - by: auditor
+      note: filed in context/review/C2-seam.md
+      sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+      status: open
+    severity: low
+    status: open
+    summary: a timeout and a "script is not executable" `OSError` are indistinguishable
+      by exit code
+  F115:
+    class: maintainability
+    context: context/review/C2-seam.md
+    evidence: reproduction
+    first_seen: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+    history:
+    - by: auditor
+      note: filed in context/review/C2-seam.md
+      sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
+      status: open
+    severity: low
+    status: open
+    summary: a provider's `env:` block cannot reference the `MULTIAGENTS_*` values
+      `build_env` just computed for that same call
   F12:
     class: security
     context: context/review/C1-sandbox-allowlist.md
