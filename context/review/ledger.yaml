@@ -16,8 +16,41 @@ findings:
         going green.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Fixed by phase 2 item 1, requirement R12 of `context/specs/phase2-ere-escaping.md`.
+        `write_proxy_config` escaped only the literal dot; a new `_ere_literal` helper
+        in `src/multiagents/executor/docker.py` now escapes exactly the twelve characters
+        POSIX ERE treats as special outside a bracket expression. An entry `evil.com|.*`
+        admits only its own literal text and refuses `anything.example`.
+
+
+        **`re.escape` was considered and rejected, with a reason worth keeping.**
+        It escapes for Python''s dialect, backslashing characters ERE does not treat
+        as special — `-`, `&`, `~`, `#`, whitespace. POSIX leaves a backslash before
+        an otherwise-ordinary character *undefined*; glibc''s `regcomp`, which tinyproxy
+        links against, happens to read it as the literal, but that is implementation
+        behaviour rather than a guarantee, and hostnames routinely contain `-`. The
+        chosen table emits a backslash only before a character that is genuinely special,
+        which POSIX defines unambiguously, so the divergence is avoided by construction
+        rather than relied upon.
+
+
+        A second implementation detail was deliberate: `str.translate` rather than
+        `re.sub`, because `re.sub` raises `TypeError` on a non-string entry where
+        `.replace()` raised `AttributeError`, and F2''s characterization test pins
+        that exact type. An out-of-scope test stayed green because the implementer
+        noticed.
+
+
+        Verified: `tests/test_phase2_ere_escaping.py` 16/16, with F1''s case asserted
+        against its own reproduction rather than inferred from the others going green
+        — the brief''s instruction for this item. The characterization tests that
+        pinned the defect were inverted separately, and each was checked to fail against
+        the pre-R12 escaping, so none passes either way.'
+      sha: 5bd61e06f937cf4a5005b7ac4398add08da705ca
+      status: fixed
     severity: critical
-    status: scheduled
+    status: fixed
     summary: An `egress_allowlist` entry containing `|` turns the allowlist into an
       allow-all
   F10:
@@ -137,6 +170,46 @@ findings:
         admits nothing, with no error — is real either way.'
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: open
+    - by: orchestrator
+      note: '**Partially resolved by phase 2 item 1 (R12), and left open deliberately.**
+        Judgement by the test engineer that inverted the affected tests, not by me
+        — I put the question to it because it had both tests in front of it, and its
+        reasoning is better than my guess would have been.
+
+
+        R12 escaped `^`, `$` and `\` as part of the full ERE escape table, so `a^b`,
+        `a$b` and `a\b` now admit their own literal text instead of being unsatisfiable
+        patterns. Those two reproductions are genuinely fixed and their tests are
+        inverted.
+
+
+        **Five reproductions in `tests/test_c1_allowlist_characterization.py` are
+        untouched and still pass, still asserting a dead entry:** a leading dot (`.example.com`)
+        still needs a literal double dot to match; a trailing dot matches only the
+        FQDN root-dot form; leading or trailing whitespace is not stripped; a `:port`
+        suffix never matches the bare host; a full URL never matches the bare host.
+        Those are the *likelier* operator mistakes and they are the majority of the
+        finding''s surface.
+
+
+        **The deeper reason it is not closed:** F11''s complaint is that the operator
+        gets a dead entry with no signal that it is dead. R12 changed what `a^b` matches;
+        it did not add a signal. `a^b` is still dead in practice — no real request
+        carries that host — merely dead for a different reason. The absence of validation
+        is untouched, and that absence *is* the finding.
+
+
+        Adjacent evidence from the same run: the two adversary fuzz tests were making
+        two claims at once, and R12 removed only one. Nothing validates that an allowlist
+        entry is a hostname; such an entry is still accepted in silence and still
+        becomes part of the egress boundary. It is now inert rather than dangerous,
+        which is the same conclusion reached from the adversary''s side.
+
+
+        A comment above the two inverted tests records this, so the next reader sees
+        the five that remain rather than assuming the finding closed.'
+      sha: 5bd61e06f937cf4a5005b7ac4398add08da705ca
+      status: open
     severity: medium
     status: open
     summary: Dead or malformed entries (leading/trailing dot, whitespace, port) silently
@@ -247,8 +320,21 @@ findings:
         explicitly; do not assume.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Fixed by phase 2 item 1, requirement R12. `_ere_literal` escapes `*`,
+        `+`, `?`, `{` and `}` along with the rest of the ERE-special set, so `a*b`,
+        `a+b`, `a?b` and `a{2}b` each admit only their own literal text. `*.example.com`
+        now admits nothing real — not itself read as a wildcard, not `example.com`,
+        not its subdomains.
+
+
+        Verified against its own reproduction rather than inferred from the sibling
+        findings, per the brief''s instruction for this item. See F1''s note for why
+        `re.escape` was rejected in favour of an explicit ERE table.'
+      sha: 5bd61e06f937cf4a5005b7ac4398add08da705ca
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: Unescaped quantifiers `*`, `+`, `?` or interval `{n}` change match semantics
   F120:
     class: bug
@@ -356,8 +442,27 @@ findings:
         rewrites.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Fixed by phase 2 item 1, requirement R12. An entry with an unbalanced
+        `(` or `[` no longer produces an invalid ERE line: the brackets are escaped
+        literally, so the filter evaluates and decides instead of raising. `a(b` and
+        `a[b` were each verified for the entry itself, an unrelated host, and alongside
+        a neighbouring honest entry — the last mattering because a crashing line took
+        the whole filter down with it, not just its own decision.
+
+
+        **One change of form in the inverted characterization tests, which I endorse.**
+        The two F13 tests previously asserted the exact generated line, `(^|\.)a(b$`.
+        The test engineer replaced that with a line-count check plus behavioural assertions,
+        on the grounds that pinning the escape *spelling* would fail a correct reimplementation
+        writing `[(]` instead of `\(`, while the contract is about what the entry
+        matches. That is right: the suite should pin behaviour, and this project has
+        spent the week learning what it costs when a test pins something other than
+        what the finding is about. The reason is recorded in the test''s docstring.'
+      sha: 5bd61e06f937cf4a5005b7ac4398add08da705ca
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: Unbalanced grouping/class metacharacters `(` or `[` crash the regex match
   F130:
     class: bug
@@ -512,8 +617,20 @@ findings:
         explicitly; do not assume.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Fixed by phase 2 item 1, requirement R12. Balanced `(...)` and `[...]`
+        are escaped literally, so `a(b)c` admits the host `a(b)c` and not `abc`, and
+        `a[bc]d` admits itself rather than `abd` or `acd`.
+
+
+        This was the quiet one of the four — no crash, no dead entry, just a rule
+        meaning something other than what it says — and therefore the easiest to leave
+        untested. Verified against its own reproduction rather than inferred from
+        the siblings, per the brief''s instruction for this item.'
+      sha: 5bd61e06f937cf4a5005b7ac4398add08da705ca
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: Balanced `()`, `[]` create a silent regex match, ignoring literal meaning
   F140:
     class: bug
