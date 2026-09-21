@@ -123,3 +123,83 @@ whatever phase 2 item 1 has added by the time you start. Run it as
 R13 is done when each of the five directives has a named test guarding it, the
 suite is green, and your result lists which test guards which directive so the
 mutation check can be walked rather than hunted.
+
+---
+
+# Amendment — after the first R13 run
+
+The first run was interrupted before writing the guards, but it corrected this
+contract three times and built the foundation the next one needs. Its handoff is
+at `HANDOFF-R13.md`, and `tests/support/c1_harness.py` now carries
+`parse_tinyproxy_conf` and `proxy_config` — a parser that reads the config the
+way tinyproxy's grammar does (keyword lower-cased, `#` stripped, quoted values
+unquoted, every value for a keyword kept so a contradicting second line is
+visible) and a `directive(name)` accessor that fails unless the keyword appears
+exactly once.
+
+## Correction 1 — the directive is `Filter`, not `FilterFile`
+
+Both this contract and F54's text say `FilterFile`. The production code emits
+`Filter "/etc/tinyproxy/filter"` (`src/multiagents/executor/docker.py:743`),
+which is tinyproxy's real keyword. Verified by inspection. **The mutation check
+must alter that line**, not one that does not exist.
+
+## Correction 2 — this contract's premise was wrong
+
+It said the suite "validates the directives not at all". That was inherited from
+F50's text and it stopped being true the moment the finding was filed:
+`tests/test_adversary_allowlist_mutation.py` (commit `38f3786`, the adversary run
+that *found* these defects) already contains five substring guards —
+`assert "FilterDefaultDeny Yes" in conf` and four siblings, at lines 26, 35, 43,
+52 and 65.
+
+So a plain deletion already goes red today. **What the remaining gap actually
+is**, demonstrated rather than asserted:
+
+```
+'FilterDefaultDeny Yes' in '# FilterDefaultDeny Yes'          -> True   (commented out, inert)
+'FilterDefaultDeny Yes' in 'XFilterDefaultDeny Yes'           -> True   (keyword misspelled, ignored)
+'FilterDefaultDeny Yes' in 'FilterDefaultDeny Yes\nFilterDefaultDeny No'
+                                                              -> True   (contradicted, last line wins)
+```
+
+Each of those three leaves the substring guard green and the directive without
+effect. **That is R13's real content**, and it is narrower and sharper than what
+this contract originally described. Write the precise guards in a **new** file
+and leave `test_adversary_allowlist_mutation.py` untouched: it is the record of
+the finding.
+
+My own instruction in the section above — *"assert the directive and its value,
+not a substring of the file"* — turns out to name the live gap exactly. Keep it.
+
+## Correction 3 — F54 cannot be settled where I asked
+
+"The `Filter` directive names the path the patterns are actually written to" is
+not checkable inside `write_proxy_config`. The directive names a **container**
+path; the patterns are written to a **host** path. The only thing making them one
+file is the bind mount at `docker.py:775`.
+
+So F54 needs a second test that reaches `ensure_proxy` with `_run` monkeypatched
+— the `tests/test_core.py:5454` idiom, inspecting argv rather than running
+docker — asserting the `-v` argument maps the written filter file onto the
+directive's value. `HANDOFF-R13.md` carries the stub shape and the
+`stdout "absent"` trick that keeps `ensure_proxy` on its happy path.
+
+## F56 is already closed, by the run that filed it
+
+`test_filter_file_ends_with_newline` exists at line 80 of the adversary's own
+file and passes. The adversary filed F56 and wrote its test in the same commit,
+and the ledger never knew. Marked `fixed`; do not write it again.
+
+## A tooling gap that affected this run
+
+The first run reported that neither `read_finding` nor `consult("dev-advisor")`
+was available to it — only the generic `Agent` tool. It recovered F50–F56 from
+`context/review/REPORT.md` instead, which was enough, but no consult was
+possible at any point.
+
+That is the second instruction of this kind I have got wrong: every phase 1 task
+told its agent to read tickets with `list_tickets`, which subagents also cannot
+call. **Point agents at files in the tree, not at orchestrator tools.** The
+findings are readable at `context/review/REPORT.md` and in the per-context files
+under `context/review/`.
