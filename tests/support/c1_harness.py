@@ -49,7 +49,8 @@ from multiagents.paths import ProjectPaths                     # noqa: E402
 
 __all__ = [
     "docker_available", "make_docker_executor", "filter_patterns",
-    "allowlist_admits", "seed_account", "authproxy_server", "closed_port_url",
+    "allowlist_admits", "parse_tinyproxy_conf", "proxy_config",
+    "seed_account", "authproxy_server", "closed_port_url",
     "fake_http_server", "fixed_response_upstream",
     "get_executor", "executor_for", "DockerExecutor", "LocalExecutor",
     "Executor", "build_env", "prepare_home", "ProjectPaths",
@@ -106,6 +107,75 @@ def allowlist_admits(tmp_path: Path, allowlist: list, host: str) -> bool:
     """
     patterns = filter_patterns(tmp_path, allowlist)
     return any(re.search(p, host, re.IGNORECASE) for p in patterns)
+
+
+# ---------------------------------------------------------------------------
+# 2b. The generated tinyproxy configuration
+# ---------------------------------------------------------------------------
+
+_DIRECTIVE_LINE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*(.*?)\s*$")
+
+
+def parse_tinyproxy_conf(text: str) -> dict[str, list[str]]:
+    """`tinyproxy.conf` read the way tinyproxy's own grammar reads it.
+
+    One `Keyword value` per line, `#` starting a comment, keywords matched
+    case-insensitively — so the keys here are lower-cased and a value keeps
+    the case it was written in. A quoted value loses its quotes, because
+    `Filter "/etc/tinyproxy/filter"` names the same file as `Filter
+    /etc/tinyproxy/filter`. Each keyword maps to a LIST, so a second,
+    contradicting line for the same keyword is visible instead of quietly
+    replacing the first.
+
+    Deliberately not a substring search over the file: `"FilterDefaultDeny
+    Yes" in conf` is also true of a config that has commented the line out,
+    misspelled the keyword, or added `FilterDefaultDeny No` underneath it.
+    That gap is F50 — the directive that decides whether the proxy is an
+    allow-list or an open relay was asserted by nothing at all, and asserting
+    it loosely is how it stays that way.
+    """
+    directives: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0]
+        match = _DIRECTIVE_LINE.match(line)
+        if not match:
+            continue
+        keyword, value = match.group(1), match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        directives.setdefault(keyword.lower(), []).append(value)
+    return directives
+
+
+def proxy_config(tmp_path: Path, allowlist: list | None = None,
+                 **config) -> SimpleNamespace:
+    """Everything `DockerExecutor.write_proxy_config` wrote for an allowlist.
+
+    Calls the real production method — the config text is not reconstructed
+    here any more than `filter_patterns` reconstructs the patterns. Yields
+    `SimpleNamespace(executor, dir, conf_path, filter_path, conf_text,
+    filter_text, directives, directive)`, where `directive("FilterType")`
+    returns the one value that keyword was given and fails the test if the
+    keyword is absent or repeated.
+    """
+    ex = make_docker_executor(tmp_path, egress_allowlist=allowlist, **config)
+    target = ex.write_proxy_config(tmp_path / "proxy")
+    conf_path, filter_path = target / "tinyproxy.conf", target / "filter"
+    conf_text = conf_path.read_text()
+    directives = parse_tinyproxy_conf(conf_text)
+
+    def directive(name: str) -> str:
+        values = directives.get(name.lower(), [])
+        assert len(values) == 1, (
+            f"expected exactly one {name} directive in the generated config, "
+            f"found {len(values)}: {values}")
+        return values[0]
+
+    return SimpleNamespace(
+        executor=ex, dir=target, conf_path=conf_path, filter_path=filter_path,
+        conf_text=conf_text, filter_text=filter_path.read_text(),
+        directives=directives, directive=directive,
+    )
 
 
 # ---------------------------------------------------------------------------
