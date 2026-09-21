@@ -84,6 +84,29 @@ class DockerHandle(Handle):
 
 PROXY_PORT = 8888
 
+# The proxy's filter lines are POSIX EREs (tinyproxy is built with
+# `FilterType ere`), not Python regexes. An allowlist entry must become a
+# literal in *that* dialect, so we escape exactly the characters ERE gives
+# special meaning to outside a bracket expression: `\ ^ $ . | ? * + ( ) [ ] { }`.
+# `re.escape` is the wrong tool here — it also escapes characters such as
+# `-`, `&`, `~`, `#` and space that ERE does not treat as special, and POSIX
+# leaves a backslash before an otherwise-ordinary character undefined. glibc's
+# regcomp happens to read that as the literal character, but "happens to" is
+# not a guarantee, and a hostname is exactly the kind of string likely to
+# contain a `-`.
+_ERE_ESCAPE_TABLE = {ord(c): "\\" + c for c in r"\^$.|?*+()[]{}"}
+
+
+def _ere_literal(text: str) -> str:
+    """Escape `text` so it matches only itself as a POSIX ERE.
+
+    `str.translate` so a non-string entry still fails with the same
+    `AttributeError` the old `host.replace(...)` gave — a malformed entry is
+    F2/F55, out of scope for this fix, and not something to change the shape
+    of as a side effect.
+    """
+    return text.translate(_ERE_ESCAPE_TABLE)
+
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -703,7 +726,7 @@ class DockerExecutor(Executor):
         # permits api.example.com but not evil-example.com.
         patterns = []
         for host in allow:
-            escaped = host.replace(".", r"\.")
+            escaped = _ere_literal(host)
             patterns.append(f"(^|\\.){escaped}$")
         (target / "filter").write_text("\n".join(patterns) + "\n")
 
