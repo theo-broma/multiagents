@@ -120,6 +120,23 @@ findings:
       note: filed in context/review/C1-sandbox-allowlist.md
       sha: 765a15b3bb1e1368599876e05c4630c434be83fe
       status: open
+    - by: orchestrator
+      note: '**Blast-radius note, 2026-09-21 — status unchanged, ground moving.**
+        Phase 2 item 1 rewrites the escaping in `write_proxy_config`, which is the
+        code this finding is about. F11 records that a malformed entry (leading or
+        trailing dot, whitespace, a port, a scheme with a path) silently matches nothing.
+        Once every metacharacter is escaped literally, a malformed entry will match
+        *something* — its own literal text — rather than nothing, so this finding''s
+        observed behaviour changes even though nobody set out to change it.
+
+
+        **Do not patch this from its current text.** Re-derive it against the rewritten
+        function: the question "does a malformed entry tell the operator anything"
+        survives the rewrite, but the answer and the reproduction both move. Left
+        `open` rather than deferred because the underlying complaint — an entry that
+        admits nothing, with no error — is real either way.'
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
+      status: open
     severity: medium
     status: open
     summary: Dead or malformed entries (leading/trailing dot, whitespace, port) silently
@@ -735,6 +752,22 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: bfdc29317eebdef5ce71b0e084c295f897c9a8b5
       status: open
+    - by: orchestrator
+      note: '**Blast-radius note, 2026-09-21 — status unchanged.** This lives in `write_proxy_config`,
+        which phase 2 rewrites across three items. F2 is a non-string entry raising
+        an uncaught `AttributeError` from the `.replace(".", ...)` call — and that
+        exact call is what item 1 replaces. The exception may move, change type, or
+        disappear as a side effect of a change aimed at something else.
+
+
+        Deliberately **not** folded into item 1: the contract scopes it out, because
+        validating entry *types* is a different decision from escaping entry *text*,
+        and widening a fix past its contract is how scope creep enters. But whoever
+        picks it up must re-derive the reproduction rather than trust the current
+        line reference. Closely related to F55, which is the whole list being null
+        rather than one entry being non-string.'
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
+      status: open
     severity: medium
     status: open
     summary: A non-string `egress_allowlist` entry crashes container config generation
@@ -935,8 +968,18 @@ findings:
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
       status: open
+    - by: orchestrator
+      note: 'Scheduled under phase 2 item 2 of BRIEF.md, alongside F50. The brief
+        already scheduled it — "F51–F54 are the same work: each is a directive mutation
+        nothing catches" — and the ledger had it as `open`, so this corrects a disagreement
+        between the two rather than making a new decision. Caught while triaging the
+        blast radius of the `write_proxy_config` rewrite before starting it.</note>
+
+        '
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`FilterType ere` can be changed to `regex` with no test failing'
   F52:
     class: correctness
@@ -948,8 +991,15 @@ findings:
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
       status: open
+    - by: orchestrator
+      note: 'Scheduled under phase 2 item 2 of BRIEF.md, alongside F50. Same correction
+        as F51: the brief schedules it, the ledger said `open`.</note>
+
+        '
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`FilterCaseSensitive Off` can be changed to `On` with no test failing'
   F53:
     class: correctness
@@ -961,8 +1011,13 @@ findings:
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
       status: open
+    - by: orchestrator
+      note: 'Scheduled under phase 2 item 2 of BRIEF.md, alongside F50. Same correction
+        as F51: the brief schedules it, the ledger said `open`.'
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`FilterURLs Off` can be changed to `On` with no test failing'
   F54:
     class: correctness
@@ -974,8 +1029,13 @@ findings:
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
       status: open
+    - by: orchestrator
+      note: 'Scheduled under phase 2 item 2 of BRIEF.md, alongside F50. Same correction
+        as F51: the brief schedules it, the ledger said `open`.'
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: The filter file path in `tinyproxy.conf` can be changed with no test
       failing
   F55:
@@ -987,6 +1047,16 @@ findings:
     - by: auditor
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    - by: orchestrator
+      note: '**Blast-radius note, 2026-09-21 — status unchanged.** `egress_allowlist:
+        null` raising an uncaught `TypeError` comes from iterating the list inside
+        `write_proxy_config`, which phase 2 rewrites. Same treatment as F2, which
+        is its per-entry sibling: scoped out of the phase 2 contracts on purpose,
+        because type validation is a different decision from escaping, and re-derive
+        rather than trust the line reference once the rewrite lands. Worth fixing
+        with F2 in one change when someone schedules either.'
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: open
     severity: low
     status: open
@@ -1000,6 +1070,17 @@ findings:
     - by: auditor
       note: filed in context/review/C1-sandbox-adversary.md
       sha: de6722df20deb0b32995493eb4a81056594660ea
+      status: open
+    - by: orchestrator
+      note: '**Blast-radius note, 2026-09-21 — status unchanged.** The filter file''s
+        trailing newline being untested is a gap in the very suite that phase 2 item
+        2 rewrites. Item 2''s contract requires the rewritten suite to assert each
+        tinyproxy directive is present and correct; if whoever writes it also pins
+        the file''s terminating shape, this closes as a side effect and should be
+        marked `fixed` then. If it does not, this stays open and is worth a line rather
+        than a rewrite. Recorded so the item 2 implementer can close it cheaply if
+        it is already in the neighbourhood, and so nobody files it again afterwards.'
+      sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: open
     severity: low
     status: open
