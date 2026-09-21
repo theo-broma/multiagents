@@ -45,17 +45,33 @@ def test_allowlist_admits_exact_and_subdomain_hosts_and_refuses_others(tmp_path)
         h.filter_patterns(tmp_path, [{"not": "a string"}])
 
 
-def test_an_unescaped_pipe_in_an_allowlist_entry_admits_every_host():
-    """F1: `write_proxy_config` only escapes literal dots, so an entry
-    containing a bare `|` turns the WHOLE allowlist into an allow-all via ERE
-    alternation's low precedence — proven here against the real method, not a
-    reimplementation of it."""
+def test_a_pipe_in_an_allowlist_entry_admits_only_that_entrys_literal_text():
+    """F1, inverted by R12 (`context/specs/phase2-ere-escaping.md`) —
+    deliberate, not a weakened test.
+
+    This test was written with the C1 harness to prove F1 against the real
+    `write_proxy_config` rather than a reimplementation of it: only literal
+    dots were escaped, so an entry containing a bare `|` turned the WHOLE
+    allowlist into an allow-all, because ERE alternation has the lowest
+    precedence of any operator and split the anchored line in two.
+
+    R12 escapes `|`, so the three hosts the allow-all admitted are now
+    refused — same three hosts, same entry, same real method, flipped
+    polarity. The literal admit is asserted alongside them, because
+    "refuses three unrelated hosts" is on its own satisfiable by a filter
+    that refuses everything, and this file's job is to show the seam reaches
+    production code that still decides.
+    """
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         tmp_path = Path(d)
         allowlist = ["evil.com|.*"]
         for host in ("attacker.example", "steal-creds.io", "pastebin.com"):
-            assert h.allowlist_admits(tmp_path, allowlist, host), host
+            assert not h.allowlist_admits(tmp_path, allowlist, host), host
+        # The entry means its own text, absurd as that text is as a hostname.
+        assert h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")
+        # And not the left branch the alternation used to offer on its own.
+        assert not h.allowlist_admits(tmp_path, allowlist, "evil.com")
 
 
 # ---------------------------------------------------------------------------
