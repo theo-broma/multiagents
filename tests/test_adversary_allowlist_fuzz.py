@@ -197,23 +197,63 @@ def test_empty_allowlist_denies_all(tmp_path):
 
 # ---------------------------------------------------------------------------
 # Entries that are valid regex but not valid hostnames
+#
+# Both tests below came from the mutation run, and both are inverted by R12
+# (`context/specs/phase2-ere-escaping.md`, findings F14). Deliberate
+# inversions, not weakened tests — and the inversion was checked against what
+# the adversary was actually proving, because a fuzz finding and a
+# characterization finding do not always survive a fix the same way.
+#
+# The mutation was making two claims at once:
+#
+#   1. Nothing validates that an allowlist entry is a hostname. A string that
+#      is not one is accepted in silence, produces a filter line, and becomes
+#      part of the egress boundary.
+#   2. That string is then read as a regex, so the line admits hosts its
+#      author never wrote.
+#
+# R12 removes (2) and leaves (1) exactly as it was. So the point survives, in
+# a different form, and each test below now asserts it in that form: the
+# non-hostname entry is still accepted without complaint and still produces a
+# line, but the line now admits only the entry's own literal text — a string
+# no real request can carry, which makes the entry inert rather than
+# dangerous. Inert with no signal is F11 and F10's territory and is not in
+# R12's scope; the assertions here are written so that a later fix which
+# starts REJECTING non-hostname entries will fail them loudly rather than
+# pass by accident, which is what an adversarial test is for.
 # ---------------------------------------------------------------------------
 
-def test_entry_that_is_valid_regex_but_not_hostname(tmp_path):
-    """An entry like `a(b)c` is valid regex but not a valid hostname."""
+def test_entry_that_is_valid_regex_but_not_hostname_is_accepted_and_matches_only_itself(tmp_path):
+    """An entry like `a(b)c` is valid regex but not a valid hostname.
+
+    Originally this asserted the parens were read as a group: `abc` admitted,
+    `a(b)c` refused. R12 escapes them, so both flip.
+    """
     allowlist = ["a(b)c"]
-    # The pattern should match the group, not the literal parens
-    assert h.allowlist_admits(tmp_path, allowlist, "abc")
-    assert not h.allowlist_admits(tmp_path, allowlist, "a(b)c")
+    # Claim 1, unchanged by R12: the entry is not validated. No error, and it
+    # still becomes one line of the egress boundary.
+    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
+    # Claim 2, inverted by R12: the parens are literal, so the line admits the
+    # entry's own text and not the group it used to denote.
+    assert h.allowlist_admits(tmp_path, allowlist, "a(b)c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "abc")
 
 
-def test_entry_with_character_class(tmp_path):
-    """An entry like `a[bc]d` is valid regex but not a valid hostname."""
+def test_entry_with_character_class_is_accepted_and_matches_only_itself(tmp_path):
+    """An entry like `a[bc]d` is valid regex but not a valid hostname.
+
+    The sharper of the two: a character class let one short entry stand in
+    for a whole set of hosts (`abd`, `acd`) rather than for one wrong host.
+    R12 escapes the brackets, so the set collapses to the literal entry.
+    """
     allowlist = ["a[bc]d"]
-    assert h.allowlist_admits(tmp_path, allowlist, "abd")
-    assert h.allowlist_admits(tmp_path, allowlist, "acd")
+    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
+    assert h.allowlist_admits(tmp_path, allowlist, "a[bc]d")
+    # Every member of the class the entry used to denote is now refused...
+    assert not h.allowlist_admits(tmp_path, allowlist, "abd")
+    assert not h.allowlist_admits(tmp_path, allowlist, "acd")
+    # ...and a non-member stays refused, as it was before the fix.
     assert not h.allowlist_admits(tmp_path, allowlist, "axd")
-    assert not h.allowlist_admits(tmp_path, allowlist, "a[bc]d")
 
 
 # ---------------------------------------------------------------------------

@@ -222,84 +222,160 @@ def test_entry_with_a_scheme_and_path_never_matches_the_bare_host(tmp_path):
     assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
 
 
-def test_embedded_caret_or_dollar_in_an_entry_makes_it_unmatchable(tmp_path):
-    """F11 (different mechanism, same consequence): `^` and `$` are not
-    escaped, so a literal caret or dollar sign inside an entry is read as a
-    start/end-of-string assertion in the middle of the pattern — a position
-    that can never be satisfied except at the true start/end of the whole
-    string — making the entry match nothing at all, not even the literal
-    string it was written to represent."""
-    assert not h.allowlist_admits(tmp_path, ["a^b"], "a^b")
-    assert not h.allowlist_admits(tmp_path, ["a$b"], "a$b")
+# The two tests below were also filed under F11, by a different mechanism:
+# `^`, `$` and `\` reached ERE unescaped and made the entry unsatisfiable.
+# R12 (context/specs/phase2-ere-escaping.md) escapes all three as part of the
+# same table, so that mechanism is gone and both are inverted below. The five
+# F11 tests above are untouched and still pass — a leading dot, a trailing
+# dot, stray whitespace, a `:port` and a full URL still produce an entry that
+# matches no real host, with no signal that it is inert. F11 is narrowed by
+# R12, not closed by it.
 
 
-def test_embedded_backslash_in_an_entry_is_read_as_a_regex_escape(tmp_path):
-    """F11 (different mechanism, same consequence): a literal backslash in an
-    entry is not escaped either, so `a\\b` is read as the regex escape `\\b`
-    (a word-boundary assertion) rather than the two literal characters —
-    again making the entry match neither the literal string nor the plain
-    concatenation of its parts."""
+def test_embedded_caret_or_dollar_in_an_entry_is_matched_as_a_literal_character(tmp_path):
+    """F11, inverted by R12 — deliberate, not a weakened test.
+
+    This test was written during the review to record that `^` and `$` were
+    not escaped: a literal caret or dollar inside an entry was read as a
+    start/end-of-string assertion in the middle of the pattern, a position
+    nothing could satisfy, so the entry matched nothing at all — not even the
+    string it was written to represent.
+
+    R12 escapes both, so the entry now means its own text. The assertion is
+    inverted rather than deleted, and the inverted form is the stronger one:
+    "matches nothing" was satisfied by any broken pattern, whereas "matches
+    exactly its own literal text and not the concatenation without the
+    metacharacter" rules out both the old behaviour and a fix that merely
+    dropped the offending character.
+    """
+    assert h.allowlist_admits(tmp_path, ["a^b"], "a^b")
+    assert not h.allowlist_admits(tmp_path, ["a^b"], "ab")
+    assert h.allowlist_admits(tmp_path, ["a$b"], "a$b")
+    assert not h.allowlist_admits(tmp_path, ["a$b"], "ab")
+
+
+def test_embedded_backslash_in_an_entry_is_matched_as_a_literal_backslash(tmp_path):
+    """F11, inverted by R12 — deliberate, not a weakened test.
+
+    Originally: a literal backslash in an entry was not escaped either, so
+    `a\\b` was read as the regex escape `\\b` (a word-boundary assertion) rather
+    than two literal characters, and the entry matched neither the literal
+    string nor the plain concatenation of its parts.
+
+    R12 escapes the backslash, so the entry matches the two literal
+    characters. Note the second assertion is carried over unchanged from the
+    original: `ab` must still be refused. That was true when the entry was
+    dead and it is true now that it is literal, and keeping it is what stops
+    this inversion from admitting a superset of what it used to.
+    """
     allowlist = ["a\\b"]
-    assert not h.allowlist_admits(tmp_path, allowlist, "a\\b")
+    assert h.allowlist_admits(tmp_path, allowlist, "a\\b")
     assert not h.allowlist_admits(tmp_path, allowlist, "ab")
 
 
 # ---------------------------------------------------------------------------
-# F12 — unescaped ERE quantifiers change what an entry matches, rather than
-# either failing closed or matching the literal string.
+# F12 — ERE quantifiers in an entry. These tests recorded quantifiers changing
+# what an entry matched instead of it matching the literal string; R12
+# (context/specs/phase2-ere-escaping.md) escapes `*`, `+`, `?`, `{` and `}`,
+# so all three are inverted below. Deliberate inversions, not weakened tests.
 # ---------------------------------------------------------------------------
 
-def test_unescaped_star_in_an_entry_makes_it_match_a_range_of_hosts(tmp_path):
-    """F12: only `.` is escaped before the entry is embedded in the pattern.
-    A `*` in an entry (e.g. from a glob-style config pasted in by mistake)
-    is read as the ERE repetition operator on the character before it, so
-    `a.b*c` matches `a.bc` (zero `b`s) and `a.bbbc` (three), not just the
-    literal string `a.b*c` the author wrote — which itself is refused."""
+def test_a_star_in_an_entry_is_a_literal_star_not_a_repetition_operator(tmp_path):
+    """F12, inverted by R12 — deliberate, not a weakened test.
+
+    Originally: only `.` was escaped, so a `*` in an entry (e.g. from a
+    glob-style config pasted in by mistake) was the ERE repetition operator
+    on the character before it. `a.b*c` matched `a.bc` (zero `b`s) and
+    `a.bbbc` (three) and refused the literal string its author wrote.
+
+    Every host from the original is still named here, with the two admits
+    flipped to refusals and the one refusal flipped to an admit. `a.xc` keeps
+    its original polarity: it was refused under the quantifier reading and is
+    refused under the literal one, and asserting it still rules out a fix
+    that turned the entry into something broader.
+    """
     allowlist = ["a.b*c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a.bc")
-    assert h.allowlist_admits(tmp_path, allowlist, "a.bbbc")
+    assert h.allowlist_admits(tmp_path, allowlist, "a.b*c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.bc")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.bbbc")
     assert not h.allowlist_admits(tmp_path, allowlist, "a.xc")
-    assert not h.allowlist_admits(tmp_path, allowlist, "a.b*c")
 
 
-def test_unescaped_plus_in_an_entry_requires_one_or_more_of_the_preceding_char(tmp_path):
-    """F12: same mechanism as `*` — `a.b+c` matches `a.bc`... """
+def test_a_plus_in_an_entry_is_a_literal_plus_not_a_one_or_more_operator(tmp_path):
+    """F12, inverted by R12 — deliberate, not a weakened test.
+
+    Originally, same mechanism as `*`: `a.b+c` matched `a.bc` and `a.bbc`,
+    one-or-more of the preceding character. Both are now refused and the
+    entry admits its own text instead.
+    """
     allowlist = ["a.b+c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a.bc")
-    assert h.allowlist_admits(tmp_path, allowlist, "a.bbc")
+    assert h.allowlist_admits(tmp_path, allowlist, "a.b+c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.bc")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.bbc")
 
 
-def test_unescaped_question_mark_in_an_entry_makes_the_preceding_char_optional(tmp_path):
-    """F12: same mechanism — `a.b?c` matches both `a.c` and `a.bc`."""
+def test_a_question_mark_in_an_entry_is_a_literal_not_an_optional_marker(tmp_path):
+    """F12, inverted by R12 — deliberate, not a weakened test.
+
+    Originally, same mechanism: `a.b?c` made the `b` optional and so matched
+    both `a.c` and `a.bc`, neither of which anybody listed. Both are now
+    refused and the entry admits its own text instead.
+    """
     allowlist = ["a.b?c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a.c")
-    assert h.allowlist_admits(tmp_path, allowlist, "a.bc")
+    assert h.allowlist_admits(tmp_path, allowlist, "a.b?c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.bc")
 
 
 # ---------------------------------------------------------------------------
-# F13 — unescaped grouping/class metacharacters with no matching close
-# produce an invalid regex: the match itself raises, rather than admitting or
-# refusing the host.
+# F13 — grouping/class metacharacters with no matching close. These tests
+# recorded an entry like `a(b` producing a syntactically invalid ERE line, so
+# that evaluating it raised instead of deciding. R12
+# (context/specs/phase2-ere-escaping.md) escapes `(`, `)`, `[` and `]`, so
+# both are inverted below. Deliberate inversions, not weakened tests.
+#
+# What replaces "it raises" is not "it does not raise" — that on its own
+# would assert almost nothing, since a filter that admitted every host would
+# also not raise. Each test below names the decision the entry now makes.
 # ---------------------------------------------------------------------------
 
-def test_unbalanced_paren_in_an_entry_crashes_the_match_instead_of_deciding(tmp_path):
-    """F13: `(` is not escaped. An entry with an unmatched `(` (plausible in
-    a pasted regex fragment, or just a typo) produces a syntactically invalid
-    ERE line. Evaluating it — the exact thing `allowlist_admits` /
-    tinyproxy's `regexec` must do for every request — raises instead of
-    cleanly admitting or refusing the connection."""
+def test_unbalanced_paren_in_an_entry_admits_its_literal_text_without_raising(tmp_path):
+    """F13, inverted by R12 — deliberate, not a weakened test.
+
+    Originally: `(` was not escaped, so an entry with an unmatched `(`
+    (plausible in a pasted regex fragment, or just a typo) produced an
+    invalid ERE line, and evaluating it — the exact thing `allowlist_admits`
+    and tinyproxy's `regexec` must do for every request — raised instead of
+    admitting or refusing the connection.
+
+    The entry now decides, and the decision asserted here is the one the
+    contract requires: it admits its own literal text and nothing else.
+
+    The original also pinned the generated line as the exact string
+    `(^|\\.)a(b$`. That is replaced rather than dropped: the line count is
+    still checked (generation still produces one line per entry, and still
+    does not raise), and what the line *means* is checked by the two
+    decisions below. Pinning the exact escape spelling would fail a correct
+    reimplementation that wrote, say, `[(]` instead of `\\(`, and the contract
+    is about what the entry matches, not how the escaping is spelled.
+    """
     allowlist = ["a(b"]
-    assert h.filter_patterns(tmp_path, allowlist) == [r"(^|\.)a(b$"]
-    with pytest.raises(Exception):
-        h.allowlist_admits(tmp_path, allowlist, "a(b")
+    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
+    assert h.allowlist_admits(tmp_path, allowlist, "a(b")
+    assert not h.allowlist_admits(tmp_path, allowlist, "ab")
 
 
-def test_unbalanced_bracket_in_an_entry_crashes_the_match_instead_of_deciding(tmp_path):
-    """F13: same mechanism as the unbalanced paren, with `[` (an unterminated
-    character class) instead."""
+def test_unbalanced_bracket_in_an_entry_admits_its_literal_text_without_raising(tmp_path):
+    """F13, inverted by R12 — deliberate, not a weakened test.
+
+    Same mechanism as the unbalanced paren, with `[` (an unterminated
+    character class) instead: the match used to raise, and now decides. The
+    decision is the literal one.
+    """
     allowlist = ["a[b"]
-    with pytest.raises(Exception):
-        h.allowlist_admits(tmp_path, allowlist, "a[b")
+    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
+    assert h.allowlist_admits(tmp_path, allowlist, "a[b")
+    assert not h.allowlist_admits(tmp_path, allowlist, "ab")
 
 
 # ---------------------------------------------------------------------------
@@ -313,10 +389,33 @@ def test_non_string_entry_raises_attributeerror_not_a_validation_error(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# F1 (already filed) — reconfirmed once here for completeness of this file's
-# own sweep of ERE metacharacters; not re-filed, see C1-sandbox.md.
+# F1 (already filed, see C1-sandbox.md) — reconfirmed here for completeness of
+# this file's own sweep of ERE metacharacters. Fixed by R12
+# (context/specs/phase2-ere-escaping.md) and inverted below. Deliberate
+# inversion, not a weakened test.
 # ---------------------------------------------------------------------------
 
-def test_unescaped_pipe_in_one_entry_admits_hosts_unrelated_to_any_entry(tmp_path):
+def test_a_pipe_in_one_entry_admits_only_that_entrys_own_literal_text(tmp_path):
+    """F1, inverted by R12 — deliberate, not a weakened test.
+
+    Originally one assertion: with `evil.com|.*` in the list,
+    `totally-unrelated.example` was admitted, because ERE alternation has the
+    lowest precedence of any operator and so split the whole anchored line
+    into `(^|\\.)evil\\.com` or `.*` — an allow-all.
+
+    That host is still named, with its polarity flipped, and the inversion is
+    widened in the two directions that make the flip mean something. `|` is
+    now a literal, so the entry admits the (absurd, but literal) host
+    `evil.com|.*` and does NOT admit `evil.com` — the second matters because
+    a fix that merely dropped everything from the `|` onwards would leave
+    `evil.com` admitted and still pass an "unrelated host is refused" check.
+    The honest neighbouring entry is asserted to still work, exact and by
+    subdomain, since a two-entry list is the shape in which alternation did
+    its damage.
+    """
     allowlist = ["good.example.com", "evil.com|.*"]
-    assert h.allowlist_admits(tmp_path, allowlist, "totally-unrelated.example")
+    assert not h.allowlist_admits(tmp_path, allowlist, "totally-unrelated.example")
+    assert h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "good.example.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "api.good.example.com")
