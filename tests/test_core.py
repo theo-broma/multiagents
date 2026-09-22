@@ -4098,12 +4098,24 @@ def test_the_orchestrator_routes_by_judgement_not_importance():
 
 def test_every_working_agent_names_a_cross_provider_fallback():
     """Without one an agent cannot fail over — a model id belongs to its own
-    provider's namespace, so `agy --model opencode-go/...` is meaningless."""
+    provider's namespace, so `agy --model opencode-go/...` is meaningless.
+
+    Except where waiting is the point. The user's standing decision (fc01d27):
+    an agent never runs on a claude model through the agy provider; it defers
+    instead. The only cross-provider fallback these four had was exactly that,
+    so they now have none, and that is correct rather than an omission. Every
+    other working agent still has to name one.
+    """
+    defers_instead = {"implementer", "implementer-deep", "harness", "characterizer"}
     agents = _shipped_agents()
     for name, spec in agents.items():
         if spec.get("disabled") or spec.get("launch"):
             continue
         alternatives = spec.get("models") or {}
+        assert not str(alternatives.get("agy", "")).startswith("claude"), \
+            f"{name} falls back to a claude model via agy; it must defer instead"
+        if name in defers_instead:
+            continue
         assert alternatives, f"{name} has no fallback and would wait instead"
         assert spec["provider"] not in alternatives, \
             f"{name}'s fallback is its own provider"
