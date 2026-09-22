@@ -163,13 +163,38 @@ container's life. The claude CLI updates itself; the next update bricks the
 project until someone does the manual step above, killing every in-flight agent
 with it.
 
-Mount the versions *directory* rather than the version. The launcher symlink
-still needs its own mount — the existing comment says why and is correct. **Do
-not special-case claude by name**: any provider whose launcher resolves into a
-versioned directory has the same exposure, and naming one in the executor is the
-hardcode this project exists to avoid.
+**Mounting the versions directory is necessary and NOT sufficient.** The
+advisor raised this and it checks out, though not for the reason it gave. It
+said docker binds the launcher symlink and the container would keep a stale
+symlink. Measured instead, inside the live container:
 
-Doing this first means the manual step above is the last time anyone does it.
+```
+host:      ~/.local/bin/claude  ->  symlink, 52 bytes, -> versions/2.1.280
+container: /home/.../.local/bin/claude  ->  regular file, 233,709,640 bytes
+```
+
+Docker **resolved** the symlink at mount time. The launcher path inside the
+container is a single-file bind of one version's *inode*, wearing the
+launcher's name. So mounting the versions directory makes new versions visible
+and changes nothing about which one gets executed — the container would still
+run the binary it was born with.
+
+And the old versions are not cleaned up (`2.1.261`, `2.1.273`, `2.1.274`,
+`2.1.278`, `2.1.280` are all on disk today), so nothing would fail. **The
+container would silently keep running a superseded CLI**, which is worse than
+the refusal we have now. The refusal is ours (`f963ba3` compares the declared
+mounts against the config); the kernel would not have complained.
+
+So the question the contract has to answer is not which path to mount, it is
+**how the container resolves the binary at exec time instead of at creation
+time**. Mounting `~/.local/bin` wholesale is one answer and a blunt one — it is
+a directory of unrelated binaries. Resolving inside the container, against a
+mounted versions directory, is another. Settle it there, with the constraint
+below.
+
+**Do not special-case claude by name.** Any provider whose launcher resolves
+into a versioned directory has the same exposure, and naming one in the
+executor is the hardcode this project exists to avoid.
 
 ### R2 — re-arm the watchdog (`F201`)
 
@@ -178,16 +203,29 @@ the first alert is the only alert — including for a *different* condition
 firing later. Measured: `ag-179bc2` tripped correctly at 5 identical
 `view_file` calls and then ran to 116 events in silence.
 
-Two requirements, both to be stated in the contract rather than assumed:
+Three requirements, and the third is the one that is easy to get wrong:
 
 - a condition that differs from the one already reported is reported (a doom
   loop followed by a wall-clock timeout is two facts, not one);
-- a repeat of the same condition re-arms after a further N repeats, with N
-  configurable and sitting beside `doom_loop_repeats`.
+- a *recurring* condition re-arms after a further N repeats, with N
+  configurable and sitting beside `doom_loop_repeats`;
+- **a monotone condition never re-arms.** `runaway_steps` fires on
+  `self.steps > self.max_steps`, and `self.steps` only grows — so a naive
+  re-arm makes it trip on *every subsequent event* for the rest of the run.
+  Same for `timeout`. These are terminal states, not recurring ones: report
+  once, never again. Only `doom_loop` is genuinely repeatable.
 
-**This will make runs noisier.** That is the point. It is scheduled before R3
-because it is provider-agnostic, and because it is the only thing that will
-tell us whether R3's compensation actually worked.
+That third requirement came out of the advisor's review, which argued R2 and R4
+should not land together because R2 would "weaponize" R4 — an inflated step
+count plus a re-arming watchdog equals `runaway_steps` spam on every claude
+agent. The premise is right and the conclusion does not follow: the spam comes
+from re-arming a monotone condition, which is wrong on its own terms whatever
+R4 does. Fix the re-arm rule and the interaction disappears, which is why R4
+stays scheduled rather than parked.
+
+**This will still make runs noisier.** That is the point. It is scheduled
+before R3 because it is provider-agnostic, and because it is the only thing
+that will tell us whether R3's compensation actually worked.
 
 ### R3 — a seam for provider-specific prompt guidance (`F202`)
 
@@ -225,7 +263,11 @@ Then carry the pagination guidance in agy's block.
 
 ### R4 — the claude step counter (`bug-b1c130`)
 
-**Do this with R2, not after it.** Same function, and R2 makes this one louder.
+**Same function as R2** (`Observer.observe`), so land them in an order that
+keeps the diffs legible — but they are **not** coupled, once R2's third
+requirement holds. The advisor argued for parking R4 until R2 shipped, on the
+grounds that R2 would amplify it; that amplification is the monotone re-arm
+bug, and R2 fixes it rather than causing it. R4 stands on its own evidence.
 
 `supervisor.py:71-72` has two counting paths: `self.steps = max(self.steps,
 event.step + 1)` when the provider reports a step index, and `self.steps += 1`
@@ -435,10 +477,19 @@ that ended with work still in the orchestrator's head and not on disk is the one
 turn where this is destructive, because compaction drops tool results first
 (`transcripts.py:51-52`).
 
-Requirement, stated because it is the part that can silently regress: the driver
-verifies the compaction landed by reading back the `compact_boundary` record it
-expects, and treats a missing one as a failure rather than as success. `preTokens`
-and `postTokens` make that check exact.
+Requirement, stated because it is the part that can silently regress: the
+compaction is **verified**, not assumed, and a missing confirmation is a failure
+rather than a success.
+
+**The verification belongs in the provider script, not in the core** — the
+advisor caught this and it is right. `compact_boundary`, `compactMetadata`,
+`trigger: "manual"` and the transcript layout that carries them are all claude's
+vocabulary; parsing them in `src/multiagents/` would put provider logic back in
+the core one item after R3 took it out. So `providers/claude.sh compact <sid>`
+performs the call, reads back its own record, and reports through its exit code.
+The driver learns success or failure and never learns what a `compact_boundary`
+is. `preTokens`/`postTokens` make the script's own check exact, and it may print
+them for the log.
 
 **R8d — the other two providers, which do not work like claude.** Measured on
 2026-09-22 against the installed binaries. Three providers, three unrelated
@@ -493,6 +544,14 @@ contract: `providers/claude.sh compact <session_id>` runs the CLI invocation,
 know which of the three it got. Any `if provider == ...` in Python here is the
 hardcode the plugin invariant exists to forbid, and this is the case that would
 tempt it most, because the three mechanisms genuinely have nothing in common.
+
+**One concrete gap, raised by the advisor and confirmed:** a `compact` action
+needs the session id, and no action takes one today — `run_action`
+(`scripts.py:172-175`) passes only the action name. The seam for it already
+exists though: the same signature ends in `extra_env`, which `build_env` merges
+into the script's environment. So the session id reaches the script as an
+environment variable, the way the action contract already carries everything
+else, and no new parameter is needed.
 
 **Under `--unattended` this matters most**, not least: nobody is there to notice
 a window filling, and the automatic compaction will fire mid-task at whatever
