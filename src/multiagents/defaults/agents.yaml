@@ -221,8 +221,6 @@ agents:
     provider: claude
     model: sonnet
     instructions: team/implementer.md
-    models:
-      agy: claude-sonnet-4-6
     description: Writes code on its own branch. The workhorse, and the default.
     writes: true
     permission: full
@@ -241,8 +239,6 @@ agents:
     provider: claude
     model: opus
     instructions: team/implementer.md
-    models:
-      agy: claude-opus-4-6-thinking
     description: >-
       Strong coder for work that needs design judgement, or that a lower tier
       escalated. Expensive; used deliberately.
@@ -418,8 +414,6 @@ agents:
     provider: claude
     model: sonnet
     instructions: team/harness.md
-    models:
-      agy: claude-sonnet-4-6
     description: >-
       Builds or extends the test harness for one context so it can be
       exercised. Runs alone, before characterization.
@@ -446,7 +440,6 @@ agents:
       # NOT gemini-3.1-pro-high, which is where the auditor lands: the auditor
       # partly judges what this agent chose to pin, and with opencode down they
       # would have collapsed onto one model at the moment nobody is watching.
-      agy: claude-sonnet-4-6
     description: >-
       Writes characterization tests pinning a context's current behaviour, and
       flags every behaviour it had to pin that looks wrong.
