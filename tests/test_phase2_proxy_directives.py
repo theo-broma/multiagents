@@ -42,7 +42,7 @@ characterization suite cover what the patterns mean under those directives.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -106,3 +106,99 @@ def test_filter_urls_is_off_so_the_patterns_match_the_host_not_the_url(tmp_path)
     admitting the hosts it names."""
     conf = h.proxy_config(tmp_path, ["example.com"])
     assert conf.directive("FilterURLs") == "Off"
+
+
+# ---------------------------------------------------------------------------
+# F54 — the directive names a file, and a name is only worth what is at it.
+#
+# This one takes two tests, and the split is not padding. `write_proxy_config`
+# writes the patterns to a HOST path and names a CONTAINER path in the config
+# it writes beside them; nothing inside that function can say whether the two
+# are the same file. The bind mount in `ensure_proxy` is the only thing that
+# makes them one, so the first test below pins the directive's value the way
+# the four above pin theirs, and the second follows the value through to the
+# mount. Change either the container path or the mount alone and the second
+# goes red; that is the whole point of it.
+# ---------------------------------------------------------------------------
+
+def test_the_filter_directive_names_the_file_the_patterns_were_written_to(tmp_path):
+    """`Filter` — tinyproxy's actual keyword, not `FilterFile`, which F54's
+    text and the contract both name and which tinyproxy does not have. A
+    `Filter` pointing at a path with no file at it is not an error tinyproxy
+    reports; it loads no patterns, and with `FilterDefaultDeny Yes` above it
+    that is a proxy which refuses everything.
+
+    Asserted here: an absolute container path, whose basename is the name
+    `write_proxy_config` gave the file it wrote the patterns to. Whether
+    anything is mounted there is the next test."""
+    conf = h.proxy_config(tmp_path, ["example.com"])
+    named = PurePosixPath(conf.directive("Filter"))
+
+    assert str(named) == "/etc/tinyproxy/filter"
+    assert named.is_absolute()
+    assert named.name == conf.filter_path.name
+
+
+def test_the_bind_mount_puts_the_generated_filter_file_where_the_directive_looks(
+        tmp_path, monkeypatch):
+    """The half of F54 that cannot be settled in `write_proxy_config`.
+
+    Reaches `ensure_proxy` with `_run` replaced by a recorder — argv
+    inspection, no docker daemon, the idiom `test_core.py` already uses for
+    `docker inspect` and `docker run`. `returncode 0` makes `image_exists`
+    true; `stdout "absent"` makes `container_state` report no container, which
+    is the branch that goes on to write the config and start the proxy.
+
+    The chain is followed rather than recomputed, and each link is read out of
+    the argv the executor built:
+
+      the conf mounted at the path `Dockerfile.proxy`'s CMD loads
+        -> its `Filter` directive
+          -> a mount whose container side is that exact path
+            -> whose host side holds the patterns for this allowlist
+
+    Recomputing `config_dir / "filter"` and comparing it to the mount would
+    prove only that two expressions in the test agree with two in the
+    production code. Following the directive's own value into the mount table
+    is what makes moving either end — the container path in the config, or the
+    target of the `-v` — turn this red."""
+    import multiagents.executor.docker as docker_mod
+
+    calls: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stdout = "absent"      # container_state -> "absent": nothing to remove
+        stderr = ""
+
+    def fake_run(argv, *args, **kwargs):
+        calls.append(list(argv))
+        return _Result()
+
+    monkeypatch.setattr(docker_mod, "_run", fake_run)
+
+    # A host that appears in no other fixture, so the file found at the end of
+    # the chain is identifiably the one this executor generated.
+    allowlist = ["mount-probe.example"]
+    executor = h.make_docker_executor(tmp_path, egress_allowlist=allowlist)
+    assert executor.ensure_proxy() == {"ok": True, "created": True}
+
+    run = next(c for c in calls if c[:2] == ["docker", "run"])
+    mounts = {}
+    for flag, value in zip(run, run[1:]):
+        if flag == "-v":
+            host, container, _mode = value.rsplit(":", 2)
+            mounts[container] = Path(host)
+
+    # `Dockerfile.proxy` runs `tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf`,
+    # so this is the only config the proxy reads — and therefore the only one
+    # whose `Filter` directive means anything.
+    assert "/etc/tinyproxy/tinyproxy.conf" in mounts, (
+        f"no config mounted where tinyproxy reads one: {sorted(mounts)}")
+    named = h.parse_tinyproxy_conf(mounts["/etc/tinyproxy/tinyproxy.conf"].read_text())["filter"]
+    assert len(named) == 1, f"expected one Filter directive, found {named}"
+
+    assert named[0] in mounts, (
+        f"Filter names {named[0]}, but the proxy mounts nothing there: "
+        f"{sorted(mounts)}")
+    assert mounts[named[0]].read_text() == h.proxy_config(tmp_path, allowlist).filter_text
