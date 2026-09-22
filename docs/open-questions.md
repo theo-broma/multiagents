@@ -446,3 +446,13 @@ fact, and each names its own falsifier.
   your own token, at most once every five minutes, is the same request the
   vendor's own client makes — but the endpoint is undocumented and the account
   at risk is the user's. Shipped on, with a switch and the trade written down.
+
+**Recount, 2026-09-22: it is 18, not 17.** A `tester` run writing the R14/R15
+suite reported the count independently — `PermissionError: can_spawn is false`,
+all in `test_core.py`, reproducing when `test_core.py` is run alone — and
+counted **18**. The mechanism above is unchanged and still the explanation; only
+the number was one short, and it has been carried as "17" through `REPORT.md`,
+`MAP.md` and this entry since. Cite 18.
+
+The recount also confirms the entry's central claim for a third time and from a
+third agent: the failures appear only inside an agent, never from a shell.
