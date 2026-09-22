@@ -2532,14 +2532,17 @@ class Runner:
         # work is told there is none while tasks sit ready to restart.
         revived = await self.resume_deferred()
         # A pause stops new work, not the wait: agents already running are
-        # waited on as usual, and every result says the pause is in force.
-        pause: dict[str, Any] = {}
-        if revived.get("paused"):
-            waiting = max(0, int((revived.get("until") or 0) - now()))
-            pause = {"paused": True, "reason": revived["reason"],
-                     "retry_after_seconds": waiting,
-                     "note": "no provider has headroom; deferred work restarts by "
-                             "itself when this clears. Wait rather than re-planning."}
+        # waited on as usual, and every result says whether a pause is in
+        # force. Read when the result is built, not now — a pause can expire
+        # or begin while we wait.
+        def pause() -> dict[str, Any]:
+            record = self.tree.pause_state()
+            if not record:
+                return {}
+            return {"paused": True, "reason": record.get("reason", ""),
+                    "retry_after_seconds": max(0, int((record.get("until") or 0) - now())),
+                    "note": "no provider has headroom; deferred work restarts by "
+                            "itself when this clears. Wait rather than re-planning."}
 
         deadline = time.monotonic() + timeout
         if agent_ids:
@@ -2555,7 +2558,7 @@ class Runner:
                     if r.get("agent_id") and r["agent_id"] not in watched]
         if not watched:
             return {"changed": [], "reason": "no active agents",
-                    "still_running": [], "capacity": self.capacity(), **pause}
+                    "still_running": [], "capacity": self.capacity(), **pause()}
 
         # Agents that had already finished before this call are reported, but
         # are NOT what we wait on. Without this split, calling again with the
@@ -2578,25 +2581,32 @@ class Runner:
         if not pending:
             return {"changed": already, "all_finished": True,
                     "still_running": [], "capacity": self.capacity(),
-                    "note": "every agent you named had already finished", **pause}
+                    "note": "every agent you named had already finished", **pause()}
 
         while time.monotonic() < deadline:
             changed = []
+            running = []
             for agent_id in pending:
                 node = self.tree.get(agent_id)
-                if node is not None and node.status not in {"pending", "running"}:
+                if node is None:
+                    continue
+                if node.status in {"pending", "running"}:
+                    running.append(agent_id)
+                else:
                     changed.append({
                         "agent_id": agent_id, "agent": node.agent,
                         "status": node.status, "reason": node.reason,
                     })
             if changed:
+                # Both lists from one read, so an agent finishing between two
+                # reads is not dropped from both.
                 return {
                     "changed": changed,
                     "already_finished": already,
-                    "still_running": [i for i in pending if i not in {c["agent_id"] for c in changed}],
+                    "still_running": running,
                     "waited_seconds": round(timeout - (deadline - time.monotonic())),
                     **self._idle_capacity_note(),
-                    **pause,
+                    **pause(),
                 }
             await asyncio.sleep(1.0)
 
@@ -2607,7 +2617,7 @@ class Runner:
             "still_running": [i for i in pending
                               if (n := self.tree.get(i)) is not None
                               and n.status in {"pending", "running"}],
-            **pause,
+            **pause(),
         }
 
     # ------------------------------------------------------------------- git --
