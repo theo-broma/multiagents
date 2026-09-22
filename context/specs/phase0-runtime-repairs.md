@@ -377,3 +377,20 @@ Today `wait_for_any` returns immediately with `paused: true` and no
   further reload on the next call. Recording the pre-load fingerprint is
   deliberate: it guarantees a mid-load edit is re-detected, and a redundant
   reload is harmless.
+
+## Amendments after the review (2026-09-23, reviewer ag-e4919f)
+
+- **P0-R1.8** The versioned-launcher definition is tightened, because as
+  written it also matched the out-of-scope nested layout: a launcher is
+  versioned only when, in addition, the resolved target's **file name differs
+  from the launcher's name** (the file itself carries the version, as
+  `~/.local/bin/claude` → `…/versions/2.1.280`). A target whose file name equals
+  the launcher's (`bin/cli` → `…/versions/1.0.0/bin/cli`) is not versioned and
+  keeps today's behaviour: the resolved file is mounted and the command uses the
+  bare name. *Verified by:* a test with the nested layout asserting today's mount
+  list and an unrewritten command. *(Review finding 1.)*
+- Review finding 2 duplicates adversary finding 5 (P0-R5.10).
+- **Accepted — finding 3:** the fingerprint's `rglob` over `agents/` per tool
+  call is a few dozen `stat`s today; reopen if briefs grow into the hundreds.
+- **Declined — finding 4:** the invariant forbids *provider* strings (tool names,
+  a CLI's error text) in core code, not multiagents' own messages.
