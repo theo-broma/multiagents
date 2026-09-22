@@ -119,6 +119,11 @@ Trip reasons today: `doom_loop`, `runaway_steps`, `silence`, `timeout`.
   of the loop, or any change of the working tree, resets the re-arm count.
   *Verified by:* unit test: 5 identical calls → trip; 4 more → nothing; 5th → a
   second trip; and a test that a different call in between resets the count.
+  *Amended 2026-09-22:* for an A,B cycle the unit of repetition is **one pair**,
+  the unit that tripped. A call on a **different** signature is not part of the
+  loop: it resets the re-arm count, and a loop on that new signature is a fresh
+  detection governed by `doom_loop_repeats`. The Supervisor takes the value as
+  a constructor keyword `loop_rearm` (beside `loop_repeats`).
 - **P0-R2.3** `runaway_steps` and `timeout` are **terminal**: reported at most
   once per run, however many further events arrive. (`self.steps` only grows;
   a naive re-arm trips on every later event.)
@@ -145,6 +150,17 @@ Trip reasons today: `doom_loop`, `runaway_steps`, `silence`, `timeout`.
   the tree or the events log unless a new trip is reported.
   *Verified by:* test counting tree writes across idle polls after a terminal
   trip.
+- **P0-R2.9** The runner's timer loop runs for the whole life of the run and
+  never dies on its own exception. *(Added 2026-09-22 from the group B tester's
+  probe:)* `supervisor.py` defines `quiet_for` both as a method and as a
+  property; the property wins, `runner.py:~1668` calls `quiet_for()`, and the
+  loop dies with `TypeError: 'float' object is not callable` on its first poll
+  of any run with a worktree. So **no `timeout` or `silence` trip reaches the
+  tree today**, on any provider. Fix the collision; and an exception inside one
+  poll must be recorded (an event) rather than silently ending the loop.
+  *Verified by:* runner test with `timeout=1` and a fake agent alive for ~7 s
+  producing a `stuck`/`timeout` event (the tester's probe); a test that an
+  injected exception in one poll is recorded and the next poll still runs.
 - **P0-R2.6** The first trip of a run is reported exactly as today (same reason
   strings, same detail format), so existing watchdog tests stay green.
   *Verified by:* the existing supervisor tests, unmodified.
@@ -212,11 +228,17 @@ is the assistant message id (`message.id`).
   event carries the lifted value (string; absent → empty).
   *Verified by:* `parse_line` test on a claude assistant line.
 - **P0-R4.2** Step counting, in order of precedence: an event with a step index
-  counts as today (`max(steps, index+1)`); otherwise an event with a non-empty
-  `turn` increments the count **only the first time that turn value is seen in
-  the run**; otherwise, **once the run has seen any turn value**, an untagged
-  event does not count; otherwise (a provider that declares neither) it counts
-  as today (`+= 1` for kind `step`).
+  counts as today (`max(steps, index+1)`); otherwise, **if the provider's stream
+  rules declare `turn` on any rule**, only a non-empty `turn` counts, and only
+  the first time that value is seen in the run — untagged events never count,
+  including those that arrive before the first turn; otherwise (a provider that
+  declares neither) it counts as today (`+= 1` for kind `step`).
+  *Amended 2026-09-22:* the earlier wording ("once the run has seen any turn
+  value") let claude's ~43 pre-turn `system`/`rate_limit_event` lines count and
+  contradicted P0-R4.3; R4.3 wins. Whether a provider declares `turn` is read
+  from its `providers.yaml` rules and handed to the Supervisor — never decided
+  by provider name. The parsed value is exposed as `Event.turn` (str, default
+  `""`).
   *Verified by:* supervisor unit tests for each branch, including a stream of
   10 events sharing one turn id counting as 1, and a provider with no turn
   declaration keeping today's count exactly.
