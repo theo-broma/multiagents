@@ -121,6 +121,118 @@ needs no exemption.
 
 ---
 
+## Phase 0 — the runtime the team runs on
+
+**Inserted 2026-09-22, ahead of everything.** The work described in Phases 1–4
+is paused, not abandoned: `refactor/split-consume` carries the R14–R18
+implementation and is committed and clean. Come back to it when this phase
+lands.
+
+These three come from `context/review/C4-runtime-observed.md`. None was
+reachable by reading the code — each needed the logs of real runs — and they
+are one failure arriving in three steps, which is why they are one phase.
+
+**Before any agent can be launched at all**, a human runs, once:
+
+```
+multiagents docker rm && multiagents docker up
+```
+
+The container was created against a claude CLI version that no longer exists
+and refuses every spawn. Nothing is running (checked: the newest result-less
+run is hours old), so this costs nothing today. It is a manual step because
+recreating a container kills whatever is inside it, and that is not a decision
+an agent gets to make.
+
+### R1 — the versioned mount (`F200`)
+
+`src/multiagents/executor/docker.py:340-352` mounts both a provider's launcher
+and the path its symlink resolves to. The second is resolved at container
+creation, which pins one version number into a mount list that is fixed for the
+container's life. The claude CLI updates itself; the next update bricks the
+project until someone does the manual step above, killing every in-flight agent
+with it.
+
+Mount the versions *directory* rather than the version. The launcher symlink
+still needs its own mount — the existing comment says why and is correct. **Do
+not special-case claude by name**: any provider whose launcher resolves into a
+versioned directory has the same exposure, and naming one in the executor is the
+hardcode this project exists to avoid.
+
+Doing this first means the manual step above is the last time anyone does it.
+
+### R2 — re-arm the watchdog (`F201`)
+
+`src/multiagents/supervisor.py:199-203`. `_trip` latches for the whole run, so
+the first alert is the only alert — including for a *different* condition
+firing later. Measured: `ag-179bc2` tripped correctly at 5 identical
+`view_file` calls and then ran to 116 events in silence.
+
+Two requirements, both to be stated in the contract rather than assumed:
+
+- a condition that differs from the one already reported is reported (a doom
+  loop followed by a wall-clock timeout is two facts, not one);
+- a repeat of the same condition re-arms after a further N repeats, with N
+  configurable and sitting beside `doom_loop_repeats`.
+
+**This will make runs noisier.** That is the point. It is scheduled before R3
+because it is provider-agnostic, and because it is the only thing that will
+tell us whether R3's compensation actually worked.
+
+### R3 — a seam for provider-specific prompt guidance (`F202`)
+
+`notes:` is parsed off every provider (`src/multiagents/providers.py:153` and
+`:196`) and read by nothing. So a provider's configuration cannot influence what
+its own agents are told, and `compose_prompt` has no provider-dependent branch
+at all.
+
+That matters because of a defect we do not control. agy's `view_file` returns,
+on truncation:
+
+> The above content does NOT show the entire file contents. If you need to view
+> any lines of the file which were not shown to complete your task, call this
+> tool again to view those lines.
+
+It says "call this tool again" and names no pagination argument. A model that
+follows it literally re-reads the same head forever — and this is **not a model
+problem**: two of the seven loops measured on 2026-09-22 were
+`agy/claude-opus-4-6-thinking`, and the same model under the claude CLI never
+loops. It is the tool's message.
+
+Add a key to `providers.yaml` that the runner appends to the prompt **for that
+provider's agents only**. Requirements:
+
+- absent key means the prompt is byte-for-byte what it is today;
+- the fragment reaches agents on that provider and no others;
+- **it is not `notes:`** — configuration commentary written for a human reader
+  must not start being sent to models because the two shared a field;
+- agy's tool name and its English error string appear in `providers.yaml` and
+  **nowhere in `src/multiagents/*.py`**. That is the providers-are-plugins
+  invariant, and it is the specific thing the user asked the review team to
+  watch.
+
+Then carry the pagination guidance in agy's block.
+
+### Not in this phase
+
+`F203` (four opencode agents fall back onto agy, which is the looping CLI, and
+opencode is at 99% of its monthly cap until 2026-10-05) and `F204` (the prompt
+preamble ordering) are both **accepted, with reasons in the ledger**. R2 and R3
+between them remove what was damaging about F203. F204 was measured rather than
+judged: cache read beats creation 26.7:1, the addressable surface is under 3.5%
+of claude-side tokens, and reordering recovers almost none of it.
+
+`critic` has no fallback and stops when opencode's cap binds. Raised with the
+user on 2026-09-22; it is not used on this project, so that is accepted and is
+not work.
+
+**None of these three is a cost optimisation and none should be sold as one.**
+Measured on 2026-09-22: all seven looping runs were agy, which is unmetered, so
+the loops cost nothing in money. R2 will *increase* orchestrator requests, not
+reduce them. These are robustness fixes.
+
+---
+
 ## Phase 1 — repair the tool, before using it
 
 **This is the whole first phase and nothing else starts until it lands.**
@@ -326,6 +438,9 @@ deleting anything** — the rest are spent, but that one holds work.
 - `context/review/REPORT.md` — the review. **The index; read it first.**
 - `context/review/MAP.md` — the seven contexts, ranked with measurements.
 - `context/review/ledger.yaml` — finding state. Prefer `list_findings`.
+- `context/review/C4-runtime-observed.md` — F200–F204, found on 2026-09-22 by
+  measuring this project's own runs rather than by reading it. Phase 0 works
+  from these.
 - `context/review/BRIEF-review-phase.md` — the review phase's brief. The two
   invariants in it still hold.
 - `docs/open-questions.md` — what this project believes, with the evidence and

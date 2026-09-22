@@ -17,6 +17,7 @@ Nothing but this file. The review writes the rest.
 | `review/MAP.md` | `cartographer` | phase 1, once for the whole project |
 | `review/<context>.md` | `auditor`, `adversary`, `characterizer`, `harness` | as each context is worked |
 | `review/REPORT.md` | `reporter` | phase 6, last |
+| `review/C4-runtime-observed.md` | the orchestrator | 2026-09-22, outside the review |
 
 Findings are `F<n>` ids. They go into the ledger through `record_findings`, and
 the ledger — not these files — is what you read to decide what to work on. Use

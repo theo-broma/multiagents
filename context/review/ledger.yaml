@@ -918,6 +918,121 @@ findings:
     status: open
     summary: Ordinary upstream errors (anything but 429/529) emit no `on_event` at
       all
+  F200:
+    class: bug
+    context: context/review/C4-runtime-observed.md
+    evidence: reproduction
+    first_seen: fc01d274721e3d66cf3299efdafb6d6f2682502a
+    history:
+    - by: auditor
+      note: filed in context/review/C4-runtime-observed.md
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: open
+    - by: initializer
+      note: 'BRIEF item R1 (Runtime series). Mount the provider CLI''s versions *directory*
+        rather than the one version the symlink resolves to at container-creation
+        time, without special-casing claude by name. Blocks everything else: the container
+        is unusable right now, so no agent can be launched to do any of this work
+        until it is recreated by hand once.'
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: scheduled
+    severity: high
+    status: scheduled
+    summary: The docker executor mounts a provider CLI's *resolved versioned* path,
+      so any CLI self-update makes the container unusable until it is recreated
+  F201:
+    class: bug
+    context: context/review/C4-runtime-observed.md
+    evidence: observation
+    first_seen: fc01d274721e3d66cf3299efdafb6d6f2682502a
+    history:
+    - by: auditor
+      note: filed in context/review/C4-runtime-observed.md
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: open
+    - by: initializer
+      note: 'BRIEF item R2. Re-arm the watchdog: a different condition tripping after
+        the first must be reported, and a repeat of the same condition re-arms after
+        a further configurable number of repeats. Scheduled before R3 deliberately
+        — it is provider-agnostic, and it is what will tell us whether R3''s compensation
+        actually worked.'
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: scheduled
+    severity: high
+    status: scheduled
+    summary: The supervisor reports only the first watchdog trip per run, so an agent
+      that keeps looping after the first alert is never mentioned again
+  F202:
+    class: design
+    context: context/review/C4-runtime-observed.md
+    evidence: reproduction
+    first_seen: fc01d274721e3d66cf3299efdafb6d6f2682502a
+    history:
+    - by: auditor
+      note: filed in context/review/C4-runtime-observed.md
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: open
+    - by: initializer
+      note: BRIEF item R3. Add a per-provider prompt fragment key to providers.yaml
+        that the runner appends for that provider's agents only, then use it to carry
+        the agy view_file pagination guidance. Must NOT reuse `notes:` (human documentation
+        must not start being sent to models) and must not put agy's tool name or error
+        string anywhere in runner.py — that is the providers-are-plugins invariant.
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: scheduled
+    severity: medium
+    status: scheduled
+    summary: 'There is no seam for provider-specific prompt guidance: `notes:` is
+      parsed off every provider and never used anywhere'
+  F203:
+    class: risk
+    context: context/review/C4-runtime-observed.md
+    evidence: observation
+    first_seen: fc01d274721e3d66cf3299efdafb6d6f2682502a
+    history:
+    - by: auditor
+      note: filed in context/review/C4-runtime-observed.md
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: open
+    - by: initializer
+      note: 'Accepted, not fixed, for two stated reasons. (1) Repinning is off the
+        table: the user''s instruction on 2026-09-22 is that agents keep their current
+        models, so the four agy fallbacks stay. (2) `critic` has no fallback and dies
+        outright when opencode''s monthly cap binds on 2026-10-05; the user''s answer
+        when this was raised is that critic is not used on this project, so its loss
+        is accepted rather than work. What remains of the exposure is handled by R2
+        (the loops become visible) and R3 (they largely stop happening). Revisit if
+        a role that IS used loses its last option.'
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: accepted
+    severity: medium
+    status: accepted
+    summary: Four of the six opencode-pinned agents fall back onto agy, the one provider
+      with a known looping defect, and opencode is at 99% of its monthly cap
+  F204:
+    class: efficiency
+    context: context/review/C4-runtime-observed.md
+    evidence: observation
+    first_seen: fc01d274721e3d66cf3299efdafb6d6f2682502a
+    history:
+    - by: auditor
+      note: filed in context/review/C4-runtime-observed.md
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: open
+    - by: initializer
+      note: 'Accepted on measurement, not on judgement. Cache read beats creation
+        26.7:1 across 42 claude runs (48,050,603 vs 1,800,480), and creation is the
+        entire addressable surface — under 3.5% of claude-side tokens, most of it
+        intra-run prefix growth that reordering cannot recover. Runs of one role are
+        hours apart, so the stable head is dead by TTL before the next run starts.
+        What would change this: agents of a single role running concurrently or back
+        to back. That is the falsifier; until it holds, reordering buys nothing measurable.'
+      sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
+      status: accepted
+    severity: low
+    status: accepted
+    summary: '`compose_prompt` puts per-run unique text ahead of the stable per-role
+      instructions'
   F21:
     class: security
     context: context/review/C1-sandbox-authproxy.md
