@@ -349,3 +349,31 @@ Today `wait_for_any` returns immediately with `paused: true` and no
   returns promptly (does not block for the full timeout), with `still_running:
   []`.
   *Verified by:* timing test with a short bound.
+
+---
+
+## Amendments after the adversary (2026-09-23, ag-c0668b, tests in `tests/test_config_reload_adversary.py`, `tests/test_wait_paused_adversary.py`)
+
+- **P0-R5.9** A config layer file that was readable at the last successful load
+  and is now missing, a directory, or a broken symlink is a **load error**
+  (P0-R5.4 applies: previous config stays, error reported and recorded). It is
+  never read as an empty layer. *(Adversary finding 1.)*
+- **P0-R5.10** Concurrent tool calls detecting the same change produce exactly
+  one reload, one event, and one announcement (to the call that performed it).
+  *(Finding 5.)*
+- **P0-R5.11** Returning the files to the fingerprint of the config in force
+  clears any remembered load failure, so a later identical breakage is
+  reported and recorded again. *(Finding 6.)*
+- **P0-R6.5** The pause fields in a `wait_for_agents` result describe the pause
+  in force **when the result is returned**, not when the wait began: a pause
+  that expired during the wait is not reported, one that began during it is.
+  *(Findings 2, 3.)*
+- **P0-R6.6** `still_running` never lists an agent that is no longer in the
+  tree or is no longer pending/running, on any return path. *(Finding 4.)*
+- **Accepted, not fixed — finding 7:** two edits of identical size within one
+  mtime tick are not detected. That is the stated cost of P0-R5.5's cheap
+  fingerprint; the next edit is detected normally.
+- **Declined — finding 8:** an edit landing during `load_config` triggers one
+  further reload on the next call. Recording the pre-load fingerprint is
+  deliberate: it guarantees a mid-load edit is re-detected, and a redundant
+  reload is harmless.
