@@ -440,6 +440,60 @@ verifies the compaction landed by reading back the `compact_boundary` record it
 expects, and treats a missing one as a failure rather than as success. `preTokens`
 and `postTokens` make that check exact.
 
+**R8d — the other two providers, which do not work like claude.** Measured on
+2026-09-22 against the installed binaries. Three providers, three unrelated
+mechanisms — which is the whole argument for putting this behind the provider
+seam rather than in the runner.
+
+| provider | route | state |
+|---|---|---|
+| `claude` | `claude -p "/compact" --resume <sid>` | **works**, verified above |
+| `opencode` | `POST /session/{id}/summarize` on its HTTP server | route confirmed in the binary; the CLI route is broken |
+| `agy` | none found | compaction is internal |
+
+**opencode** is a client/server design, and the server exposes the operation:
+the literal `"/session/{id}/summarize"` is in the binary, alongside
+`session.compact`, `session.summarize` and `session.compacting`. `opencode
+serve` starts that server and `opencode run --attach <url>` joins one, so the
+call is reachable. The documented CLI route is **not** usable as it stands:
+`opencode run --command compact --session <sid>` is recognised — it does not
+report an unknown command — and returns
+
+```json
+{"type":"error","error":{"name":"UnknownError",
+ "data":{"message":"Unexpected server error. Check server logs for details.",
+         "ref":"err_0ab962ed"}}}
+```
+
+against a healthy 9,888-token session. Sending `/compact` as an ordinary message
+just reaches the model, which answers it. So: use the HTTP route, and treat
+`--command compact` as unavailable. That failure is a third-party defect, not
+ours — no `TICKET`, which is the channel for multiagents' own bugs — but it is
+worth reporting upstream and worth re-testing on each opencode release.
+
+**agy has no external trigger, and the attempt is expensive.** `agy
+--conversation=<id> -p "/compact"` does not compact: print mode *expands* slash
+commands into the prompt (`agy --help`: "Disable slash command and skill
+expansion in print mode"), so the text reached the model, which ran two turns,
+tried to invoke a command tool, was auto-denied for lack of a permission rule,
+and produced nothing. **It cost 42,752 tokens.** Do not retry it. agy's
+compaction is configured through a protobuf message —
+`genai.AntigravityAgentConfig.AntigravityCompactionConfig` and
+`antigravity.localharness.CompactionConfig` are both in the binary — which is
+internal, versioned with the CLI, and not something to depend on. For agy the
+honest answer is that the context wind-down (R8a) and the durable-state
+discipline (R8b) are the whole protection, and R8c does not apply.
+
+**Where this goes.** Not in the runner. A provider script already answers
+actions — `check`, `login`, `budget`, with `exit 64` meaning "I cannot, use the
+fallback" (`providers/claude.sh:374-382`). Add a `compact` action on the same
+contract: `providers/claude.sh compact <session_id>` runs the CLI invocation,
+`providers/opencode.sh compact <session_id>` makes the HTTP call, and
+`providers/agy.sh compact` exits 64. The driver asks the provider and does not
+know which of the three it got. Any `if provider == ...` in Python here is the
+hardcode the plugin invariant exists to forbid, and this is the case that would
+tempt it most, because the three mechanisms genuinely have nothing in common.
+
 **Under `--unattended` this matters most**, not least: nobody is there to notice
 a window filling, and the automatic compaction will fire mid-task at whatever
 moment it chooses. Deliberate compaction at a boundary is the whole difference
