@@ -255,6 +255,24 @@ class Runner:
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.runs: dict[str, Run] = {}
 
+    def reload(self, config: Config) -> None:
+        """Swap in a freshly loaded config and everything derived from it.
+
+        Only what is built FROM config is replaced. The tree, in-flight runs
+        and the deferred queue are state, and survive untouched; a run already
+        going keeps the provider, spec and supervisor it was started with.
+        Providers are built before anything is assigned, so a config that
+        fails validation here leaves the previous one wholly in force.
+        """
+        providers = load_providers(config.providers)
+        if config.providers != self.config.providers:
+            # A cached reading was taken through the old provider definition.
+            # Dropped only when providers changed: a re-read costs a script run
+            # per provider, on every spawn's critical path.
+            budget_mod.invalidate_cache()
+        self.config = config
+        self.providers = providers
+
     def executor(self, spec: AgentSpec | None = None):
         """The execution backend for an agent, with the context docker needs.
 
@@ -2036,6 +2054,16 @@ class Runner:
                 await run.task
             except (asyncio.CancelledError, Exception):
                 pass
+            # A task cancelled before its first step never ran `_consume`, so
+            # nothing stopped the process it was about to read.
+            if run.handle and run.handle.returncode is None:
+                await run.handle.stop()
+            if not internal:
+                # Nor does a cancelled run reach the release at the end of
+                # `_consume`, and whoever waits on it (consult, a drain) would
+                # wait forever on a run that has ended. steer's internal stop
+                # is not an end: it relaunches.
+                run.done.set()
         elif run and run.handle:
             await run.handle.stop()
         else:
@@ -2493,12 +2521,15 @@ class Runner:
         # invisible to active(), so without this an orchestrator polling for
         # work is told there is none while tasks sit ready to restart.
         revived = await self.resume_deferred()
+        # A pause stops new work, not the wait: agents already running are
+        # waited on as usual, and every result says the pause is in force.
+        pause: dict[str, Any] = {}
         if revived.get("paused"):
             waiting = max(0, int((revived.get("until") or 0) - now()))
-            return {"changed": [], "paused": True, "reason": revived["reason"],
-                    "retry_after_seconds": waiting,
-                    "note": "no provider has headroom; deferred work restarts by "
-                            "itself when this clears. Wait rather than re-planning."}
+            pause = {"paused": True, "reason": revived["reason"],
+                     "retry_after_seconds": waiting,
+                     "note": "no provider has headroom; deferred work restarts by "
+                             "itself when this clears. Wait rather than re-planning."}
 
         deadline = time.monotonic() + timeout
         if agent_ids:
@@ -2514,7 +2545,7 @@ class Runner:
                     if r.get("agent_id") and r["agent_id"] not in watched]
         if not watched:
             return {"changed": [], "reason": "no active agents",
-                    "capacity": self.capacity()}
+                    "still_running": [], "capacity": self.capacity(), **pause}
 
         # Agents that had already finished before this call are reported, but
         # are NOT what we wait on. Without this split, calling again with the
@@ -2536,8 +2567,8 @@ class Runner:
 
         if not pending:
             return {"changed": already, "all_finished": True,
-                    "capacity": self.capacity(),
-                    "note": "every agent you named had already finished"}
+                    "still_running": [], "capacity": self.capacity(),
+                    "note": "every agent you named had already finished", **pause}
 
         while time.monotonic() < deadline:
             changed = []
@@ -2555,6 +2586,7 @@ class Runner:
                     "still_running": [i for i in pending if i not in {c["agent_id"] for c in changed}],
                     "waited_seconds": round(timeout - (deadline - time.monotonic())),
                     **self._idle_capacity_note(),
+                    **pause,
                 }
             await asyncio.sleep(1.0)
 
@@ -2562,11 +2594,10 @@ class Runner:
             "changed": [],
             "timed_out": True,
             **self._idle_capacity_note(),
-            "still_running": [
-                {"agent_id": n.id, "agent": n.agent, "status": n.status,
-                 "elapsed_seconds": round(n.elapsed())}
-                for n in self.tree.active() if n.id in watched
-            ],
+            "still_running": [i for i in pending
+                              if (n := self.tree.get(i)) is not None
+                              and n.status in {"pending", "running"}],
+            **pause,
         }
 
     # ------------------------------------------------------------------- git --

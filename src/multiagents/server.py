@@ -11,6 +11,7 @@ Every tool result is scrubbed for credentials on the way out.
 
 from __future__ import annotations
 
+import contextvars
 import os
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from . import bugs
 from . import catalog as catalog_mod
 from . import findings as findings_mod
 from . import gitops
+from .config import CONFIG_FILES
 from .config import load as load_config
 from .config import seed_project
 from .models import refresh_models
@@ -40,11 +42,106 @@ mcp = _Server("multiagents", version=__version__)
 
 _runner: Runner | None = None
 
+# The config in use, as a fingerprint of the files it came from, and the last
+# fingerprint that failed to load. Kept apart so a broken file is parsed once
+# per edit rather than once per tool call, while every call still hears about it.
+_loaded: dict[str, tuple[int, int] | None] = {}
+_failed: dict[str, tuple[int, int] | None] | None = None
+_load_error: str = ""
+
+# What the current tool call must say about config: set by `runner()` when it
+# reloads or while a load error stands, read and cleared by `_ok`. A context
+# variable so that concurrent async calls each hear about their own reload.
+_notice: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "multiagents_config_notice", default=None)
+
+
+def _config_files(run: Runner) -> list[Path]:
+    """Every file the config in use was, or could have been, read from.
+
+    Candidates that do not exist are included on purpose: creating one is a
+    change. Instruction briefs count too — the roster reads them at spawn.
+    """
+    layers = [d.parent for d in run.config.instruction_dirs]
+    files = [layer / name for layer in layers for name in CONFIG_FILES]
+    for layer in layers:
+        agents = layer / "agents"
+        if agents.is_dir():
+            files += sorted(p for p in agents.rglob("*.md") if p.is_file())
+    for spec in run.config.agents.values():
+        for part in run.config.instruction_parts(spec):
+            path = Path(part).expanduser()
+            if path.is_absolute():
+                files.append(path)
+    return files
+
+
+def _fingerprint(run: Runner) -> dict[str, tuple[int, int] | None]:
+    """(mtime, size) per config file: a stat each, no parsing."""
+    out: dict[str, tuple[int, int] | None] = {}
+    for path in _config_files(run):
+        try:
+            st = path.stat()
+            out[str(path)] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            out[str(path)] = None
+    return out
+
+
+def _display(run: Runner, path: str) -> str:
+    try:
+        return str(Path(path).relative_to(run.paths.root))
+    except ValueError:
+        return path
+
+
+def _refresh(run: Runner) -> None:
+    """Reload the config if any of its files changed since it was loaded.
+
+    A config that fails to load is never swapped in: the previous one stays in
+    force and every call reports the error until the file is fixed. Each
+    detected change, loaded or not, is recorded once in the events log — the
+    project root is writable from inside the container, so an edit that takes
+    effect in this session must leave a trace.
+    """
+    global _loaded, _failed, _load_error
+    current = _fingerprint(run)
+    if current == _loaded:
+        return
+    if current == _failed:
+        _notice.set({"load_error": _load_error})
+        return
+    changed = sorted(_display(run, p) for p in set(current) | set(_loaded)
+                     if current.get(p) != _loaded.get(p))
+    try:
+        run.reload(load_config(run.paths))
+    except Exception as exc:
+        _failed = current
+        _load_error = (
+            f"config failed to load after a change to {', '.join(changed)}; the "
+            f"previous config stays in force until it is fixed: "
+            f"{type(exc).__name__}: {exc}")
+        run.tree.emit(run.self_id() or "", "config_reload", files=changed,
+                      outcome="load_error", error=_load_error)
+        _notice.set({"load_error": _load_error})
+        return
+    # Re-read after the load, since the new roster may name different briefs,
+    # but keep what was seen BEFORE it for every file already known: an edit
+    # landing mid-load must still look like a change on the next call.
+    _loaded, _failed, _load_error = {**_fingerprint(run), **current}, None, ""
+    run.tree.emit(run.self_id() or "", "config_reload", files=changed,
+                  outcome="reloaded")
+    _notice.set({"reloaded": changed,
+                 "note": "config changed on disk and was reloaded before this "
+                         "call; agents already running keep the config they "
+                         "started with."})
+
 
 def runner() -> Runner:
-    """Resolve the project and build the runner, once."""
-    global _runner
+    """Resolve the project and build the runner once; reload its config on change."""
+    global _runner, _loaded, _failed, _load_error
     if _runner is not None:
+        _refresh(_runner)
         return _runner
 
     # A nested agent is told which project it belongs to; a top-level session
@@ -55,10 +152,16 @@ def runner() -> Runner:
     paths.ensure()
     seed_project(paths)
     _runner = Runner(paths, load_config(paths))
+    _loaded, _failed, _load_error = _fingerprint(_runner), None, ""
     return _runner
 
 
 def _ok(payload: Any) -> Any:
+    notice = _notice.get()
+    if notice is not None:
+        _notice.set(None)
+        if isinstance(payload, dict):
+            payload = {**payload, "config_reload": notice}
     return scrub(payload)
 
 
@@ -163,7 +266,7 @@ def refresh_model_list() -> dict:
         return _ok({"error": denied})
     run = runner()
     result = refresh_models(run.providers, run.paths.config / "models.yaml")
-    _reset()
+    runner()                  # picks up models.yaml, keeping the tree and runs
     return _ok(result)
 
 
@@ -1062,8 +1165,10 @@ def run_resource(agent_id: str) -> str:
 
 
 def _reset() -> None:
-    global _runner
+    global _runner, _loaded, _failed, _load_error
     _runner = None
+    _loaded, _failed, _load_error = {}, None, ""
+    _notice.set(None)
 
 
 def main() -> None:
