@@ -128,11 +128,11 @@ is paused, not abandoned: `refactor/split-consume` carries the R14–R18
 implementation and is committed and clean. Come back to it when this phase
 lands.
 
-**Seven items, from three channels.** R1–R3 come from
+**Eight items, from three channels.** R1–R3 come from
 `context/review/C4-runtime-observed.md` (`F200`, `F201`, `F202`); R4–R6 are the
 three bug tickets still `awaiting_user` (`bug-b1c130`, `bug-2138e6`,
-`bug-b864b8`); R7 is a feature the user asked for on 2026-09-22 and is the only
-thing in this phase that is not a repair. None of R1–R6 was reachable by reading the code — each needed
+`bug-b864b8`); R7 and R8 are features the user asked for on 2026-09-22 and are
+the only things in this phase that are not repairs. None of R1–R6 was reachable by reading the code — each needed
 the logs of real runs — and they are not independent chores: R2 and R4 are the
 same function, R4 is why R5 cost two runs, and R1/R2/R3 are one failure
 arriving in three steps. That is why they are one phase.
@@ -337,6 +337,72 @@ initializer that changing the team is "a one-line change to `team:` in
 true and stays right, but it now reads as if hand-editing were the only route.
 Say instead that the user picks the team when they start `init-agent`, and that
 what the initializer proposes is the team for the **next** phase.
+
+### R8 — the orchestrator and its own context window
+
+**Start from what the orchestrator cannot do.** `/compact` is a slash command a
+human types; no model calls it, and under `multiagents run --unattended` there
+is no human to type it. Claude Code also compacts on its own when the window
+fills, whether or not anyone planned for it. So the requirement is not "compact
+at the right moment" — the orchestrator does not own that moment. It is
+**never be in a state where a compaction loses something**, plus a nudge at the
+moments a human could usefully act.
+
+**This is the quota problem again, and the answer is already written.** When a
+provider window is about to close, `_wind_down` (`runner.py:318-340`) stops
+sending new work and `WRAP_UP` (`runner.py:62-77`) tells the agent to commit,
+write a handoff, and stop — because *"the work resumes from your branch and
+this handoff, not from your memory of this conversation."* That paragraph is
+exactly as true of a context boundary as of a quota one. `_wind_down`'s
+docstring also carries the lesson that matters most here, learned from an
+advisor: interrupt **early**, because a handoff written while the window is
+still draining is cut off too.
+
+Three parts, in order of value.
+
+**R8a — a wind-down for context.** The sensor exists:
+`transcripts.context_tokens(usage)` (`transcripts.py:123`) computes it, and
+`walk_session` already reads the live transcript whose location the provider
+declares (`providers.yaml`, claude's `transcript.dir`). When the orchestrator's
+own context crosses a lead threshold — a `context_wind_down` beside
+`wind_down_seconds`, same shape, same reason — it gets the `WRAP_UP` treatment
+adapted to this pressure: finish the merge in hand, record the statuses, write
+the handoff, start nothing new.
+
+**State the limit rather than hiding it:** only claude declares a transcript
+location. opencode keeps sessions in sqlite and agy in an opaque brain
+directory, and `providers.yaml` says so already. So this senses a claude
+orchestrator and nothing else. That is fine today — the orchestrator is pinned
+to `claude/opus` — but it must degrade to "no reading" rather than to "plenty
+of room", which is the same mistake `budget_status` warns about with
+`known: false`.
+
+**R8b — name what does not survive.** The brief should say which state is
+durable and which is only in the conversation, because the orchestrator cannot
+judge that in the moment. Durable, and therefore free: `BRIEF.md`, the ledger
+(`list_findings`), tickets (`list_tickets`), the tree (`agent_tree`), branches
+and commits. Not durable: which agents it is waiting on and why, the reasoning
+behind a merge it has decided but not yet made, a finding it has judged but not
+yet given a status, a question it meant to ask the user. The instruction is
+**record it when you decide it, not when you are about to lose it** — a habit,
+not a boundary ritual. A `set_finding_status` costs one call; reconstructing the
+judgement after a compaction costs a re-read of the evidence.
+
+**R8c — the right moment, in interactive mode.** The right moment to compact is
+not a token count, it is **a work boundary that has just closed with its result
+on disk**: a phase finished, a branch merged, a ticket resolved. A compaction
+there loses nothing by construction, because everything the next turn needs is
+in a file. Mid-task it is the opposite — the reasoning that has not been written
+down yet is precisely what compaction drops first, and `transcripts.py:51-52`
+already records that tool results go first.
+
+So: at such a boundary, and only there, the orchestrator says plainly that this
+is a good moment to `/compact` and why. `mcp_overhead` already produces the
+signal (`server.py:1026`). It must **not** nag: once per boundary, never
+mid-task, and never as a reason to stop doing what was asked.
+
+**None of this applies under `--unattended`**, where nobody is reading. There
+R8a is the only protection, which is why it is first.
 
 ### Not in this phase
 
