@@ -270,6 +270,10 @@ new value; refusing would turn every edit into a forced `/mcp`.
   It never falls back to defaults.
   *Verified by:* test writing invalid YAML, asserting the error is reported and
   the previous value is still enforced.
+  *Amended 2026-09-22:* a spawn under a broken config **proceeds on the previous
+  config** and reports the error; it is not refused. The error names the file.
+  Each call while the file stays broken reports the error; only the call that
+  first detects a given change writes the P0-R5.8 event.
 - **P0-R5.5** Detection costs no parsing when nothing changed (a cheap
   fingerprint, not a full reload per call).
   *Verified by:* test that `load_config` is not called on a tool call when no
