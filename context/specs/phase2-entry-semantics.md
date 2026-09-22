@@ -197,3 +197,79 @@ the design note at `src/multiagents/monitor/settings.py:8-10` saying so
 deliberately. So do not look for an existing validation framework to hang this
 on, and do not introduce one. A focused check in `preflight` is the whole
 change.
+
+---
+
+# Amendment — four questions the test engineer asked, answered
+
+The R14/R15 suite is written and merged (`tests/test_phase2_entry_semantics.py`,
+36 tests, all red except eleven deliberate regression guards). It stopped on
+four things the contract did not say. These are the answers, and they are
+decisions rather than clarifications — the contract genuinely did not cover
+them.
+
+## 1. `NEED_INFO(scope-of-r15)` — the five forms, or every non-hostname?
+
+**Every non-hostname.** R15 validates against a hostname grammar; the five
+named forms are examples of what that catches, not an exhaustive list.
+
+The reason is F11's own complaint, which was never about what a dead entry
+matches — it is that the operator is not told. `a(b` is exactly as dead and
+exactly as silent as `example.com.`, and the adversary's fuzz remainder is in
+this contract's scope by name: *"nothing validates that an entry is a hostname
+at all"*.
+
+**This does not conflict with phase 2 item 1, and the test engineer was right
+to ask.** `tests/test_phase2_ere_escaping.py` asserts that `evil.com|.*` and
+`a(b` match literally, and that stays true: item 1 is about what
+`write_proxy_config` does with an entry, R15 is about whether an entry reaches
+it. The two seams are different. An entry forced past preflight is still inert
+— belt and braces, which is the right arrangement for an egress boundary.
+
+## 2. `NEED_INFO(ip-entries)` — IPv4 and IPv6 literals
+
+- **A bare IPv4 literal is valid**, and matches **exactly**, the same rule as a
+  dotless entry under R14. `192.168.1.10` admits that address and nothing else.
+  It must **not** behave as a suffix: `foo.192.168.1.10` is not a host anyone
+  means to admit, and letting the dotted-entry rule apply here by accident is
+  the same class of mistake as F10.
+- **An IPv6 literal is malformed**, in both `::1` and `[::1]` forms, and says
+  so. Not because it is meaningless, but because tinyproxy's host filter does
+  not handle it and admitting it would generate a pattern that quietly matches
+  nothing — F11 again, in a new costume.
+
+State the IPv6 case explicitly in the validator rather than letting the `:port`
+rule catch it by side effect. A message saying "looks like a port" about `::1`
+is worse than no message.
+
+## 3. `NEED_INFO(empty-entry)` — the empty string
+
+**Malformed.** An empty entry is refused and named as empty. It is not one of
+the five forms and it is unmistakably not a hostname.
+
+## 4. `network: bridge` and `network: none`
+
+**Do not validate.** The allowlist is unused under those modes, and refusing to
+start a bridge-network environment over a key it ignores is the same mistake I
+avoided by moving off `config.load()`: a check that fires where it does not
+apply.
+
+Validate when `network: allowlist`, which is also the only mode where
+`write_proxy_config` runs. An operator who switches to `allowlist` later gets
+the refusal then, which is the moment it means something.
+
+## On the message vocabulary
+
+The test engineer constrained the wording to a word set per form —
+dot/period, whitespace/space/blank/tab, port, url/scheme — and flagged it as
+the assumption most likely to need loosening. **Keep it.** A test that only
+asserts a non-empty list lets "invalid allowlist entry" pass, which this
+contract rules out by name, and a word set is the loosest constraint that still
+has teeth. If an implementer's phrasing is good and fails the set, widen the
+set rather than weakening the test.
+
+## What this adds to the suite
+
+The merged suite does not cover the four cases above. A follow-up test pass
+adds them; the implementer should treat the file as complete only once that has
+landed.
