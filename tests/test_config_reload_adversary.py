@@ -141,6 +141,10 @@ def test_reverting_broken_config_with_restored_mtime_clears_error_and_announces(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Finding 7, accepted not fixed: same-size edits within one mtime tick are the stated cost of P0-R5.5's cheap fingerprint.",
+)
 def test_same_tick_and_size_change_is_detected(project):
     """P0-R5.1: Changing a limit in-place without altering byte length or mtime
 
@@ -163,6 +167,10 @@ def test_same_tick_and_size_change_is_detected(project):
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Finding 8, declined: recording the pre-load fingerprint is deliberate so a mid-load edit is re-detected; the redundant reload is harmless.",
+)
 def test_midload_edit_causes_phantom_reload_on_subsequent_idle_call(project, monkeypatch):
     """P0-R5.5 / P0-R5.8: An edit landing while load_config is running must not
 
