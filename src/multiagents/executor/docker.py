@@ -315,6 +315,34 @@ class DockerExecutor(Executor):
 
     # -------------------------------------------------------------- mounts --
 
+    @staticmethod
+    def _versions_dir(launcher: Path, resolved: Path) -> Path | None:
+        """The versions directory backing a versioned launcher, or ``None``.
+
+        A versioned launcher (P0-R1, `F200`) is a symlink whose resolved
+        target is a FILE in a directory other than the launcher's own — that
+        directory counts as the versions directory whatever its name, even
+        holding a single entry. A target nested below a per-version directory
+        (``versions/1.0.0/bin/x``) is out of scope: it reads as unversioned
+        here and keeps today's behaviour.
+        """
+        if resolved == launcher or not resolved.is_file():
+            return None
+        if resolved.parent == launcher.parent:
+            return None
+        return resolved.parent
+
+    def _resolve_launcher(self, binary: str) -> Path:
+        """Where `binary`'s host launcher points RIGHT NOW.
+
+        Docker fixes a bind mount's target at container creation; a versioned
+        launcher's target moves after that. Resolving on the host at every
+        spawn — rather than trusting whatever `mounts()` last computed — is
+        what makes the container run the CLI version current at spawn time
+        without being recreated (P0-R1.2).
+        """
+        return Path(binary).resolve()
+
     def mounts(self) -> list[tuple[Path, bool]]:
         """(host path, read_only) pairs, each mounted at its own path.
 
@@ -347,9 +375,19 @@ class DockerExecutor(Executor):
                     # versioned directory: mounting only the resolved target
                     # leaves nothing named `claude` on PATH inside the container,
                     # and every run dies with "exec: claude: not found".
-                    out.append((Path(binary), True))
-                    resolved = Path(binary).resolve()
-                    if resolved != Path(binary):
+                    launcher_path = Path(binary)
+                    out.append((launcher_path, True))
+                    resolved = launcher_path.resolve()
+                    versions_dir = self._versions_dir(launcher_path, resolved)
+                    if versions_dir is not None:
+                        # A versioned launcher: mount the versions directory
+                        # itself, not the resolved file, so the declared mount
+                        # list is stable across a CLI update (P0-R1.1) and the
+                        # container can still reach whatever version the host
+                        # launcher points at after the update (P0-R1.2) without
+                        # being recreated.
+                        out.append((versions_dir, True))
+                    elif resolved != launcher_path:
                         out.append((resolved, True))
 
                 private = list(getattr(provider, "container_private_home", []) or [])
@@ -1161,10 +1199,35 @@ class DockerExecutor(Executor):
             )
         return problems
 
+    def _versioned_argv(self, argv: list[str]) -> list[str]:
+        """`argv` with a versioned launcher's program named by its resolved
+        absolute path, so the container executes the version current at spawn
+        time (P0-R1.2) rather than whatever a bind mount pinned at creation.
+
+        Only the program token is touched — arguments that happen to spell a
+        provider's bare command name are left alone (P0-R1.2). A launcher that
+        is not versioned keeps today's bare-name argv.
+        """
+        if not argv:
+            return argv
+        for provider in self.providers.values():
+            if provider.bin != argv[0]:
+                continue
+            binary = provider.available()
+            if not binary:
+                break
+            launcher_path = Path(binary)
+            resolved = self._resolve_launcher(binary)
+            if self._versions_dir(launcher_path, resolved) is not None:
+                return [str(resolved), *argv[1:]]
+            break
+        return argv
+
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
         state = self.ensure_running()
         if not state.get("ok"):
             raise RuntimeError(f"docker executor: {state.get('error')}")
+        argv = self._versioned_argv(argv)
 
         # Environment goes through a file rather than --env flags so that values
         # never appear in the host process list.
