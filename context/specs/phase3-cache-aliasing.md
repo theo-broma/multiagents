@@ -245,3 +245,86 @@ is `NEED_INFO` to me, not a reason to keep the aliasing.
 The advisor offered `read_claude`'s `extra_credits` write as something I had
 missed. It is the centre of this contract's opening section and the reason R17
 exists. Recorded here only so a later reader does not think it arrived late.
+
+---
+
+# Amendment 2 — a gap in R16, and the answer to `NEED_INFO(R17)`
+
+The first R16-R18 run was cut off by quota after committing the F150 inversion,
+and left `HANDOFF-R16-R18.md` at the repository root. Two of its three points
+are corrections to this contract rather than notes, and both are taken.
+
+## R16 was wrong to say "a cache hit"
+
+R16's headline — *"a cache hit never hands out the cache's own object"* — is not
+sufficient, and F171 is the proof. **The fresh path caches the very object it
+returns**:
+
+```python
+if spent:
+    budget.spent = {**budget.spent, **spent}
+_cache[name] = (now_, budget)      # the same object
+return budget
+```
+
+So `read_all`'s **first** read of a provider is a cache *miss*, it decorates
+what it gets back with `cooldown_until`, `severity = "critical"` and an appended
+note, and that decoration lands in the cache entry anyway. Copy-on-cache-hit
+alone leaves the note accumulating and `severity` stuck exactly as before.
+
+**R16 therefore applies to both paths**: what `read_provider` returns is never
+the object the cache holds, whether the read was cached or fresh. Whether that
+is achieved by copying on the way out or by caching a copy on the way in is
+still the implementer's choice; that no caller can ever reach the cached object
+is not.
+
+**A test that mutates a fresh read's return and then reads again is required,
+not optional.** The handoff is right that without it the suite would pass with
+F171 fully intact.
+
+## `NEED_INFO(R17)` — a caller's `spent` does not persist into the cache
+
+The question was whether the cache entry should hold only what the reader
+reported, or the already-merged result including the first caller's keys.
+
+**Only what the reader reported.** The caller's `spent` is a per-call overlay,
+merged onto the returned copy and never stored.
+
+Three reasons, in order of weight:
+
+1. **The alternative is the defect.** If caller keys persisted, a later caller
+   passing no `spent` would inherit them — which is exactly the third assertion
+   of the test F150 pins (`third.spent == {"b": 2}` after a spentless read), and
+   that assertion is being inverted precisely because it is wrong.
+2. **Caching it buys nothing.** `spend_by_provider` recomputes the whole figure
+   from the tree on every call, so a cached copy of it is at best redundant and
+   at worst stale.
+3. It makes R17's second bullet exactly true rather than accidentally true.
+
+So the cached `Budget.spent` carries `read_claude`'s `extra_credits_*` keys and
+nothing else, and every caller sees those plus its own. Tests may assert exact
+dicts.
+
+## The `_from_script` constraint, which is a seam not an assertion
+
+The handoff records that `_from_script` has no `spent` key, so a *script* reader
+cannot contribute to `spent` at all — R18's "both sources reporting at once"
+shape is reachable only through the built-in path, and the real `read_claude`
+cannot be used because it would read the developer's own `~/.claude.json`.
+
+Its proposed seam is right and is hereby sanctioned:
+`monkeypatch.setitem(budget_mod._BUILTIN, "<made-up provider>", fake)` with
+`fake(*args, **kwargs)` so it survives either dispatch shape. One private name,
+opened deliberately, and stated in the test rather than buried.
+
+This is also worth noticing as a fact about the system rather than a test
+inconvenience: **a provider whose budget comes from a script can never report
+spend**, only headroom. Not in scope here; recorded so it is not rediscovered.
+
+## `Budget.__eq__`
+
+The handoff notes `Budget` is a dataclass, so `==` is already value equality,
+and says it avoided relying on that rather than assume semantics I had not
+granted. Correct instinct, and the answer is: **do not rely on `==` for the
+copy tests.** Identity (`is not`) and independent mutation are what R16 is
+about; value equality would pass against the very aliasing being removed.
