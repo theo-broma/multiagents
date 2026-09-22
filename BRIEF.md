@@ -128,12 +128,13 @@ is paused, not abandoned: `refactor/split-consume` carries the R14–R18
 implementation and is committed and clean. Come back to it when this phase
 lands.
 
-**Six items, from two channels.** R1–R3 come from
+**Seven items, from three channels.** R1–R3 come from
 `context/review/C4-runtime-observed.md` (`F200`, `F201`, `F202`); R4–R6 are the
 three bug tickets still `awaiting_user` (`bug-b1c130`, `bug-2138e6`,
-`bug-b864b8`). None of the six was reachable by reading the code — each needed
-the logs of real runs — and they are not six independent chores: R2 and R4 are
-the same function, R4 is why R5 cost two runs, and R1/R2/R3 are one failure
+`bug-b864b8`); R7 is a feature the user asked for on 2026-09-22 and is the only
+thing in this phase that is not a repair. None of R1–R6 was reachable by reading the code — each needed
+the logs of real runs — and they are not independent chores: R2 and R4 are the
+same function, R4 is why R5 cost two runs, and R1/R2/R3 are one failure
 arriving in three steps. That is why they are one phase.
 
 **Close each ticket with `resolve_ticket` when its fix merges.** A ticket whose
@@ -285,6 +286,57 @@ Two requirements:
 
 Filed 2026-09-17 and set aside then for budget. It is scheduled now because R1
 through R5 will have the orchestrator waiting on agents constantly.
+
+### R7 — choose the team when `init-agent` starts
+
+**The one feature in this phase**, and it is here rather than in a queue of its
+own because it lives in the same command surface as R1–R6 and because the
+mistake it prevents is expensive: `init-agent` today shapes a project under
+whatever `team:` happens to be left in the config from last time. Getting that
+wrong is not a typo — it is an initializer having a long conversation about the
+wrong phase.
+
+`cmd_init_agent` (`src/multiagents/cli.py:69`) loads the config, reports the
+state, runs its checks and launches. It never mentions the team. Make it offer
+the choice first, write the answer, then launch.
+
+**What it shows.** `teams:` in `project.yaml` already carries a `description:`
+per team (`src/multiagents/defaults/project.yaml:192+`), reachable as
+`config.teams` (`src/multiagents/config.py:415`). Today that is `implement` and
+`review`. The list is therefore self-documenting and **must be read from
+config** — a hardcoded list of two names is a third place to update when a
+third team is added.
+
+**How it behaves.**
+
+- A cursor moving over the list, the current `team:` highlighted on entry, so
+  Enter on an unchanged project is a no-op.
+- Cancelling (Escape, `q`, Ctrl-C) leaves the config untouched and does not
+  launch. Choosing the team already set writes nothing.
+- **Not a tty → no prompt.** Keep the configured team, print which one is in
+  force, carry on. Every other prompt in this file is guarded that way
+  (`cli.py:313`, `:367`, `:492`, `:509`) and for a stated reason: a closed stdin
+  must never let `make init` change a project's setup with nobody deciding.
+- `--team <name>` for scripts and for re-running without the prompt. An unknown
+  name fails with the list of real ones rather than launching on a default.
+
+**The trap, which has a precedent in this file.** Writing `team:` back must not
+round-trip the YAML. `project.yaml` is mostly comments explaining the choices,
+and dumping it through the parser deletes all of them — `_set_executor`
+(`cli.py:442-460`) already solved exactly this with a targeted line edit and
+says so in its docstring. Follow it: a `_set_team` beside it, same shape, same
+reason. Note one difference — `executor.kind` is always present to substitute,
+but a project that has never set `team:` inherits it from the defaults layer and
+has no line to replace, so this one has to insert as well as substitute, and a
+test should cover the empty case.
+
+**Reconcile the initializer's brief.**
+`src/multiagents/defaults/agents/team/_initializer.md:94-95` tells the
+initializer that changing the team is "a one-line change to `team:` in
+`project.yaml` — put it to the user rather than editing it yourself". That stays
+true and stays right, but it now reads as if hand-editing were the only route.
+Say instead that the user picks the team when they start `init-agent`, and that
+what the initializer proposes is the team for the **next** phase.
 
 ### Not in this phase
 
