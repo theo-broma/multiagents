@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import contextvars
 import os
+import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,9 @@ _runner: Runner | None = None
 _loaded: dict[str, tuple[int, int] | None] = {}
 _failed: dict[str, tuple[int, int] | None] | None = None
 _load_error: str = ""
+# Held across detect-and-reload, so concurrent calls that see the same change
+# produce one reload, one event and one announcement between them.
+_lock = threading.RLock()
 
 # What the current tool call must say about config: set by `runner()` when it
 # reloads or while a load error stands, read and cleared by `_ok`. A context
@@ -56,15 +61,20 @@ _notice: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "multiagents_config_notice", default=None)
 
 
+def _layer_files(run: Runner) -> list[Path]:
+    """The YAML files of every config layer, present or not."""
+    layers = [d.parent for d in run.config.instruction_dirs]
+    return [layer / name for layer in layers for name in CONFIG_FILES]
+
+
 def _config_files(run: Runner) -> list[Path]:
     """Every file the config in use was, or could have been, read from.
 
     Candidates that do not exist are included on purpose: creating one is a
     change. Instruction briefs count too — the roster reads them at spawn.
     """
-    layers = [d.parent for d in run.config.instruction_dirs]
-    files = [layer / name for layer in layers for name in CONFIG_FILES]
-    for layer in layers:
+    files = _layer_files(run)
+    for layer in [d.parent for d in run.config.instruction_dirs]:
         agents = layer / "agents"
         if agents.is_dir():
             files += sorted(p for p in agents.rglob("*.md") if p.is_file())
@@ -77,14 +87,20 @@ def _config_files(run: Runner) -> list[Path]:
 
 
 def _fingerprint(run: Runner) -> dict[str, tuple[int, int] | None]:
-    """(mtime, size) per config file: a stat each, no parsing."""
+    """(mtime, size) per config file: a stat each, no parsing.
+
+    None for anything that is not a readable regular file — missing, a
+    directory, a broken symlink — so replacing a file with one is a change.
+    """
     out: dict[str, tuple[int, int] | None] = {}
     for path in _config_files(run):
         try:
             st = path.stat()
-            out[str(path)] = (st.st_mtime_ns, st.st_size)
         except OSError:
             out[str(path)] = None
+            continue
+        out[str(path)] = ((st.st_mtime_ns, st.st_size)
+                          if stat.S_ISREG(st.st_mode) else None)
     return out
 
 
@@ -107,13 +123,24 @@ def _refresh(run: Runner) -> None:
     global _loaded, _failed, _load_error
     current = _fingerprint(run)
     if current == _loaded:
+        # Back to the files the config in force came from: any remembered
+        # failure is over, so the same breakage later is news again.
+        _failed, _load_error = None, ""
         return
     if current == _failed:
         _notice.set({"load_error": _load_error})
         return
     changed = sorted(_display(run, p) for p in set(current) | set(_loaded)
                      if current.get(p) != _loaded.get(p))
+    # A layer file that loaded last time and is now gone, a directory or a
+    # dangling link would read as an empty layer — silently reverting its
+    # settings to defaults. Treat it as a file that fails to load.
+    vanished = [_display(run, str(p)) for p in _layer_files(run)
+                if _loaded.get(str(p)) is not None and current.get(str(p)) is None]
     try:
+        if vanished:
+            raise FileNotFoundError(
+                f"no longer a readable file: {', '.join(vanished)}")
         run.reload(load_config(run.paths))
     except Exception as exc:
         _failed = current
@@ -139,6 +166,11 @@ def _refresh(run: Runner) -> None:
 
 def runner() -> Runner:
     """Resolve the project and build the runner once; reload its config on change."""
+    with _lock:
+        return _runner_locked()
+
+
+def _runner_locked() -> Runner:
     global _runner, _loaded, _failed, _load_error
     if _runner is not None:
         _refresh(_runner)
