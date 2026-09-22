@@ -2032,19 +2032,28 @@ def test_home_copy_copies_rather_than_links(tmp_path, monkeypatch):
     assert (fake_home / ".claude.json").read_text() == '{"projects": {}}'
 
 
-def test_docker_mounts_a_symlinked_binary_under_its_path_name(tmp_path):
-    """~/.local/bin/claude is a symlink into a versioned directory. Mounting
-    only the resolved target leaves nothing named `claude` on PATH inside the
-    container, and every run dies with exec: claude: not found."""
+def test_docker_mounts_a_versioned_launcher_and_its_versions_directory_read_only(tmp_path):
+    """~/.local/bin/claude is a symlink into a versioned directory. The PATH
+    name must be mounted (else exec: claude: not found), and so must the
+    directory of versions, not the one build it happens to resolve to today."""
+    # Inverted deliberately: this used to pin the resolved version file as the
+    # mount; P0-R1 (F200) of context/specs/phase0-runtime-repairs.md replaced it.
     from multiagents.executor.docker import DockerExecutor
     from multiagents.paths import ProjectPaths
 
-    real = tmp_path / "versions" / "2.1.0"
+    # The host layout sits outside the project root, which is mounted
+    # writable and would otherwise contain everything.
+    host = tmp_path / "host"
+    versions = host / "share" / "claude" / "versions"
+    real = versions / "2.1.0"
     real.parent.mkdir(parents=True)
     real.write_text("#!/bin/sh\n")
-    link = tmp_path / "bin" / "claude"
+    real.chmod(0o755)
+    link = host / "bin" / "claude"
     link.parent.mkdir(parents=True)
     link.symlink_to(real)
+    project = tmp_path / "project"
+    project.mkdir()
 
     class _P:
         name, home_links, container_private_home, home_copy = "claude", [], [], []
@@ -2052,10 +2061,11 @@ def test_docker_mounts_a_symlinked_binary_under_its_path_name(tmp_path):
             return str(link)
 
     ex = DockerExecutor({"image": "i", "network": "bridge"},
-                        ProjectPaths(tmp_path), {"claude": _P()}, tmp_path)
-    mounted = {p for p, _ in ex.mounts()}
-    assert link in mounted, "the PATH name itself must be mounted"
-    assert real in mounted, "and its resolved target"
+                        ProjectPaths(project), {"claude": _P()}, project)
+    mounted = dict(ex.mounts())
+    assert mounted.get(link) is True, "the PATH name itself must be mounted read-only"
+    assert mounted.get(versions) is True, "the versions directory must be mounted read-only"
+    assert real not in mounted, "no mount may name a single build"
 
 
 # --------------------------------------------------------------------------

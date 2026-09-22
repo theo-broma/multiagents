@@ -248,30 +248,33 @@ def test_fuzz_pick_instance_respects_reserve():
 # Interference: cache mutation and concurrency
 # ===========================================================================
 
-def test_interference_cache_hit_mutates_shared_object(tmp_path):
-    """The suite pins that a cache hit overwrites spent, but does not pin that
-    the mutation affects the cached object itself. This test proves it.
-    """
+def test_interference_cache_hit_leaves_the_cached_object_and_earlier_results_alone(tmp_path):
+    """A cache hit hands out its own copy: merging one caller's spend must not
+    reach the cache, nor any Budget an earlier caller already holds."""
+    # Inverted deliberately: this pinned F122 (cache aliasing); R16/R17 of
+    # context/specs/phase3-cache-aliasing.md make the opposite true.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(tmp_path, "p.sh", 'budget) printf \'{"known": true, "headroom": 0.5}\'; exit 0 ;;')
 
     first = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, spent={"a": 1})
-    cached_obj = h.budget_mod._cache["p"][1]
-
     second = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, spent={"b": 2})
 
-    assert cached_obj.spent == {"b": 2}, "cache object was mutated in place"
-    assert first.spent == {"b": 2}, "first reference sees the mutation"
+    assert second is not first
+    assert first.spent == {"a": 1}, "an earlier result must not see a later caller's spend"
+    second.spent["mutated"] = 3
+    second.note = "mutated by caller"
+    third = h.read_provider("p", provider, h.FakeExecutor(), tmp_path)
+    assert third.spent == {}, "the cached entry must carry no caller's spend or mutation"
+    assert third.note != "mutated by caller"
+    h.invalidate_cache()
 
 
-def test_interference_concurrent_cache_reads_may_see_stale_data(tmp_path):
-    """If two callers interleave, one may see the other's spent overwrite.
-
-    This is not a race condition in the threading sense (Python's GIL prevents
-    true concurrency), but it demonstrates that the cache's in-place mutation
-    means callers sharing a provider name will see each other's spend.
-    """
+def test_interference_callers_sharing_a_cache_entry_do_not_see_each_others_spend(tmp_path):
+    """Two callers reading the same provider inside the TTL each get their own
+    spend back, and neither's figures leak into the other's Budget."""
+    # Inverted deliberately: this pinned F122 (cache aliasing); R16/R17 of
+    # context/specs/phase3-cache-aliasing.md make the opposite true.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(tmp_path, "p.sh", 'budget) printf \'{"known": true, "headroom": 0.5}\'; exit 0 ;;')
@@ -279,8 +282,9 @@ def test_interference_concurrent_cache_reads_may_see_stale_data(tmp_path):
     caller1 = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, spent={"caller1": 100})
     caller2 = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, spent={"caller2": 200})
 
-    assert caller1.spent == {"caller2": 200}, "caller1 sees caller2's spend"
-    assert caller2.spent == {"caller2": 200}
+    assert caller1.spent == {"caller1": 100}, "caller1 must not see caller2's spend"
+    assert caller2.spent == {"caller2": 200}, "caller2 must not inherit caller1's spend"
+    h.invalidate_cache()
 
 
 # ===========================================================================
