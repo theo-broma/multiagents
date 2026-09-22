@@ -180,3 +180,68 @@ change is not evidence here, because green was already wrong. That is F150.
 
 Say in your result which test guards which of the three, so that check is a list
 to walk rather than a hunt.
+
+---
+
+# Amendment — after the advisor read this
+
+## The copy must be deep enough to cover `spent` and `windows`
+
+I had left shallow-versus-deep to the implementer as an implementation choice.
+**That was wrong, and it is the load-bearing part.** `Budget.spent` and
+`Budget.windows` are mutable dicts, so a shallow `copy.copy()` or
+`dataclasses.replace()` hands out a new `Budget` whose `.spent` is still the
+cache's own dict — and `read_claude` writes into it by item assignment
+(`budget.spent["extra_credits_used"] = ...`), which is exactly the shape that
+would still reach the cache.
+
+**So R16 requires that `spent` and `windows` are themselves copied**, not only
+the `Budget` around them. A caller doing `returned.spent["k"] = v` must not
+change what the next call sees. Test it that way — by item assignment, not by
+rebinding the attribute — or the guard passes against a shallow copy.
+
+Whether that is `copy.deepcopy`, `replace(b, spent=dict(b.spent),
+windows=dict(b.windows))`, or copying at insertion instead of on read remains
+the implementer's choice. What is no longer optional is the observable
+behaviour.
+
+## An objection I considered and rejected, with the evidence
+
+The advisor's reading was that `runner.py` **depends** on the aliasing: that
+`_wind_down` (line 339) and `_half_open` (line 377) set `cooldown_until` without
+ever writing it to the tree, so a copy would make those cooldowns "instantly
+vanish on the next read" and break wind-down.
+
+I checked, and it does not hold. The whole sequence lives inside one
+`start_agent` call at `runner.py:1026-1046`:
+
+```
+cooldowns = self.tree.read().get("cooldowns", {})     # durable state
+budgets   = read_all(..., cooldowns)                  # fresh, re-applies them
+self._half_open(budgets, cooldowns)                   # decorates
+self._wind_down(budgets)                              # decorates
+chosen, why = choose_provider(spec.provider, budgets, ...)   # consumes
+```
+
+`budgets` is built, decorated and consumed in one synchronous block, and the
+next pass rebuilds all of it. `_wind_down`'s conclusion is **recomputed** every
+time from `self.tree.burn(name)`, so it does not need to persist; `_half_open`'s
+line 377 branch is likewise re-derived from `claim_trial`, and its lines 392 and
+398 write the durable half to the tree via `clear_cooldown`/`set_cooldown`
+first.
+
+The reading is not merely unnecessary — it is inverted. A wind-down decision
+surviving in the cache *past the pass that made it* is a stale conclusion
+leaking into unrelated readers, which is F171 exactly. Today `_wind_down` even
+skips a provider `if ... budget.cooldown_until`, so an aliased leftover can
+suppress the very re-evaluation that would have been correct. Copying fixes
+that too.
+
+If an implementer finds a wind-down case that genuinely needs to persist, that
+is `NEED_INFO` to me, not a reason to keep the aliasing.
+
+## Not a correction: the second writer
+
+The advisor offered `read_claude`'s `extra_credits` write as something I had
+missed. It is the centre of this contract's opening section and the reason R17
+exists. Recorded here only so a later reader does not think it arrived late.
