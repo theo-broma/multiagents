@@ -38,21 +38,30 @@ that none of them appears in the offending entry itself:
     whitespace                  "whitespace", "space", "blank" or "tab"
     a `:port` suffix            "port"
     a full URL                  "url" or "scheme"
+    an IPv6 literal             "ipv6" or "address", and NOT the bare word
+                                "port" — the contract rules that one out by
+                                name, so it is the single place in this table
+                                where a word is forbidden as well as required
+    the empty string            "empty"
 
 That is a constraint on vocabulary, not on phrasing: any sentence using one of
-those words passes, and the five forms may share a message or have one each.
+those words passes, and the forms may share a message or have one each.
 
-**Where this file is deliberately silent.** Three questions the contract does
-not answer, so nothing here asserts an answer to them — see the `## Result`
-of the run that wrote this file:
+**Where this file was deliberately silent, and now is not.** The run that
+wrote it stopped on four questions the contract did not answer. They are
+answered in its closing section, "Amendment — four questions the test engineer
+asked, answered", and the tests at the bottom of this file assert those
+answers rather than a guess at them:
 
-- whether a bare IPv4 address (`192.168.1.10`) or an IPv6 literal (`::1`,
-  `[::1]`) is a malformed entry;
-- whether the empty string `""` is one;
-- whether R15 is the five named forms only, or every string that is not a
-  plausible hostname — the adversary's fuzz remainder reads like the latter,
-  and `evil.com|.*` and `a(b` (made inert, not noticed, by phase 2 item 1)
-  are the cases that separate them.
+- R15's scope is **every non-hostname**, not the five named forms only — so
+  `evil.com|.*` and `a(b`, which phase 2 item 1 made inert but not *noticed*,
+  are refused as well;
+- a bare IPv4 literal (`192.168.1.10`) is **valid**, and matches exactly by
+  the same rule R14 gives a dotless entry; an IPv6 literal (`::1`, `[::1]`)
+  is **malformed**;
+- the empty string is **malformed**, and is named as empty;
+- under `network: bridge` and `network: none` the allowlist is **not
+  validated at all**, because it is unused there.
 
 **Untouched on purpose.** `tests/test_c1_allowlist_characterization.py` holds
 the five F11 reproductions and the F10 one. They pin today's silent-and-dead
@@ -63,6 +72,7 @@ is a separate, deliberate run. Nothing here duplicates them.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -464,3 +474,429 @@ def test_r15_docker_up_still_starts_on_a_valid_allowlist(
 
     assert code == 0, "a valid allowlist must not stop `docker up`"
     assert started, "a valid allowlist must reach ensure_running"
+
+
+# ---------------------------------------------------------------------------
+# R15 — the scope question: every non-hostname, not the five named forms.
+#
+# `NEED_INFO(scope-of-r15)` is answered "every non-hostname": R15 validates
+# against a hostname grammar, and the five F11 reproductions are examples of
+# what that catches rather than the whole list. The adversary's fuzz remainder
+# is in the contract by name — "nothing validates that an entry is a hostname
+# at all" — and F11's complaint was never about what a dead entry matches, it
+# is that the operator is not told. `a(b` is exactly as dead and exactly as
+# silent as `example.com.`.
+#
+# No word set for these, on purpose. The contract fixes a vocabulary for the
+# five named forms and for the two the amendment adds, and says nothing about
+# how to phrase "this is not a hostname" — so nothing below asserts a phrasing
+# nobody agreed to. Naming the entry is the whole requirement here.
+# ---------------------------------------------------------------------------
+
+NOT_HOSTNAMES = [
+    # The two the amendment names, and the two phase 2 item 1 made inert.
+    ("alternation", "evil.com|.*"),
+    ("unbalanced_group", "a(b"),
+    # The rest of item 1's reproductions, which are the same class of string.
+    ("unbalanced_class", "a[b"),
+    ("balanced_group", "a(b)c"),
+    ("character_class", "a[bc]d"),
+    ("glob", "*.example.com"),
+    ("quantifier", "a*b"),
+    # Not regex at all, just not a hostname: characters no label may carry.
+    ("interior_space", "exam ple.com"),
+    ("path_without_scheme", "example.com/path"),
+    ("userinfo", "user@example.com"),
+]
+
+_NOT_HOSTNAME_PARAMS = [pytest.param(entry, id=case) for case, entry in NOT_HOSTNAMES]
+
+
+@pytest.mark.parametrize("entry", _NOT_HOSTNAME_PARAMS)
+def test_r15_a_string_that_is_not_a_hostname_at_all_is_a_preflight_problem_naming_it(
+        tmp_path, monkeypatch, entry):
+    """None of these is one of the five F11 forms, and every one of them is
+    dead on arrival: it generates a filter line that matches no host any
+    resolver will ever be asked for, and says nothing about it.
+
+    An implementation that enumerated the five forms — a leading dot, a
+    trailing dot, whitespace, `:port`, a URL — and let everything else past
+    satisfies every other R15 test in this file and fails these. That is the
+    distinction they exist to draw.
+    """
+    problems = _preflight(tmp_path, monkeypatch, [entry])
+    assert problems, (
+        f"{entry!r} is not a hostname and must be refused by preflight — R15 "
+        f"is every non-hostname, not only the five named forms")
+    joined = " ".join(problems)
+    assert entry in joined, (
+        f"the problem must name the offending entry; {entry!r} is not in "
+        f"{joined!r}")
+
+
+@pytest.mark.parametrize("entry,r12_pins_its_own_literal", [
+    pytest.param("evil.com|.*", True, id="alternation"),
+    pytest.param("a(b", False, id="unbalanced_group"),
+])
+def test_r15_an_entry_it_refuses_is_still_inert_if_it_reaches_the_generator(
+        tmp_path, monkeypatch, entry, r12_pins_its_own_literal):
+    """Deliberate belt and braces, asserted about one string in one test so
+    that the relationship between the two phase 2 items is visible instead of
+    having to be inferred from two files that never mention each other.
+
+    They are different seams and the amendment says so in as many words: item
+    1 (R12, `tests/test_phase2_ere_escaping.py`) governs what
+    `write_proxy_config` does with an entry; R15 governs whether an entry
+    reaches it. So R15 is a signal added on top of inertness, not a
+    replacement for it — an entry that somehow gets past preflight, through a
+    caller that does not preflight or a future flag that skips it, must still
+    match nothing but itself.
+
+    Which means the literal-match half must keep passing. It is
+    `test_r12_f1_entry_containing_a_pipe_admits_only_its_own_literal_text` and
+    `test_r12_f13_entry_with_an_unbalanced_group_or_class_decides_without_raising`
+    restated against the same two strings: an implementer who satisfies R15 by
+    having the generator drop, rewrite or raise on a refused entry turns that
+    file red, and this test red with it.
+
+    `a(b` carries `r12_pins_its_own_literal=False` because R12's own contract
+    declines to say what that entry matches — only that evaluating it must not
+    raise. Asserting more about it here would be inventing a requirement the
+    other file deliberately refused to make.
+    """
+    # R15: preflight refuses it, and names it.
+    problems = _preflight(tmp_path, monkeypatch, [entry])
+    assert problems, f"a non-hostname entry {entry!r} must be refused by preflight"
+    assert entry in " ".join(problems), \
+        f"the problem must name {entry!r}; got {problems!r}"
+
+    # Item 1 / R12: and on the other side of that gate it is still inert.
+    try:
+        admits_itself = h.allowlist_admits(tmp_path, [entry], entry)
+        admits_unrelated = h.allowlist_admits(tmp_path, [entry], "anything.example")
+    except Exception as exc:  # noqa: BLE001 — R12 says none may escape
+        pytest.fail(
+            f"R15 must not change what the generator does with {entry!r}: "
+            f"{type(exc).__name__}: {exc}")
+
+    assert not admits_unrelated, (
+        f"{entry!r} must still admit nothing it does not name, even when "
+        f"preflight has already refused it")
+    if r12_pins_its_own_literal:
+        assert admits_itself, (
+            f"{entry!r} must still match its own literal text — R15 gates the "
+            f"entry, it does not rewrite it")
+
+
+# ---------------------------------------------------------------------------
+# R14/R15 — a bare IPv4 literal is valid, and matches exactly.
+#
+# `NEED_INFO(ip-entries)`, first half. An operator naming a host by address is
+# naming one host, so the amendment gives an IPv4 literal the same rule R14
+# gives a dotless entry: it admits that address and nothing else.
+#
+# The exactness is the point rather than a detail. An IPv4 literal is full of
+# dots, so an implementation that decides "dot present, therefore suffix" will
+# hand it `(^|\.)` and admit every host ending `.192.168.1.10` — which is
+# F10's mistake reached from the other direction, and unlike `com` it is a
+# shape an attacker can register a subdomain for.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("entry", [
+    pytest.param("192.168.1.10", id="rfc1918"),
+    pytest.param("127.0.0.1", id="loopback"),
+    pytest.param("10.0.0.1", id="private_a"),
+    pytest.param("8.8.8.8", id="public"),
+    pytest.param("255.255.255.255", id="max_octets"),
+    pytest.param("0.0.0.0", id="min_octets"),
+])
+def test_r15_a_bare_ipv4_literal_is_valid_configuration_not_a_malformed_one(
+        tmp_path, monkeypatch, entry):
+    """An address is a legitimate thing to put in an allowlist, so preflight
+    must let it through. Asserted at both octet boundaries as well as the
+    ordinary case, because a validator built out of a hostname grammar can
+    reject `0.0.0.0` and `255.255.255.255` by accident — an all-numeric label
+    is not a valid *hostname* label, and an IP entry has nothing but."""
+    assert _preflight(tmp_path, monkeypatch, [entry]) == [], \
+        f"a bare IPv4 literal {entry!r} is valid configuration"
+
+
+def test_r14_an_ipv4_entry_admits_that_address_and_nothing_beneath_it(tmp_path):
+    """The load-bearing half, and the reason the amendment answered this
+    question at all: `foo.192.168.1.10` is a host nobody means to admit.
+
+    Today the entry generates `(^|\\.)192\\.168\\.1\\.10$` and `foo.` in front
+    of it matches the optional-dot prefix, so a name an attacker controls is
+    inside the boundary. Letting the dotted-entry suffix rule apply to an
+    address by accident is F10's class of mistake, so it is pinned here rather
+    than left to follow from R14's wording about dots.
+    """
+    entry = "192.168.1.10"
+    assert h.allowlist_admits(tmp_path, [entry], entry), \
+        "an IPv4 entry must admit its own address"
+    for refused in ("foo.192.168.1.10", "evil.example.com.192.168.1.10",
+                    "a.192.168.1.10"):
+        assert not h.allowlist_admits(tmp_path, [entry], refused), \
+            f"an IPv4 entry must match exactly; {refused!r} is not that address"
+
+
+def test_r14_an_ipv4_entry_does_not_admit_its_neighbours_by_prefix_or_suffix(
+        tmp_path):
+    """The near misses either side of an exact match, which a fix built from
+    string containment rather than a whole-value comparison would admit:
+    another address this one is a prefix of, and one it is a suffix of."""
+    entry = "192.168.1.1"
+    assert h.allowlist_admits(tmp_path, [entry], entry)
+    for refused in ("192.168.1.10", "192.168.1.100", "1192.168.1.1",
+                    "192.168.1.2"):
+        assert not h.allowlist_admits(tmp_path, [entry], refused), \
+            f"{entry!r} must not admit {refused!r}"
+
+
+def test_r14_an_ipv4_entry_and_a_domain_entry_keep_their_own_rules_together(
+        tmp_path):
+    """Both rules in one realistic list: an internal address alongside a
+    public domain. The domain keeps its subdomains, the address does not
+    acquire any, and neither widens the other."""
+    allowlist = ["192.168.1.10", "googleapis.com"]
+    assert h.allowlist_admits(tmp_path, allowlist, "192.168.1.10")
+    assert h.allowlist_admits(tmp_path, allowlist, "storage.googleapis.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "foo.192.168.1.10")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil.net")
+
+
+# ---------------------------------------------------------------------------
+# R15 — an IPv6 literal is malformed, and is told it is an address.
+#
+# `NEED_INFO(ip-entries)`, second half. Not because `::1` is meaningless, but
+# because tinyproxy's host filter does not handle it: admitting the entry
+# generates a pattern that quietly matches nothing, which is F11 again in a
+# new costume.
+#
+# Both spellings are the same answer. `::1` is what an operator copies out of
+# a config file, `[::1]` is what they copy out of a URL, and a validator that
+# catches one by shape will often miss the other.
+#
+# The message constraint has two halves, and the second is the unusual one:
+# the contract says a "looks like a port" message about `::1` is worse than no
+# message, and asks for the IPv6 case to be stated in the validator rather
+# than caught by side effect from the `:port` rule. So this is the one form
+# where a word is forbidden as well as required.
+# ---------------------------------------------------------------------------
+
+_IPV6_ADDRESS_WORDS = ("ipv6", "address")
+
+IPV6 = [
+    ("loopback", "::1"),
+    ("loopback_bracketed", "[::1]"),
+    ("documentation", "2001:db8::1"),
+    ("documentation_bracketed", "[2001:db8::1]"),
+    ("link_local", "fe80::1"),
+    ("unspecified", "::"),
+    ("full_form", "2001:0db8:0000:0000:0000:0000:0000:0001"),
+]
+
+_IPV6_PARAMS = [pytest.param(entry, id=case) for case, entry in IPV6]
+
+
+@pytest.mark.parametrize("entry", _IPV6_PARAMS)
+def test_r15_an_ipv6_literal_is_a_preflight_problem_naming_it(
+        tmp_path, monkeypatch, entry):
+    """An IPv6 entry reaches the filter as a pattern no destination host will
+    ever match, and today nothing says so — the operator who wrote `::1`
+    meaning their local registry gets an allowlist one entry shorter than
+    they think it is, with no signal at all."""
+    problems = _preflight(tmp_path, monkeypatch, [entry])
+    assert problems, (
+        f"an IPv6 literal {entry!r} must be refused by preflight — "
+        f"tinyproxy's host filter cannot express it")
+    joined = " ".join(problems)
+    assert entry in joined, (
+        f"the problem must name the offending entry; {entry!r} is not in "
+        f"{joined!r}")
+
+
+@pytest.mark.parametrize("entry", _IPV6_PARAMS)
+def test_r15_the_ipv6_problem_names_an_address_form_and_does_not_say_port(
+        tmp_path, monkeypatch, entry):
+    """"A message saying "looks like a port" about `::1` is worse than no
+    message" — the contract, verbatim, and the reason it asks for the IPv6
+    case to be stated in the validator instead of falling out of the `:port`
+    rule. An operator told their loopback address has a port suffix goes
+    looking for a port to delete and finds none.
+
+    So: an address word must be present, and the word "port" must be absent.
+    `\\bport\\b` rather than a substring test, because "not supported" is a
+    perfectly good thing for the message to say and contains "port" —
+    forbidding that spelling would be pinning phrasing rather than meaning.
+    """
+    problems = _preflight(tmp_path, monkeypatch, [entry])
+    joined = " ".join(problems).lower()
+    assert any(word in joined for word in _IPV6_ADDRESS_WORDS), (
+        f"the problem for {entry!r} must name it as an address form — "
+        f"expected one of {list(_IPV6_ADDRESS_WORDS)} in {joined!r}")
+    assert not re.search(r"\bport\b", joined), (
+        f"{entry!r} has no port in it; a port message here sends the operator "
+        f"looking for something that is not there: {joined!r}")
+
+
+def test_r15_an_ipv6_literal_alongside_valid_entries_is_the_only_one_reported(
+        tmp_path, monkeypatch):
+    """The realistic paste: one address among working entries. Exactly one
+    problem, and it names the address rather than the list."""
+    good = ["api.anthropic.com", "pypi.org", "localhost", "192.168.1.10"]
+    problems = _preflight(tmp_path, monkeypatch, good[:2] + ["::1"] + good[2:])
+
+    assert len(problems) == 1, f"expected one problem, got {problems}"
+    assert "::1" in problems[0], f"the problem must name `::1`; got {problems[0]!r}"
+    for entry in good:
+        assert entry not in problems[0], \
+            f"{entry!r} is valid and must not be reported"
+
+
+# ---------------------------------------------------------------------------
+# R15 — the empty string is malformed, and is named as empty.
+#
+# `NEED_INFO(empty-entry)`, answered: refused, and told it is empty. It is
+# not one of the five forms and it is unmistakably not a hostname.
+#
+# It is also the entry most likely to arrive by accident rather than by
+# mistake — a trailing `- ` in the YAML list, a templated value that resolved
+# to nothing — and today it generates `(^|\.)$`, a line that matches the empty
+# host and nothing else. Silent, dead, and invisible in a diff.
+#
+# "empty" is asserted instead of the entry appearing in the message, because
+# there is no text to look for: naming the entry and saying what is wrong with
+# it are the same sentence here.
+# ---------------------------------------------------------------------------
+
+def test_r15_the_empty_string_is_a_preflight_problem_saying_it_is_empty(
+        tmp_path, monkeypatch):
+    """The whole of the requirement, in one assertion each: refused, and the
+    message says which kind of nothing it is."""
+    problems = _preflight(tmp_path, monkeypatch, [""])
+    assert problems, "an empty allowlist entry must be refused by preflight"
+    joined = " ".join(problems).lower()
+    assert "empty" in joined, (
+        f"the problem for an empty entry must say it is empty — an entry with "
+        f"no text to quote is the one case where the word is the whole "
+        f"message: {joined!r}")
+
+
+def test_r15_an_empty_entry_is_reported_without_swallowing_the_valid_ones(
+        tmp_path, monkeypatch):
+    """The boundary the empty string is dangerous at: an entry with no text
+    cannot be pointed at by quoting it, so a message built by substituting the
+    entry into a sentence produces `allowlist entry '' is invalid` — or, worse,
+    a problem that names one of the neighbouring entries instead.
+
+    An empty entry alongside valid ones is also the shape this actually
+    arrives in. A list that is *entirely* empty entries is not: the empty
+    LIST is a separate and valid case, already pinned above.
+    """
+    good = ["api.anthropic.com", "pypi.org", "localhost"]
+    problems = _preflight(tmp_path, monkeypatch, [good[0], "", good[1], good[2]])
+
+    assert len(problems) == 1, f"expected one problem, got {problems}"
+    assert "empty" in problems[0].lower()
+    for entry in good:
+        assert entry not in problems[0], \
+            f"{entry!r} is valid and must not be named in the empty entry's problem"
+
+
+@pytest.mark.parametrize("entry", [
+    pytest.param(" ", id="one_space"),
+    pytest.param("   ", id="several_spaces"),
+    pytest.param("\t", id="tab"),
+    pytest.param("\n", id="newline"),
+])
+def test_r15_a_whitespace_only_entry_is_refused_too(tmp_path, monkeypatch, entry):
+    """The boundary between the empty case and the whitespace case, and the
+    one the two answers meet at: `"   "` is whitespace by its characters and
+    empty by its content.
+
+    The contract does not choose between those two messages, so this asserts
+    only that the entry is refused — which both answers agree on, and which
+    follows from the scope answer above whichever way the wording lands.
+    Pinning a word here would be inventing a decision nobody made.
+    """
+    assert _preflight(tmp_path, monkeypatch, [entry]), \
+        f"a whitespace-only entry {entry!r} is not a hostname and must be refused"
+
+
+# ---------------------------------------------------------------------------
+# R15 — and NOT under `network: bridge` or `network: none`.
+#
+# The fourth answer, and the only one that takes something out of scope rather
+# than putting something in. The allowlist is unused under those modes —
+# `write_proxy_config` runs only for `allowlist`, and `ensure_proxy` returns
+# `{"ok": True, "skipped": ...}` — so refusing to start a bridge-network
+# environment over a key it ignores is the same mistake the amendment avoided
+# by moving R15 off `config.load()`: a check that fires where it does not
+# apply. An operator who switches to `allowlist` later gets the refusal then,
+# which is the moment it means something.
+#
+# These pass today, and they pass for a reason that will stop being true:
+# nothing validates the allowlist at all yet. They are guards, not coverage —
+# their job starts the moment the check exists, and what they rule out is the
+# obvious implementation, a loop over `egress_allowlist` at the top of
+# `preflight` with no look at `network_mode`. Every other R15 test in this
+# file is what stops them being vacuous, by failing if the check never fires
+# anywhere.
+# ---------------------------------------------------------------------------
+
+_UNVALIDATED_MODES = [pytest.param("bridge", id="bridge"),
+                      pytest.param("none", id="none")]
+
+# Deliberately one of every form R15 refuses under `allowlist`: the five F11
+# reproductions, a non-hostname, an IPv6 literal and the empty string. If any
+# single rule is applied unconditionally, this list finds it.
+EVERY_MALFORMED_FORM = [
+    ".example.com", "example.com.", " example.com ", "example.com:8080",
+    "https://example.com/path", "evil.com|.*", "::1", "",
+]
+
+
+@pytest.mark.parametrize("network", _UNVALIDATED_MODES)
+def test_r15_a_malformed_allowlist_is_not_validated_under_bridge_or_none(
+        tmp_path, monkeypatch, network):
+    """Exact equality with the empty list, not "no problem mentions the
+    allowlist": under these modes the key is inert, so the correct number of
+    problems it can produce is zero.
+
+    Every form R15 refuses is in the list at once, so a rule applied
+    unconditionally is caught whichever rule it is.
+    """
+    assert _preflight(tmp_path, monkeypatch, EVERY_MALFORMED_FORM,
+                      network=network) == [], (
+        f"the egress allowlist is unused under `network: {network}` — refusing "
+        f"to start over a key this mode ignores is a check firing where it "
+        f"does not apply")
+
+
+@pytest.mark.parametrize("network", _UNVALIDATED_MODES)
+def test_r15_a_valid_allowlist_is_also_clean_under_bridge_or_none(
+        tmp_path, monkeypatch, network):
+    """The other half, so the test above cannot be satisfied by a preflight
+    that reports something unrelated under these modes and happens not to
+    mention the allowlist. Nothing about switching network mode is a
+    problem."""
+    assert _preflight(tmp_path, monkeypatch,
+                      ["api.anthropic.com", "localhost", "192.168.1.10"],
+                      network=network) == []
+
+
+def test_r15_the_same_malformed_allowlist_is_refused_under_allowlist_mode(
+        tmp_path, monkeypatch):
+    """The contrast that gives the two tests above their meaning, written out
+    rather than left to the reader: the identical list, the only difference
+    being `network: allowlist`, and now every entry in it is a problem.
+
+    Read together, the three say what the answer actually was — not "this list
+    is fine" but "this list is not looked at here".
+    """
+    problems = _preflight(tmp_path, monkeypatch, EVERY_MALFORMED_FORM,
+                          network="allowlist")
+    assert len(problems) == len(EVERY_MALFORMED_FORM), (
+        f"expected one problem per entry ({len(EVERY_MALFORMED_FORM)}), got "
+        f"{len(problems)}: {problems}")
