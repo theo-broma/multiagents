@@ -17,8 +17,10 @@ everything):
 
 Versioned launcher, as amended 2026-09-22 (47698b3): a symlink whose resolved
 target is a FILE in a directory other than the launcher's own; that directory
-is the versions directory whatever its name, even with a single entry. A
-target nested under a per-version directory is out of scope and not tested.
+is the versions directory whatever its name, even with a single entry.
+Tightened by P0-R1.8 (d12ef43): the target's file name must also differ from
+the launcher's, so a target nested as `versions/1.0.0/bin/fakecli` is not
+versioned and keeps today's behaviour (tested at the end).
 
 The provider is named `fakecli` on purpose: the executor must not know which
 provider it is dealing with.
@@ -507,3 +509,71 @@ def test_p0_r1_7_provider_names_in_the_executor_do_not_grow():
     assert total <= PROVIDER_NAMES_IN_EXECUTOR_TODAY, (
         f"provider names in executor/*.py grew from "
         f"{PROVIDER_NAMES_IN_EXECUTOR_TODAY} to {total}: {found}")
+
+
+# ===========================================================================
+# P0-R1.8 — a target whose file name equals the launcher's is not versioned
+# ===========================================================================
+#
+# Amendment after the review (finding 1): versioned additionally requires the
+# resolved file's name to DIFFER from the launcher's. The nested layout
+#
+#     host/.local/bin/fakecli -> host/.local/share/fakecli/versions/1.0.0/bin/fakecli
+#
+# is therefore not versioned and keeps today's behaviour: the launcher and its
+# resolved file are mounted (as for any symlink, P0-R1.5), and the command
+# issued uses the bare name.
+
+def _nested(layout: Layout, relative: bool = False) -> Path:
+    layout.version("1.0.0").unlink()        # the fixture's flat build makes way
+    target = _executable(layout.version("1.0.0") / "bin" / NAME)
+    _point(layout.launcher, os.path.relpath(target, layout.bin) if relative else target)
+    return target
+
+
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+def test_p0_r1_8_nested_same_name_target_is_mounted_as_today(tmp_path, layout, relative):
+    target = _nested(layout, relative)
+    ex = _executor(tmp_path)
+    mounts = ex.mounts()
+    assert mounts == _todays_list(ex, layout.launcher, target), (
+        "a target whose file name equals the launcher's is not versioned: "
+        f"today's list is the launcher plus its resolved file; got {mounts}")
+
+
+def test_p0_r1_8_nested_same_name_target_mounts_no_directory_of_the_install(
+        tmp_path, layout):
+    target = _nested(layout)
+    ex = _executor(tmp_path)
+    paths = [p for p, _ in ex.mounts()]
+    for directory in (target.parent, layout.version("1.0.0"), layout.versions):
+        assert directory not in paths, (
+            f"{directory} is mounted; the nested layout must mount the "
+            f"resolved file {target} only. mounts={paths}")
+
+
+def test_p0_r1_8_nested_same_name_target_spawn_uses_the_bare_name(
+        tmp_path, layout, monkeypatch):
+    target = _nested(layout)
+    ex = _executor(tmp_path)
+    command = _issued_command(ex, [NAME, *AGENT_ARGS], tmp_path, monkeypatch)
+    assert command[-(len(AGENT_ARGS) + 1):] == [NAME, *AGENT_ARGS], (
+        f"the nested layout is not versioned: the program must stay the bare "
+        f"name {NAME!r}, unrewritten. command={command}")
+    assert not any(str(target) in token for token in command), command
+
+
+def test_p0_r1_8_differently_named_target_is_still_versioned(
+        tmp_path, layout, monkeypatch):
+    # The claude-shaped layout (bin/fakecli -> versions/1.0.0): the file name
+    # `1.0.0` differs from `fakecli`, so the tightened definition still applies.
+    ex = _executor(tmp_path)
+    mounts = ex.mounts()
+    assert (layout.versions, True) in mounts, (
+        f"the versions directory {layout.versions} must be mounted read-only; "
+        f"mounts={mounts}")
+    assert layout.version("1.0.0") not in [p for p, _ in mounts]
+
+    command = _issued_command(ex, [NAME, *AGENT_ARGS], tmp_path, monkeypatch)
+    assert command[-(len(AGENT_ARGS) + 1):] == [str(layout.version("1.0.0")), *AGENT_ARGS], (
+        f"a versioned launcher's program must be its resolved path; command={command}")
