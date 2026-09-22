@@ -1199,8 +1199,26 @@ findings:
         it is already in the neighbourhood, and so nobody files it again afterwards.'
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: open
+    - by: orchestrator
+      note: '**Already fixed when it was filed, and the ledger never knew.** `tests/test_adversary_allowlist_mutation.py::test_filter_file_ends_with_newline`
+        exists at line 80 of the adversary''s own file and passes. The adversary run
+        that reported F56 as "the filter file''s trailing newline is untested" wrote
+        the test for it in the same commit (`38f3786`).
+
+
+        Found while amending the phase 2 item 2 contract: the implementer sent to
+        add directive guards reported that five of them already existed, and F56''s
+        was in the same file. Verified by running it — 13 passed in that file.
+
+
+        Worth noting for the next review pass rather than only closing the id: an
+        adversary that fixes what it finds, in the commit that finds it, will leave
+        the ledger describing a defect that is already gone. Nothing was lost here,
+        but a finding recorded as open for four days was closed the whole time.'
+      sha: a4f0963bbc77b6ebe98bb5a9ead9e1b954646ed4
+      status: fixed
     severity: low
-    status: open
+    status: fixed
     summary: The filter file's trailing newline is untested
   F60:
     class: bug
