@@ -338,12 +338,28 @@ def test_cache_distinguishes_two_config_dirs_for_one_provider_name(tmp_path):
     h.invalidate_cache()
 
 
-def test_cache_hit_overwrites_spent_instead_of_merging_and_mutates_the_cached_object(tmp_path):
-    # F120. Fresh reads MERGE spent (`{**budget.spent, **spent}`); a cache hit
-    # instead does `budget.spent = spent or budget.spent` on the very object
-    # stored in `_cache`, so the replacement is not a local copy — it
-    # permanently overwrites what every future cache hit will see, and a
-    # second caller's spend dict silently erases the first caller's.
+def test_cache_hit_merges_spent_onto_a_copy_and_leaves_the_cached_object_alone(tmp_path):
+    # F122 (context/review/C2-budget.md) and F150
+    # (context/review/C2-budget-adversary.md). **This inversion is
+    # deliberate.** The test was called
+    # `test_cache_hit_overwrites_spent_instead_of_merging_and_mutates_the_cached_object`
+    # and pinned F122's defect — a cache hit doing
+    # `budget.spent = spent or budget.spent` on the very object sitting in
+    # `_cache`, so one caller's spend dict permanently erased another's — under
+    # a name that read like an intended invariant. F150 is that hazard itself:
+    # whoever fixed F122 would have seen this go red and reverted the fix.
+    # context/specs/phase3-cache-aliasing.md (R16, R17) makes the opposite
+    # true, so the assertions are inverted and the name states what is now
+    # true. Kept rather than deleted, because what it pinned is still a
+    # behaviour worth holding — from the other side.
+    #
+    # (Its original comment cited F120. F120 is the discarded `config_dir`,
+    # a different defect in the same file; the finding this pins is F122.)
+    #
+    # The exact merged dicts are pinned in tests/test_phase3_cache_aliasing.py,
+    # where the reader contributes spend of its own. Here the script reports
+    # none, so this asserts only what does not depend on whether a caller's
+    # `spent` is itself kept in the cache entry — see that file's NEED_INFO.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(tmp_path, "p.sh", 'budget) printf \'{"known": true, "headroom": 0.5}\'; exit 0 ;;')
@@ -352,11 +368,11 @@ def test_cache_hit_overwrites_spent_instead_of_merging_and_mutates_the_cached_ob
     assert first.spent == {"a": 1}
 
     second = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, spent={"b": 2})
-    assert second.spent == {"b": 2}       # "a" is gone, not merged in
-    assert second is first                # same object: the cache entry was mutated in place
+    assert second is not first            # R16: never the cache's own object
+    assert second.spent["b"] == 2         # the caller's own figures reach its own result
 
     third = h.read_provider("p", provider, h.FakeExecutor(), tmp_path)   # no spent at all
-    assert third.spent == {"b": 2}        # the overwrite persists beyond the call that made it
+    assert "b" not in third.spent         # R17: a later call inherits no caller's spent
 
 
 def test_fresh_read_merges_spent_rather_than_replacing_it(tmp_path):
