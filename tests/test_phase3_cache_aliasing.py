@@ -402,3 +402,76 @@ def test_r18_a_cache_hit_keeps_both_the_readers_spend_and_the_callers(tmp_path, 
 
     assert dict(out[name].spent) == {"extra_credits_used": 7, "extra_credits_limit": 100,
                                      "total": 100, "cost_usd": 2}
+
+
+def test_r18_a_fresh_read_with_the_cache_on_keeps_both_but_caches_only_the_readers(
+        tmp_path, monkeypatch):
+    # The production shape: `monitor/snapshot.py:133` passes
+    # `spend_by_provider` with the cache ON, so its first read of a provider
+    # is a cache MISS that goes down the fresh path and then stores what it
+    # returns. The test above turns the cache off, which is exactly the shape
+    # that survives the half-fix Amendment 2 names — copy on the hit path
+    # only, keep caching the already-merged object on the fresh one.
+    #
+    # Amendment 2 settles what must be cached: the reader's keys and nothing
+    # else. So both sources survive onto THIS caller's result, and the next
+    # caller, passing nothing, inherits none of them.
+    h.invalidate_cache()
+    name = _builtin_reader(monkeypatch)
+    providers = {name: h.make_provider(name)}
+
+    first = h.read_all(providers=providers, executor_for=_executor_for,
+                       config_dir=tmp_path,
+                       spend_by_provider={name: {"total": 100, "cost_usd": 2}})[name]
+    assert dict(first.spent) == {"extra_credits_used": 7, "extra_credits_limit": 100,
+                                 "total": 100, "cost_usd": 2}
+
+    second = h.read_all(providers=providers, executor_for=_executor_for,
+                        config_dir=tmp_path)[name]
+    assert dict(second.spent) == READER_SPENT
+
+
+def test_r18_a_callers_key_wins_over_the_readers_same_key_on_the_fresh_path(
+        tmp_path, monkeypatch):
+    # Merge DIRECTION on the fresh path. Every other fresh-path test here
+    # uses disjoint keys, against which `{**reader, **caller}` and
+    # `{**caller, **reader}` are indistinguishable — and the reversed merge is
+    # the plausible way to "keep the reader's figures" while quietly pinning
+    # a stale `extra_credits_used` over the caller's newer one. R17's
+    # collision test covers the hit path; this is its other half, and it is
+    # also the F154 guard with a colliding key: a bare assignment loses
+    # `extra_credits_limit`.
+    h.invalidate_cache()
+    name = _builtin_reader(monkeypatch)
+
+    out = h.read_all(providers={name: h.make_provider(name)},
+                     executor_for=_executor_for, config_dir=tmp_path,
+                     spend_by_provider={name: {"extra_credits_used": 9, "total": 100}},
+                     use_cache=False)
+
+    assert dict(out[name].spent) == {"extra_credits_used": 9,
+                                     "extra_credits_limit": 100, "total": 100}
+
+
+def test_r18_a_callers_spent_dict_is_neither_written_to_nor_handed_back(
+        tmp_path, monkeypatch):
+    # The merge must build a NEW dict on both paths. Two implementations pass
+    # every exact-dict assertion above and still corrupt the caller:
+    # `spent.update(budget.spent)` writes the reader's figures into the
+    # caller's own dict, and `budget.spent = spent` (today's hit path) hands
+    # that dict straight back, so the next writer into the returned `spent` —
+    # `read_claude`'s `budget.spent["extra_credits_used"] = ...` is one —
+    # reaches the caller's accounting from the outside.
+    h.invalidate_cache()
+    name = _builtin_reader(monkeypatch)
+    provider = h.make_provider(name)
+
+    mine = {"total": 100, "cost_usd": 2}
+    fresh = h.read_provider(name, provider, h.FakeExecutor(), tmp_path, spent=mine)
+    fresh.spent["scribbled"] = 1
+    assert mine == {"total": 100, "cost_usd": 2}
+
+    theirs = {"total": 300, "cost_usd": 5}
+    hit = h.read_provider(name, provider, h.FakeExecutor(), tmp_path, spent=theirs)
+    hit.spent["scribbled"] = 1
+    assert theirs == {"total": 300, "cost_usd": 5}
