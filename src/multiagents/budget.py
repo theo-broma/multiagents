@@ -37,7 +37,7 @@ import contextlib
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -680,8 +680,12 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
         if (cached and now_ - cached[0] < _CACHE_TTL
                 and _cache_source.get(name) == source):
             budget = cached[1]
-            budget.spent = spent or budget.spent
-            return budget
+            # R16: never hand out the cache's own object — copy with
+            # independent spent/windows dicts so item assignment by a
+            # caller cannot reach the cached entry.  R17: merge the
+            # caller's spent over the reader's (F122), never replace.
+            merged = {**budget.spent, **spent} if spent else dict(budget.spent)
+            return replace(budget, spent=merged, windows=dict(budget.windows))
     try:
         budget = _from_script(name, provider, executor, config_dir, project_config)
         if budget is None:
@@ -694,11 +698,14 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     except Exception as exc:              # telemetry must never break a run
         budget = Budget(provider=name, known=False,
                         note=f"{type(exc).__name__}: {exc}")
-    if spent:
-        budget.spent = {**budget.spent, **spent}
+    # Cache the reader's own budget BEFORE merging the caller's spent —
+    # the caller's keys are a per-call overlay, not durable state (R17).
     _cache[name] = (now_, budget)
     _cache_source[name] = source
-    return budget
+    # R16: return a copy so the fresh-read caller cannot poison the cache
+    # either (Amendment 2 — F171).  Merge the caller's spent onto the copy.
+    merged = {**budget.spent, **spent} if spent else dict(budget.spent)
+    return replace(budget, spent=merged, windows=dict(budget.windows))
 
 
 def read_all(providers: dict[str, Any] | None = None,
