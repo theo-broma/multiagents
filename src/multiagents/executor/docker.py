@@ -320,15 +320,20 @@ class DockerExecutor(Executor):
         """The versions directory backing a versioned launcher, or ``None``.
 
         A versioned launcher (P0-R1, `F200`) is a symlink whose resolved
-        target is a FILE in a directory other than the launcher's own — that
+        target is a FILE in a directory other than the launcher's own, AND
+        whose file name differs from the launcher's own name — that
         directory counts as the versions directory whatever its name, even
         holding a single entry. A target nested below a per-version directory
-        (``versions/1.0.0/bin/x``) is out of scope: it reads as unversioned
-        here and keeps today's behaviour.
+        with the launcher's own name (``versions/1.0.0/bin/x`` for launcher
+        ``bin/x``) is out of scope, since the version there lives in the
+        directory, not the file name: it reads as unversioned here and keeps
+        today's behaviour (P0-R1.8).
         """
         if resolved == launcher or not resolved.is_file():
             return None
         if resolved.parent == launcher.parent:
+            return None
+        if resolved.name == launcher.name:
             return None
         return resolved.parent
 
