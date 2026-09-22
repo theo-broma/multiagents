@@ -128,9 +128,18 @@ is paused, not abandoned: `refactor/split-consume` carries the R14–R18
 implementation and is committed and clean. Come back to it when this phase
 lands.
 
-These three come from `context/review/C4-runtime-observed.md`. None was
-reachable by reading the code — each needed the logs of real runs — and they
-are one failure arriving in three steps, which is why they are one phase.
+**Six items, from two channels.** R1–R3 come from
+`context/review/C4-runtime-observed.md` (`F200`, `F201`, `F202`); R4–R6 are the
+three bug tickets still `awaiting_user` (`bug-b1c130`, `bug-2138e6`,
+`bug-b864b8`). None of the six was reachable by reading the code — each needed
+the logs of real runs — and they are not six independent chores: R2 and R4 are
+the same function, R4 is why R5 cost two runs, and R1/R2/R3 are one failure
+arriving in three steps. That is why they are one phase.
+
+**Close each ticket with `resolve_ticket` when its fix merges.** A ticket whose
+fix landed and still reads `awaiting_user` gets refiled by the next review —
+which is exactly how `bug-49c1c1`, `bug-7c4b78`, `bug-2a0af0` and `bug-087fee`
+came to be declined duplicates.
 
 **Before any agent can be launched at all**, a human runs, once:
 
@@ -213,6 +222,70 @@ provider's agents only**. Requirements:
 
 Then carry the pagination guidance in agy's block.
 
+### R4 — the claude step counter (`bug-b1c130`)
+
+**Do this with R2, not after it.** Same function, and R2 makes this one louder.
+
+`supervisor.py:71-72` has two counting paths: `self.steps = max(self.steps,
+event.step + 1)` when the provider reports a step index, and `self.steps += 1`
+otherwise. agy maps one (`providers.yaml:174,179` →
+`step_update.step_index`), so its count is monotonic per turn. The claude block
+maps `assistant`, `user` and `system` to `as: step` with `fields: {}`, so
+`event.step` is always `null` and every streaming delta increments. Verified in
+`.multiagents/runs/ag-329af1/stream.jsonl`: every `step` event carries
+`"step": null`, and they arrive in bursts sharing a millisecond.
+
+Cost so far: `ag-329af1` killed at 121 steps after 16 tool calls, uncommitted
+work dropped; `ag-6f5a9c` reached 295 step events across 37 tool calls.
+
+**The open question the contract phase has to settle**, because it is not a
+mapping: claude's stream-json carries no step index to map. Counting distinct
+`message.id` values would give turn semantics, but `providers.yaml` has no way
+today to express "count distinct values of a field" — only "lift this path".
+So either the stream rules gain that, or the supervisor derives a turn boundary
+from something claude does emit. **Whichever it is, the answer belongs in
+`providers.yaml`, not in a `if provider == "claude"` in the supervisor.**
+
+**There is a live workaround to unwind.** `.multiagents/config/project.yaml`
+carries `max_steps: 600`, raised by hand to survive this; the shipped default is
+250. That file is gitignored, so no agent can see it — the person merging this
+has to revert it, and a run that still needs 600 afterwards means the fix did
+not work.
+
+### R5 — config staleness in the MCP server (`bug-2138e6`)
+
+The MCP server calls `load_config` once at startup and holds it for the life of
+the process; `multiagents run` reloads per command (`cli.py:72,204,474`). So an
+operator who edits `project.yaml`, verifies it through the CLI, and then spawns
+agents through MCP gets the old value with no warning.
+
+This is not hypothetical and it is not cheap: on 2026-09-22 an operator raised
+`max_steps` from 120 to 600 to work around R4 and lost two more runs to a
+ceiling that no longer existed on disk.
+
+The precedent for what to do is already in this codebase and is named in the
+ticket: `executor/docker.py:961-975` refuses a container whose mounts no longer
+match the config and says so, rather than running stale (that is also what
+produced R1's diagnosis). Either reload, or refuse and say which key went
+stale — but silence is the one option ruled out.
+
+### R6 — `wait_for_agents` and the paused queue (`bug-b864b8`)
+
+A pause recorded by an unrelated deferred task makes `wait_for_agents` return
+immediately with `paused: true` and **no `still_running` field at all**, while
+`check_agent` on a live agent in the same tree reports it running and making
+progress at the same timestamp.
+
+Two requirements:
+
+- a pause on the deferred queue does not mean the tree is idle; live agents are
+  still waited on;
+- `still_running` is reported whether or not a pause is in force. Omitting a
+  field is how a caller concludes there is nothing running.
+
+Filed 2026-09-17 and set aside then for budget. It is scheduled now because R1
+through R5 will have the orchestrator waiting on agents constantly.
+
 ### Not in this phase
 
 `F203` (four opencode agents fall back onto agy, which is the looping CLI, and
@@ -233,9 +306,19 @@ reduce them. These are robustness fixes.
 
 ---
 
-## Phase 1 — repair the tool, before using it
+## Phase 1 — repair the tool, before using it — **DONE**
 
-**This is the whole first phase and nothing else starts until it lands.**
+**Landed. Kept here because it records what was decided and why, and an agent
+that cannot tell finished work from planned work will redo it.**
+
+All seven tickets below read `fixed` in `list_tickets`, and two were spot-checked
+in the code rather than trusted: `--init` is at
+`src/multiagents/executor/docker.py:989`, and the `readonly_paths` corrections
+are at `src/multiagents/defaults/agents.yaml:426` (`harness: []`) and `:501`
+(`reporter: ["src/**", "tests/**"]`). The assertion at `tests/test_core.py:10592`
+that used to encode `bug-08f9b3` is gone.
+
+Phase 0 above is the current phase.
 
 The review filed **7 blocking tickets** against multiagents itself. They are not
 an upstream queue here — the user is the maintainer, and three of them actively
