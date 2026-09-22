@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -106,6 +108,98 @@ def _ere_literal(text: str) -> str:
     of as a side effect.
     """
     return text.translate(_ERE_ESCAPE_TABLE)
+
+
+def _is_ipv4_literal(text: str) -> bool:
+    """True when `text` is a dotted-decimal IPv4 address (four octets, 0–255)."""
+    try:
+        ipaddress.IPv4Address(text)
+        return True
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+
+
+def _is_ipv6_literal(text: str) -> bool:
+    """True when `text` is an IPv6 address, bare or bracket-wrapped."""
+    inner = text
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    try:
+        ipaddress.IPv6Address(inner)
+        return True
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+
+
+# A valid hostname label: starts and ends with an alnum, interior may contain
+# hyphens, 1–63 characters.  All-numeric labels are accepted so that IPv4
+# addresses (handled separately) are not rejected by the grammar check.
+_LABEL_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _validate_allowlist_entry(entry: str) -> str | None:
+    """Return a human-readable problem message, or ``None`` if `entry` is valid.
+
+    Checked in the order the test vocabulary requires — each earlier check
+    prevents a later, less-specific one from claiming the entry.  The contract
+    says ``write_proxy_config`` must NOT gain a raise; this function is called
+    from ``preflight()`` only.
+    """
+    # 1. Empty (includes whitespace-only after strip — but whitespace-only
+    #    strings with non-empty pre-strip text are caught by step 2 instead).
+    if not entry.strip():
+        if not entry:
+            return "empty allowlist entry"
+        # Whitespace-only: still empty after stripping.
+        return f"allowlist entry is blank (whitespace only: {entry!r})"
+
+    # 2. Leading/trailing whitespace on a non-empty entry.
+    if entry != entry.strip():
+        return (
+            f"allowlist entry {entry.strip()!r} has surrounding whitespace — "
+            f"did you mean {entry.strip()!r}?"
+        )
+
+    # 3. Leading or trailing dot.
+    if entry.startswith("."):
+        return f"allowlist entry {entry!r} has a leading dot"
+    if entry.endswith("."):
+        return f"allowlist entry {entry!r} has a trailing dot — remove the period"
+
+    # 4. IPv6 literal (bare or bracketed).  Must come before the port check so
+    #    that `::1` says "IPv6 address" rather than "looks like a port".
+    if _is_ipv6_literal(entry):
+        return (
+            f"allowlist entry {entry!r} is an IPv6 address, which tinyproxy's "
+            f"host filter cannot express — use the hostname instead"
+        )
+
+    # 5. URL with scheme.
+    if "://" in entry:
+        return (
+            f"allowlist entry {entry!r} looks like a URL — use the bare "
+            f"hostname without a scheme or path"
+        )
+
+    # 6. Valid IPv4 literal — accept it.
+    if _is_ipv4_literal(entry):
+        return None
+
+    # 7. Host:port shape.
+    if re.search(r":\d+$", entry):
+        return (
+            f"allowlist entry {entry!r} has a port suffix — tinyproxy matches "
+            f"the bare hostname, not a host:port pair"
+        )
+
+    # 8. Hostname grammar: split on dots, check each label.
+    labels = entry.split(".")
+    for label in labels:
+        if not _LABEL_RE.match(label):
+            return f"allowlist entry {entry!r} is not a valid hostname"
+
+    # All labels passed — valid.
+    return None
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
