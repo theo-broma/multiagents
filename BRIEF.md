@@ -727,6 +727,27 @@ Eleven agent worktrees from the review are still on disk with unmerged branches
 carries a REPORT.md amendment reverted by `bug-08f9b3`. **Check it before
 deleting anything** — the rest are spent, but that one holds work.
 
+**Nothing prunes the per-run provider state, and it grows without bound.**
+multiagents starts a fresh conversation for every agent run, and agy keeps each
+one as a directory under `antigravity-cli/brain/`. Measured 2026-09-22:
+
+- host: 262 MB over 142 conversations, one of them 174 MB on its own
+- container: 60 MB over 90 conversations, inside
+  `~/.multiagents/container-state/shared/agy/`, which is **our** directory
+- `~/.multiagents/container-state/` in total: 227 MB
+
+Three weeks, two projects. Nothing deletes any of it, and a run that loops —
+which is what R2 and R3 are about — writes the most.
+
+agy ships no pruning of its own; the `/cleanup` skill that looks like it does is
+a user-installed helper for the `/resume` menu (see R8d) and is not reachable
+from a headless run. So the container side is ours to handle: a retention rule
+on `container-state`, applied by age or by count, with the run's own
+`.multiagents/runs/<id>/` left alone — that is the evidence a ticket or a
+finding cites, and it is small.
+
+Low severity, stated so it is a decision and not a surprise when a disk fills.
+
 ---
 
 ## Where things are
