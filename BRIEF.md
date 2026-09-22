@@ -243,6 +243,41 @@ If it genuinely has no expiry, the honest result is `cannot verify`, not
 
 ---
 
+## Phase 4 — amending a filed bug report
+
+**Requested by the user on 2026-09-22.** Not a defect in what multiagents does;
+a capability it lacks.
+
+Today `submit_ticket` and `resolve_ticket` are the only things that can touch a
+ticket once a `bug-reporter` has filed it, and neither changes its content.
+When a filed ticket turns out to contain an error — a wrong figure, a claim
+that does not survive checking — there is no way to correct it in place.
+
+**Steering the `bug-reporter` does not do it.** Measured, twice, on
+2026-09-22: a steer asking for a correction produced a **second ticket**
+rather than an amended one. Five tickets existed for three defects until the
+duplicates were declined by hand, and declining leaves the wrong version in
+the record with a note pointing elsewhere. The two survivors were `bug-b1c130`
+and `bug-2138e6`; the discarded ones `bug-2a0af0` and `bug-087fee`.
+
+That matters because the orchestrator is the one reader who checks a ticket
+before it is published, and finding an error is the expected outcome of
+checking rather than an exception. A review step whose only remedy is "file it
+again" is not a review step.
+
+**What is wanted:** an orchestrator can revise a filed ticket's body, title,
+severity or proposed fix, keeping its id and its filing time, so that the
+version the user sends is the corrected one and the history shows it was
+corrected. Whether that is a new tool, an argument to `submit_ticket`, or a
+`bug-reporter` mode that targets an existing id is the contract's question,
+not this note's.
+
+**Where to look:** `submit_ticket`, `resolve_ticket` and `list_tickets` in
+`src/multiagents/server.py`, and whatever holds the ticket store underneath
+them.
+
+---
+
 ## What is NOT scheduled
 
 **54 findings remain `open`. That is honest: nobody has decided about them yet**
