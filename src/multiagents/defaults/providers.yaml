@@ -98,6 +98,14 @@ providers:
       why no profile here is flagless. Genuine least-privilege would need
       allow-rules in the CLI's own settings.json; until then, isolation comes
       from the worktree.
+    # Sent to the model itself (see P0-R3), unlike `notes:` above.
+    agent_guidance: >
+      Your `view_file` tool truncates long files. When its output ends with
+      "The above content does NOT show the entire file contents... call this
+      tool again to view those lines", that is not the end of the file — call
+      `view_file` again on the same `AbsolutePath` with `StartLine` set past
+      what you already saw (and `EndLine` if you want a bounded chunk).
+      Never treat a truncated read as the whole file.
     spawn:
       # --print-timeout is NOT optional. Without it agy stops a turn at its own
       # default of 5 minutes, prints "print timeout after 5m0s with turn in

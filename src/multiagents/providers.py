@@ -154,6 +154,9 @@ class Provider:
     auth: dict[str, Any] = field(default_factory=dict)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
+    # Sent to the model, verbatim, as its own prompt section — unlike `notes`,
+    # which is for whoever edits this file. See compose_prompt's use of it.
+    agent_guidance: str = ""
     # --- more than one account on the same CLI ---------------------------
     #
     # A second subscription is a second PROVIDER: same binary, same script,
@@ -197,6 +200,7 @@ class Provider:
             auth=data.get("auth", {}) or {},
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
+            agent_guidance=data.get("agent_guidance") or "",
             extends=data.get("extends", "") or "",
             # An instance with no family stated belongs to the one it extends,
             # and a provider that extends nothing is its own family of one.

@@ -699,6 +699,16 @@ class Runner:
             parts.append(self._bug_context())
         if instructions.strip():
             parts.append(instructions.strip() + "\n\n---\n")
+        # Keyed on the provider the run actually launched on (`node.provider`),
+        # not `spec.provider` — a run that fell back keeps its pinned spec but
+        # `node.provider` is updated to whatever it landed on (see `start`'s
+        # `chosen != spec.provider` branch), and that is whose tools and quirks
+        # this prompt needs to describe. `notes:` is deliberately not read here:
+        # it is for whoever edits providers.yaml, never for a model.
+        launched_on = self.providers.get(node.provider)
+        guidance = (launched_on.agent_guidance if launched_on else "").strip()
+        if guidance:
+            parts.append(guidance + "\n\n---\n")
         parts.append(f"## Task\n\n{task.strip()}\n")
         return "\n".join(parts)
 
