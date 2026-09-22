@@ -114,6 +114,17 @@ def _worktree_state(worktree: Path) -> str:
         return ""
     return hashlib.sha1(result.out.encode()).hexdigest()[:12]
 
+
+def _declares_turn(provider: Provider) -> bool:
+    """Does this provider's stream tag events with a model-turn id?
+
+    Read from the shape of its own rules, never from the provider's name —
+    the Supervisor's turn-based step counting is opt-in per config, not
+    per binary.
+    """
+    return any((rule.get("fields") or {}).get("turn")
+               for rule in provider.stream.get("rules", []) or [])
+
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
 # a file that mentions the marker must not park itself.
 NEED_DECISION = re.compile(r"NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
@@ -848,6 +859,7 @@ class Runner:
             raise RuntimeError("; ".join(problems))
 
         handle = await executor.start(argv, workdir, env)
+        loop_repeats = int(self.config.limits.get("doom_loop_repeats", 5))
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
             supervisor=Supervisor(
@@ -855,7 +867,9 @@ class Runner:
                 wall_timeout=timeout or spec.timeout,
                 max_steps=spec.max_steps or int(
                     self.config.limits.get("max_steps", 250)),
-                loop_repeats=int(self.config.limits.get("doom_loop_repeats", 5)),
+                loop_repeats=loop_repeats,
+                loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
+                declares_turn=_declares_turn(provider),
             ),
         )
         self.runs[node_id] = run
@@ -1651,28 +1665,42 @@ class Runner:
             )
 
     async def _watch_timers(self, run: Run) -> None:
-        """Detect the conditions no event will announce: silence and wall clock."""
+        """Detect the conditions no event will announce: silence and wall clock.
+
+        Runs for the whole life of the run — the caller cancels it, this loop
+        never returns on its own — because runaway_steps/timeout tripping once
+        must not stop silence (or a later timeout re-check) from still being
+        reported. One poll's failure is recorded as an event rather than
+        ending the loop, since that would silently stop watching the run for
+        good.
+        """
         assert run.supervisor is not None
         node = self.tree.get(run.node_id)
         progress_dir = (Path(node.worktree) if node and node.worktree
                         and gitops.is_repo(Path(node.worktree)) else None)
         while True:
             await asyncio.sleep(5)
-            # Only while the agent is quiet, and only if it has a tree of its
-            # own. The silence check needs a CURRENT reading to tell a long tool
-            # call from a stall, and `_consume` refreshes this on tool events,
-            # which is exactly what a silent agent is not producing. Threaded,
-            # because a blocking git call on this loop would stop the pipe from
-            # being drained — a deadlock, not a slowdown.
-            if (progress_dir is not None
-                    and run.supervisor.quiet_for() >= run.supervisor.silence_timeout):
-                run.supervisor.note_progress(
-                    await asyncio.to_thread(_worktree_state, progress_dir))
-            trip = run.supervisor.check_timers()
-            if trip:
-                self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
-                self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
-                return
+            try:
+                # Only while the agent is quiet, and only if it has a tree of
+                # its own. The silence check needs a CURRENT reading to tell a
+                # long tool call from a stall, and `_consume` refreshes this on
+                # tool events, which is exactly what a silent agent is not
+                # producing. Threaded, because a blocking git call on this loop
+                # would stop the pipe from being drained — a deadlock, not a
+                # slowdown.
+                if (progress_dir is not None
+                        and run.supervisor.quiet_for >= run.supervisor.silence_timeout):
+                    run.supervisor.note_progress(
+                        await asyncio.to_thread(_worktree_state, progress_dir))
+                trip = run.supervisor.check_timers()
+                if trip:
+                    self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
+                    self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.tree.emit(run.node_id, "watchdog_poll_error",
+                               detail=f"{type(exc).__name__}: {exc}")
 
     def _did_work(self, run: Run) -> bool:
         """Is there anything to show for this run besides its silence?"""

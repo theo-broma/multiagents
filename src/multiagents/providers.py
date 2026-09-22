@@ -104,6 +104,9 @@ class Event:
     cost: float = 0.0                    # dollars for this step, if reported
     step: int | None = None
     session_id: str = ""
+    # One model turn's id, when the provider's rules declare one (see
+    # `fields.turn` in providers.yaml). Empty when untagged.
+    turn: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     def loop_signature(self) -> str | None:
@@ -331,6 +334,7 @@ class Provider:
                     cost=cost,
                     step=step if isinstance(step, int) else None,
                     session_id=session_id,
+                    turn=str(extracted.get("turn") or ""),
                     raw=payload,
                 )
 

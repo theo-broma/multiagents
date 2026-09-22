@@ -251,6 +251,8 @@ limits:
   # requires the working tree to have stood still, so a higher bar costs little
   # and 3 was firing on ordinary iteration.
   doom_loop_repeats: 5
+  # Further repeats (one pair, for a two-step cycle) before doom_loop re-arms.
+  doom_loop_rearm: 5
   budget_tokens: 0          # 0 = unlimited; otherwise tree-wide ceiling
 
   # `start_agent(workdir=...)` puts an agent in a directory of its choosing
