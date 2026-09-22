@@ -137,6 +137,14 @@ the logs of real runs — and they are not independent chores: R2 and R4 are the
 same function, R4 is why R5 cost two runs, and R1/R2/R3 are one failure
 arriving in three steps. That is why they are one phase.
 
+**Two contracts, not one.** The advisor's judgement, taken: R1–R6 are repairs
+against evidence that already exists, R7–R8 are features whose shape is still
+being decided, and R8 alone reaches the runner, the config layer and the
+provider script contract. One contract spanning both would be negotiating a
+design while landing fixes. So **R1–R6 first, as one contract; R7–R8 second, as
+another.** Nothing in R7 or R8 is blocked by that order, and R1 has to land
+before either of them can be tested anyway.
+
 **Close each ticket with `resolve_ticket` when its fix merges.** A ticket whose
 fix landed and still reads `awaiting_user` gets refiled by the next review —
 which is exactly how `bug-49c1c1`, `bug-7c4b78`, `bug-2a0af0` and `bug-087fee`
