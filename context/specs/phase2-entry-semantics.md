@@ -133,3 +133,67 @@ in this phase already.
 R14 and R15 are done when a dotless entry matches exactly, every malformed form
 is refused with a message naming it, both real allowlists still load, and the
 suite is green apart from the inversions.
+
+---
+
+# Amendment — the seam for R15, before anyone builds against it
+
+R15 said a malformed entry "raises at configuration load". **That was the wrong
+seam**, and a researcher pass established why before the contract cost anyone a
+run. Corrected here; where the two disagree, this section wins.
+
+## Not `config.load()`
+
+`config.load()` (`src/multiagents/config.py:541`) is unmemoized and is called by
+**every** CLI entry point — `clean`, `agents`, `models`, and every command that
+runs under `executor.kind: local`. Raising there would fail `multiagents clean`
+because a *docker* proxy allowlist has a trailing dot, on a machine that may not
+run docker at all. That is a worse defect than the one R15 closes.
+
+## `DockerExecutor.preflight()` instead
+
+`preflight` (`src/multiagents/executor/docker.py:1054`) already exists for
+exactly this job and already checks configuration constraints — it is where
+`mount_docker_socket` is refused. It returns `list[str]` rather than raising,
+which is the right shape: the caller decides how loud to be, and the operator
+gets a message instead of a traceback.
+
+It is reached from two places, and they differ:
+
+- `multiagents run` → `_executor_problems` (`cli.py:637`, called at `cli.py:822`)
+  → prints each problem to stderr and exits **4**, cleanly.
+- `Runner.start_agent` (`runner.py:846`) → `RuntimeError("; ".join(problems))`.
+
+**So a malformed entry must appear as a problem string from `preflight()`**, one
+per offending entry, naming the entry and what is wrong with it. That satisfies
+"loudly, before anything starts" without turning an unrelated command into a
+traceback.
+
+## The gap the researcher found, which is now in scope
+
+**`multiagents docker up` does not call `preflight()` at all.** It goes straight
+to `ensure_running` (`cli.py:2194`). So today the command whose entire job *is*
+starting the environment is the one command that would not check it — and it is
+the command that writes the proxy config.
+
+Fix that too: `docker up` consults `preflight()` and refuses on problems, in the
+same `{"ok": False, "error": ...}` shape it already prints and exits 1 with
+(`cli.py:2195`). Without this, R15 is satisfied on paper and absent from the
+path that matters.
+
+## What this does not change
+
+- **Fail closed and fail loudly** still holds; only the mechanism moved from an
+  exception at load to a problem string at preflight.
+- `write_proxy_config` does **not** grow a raise. Preflight is the gate; a
+  traceback from deep inside config generation is what this amendment avoids.
+- R14 is untouched. It is behaviour of the generated pattern and has no seam
+  question.
+
+## One more thing the researcher settled
+
+There is **no schema validation anywhere** for `project.yaml` — confirmed, with
+the design note at `src/multiagents/monitor/settings.py:8-10` saying so
+deliberately. So do not look for an existing validation framework to hang this
+on, and do not introduce one. A focused check in `preflight` is the whole
+change.
