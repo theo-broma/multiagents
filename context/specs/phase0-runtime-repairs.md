@@ -286,6 +286,11 @@ new value; refusing would turn every edit into a forced `/mcp`.
 - **P0-R5.3** Agents already running keep the config they were started with; a
   reload affects only what happens after it.
   *Verified by:* test with a running (fake) agent across a reload.
+  *Amended 2026-09-23:* "the config they were started with" covers the run's
+  provider object, spec and Supervisor. End-of-run policy (`_finalize`,
+  cooldown lengths, `silent_success_steps`) follows the config current when the
+  run ends — that happens after the reload, and pinning it per run is not
+  required.
 - **P0-R5.4** A config that fails to load (invalid YAML, failed validation) is
   **not** swapped in: the previous config stays in force, and every tool call
   that would have used config reports the load error until the file is fixed.
