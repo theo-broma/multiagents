@@ -859,6 +859,21 @@ findings:
     severity: high
     status: open
     summary: '`consult()` never returns when its run is silently retried'
+  F171:
+    class: bug
+    context: context/review/C2-budget.md
+    evidence: reproduction
+    first_seen: 9e4b1a51bbe08108bc76a4c7ce1565eb92819bd3
+    history:
+    - by: auditor
+      note: filed in context/review/C2-budget.md
+      sha: 9e4b1a51bbe08108bc76a4c7ce1565eb92819bd3
+      status: open
+    severity: medium
+    status: open
+    summary: '`read_all`''s cooldown decoration lands on the shared cached `Budget`,
+      so the note accumulates on every cache hit and `severity` stays pinned at `critical`
+      after the cooldown has lapsed'
   F2:
     class: correctness
     context: context/review/C1-sandbox.md
