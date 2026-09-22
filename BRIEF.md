@@ -340,13 +340,44 @@ what the initializer proposes is the team for the **next** phase.
 
 ### R8 — the orchestrator and its own context window
 
-**Start from what the orchestrator cannot do.** `/compact` is a slash command a
-human types; no model calls it, and under `multiagents run --unattended` there
-is no human to type it. Claude Code also compacts on its own when the window
-fills, whether or not anyone planned for it. So the requirement is not "compact
-at the right moment" — the orchestrator does not own that moment. It is
-**never be in a state where a compaction loses something**, plus a nudge at the
-moments a human could usefully act.
+**Compaction can be triggered from outside the session. Verified on
+2026-09-22**, end to end, against `claude 2.1.280`:
+
+```
+claude -p "/compact" --resume <session_id> --output-format json
+```
+
+returns `subtype: success`, `num_turns: 0`, an empty `result` and the **same**
+`session_id` — the slash command is consumed by the CLI rather than sent to the
+model, so it costs no turn of its own. The session's transcript then carries:
+
+```json
+{"type": "system", "subtype": "compact_boundary",
+ "compactMetadata": {"trigger": "manual", "preTokens": 27729,
+                     "postTokens": 1607, "durationMs": 23771,
+                     "cumulativeDroppedTokens": 26122}}
+```
+
+`trigger: "manual"` is the same value the binary carries as
+`compactionRequestKind: "manual"`. A real compaction, on demand, 27.7k → 1.6k in
+24s, and the next `--resume` continues from the summary.
+
+**So the orchestrator does not do this — multiagents does, between turns.** A
+session cannot resume itself while it is running, and it does not have to:
+`--unattended` already spawns a turn, waits for it to end, and starts another
+(`driver.py:317-320`). The gap between two turns is where a compaction belongs —
+no re-entrancy, and the same place that already knows the session id.
+
+The second lever is `--autocompact <auto|tokens>` (documented in `claude
+--help`, accepts `auto` or 100k–1M), which sets where *automatic* compaction
+fires. That one is **one line in `providers.yaml`** and no Python at all: the
+claude block already has an `optional:` map turning a config key into a flag
+(`providers.yaml:66-67`, `max_budget_usd`). Adding `autocompact` there is the
+plugin seam working exactly as intended.
+
+The requirement is therefore both halves: **never be in a state where a
+compaction loses something**, and **compact deliberately, at a boundary we
+choose**, rather than being surprised by the automatic one.
 
 **This is the quota problem again, and the answer is already written.** When a
 provider window is about to close, `_wind_down` (`runner.py:318-340`) stops
@@ -396,13 +427,23 @@ in a file. Mid-task it is the opposite — the reasoning that has not been writt
 down yet is precisely what compaction drops first, and `transcripts.py:51-52`
 already records that tool results go first.
 
-So: at such a boundary, and only there, the orchestrator says plainly that this
-is a good moment to `/compact` and why. `mcp_overhead` already produces the
-signal (`server.py:1026`). It must **not** nag: once per boundary, never
-mid-task, and never as a reason to stop doing what was asked.
+So the driver compacts there, and only there: between turns, when the last turn
+ended at a closed boundary and context is over the threshold. Interactively it
+says what it did and what the figures were, the way `compactMetadata` already
+reports them. It must **not** nag, and it must never compact mid-task — a turn
+that ended with work still in the orchestrator's head and not on disk is the one
+turn where this is destructive, because compaction drops tool results first
+(`transcripts.py:51-52`).
 
-**None of this applies under `--unattended`**, where nobody is reading. There
-R8a is the only protection, which is why it is first.
+Requirement, stated because it is the part that can silently regress: the driver
+verifies the compaction landed by reading back the `compact_boundary` record it
+expects, and treats a missing one as a failure rather than as success. `preTokens`
+and `postTokens` make that check exact.
+
+**Under `--unattended` this matters most**, not least: nobody is there to notice
+a window filling, and the automatic compaction will fire mid-task at whatever
+moment it chooses. Deliberate compaction at a boundary is the whole difference
+between the two.
 
 ### Not in this phase
 
