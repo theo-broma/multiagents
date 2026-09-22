@@ -36,8 +36,14 @@ container runs the version that was current when it was created, and the
 resolved path pins that version into the declared mount list.
 
 A **versioned launcher** is a provider binary found on PATH that is a symlink
-whose resolved target lies inside a directory holding sibling version entries
-(`…/versions/2.1.280`). The executor must not know which provider this is.
+whose resolved target is a file in a directory other than the launcher's own
+(`~/.local/bin/claude` → `~/.local/share/claude/versions/2.1.280`). The
+directory is called the *versions directory* whatever its name, and it counts
+even when it holds a single entry. The executor must not know which provider
+this is. *(Amended 2026-09-22 after the group A tester asked: no sibling count,
+no name test.)* Out of scope: a target nested below a per-version directory
+(`versions/1.0.0/bin/x`); such a launcher keeps today's behaviour, and no test
+is written for it.
 
 - **P0-R1.1** The declared mount list is **stable across a CLI update**: computing
   it before and after the launcher symlink is retargeted from one version to
@@ -81,9 +87,12 @@ whose resolved target lies inside a directory holding sibling version entries
   provider names, scoped to lines added by this work (a test that fails if the
   count grows).
 
-**Left to the implementer:** how the exec-time resolution is done (resolve on
-the host per spawn and exec the absolute path; a symlink recreated inside the
-container; a wrapper). Whichever it is, it must satisfy R1.2 **and** R1.4.
+**Decided (amended 2026-09-22):** the executor resolves the launcher **on the
+host, at each spawn**, and the command it issues to the container names that
+resolved absolute path, which lies under the mounted versions directory. So
+P0-R1.2 is tested on the issued command. The launcher path itself stays mounted
+as today, which is what P0-R1.4 asks; the agent's own command does not go
+through it.
 
 ---
 
@@ -151,6 +160,8 @@ Trip reasons today: `doom_loop`, `runaway_steps`, `silence`, `timeout`.
   "Executing on" means the provider the run actually launched on after routing
   and fallback — an agent pinned to opencode that fell back to agy gets agy's
   guidance and not opencode's.
+  No heading is mandated; tests assert the text appears verbatim and in that
+  position.
   *Verified by:* `compose_prompt` test with two providers, only one declaring
   the key; and a routing test where fallback changes the provider.
 - **P0-R3.2** **Absent or empty key → the prompt is byte-for-byte what it is
@@ -296,7 +307,9 @@ Today `wait_for_any` returns immediately with `paused: true` and no
   *Verified by:* test with a paused queue and a running fake agent that finishes
   after a delay; the call returns that agent in `changed`.
 - **P0-R6.2** `still_running` is present in **every** result, paused or not,
-  and lists the watched agents still running (empty list when none).
+  and is a **list of agent id strings** of the watched agents still running
+  (empty list when none). Today it is ids on one path and objects on the
+  timeout path; both become ids. *(Amended 2026-09-22.)*
   *Verified by:* result-shape test over paused/unpaused × agents/no agents.
 - **P0-R6.3** When a pause is in force, the result also carries `paused: true`,
   `reason`, and `retry_after_seconds`, as today.
