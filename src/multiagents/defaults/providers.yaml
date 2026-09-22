@@ -337,10 +337,12 @@ providers:
           fields:
             name: "message.content[type=tool_use].name"
             args: "message.content[type=tool_use].input"
+            turn: "message.id"
         - match: {type: "assistant", "message.content[type=text].type": "text"}
           as: text
           fields:
             text: "message.content[type=text].text"
+            turn: "message.id"
         - match: {type: "result"}
           as: result
           fields:
@@ -357,7 +359,8 @@ providers:
         # deliberately-ignored one.
         - match: {type: "assistant"}
           as: step
-          fields: {}
+          fields:
+            turn: "message.id"
         - match: {type: "user"}
           as: step
           fields: {}

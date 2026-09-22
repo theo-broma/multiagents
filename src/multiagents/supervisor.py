@@ -40,6 +40,14 @@ class Supervisor:
     max_steps: int = 120
     loop_repeats: int = 5
     loop_window: int = 20
+    # Further identical repeats (or cycle pairs) before doom_loop re-arms.
+    # 0 means "use loop_repeats" — set in __post_init__, since a plain default
+    # of loop_repeats here would freeze at the class default rather than
+    # tracking whatever loop_repeats a caller actually passed.
+    loop_rearm: int = 0
+    # Whether this provider's stream rules tag events with a turn id. Read from
+    # providers.yaml by the caller and handed in — never decided here by name.
+    declares_turn: bool = False
 
     started: float = field(default_factory=time.monotonic)
     last_event: float = field(default_factory=time.monotonic)
@@ -58,21 +66,46 @@ class Supervisor:
     # whether the next event is a NEW call or the same one reported again.
     last_digest: str = ""
     last_step: int | None = None
-    tripped: Trip | None = None
+    # Distinct turn ids already counted as a step, so only the first sighting
+    # of each one moves the counter.
+    _seen_turns: set[str] = field(default_factory=set)
+    # runaway_steps and timeout are terminal: reported at most once per run.
+    # doom_loop and silence are not latched here — they re-arm on their own
+    # rules (see _check_loop and check_timers).
+    _runaway_reported: bool = False
+    _timeout_reported: bool = False
+    # True from the moment a silence trip is reported until the next real
+    # stream event arrives — a moving tree alone must not re-arm it.
+    _silence_pending: bool = False
 
     def __post_init__(self) -> None:
         self.signatures = deque(maxlen=self.loop_window)
+        if not self.loop_rearm:
+            self.loop_rearm = self.loop_repeats
 
     # ------------------------------------------------------------- ingestion --
 
     def observe(self, event: Event) -> Trip | None:
-        """Feed one event. Returns a Trip the first time a condition fires."""
+        """Feed one event. Returns a Trip whenever a condition fires."""
         self.last_event = time.monotonic()
+        # Any real stream event is proof of life: the next quiet spell gets a
+        # fresh look before it can trip silence again.
+        self._silence_pending = False
+        self.progress_when_last_quiet = None
+
         if event.step is not None:
             self.steps = max(self.steps, event.step + 1)
+        elif self.declares_turn:
+            # A step is one model turn, not one stream line. Untagged events —
+            # including anything before the provider's first turn — never
+            # count; only the first sighting of each turn id does.
+            if event.turn and event.turn not in self._seen_turns:
+                self._seen_turns.add(event.turn)
+                self.steps += 1
         elif event.kind == "step":
             self.steps += 1
 
+        trip: Trip | None = None
         signature = event.loop_signature()
         if signature:
             digest = hashlib.sha1(signature.encode()).hexdigest()[:12]
@@ -89,11 +122,12 @@ class Supervisor:
             if not repeat:
                 self.signatures.append((digest, self.current_progress))
                 trip = self._check_loop(event)
-                if trip:
-                    return self._trip(trip)
 
-        if self.steps > self.max_steps:
-            return self._trip(Trip("runaway_steps", f"{self.steps} steps exceeds max_steps={self.max_steps}"))
+        if trip:
+            return trip
+        if not self._runaway_reported and self.steps > self.max_steps:
+            self._runaway_reported = True
+            return Trip("runaway_steps", f"{self.steps} steps exceeds max_steps={self.max_steps}")
         return None
 
     def note_progress(self, state: str) -> None:
@@ -106,44 +140,76 @@ class Supervisor:
         """
         self.current_progress = state
 
-    def _stalled(self, window: list[tuple[str, str]]) -> bool:
-        """Did the working tree stand still across this window?
+    @staticmethod
+    def _suffix_run(recent: list[tuple[str, str]]) -> int:
+        """Length of the tail run of identical (digest, progress) pairs."""
+        last = recent[-1]
+        n = 0
+        for item in reversed(recent):
+            if item != last:
+                break
+            n += 1
+        return n
 
-        With no sampler wired the value is "" throughout, which reads as
-        stalled — so the detector behaves exactly as it did before, rather than
-        silently switching itself off where progress cannot be observed.
-        """
-        return len({progress for _, progress in window}) == 1
+    @staticmethod
+    def _cycle_suffix_run(recent: list[tuple[str, str]]) -> int:
+        """Length of the tail run alternating strictly between exactly two
+        digests, with the working tree uniformly still across it. Not
+        truncated to even length — a dangling half-pair at the tail is
+        reported as-is so the caller can tell an in-progress pair from a
+        completed one."""
+        n = len(recent)
+        if n < 2:
+            return 0
+        x_digest, progress = recent[-1]
+        y_digest, y_progress = recent[-2]
+        if x_digest == y_digest or y_progress != progress:
+            return 0
+        pattern = (x_digest, y_digest)
+        length = 0
+        i = n - 1
+        while i >= 0:
+            digest, prog = recent[i]
+            if prog != progress or digest != pattern[length % 2]:
+                break
+            length += 1
+            i -= 1
+        return length
 
     def _check_loop(self, event: Event) -> Trip | None:
         """Identical repeats, and simple alternating cycles.
 
-        Both now require the working tree to have stood still as well. That is
+        Both require the working tree to have stood still as well. That is
         the invariant that separates the two cases the signature alone cannot:
         an agent re-reading one file changes nothing on disk and is stuck; an
         agent editing and re-testing changes the tree every pass and is
         working, however identical its reported arguments look.
+
+        Re-arms rather than latching: recomputed fresh from `signatures` on
+        every call, so there is no separate streak counter to keep in sync. A
+        trip fires once at `loop_repeats`, and again every further
+        `loop_rearm` repeats — one pair at a time for a two-step cycle, since
+        that is the unit that actually repeated.
         """
         if len(self.signatures) < self.loop_repeats:
             return None
         recent = list(self.signatures)
 
-        tail = recent[-self.loop_repeats:]
-        if len({digest for digest, _ in tail}) == 1 and self._stalled(tail):
-            return Trip(
-                "doom_loop",
-                f"{event.name} called {self.loop_repeats}x with identical arguments "
-                f"and nothing changed on disk",
-            )
+        single_len = self._suffix_run(recent)
+        if single_len >= self.loop_repeats:
+            position = single_len - self.loop_repeats + 1
+            if (position - 1) % self.loop_rearm == 0:
+                return Trip(
+                    "doom_loop",
+                    f"{event.name} called {self.loop_repeats}x with identical arguments "
+                    f"and nothing changed on disk",
+                )
 
-        # A -> B -> A -> B ... repeated often enough to be a cycle, not a retry.
-        span = self.loop_repeats * 2
-        if len(recent) >= span:
-            window = recent[-span:]
-            digests = [digest for digest, _ in window]
-            if len(set(digests)) == 2 and digests[::2].count(digests[0]) == len(digests[::2]) \
-               and digests[1::2].count(digests[1]) == len(digests[1::2]) \
-               and self._stalled(window):
+        cycle_len = self._cycle_suffix_run(recent)
+        if cycle_len % 2 == 0 and cycle_len >= self.loop_repeats * 2:
+            pairs = cycle_len // 2
+            position = pairs - self.loop_repeats + 1
+            if (position - 1) % self.loop_rearm == 0:
                 return Trip("doom_loop",
                             f"two-step cycle repeated {self.loop_repeats}x with nothing "
                             f"changing on disk (last: {event.name})")
@@ -151,19 +217,18 @@ class Supervisor:
 
     # --------------------------------------------------------------- polling --
 
-    def quiet_for(self) -> float:
-        """Seconds since the last stream event. Lets the caller sample the
-        working tree only when silence is actually in question."""
-        return time.monotonic() - self.last_event
-
     def check_timers(self) -> Trip | None:
-        """Call periodically; detects conditions no event will announce."""
-        if self.tripped:
-            return None
+        """Call periodically; detects conditions no event will announce.
+
+        `runaway_steps` and `timeout` are terminal — reported at most once per
+        run. `silence` is per episode: it re-arms only once a real stream
+        event has arrived (see observe), never from tree movement alone.
+        """
         now = time.monotonic()
-        if now - self.started > self.wall_timeout:
-            return self._trip(Trip("timeout", f"exceeded {self.wall_timeout:.0f}s wall clock"))
-        if now - self.last_event > self.silence_timeout:
+        if not self._timeout_reported and now - self.started > self.wall_timeout:
+            self._timeout_reported = True
+            return Trip("timeout", f"exceeded {self.wall_timeout:.0f}s wall clock")
+        if not self._silence_pending and now - self.last_event > self.silence_timeout:
             # "Said nothing" is not "did nothing". A single long tool call —
             # a test suite, an install, a large edit — streams nothing while it
             # runs, and this fired on seven opencode implementers in one night
@@ -193,14 +258,9 @@ class Supervisor:
                 self.last_event = now              # it is working; start again
                 return None
             quiet = now - self.last_event
-            return self._trip(Trip("silence", f"no stream event for {quiet:.0f}s"))
+            self._silence_pending = True
+            return Trip("silence", f"no stream event for {quiet:.0f}s")
         return None
-
-    def _trip(self, trip: Trip) -> Trip | None:
-        if self.tripped:
-            return None                  # report each run's first trip only
-        self.tripped = trip
-        return trip
 
     # ---------------------------------------------------------------- status --
 
