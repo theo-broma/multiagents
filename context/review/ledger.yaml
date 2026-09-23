@@ -224,8 +224,13 @@ findings:
       note: filed in context/review/C2-seam.md
       sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
       status: open
+    - by: orchestrator
+      note: Fixed in d4ae4ec (run_action decodes with errors="replace"); the characterization
+        pin was inverted in 137f37f to assert the fix.
+      sha: 230e6febaa82274c9caffe21252a368d97c4fea9
+      status: fixed
     severity: high
-    status: open
+    status: fixed
     summary: '`run_action` raises `UnicodeDecodeError` on non-UTF-8 script output,
       contradicting its own "never raises" contract'
   F111:
@@ -238,8 +243,14 @@ findings:
       note: filed in context/review/C2-seam.md
       sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
       status: open
+    - by: orchestrator
+      note: Fixed in d4ae4ec (run_action starts a new session and kills the process
+        group on timeout); the pin was inverted in 137f37f to assert the grandchild
+        is killed.
+      sha: 230e6febaa82274c9caffe21252a368d97c4fea9
+      status: fixed
     severity: medium
-    status: open
+    status: fixed
     summary: a script's background children outlive `run_action`'s timeout
   F112:
     class: security
