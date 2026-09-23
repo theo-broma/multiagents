@@ -425,6 +425,33 @@ recorded in BRIEF under "Awaiting the user".
 
 ---
 
+### Amendments, 2026-09-23, from the tester's read (ag-48f51a)
+
+- **P0-R8a.2, decided:** the reading uses the file named by `session_id` and
+  nothing else. If that file does not exist the result is `None`; it never
+  falls back to the newest transcript, which could be another role's session
+  (`run` and `init-agent` share a project directory).
+- **P0-R8a.8 — where the server's reading comes from.** The provider is the
+  one of the launched role's roster entry (the role named by
+  `MULTIAGENTS_ROLE`, as `driver._launched_spec` resolves it), and the
+  directory is the project root. Not the process cwd, which an agent can
+  change.
+  *Verified by:* a test where the process cwd differs from the project root.
+- **P0-R8a.5, extended:** the `context` block is present in every
+  `budget_status` response; for a server that is not a launched role
+  (R8a.6), it is `known: false, tokens: null`.
+- **P0-R8c.1, clarified:** "a turn run by `_supervise`" includes the headless
+  fallback `_run_supervised` enters when the terminal is lost; once the
+  terminal is gone the run is unattended. R8c.5 is about the attached,
+  interactive part only.
+- **Order within a turn:** the compaction decision is made after every turn
+  that qualifies, *before* the loop decides whether to stop (idle turns, the
+  turn limit). So the last turn of a run can compact, and the second of two
+  idle turns compacts before the run stops.
+- **The compact action's cwd** is the project root, whatever mechanism carries
+  it there.
+- **Deferred tasks** block compaction whether or not they are already due.
+
 ## Silences, answered
 
 - **Existing data.** A project.yaml without a `team:` line is R7.7; a project
