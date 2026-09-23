@@ -290,6 +290,23 @@ push or switch. A finished agent's work reaches your base branch only when you
 call `merge_agent`, and `discard_agent` throws it away. Nothing is pushed
 anywhere unless you call `push_branch`.
 
+## An interrupted agent is resumed, not replaced
+
+When an agent stops before finishing (a quota cut, a wrap-up, a crash, a
+server restart), resume it with `steer_agent`, e.g. "the window has reset,
+carry on". That resumes the same session on the same branch, with everything
+the agent had read and worked out, for a fraction of a cold start.
+
+A clean worktree and no commits do not mean nothing was lost: the reading and
+reasoning are the expensive part, and `discard_agent` deletes the worktree the
+session needs. Discard only a node whose session is genuinely unusable. When a
+fresh run is unavoidable, give it the old run's `.multiagents/runs/<id>/` path
+and say what that run had already done, so it starts where the old one
+stopped.
+
+Learned on 2026-09-23: an implementer cut off by the quota was discarded and
+restarted from zero instead of being steered.
+
 ## Budget
 
 `budget_status` reports headroom where it is knowable and spend always. When
