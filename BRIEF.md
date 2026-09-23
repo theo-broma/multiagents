@@ -1164,3 +1164,32 @@ Low severity, stated so it is a decision and not a surprise when a disk fills.
 No `context/specs/`. Requirements are expressed as tests, as findings, and as
 `docs/open-questions.md`. The interface contract for each phase is the
 orchestrator's to write.
+
+## Progress, 2026-09-23 ~20:05 (handoff)
+
+Order unchanged (items 1–7 of the ~17:30 handoff). Tickets are fixed here,
+not sent upstream.
+
+- **Item 1, bug-2cebea:** contract `context/specs/stuck-lifecycle.md`
+  (SL-R1–R7, commits bd6c903 and 1285b22). Tests `tests/test_stuck_lifecycle.py`
+  are merged (42cc404): 31 tests, 22 red. Implementer **ag-698a01** is running
+  (the first attempt, ag-3b4d7a, died at the claude quota with nothing done and
+  was discarded). Next: adversary (the status machine), then reviewer, then
+  merge, then `resolve_ticket(bug-2cebea, fixed)`.
+- **Item 2, test isolation:** tester **ag-d88a82** holds 47602d9 (an autouse
+  conftest fixture that clears MULTIAGENTS_*/CLAUDE_*). It was steered to
+  verify both ways. Merge once the counts match.
+  Note: the 72 failures in `test_phase2_entry_semantics.py` are the paused
+  phase 2, red by design, not a regression.
+- **Item 3, tooling defect 6:** root cause found (ag-4faa57). Claude subagents
+  are spawned with `--strict-mcp-config` and no config, and opencode subagents
+  get no server either, so no claude agent with can_spawn has `consult`.
+  Contract `context/specs/subagent-mcp.md` (SM-R1–R5, 3554520). Next: tester,
+  then **implementer-deep** (container: no `uv` inside; see the spec's facts),
+  then a live check by the orchestrator.
+- **Item 5, bug-c050b0:** contract `context/specs/burn-rate-baseline.md`
+  (BR-R1–R4, 37ace75). Next: tester, then implementer-quick or implementer.
+- Researcher experiment: ag-4faa57 is the first run on the new brief (353k
+  uncached, 1.76M cache reads, 195 s, a correct answer). See memory.
+- Budget at 20:00: the claude session window has reset, weekly is at 69 %.
+  opencode is at its monthly cap until Oct 05. agy is available.
