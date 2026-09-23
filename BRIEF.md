@@ -162,6 +162,45 @@ run is hours old), so this costs nothing today. It is a manual step because
 recreating a container kills whatever is inside it, and that is not a decision
 an agent gets to make.
 
+### Status — contract A (R1–R6) DONE, 2026-09-23
+
+Contract: `context/specs/phase0-runtime-repairs.md` (ids `P0-R1.1`…`P0-R6.6`,
+with dated amendments from the testers, the adversary and the reviewer).
+All merged on `refactor/split-consume`; verified live after a container
+recreate and an MCP reconnect. Tickets `bug-b864b8`, `bug-b1c130`, `bug-2138e6`
+resolved `fixed`; findings F200–F202 `fixed`. The local `max_steps: 600`
+workaround is removed. Full suite: 1179 passed, 73 failed = 72 in
+`test_phase2_entry_semantics.py` (Phase 2 R14/R15, paused) + 1
+environment-dependent `test_core` test that already failed before Phase 0.
+Mutation checks: 12 of 12 caught.
+
+Found on the way: the watchdog's timer loop had been dying on its first poll
+(a `quiet_for` method/property collision), so no `timeout` or `silence` trip
+had ever been reported. Fixed under P0-R2.9.
+
+**Open follow-ups, small, not yet scheduled** — decide before or alongside
+contract B:
+
+1. **agy guidance may be too weak.** In one run (`ag-eafe1e`)
+   gemini-3.8-flash-medium had the `agent_guidance` in its prompt and still
+   re-read one file head 5×. The seam works; the content may need to say
+   "read ranges with the shell". One run is a hint, not evidence.
+2. **`stuck` is sticky.** Once set it stays even when the agent resumes normal
+   work, and `wait_for_agents` then returns immediately for that agent, so it
+   can no longer be waited on. Contract A said when to *report*, never when
+   to *clear*.
+3. **claude 2.1.280 emits `tool_progress` heartbeats** that no stream rule
+   classifies (they land as `raw`). One rule in `providers.yaml`.
+4. **The local `doom_loop_repeats: 3`** (gitignored project config) is stricter
+   than the shipped 5 and trips on agy's `manage_task` updates. The user's call.
+5. **Tooling:** an `implementer-deep` run reported having no `consult` tool to
+   reach `dev-advisor`, contrary to the orchestrator protocol. Needs a ticket.
+6. **Phase 3 leftovers already on disk:** branch `agents/tester/cf02a1` holds
+   R19/R20 tests (25 red), produced when a deferred task restarted itself;
+   unmerged because Phase 3 is paused.
+
+**Next: contract B (R7, R8).**
+
 ### R1 — the versioned mount (`F200`)
 
 `src/multiagents/executor/docker.py:340-352` mounts both a provider's launcher
