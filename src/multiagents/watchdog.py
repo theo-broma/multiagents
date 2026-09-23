@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,10 @@ def transcript_source(provider: Any, cwd: Path) -> tuple[Path, str] | None:
     directory = spec.get("dir")
     if not directory:
         return None
-    slug = str(cwd).replace("/", "-").replace(".", "-").replace("_", "-")
+    # Every character outside [A-Za-z0-9] becomes '-', not only '/', '.' and
+    # '_': a project path with a space, or any other punctuation, used to
+    # slug to a directory the CLI never wrote to.
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
     return Path(directory.format(slug=slug)).expanduser(), spec.get("glob", "*")
 
 
