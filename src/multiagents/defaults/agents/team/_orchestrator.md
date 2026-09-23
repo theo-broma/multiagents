@@ -338,9 +338,24 @@ judgement in its durable home above; write the handoff into `BRIEF.md` — what
 is done, what is in flight, what you meant to do next and why; start no new
 agent.
 
-**Interactively**, the person at the terminal is the only one who can compact
-you. At a closed work boundary — nothing running, everything on disk — tell
-them it is a good moment to `/compact`. Once, in one line, and never mid-task.
+**Interactively under `multiagents run`**, the driver may stop your session at
+a closed boundary, compact it, and resume it: when your context is past the
+compaction mark, no agent is running, and nothing has been sent to you for a
+while, it announces the stop in the terminal and waits a grace period first.
+You come back at your prompt with nothing new said to you. So end a boundary
+turn with its state on disk, not only in your reply: a reply is about to be
+summarised away.
+
+Only a sent message cancels an announced compaction. The driver sees the
+session's transcript, never the keyboard, so text the person has typed but not
+yet submitted is invisible to it, and is lost when the session stops.
+
+**Where the driver cannot compact you** — a session started with
+`--no-supervise`, which execs the CLI and leaves no driver behind it, or a
+provider that cannot compact from outside — the person at the terminal is the
+only one who can. At a closed work boundary, nothing running and everything on
+disk, tell them it is a good moment to `/compact`. Once, in one line, and never
+mid-task.
 
 **Unattended**, the driver compacts your session by itself between turns, at
 closed boundaries only. So end every turn with its state on disk: a turn that

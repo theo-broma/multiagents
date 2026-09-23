@@ -188,6 +188,7 @@ compact)
     # session, a third-party defect rather than ours. Exits 64 without
     # starting the CLI; the day the HTTP route is wired, nothing in Python
     # changes.
+    # The same answer in check mode (MULTIAGENTS_COMPACT_CHECK=1).
     exit 64
     ;;
 *)  echo "usage: $0 check|login|budget|usage|prepare|launch|compact" >&2; exit 64 ;;

@@ -44,8 +44,10 @@ because shell was the only language the contract accepted.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -178,23 +180,59 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
 
     Never raises: a missing script, a timeout or an OS error all come back as a
     non-zero code with the reason in stderr, because every caller of this is
-    reporting status rather than doing work.
+    reporting status rather than doing work. Output that is not UTF-8 is
+    decoded with replacement rather than raising: a CLI error that echoes a
+    binary path is still an answer.
+
+    The script runs in its own process group, and a timeout kills the GROUP.
+    A shell script's real work is usually a child — a `compact` that runs the
+    CLI to do it — and killing only the shell left that child working on the
+    session after the caller had reported the attempt over and moved on.
+    stdin is closed: a captured action is non-interactive, and one run beside
+    an attached CLI must not read the keys meant for it.
     """
     script = resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return 127, "", f"no script for provider {provider_name!r}"
     try:
-        result = subprocess.run(
+        child = subprocess.Popen(
             [*script_argv(script), action],
-            capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, start_new_session=True,
             env=build_env(provider_name, provider, executor, extra_env),
             cwd=cwd,
         )
-    except subprocess.TimeoutExpired as exc:
-        return 124, "", f"{type(exc).__name__}: {exc}"
     except OSError as exc:
         return 124, "", why_it_would_not_run(script, exc)
-    return result.returncode, result.stdout, result.stderr
+    try:
+        out, err = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(child)
+        return 124, "", f"{type(exc).__name__}: {exc}"
+    return child.returncode, _text(out), _text(err)
+
+
+def _text(data: bytes | None) -> str:
+    """Bytes as `text=True` would have given them, minus the ways it raises."""
+    text = (data or b"").decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _kill_group(child: subprocess.Popen) -> None:
+    """Kill a timed-out action and everything it started, and reap it."""
+    with contextlib.suppress(OSError):
+        os.killpg(child.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        child.kill()
+    # Bounded: a grandchild that left the group can still hold the pipes open.
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+        child.communicate(timeout=5)
+    for stream in (child.stdout, child.stderr):
+        with contextlib.suppress(OSError):
+            if stream is not None:
+                stream.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=5)
 
 
 def exec_action(provider_name: str, provider: Any, executor: Any, action: str,

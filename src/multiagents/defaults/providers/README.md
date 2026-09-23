@@ -75,6 +75,15 @@ read JSON.
                             exit 64 = this provider cannot compact from outside
                             exit *  = attempted and failed; reason on stderr
 
+                            With MULTIAGENTS_COMPACT_CHECK=1 it is a probe: it
+                            compacts nothing and does not start the CLI.
+                            exit 0  = a real compact could succeed now
+                            exit 64 = this provider cannot compact from outside
+                            exit *  = not now (e.g. no session id, no transcript)
+                            The interactive driver asks this before it stops a
+                            live session to compact it. Any other value of the
+                            variable is a real compaction.
+
 ## Environment provided
 
     MULTIAGENTS_PROVIDER          provider name

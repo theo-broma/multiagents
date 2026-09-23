@@ -434,6 +434,24 @@ def _last_reading(handle, start: int, end: int) -> int | None:
     return None
 
 
+def session_transcript(provider: Any, cwd: Path, session_id: str) -> Path | None:
+    """The file the provider declares for this session in `cwd`, or None.
+
+    None when there is no session id or the provider declares no transcript;
+    the file itself may not exist yet.
+    """
+    from .watchdog import transcript_source
+
+    if not session_id:
+        return None
+    source = transcript_source(provider, Path(cwd))
+    if source is None:
+        return None
+    directory, pattern = source
+    name = pattern.replace("*", session_id, 1) if "*" in pattern else session_id
+    return directory / name
+
+
 def session_context(provider: Any, cwd: Path, session_id: str) -> int | None:
     """Tokens the most recent request of this session carried, or None.
 
@@ -447,16 +465,9 @@ def session_context(provider: Any, cwd: Path, session_id: str) -> int | None:
     Cheap to call on every tool call: an unchanged file is not opened, and one
     that grew has only its new tail read.
     """
-    from .watchdog import transcript_source
-
-    if not session_id:
+    path = session_transcript(provider, cwd, session_id)
+    if path is None:
         return None
-    source = transcript_source(provider, Path(cwd))
-    if source is None:
-        return None
-    directory, pattern = source
-    name = pattern.replace("*", session_id, 1) if "*" in pattern else session_id
-    path = directory / name
     key = str(path)
     try:
         st = path.stat()
