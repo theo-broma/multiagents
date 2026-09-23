@@ -18,7 +18,7 @@ Work groups, touching disjoint files:
 |---|---|---|
 | E | P0-R7 | `cli.py` (`cmd_init_agent`, a new `_set_team`, the selector, the `init-agent` parser), `defaults/agents/team/_initializer.md` |
 | F | P0-R8a, P0-R8b | `server.py` / `runner.py` (the notice and the reading), `defaults/project.yaml` (`limits`), `defaults/agents/team/_orchestrator.md` |
-| G | P0-R8c, P0-R8d, P0-R8e | `driver.py` (`_supervise`), `defaults/providers/*.sh`, `defaults/providers/README.md`, `defaults/providers.yaml`, `providers.py` only if R8e needs it |
+| G | P0-R8c, P0-R8d, P0-R8e, P0-R8f | `driver.py` (`_supervise`), `defaults/providers/*.sh`, `defaults/providers/README.md`, `defaults/providers.yaml`, `providers.py` only if R8e needs it |
 
 F and G share the context reading (P0-R8a.2). F owns it; G calls it. Build F
 before G, or build G against the signature below.
@@ -401,6 +401,105 @@ cannot be verified end to end now. `opencode.sh compact` exits 64 with a
 comment naming the route and the reason it is not wired, so the day it is
 wired, nothing in Python changes. Recorded as a deferred item in BRIEF.
 *Verified by:* a test asserting exit 64 without starting the CLI.
+
+### P0-R8f — interactive compaction: stop, compact, resume (added 2026-09-23, user's request)
+
+The user asked for compaction between turns in interactive mode too. A live
+interactive CLI holds its conversation in memory, so compacting its session
+from outside while it runs would fork the transcript. Instead the supervised
+interactive path ends the CLI at a closed boundary, compacts, and resumes the
+same session. It reuses what `_run_supervised` already does for a usage limit:
+a `stalled` poll, an announced grace period, a terminate, a relaunch with
+`--resume`. **This amends P0-R8c.5:** the attached path now compacts, but only
+through this mechanism. The exec path (no supervising parent) never does.
+
+**P0-R8f.1 — the probe: can this provider compact, before anything is stopped.**
+The `compact` action gains a check mode. With `MULTIAGENTS_COMPACT_CHECK=1` in
+its environment, a script exits `0` if a real `compact` call could succeed now
+(for claude: the session id is set and its transcript exists), exits `64` if
+the provider cannot compact, and exits anything else for "not now". It compacts
+nothing, and it does not start the provider CLI. `agy.sh` and `opencode.sh`
+keep exiting 64 unconditionally. The README documents the check mode.
+*Verified by:* script tests. Claude with a transcript exits 0, and with no
+session id or no transcript exits non-zero and not 64. A fake CLI records that
+it was never run. agy and opencode exit 64.
+
+**P0-R8f.2 — when it is proposed.** While the attached CLI runs,
+`_run_supervised` schedules a compaction only if all of these hold:
+1. `compact_at_tokens` is not 0, and the reading (R8a.2) for this role's
+   session is not `None` and is at or above it;
+2. the tree is idle, as in R8c.1.3;
+3. the session is at rest: the session's transcript file has not changed
+   (same mtime and size) for at least `limits.compact_idle_seconds`
+   (default `60`, added to `defaults/project.yaml`). That means the model
+   has finished its turn and nothing has been submitted since;
+4. no usage-limit warning is pending (the limit path wins);
+5. the probe (R8f.1) exited 0;
+6. this driver run has not already disabled it (R8f.5).
+*Verified by:* table tests over each condition on `_run_supervised`, with a
+fake launch script (a long-sleeping child), a fixture transcript, and time
+under the test's control. Each asserts the child is or is not terminated.
+
+**P0-R8f.3 — the announcement and the grace period.** When the conditions
+first hold, the driver prints one line and emits `compact_scheduled` with
+`tokens`:
+
+`compacting this session in 30s (<tokens> tokens, nothing running) — type anything to keep it`
+
+The 30 comes from `limits.compact_grace_seconds` (default `30`, added to
+`defaults/project.yaml`). If the transcript changes during the grace period
+(the user submitted something, or the model is working), the compaction is
+cancelled. The driver then prints one line, emits `compact_cancelled`, and
+does not propose again until the transcript has changed and then come back to
+rest (R8f.2.3). Text typed but not yet submitted cannot be seen; the README
+of the driver behaviour and the orchestrator's brief (R8b) say so.
+*Verified by:* a test where the transcript is appended during the grace
+period, asserting no terminate and one `compact_cancelled`. A test where it
+stays unchanged asserts the terminate happens no earlier than the grace
+period.
+
+**P0-R8f.4 — stop, compact, resume.** When the grace period passes untouched,
+the driver:
+1. terminates the CLI the way the limit path does;
+2. restores the terminal;
+3. runs the `compact` action exactly as in R8c.2 (session id, project root,
+   `compact_timeout_seconds`);
+4. relaunches the same session, attached, with `MULTIAGENTS_RESUME=1` and
+   **no** resume prompt. The orchestrator was idle at its prompt and comes
+   back idle at its prompt; nothing is sent to the model.
+It prints `compacted    <figures>` before relaunching and emits `compacted`
+as in R8c.3. This stop is not a crash, not a deliberate exit and not a
+restart attempt: it does not end the driver, does not consume
+`restart_attempts`, and does not go through the headless fallback.
+*Verified by:* a test asserting the order terminate → compact → relaunch,
+the relaunch environment (resume on, no prompt), that the driver keeps
+running afterwards, and that `restart_attempts` is untouched.
+
+**P0-R8f.5 — failure never loses the session, and never loops.** If the
+`compact` action exits non-zero after the CLI was stopped, the driver still
+relaunches the session with resume on, prints the failure line, emits
+`compact_failed` (or `compact_unsupported` for 64), and disables interactive
+compaction for the rest of this driver run. A session is stopped for
+compaction at most once per crossing of the threshold: after a success it is
+not proposed again until the reading has fallen below `compact_at_tokens` and
+risen above it again.
+*Verified by:* a test with a compact action exiting 1 asserting a relaunch,
+the event, and no second terminate within the same run.
+
+**P0-R8f.6 — the exec path and the headless path are unchanged.** The exec
+handover (`supervise=False`) never compacts. The headless `_supervise` loop
+keeps R8c; it does not use the probe or the grace period.
+*Verified by:* the existing R8c tests stay green, and a test on the exec
+path asserts no probe is run.
+
+**P0-R8f.7 — the orchestrator knows.** The `## Your own context window`
+section of `_orchestrator.md` (R8b.1) says that, under `multiagents run`, the
+driver may stop and resume the session at a closed boundary after announcing
+it, and that the orchestrator should therefore end a boundary turn with its
+state on disk rather than in its reply. It no longer tells the orchestrator to
+ask the user for `/compact` when that mechanism is active, only when it is not
+(exec path, or a provider that cannot compact).
+*Verified by:* a test on the composed prompt for the new sentence.
 
 ### P0-R8e — the automatic threshold, through the plugin seam
 
