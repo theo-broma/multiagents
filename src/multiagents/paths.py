@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -43,6 +44,34 @@ def state_root() -> Path:
     if env:
         return Path(env).expanduser()
     return Path.home() / ".multiagents"
+
+
+def server_command() -> list[str]:
+    """How a spawned agent's CLI starts the multiagents MCP server (SM-R1).
+
+    This interpreter, by its own path, rather than `uv run` as the
+    orchestrator's registration does: `uv` is not in the docker executor's
+    container, and a CLI there starts the server there. The interpreter is the
+    one already running multiagents, so the server is the same code as the
+    runner that spawned the agent. Not resolved: a virtualenv is found through
+    the path of its own `bin/python`, and a resolved one loses it.
+    """
+    return [sys.executable or "python3", "-m", "multiagents.server"]
+
+
+def server_install_paths() -> list[Path]:
+    """What `server_command` needs to be reachable at the same path to run.
+
+    The environment it runs in, the package it imports, and the interpreter
+    behind a virtualenv — unless that is the system's own, which a container
+    built on the host's distribution already has at the same path.
+    """
+    package_root = Path(__file__).resolve().parents[1]
+    out = [Path(sys.prefix), package_root]
+    base = Path(sys.base_prefix)
+    if base != Path(sys.prefix) and not str(base).startswith(("/usr", "/bin", "/lib")):
+        out.append(base)
+    return out
 
 
 def shipped_defaults_dir() -> Path:

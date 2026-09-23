@@ -42,6 +42,22 @@ providers:
         readonly: ["--auto"]
       optional:
         variant: ["--variant", "{variant}"]
+    # The multiagents server for an agent with spawn rights (see the claude
+    # block for the placeholders). OPENCODE_CONFIG names a file layered over
+    # the user's own config, which is how `prepare` gives the orchestrator the
+    # server too — the user's opencode.json is never touched.
+    mcp:
+      file: opencode.json
+      config:
+        $schema: "https://opencode.ai/config.json"
+        mcp:
+          multiagents:
+            type: local
+            enabled: true
+            command: "{mcp_argv}"
+            environment: "{mcp_env}"
+      env:
+        OPENCODE_CONFIG: "{mcp_config}"
     # opencode reports PER-STEP deltas: each step_finish carries that step's
     # tokens and its own dollar cost, so they must be summed. This is the same
     # figure the web console's usage page shows.
@@ -130,6 +146,25 @@ providers:
         readonly: ["--sandbox", "--dangerously-skip-permissions"]
       optional:
         effort: ["--effort", "{effort}"]
+    # The multiagents server for an agent with spawn rights (see the claude
+    # block for the placeholders). agy has no flag or variable naming an MCP
+    # config: it reads ~/.gemini/config/mcp_config.json and nothing else
+    # (checked 2026-09-23 against `agy --help` and `agy mcp add` under a
+    # scratch HOME). So the file goes in the agent's private HOME, which is
+    # this launch's own; the linked `.gemini/config` is replaced there by a
+    # directory of links so the write cannot reach the user's copy. `merge`
+    # keeps the servers the user registered, so the agent loses none of them.
+    # Under `home_policy: shared` there is no private HOME to put it in, and
+    # the run records the server as unavailable instead.
+    mcp:
+      home_file: .gemini/config/mcp_config.json
+      merge: true
+      config:
+        mcpServers:
+          multiagents:
+            command: "{mcp_command}"
+            args: "{mcp_args}"
+            env: "{mcp_env}"
     # agy reports RUNNING TOTALS on every step, so they must be taken at their
     # maximum rather than added. It reports no cost at all.
     # Text the CLI prints when it cut the turn short ITSELF. Matched against
@@ -277,6 +312,35 @@ providers:
       optional:
         max_budget_usd: ["--max-budget-usd", "{max_budget_usd}"]
         autocompact: ["--autocompact", "{autocompact}"]
+    # How an agent with spawn rights is handed the multiagents MCP server
+    # (SM-R1); one without them never is (SM-R2). Placeholders are whole
+    # values, filled in per spawn: {mcp_command} and {mcp_args} (or both as
+    # one list, {mcp_argv}), {mcp_env} — the agent's own identity, so every
+    # call is attributed to it — and {mcp_config}, the path `config` is
+    # written to. `file` puts that under the run's own directory; `home_file`
+    # puts it in the agent's private HOME instead, for a CLI that reads its
+    # servers from nowhere else. The user's own configuration is never written.
+    #
+    # --strict-mcp-config stays in `spawn.args`, so the agent loads this one
+    # server and none of the user's. Appended after every other flag, because
+    # --mcp-config takes a variable number of values.
+    mcp:
+      file: mcp.json
+      config:
+        mcpServers:
+          multiagents:
+            type: stdio
+            command: "{mcp_command}"
+            args: "{mcp_args}"
+            env: "{mcp_env}"
+      args: ["--mcp-config", "{mcp_config}"]
+      # SM-R5: the init event names every server and whether it started. A
+      # server that failed does not stop the CLI; it is recorded, so a consult
+      # that never happened has a visible reason.
+      unavailable:
+        match: {type: "system", subtype: "init"}
+        status: "mcp_servers[name=multiagents].status"
+        values: ["failed", "needs-auth"]
     # No `claude models` command exists, so the list is static. Keep it short:
     # these are aliases the CLI resolves, so they do not go stale on a release.
     models:

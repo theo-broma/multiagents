@@ -9,6 +9,7 @@ makes ``executor.kind: docker`` a one-line switch later.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 from abc import ABC, abstractmethod
@@ -128,6 +129,10 @@ class Executor(ABC):
     def preflight(self) -> list[str]:
         """Problems that would make every run fail. Empty means ready."""
         return []
+
+    def agent_env(self) -> dict[str, str]:
+        """Environment every agent started here carries about where it runs."""
+        return {}
 
 
 # --------------------------------------------------------------------------
@@ -255,3 +260,35 @@ def prepare_home(home: Path, links: list[str], policy: str = "per-agent",
             "[advice]\n\tdetachedHead = false\n"
         )
     return home
+
+
+def private_file(home: Path, relative: str) -> Path:
+    """``home / relative``, made safe to write without reaching the real home.
+
+    A per-agent HOME links whole directories of the user's CLI state into
+    place, so writing a file beneath one of them writes the user's own copy.
+    Every linked directory on the way down is therefore replaced by a real
+    directory holding one link per entry of what it pointed at: the CLI still
+    finds everything else it had, and the file itself is this agent's alone.
+    Only the link is removed, never anything it pointed at.
+    """
+    target = home / relative
+    cursor = home
+    for part in Path(relative).parent.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            source = Path(os.readlink(cursor))
+            if not source.is_absolute():
+                source = cursor.parent / source
+            cursor.unlink()
+            cursor.mkdir()
+            if source.is_dir():
+                for entry in source.iterdir():
+                    with contextlib.suppress(OSError):
+                        (cursor / entry.name).symlink_to(
+                            entry, target_is_directory=entry.is_dir())
+        else:
+            cursor.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        target.unlink()
+    return target

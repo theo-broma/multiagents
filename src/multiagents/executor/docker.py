@@ -45,7 +45,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..paths import ProjectPaths, state_root
+from ..paths import ProjectPaths, server_install_paths, state_root
 from .base import Executor, Handle
 
 
@@ -288,6 +288,21 @@ class DockerExecutor(Executor):
     def container(self) -> str:
         return self.config.get("container_name") or f"multiagents-{self.slug}"
 
+    def agent_env(self) -> dict[str, str]:
+        # Tells a server started inside the container that it is inside it.
+        return {"MULTIAGENTS_CONTAINER": self.container}
+
+    def inside(self) -> bool:
+        """Is this process already running in this project's container?
+
+        True for the MCP server of an agent with spawn rights (SM-R1): its CLI
+        starts it in here, where there is no `docker` and no socket to reach
+        the daemon with. Its own spawns are therefore started directly — they
+        are in the container already, which is the whole of what `docker
+        exec` would have given them.
+        """
+        return os.environ.get("MULTIAGENTS_CONTAINER") == self.container
+
     @property
     def auth_container(self) -> str:
         return f"multiagents-auth-{self.slug}"
@@ -347,6 +362,30 @@ class DockerExecutor(Executor):
         without being recreated (P0-R1.2).
         """
         return Path(binary).resolve()
+
+    @staticmethod
+    def server_mounts(base: list[tuple[Path, bool]]) -> list[Path]:
+        """What the multiagents server needs mounted that `base` does not reach.
+
+        SM-R1: an agent with spawn rights starts the server in here, by the
+        interpreter running multiagents on the host (`paths.server_command`).
+        A checkout of multiagents used as its own project already has all of
+        it under the root, and then nothing is added.
+
+        Best effort, and deliberately never a reason to call a container
+        stale (`stale_mounts`, `mount_drift`): the interpreter differs between
+        entry points — an installed `multiagents` and a checkout's venv — so
+        requiring it would make whichever ran second refuse every spawn. A
+        container without it runs its agents without the server, and the run
+        records that (SM-R5).
+        """
+        covered = [path for path, _ in base]
+        out: list[Path] = []
+        for path in sorted(server_install_paths(), key=lambda p: len(p.parts)):
+            if not any(path == c or c in path.parents for c in covered):
+                out.append(path)
+                covered.append(path)
+        return out
 
     def mounts(self) -> list[tuple[Path, bool]]:
         """(host path, read_only) pairs, each mounted at its own path.
@@ -526,6 +565,8 @@ class DockerExecutor(Executor):
         from .. import scripts
         from ..paths import global_config_dir
 
+        if self.inside():
+            return []                  # the host's job; nothing in here can do it
         notes = []
         for name, provider in self.providers.items():
             backing = self.private_state(name)
@@ -696,8 +737,12 @@ class DockerExecutor(Executor):
                        self.container])
         if result.returncode != 0:
             return []
-        have = {line.strip() for line in result.stdout.splitlines() if line.strip()}
         private = self.private_state()
+        # The server's own install paths differ by entry point, so they are
+        # neither owed nor surplus: left out on both sides.
+        optional = {str(p) for p in self.server_mounts([])}
+        have = {line.strip() for line in result.stdout.splitlines()
+                if line.strip() and line.strip().split(">")[-1] not in optional}
         want = {f"{private.get(path, path)}>{path}" for path, _ in self.mounts()}
         missing = sorted(want - have)
         extra = sorted(h for h in have - want if h.split(">")[1] in
@@ -1046,9 +1091,14 @@ class DockerExecutor(Executor):
                 argv += [flag, str(value)]
 
         private = self.private_state()
-        for path, read_only in self.mounts():
+        mounts = self.mounts()
+        for path, read_only in mounts:
             source = private.get(path, path)
             argv += ["-v", f"{source}:{path}" + (":ro" if read_only else "")]
+        # Added here and not in `mounts()`, which lists what a container is
+        # owed: these are best effort (see `server_mounts`).
+        for path in self.server_mounts(mounts):
+            argv += ["-v", f"{path}:{path}:ro"]
 
         if self.network_mode == "allowlist":
             proxy = f"http://{self.proxy_container}:{PROXY_PORT}"
@@ -1229,6 +1279,8 @@ class DockerExecutor(Executor):
         return argv
 
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
+        if self.inside():
+            return await self._start_inside(argv, cwd, env)
         state = self.ensure_running()
         if not state.get("ok"):
             raise RuntimeError(f"docker executor: {state.get('error')}")
@@ -1271,3 +1323,25 @@ class DockerExecutor(Executor):
             start_new_session=True,
         )
         return DockerHandle(proc.pid, proc, self.container, pid_file)
+
+    async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
+        """Start `argv` from within the container, as `docker exec` would.
+
+        Through the same pid-recording shell, so `kill_detached` from the host
+        still reaches it; stopped as a local process group from in here.
+        """
+        pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
+                    if self.paths is not None else Path("/tmp")) / "container.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        cwd.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            "sh", "-c", f'echo $$ > "{pid_file}"; exec "$@"', "--", *argv,
+            limit=STREAM_LIMIT,
+            cwd=str(cwd),
+            env={**env, **self.agent_env()},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return Handle(pid=proc.pid, _proc=proc)

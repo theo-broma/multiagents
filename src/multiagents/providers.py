@@ -90,6 +90,23 @@ def _given(value: Any) -> bool:
     return value is not None and value != ""
 
 
+def _render_value(obj: Any, values: dict[str, Any]) -> Any:
+    """`obj` with every string that is exactly ``{name}`` replaced by that value.
+
+    Whole values only, recursively through lists and mappings, so a structured
+    config can name a list or a mapping as easily as a string.
+    """
+    if isinstance(obj, str):
+        if obj.startswith("{") and obj.endswith("}") and obj[1:-1] in values:
+            return values[obj[1:-1]]
+        return obj
+    if isinstance(obj, list):
+        return [_render_value(item, values) for item in obj]
+    if isinstance(obj, dict):
+        return {key: _render_value(value, values) for key, value in obj.items()}
+    return obj
+
+
 @dataclass
 class Event:
     """One normalised stream event."""
@@ -178,6 +195,11 @@ class Provider:
     # file-viewer that never reports which range it viewed) — repeating one
     # must not trip doom_loop on its own. See Supervisor.opaque_tools.
     opaque_tools: list[str] = field(default_factory=list)
+    # SM-R1: how this CLI is handed the multiagents MCP server when the agent it
+    # runs may spawn. Declared, like everything else here; see `mcp_launch` and
+    # the `mcp:` blocks in providers.yaml. Empty means the CLI cannot be given
+    # one, and agents on it run without the server.
+    mcp: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -211,6 +233,7 @@ class Provider:
             family=data.get("family") or data.get("extends") or name,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             opaque_tools=list(data.get("opaque_tools", []) or []),
+            mcp=dict(data.get("mcp") or {}),
         )
 
     # ------------------------------------------------------------- command --
@@ -285,6 +308,52 @@ class Provider:
                 argv += render(template)
 
         return argv
+
+    # ----------------------------------------------------------------- mcp --
+
+    def mcp_launch(self, values: dict[str, Any]) -> dict[str, Any]:
+        """The pieces that hand this CLI the multiagents MCP server (SM-R1).
+
+        `values` carries the server as `mcp_command` (str), `mcp_args` (list),
+        `mcp_argv` (both, as one list) and `mcp_env` (dict), plus `mcp_config`,
+        the path the rendered config will be written to. Returned:
+
+        ``config``     the file's content, placeholders rendered
+        ``file``       its name under the run's own directory, or
+        ``home_file``  its path inside the agent's private HOME, for a CLI that
+                       reads its servers from nowhere else
+        ``merge``      start from the user's own copy of ``home_file``
+        ``args``/``env``  what the command line and environment gain
+
+        Placeholders are whole values, as in `build_command`: a string that is
+        exactly ``{name}`` becomes that value, list or mapping included.
+        """
+        block = self.mcp or {}
+        return {
+            "config": _render_value(block.get("config") or {}, values),
+            "file": str(block.get("file") or ""),
+            "home_file": str(block.get("home_file") or ""),
+            "merge": bool(block.get("merge")),
+            "args": [str(a) for a in _render_value(list(block.get("args") or []), values)],
+            "env": {str(k): str(v) for k, v in
+                    _render_value(dict(block.get("env") or {}), values).items()},
+        }
+
+    def mcp_unavailable(self, payload: dict) -> str:
+        """The status a stream line reports for a server that did not start, or "".
+
+        SM-R5. Declared as ``mcp.unavailable``: a ``match`` like a stream rule's,
+        the dotted ``status`` path, and the ``values`` that mean it failed.
+        """
+        rule = (self.mcp or {}).get("unavailable") or {}
+        if not rule.get("status"):
+            return ""
+        match = rule.get("match") or {}
+        if not all(get_path(payload, key) == value for key, value in match.items()):
+            return ""
+        status = get_path(payload, str(rule["status"]))
+        failed = [str(v) for v in rule.get("values") or []]
+        return str(status) if status is not None and str(status) in failed else ""
 
     # -------------------------------------------------------------- stream --
 
