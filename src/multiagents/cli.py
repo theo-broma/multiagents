@@ -991,9 +991,16 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 print(f"  could not stop {node.id}: {exc}", file=sys.stderr)
         elif alive:
             continue                        # another session owns it
-        tree.set_status(node.id, "orphaned",
-                        "reaped: left running by a server that is gone" if alive
-                        else "process gone; server restarted")
+        # SL-R7: a node still `stuck` here never got a terminal status of its
+        # own — that classification never ran, since the server that would
+        # have run it is what died. Fold the trip into the reconciled reason
+        # rather than overwrite it, so the trip that caused the stall is not
+        # lost the moment it is healed.
+        reason = ("reaped: left running by a server that is gone" if alive
+                  else "process gone; server restarted")
+        if node.status == "stuck" and node.reason:
+            reason = f"{reason} (was stuck: {node.reason})"
+        tree.set_status(node.id, "orphaned", reason)
         reclaimed += 1
         # Committed HERE rather than in the cancellation handler: this runs with
         # time, a live loop and full information, where a teardown has none of

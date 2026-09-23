@@ -140,6 +140,17 @@ providers:
     truncation_markers:
       - "print timeout"
     usage_mode: cumulative
+    # SL-R6 (bug-2cebea): `view_file`'s reported arguments do not identify the
+    # call — the streamed tool_info.parameters carries only AbsolutePath, never
+    # the StartLine/EndLine a re-read at a different range actually used, so
+    # two different reads of the same file hash identically and doom_loop trips
+    # on ordinary re-reading. Checked whether this was a parser gap first: the
+    # stream rule below maps tool_info.parameters straight into args with
+    # nothing filtered out, so if the raw stream ever carried a range our own
+    # recorded args would already show it — and across the real streams
+    # available to check, it never does. Declared opaque instead of mapped.
+    opaque_tools:
+      - view_file
     # Under docker, do NOT mount the host's copy of these paths. A private
     # directory is mounted over each one instead, so the container keeps its own
     # credentials and can never overwrite or downgrade the host's.
