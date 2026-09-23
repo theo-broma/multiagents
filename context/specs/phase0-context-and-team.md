@@ -547,6 +547,16 @@ amendments narrow that window and make the warning impossible to miss.
   of the bell), and a test per key with a malformed value asserting the
   default is used.
 - R8f.7's brief text also says that only a sent message cancels.
+- **Decided, from the tester's read (ag-58ad0b):**
+  - **Rest (R8f.2.3)** is measured from the transcript's last modification
+    time (mtime), not from when the driver first noticed the file unchanged.
+  - **A value of 0** for `compact_idle_seconds` or `compact_grace_seconds` is
+    malformed and falls back to the default. A zero grace would stop the
+    session with no warning.
+  - **`compact_bell`** accepts YAML booleans only. `"false"` (a string) and
+    `0` are malformed and fall back to `true`.
+  - **The bell** is written on the announcement line, on the same stream as
+    the announcement.
 
 ### P0-R8e — the automatic threshold, through the plugin seam
 
