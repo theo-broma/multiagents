@@ -348,3 +348,121 @@ def analyse(window_hours: float = 24.0, root: Path | None = None,
                         report.by_server.get(server, 0.0) + part)
     report.sessions = len(sessions)
     return report
+
+
+# --------------------------------------------------------------------------
+# One session's context size, for a launched role watching its own window
+# --------------------------------------------------------------------------
+
+# path -> (inode, mtime_ns, size, offset, check, reading). `offset` is where the
+# last complete line ended; `check` is the bytes just before it, so a file
+# rewritten in place to something longer is not mistaken for one that grew.
+_readings: dict[str, tuple[int, int, int, int, bytes, int | None]] = {}
+_CHUNK = 1 << 16
+_CHECK = 64
+
+
+def _usage_of(line: bytes) -> int | None:
+    if b'"usage"' not in line:
+        return None                          # cheap reject before parsing
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    message = record.get("message") if isinstance(record, dict) else None
+    usage = message.get("usage") if isinstance(message, dict) else None
+    if not isinstance(usage, dict) or not usage:
+        return None
+    try:
+        return int(context_tokens(usage))
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_reading(handle, start: int, end: int) -> int | None:
+    """The last line in [start, end) that carried usage, read from the end."""
+    pos, carry = end, b""
+    while pos > start:
+        step = min(_CHUNK, pos - start)
+        pos -= step
+        handle.seek(pos)
+        block = handle.read(step) + carry
+        lines = block.split(b"\n")
+        # The first piece may be the tail of a line that began earlier.
+        carry = lines.pop(0) if pos > start else b""
+        for line in reversed(lines):
+            found = _usage_of(line)
+            if found is not None:
+                return found
+    return None
+
+
+def session_context(provider: Any, cwd: Path, session_id: str) -> int | None:
+    """Tokens the most recent request of this session carried, or None.
+
+    Reads the transcript the provider declares for `cwd`, the file named by
+    `session_id` and no other: a directory is shared by every role launched
+    from it, and the newest file there may be somebody else's session. None —
+    never 0 — when there is no reading at all, so that "unknown" cannot pass
+    for "plenty of room". A compaction needs no handling of its own: the
+    request after it already reports the smaller context.
+
+    Cheap to call on every tool call: an unchanged file is not opened, and one
+    that grew has only its new tail read.
+    """
+    from .watchdog import transcript_source
+
+    if not session_id:
+        return None
+    source = transcript_source(provider, Path(cwd))
+    if source is None:
+        return None
+    directory, pattern = source
+    name = pattern.replace("*", session_id, 1) if "*" in pattern else session_id
+    path = directory / name
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        _readings.pop(key, None)
+        return None
+    cached = _readings.get(key)
+    if cached and cached[:3] == (st.st_ino, st.st_mtime_ns, st.st_size):
+        return cached[5]
+    try:
+        with path.open("rb") as handle:
+            size = st.st_size
+            start, previous = 0, None
+            if cached and cached[0] == st.st_ino and cached[3] <= size:
+                offset, check = cached[3], cached[4]
+                handle.seek(offset - len(check))
+                if handle.read(len(check)) == check:
+                    start, previous = offset, cached[5]
+            # Only complete lines: the last one may be mid-write.
+            end = size
+            if end > start:
+                handle.seek(max(start, end - 1))
+                if handle.read(1) != b"\n":
+                    end = _line_start(handle, start, end)
+            found = _last_reading(handle, start, end) if end > start else None
+            reading = found if found is not None else previous
+            handle.seek(max(0, end - _CHECK))
+            check = handle.read(end - max(0, end - _CHECK))
+    except OSError:
+        _readings.pop(key, None)
+        return None
+    _readings[key] = (st.st_ino, st.st_mtime_ns, st.st_size, end, check, reading)
+    return reading
+
+
+def _line_start(handle, start: int, end: int) -> int:
+    """Where the unterminated last line in [start, end) begins."""
+    pos = end
+    while pos > start:
+        step = min(_CHUNK, pos - start)
+        pos -= step
+        handle.seek(pos)
+        at = handle.read(step).rfind(b"\n")
+        if at >= 0:
+            return pos + at + 1
+    return start

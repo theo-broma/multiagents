@@ -172,7 +172,8 @@ def why_it_would_not_run(script: Path, exc: OSError) -> str:
 def run_action(provider_name: str, provider: Any, executor: Any, action: str,
                config_dir: Path, project_config: Path | None = None,
                timeout: int = CAPTURE_TIMEOUT,
-               extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
+               extra_env: dict[str, str] | None = None,
+               cwd: Path | None = None) -> tuple[int, str, str]:
     """Run a captured action. Returns ``(returncode, stdout, stderr)``.
 
     Never raises: a missing script, a timeout or an OS error all come back as a
@@ -187,6 +188,7 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
             [*script_argv(script), action],
             capture_output=True, text=True, timeout=timeout,
             env=build_env(provider_name, provider, executor, extra_env),
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired as exc:
         return 124, "", f"{type(exc).__name__}: {exc}"

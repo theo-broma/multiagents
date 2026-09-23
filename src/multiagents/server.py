@@ -39,6 +39,7 @@ from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
 from .redact import scrub
 from .runner import Runner
+from .transcripts import session_context
 
 mcp = _Server("multiagents", version=__version__)
 
@@ -59,6 +60,28 @@ _lock = threading.RLock()
 # variable so that concurrent async calls each hear about their own reload.
 _notice: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "multiagents_config_notice", default=None)
+
+# Whether the wind-down notice has been given for the current crossing of the
+# threshold. Re-armed only by a reading below it; a restart forgets it, which
+# is the one repeat allowed.
+_wind_down_given = False
+
+CONTEXT_WIND_DOWN = (
+    "Your own context window is nearly full ({tokens} tokens; the wind-down "
+    "threshold is {threshold}). You are being told now, while there is room to "
+    "do it well, because what is only in this conversation does not survive "
+    "it being compacted or restarted.\n\n"
+    "Do exactly this:\n"
+    "1. Finish the merge or decision already in hand — do not open another.\n"
+    "2. Record every status and judgement in its durable home: finding "
+    "statuses (set_finding_status), tickets, decisions in the spec under "
+    "context/, and which agents you are waiting on and why.\n"
+    "3. Write the handoff into BRIEF.md — what is done, what is in flight, "
+    "what you meant to do next and why.\n"
+    "4. Start no new agent.\n\n"
+    "The work resumes from BRIEF.md, the ledger, the tickets and the tree, not "
+    "from your memory of this conversation."
+)
 
 
 def _layer_files(run: Runner) -> list[Path]:
@@ -188,12 +211,66 @@ def _runner_locked() -> Runner:
     return _runner
 
 
-def _ok(payload: Any) -> Any:
+def _context_reading(run: Runner) -> int | None:
+    """The launched role's own context size, or None when it is not one.
+
+    Only a launched role (depth 0, with a session id) reads anything: a
+    subagent's context is not the orchestrator's to sense. The provider is the
+    role's roster entry and the directory the project root — not the process
+    cwd, which the agent can change.
+    """
+    session = run.session()
+    if run.self_depth() != 0 or not session:
+        return None
+    from .driver import _launched_spec
+
+    spec = _launched_spec(run.config, os.environ.get("MULTIAGENTS_ROLE") or "orchestrator")
+    provider = run.providers.get(spec.provider) if spec is not None else None
+    if provider is None:
+        return None
+    return session_context(provider, run.paths.root, session)
+
+
+def _limit(run: Runner, key: str) -> int:
+    try:
+        return int(run.config.limits.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _context_notice(run: Runner) -> dict | None:
+    """The wind-down notice, once per crossing of the threshold."""
+    global _wind_down_given
+    threshold = _limit(run, "context_wind_down_tokens")
+    if threshold <= 0:
+        return None
+    tokens = _context_reading(run)
+    if tokens is None:
+        return None                 # no reading is not a reading below, either
+    with _lock:
+        if tokens < threshold:
+            _wind_down_given = False
+            return None
+        if _wind_down_given:
+            return None
+        _wind_down_given = True
+    run.tree.emit(run.self_id() or "", "context_wind_down", tokens=tokens,
+                  threshold=threshold)
+    return {"tokens": tokens, "threshold": threshold,
+            "instruction": CONTEXT_WIND_DOWN.format(tokens=tokens,
+                                                    threshold=threshold)}
+
+
+def _ok(payload: Any, wind_down: bool = True) -> Any:
     notice = _notice.get()
     if notice is not None:
         _notice.set(None)
         if isinstance(payload, dict):
             payload = {**payload, "config_reload": notice}
+    if wind_down and _runner is not None and isinstance(payload, dict):
+        given = _context_notice(_runner)
+        if given is not None:
+            payload = {**payload, "context_wind_down": given}
     return scrub(payload)
 
 
@@ -1108,19 +1185,26 @@ def budget_status() -> dict:
         run.paths.config, spend, data.get("cooldowns", {}),
     )
     reserve = float(run.config.project.get("budget", {}).get("reserve_headroom", 0.15))
+    tokens = _context_reading(run)
     advice = []
     for name, entry in budgets.items():
         if entry.cooldown_until:
             advice.append(f"{name} is cooling down; route elsewhere or defer")
         elif entry.known and entry.headroom is not None and entry.headroom < reserve:
             advice.append(f"{name} is below the {reserve:.0%} reserve — delegate rather than run work yourself")
+    # The reading is reported here, in `context`; the notice itself is left
+    # for the next other tool call rather than spent on this one.
     return _ok({
         "providers": {k: v.to_dict() for k, v in budgets.items()},
         "tree_usage": run.tree.rollup_usage(),
         "by_model": run.tree.usage_by_model(),
         "deferred_tasks": len(data.get("deferred", [])),
         "advice": advice or ["all providers have headroom"],
-    })
+        # The calling session's own window. `known: false` is not room to spare.
+        "context": {"known": tokens is not None, "tokens": tokens,
+                    "wind_down_at": _limit(run, "context_wind_down_tokens"),
+                    "compact_at": _limit(run, "compact_at_tokens")},
+    }, wind_down=False)
 
 
 @mcp.tool()
@@ -1197,9 +1281,10 @@ def run_resource(agent_id: str) -> str:
 
 
 def _reset() -> None:
-    global _runner, _loaded, _failed, _load_error
+    global _runner, _loaded, _failed, _load_error, _wind_down_given
     _runner = None
     _loaded, _failed, _load_error = {}, None, ""
+    _wind_down_given = False
     _notice.set(None)
 
 

@@ -392,6 +392,25 @@ limits:
   wrap_up_seconds: 420
   wind_down_poll_seconds: 60
 
+  # The orchestrator's OWN context window, which fills whatever the quota says.
+  # Both are TOKEN counts — the size of the latest request in the launched
+  # role's session, read from its provider's transcript — not percentages of
+  # any window. 0 disables either. No reading (a provider that declares no
+  # transcript) is never taken as room to spare, and never acted on.
+  #
+  # At this many tokens the orchestrator is told, once, to land its work:
+  # finish the decision in hand, write everything down, start nothing new.
+  context_wind_down_tokens: 150000
+  # At this many tokens the unattended driver (`run --unattended`, and the
+  # headless loop after a lost terminal) compacts the session between turns —
+  # only after a clean turn, with no agent running and nothing deferred.
+  # Deliberately lower than the wind-down: compacting at a closed boundary is
+  # the planned path, and the wind-down is the warning that it did not happen.
+  compact_at_tokens: 120000
+  # How long the provider script's `compact` action may take before it counts
+  # as a failed compaction. A failure is reported and the loop carries on.
+  compact_timeout_seconds: 180
+
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents
   # said — which is the signal this project learned not to classify on. Set
