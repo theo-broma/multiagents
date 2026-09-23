@@ -1274,3 +1274,22 @@ not sent upstream.
   `context_wind_down_tokens: 300000` (user's request). R8f compaction
   becomes active only after `multiagents run` is restarted (the current
   driver dates from 10:45).
+- **~21:50:** adversary ag-c0f64f on bug-2cebea, merged as red tests
+  (990fc28, `tests/test_stuck_lifecycle_adversary.py`, 7 red). Findings, worst
+  first:
+  1. `consult()` loses the reply after a free retry: `_consult_turn` reads
+     the dead Run's text;
+  2. `wait_for_any` misses a second trip after a clear, because
+     `baseline_stuck` is static;
+  3. an opaque tool never clears `stuck`, since `last_digest` is unchanged;
+  4. the trip reason leaks into `running`/`done`: `set_status` ignores an
+     empty reason;
+  5. a `stuck` node with `pid=None` holds a slot for ever;
+  6. `wait_for_any` hangs on a dead stuck process (the same as reviewer
+     point 2);
+  7. the `_preflight` `max_children` check counts dead stuck children.
+  **Next (after 01:00):** one implementer on these 7 plus reviewer points 1
+  and 3, `verifies=ag-698a01`. Done means both SL test files are green.
+- **The tree is idle at ~21:50.** A good moment for the user to restart
+  `multiagents run`: the server picks up the stuck fix, and R8f compaction
+  becomes active.
