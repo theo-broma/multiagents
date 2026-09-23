@@ -407,6 +407,32 @@ spec consult-fresh-worktree.md) has NOT been started yet: start it once the
 pause clears. The researcher brief is now live: the project copy was
 overwritten at the user's request.
 
+**Progress, 2026-09-23 ~17:00:**
+- **Merged:**
+  - R8f.10-17 (a8e695f), with the review fixes in 478f276;
+  - the CF fix for bug-7f6ba7, where consult refreshes a conversational
+    worktree (6035c65, round 2 in 6b24462);
+  - the tests: 42fa3de, 62e5a37, 12d893f, 3832697, 4d860fa, 575193e.
+  The full suite was green on the round-2 branch (1549 passed).
+- **Declined:**
+  - an empty commit counts as absorbed;
+  - `fcntl` on Windows, since the project is POSIX-only already;
+  - the `stopping` attribute on a callable (style only);
+  - the headless "no shrink" loop test, because R8c.3 wins.
+- **Not yet done:**
+  - a live check of CF, which needs the MCP server restarted (/mcp),
+    because the running server still has the old runner code;
+  - then one consult of the advisor, to confirm it reads current code;
+  - a live `claude.sh compact` check against a real session.
+- **Noted, not fixed:**
+  - `claude.sh launch` still looks under `$HOME/.claude`, not
+    `CLAUDE_CONFIG_DIR`;
+  - the usage-limit stop has the same exit race as R8f.12;
+  - `limit_wait_seconds`, `restart_min_runtime_seconds`,
+    `supervised_turns` and `spend_limit_pause_hours` still parse unsafely;
+  - implementer-deep again had no `consult` tool (ag-d67496), which is
+    tooling defect 6, still without a ticket.
+
 ### Awaiting the user
 
 - **(re-authenticated by the user ~10:40)** **agy could not authenticate in the container (2026-09-23 05:03).** The stored
