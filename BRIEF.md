@@ -282,6 +282,52 @@ with a `select` timeout.
 - `runaway_steps` fired falsely again (ag-57985b at 251), which confirms the
   inflated step counter noted above.
 
+**Progress, 2026-09-23 ~11:30 (after the restart):**
+- **Advisor review of contract B (ag-25c350, turns 3–4).** It first said to
+  drop R8f and claimed the invariant was broken and the thresholds inverted.
+  After checking, it withdrew three of those points: the cited lines predate
+  this work, compaction only happens while idle so the wind-down still fires
+  while agents run, and the tester did find the slug bug. It kept one point:
+  unsubmitted typing is invisible to the driver. Decided with the user in
+  c886f79: idle default 300 s, a bell (`compact_bell`), "send … to cancel"
+  wording, and all values configurable (R8f.8, R8f.9). The tester's questions
+  were decided in e3c1b96.
+- **Merged:** the updated R8f tests (4800277, 47 red until implemented).
+  Attack findings 2, 4, 6, 7, 8 and 9 are fixed (52105e7). The long-path
+  (>200 chars) hashed slug is **not** done, because no test asks for it. It
+  stays open.
+- **In flight:** `implementer-deep` ag-829577 on R8f and driver findings
+  1, 3, 5 and 10. `implementer-quick` ag-9c3885 on the monitor history sort
+  (the user decided it). `implementer-quick` ag-77113c on the researcher
+  brief.
+- **The monitor history "missing" advisors.** Consult runs are in the
+  history but buried: roots are sorted by `started_at`, and a conversational
+  agent keeps one node across days (ag-25c350 started 2026-09-22 20:42). The
+  user decided to sort roots by last activity.
+- **Tooling defects seen today** (Phase 0 follow-ups):
+  1. `stuck` stays on a node after the agent recovers or finishes.
+  2. The silence watchdog fires while an agent waits on its own long
+     background test run.
+  3. `doom_loop` false positive on agy: `view_file` events carry the path
+     but not the line range, so paging through a file looks like a loop.
+  4. `total_tokens` excludes cache reads. ag-4548ac showed 1.86M, but
+     processed about 8.1M.
+  5. An agy agent can end its turn while its own background job is still
+     running, and so commit nothing (ag-9c3885).
+- **Researcher token cost; the experiment is running.** ag-4548ac (a
+  researcher on agy) used 128 steps, with 1.8M uncached input plus 6.3M
+  cache reads, and ended with a context of about 157k. It paged whole large
+  files (`runner.py` 10×, `tree.py` 7×) instead of searching. Its brief
+  said "read widely", and my task broke "one question per run". The user
+  approved a brief change: locate with `rg -n`, read line ranges only, stop
+  once answerable (ag-77113c). **Evaluate it on the next researcher runs**:
+  record steps, uncached input and cache reads, and the final context, per
+  run, against the ag-4548ac baseline. A small single-question baseline is
+  ag-85e40d, at 34k.
+  **If it works, consider the same rule for other read-heavy agents**:
+  reviewer, advisor, dev-advisor, auditor, cartographer, characterizer.
+  Their briefs have not been checked for similar "read widely" wording yet.
+
 ### Awaiting the user
 
 - **(re-authenticated by the user ~10:40)** **agy could not authenticate in the container (2026-09-23 05:03).** The stored
