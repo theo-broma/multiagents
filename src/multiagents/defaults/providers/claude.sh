@@ -42,7 +42,7 @@ VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
 # wrote (P0-R8f.16), which is not the same as choosing a profile for it. A
 # function, so an action that never looks does not need HOME set.
 claude_sessions_root() {
-    printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    printf '%s/projects' "${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
 }
 
 # The project folder name Claude Code itself derives from a directory path:

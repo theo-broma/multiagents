@@ -232,7 +232,10 @@ def _pick_team(options: list[tuple[str, str]], current: str) -> str | None:
     finally:
         if saved is not None:
             import termios
-            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except Exception:
+                pass
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
 
