@@ -345,6 +345,12 @@ async def _until(predicate, timeout: float) -> bool:
     return predicate()
 
 
+# The fake CLI replays the same lines on every spawn, so the free retry after a
+# cheap, unexplained death (SL-R1) would trip the detector a second time. Tests
+# counting trips within one attempt switch the retry off.
+NO_RETRY = {"retry_silent_failure_under_seconds": 0}
+
+
 def _runner(tmp_path, monkeypatch, prov, *, project=None, **spec_kw):
     spec = h.AgentSpec("worker", "p", "m", **spec_kw)
     return h.make_runner(tmp_path, monkeypatch, agents={"worker": spec},
@@ -359,7 +365,7 @@ def test_p0_r2_2_runner_reads_doom_loop_rearm_from_limits(tmp_path, monkeypatch)
         base.mkdir()
         prov = _cli(base, [_tool_line() for _ in range(2 + n_after)], then_sleep=0)
         r = _runner(base, monkeypatch, prov, project={"limits": {
-            "doom_loop_repeats": 2, "doom_loop_rearm": 4}})
+            "doom_loop_repeats": 2, "doom_loop_rearm": 4, **NO_RETRY}})
 
         async def go():
             res = await r.start("worker", "go")
@@ -375,7 +381,7 @@ def test_p0_r2_2_runner_reads_doom_loop_rearm_from_limits(tmp_path, monkeypatch)
 def test_p0_r2_2_runner_rearm_defaults_to_doom_loop_repeats(tmp_path, monkeypatch):
     prov = _cli(tmp_path, [_tool_line() for _ in range(4)], then_sleep=0)
     r = _runner(tmp_path, monkeypatch, prov,
-                project={"limits": {"doom_loop_repeats": 2}})
+                project={"limits": {"doom_loop_repeats": 2, **NO_RETRY}})
 
     async def go():
         res = await r.start("worker", "go")
