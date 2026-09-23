@@ -37,11 +37,11 @@ from . import budget as budget_mod
 from . import gitops
 from . import config as config_mod
 from .config import AgentSpec, Config, matches_any
-from .executor import build_env, get_executor, prepare_home
+from .executor import build_env, get_executor, prepare_home, private_file
 from .executor.base import Handle
 from . import providers as providers_mod
 from . import procs
-from .paths import ProjectPaths, global_config_dir
+from .paths import ProjectPaths, global_config_dir, server_command, state_root
 from .providers import Event, Provider, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
@@ -264,6 +264,7 @@ class Run:
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     ticket: dict | None = None        # a TICKET filed from the final message
     wrap_up_asked: bool = False       # asked once to land its work before a wall
+    server_reported: bool = False     # SM-R5: an unavailable MCP server, recorded once
     # SL-R3: the live trip this run is currently marked `stuck` for, and the
     # supervisor state at the moment it fired — compared against the current
     # state on each later event to tell "moved on" from "still repeating".
@@ -888,6 +889,8 @@ class Runner:
         # is not passthrough: it is configuration, not inheritance.
         for key, value in (provider.env or {}).items():
             env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+        executor = self.executor(spec)
+        env.update(executor.agent_env())
 
         options = {"effort": spec.effort,
                    **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
@@ -899,6 +902,11 @@ class Runner:
 
         run_dir = self.paths.run_dir(node_id)
         run_dir.mkdir(parents=True, exist_ok=True)
+        # SM-R1/R2: the server goes to an agent that may spawn, and only to one.
+        if spec.can_spawn:
+            server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
+            argv += server_argv
+            env.update(server_env)
         turn = len(list(run_dir.glob("prompt*.md")))
         (run_dir / (f"prompt.{turn}.md" if turn else "prompt.md")).write_text(prompt)
         # Environment KEYS only — values may be secret and this file is on disk.
@@ -908,7 +916,6 @@ class Runner:
             "permission": spec.permission, "resumed": bool(session_id),
         }), indent=2))
 
-        executor = self.executor(spec)
         problems = executor.preflight()
         if problems:
             raise RuntimeError("; ".join(problems))
@@ -939,6 +946,74 @@ class Runner:
         asyncio.create_task(self._wrap_up_watch(node_id))
         self._start_credential_watch()
         return run
+
+    def _hand_server(self, node_id: str, provider: Provider, env: dict[str, str],
+                     home: Path | None, run_dir: Path) -> tuple[list[str], dict[str, str]]:
+        """What gives this spawn the multiagents MCP server: (argv, env) to add.
+
+        How is the provider's to declare (`mcp:` in providers.yaml); this only
+        fills it in and writes the config where the run owns it — `runs/<id>/`
+        or the agent's private HOME, never the user's own (SM-R4). A provider
+        that cannot be given the server, here, is recorded rather than failed:
+        the agent still runs its task without it (SM-R5).
+        """
+        def unavailable(reason: str) -> tuple[list[str], dict[str, str]]:
+            self.tree.emit(node_id, "mcp_unavailable", server="multiagents",
+                           detail=f"the multiagents MCP server is unavailable to "
+                                  f"this agent: {reason}")
+            return [], {}
+
+        if not provider.mcp:
+            return unavailable(f"provider {provider.name} declares no `mcp:` block")
+        command, *args = server_command()
+        # SM-R3: the server acts as this agent, so it carries the agent's
+        # identity itself rather than trusting the CLI to pass it through. It
+        # RUNS as multiagents does, though: in the user's HOME and the
+        # machine's state and config directories, not the agent's private ones
+        # — otherwise it would look for worktrees, and link the next agent's
+        # credentials, inside this agent's HOME.
+        server_env = {k: v for k, v in env.items() if k.startswith("MULTIAGENTS_")}
+        server_env.update({
+            "HOME": str(Path.home()),
+            "MULTIAGENTS_STATE_DIR": str(state_root()),
+            "MULTIAGENTS_CONFIG_DIR": str(global_config_dir()),
+        })
+        block = provider.mcp
+        if block.get("home_file"):
+            if home is None:
+                return unavailable(f"{provider.name} reads its MCP servers only from "
+                                   f"HOME, and home_policy is not per-agent")
+            target = private_file(home, str(block["home_file"]))
+        else:
+            target = run_dir / str(block.get("file") or "mcp.json")
+        launch = provider.mcp_launch({
+            "mcp_command": command, "mcp_args": args, "mcp_argv": [command, *args],
+            "mcp_env": server_env, "mcp_config": str(target),
+        })
+        config = launch["config"]
+        if launch["merge"]:
+            config = config_mod.deep_merge(
+                self._user_mcp_config(str(block["home_file"])), config)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(config, indent=2) + "\n")
+        target.chmod(0o600)
+        return launch["args"], launch["env"]
+
+    @staticmethod
+    def _user_mcp_config(relative: str) -> dict:
+        """The user's own copy of a CLI's MCP config, read and never written."""
+        try:
+            data = json.loads((Path.home() / relative).read_text())
+        except (OSError, ValueError):
+            return {}
+
+        # The user's own `multiagents` entry — the orchestrator's global
+        # registration, if any — is replaced whole, never merged key by key.
+        def without_ours(obj):
+            if isinstance(obj, dict):
+                return {k: without_ours(v) for k, v in obj.items() if k != "multiagents"}
+            return obj
+        return without_ours(data) if isinstance(data, dict) else {}
 
     def _start_credential_watch(self) -> None:
         """Keep the container's access token fresh while runs are in flight.
@@ -1304,6 +1379,18 @@ class Runner:
                     session_id = event.session_id
                 if event.status:
                     run.final_status = event.status
+                # SM-R5: the CLI carries on without a server that did not
+                # start, and so does the run — but the orchestrator is told,
+                # or a consult that never happened has no visible reason.
+                failed = (provider.mcp_unavailable(event.raw)
+                          if event.raw and not run.server_reported else "")
+                if failed:
+                    run.server_reported = True
+                    self.tree.emit(node_id, "mcp_unavailable", server="multiagents",
+                                   status=failed,
+                                   detail=f"the multiagents MCP server did not start "
+                                          f"(the CLI reports it {failed}); this agent "
+                                          f"runs without consult or start_agent")
 
                 # Batched: see TREE_FLUSH_SECONDS. A newly captured session id
                 # is flushed immediately regardless, because steer() and

@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import Executor, Handle, build_env, prepare_home
+from .base import Executor, Handle, build_env, prepare_home, private_file
 from .docker import DockerExecutor
 from .local import LocalExecutor
 
 __all__ = [
-    "Executor", "Handle", "build_env", "prepare_home",
+    "Executor", "Handle", "build_env", "prepare_home", "private_file",
     "LocalExecutor", "DockerExecutor", "get_executor", "executor_for",
 ]
 
