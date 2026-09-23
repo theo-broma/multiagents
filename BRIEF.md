@@ -1328,3 +1328,11 @@ not sent upstream.
   `test_subagent_mcp.py` + `test_subagent_mcp_adversary.py` green. Then the
   SM-R1 live check.
 - **Running:** ag-004177 (bug-2cebea fixes), ag-d5bc6d (bug-c050b0).
+- **Item 6, the claude cause found (ag-d5bc6d's own narration):** Claude Code's
+  Bash tool moves a command to the background after 2 minutes unless the call
+  passes `timeout` (up to 600000). The agent then waits for a completion
+  notice that never comes in `-p` mode, and ends its turn. **The fix is
+  guidance** in the claude seam (P0 R3 provider-specific prompt guidance):
+  long commands take `timeout: 600000` and are split to fit within 10 min;
+  never end a turn with a background job pending. agy's equivalent is
+  `manage_task` polling.
