@@ -125,6 +125,23 @@ def _declares_turn(provider: Provider) -> bool:
     return any((rule.get("fields") or {}).get("turn")
                for rule in provider.stream.get("rules", []) or [])
 
+
+def _occupies_slot(node: Node) -> bool:
+    """SL-R4: does this node hold a concurrency slot (or belong in a wait)
+    right now?
+
+    A `pending` node has no pid yet and always counts. A `running` or `stuck`
+    node counts only while its process is actually alive, checked by pid
+    identity (`procs.alive`, immune to pid reuse) rather than by the status
+    label alone — a trip that outlived its run must stop blocking new work
+    the moment the process behind it is gone.
+    """
+    if node.status == "pending":
+        return True
+    if node.status in ("running", "stuck"):
+        return node.pid is None or procs.alive(node.pid, node.pid_start)
+    return False
+
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
 # a file that mentions the marker must not park itself.
 NEED_DECISION = re.compile(r"NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
@@ -247,6 +264,12 @@ class Run:
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     ticket: dict | None = None        # a TICKET filed from the final message
     wrap_up_asked: bool = False       # asked once to land its work before a wall
+    # SL-R3: the live trip this run is currently marked `stuck` for, and the
+    # supervisor state at the moment it fired — compared against the current
+    # state on each later event to tell "moved on" from "still repeating".
+    trip_kind: str = ""
+    trip_signature: str = ""
+    trip_progress: str = ""
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -579,7 +602,7 @@ class Runner:
         if depth > max_depth:
             raise PermissionError(f"Depth limit reached: {depth} > max_depth={max_depth}")
 
-        active = self.tree.active()
+        active = [n for n in self.tree.active() if _occupies_slot(n)]
         max_concurrent = int(limits.get("max_concurrent", 4))
         if len(active) >= max_concurrent:
             raise RuntimeError(
@@ -902,6 +925,7 @@ class Runner:
                 loop_repeats=loop_repeats,
                 loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
                 declares_turn=_declares_turn(provider),
+                opaque_tools=frozenset(provider.opaque_tools),
             ),
         )
         self.runs[node_id] = run
@@ -1321,6 +1345,11 @@ class Runner:
                 if trip:
                     self.tree.set_status(node_id, "stuck", f"{trip.reason}: {trip.detail}")
                     self.tree.emit(node_id, "stuck", reason=trip.reason, detail=trip.detail)
+                    run.trip_kind = trip.reason
+                    run.trip_signature = run.supervisor.last_digest
+                    run.trip_progress = run.supervisor.current_progress
+                elif run.trip_kind:
+                    self._maybe_clear_stuck(run, node_id)
 
             code = await handle.wait()
         except asyncio.CancelledError:
@@ -1394,6 +1423,50 @@ class Runner:
             if not relaunched:
                 run.done.set()
 
+    def _maybe_clear_stuck(self, run: Run, node_id: str) -> None:
+        """SL-R3: drop `stuck` the moment the agent visibly moves on.
+
+        Never restarts, steers or otherwise touches the agent — only relabels
+        a node the run itself is already changing. Three kinds of evidence
+        count, matched to why each trip fired in the first place:
+
+        * `silence` clears on ANY stream event at all — the trip was exactly
+          "nothing arrived", so anything arriving answers it.
+        * `doom_loop`/`runaway_steps` clear on a different tool-call signature
+          (a genuinely new call, not the same one reported twice) or on the
+          working tree moving — the same two kinds of evidence the watchdog
+          itself uses to tell "repeating" from "working".
+        """
+        node = self.tree.get(node_id)
+        if node is None or node.status != "stuck":
+            return
+        supervisor = run.supervisor
+        assert supervisor is not None
+        cleared = (
+            run.trip_kind == "silence"
+            or supervisor.last_digest != run.trip_signature
+            or supervisor.current_progress != run.trip_progress
+        )
+        if cleared:
+            self.tree.set_status(node_id, "running")
+            run.trip_kind = ""
+            run.trip_signature = ""
+            run.trip_progress = ""
+
+    @staticmethod
+    def _with_trip(prior_stuck: str, reason: str) -> str:
+        """SL-R2: fold a run's last trip into its terminal reason.
+
+        `stuck` itself does not survive past the run ending, so this is the
+        only place the trip stays readable afterwards — inline with whatever
+        the classification itself has to say, not replacing it.
+        """
+        if not prior_stuck:
+            return reason
+        if not reason:
+            return f"was stuck: {prior_stuck}"
+        return f"{reason} (was stuck: {prior_stuck})"
+
     async def _finalize(self, run: Run, code: int, usage: dict[str, Any],
                         session_id: str) -> bool:
         """Decide what a finished run meant, and record it.
@@ -1411,6 +1484,13 @@ class Runner:
         rule a reader had to know.
         """
         node_id = run.node_id
+        # SL-R1/SL-R2: `stuck` is a label on a run still in flight, not a
+        # verdict — once the run is over it must get the SAME terminal status
+        # it would have gotten had it never tripped, with the trip folded into
+        # the reason so it stays visible to whoever reads the node afterwards.
+        stuck_before = self.tree.get(node_id)
+        prior_stuck = (stuck_before.reason
+                      if stuck_before and stuck_before.status == "stuck" else "")
         run_dir = self.paths.run_dir(node_id)
         text = "\n".join(run.text_parts).strip()
         stderr = run.handle.stderr_tail if run.handle else ""
@@ -1472,8 +1552,9 @@ class Runner:
         elif status == "unauthenticated":
             self.tree.set_status(
                 node_id, "failed",
-                f"{run.provider.name} is not authenticated — "
-                f"run: multiagents auth login {run.provider.name}",
+                self._with_trip(prior_stuck,
+                    f"{run.provider.name} is not authenticated — "
+                    f"run: multiagents auth login {run.provider.name}"),
             )
             self.tree.emit(node_id, "unauthenticated", provider=run.provider.name)
         elif status == "quota":
@@ -1481,13 +1562,11 @@ class Runner:
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
             )
             self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run")
-            self.tree.set_status(node_id, "failed", "quota exhausted")
-        elif self.tree.get(node_id) and self.tree.get(node_id).status == "stuck":
-            pass                              # keep the trip reason visible
+            self.tree.set_status(node_id, "failed", self._with_trip(prior_stuck, "quota exhausted"))
         elif run.spec.conversational and status == "done":
             # A conversation is not finished just because a turn is. Park it as
             # idle so the session stays resumable for the next question.
-            self.tree.set_status(node_id, "idle")
+            self.tree.set_status(node_id, "idle", self._with_trip(prior_stuck, ""))
         else:
             # One free retry for a cheap, unexplained death — a crash with
             # nothing to say, gone before it did any work. That shape is a
@@ -1499,6 +1578,10 @@ class Runner:
             # retry any such failure: a run that died at 996 seconds had spent
             # 5.5M tokens, and silently spending that again is not absorbing a
             # glitch. Past the threshold it is reported and handed back.
+            #
+            # SL-R1: applies exactly as it would have had the run never
+            # tripped — a trip does not disqualify a death from being cheap
+            # and unexplained.
             fresh = self.tree.get(node_id)
             if (status == "failed" and said_nothing
                     and fresh and not fresh.retries
@@ -1511,13 +1594,20 @@ class Runner:
                 # becomes an unbounded loop. Found by running it.
                 self.tree.update(node_id, retries=fresh.retries + 1)
                 with contextlib.suppress(Exception):
-                    await self._launch(
+                    retried = await self._launch(
                         node_id=node_id, spec=run.spec, provider=run.provider,
                         prompt=(run_dir / "prompt.md").read_text(),
                         workdir=Path(fresh.worktree), branch=fresh.branch,
                         parent=fresh.parent, depth=fresh.depth,
                         session_id=session_id or None,
                     )
+                    # Continuity for whoever is waiting on the attempt that
+                    # just died: `_launch` starts every relaunch with a fresh
+                    # `Run`, but a caller that captured this run (consult(),
+                    # or a test driving the agent directly) before the retry
+                    # must still be woken when the SECOND attempt finishes,
+                    # not left waiting on an event nothing will ever set.
+                    retried.done = run.done
                     self.tree.set_status(node_id, "running", "retried once after "
                                          "an unexplained early exit")
                     return True
@@ -1563,7 +1653,7 @@ class Runner:
                     reason = f"exited {code}"
                 else:
                     reason = "produced no output"
-            self.tree.set_status(node_id, status, reason)
+            self.tree.set_status(node_id, status, self._with_trip(prior_stuck, reason))
 
         # Auto-merge this agent's own children upward: their work is still
         # quarantined on this agent's branch, so nothing real has changed yet.
@@ -1728,6 +1818,9 @@ class Runner:
                 if trip:
                     self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
                     self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
+                    run.trip_kind = trip.reason
+                    run.trip_signature = run.supervisor.last_digest
+                    run.trip_progress = run.supervisor.current_progress
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2652,7 +2745,7 @@ class Runner:
         slots free is not doing less work, it is taking four times as long to
         do it.
         """
-        running = len(self.tree.active())
+        running = len([n for n in self.tree.active() if _occupies_slot(n)])
         limit = int(self.config.limits.get("max_concurrent", 4))
         return {"running": running, "max_concurrent": limit,
                 "free_slots": max(0, limit - running)}
@@ -2764,7 +2857,7 @@ class Runner:
             node = self.tree.get(agent_id)
             if node is None:
                 continue
-            if node.status in {"pending", "running"}:
+            if _occupies_slot(node):
                 pending.append(agent_id)
             else:
                 already.append({
@@ -2777,20 +2870,38 @@ class Runner:
                     "still_running": [], "capacity": self.capacity(),
                     "note": "every agent you named had already finished", **pause()}
 
-        while time.monotonic() < deadline:
-            changed = []
-            running = []
+        # SL-R5: an agent that was ALREADY stuck-and-live when the wait began
+        # is treated as running-equivalent for the whole wait — it is reported
+        # once it truly finishes, not the moment it is first observed stuck,
+        # since that moment is now (waiting on it would otherwise be a no-op).
+        # An agent that BECOMES stuck DURING the wait is a real state change
+        # and is reported at once, as before.
+        baseline_stuck = {i for i in pending
+                          if (n := self.tree.get(i)) is not None and n.status == "stuck"}
+
+        def classify() -> tuple[list[dict], list[str], list[dict]]:
+            changed_, running_, still_stuck_ = [], [], []
             for agent_id in pending:
                 node = self.tree.get(agent_id)
                 if node is None:
                     continue
                 if node.status in {"pending", "running"}:
-                    running.append(agent_id)
+                    running_.append(agent_id)
+                elif node.status == "stuck" and agent_id in baseline_stuck:
+                    running_.append(agent_id)
+                    still_stuck_.append({
+                        "agent_id": agent_id, "agent": node.agent,
+                        "reason": node.reason,
+                    })
                 else:
-                    changed.append({
+                    changed_.append({
                         "agent_id": agent_id, "agent": node.agent,
                         "status": node.status, "reason": node.reason,
                     })
+            return changed_, running_, still_stuck_
+
+        while time.monotonic() < deadline:
+            changed, running, still_stuck = classify()
             if changed:
                 # Both lists from one read, so an agent finishing between two
                 # reads is not dropped from both.
@@ -2798,19 +2909,20 @@ class Runner:
                     "changed": changed,
                     "already_finished": already,
                     "still_running": running,
+                    "still_stuck": still_stuck,
                     "waited_seconds": round(timeout - (deadline - time.monotonic())),
                     **self._idle_capacity_note(),
                     **pause(),
                 }
             await asyncio.sleep(1.0)
 
+        _changed, running, still_stuck = classify()
         return {
             "changed": [],
             "timed_out": True,
             **self._idle_capacity_note(),
-            "still_running": [i for i in pending
-                              if (n := self.tree.get(i)) is not None
-                              and n.status in {"pending", "running"}],
+            "still_running": running,
+            "still_stuck": still_stuck,
             **pause(),
         }
 

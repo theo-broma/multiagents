@@ -48,6 +48,10 @@ class Supervisor:
     # Whether this provider's stream rules tag events with a turn id. Read from
     # providers.yaml by the caller and handed in — never decided here by name.
     declares_turn: bool = False
+    # Tool names whose reported arguments do not identify the call (SL-R6):
+    # repeating one must never trip doom_loop by itself. silence/runaway_steps
+    # /timeout are unaffected — only the loop-signature check is skipped.
+    opaque_tools: frozenset[str] = field(default_factory=frozenset)
 
     started: float = field(default_factory=time.monotonic)
     last_event: float = field(default_factory=time.monotonic)
@@ -106,7 +110,7 @@ class Supervisor:
             self.steps += 1
 
         trip: Trip | None = None
-        signature = event.loop_signature()
+        signature = None if event.name in self.opaque_tools else event.loop_signature()
         if signature:
             digest = hashlib.sha1(signature.encode()).hexdigest()[:12]
             # ONE call, not one per lifecycle event. Providers report a tool

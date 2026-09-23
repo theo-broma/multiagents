@@ -174,6 +174,10 @@ class Provider:
     extends: str = ""
     family: str = ""
     env: dict[str, str] = field(default_factory=dict)
+    # Tools whose reported arguments do not identify the call (e.g. a
+    # file-viewer that never reports which range it viewed) — repeating one
+    # must not trip doom_loop on its own. See Supervisor.opaque_tools.
+    opaque_tools: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -206,6 +210,7 @@ class Provider:
             # and a provider that extends nothing is its own family of one.
             family=data.get("family") or data.get("extends") or name,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
+            opaque_tools=list(data.get("opaque_tools", []) or []),
         )
 
     # ------------------------------------------------------------- command --
