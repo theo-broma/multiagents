@@ -226,8 +226,12 @@ def _text(data: bytes | None) -> str:
 
 def _kill_group(child: subprocess.Popen) -> None:
     """Kill a timed-out action and everything it started, and reap it."""
-    with contextlib.suppress(OSError):
-        os.killpg(child.pid, signal.SIGKILL)
+    # Only while still running: once `child.returncode` is set the pid has
+    # been reaped and the OS is free to hand it to an unrelated process, so a
+    # `killpg` after that point could kill a stranger's group instead of ours.
+    if child.returncode is None:
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, signal.SIGKILL)
     with contextlib.suppress(OSError):
         child.kill()
     # Bounded: a grandchild that left the group can still hold the pipes open.

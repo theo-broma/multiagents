@@ -83,9 +83,18 @@ def _read_yaml(path: Path) -> dict:
 
 
 @lru_cache(maxsize=1)
-def shipped_limits() -> dict[str, Any]:
-    """The `limits` block of the package's own project.yaml, never a layer's."""
+def _shipped_limits_cached() -> dict[str, Any]:
     return dict(_read_yaml(shipped_defaults_dir() / "project.yaml").get("limits") or {})
+
+
+def shipped_limits() -> dict[str, Any]:
+    """The `limits` block of the package's own project.yaml, never a layer's.
+
+    A fresh copy each call: the cached dict underneath is shared across every
+    caller, and one caller mutating what it got back must not leak into the
+    next.
+    """
+    return dict(_shipped_limits_cached())
 
 
 def limit_number(limits: dict, key: str, zero_ok: bool = False) -> float:
