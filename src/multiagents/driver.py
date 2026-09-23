@@ -34,6 +34,7 @@ from .budget import read_all, reset_label
 from .executor import executor_for
 from .paths import global_config_dir
 from .providers import load_providers
+from .transcripts import session_context
 from .tree import Node, Tree, now as tree_now
 
 
@@ -762,6 +763,8 @@ def _supervise(paths, config, role, spec, provider, executor,
     idle_turns = 0
     failures = 0
     limit_waits = 0
+    # Set once the provider says it cannot compact; not asked again this run.
+    compact_unsupported: list = []
 
     for turn in range(1, max_turns + 1):
         held = _orchestrator_hold(paths, config)
@@ -844,7 +847,14 @@ def _supervise(paths, config, role, spec, provider, executor,
             continue
 
         failures = 0
-        if _activity_fingerprint(tree) == before:
+        # Judged before compacting: the events a compaction writes are not
+        # activity, and must not make an idle turn look productive.
+        idle = _activity_fingerprint(tree) == before
+        # Before deciding whether to stop, so the last turn of a run — the
+        # second idle one, or the one at the turn limit — compacts too.
+        _compact_if_due(paths, config, spec, provider, executor, context, tree,
+                        compact_unsupported)
+        if idle:
             idle_turns += 1
             print(f"\n(turn {turn} changed nothing in the tree"
                   f"{' — second in a row' if idle_turns > 1 else ''})")
@@ -856,6 +866,50 @@ def _supervise(paths, config, role, spec, provider, executor,
 
     print(f"\nreached the {max_turns}-turn limit; stopping.")
     return 0
+
+
+def _compact_if_due(paths, config, spec, provider, executor, context: dict,
+                    tree, unsupported: list) -> None:
+    """Compact the session at a closed boundary, if it has grown past the mark.
+
+    Called only after a turn that exited 0 and was not stopped by a limit. A
+    compaction cannot be undone, so it happens only with nothing in flight: no
+    agent active and nothing deferred. A turn that ended with agents running
+    ended with reasoning in the orchestrator's head that is not on disk.
+
+    The provider script does the work and answers with its exit code: 0
+    compacted, 64 cannot (asked no more this run), anything else failed — which
+    is reported and is not a failed turn.
+    """
+    threshold = int(config.limits.get("compact_at_tokens", 0) or 0)
+    if threshold <= 0 or unsupported:
+        return
+    session = context.get("MULTIAGENTS_SESSION_ID", "")
+    tokens = session_context(provider, paths.root, session)
+    if tokens is None or tokens < threshold:
+        return
+    if tree.active() or tree.read().get("deferred"):
+        return
+
+    who = next((n.id for n in tree.drivers() if n.session == session), spec.name)
+    timeout = int(config.limits.get("compact_timeout_seconds", 180) or 180)
+    code, out, err = scripts.run_action(
+        spec.provider, provider, executor, "compact", global_config_dir(),
+        paths.config, timeout=timeout, extra_env=dict(context), cwd=paths.root)
+    if code == 0:
+        detail = next((line.strip() for line in out.splitlines() if line.strip()), "")
+        print(f"\ncompacted    {detail}")
+        tree.emit(who, "compacted", tokens_before=tokens, detail=detail)
+    elif code == scripts.UNIMPLEMENTED:
+        unsupported.append(True)
+        print(f"\n{spec.provider} cannot compact a session from outside; "
+              f"not asking again this run.")
+        tree.emit(who, "compact_unsupported", tokens_before=tokens)
+    else:
+        tail = " | ".join(line.strip() for line in err.strip().splitlines()[-3:])
+        print(f"\ncompaction failed (exit {code}): {tail or 'no reason given'}")
+        tree.emit(who, "compact_failed", code=code, detail=tail[-500:])
+    sys.stdout.flush()
 
 
 def _activity_fingerprint(tree) -> tuple:

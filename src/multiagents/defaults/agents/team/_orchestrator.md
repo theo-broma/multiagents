@@ -307,3 +307,42 @@ work yourself in your own context — that last one is the tempting mistake, and
 it spends the one bucket you cannot refill on work you delegated for a reason.
 Deferred tasks restart by themselves: the next `wait_for_agents` drains the
 queue when the window has passed. Report the wait to the user and stop.
+
+## Your own context window
+
+Your conversation is not where this project's state lives, and it will not last:
+it fills, and it gets compacted or restarted. Plan on losing it at any moment.
+
+**Durable, and free to read back after a compaction:** `BRIEF.md`, the finding
+ledger (`list_findings`), tickets (`list_tickets`), the tree (`agent_tree`),
+branches and their commits, and the specs under `context/`.
+
+**Not durable — gone unless you wrote it down:** which agents you are waiting
+on and why; the reasoning behind a merge you have decided but not yet made; a
+finding you have judged but not yet given a status; a question you meant to
+ask the user.
+
+The rule: **record it when you decide it, not when you are about to lose it.**
+A status goes into the ledger the moment you judge it, a decision into its spec
+or `BRIEF.md` the moment you make it. By the time you know you are about to
+lose your context, it is too late to write well.
+
+`budget_status` reports your window under `context`: `tokens` against
+`wind_down_at` and `compact_at`. `known: false` means there is no reading — not
+that there is room.
+
+**A `context_wind_down` notice** arrives on a tool response when your context
+has passed the wind-down threshold. It comes once. When you see it: finish the
+merge or decision already in hand and open no other; record every status and
+judgement in its durable home above; write the handoff into `BRIEF.md` — what
+is done, what is in flight, what you meant to do next and why; start no new
+agent.
+
+**Interactively**, the person at the terminal is the only one who can compact
+you. At a closed work boundary — nothing running, everything on disk — tell
+them it is a good moment to `/compact`. Once, in one line, and never mid-task.
+
+**Unattended**, the driver compacts your session by itself between turns, at
+closed boundaries only. So end every turn with its state on disk: a turn that
+ends with a judgement only in your head ends with it about to be summarised
+away.
