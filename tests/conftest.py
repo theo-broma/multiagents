@@ -41,13 +41,37 @@ readers unmocked would reintroduce it, and would have to mock them instead.
 
 from __future__ import annotations
 
+import os
 import urllib.error
 
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _machine_state_is_disposable(tmp_path_factory, monkeypatch):
+def _caller_environment_is_invisible(monkeypatch):
+    """Start every test with no MULTIAGENTS_* or CLAUDE_* variables.
+
+    The suite is run by people and by agents, and an agent's environment
+    carries its own identity: MULTIAGENTS_AGENT_ID, _DEPTH, _CAN_SPAWN,
+    CLAUDE_CONFIG_DIR and the rest. The code under test reads those, so the
+    same commit gave different results depending on who ran it — measured
+    2026-09-23, about eighteen CAN_SPAWN tests and four doctor /
+    container-profile tests failed from inside an agent and passed from a
+    clean shell. That is a leak, not a regression, and it made a real
+    regression impossible to tell apart from one.
+
+    A test that needs one of these sets it itself with `monkeypatch.setenv`,
+    which runs after this. `_machine_state_is_disposable` requests this
+    fixture so its two redirects are set after the clear, not wiped by it.
+    """
+    for name in list(os.environ):
+        if name.startswith(("MULTIAGENTS_", "CLAUDE_")):
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _machine_state_is_disposable(_caller_environment_is_invisible,
+                                 tmp_path_factory, monkeypatch):
     """Point the machine-wide roots at a directory belonging to this test.
 
     `mktemp` numbers each call, so this is per-test rather than per-session.
