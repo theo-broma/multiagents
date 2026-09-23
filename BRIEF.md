@@ -199,7 +199,38 @@ contract B:
    R19/R20 tests (25 red), produced when a deferred task restarted itself;
    unmerged because Phase 3 is paused.
 
-**Next: contract B (R7, R8).**
+### Status — contract B (R7, R8), started 2026-09-23 05:05, unattended
+
+Contract: `context/specs/phase0-context-and-team.md` (P0-R7.1–R7.12,
+P0-R8a–R8e). Decisions taken in it, for the user to see:
+
+- **R8c applies to `--unattended` only.** Interactively the CLI holds the
+  session for the whole conversation, so there is no gap between turns the
+  driver controls; interactive protection is the wind-down notice (R8a), the
+  brief (R8b) and the automatic threshold (R8e).
+- **R8d opencode is deferred:** `opencode.sh compact` exits 64. The HTTP route
+  needs an `opencode serve` process and cannot be verified while opencode's
+  monthly quota is exhausted (until 2026-10-05).
+- Thresholds shipped: `compact_at_tokens: 120000`,
+  `context_wind_down_tokens: 150000` (tunable, 0 disables).
+
+### Awaiting the user
+
+- **agy cannot authenticate in the container (2026-09-23 05:03).** The stored
+  token expired at 00:10 UTC and the silent refresh fails with
+  `Post "https://oauth2.googleapis.com/token": Unable to connect`
+  (`~/.multiagents/container-state/shared/agy/.gemini/antigravity-cli/log/cli-20260923_030345.log`),
+  although `googleapis.com` is in `egress_allowlist`. `auth_status` still says
+  "authenticated". Fix: `multiagents auth login agy` (needs a person), then
+  find out why the refresh cannot reach Google through the proxy — probably
+  a multiagents defect worth a ticket (the bug-reporter itself runs on
+  opencode/agy, so it could not be filed tonight). Consequence: advisor,
+  reviewer, dev-advisor, researcher, adversary and bug-reporter were all
+  unavailable; contract B was written without an advisor review, and runs on
+  claude only.
+- **`autocompact:` on the orchestrator** (P0-R8e.2): no shipped default;
+  whether to set one locally is your call.
+- Follow-up 4 above (`doom_loop_repeats`).
 
 ### R1 — the versioned mount (`F200`)
 
