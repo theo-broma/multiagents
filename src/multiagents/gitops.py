@@ -206,21 +206,77 @@ def short_sha(repo: Path, ref: str) -> str:
     return result.out if result.ok else ""
 
 
-def holds_unmerged_commits(repo: Path, head: str, base: str) -> bool:
+def holds_unmerged_commits(repo: Path, head: str, base: str, since: str = "") -> bool:
     """Whether `head` has commits whose changes `base` does not already hold.
 
     Absorbed means merging `head` into `base` would change no file, which is
     what a squash merge leaves behind: the branch's own shas never reach base,
     but its content does. A conflicting merge, or a git too old to answer, is
     counted as holding work — the safe side of this question is "yes".
+
+    `since` is where the branch started, when that is known. Only commits
+    after it are the branch's own: without it, a base that was amended or
+    moved backwards leaves the commit the branch was cut from looking like
+    work of its own.
     """
     if run(repo, "merge-base", "--is-ancestor", head, base).ok:
         return False
-    merged = run(repo, "merge-tree", "--write-tree", base, head)
+    args = ["merge-tree", "--write-tree"]
+    if since:
+        own = run(repo, "rev-list", "--count", head, "--not", base, since)
+        if own.ok and own.out == "0":
+            return False
+        if run(repo, "merge-base", "--is-ancestor", since, head).ok:
+            args.append(f"--merge-base={since}")
+    merged = run(repo, *args, base, head)
     if not merged.ok or not merged.out:
         return True
     base_tree = run(repo, "rev-parse", f"{base}^{{tree}}")
     return not base_tree.ok or merged.out.splitlines()[0] != base_tree.out
+
+
+def untracked_in_the_way(worktree: Path, head: str, target: str) -> str:
+    """A path moving `worktree` from `head` to `target` would overwrite, or "".
+
+    Such a path is one `target` tracks and `head` does not, which exists in
+    the worktree as something git is not tracking — an ignored file, most
+    often — with other content than `target` gives it. `reset --keep` refuses
+    an untracked file there but overwrites an ignored one. A file (or a
+    directory) standing where `target` needs a directory counts too. When git
+    cannot answer, the first path it could not rule out is returned.
+    """
+    diff = run(worktree, "diff", "--raw", "--no-abbrev", "--no-renames", "-z",
+               head, target)
+    if not diff.ok:
+        return diff.err or "git diff failed"
+    fields = diff.out.split("\0")
+    added: dict[str, str] = {}
+    removed: set[str] = set()
+    for meta, path in zip(fields[0::2], fields[1::2]):
+        parts = meta.split()
+        if len(parts) < 5:
+            continue
+        if parts[4] == "A":
+            added[path] = parts[3]
+        elif parts[4] == "D":
+            removed.add(path)
+    for path, blob in added.items():
+        segments = path.split("/")
+        for depth in range(1, len(segments)):
+            prefix = "/".join(segments[:depth])
+            spot = worktree / prefix
+            if prefix not in removed and (spot.is_symlink() or
+                                          (spot.exists() and not spot.is_dir())):
+                return prefix
+        spot = worktree / path
+        if not (spot.exists() or spot.is_symlink()):
+            continue
+        if spot.is_symlink() or not spot.is_file():
+            return path
+        same = run(worktree, "hash-object", "--", path)
+        if not same.ok or same.out != blob:
+            return path
+    return ""
 
 
 def diff_stat(repo: Path, branch: str, base: str) -> str:

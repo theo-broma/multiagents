@@ -186,6 +186,12 @@ class Node:
     # budget will not.
     budget_tag: str = ""
     turns: int = 0
+    # The base commit a conversation's worktree was last placed on: where it
+    # was cut on turn 1, then every refresh that moved it. Own work is what
+    # came after this point, so a base amended or moved backwards is never
+    # mistaken for the agent's (bug-7f6ba7). "" on nodes from before it was
+    # recorded, which fall back to "whatever base does not hold".
+    placed_on: str = ""
     paused_at: float | None = None    # entered idle / awaiting_user at
     created_at: float = field(default_factory=now)
     started_at: float | None = None
