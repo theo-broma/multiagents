@@ -214,6 +214,37 @@ P0-R8a–R8e). Decisions taken in it, for the user to see:
 - Thresholds shipped: `compact_at_tokens: 120000`,
   `context_wind_down_tokens: 150000` (tunable, 0 disables).
 
+**Result, 2026-09-23 ~05:40.** P0-R7 (team choice) and P0-R8a–R8e are all
+implemented and merged on `refactor/split-consume`. The contract tests total
+190: 78 for R7 and 112 for R8. Full suite, run by the orchestrator with
+`test_phase2_entry_semantics.py` excluded: **1348 passed, 1 failed, 2 xfailed**.
+The one failure is
+`test_core::test_the_claude_script_uses_the_container_profile_only_where_it_should`,
+which already failed at 5249107, before contract B.
+
+The orchestrator reviewed the R7 diff. It found two real-terminal defects the
+tests cannot see: `setraw` made the redraw staircase, and a lone Escape
+blocked. Both are fixed: the reader now uses cbreak mode, and reads the fd
+with a `select` timeout.
+
+**Still open on contract B:**
+- **Adversary, reviewer and advisor.** None has looked at the finished diff:
+  all three run on agy or opencode, and those were down. R8c/R8d is the part
+  that deserves the attack. A compaction is irreversible, and the claude
+  script decides success by parsing the transcript.
+- **Live check.** `claude.sh compact` has never run against a real session.
+  Only a fake CLI has exercised it; the invocation itself was verified by
+  hand on 2026-09-22.
+- **Step counter looks inflated in the wild.** A tester (`ag-48f51a`) tripped
+  `runaway_steps` at 251 in about 5 minutes. Its stream shows bursts of about
+  25 `step` events within the same millisecond, which should be impossible
+  under P0-R4's turn-only counting. Nothing was killed and the work finished.
+  This needs the raw CLI stream to diagnose; it probably joins follow-up 3
+  (`tool_progress`).
+- **Claude's 5-hour window.** It went from 0% to 88% in about 35 minutes of
+  two or three Opus/Sonnet agents; the wrap-up at 05:38 was legitimate. It
+  resets at 09:59.
+
 ### Awaiting the user
 
 - **agy cannot authenticate in the container (2026-09-23 05:03).** The stored
