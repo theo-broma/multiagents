@@ -36,6 +36,15 @@ fi
 # own instead of twenty-eight days of account access.
 VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
 
+# The project folder name Claude Code itself derives from a directory path:
+# every character outside [A-Za-z0-9] becomes '-'. Used wherever this script
+# has to find a transcript the CLI already wrote, rather than one it is about
+# to write — get this wrong and a project path with a space, or any other
+# punctuation, silently looks empty.
+claude_slug() {
+    printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'
+}
+
 # Write the vault's access token into the mounted profile, dropping everything
 # that could mint another one. Atomic, because an agent may be starting while
 # this runs and half a credential file is worse than an old one.
@@ -349,7 +358,7 @@ else:
         echo "refresh failed: $(printf '%s' "$out" | tail -1 | head -c 200)"
         exit 10
     }
-    rm -rf "$RENEW/projects/$(printf '%s' "$probe" | sed 's|[/._]|-|g')" 2>/dev/null
+    rm -rf "$RENEW/projects/$(claude_slug "$probe")" 2>/dev/null
     # Host-pid state is meaningless inside a container, same as after `login`.
     rm -rf "$RENEW/daemon" "$RENEW/daemon.lock" "$RENEW/daemon.status.json"
     # SAY WHAT HAPPENED, not what was attempted. There is no `claude auth
@@ -441,7 +450,7 @@ launch)
     # conversation. Naming the session removes the ambiguity: resume it if it
     # exists, create it under that id if it does not.
     if [ -n "${MULTIAGENTS_SESSION_ID:-}" ]; then
-        sessions="$HOME/.claude/projects/$(pwd | sed 's|[/._]|-|g')"
+        sessions="$HOME/.claude/projects/$(claude_slug "$(pwd)")"
         if [ "${MULTIAGENTS_RESUME:-0}" = "1" ] \
            && [ -f "$sessions/$MULTIAGENTS_SESSION_ID.jsonl" ]; then
             set -- "$@" --resume "$MULTIAGENTS_SESSION_ID"
@@ -451,7 +460,7 @@ launch)
     elif [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
         # No id: an install predating this. Fall back to the old behaviour,
         # which is still better than passing --continue into nothing.
-        sessions="$HOME/.claude/projects/$(pwd | sed 's|[/._]|-|g')"
+        sessions="$HOME/.claude/projects/$(claude_slug "$(pwd)")"
         if ls "$sessions"/*.jsonl >/dev/null 2>&1; then
             set -- "$@" --continue
         else
@@ -488,13 +497,20 @@ compact)
         echo "MULTIAGENTS_SESSION_ID is required to compact a session" >&2
         exit 2
     fi
-    slug=$(pwd | sed 's|[/._]|-|g')
+    slug=$(claude_slug "$(pwd)")
     transcript="$HOME/.claude/projects/$slug/$sid.jsonl"
     if [ ! -f "$transcript" ]; then
         echo "no transcript for session $sid at $transcript" >&2
         exit 1
     fi
+    # `wc -l` counts newlines, not lines: an unterminated last line (a writer
+    # killed mid-flush) is one line short. Left uncorrected, the python below
+    # slices from one line too early and hands an old, pre-existing record to
+    # a caller that appended nothing.
     before=$(wc -l < "$transcript" 2>/dev/null || echo 0)
+    if [ -s "$transcript" ] && [ -n "$(tail -c1 "$transcript")" ]; then
+        before=$((before + 1))
+    fi
     out=$("$BIN" -p "/compact" --resume "$sid" --output-format json 2>&1)
     code=$?
     if [ "$code" -ne 0 ]; then
@@ -507,7 +523,10 @@ compact)
     figures=$(python3 -c "
 import json, sys
 path, before = sys.argv[1], int(sys.argv[2])
-with open(path) as fh:
+# errors='replace': a byte elsewhere in the session that is not valid UTF-8
+# (written long before this call) must not turn a real compaction into a
+# reported failure.
+with open(path, errors='replace') as fh:
     lines = fh.readlines()
 for line in lines[before:]:
     line = line.strip()

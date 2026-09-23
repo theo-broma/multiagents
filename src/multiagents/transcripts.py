@@ -120,11 +120,27 @@ def request_cost(model: str, usage: dict[str, Any]) -> float:
     ) / 1e6
 
 
+def _figure(value: Any) -> int | float:
+    """One usage field, coerced to a number.
+
+    A transcript's usage fields are normally ints, but a numeric string must
+    still add rather than concatenate — three string figures summed with `+`
+    silently became one five-million-token string.
+    """
+    if isinstance(value, bool):
+        raise TypeError("bool is not a usage figure")
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return float(value)
+    raise TypeError(f"not a usage figure: {value!r}")
+
+
 def context_tokens(usage: dict[str, Any]) -> int:
     """Everything the model was handed on this request."""
-    return (usage.get("input_tokens", 0)
-            + usage.get("cache_read_input_tokens", 0)
-            + usage.get("cache_creation_input_tokens", 0))
+    return (_figure(usage.get("input_tokens", 0))
+            + _figure(usage.get("cache_read_input_tokens", 0))
+            + _figure(usage.get("cache_creation_input_tokens", 0)))
 
 
 def server_of(tool_name: str) -> str | None:
@@ -375,25 +391,46 @@ def _usage_of(line: bytes) -> int | None:
         return None
     try:
         return int(context_tokens(usage))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # `int(float("inf"))` raises OverflowError, not caught above; `Infinity`
+        # is valid to Python's json, and a raising read here is never cached,
+        # so every later tool call would re-read and raise again.
         return None
 
 
 def _last_reading(handle, start: int, end: int) -> int | None:
-    """The last line in [start, end) that carried usage, read from the end."""
-    pos, carry = end, b""
+    """The last line in [start, end) that carried usage, read from the end.
+
+    Reads backward in fixed-size chunks. A block that carries no boundary is
+    just appended to a list of pieces of the still-open line — not
+    concatenated onto a growing `carry` on every chunk it spans, which is what
+    made one huge line (a big tool result) cost time quadratic in its length.
+    The pieces are only ever joined once, when the line's start is finally
+    found, so the whole scan stays linear in the bytes read.
+    """
+    pos = end
+    open_line: list[bytes] = []   # pieces of the not-yet-bounded line
     while pos > start:
         step = min(_CHUNK, pos - start)
         pos -= step
         handle.seek(pos)
-        block = handle.read(step) + carry
-        lines = block.split(b"\n")
-        # The first piece may be the tail of a line that began earlier.
-        carry = lines.pop(0) if pos > start else b""
-        for line in reversed(lines):
-            found = _usage_of(line)
+        block = handle.read(step)
+        parts = block.split(b"\n")
+        open_line.append(parts[-1])
+        if len(parts) == 1:
+            continue                          # no boundary in this block yet
+        found = _usage_of(b"".join(reversed(open_line)))
+        if found is not None:
+            return found
+        for piece in reversed(parts[1:-1]):
+            found = _usage_of(piece)
             if found is not None:
                 return found
+        open_line = [parts[0]]                # continues into the next block
+    if open_line:
+        found = _usage_of(b"".join(reversed(open_line)))
+        if found is not None:
+            return found
     return None
 
 
