@@ -577,6 +577,43 @@ amendments narrow that window and make the warning impossible to miss.
     group is killed. This holds for every captured action, not only
     `compact`: they are non-interactive by contract, and the probe runs while
     the CLI owns the terminal.
+- **Added from the review of d4ae4ec (reviewer ag-e8565d, 2026-09-23):**
+  - **P0-R8f.10 — SIGTERM restores the terminal.** When the process running
+    an attached session (`driver._run_attached`) or the interactive team
+    picker (`cli.py`, cbreak mode) receives SIGTERM, the terminal attributes
+    in force before it started are restored before the process exits, just
+    as they are on SIGINT, SIGHUP or a normal return. The process still
+    exits (it does not ignore SIGTERM), with a non-zero status.
+    *Verified by:* a test that sends SIGTERM during an attached run and
+    during the picker, and asserts that the saved terminal attributes were
+    written back and the process ended.
+  - **P0-R8f.11 — a captured action never outlives its caller.** If
+    `scripts.run_action` is interrupted by any exception while waiting for
+    the provider script (KeyboardInterrupt included), the script's whole
+    process group is killed and reaped before the exception propagates. The
+    exception still propagates unchanged.
+    *Verified by:* a test that raises KeyboardInterrupt during a slow action
+    and asserts that no process of that action's group remains.
+  - **P0-R8f.12 — a user's own exit wins over a pending compaction.** If the
+    attached CLI exits by itself (any exit the driver did not cause by
+    stopping it for R8f.4) while a compaction is announced or has just
+    become due, the driver does not compact and does not relaunch: it ends
+    the session as it would with no compaction pending. Only a CLI stopped
+    by the driver for R8f.4 is compacted and resumed.
+    *Verified by:* a test where the CLI exits 0 at the moment the grace
+    period expires, asserting no `compact` action runs and no relaunch
+    happens.
+  - **P0-R8f.13 — the driver's other limits parse safely too.**
+    `restart_attempts`, `restart_delay_seconds` and `limit_max_waits`
+    follow R8f.9's rule: a malformed value (not a number, negative, `inf`,
+    NaN, a string) falls back to the shipped default in
+    `defaults/project.yaml` and never crashes the driver. The same rule
+    applies to `compact_at_tokens`, `context_wind_down_tokens` and
+    `compact_timeout_seconds`, both in the driver and in the server
+    (superseding the "malformed → off" decision above).
+    *Verified by:* a test per key with a malformed value asserting the
+    default's observable effect, and that an explicit `0` keeps its meaning
+    where 0 means off.
 
 ### P0-R8e — the automatic threshold, through the plugin seam
 
