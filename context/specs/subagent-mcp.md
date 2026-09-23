@@ -78,6 +78,21 @@ unresolvable: the run completes and the event is present. If the provider
 CLI refuses to start at all with a broken server, say so and propose an
 alternative rather than inventing one.
 
+## Decided, from the tester's questions (ag-7b6737)
+
+- **agy counts only if its launch names the server.** Its global MCP profile
+  does not satisfy SM-R1. It is the user's configuration (SM-R4). It is also
+  probably unusable in the container, which has no `uv`. If agy offers no
+  per-launch way to be given an MCP server, the developer stops and says so
+  (NEED_INFO) rather than relying on the global profile.
+- **SM-R4, "the run's own state directory"** is either `runs/<id>/` or the
+  agent's private home under the multiagents state directory
+  (`homes/<id>`). Both belong to the run. The rule's intent is: never the
+  user's own CLI configuration.
+- **SM-R5** is tested through what the agent's CLI reports: claude's init
+  event reporting the `multiagents` server as failed. That is accepted.
+  Covering opencode and agy the same way is welcome, but not required.
+
 ## Out of scope, recorded
 
 - Whether agy's global registration works inside the container, given there
