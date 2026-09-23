@@ -70,6 +70,11 @@ read JSON.
                             prompt applied. Takes over the terminal; does not
                             return.
 
+    <provider>.sh compact   non-interactive; MULTIAGENTS_SESSION_ID names the session
+                            exit 0  = compacted, and verified; stdout line 1 = figures
+                            exit 64 = this provider cannot compact from outside
+                            exit *  = attempted and failed; reason on stderr
+
 ## Environment provided
 
     MULTIAGENTS_PROVIDER          provider name

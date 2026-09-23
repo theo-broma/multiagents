@@ -265,6 +265,7 @@ providers:
         readonly: ["--restricted", "--tools", "Read,Glob,Grep,WebFetch"]
       optional:
         max_budget_usd: ["--max-budget-usd", "{max_budget_usd}"]
+        autocompact: ["--autocompact", "{autocompact}"]
     # No `claude models` command exists, so the list is static. Keep it short:
     # these are aliases the CLI resolves, so they do not go stale on a release.
     models:

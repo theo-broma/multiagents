@@ -322,5 +322,19 @@ launch)
     # and the session continues interactively from there.
     exec "$BIN" --model "${MULTIAGENTS_MODEL:-}" --prompt-interactive "$prompt"
     ;;
-*)  echo "usage: $0 check|login|budget|usage|prepare|launch" >&2; exit 64 ;;
+compact)
+    # No external trigger exists. agy's compaction is configured through a
+    # protobuf message (genai.AntigravityAgentConfig.AntigravityCompactionConfig,
+    # antigravity.localharness.CompactionConfig), internal and versioned with
+    # the CLI. The one thing that looked like a route — sending "/compact" in
+    # print mode — is not one: print mode EXPANDS slash commands into the
+    # prompt rather than consuming them (agy --help names the flag that would
+    # disable that), so the text reaches the model instead of the CLI, the
+    # model attempts a tool call that gets auto-denied for lack of a
+    # permission rule, and nothing is compacted. Measured 2026-09-22: the one
+    # attempt cost 42,752 tokens. Do not retry it — exit 64 without starting
+    # the CLI at all.
+    exit 64
+    ;;
+*)  echo "usage: $0 check|login|budget|usage|prepare|launch|compact" >&2; exit 64 ;;
 esac
