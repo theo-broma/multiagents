@@ -1231,3 +1231,46 @@ not sent upstream.
 - Add to the bug-c050b0 work: the wrap-up message was sent **6 times** to
   ag-3b4d7a (runs/ag-3b4d7a/prompt.1-6.md). The config says once. Each resend
   interrupted its turn, so it never started writing.
+
+## Progress, 2026-09-23 ~21:40 (handoff; claude 5h window at 95 %, resets 01:00 CEST)
+
+- **Item 1, bug-2cebea:** implemented and merged (904e7f0; watchdog-test fix
+  d06bd8d). All 31 SL tests pass. Still open:
+  - adversary ag-c0f64f (agy) was steered to finish its findings
+    (`tests/test_stuck_lifecycle_adversary.py`);
+  - reviewer ag-98e037 rejected with 4 points. My triage:
+    - (1) the retry takes over the original `done` Event after
+      `await _launch`: plausible, cheap to fix;
+    - (2) `wait_for_agents`'s `classify()` ignores liveness, contrary to
+      SL-R4: real;
+    - (3) `_maybe_clear_stuck` calls `tree.get` per event after an external
+      status change: minor;
+    - (4) `suppress(Exception)` predates this work: declined.
+  - **Next:** route adversary findings plus reviewer points 1-3 to an
+    implementer (claude, after 01:00), then `resolve_ticket(bug-2cebea,
+    fixed)`. The running MCP server still has the old code (the stuck
+    labels, and wait returning at once on stuck agents) until
+    `multiagents run` is restarted.
+- **Item 2, test isolation:** merged (4d80cdf). Verified by the
+  orchestrator: `tests/test_core.py` 560 passed with 32 ambient variables
+  set, using `.venv/bin/python`. The system python lacks `mcp`.
+- **Item 3, defect 6:**
+  - tests merged (2e87c4b, 49); decisions recorded (9882b22);
+  - implementer-deep **ag-009901** got a legitimate wrap-up at 21:33 and
+    stopped with everything committed (433600c): 49/49 SM tests pass, and
+    the full suite is NOT yet run (its test_core run was killed, exit 137);
+  - **resume it with steer_agent after 01:00**: full suite, then its
+    result;
+  - then reviewer and adversary (it touches executors and docker), then
+    merge;
+  - then the live SM-R1 check (steps in its handoff: `collect_agent
+    ag-009901`).
+- **Item 5, bug-c050b0:** BR-R5 added (c26169b); tests merged (e1d7139,
+  39 cases, 33 red). The cause of the 6 resends is confirmed: the flag
+  lives on the Run, and steer replaces the Run. **Next:** implementer.
+- **Item 8** added (7d7b6a2): agents survive a restart of the
+  orchestrator's CLI.
+- Local config: `compact_at_tokens: 200000`,
+  `context_wind_down_tokens: 300000` (user's request). R8f compaction
+  becomes active only after `multiagents run` is restarted (the current
+  driver dates from 10:45).
