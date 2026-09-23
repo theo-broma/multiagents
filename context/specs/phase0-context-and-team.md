@@ -557,6 +557,22 @@ amendments narrow that window and make the warning impossible to miss.
     `0` are malformed and fall back to `true`.
   - **The bell** is written on the announcement line, on the same stream as
     the announcement.
+- **Decided, from the implementer's read (ag-829577):**
+  - **Rest (R8f.2.3)** starts no earlier than the latest launch of the CLI,
+    even if the transcript is older. A user who has just been handed a
+    session is the one most likely to be typing.
+  - **A malformed `compact_at_tokens`** falls back to 0, which means off. A
+    compaction is irreversible, so a threshold the config cannot state
+    safely disables the feature rather than guessing.
+  - **A probe answering 64** disables R8f silently, with no line and no
+    event: anything printed would land on the live TUI.
+  - **An announced compaction** is also cancelled if the tree stops being
+    idle during the grace period.
+  - **Captured provider actions** (`scripts.run_action`) run in their own
+    session with stdin from `/dev/null`, and on timeout the whole process
+    group is killed. This holds for every captured action, not only
+    `compact`: they are non-interactive by contract, and the probe runs while
+    the CLI owns the terminal.
 
 ### P0-R8e — the automatic threshold, through the plugin seam
 
