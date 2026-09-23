@@ -132,6 +132,40 @@ is read.
 not the one loaded before the write.
 *Verified by:* covered by the R7.6 test asserting the printed line.
 
+**Amendments, 2026-09-23, from the tester's read (ag-c06522):**
+
+- **P0-R7.13 — the key reader is named and testable.**
+  `_read_key(stream) -> str` reads one key from a binary or text stream and
+  returns a token: `ESC [ A` and `k` → `"up"`; `ESC [ B` and `j` → `"down"`;
+  `\r` and `\n` → `"enter"`; `q`, `\x03` (Ctrl-C), and an `ESC` that is not
+  followed by `[` (including `ESC` then end of stream) → `"cancel"`; end of
+  stream with nothing read → `"cancel"`; anything else → that character
+  (ignored by `_select`). Putting the terminal into raw mode and restoring it
+  is the caller's job, done in a `try/finally`; that restoration is verified
+  by review, not by a test.
+  *Verified by:* unit tests feeding `io.BytesIO`/`io.StringIO` streams.
+- **R7.8 vs R7.9, decided:** `--team` is an explicit, deliberate choice and
+  applies with or without a tty — a script that passes `--team review` means
+  it. R7.8's rule is about the *absence* of a choice: with no tty and no
+  `--team`, nothing is written.
+  *Verified by:* a test with no tty and `--team <other>` asserting the one-line
+  write and the launch.
+- **The printed team line** starts with `team`, then whitespace, then the team
+  name; what follows is free. The cancel line must contain "nothing" and
+  "changed" (case-insensitive).
+- **Cancelling skips everything after the choice**, including the executor
+  checks: the choice is the first thing `init-agent` does after reporting the
+  brief/context state (R7.1).
+- **P0-R7.14 — the launch sees the team just chosen.** After a write, the
+  config passed to the launch is reloaded (or otherwise reflects the new
+  `team:`); nothing downstream of the choice sees the old team.
+  *Verified by:* a test asserting the fake launch receives a config whose
+  `team` is the chosen one.
+- **Edge values:** an inline comment on the `team:` line is preserved after
+  the new value (`team: review  # why`); a quoted value is replaced by the bare
+  name; `_select` with an empty option list returns `None` without reading a
+  key; `--team ""` is an unknown name (R7.9).
+
 **P0-R7.12 — the initializer's brief is reconciled.**
 `defaults/agents/team/_initializer.md` (around lines 94–95) no longer presents
 hand-editing `team:` as the only route. It says the user picks the team when
