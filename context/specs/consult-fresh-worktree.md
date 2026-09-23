@@ -108,3 +108,33 @@ from CF-R4's added fields.
 - **CF-R5:** the failure is recorded as an event of kind
   `worktree_refresh_failed` on the node, carrying `base` (the base name) and
   `error` (git's message, capped at 500 characters).
+
+## Decided, from the adversary's attack (ag-2bedc4) and the review (ag-905508)
+
+- **Own work is measured from the node's recorded start point.** The node
+  records the base commit its worktree was last placed on: its creation on
+  turn 1, then every CF-R1 move. Own work is the commits after that point
+  that are not absorbed, plus uncommitted changes. Commits on base, or a
+  base that was rewritten or amended, are never the agent's own work.
+  Consequences:
+  - **Base amended or rewritten, with no own work:** the worktree moves,
+    and the line says it was updated. It never says "holds own work".
+  - **Base force-moved backwards, with no own work:** the worktree moves
+    back to base, with the "updated" line. A base that differs from the
+    worktree HEAD is never silent.
+- **An empty commit counts as absorbed (declined finding 1).** It changes no
+  file, so it may leave the branch on a move. This follows from the rule
+  above.
+- **A move never overwrites an ignored file.** If base now tracks a path
+  that exists in the worktree as an ignored or untracked file with
+  different content, the worktree is not moved. It gets the CF-R2 line,
+  saying why it was not moved.
+- **Every consult result carries the same keys.** `agent`, `agent_id`,
+  `turn`, `commit`, `base_commit` and `behind` are present on every return
+  path: a normal turn, a turn timeout, awaiting a question, and a lock-wait
+  timeout. A value unknown on that path is null, never absent.
+- **Only lock contention means "wait".** Any other `OSError` from the lock
+  (`ENOLCK` on a filesystem without locks, for example) is a failure the
+  turn reports at once. It is not a contention to wait out.
+- **Resolve once per turn.** Base's sha and `behind` are computed once per
+  turn and reused for the notice line and the result fields.

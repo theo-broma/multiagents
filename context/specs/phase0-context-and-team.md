@@ -644,6 +644,14 @@ amendments narrow that window and make the warning impossible to miss.
     The check mode exits non-zero when the transcript exists but cannot be
     read, so the session is never stopped for a compaction that must fail.
   *Verified by:* `tests/test_phase0_r8f_adversary.py` (12d893f).
+- **Decided, from ag-adac4d's NEED_INFO:** in the headless path, R8c.3 wins.
+  A compaction that fails, including one that did not shrink (R8f.15), is
+  reported and tried again on the next qualifying turn. That is at most one
+  attempt per turn, which is not a loop. The adversary test
+  `test_adversary_compaction_succeeding_without_shrinking_causes_headless_loop`
+  is withdrawn: it assumed an exit 0 without shrinking, which R8f.15 now
+  makes impossible for `claude.sh`, and which the driver cannot tell apart
+  from a success.
 
 ### P0-R8e — the automatic threshold, through the plugin seam
 
