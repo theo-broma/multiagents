@@ -56,6 +56,26 @@ they exist.
 *Verified by:* malformed values ("x", -1, null) behave as the defaults; 0
 restores projection from two samples.
 
+**BR-R5 — the wrap-up is asked once per agent, not once per run.** Observed
+2026-09-23: the wrap-up message was sent **6 times** to ag-3b4d7a
+(`runs/ag-3b4d7a/prompt.1-6.md`). Each resend interrupted its turn, so it never
+started writing its handoff. Probable cause, to be confirmed by the tester:
+- `wrap_up_asked` lives on the `Run` (`runner.py` ~266, ~1002);
+- `steer()` replaces the `Run` with a fresh one;
+- each fresh run starts its own `_wrap_up_watch` (~939) with the flag cleared.
+The retry counter hit the same trap and was moved onto the node for the same
+reason (`runner.py`, "Counted on the NODE, not on the Run").
+Required: after a node has been asked to wrap up, no further wrap-up is sent
+to it, whatever steers, relaunches or free retries follow. This holds until
+that provider's headroom has recovered: a later reading shows more headroom
+than at the moment of asking, as after a window reset. The flag survives a
+server restart only if the developer finds that cheap; that is not required.
+*Verified by:* a draining provider projecting a wall within
+`wrap_up_seconds`, with the agent's run replaced by a steer (the wrap-up's own
+steer included) and several watcher passes: exactly one `wrap_up` event and
+one steer carrying the `WRAP_UP` text for that node. After a reading with
+recovered headroom and a new drain, a second wrap-up is allowed.
+
 ## Out of scope, recorded
 
 - Gating the wind-down on absolute headroom (for example, "never below 20 %
