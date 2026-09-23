@@ -390,6 +390,17 @@ with a `select` timeout.
 - **Leftover nodes to clean:**
   - ag-4548ac, a researcher: done but marked stuck; nothing to merge.
 
+**Progress, 2026-09-23 ~13:50:** the red tests have merged: R8f.10-13
+(42fa3de), CF (consult refreshes the worktree, bug-7f6ba7, 62e5a37), and the
+adversary's R8f findings (12d893f). The decisions are cd59fec. The researcher
+brief merged as 5603870, but the project copy
+`.multiagents/config/agents/team/researcher.md` still shadows it. **Next, at
+15:01 (a pause the user asked for):**
+- implementer-deep on R8f.10-17, plus echo→printf (driver.py, scripts.py,
+  cli.py, claude.sh, server.py);
+- a second implementer-deep, in parallel, on CF-R1 to CF-R7 (runner.py).
+The tickets bug-7f6ba7 and bug-2cebea are parked for the user.
+
 ### Awaiting the user
 
 - **(re-authenticated by the user ~10:40)** **agy could not authenticate in the container (2026-09-23 05:03).** The stored
