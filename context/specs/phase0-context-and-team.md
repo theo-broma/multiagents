@@ -501,6 +501,19 @@ ask the user for `/compact` when that mechanism is active, only when it is not
 (exec path, or a provider that cannot compact).
 *Verified by:* a test on the composed prompt for the new sentence.
 
+**Amendments to P0-R8f, 2026-09-23, from the tester's read (ag-2c808f):**
+- The compaction conditions are evaluated on the existing attached poll
+  (`STALL_POLL_SECONDS`), not on a new timer.
+- With stdin not a tty, R8f does not apply: nobody can see the announcement
+  or cancel it.
+- The probe runs at most once per rest episode, i.e. once each time the
+  session comes back to rest. A probe answering 64 disables R8f for the rest
+  of the driver run. Any other non-zero answer only skips this episode.
+- "The README of the driver behaviour" in R8f.3 is withdrawn. Only the
+  orchestrator's brief (R8f.7) has to say that unsubmitted text is invisible.
+- The token count in the announcement is free-form (`9000` or `9,000`). The
+  cancel line must contain "cancel".
+
 ### P0-R8e — the automatic threshold, through the plugin seam
 
 **P0-R8e.1 — a per-agent key.** An agent entry in `agents.yaml` may carry
