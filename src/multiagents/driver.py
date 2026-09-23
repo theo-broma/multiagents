@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import replace
+import math
 import os
 import signal
 import subprocess
@@ -34,7 +35,7 @@ from .budget import read_all, reset_label
 from .executor import executor_for
 from .paths import global_config_dir
 from .providers import load_providers
-from .transcripts import session_context
+from .transcripts import session_context, session_transcript
 from .tree import Node, Tree, now as tree_now
 
 
@@ -418,6 +419,138 @@ def _launch_agent(paths, config, role: str, resume: bool,
     return 0
 
 
+class _AttachedCompaction:
+    """P0-R8f: compacting a session a person is attached to.
+
+    A live interactive CLI holds its conversation in memory, so compacting its
+    session from outside while it runs would fork the transcript. Instead the
+    session is stopped at a closed boundary, compacted, and resumed — the same
+    shape as the usage-limit stop, with an announcement and a grace period in
+    front of it, because somebody may be about to type.
+
+    `due()` is polled on the attached child's existing stall poll and says
+    whether to stop the child now; `compact()` runs after it has stopped. The
+    state lives for the whole driver run, across relaunches, because two of
+    the rules are about the run and not about one process: after a failure or
+    a "cannot" it is off for good, and after a success it waits for the reading
+    to fall below the threshold and cross it again.
+
+    The driver sees the transcript, never the keyboard: only a SENT message
+    changes the file, so only a sent message can cancel.
+    """
+
+    def __init__(self, paths, config, spec, provider, executor, context: dict):
+        self.paths, self.config, self.spec = paths, config, spec
+        self.provider, self.executor, self.context = provider, executor, context
+        self.tree = Tree(paths.tree_file, paths.events_file)
+        self.threshold = _limit_number(config, "compact_at_tokens", 0, zero_ok=True)
+        self.idle = _limit_number(config, "compact_idle_seconds", 300)
+        self.grace = _limit_number(config, "compact_grace_seconds", 30)
+        self.bell = _limit_flag(config, "compact_bell", True)
+        self.disabled = False       # a failure or a "cannot": not again this run
+        self.spent = False          # compacted in this crossing of the threshold
+        self.probed = None          # the transcript state the probe answered for
+        self.scheduled = None       # (state, announced at, tokens)
+        self.requested = None       # tokens, once the grace period ran out
+        self.since = time.time()    # when the attached CLI was last launched
+
+    def launched(self) -> None:
+        """A (re)launch: a fresh prompt is not a quiet one yet."""
+        self.since = time.time()
+        self.scheduled = self.requested = None
+
+    def _who(self) -> str:
+        session = self.context.get("MULTIAGENTS_SESSION_ID", "")
+        return next((n.id for n in self.tree.drivers() if n.session == session),
+                    self.spec.name)
+
+    def _busy(self) -> bool:
+        return bool(self.tree.active() or self.tree.read().get("deferred"))
+
+    def _state(self):
+        path = session_transcript(self.provider, self.paths.root,
+                                  self.context.get("MULTIAGENTS_SESSION_ID", ""))
+        if path is None:
+            return None
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def _cancel(self) -> None:
+        self.scheduled = None
+        print("\ncompaction cancelled — the session is in use; it will be "
+              "proposed again once it is quiet.")
+        sys.stdout.flush()
+        self.tree.emit(self._who(), "compact_cancelled")
+
+    def due(self) -> bool:
+        """One poll. True means: stop the child now, for a compaction."""
+        if self.disabled or self.threshold <= 0 or not sys.stdin.isatty():
+            return False
+        state = self._state()
+        if self.scheduled is not None:
+            announced_for, at, tokens = self.scheduled
+            if state != announced_for or self._busy():
+                self._cancel()
+                return False
+            if time.monotonic() - at < self.grace:
+                return False
+            self.scheduled, self.requested = None, tokens
+            return True
+        if state is None:
+            return False
+        tokens = session_context(self.provider, self.paths.root,
+                                 self.context.get("MULTIAGENTS_SESSION_ID", ""))
+        if tokens is None:
+            return False
+        if tokens < self.threshold:
+            self.spent = False          # below again: the next crossing counts
+            return False
+        # At rest since the file last changed, not since we noticed it — but
+        # never since before the CLI was launched: somebody who has just been
+        # handed a prompt is the person most likely to be typing into it.
+        rest = time.time() - max(state[1] / 1e9, self.since)
+        if self.spent or rest < self.idle:
+            return False
+        if self._busy() or state == self.probed:
+            return False
+        # Once per rest episode: a "not now" is not asked again until the
+        # session has changed and come back to rest.
+        self.probed = state
+        code, _, _ = scripts.run_action(
+            self.spec.provider, self.provider, self.executor, "compact",
+            global_config_dir(), self.paths.config,
+            extra_env={**self.context, "MULTIAGENTS_COMPACT_CHECK": "1"},
+            cwd=self.paths.root)
+        if code == scripts.UNIMPLEMENTED:
+            self.disabled = True
+            return False
+        if code != 0:
+            return False
+        self.scheduled = (state, time.monotonic(), tokens)
+        bell = "\a" if self.bell else ""
+        print(f"\ncompacting this session in {self.grace:g}s ({tokens:,} tokens, "
+              f"nothing running) — send any message (e.g. \"wait\") to "
+              f"cancel{bell}")
+        sys.stdout.flush()
+        self.tree.emit(self._who(), "compact_scheduled", tokens=tokens)
+        return False
+
+    def compact(self) -> None:
+        """The child has stopped for `due()`: compact, and settle the latches."""
+        tokens, self.requested = self.requested, None
+        code = _compact_session(self.paths, self.config, self.spec, self.provider,
+                                self.executor, self.context, self.tree, tokens)
+        if code == 0:
+            self.spent = True
+        else:
+            # The session is relaunched either way; what a failure changes is
+            # that nobody is stopped again for it in this run.
+            self.disabled = True
+
+
 def _run_supervised(paths, config, role, spec, provider, executor, context,
                     argv, env) -> int:
     """Hold the terminal for the CLI, and decide what to do when it ends.
@@ -458,9 +591,39 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         limit.update(found)
         return True
 
-    began = time.monotonic()
-    code = _run_attached(argv, env, stalled=_limit_hit)
-    ran_for = time.monotonic() - began
+    compaction = _AttachedCompaction(paths, config, spec, provider, executor,
+                                     context)
+
+    def _stalled() -> bool:
+        if _limit_hit():
+            return True
+        if warned:
+            return False                 # a pending limit wins (R8f.2.4)
+        return compaction.due()
+
+    def _attached(run_env) -> tuple[int, float]:
+        """Run the CLI until it ends for a reason other than a compaction.
+
+        A stop for compaction is none of the endings below — not a crash, not
+        a deliberate exit, not a restart attempt — so it never reaches them:
+        the terminal is already restored when `_run_attached` returns, the
+        session is compacted, and the same session is relaunched with resume
+        on and NO prompt, whatever happens to the compaction. The orchestrator
+        was idle at its prompt and comes back idle at its prompt.
+        """
+        while True:
+            began = time.monotonic()
+            compaction.launched()
+            code = _run_attached(argv, run_env, stalled=_stalled)
+            if compaction.requested is None:
+                return code, time.monotonic() - began
+            compaction.compact()
+            run_env = {k: v for k, v in run_env.items()
+                       if k != "MULTIAGENTS_RESUME_PROMPT"}
+            run_env["MULTIAGENTS_RESUME"] = "1"
+            sys.stdout.flush()
+
+    code, ran_for = _attached(env)
     deliberate, why = _exit_was_deliberate(code)
     if limit:
         # We sent the SIGTERM, so the exit code says "deliberate" and means it
@@ -556,10 +719,8 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
 
         retry_env = {**env, "MULTIAGENTS_RESUME": "1",
                      "MULTIAGENTS_RESUME_PROMPT": RESUME_PROMPT}
-        began = time.monotonic()
         limit.clear()
-        code = _run_attached(argv, retry_env, stalled=_limit_hit)
-        ran_for = time.monotonic() - began
+        code, ran_for = _attached(retry_env)
         deliberate, why = _exit_was_deliberate(code)
         if limit:
             # We sent the SIGTERM; "terminated" would be true about us and
@@ -875,6 +1036,34 @@ def _supervise(paths, config, role, spec, provider, executor,
     return 0
 
 
+def _limit_number(config, key: str, default: float, zero_ok: bool = False) -> float:
+    """A numeric `limits` value, or `default` when it is not a usable one.
+
+    One parser for every compaction limit, R8c's and R8f's alike, because the
+    config is typed by a person: `120k`, `5m`, `inf`, a negative number or an
+    empty key must fall back to the default rather than raise out of a driver
+    that is holding somebody's session. Zero is only a value where it means
+    "off" (`compact_at_tokens`); a zero idle or grace period would stop a
+    session with no warning, so there it is malformed too.
+    """
+    value = config.limits.get(key, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number) or number < 0 or (number == 0 and not zero_ok):
+        return default
+    return number
+
+
+def _limit_flag(config, key: str, default: bool) -> bool:
+    """A boolean `limits` value; anything but a YAML boolean is the default."""
+    value = config.limits.get(key, default)
+    return value if isinstance(value, bool) else default
+
+
 def _compact_if_due(paths, config, spec, provider, executor, context: dict,
                     tree, unsupported: list) -> None:
     """Compact the session at a closed boundary, if it has grown past the mark.
@@ -888,7 +1077,7 @@ def _compact_if_due(paths, config, spec, provider, executor, context: dict,
     compacted, 64 cannot (asked no more this run), anything else failed — which
     is reported and is not a failed turn.
     """
-    threshold = int(config.limits.get("compact_at_tokens", 0) or 0)
+    threshold = _limit_number(config, "compact_at_tokens", 0, zero_ok=True)
     if threshold <= 0 or unsupported:
         return
     session = context.get("MULTIAGENTS_SESSION_ID", "")
@@ -897,26 +1086,45 @@ def _compact_if_due(paths, config, spec, provider, executor, context: dict,
         return
     if tree.active() or tree.read().get("deferred"):
         return
+    code = _compact_session(paths, config, spec, provider, executor, context,
+                            tree, tokens)
+    if code == scripts.UNIMPLEMENTED:
+        unsupported.append(True)
 
+
+def _compact_session(paths, config, spec, provider, executor, context: dict,
+                     tree, tokens: int) -> int:
+    """Run the provider's `compact` action once, report it, return its code.
+
+    Shared by the headless loop (R8c) and the attached stop-and-resume (R8f),
+    which must say the same things about the same outcomes.
+    """
+    session = context.get("MULTIAGENTS_SESSION_ID", "")
     who = next((n.id for n in tree.drivers() if n.session == session), spec.name)
-    timeout = int(config.limits.get("compact_timeout_seconds", 180) or 180)
+    timeout = _limit_number(config, "compact_timeout_seconds", 180)
+    # Never a probe, whatever this process inherited: a check-mode answer of 0
+    # would be reported as a compaction that did not happen.
     code, out, err = scripts.run_action(
         spec.provider, provider, executor, "compact", global_config_dir(),
-        paths.config, timeout=timeout, extra_env=dict(context), cwd=paths.root)
+        paths.config, timeout=timeout,
+        extra_env={**context, "MULTIAGENTS_COMPACT_CHECK": "0"}, cwd=paths.root)
     if code == 0:
         detail = next((line.strip() for line in out.splitlines() if line.strip()), "")
-        print(f"\ncompacted    {detail}")
-        tree.emit(who, "compacted", tokens_before=tokens, detail=detail)
+        print(f"\ncompacted    {detail[:500]}")
+        tree.emit(who, "compacted", tokens_before=tokens, detail=detail[:500])
     elif code == scripts.UNIMPLEMENTED:
-        unsupported.append(True)
         print(f"\n{spec.provider} cannot compact a session from outside; "
               f"not asking again this run.")
         tree.emit(who, "compact_unsupported", tokens_before=tokens)
     else:
+        # A tail, and a bounded one: a CLI that dumps a response body onto
+        # stderr can make its "last line" megabytes long.
         tail = " | ".join(line.strip() for line in err.strip().splitlines()[-3:])
+        tail = tail if len(tail) <= 500 else "…" + tail[-500:]
         print(f"\ncompaction failed (exit {code}): {tail or 'no reason given'}")
-        tree.emit(who, "compact_failed", code=code, detail=tail[-500:])
+        tree.emit(who, "compact_failed", code=code, detail=tail)
     sys.stdout.flush()
+    return code
 
 
 def _activity_fingerprint(tree) -> tuple:

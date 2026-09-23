@@ -334,6 +334,7 @@ compact)
     # permission rule, and nothing is compacted. Measured 2026-09-22: the one
     # attempt cost 42,752 tokens. Do not retry it — exit 64 without starting
     # the CLI at all.
+    # The same answer in check mode (MULTIAGENTS_COMPACT_CHECK=1).
     exit 64
     ;;
 *)  echo "usage: $0 check|login|budget|usage|prepare|launch|compact" >&2; exit 64 ;;

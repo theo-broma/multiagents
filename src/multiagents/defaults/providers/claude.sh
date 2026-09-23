@@ -503,6 +503,12 @@ compact)
         echo "no transcript for session $sid at $transcript" >&2
         exit 1
     fi
+    # Check mode (P0-R8f.1): the driver asks this before it stops a live
+    # session, so it must answer from what is on disk and start nothing. A
+    # session id and its transcript are all a real call needs up front.
+    if [ "${MULTIAGENTS_COMPACT_CHECK:-}" = "1" ]; then
+        exit 0
+    fi
     # `wc -l` counts newlines, not lines: an unterminated last line (a writer
     # killed mid-flush) is one line short. Left uncorrected, the python below
     # slices from one line too early and hands an old, pre-existing record to

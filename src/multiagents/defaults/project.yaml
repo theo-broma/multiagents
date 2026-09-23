@@ -410,6 +410,16 @@ limits:
   # How long the provider script's `compact` action may take before it counts
   # as a failed compaction. A failure is reported and the loop carries on.
   compact_timeout_seconds: 180
+  # In an interactive `multiagents run` the CLI holds the session in memory,
+  # so it is compacted by stopping it, compacting, and resuming the same
+  # session. Proposed only once the transcript has not changed for this long
+  # (the model finished and nothing has been sent since), then announced with
+  # this much grace: a SENT message cancels it. Text typed but not sent is
+  # invisible to the driver, which is why the rest period is long. The bell
+  # rings on the announcement so it is hard to miss.
+  compact_idle_seconds: 300
+  compact_grace_seconds: 30
+  compact_bell: true
 
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents
