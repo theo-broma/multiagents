@@ -936,8 +936,14 @@ findings:
         until it is recreated by hand once.'
       sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
       status: scheduled
+    - by: orchestrator
+      note: 'P0-R1.1-R1.8, merged 859ef92 + a02b419: versions directory mounted read-only,
+        launcher resolved on the host per spawn. Verified live: container mounts ~/.local/share/claude/versions
+        and execs .../versions/2.1.280.'
+      sha: 6723edb929a5f29113612c394961d80fc516b12d
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: The docker executor mounts a provider CLI's *resolved versioned* path,
       so any CLI self-update makes the container unusable until it is recreated
   F201:
@@ -958,8 +964,16 @@ findings:
         actually worked.'
       sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
       status: scheduled
+    - by: orchestrator
+      note: 'P0-R2.1-R2.9, merged 75bbd44: per-condition reporting, doom_loop re-arm
+        (limits.doom_loop_rearm), one-shot runaway/timeout per turn, silence per episode.
+        Also fixed a worse latent bug found by the tester: the timer loop died on
+        its first poll (quiet_for method/property collision), so no timeout/silence
+        trip had been reported at all.'
+      sha: 6723edb929a5f29113612c394961d80fc516b12d
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: The supervisor reports only the first watchdog trip per run, so an agent
       that keeps looping after the first alert is never mentioned again
   F202:
@@ -980,8 +994,17 @@ findings:
         string anywhere in runner.py — that is the providers-are-plugins invariant.
       sha: fc01d274721e3d66cf3299efdafb6d6f2682502a
       status: scheduled
+    - by: orchestrator
+      note: 'P0-R3, merged e62da3b: providers.yaml `agent_guidance:` reaches only
+        prompts of runs on that provider; agy''s block carries view_file pagination
+        guidance (StartLine/EndLine, verified from agy transcripts). The seam works
+        (verified live). Caveat: in one run gemini-3.8-flash-medium ignored the guidance
+        and still re-read the file head 5x, so the content may need strengthening;
+        one run is not yet evidence.'
+      sha: 6723edb929a5f29113612c394961d80fc516b12d
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: 'There is no seam for provider-specific prompt guidance: `notes:` is
       parsed off every provider and never used anywhere'
   F203:
