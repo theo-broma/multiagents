@@ -73,3 +73,29 @@ from CF-R4's added fields.
   provider-permission question, and is not decided here. With CF-R1 in
   place, the advisor usually no longer needs it.
 - Refreshing between turns of `steer_agent` on non-conversational agents.
+
+## Decisions from the advisor's read (ag-25c350, turn 7)
+
+- **CF-R2, own work, refined.**
+  - **Git-ignored files never count.** `__pycache__`, `.pytest_cache` and the
+    like would otherwise freeze every agent that has run Python.
+  - **Commits already absorbed into base do not count.** A commit is
+    absorbed when merging the branch into base would change no file. This
+    covers squash merges, where the branch's own shas never reach base.
+  *Verified by:* (a) a worktree holding only ignored files is refreshed;
+  (b) a node commit that was squash-merged into base does not block the
+  refresh.
+- **CF-R1, the mechanism is observable.** After a move, the worktree is on
+  the node's own branch, not on a detached HEAD, and that branch points at
+  base's HEAD. The agent's branch name is unchanged.
+  *Verified by:* asserting the symbolic HEAD and the branch tip after a move.
+- **CF-R7 — one turn at a time per node.** The refresh and the turn of one
+  consult run as a unit. A second consult to the same node never refreshes
+  or runs while another consult of that node is in progress. It either
+  waits, or is refused with a clear error; whichever the current code
+  already does for concurrent turns is kept. It never crashes on a git lock.
+  *Verified by:* two concurrent consults to one node; both complete or one
+  is cleanly refused, and the worktree is consistent afterwards.
+- **CF-R3, wording extended.** The "updated" line also tells the agent to
+  re-read a file before relying on or quoting it, because its memory of
+  earlier reads may be stale.
