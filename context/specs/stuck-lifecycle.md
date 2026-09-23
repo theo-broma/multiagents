@@ -116,13 +116,28 @@ capacity and the reconciled status.
 
 ## Decisions from the advisor's read (ag-25c350, turn 9)
 
-- **Liveness is `node.pid` + `node.pid_start` via `procs.is_alive`.** They
+- **Liveness is `node.pid` + `node.pid_start` via `procs.alive`.** They
   are persisted in `tree.json`, so SL-R4 holds across a server restart.
 - **Explicit operator actions win over SL-R2.** `steer_agent` and
   `stop_agent` set their own status and reason, as they do today; the trip
   remains in the event stream. The "free retry for a cheap death"
   (`runner.py` ~1521) resets a node to `running` as today, and SL-R2 applies
   to the status the retried run finally ends with, not to the dead attempt.
+
+## Decided, from the tester's questions (ag-9cdb71)
+
+- **SL-R6 key:** a provider-level `opaque_tools: [<tool name>, …]` in
+  `providers.yaml`.
+- **SL-R4 and `pending`:** a `pending` node has no pid yet and occupies a slot
+  as today. "Live" is checked only for `running` and `stuck` nodes that have
+  a pid. A `running` node whose process is dead does not occupy a slot.
+- **The free retry:** only the final status is asserted. The dead attempt's
+  trip need not appear in the final reason.
+- **SL-R5's report:** the field name is the developer's. The result must name
+  each stuck agent still being waited on, with its trip kind, outside
+  `changed` and `already_finished`.
+- **SL-R7's reconciliation** is `cli.cmd_resume` (the `multiagents run`
+  pass). It ends such a node as `orphaned`, and its reason keeps the trip.
 
 ## Out of scope, recorded
 
