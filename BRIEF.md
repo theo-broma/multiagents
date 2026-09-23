@@ -324,9 +324,71 @@ with a `select` timeout.
   record steps, uncached input and cache reads, and the final context, per
   run, against the ag-4548ac baseline. A small single-question baseline is
   ag-85e40d, at 34k.
+  **ag-77113c was DISCARDED; the change is not applied yet.** It force-added
+  a new `.multiagents/config/agents/researcher.md` to git. `.multiagents/`
+  is gitignored, and that path already holds an old untracked project
+  override from 2026-09-05, which a merge would have clobbered. Its version
+  also lacked the "Calling this agent" section. Its edit of
+  `src/multiagents/defaults/agents/team/researcher.md` was correct; redo it
+  alone. The live copies are the global
+  `~/.config/multiagents/agents/team/researcher.md` (identical to the old
+  default) and that old project override. First find out, with a researcher
+  or by reading the config loader, which one wins. Then have the user update
+  the live copy, or run `multiagents` config sync if there is one. Never
+  commit under `.multiagents/`.
   **If it works, consider the same rule for other read-heavy agents**:
   reviewer, advisor, dev-advisor, auditor, cartographer, characterizer.
   Their briefs have not been checked for similar "read widely" wording yet.
+
+**Handoff, 2026-09-23 ~12:40 (orchestrator context wind-down at 155k):**
+- **Merged since ~11:30:**
+  - R8f and driver findings 1, 3, 5 and 10 (d4ae4ec).
+  - The monitor history sorted by last activity (29218c6).
+  - The F110/F111 pins inverted (137f37f); the ledger still needs
+    `set_finding_status` for F110 and F111 → fixed, naming d4ae4ec.
+  - Spec decisions b23fb61 and c483d51: a malformed limit now falls back to
+    its **shipped default**, not off. **The code still falls back to off.**
+- **Next implementer task** (driver.py/scripts.py/claude.sh, one run,
+  `implementer` tier):
+  1. Implement c483d51: malformed `compact_at_tokens`,
+     `context_wind_down_tokens` and `compact_timeout_seconds` fall back to
+     the shipped default. Check the server's `_limit` too.
+  2. Safe-parse `restart_attempts`, `restart_delay_seconds` and
+     `limit_max_waits` (same crash class as finding 5, `driver.py` ~505).
+  3. Reviewer ag-e8565d findings (VERDICT rejected; its report is in
+     `review.md` on its branch, which is not merged):
+     - SIGTERM leaves the terminal dirty (`driver.py` ~204, `cli.py`
+       picker);
+     - `run_action` leaks the child on KeyboardInterrupt (`scripts.py` ~186);
+     - a clean CLI exit racing with grace expiry is relaunched instead of
+       honoured (`driver.py` ~810);
+     - `claude.sh` ~523 uses `echo` on CLI output: use `printf`.
+     The tester should first write red tests for the first three. Declined:
+     `transcripts._usage_of` using "message"/"usage" (it predates this work,
+     and the invariant lists `compact_boundary`, `compactMetadata` and
+     `/compact`); caching `_launched_spec`; moving the claude.sh parse into
+     Python (it would move provider vocabulary INTO Python).
+- **Not yet run:** the adversary on R8f (task text: attack stop → compact →
+  resume, signals during grace, compaction and relaunch, loops, the
+  process-group kill). Also a live check of `claude.sh compact` against a
+  real session.
+- **The advisor reviews stale code.** A conversational agent's worktree stays
+  at the commit where its conversation began (ag-25c350: 2026-09-22 20:42),
+  and it could not run `git show`. Its contract-B review read pre-contract-B
+  code. File a ticket with the bug-reporter, or start a fresh advisor
+  conversation. Its turn-5 advice was partly taken (c483d51); its
+  `setsid` → `setpgrp` point was declined, because `login` uses
+  `exec_action` and a tty read in a background group gets SIGTTIN.
+- **More tooling defects:**
+  6. The implementer-deep toolset lacked `consult` (dev-advisor), ag-829577.
+  7. Stuck and idle nodes seem to count against `max_concurrent`:
+     `start_agent` refused with "4 running" when 2 were really running.
+  8. `test_core.py` has 18 tests that read the live `MULTIAGENTS_CAN_SPAWN=0`
+     etc., so they fail inside any agent that cannot spawn (ag-b3d873).
+  9. agy agents repeatedly end their turn with a background test still
+     running (ag-9c3885, ag-77113c twice).
+- **Leftover nodes to clean:**
+  - ag-4548ac, a researcher: done but marked stuck; nothing to merge.
 
 ### Awaiting the user
 
