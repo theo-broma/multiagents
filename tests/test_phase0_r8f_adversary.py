@@ -163,54 +163,7 @@ echo '{{"type":"result","subtype":"success","session_id":"{s.transcript.stem}"}}
     )
 
 
-# ==============================================================================
-# Attack 4: Compaction succeeding without shrinking causes headless loop
-# ==============================================================================
-
-def test_adversary_compaction_succeeding_without_shrinking_causes_headless_loop(tmp_path):
-    """Attack on P0-R8c.1 / P0-R8c.3:
-    In headless mode (`_supervise`), `_compact_if_due` checks whether `tokens >= threshold`.
-    If `claude.sh compact` reports success (exit 0) but did not shrink the transcript below threshold,
-    `_compact_if_due` lacks any threshold-crossing latch and runs compaction again on the next turn,
-    looping repeatedly on every turn.
-    """
-    from multiagents.driver import _compact_if_due
-
-    paths = MagicMock()
-    paths.root = tmp_path
-    config = MagicMock()
-    config.limits = {"compact_at_tokens": 8000}
-    spec = MagicMock()
-    spec.provider = "claude"
-    provider = MagicMock()
-    executor = MagicMock()
-    context = {"MULTIAGENTS_SESSION_ID": "sid-test"}
-    tree = MagicMock()
-    tree.active.return_value = []
-    tree.read.return_value = {}
-    unsupported = []
-
-    compact_calls = 0
-
-    def fake_compact(*a, **k):
-        nonlocal compact_calls
-        compact_calls += 1
-        return 0  # reports success, but tokens remain 9000
-
-    with patch("multiagents.driver.session_context", return_value=9000), \
-         patch("multiagents.driver._compact_session", side_effect=fake_compact):
-
-        # Turn 1
-        _compact_if_due(paths, config, spec, provider, executor, context, tree, unsupported)
-        assert compact_calls == 1
-
-        # Turn 2: tokens are still 9000 because compaction didn't shrink them
-        _compact_if_due(paths, config, spec, provider, executor, context, tree, unsupported)
-        assert compact_calls == 1, (
-            f"DEFECT: _compact_if_due ran compaction {compact_calls} times in a row! "
-            "When compaction succeeds without shrinking tokens below threshold, "
-            "headless mode loops compactions on every turn."
-        )
+# Attack 4 withdrawn (8493889): in headless mode R8c.3 wins; a compaction that fails, including one that did not shrink (R8f.15), is retried next qualifying turn.
 
 
 # ==============================================================================

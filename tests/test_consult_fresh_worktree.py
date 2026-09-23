@@ -39,7 +39,8 @@ SESSION = "s-cf-1"
 
 # The fake agent CLI. Called as: <script> <prompt> <workdir> [--resume <sid>].
 # It records what the turn saw, answers, and exits. A prompt containing SLOW
-# holds the turn open for a few seconds so a second consult can land inside it.
+# holds the turn open for a few seconds so a second consult can land inside it;
+# HOLD holds it until the file `release` appears in the probe directory.
 _CLI = r'''#!{python}
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -68,6 +69,10 @@ started = time.time_ns()
 start = snap()
 if "SLOW" in prompt:
     time.sleep(4)
+if "HOLD" in prompt:
+    deadline = time.time() + 150
+    while not (PROBE / "release").exists() and time.time() < deadline:
+        time.sleep(0.05)
 end = snap()
 (PROBE / f"turn-{{started}}-{{os.getpid()}}.json").write_text(json.dumps({{
     "started": started, "prompt": prompt, "workdir": workdir,
@@ -774,3 +779,163 @@ def test_cf_r7_two_concurrent_consults_never_overlap_and_never_refresh_mid_turn(
     wt = Path(slow[0]["workdir"])
     assert git(wt, "status", "--porcelain") == "", "worktree left inconsistent"
     assert git(wt, "symbolic-ref", "-q", "HEAD") == turns[0]["start"]["symref"]
+
+
+# --------------------------------------------------------------------------
+# Decided, from the adversary's attack (ag-2bedc4) and the review (ag-905508)
+# --------------------------------------------------------------------------
+
+def _assert_updated_line(prompt, message, old, new):
+    line = first_line_and_rest(prompt, message)
+    tokens = hex_tokens(line)
+    assert any(old.startswith(t) for t in tokens) and any(
+        new.startswith(t) for t in tokens), (
+        f"the line must say the worktree was updated from {old[:7]} to "
+        f"{new[:7]}: {line!r}")
+    assert re.search(r"re-?read", line.lower()), f"not the 'updated' line: {line!r}"
+    assert "own work" not in line.lower() and "work of your own" not in line.lower(), (
+        f"the agent holds no own work, and must not be told it does: {line!r}")
+
+
+def test_decided_own_work_from_start_point_amended_base_moves_with_updated_line(proj):
+    """Own work is measured from the node's recorded start point. A base that
+    was amended is never the agent's own work: the worktree moves."""
+    _, t1 = start_conversation(proj)
+    old = t1["start"]["head"]
+    (proj.root / "notes.txt").write_text("v1 amended\n")
+    git(proj.root, "commit", "--amend", "-am", "base v1 amended")
+    amended = proj.base_sha()
+    assert amended != old
+    message = "turn two"
+
+    second = proj.consult(message)
+
+    t2 = proj.last()
+    assert t2["start"]["head"] == amended, "the worktree must move to the amended base"
+    assert t2["start"]["notes"] == "v1 amended\n"
+    assert t2["start"]["symref"] == t1["start"]["symref"]
+    assert git(proj.root, "rev-parse", t1["start"]["symref"]) == amended
+    _assert_updated_line(t2["prompt"], message, old, amended)
+    assert is_short_of(second.get("commit"), amended), second
+    assert second.get("behind") == 0, second
+
+
+def test_decided_own_work_from_start_point_backwards_base_moves_back_with_updated_line(proj):
+    """A base force-moved backwards is never own work, and a base that differs
+    from the worktree HEAD is never silent."""
+    proj.advance_base("v2\n")
+    first = proj.consult("turn one")
+    assert "error" not in first, first
+    old = proj.last()["start"]["head"]
+    symref = proj.last()["start"]["symref"]
+    git(proj.root, "reset", "--hard", "HEAD~1")
+    back = proj.base_sha()
+    message = "turn two"
+
+    second = proj.consult(message)
+
+    t2 = proj.last()
+    assert t2["start"]["head"] == back, "the worktree must move back to base"
+    assert t2["start"]["notes"] == "v1\n"
+    assert t2["start"]["symref"] == symref
+    assert git(proj.root, "rev-parse", symref) == back
+    _assert_updated_line(t2["prompt"], message, old, back)
+    assert is_short_of(second.get("commit"), back), second
+    assert second.get("behind") == 0, second
+
+
+def test_decided_own_work_from_start_point_after_a_move_a_later_own_commit_still_counts(proj):
+    """The start point is re-recorded on every move: a commit made after a
+    move is own work and blocks the next one."""
+    _, t1 = start_conversation(proj)
+    proj.advance_base("v2\n")
+    proj.consult("turn two")
+    wt = Path(proj.last()["workdir"])
+    (wt / "feature.txt").write_text("mine\n")
+    git(wt, "add", "feature.txt")
+    git(wt, "commit", "-m", "own, after the move")
+    own = git(wt, "rev-parse", "HEAD")
+    new_base = proj.advance_base("v3\n")
+
+    proj.consult("turn three")
+
+    t3 = proj.last()
+    assert t3["start"]["head"] == own
+    assert_branch_kept(proj, t1["start"]["symref"], own, new_base)
+
+
+def test_decided_enolck_from_the_lock_fails_at_once_instead_of_waiting(proj, monkeypatch):
+    """Only lock contention means "wait". ENOLCK (a filesystem without locks)
+    is a failure the turn reports at once."""
+    import errno
+    import fcntl
+    import time
+
+    start_conversation(proj)
+    real_flock = fcntl.flock
+
+    def no_locks(fd, op):
+        if op & (fcntl.LOCK_EX | fcntl.LOCK_SH):
+            raise OSError(errno.ENOLCK, "No locks available")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    turns_before = len(proj.turns())
+
+    async def attempt():
+        # A contention wait would last timeout + 60 s; 15 s is "not at once".
+        return await asyncio.wait_for(
+            proj.runner.consult("advisor", "turn two", timeout=60), 15)
+
+    t0 = time.monotonic()
+    try:
+        outcome = asyncio.run(attempt())
+    except asyncio.TimeoutError:
+        pytest.fail("ENOLCK was treated as contention: the consult waited")
+    except Exception as exc:            # reported by raising: acceptable
+        outcome = exc
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 15, f"took {elapsed:.1f}s"
+    assert len(proj.turns()) == turns_before, "the turn must not run unlocked"
+    if isinstance(outcome, dict):
+        error = outcome.get("error")
+        assert error, f"the failure must be reported: {outcome}"
+        assert "still answering" not in error, (
+            f"ENOLCK is not another consult answering: {error!r}")
+
+
+def test_decided_lock_wait_timeout_result_carries_every_key(proj):
+    """Every consult result carries agent, agent_id, turn, commit,
+    base_commit and behind, null when unknown — the lock-wait timeout too."""
+    first, _ = start_conversation(proj)
+
+    async def both():
+        a = asyncio.ensure_future(
+            proj.runner.consult("advisor", "HOLD first", timeout=300))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 20
+        while not (proj.probe / "busy").exists() and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        try:
+            # timeout=1: B waits at most 1 + 60 s for A's turn, then gives up.
+            b = await proj.runner.consult("advisor", "second", timeout=1)
+        finally:
+            (proj.probe / "release").write_text("")
+        return b, await a
+
+    rb, ra = asyncio.run(both())
+
+    assert "answered" in ra.get("reply", ""), ra
+    assert rb.get("error"), f"B must have given up waiting: {rb}"
+    keys = {"agent", "agent_id", "turn", "commit", "base_commit", "behind"}
+    missing = keys - set(rb)
+    assert not missing, f"lock-wait timeout result lacks {sorted(missing)}: {rb}"
+    assert rb["agent"] == "advisor"
+    assert rb["agent_id"] in (None, first["agent_id"]), rb
+    assert rb["turn"] is None or isinstance(rb["turn"], int), rb
+    for key in ("commit", "base_commit"):
+        assert rb[key] is None or is_short_of(rb[key], git(proj.root, "rev-parse",
+                                                           rb[key])), rb
+    assert rb["behind"] is None or (isinstance(rb["behind"], int)
+                                    and not isinstance(rb["behind"], bool)), rb

@@ -115,12 +115,13 @@ class Project:
         if base_branch:
             git_cmd(self.root, "branch", base_branch)
         self.base = base_branch or self.root_branch
-        # In multiagents config, base_branch must be under git:
-        git_cfg = {"base_branch": base_branch} if base_branch else False
+        # In multiagents config, base_branch is under git:. `git=False` because
+        # the repo already exists; make_runner's `git` only says "create one".
+        project = {"git": {"base_branch": base_branch}} if base_branch else None
         self.runner = h.make_runner(self.root, monkeypatch,
                                     agents={"advisor": spec},
                                     providers={"fake": provider},
-                                    git=git_cfg)
+                                    git=False, project=project)
 
     def consult(self, message, timeout=60):
         return asyncio.run(self.runner.consult("advisor", message, timeout=timeout))
@@ -169,46 +170,24 @@ def proj(tmp_path, monkeypatch):
     return Project(tmp_path, monkeypatch)
 
 
-# ==========================================================================
-# ATTACK 1: CF-R2 OWN WORK DESTROYED (Empty commit on node's branch wiped out)
-# ==========================================================================
+# Decided (8493889): every consult result carries these keys on every return
+# path; a value unknown on that path is null, never absent.
+RESULT_KEYS = {"agent", "agent_id", "turn", "commit", "base_commit", "behind"}
 
-def test_cf_r2_adversary_empty_commit_on_nodes_branch_must_not_be_destroyed(proj):
-    """CF-R2: own work is never destroyed.
 
-    Terms define own work as: "commits on the node's branch that are not on base".
-    If an agent records an empty commit (e.g., git commit --allow-empty as a
-    checkpoint, marker, or signal), that commit exists on the node's branch and
-    is NOT on base.
-    However, holds_unmerged_commits() uses `merge-tree --write-tree base head`,
-    which produces base's tree because the empty commit has no tree diff.
-    holds_unmerged_commits() therefore returns False!
-    Then Runner._refresh_conversation() executes `git reset --keep base_sha`,
-    which resets the node's branch and destroys the agent's commit!
-    """
-    proj.consult("turn one")
-    agent_worktree = proj.worktree
+def assert_all_keys(res, first):
+    missing = RESULT_KEYS - set(res)
+    assert not missing, f"result lacks {sorted(missing)} (null if unknown): {res}"
+    assert res["agent"] == "advisor", res
+    assert res["agent_id"] in (None, first["agent_id"]), res
+    assert res["turn"] is None or isinstance(res["turn"], int), res
+    for key in ("commit", "base_commit"):
+        assert res[key] is None or (isinstance(res[key], str) and res[key]), res
+    assert res["behind"] is None or (isinstance(res["behind"], int)
+                                     and not isinstance(res["behind"], bool)), res
 
-    # Agent records an empty commit on its branch (own work)
-    git_cmd(agent_worktree, "commit", "--allow-empty", "-m", "agent checkpoint commit")
-    agent_commit = git_cmd(agent_worktree, "rev-parse", "HEAD")
 
-    # Base advances with a new commit
-    proj.advance_base("v2\n")
-
-    # Turn two runs
-    second = proj.consult("turn two")
-
-    # CF-R2 assertion: the turn must run on the worktree as it is, and
-    # own work must never be destroyed or reset.
-    current_head = git_cmd(agent_worktree, "rev-parse", "HEAD")
-    branch_commits = git_cmd(agent_worktree, "log", "--oneline", "-n", "5")
-
-    assert current_head == agent_commit, (
-        f"CF-R2 VIOLATION: Agent's commit {agent_commit[:8]} was destroyed! "
-        f"Worktree HEAD was reset to {current_head[:8]}.\n"
-        f"Branch log:\n{branch_commits}"
-    )
+# Attack 1 withdrawn (8493889): an empty commit changes no file, so it counts as absorbed and may leave the branch on a move.
 
 
 # ==========================================================================
@@ -225,6 +204,7 @@ def test_cf_r2_adversary_ignored_file_silently_overwritten_by_base(proj):
     """
     proj.consult("turn one")
     agent_worktree = proj.worktree
+    head_before = git_cmd(agent_worktree, "rev-parse", "HEAD")
 
     # Worktree has .gitignore containing __pycache__/ and .pytest_cache/
     # Agent creates a file in .pytest_cache/
@@ -246,6 +226,11 @@ def test_cf_r2_adversary_ignored_file_silently_overwritten_by_base(proj):
     assert content == '{"agent_state": "critical_data"}', (
         f"CF-R2 VIOLATION: Agent's file in worktree was overwritten by base: {content!r}"
     )
+    # Decided (8493889): the worktree is not moved, and gets the CF-R2 line.
+    t2 = proj.last()
+    assert t2["start"]["head"] == head_before, "the worktree must not be moved"
+    assert t2["prompt"] != "turn two" and t2["prompt"].endswith("turn two"), (
+        f"the agent must be told why it was not updated: {t2['prompt']!r}")
 
 
 # ==========================================================================
@@ -263,7 +248,7 @@ def test_cf_r4_adversary_lock_timeout_missing_result_fields(proj, monkeypatch):
     The caller cannot inspect what commit the agent worktree is on or how far
     behind base it is.
     """
-    proj.consult("turn one")
+    first = proj.consult("turn one")
 
     # Simulate another process holding the flock on consult-advisor.lock
     lock_file = proj.runner.paths.data / "consult-advisor.lock"
@@ -283,16 +268,8 @@ def test_cf_r4_adversary_lock_timeout_missing_result_fields(proj, monkeypatch):
 
         # The consult timed out waiting for the lock
         assert "error" in res, res
-        # CF-R4 requires result to carry commit, base_commit, behind
-        assert "commit" in res, (
-            f"CF-R4 VIOLATION: 'commit' is missing from consult lock timeout result: {res}"
-        )
-        assert "base_commit" in res, (
-            f"CF-R4 VIOLATION: 'base_commit' is missing from consult lock timeout result: {res}"
-        )
-        assert "behind" in res, (
-            f"CF-R4 VIOLATION: 'behind' is missing from consult lock timeout result: {res}"
-        )
+        # Decided (8493889): every key present, null when unknown.
+        assert_all_keys(res, first)
     finally:
         fcntl.flock(held_fd, fcntl.LOCK_UN)
         os.close(held_fd)
@@ -313,7 +290,7 @@ def test_cf_r4_adversary_agent_timeout_omits_agent_field(proj, monkeypatch):
       - lock timeout: {"agent": agent_name, "error": ...}
     Only agent timeout drops "agent"!
     """
-    proj.consult("turn one")
+    first = proj.consult("turn one")
 
     orig_wait_for = asyncio.wait_for
 
@@ -324,9 +301,18 @@ def test_cf_r4_adversary_agent_timeout_omits_agent_field(proj, monkeypatch):
     res = proj.consult("turn two timeout")
 
     assert res.get("timed_out") is True, res
-    assert "agent" in res, (
-        f"DEFECT: 'agent' field is missing from timed_out consult result: {res}"
-    )
+    # Decided (8493889): every key present on the turn-timeout path too.
+    assert_all_keys(res, first)
+
+
+def test_cf_r4_adversary_awaiting_a_question_carries_every_key(proj):
+    """Decided (8493889): the awaiting-a-question path carries every key."""
+    first = proj.consult("turn one")
+
+    res = proj.consult("ASK turn two")
+
+    assert res.get("status") == "awaiting_user", res
+    assert_all_keys(res, first)
 
 
 # ==========================================================================
@@ -354,13 +340,13 @@ def test_cf_r3_adversary_base_amended_falsely_claims_agent_holds_own_work(proj):
     second = proj.consult("turn two")
     t2 = proj.last()
 
-    # The prompt given to the agent
-    prompt = t2["prompt"]
-    assert "holds work of your own" not in prompt, (
-        f"CF-R3 DEFECT: Agent was told its worktree was not updated because it "
-        f"'holds work of your own', but the agent never made any changes!\n"
-        f"Prompt was:\n{prompt}"
-    )
+    # Decided (8493889): a rewritten base is never own work. With no own
+    # work the worktree moves to the amended base.
+    amended = proj.base_sha()
+    assert t2["start"]["head"] == amended, (
+        f"CF-R3 DEFECT: the worktree was not moved onto the amended base; "
+        f"prompt was:\n{t2['prompt']}")
+    assert t2["start"]["notes"] == "v1 amended\n"
 
 
 # ==========================================================================
@@ -391,7 +377,9 @@ def test_cf_r3_adversary_base_moved_backwards_gives_no_stale_warning(proj):
     second = proj.consult("turn two")
     t2 = proj.last()
 
-    # The agent's prompt has no notice line:
+    # Decided (8493889): the worktree moves back to base, and is told so.
+    assert t2["start"]["head"] == proj.base_sha(), "the worktree must move back to base"
+    assert t2["start"]["notes"] == "v1\n"
     assert t2["prompt"] != "turn two", (
         "CF-R3 DEFECT: Base was force-moved backwards, but no notice was given to the agent; "
         f"prompt was untouched: {t2['prompt']!r}"
