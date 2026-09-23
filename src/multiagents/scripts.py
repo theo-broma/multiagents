@@ -209,6 +209,12 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
     except subprocess.TimeoutExpired as exc:
         _kill_group(child)
         return 124, "", f"{type(exc).__name__}: {exc}"
+    except BaseException:
+        # P0-R8f.11: interrupted while waiting — Ctrl-C, a signal handler's
+        # exception — the action must not go on working after its caller has
+        # stopped listening. Kill and reap the group, then let it propagate.
+        _kill_group(child)
+        raise
     return child.returncode, _text(out), _text(err)
 
 

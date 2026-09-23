@@ -22,7 +22,6 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import replace
-import math
 import os
 import signal
 import subprocess
@@ -32,6 +31,7 @@ from pathlib import Path
 
 from . import procs, scripts
 from .budget import read_all, reset_label
+from .config import limit_number
 from .executor import executor_for
 from .paths import global_config_dir
 from .providers import load_providers
@@ -188,12 +188,20 @@ def _run_attached(argv, env, stalled=None) -> int:
       reaching the orchestrator entirely. A handler is reset to the default on
       exec, so the child gets normal behaviour while this process keeps waiting
       instead of dying first and orphaning it.
-    * the terminal mode is saved and restored around the run.
+    * the terminal mode is saved and restored around the run — on SIGTERM too
+      (P0-R8f.10), which is turned into an exit so the restore runs. The CLI
+      is stopped first: it would otherwise stay on the terminal, orphaned, with
+      nobody left to put the terminal back after it.
     * nothing in this process reads stdin, or it would steal the child's keys.
 
     `stalled` is polled while the child runs and, if it ever returns true, the
     child is stopped. Without it a session that stops working without exiting is
     invisible: the supervisor waits on a process that will never end.
+
+    If `stalled` has a `stopping` attribute, it is called just before that
+    stop, and only if the child is still running when it comes: a CLI that exited by itself while `stalled` was
+    deciding was ended by its user, not by us, and its caller must be able to
+    tell the two apart (P0-R8f.12).
     """
     saved = _terminal_state()
     previous = {}
@@ -207,6 +215,13 @@ def _run_attached(argv, env, stalled=None) -> int:
         except (ValueError, OSError):
             pass
     try:
+        # Not ignored: whoever sent it wants this process gone, and it goes —
+        # through the `finally` below, which a default SIGTERM would skip.
+        previous[signal.SIGTERM] = signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    except (ValueError, OSError):
+        pass
+    child = None
+    try:
         child = subprocess.Popen(argv, env=env)          # NOT start_new_session
         while True:
             try:
@@ -217,19 +232,37 @@ def _run_attached(argv, env, stalled=None) -> int:
                 # exit-code path in here is blind to the most common way a
                 # session stops being useful.
                 if stalled is not None and stalled():
-                    child.terminate()
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=20)
-                    if child.poll() is None:
-                        child.kill()
-                    return child.wait()
+                    if child.poll() is not None:
+                        return child.returncode      # it ended by itself
+                    stopping = getattr(stalled, "stopping", None)
+                    if stopping is not None:
+                        stopping()
+                    return _stop_child(child)
             except KeyboardInterrupt:                    # belt and braces
                 continue
+    except BaseException:
+        if child is not None and child.poll() is None:
+            _stop_child(child)
+        raise
     finally:
         for sig, handler in previous.items():
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, handler)
         _restore_terminal(saved)
+
+
+def _exit_on_sigterm(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+def _stop_child(child: subprocess.Popen) -> int:
+    """Terminate the attached CLI, kill it if it will not go, and reap it."""
+    child.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=20)
+    if child.poll() is None:
+        child.kill()
+    return child.wait()
 
 
 def _hand_over(argv: list[str], env: dict, script: Path | None) -> int:
@@ -443,9 +476,9 @@ class _AttachedCompaction:
         self.paths, self.config, self.spec = paths, config, spec
         self.provider, self.executor, self.context = provider, executor, context
         self.tree = Tree(paths.tree_file, paths.events_file)
-        self.threshold = _limit_number(config, "compact_at_tokens", 0, zero_ok=True)
-        self.idle = _limit_number(config, "compact_idle_seconds", 300)
-        self.grace = _limit_number(config, "compact_grace_seconds", 30)
+        self.threshold = _limit_number(config, "compact_at_tokens", zero_ok=True)
+        self.idle = _limit_number(config, "compact_idle_seconds")
+        self.grace = _limit_number(config, "compact_grace_seconds")
         self.bell = _limit_flag(config, "compact_bell", True)
         self.disabled = False       # a failure or a "cannot": not again this run
         self.spent = False          # compacted in this crossing of the threshold
@@ -479,7 +512,10 @@ class _AttachedCompaction:
         return (st.st_ino, st.st_mtime_ns, st.st_size)
 
     def _cancel(self) -> None:
-        self.scheduled = None
+        # A new episode either way (R8f.14): a cancel for a busy tree leaves
+        # the transcript as the probe saw it, and must not suppress the next
+        # proposal once the tree is quiet again.
+        self.scheduled = self.probed = None
         print("\ncompaction cancelled — the session is in use; it will be "
               "proposed again once it is quiet.")
         sys.stdout.flush()
@@ -614,8 +650,13 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         while True:
             began = time.monotonic()
             compaction.launched()
+            stopped: list = []
+            _stalled.stopping = lambda: stopped.append(True)
             code = _run_attached(argv, run_env, stalled=_stalled)
-            if compaction.requested is None:
+            if compaction.requested is None or not stopped:
+                # The user's own exit wins over a compaction that was due
+                # (R8f.12): only a CLI we stopped for it is compacted.
+                compaction.requested = None
                 return code, time.monotonic() - began
             compaction.compact()
             run_env = {k: v for k, v in run_env.items()
@@ -673,15 +714,15 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
               f"it retried anyway.")
         return 1
 
-    attempts = int(config.limits.get("restart_attempts", 5))
-    delay = float(config.limits.get("restart_delay_seconds", 60))
+    attempts = int(_limit_number(config, "restart_attempts", zero_ok=True))
+    delay = _limit_number(config, "restart_delay_seconds", zero_ok=True)
     survived = float(config.limits.get("restart_min_runtime_seconds", 60))
     # Waiting out a usage window is not a restart attempt and must not spend
     # them. The window is FIVE HOURS on this provider; five attempts backing off
     # from a minute would give up in the middle of it, having proved only that
     # the limit was still there — which was never in doubt.
     limit_waits = limit_waits_before_loop
-    limit_budget = int(config.limits.get("limit_max_waits", 12))
+    limit_budget = int(_limit_number(config, "limit_max_waits", zero_ok=True))
     after_limit = bool(limit_waits_before_loop)
     attempt = 0
     while attempt < attempts:
@@ -982,7 +1023,7 @@ def _supervise(paths, config, role, spec, provider, executor,
         limit = watchdog.limit_reached(provider, paths.root)
         if limit:
             limit_waits += 1
-            if limit_waits > int(config.limits.get("limit_max_waits", 12)):
+            if limit_waits > int(_limit_number(config, "limit_max_waits", zero_ok=True)):
                 print(f"\n{spec.provider} is still limited after "
                       f"{limit_waits - 1} waits; stopping.")
                 return 3
@@ -1036,26 +1077,9 @@ def _supervise(paths, config, role, spec, provider, executor,
     return 0
 
 
-def _limit_number(config, key: str, default: float, zero_ok: bool = False) -> float:
-    """A numeric `limits` value, or `default` when it is not a usable one.
-
-    One parser for every compaction limit, R8c's and R8f's alike, because the
-    config is typed by a person: `120k`, `5m`, `inf`, a negative number or an
-    empty key must fall back to the default rather than raise out of a driver
-    that is holding somebody's session. Zero is only a value where it means
-    "off" (`compact_at_tokens`); a zero idle or grace period would stop a
-    session with no warning, so there it is malformed too.
-    """
-    value = config.limits.get(key, default)
-    if isinstance(value, bool):
-        return default
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(number) or number < 0 or (number == 0 and not zero_ok):
-        return default
-    return number
+def _limit_number(config, key: str, zero_ok: bool = False) -> float:
+    """A numeric `limits` value; a malformed one is the shipped default."""
+    return limit_number(config.limits, key, zero_ok=zero_ok)
 
 
 def _limit_flag(config, key: str, default: bool) -> bool:
@@ -1077,7 +1101,7 @@ def _compact_if_due(paths, config, spec, provider, executor, context: dict,
     compacted, 64 cannot (asked no more this run), anything else failed — which
     is reported and is not a failed turn.
     """
-    threshold = _limit_number(config, "compact_at_tokens", 0, zero_ok=True)
+    threshold = _limit_number(config, "compact_at_tokens", zero_ok=True)
     if threshold <= 0 or unsupported:
         return
     session = context.get("MULTIAGENTS_SESSION_ID", "")
@@ -1101,7 +1125,7 @@ def _compact_session(paths, config, spec, provider, executor, context: dict,
     """
     session = context.get("MULTIAGENTS_SESSION_ID", "")
     who = next((n.id for n in tree.drivers() if n.session == session), spec.name)
-    timeout = _limit_number(config, "compact_timeout_seconds", 180)
+    timeout = _limit_number(config, "compact_timeout_seconds")
     # Never a probe, whatever this process inherited: a check-mode answer of 0
     # would be reported as a compaction that did not happen.
     code, out, err = scripts.run_action(

@@ -34,7 +34,7 @@ from . import findings as findings_mod
 from . import gitops
 from .config import CONFIG_FILES
 from .config import load as load_config
-from .config import seed_project
+from .config import limit_number, seed_project
 from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
 from .redact import scrub
@@ -232,10 +232,8 @@ def _context_reading(run: Runner) -> int | None:
 
 
 def _limit(run: Runner, key: str) -> int:
-    try:
-        return int(run.config.limits.get(key, 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    """A token threshold; 0 is off, and a malformed one is the shipped default."""
+    return int(limit_number(run.config.limits, key, zero_ok=True))
 
 
 def _context_notice(run: Runner) -> dict | None:
