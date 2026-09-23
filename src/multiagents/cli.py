@@ -64,6 +64,203 @@ def _resolve(explicit: str | None = None) -> ProjectPaths:
 # --------------------------------------------------------------------------
 
 
+def _read_key(stream) -> str:
+    """Read and decode exactly one key from a raw terminal stream.
+
+    `stream` may be binary or text — whichever `sys.stdin` is when a caller
+    puts the terminal into raw mode. Every call consumes one whole key, so
+    nothing left over can register as the next one: an `ESC [` sequence other
+    than up/down is read through its final byte (`@`-`~`) and yields `""`
+    (unknown, ignored by `_select`); a lone `ESC` — end of stream right after
+    it, or anything but `[` — is consumed along with what follows it and
+    cancels; end of stream with nothing read at all also cancels.
+
+    Shares its key-decoding table with `_read_key_fd`, which reads the same
+    way off a real terminal fd instead of an in-memory stream — see that
+    function for why the two aren't just one.
+    """
+    def get(timeout=None) -> str:
+        chunk = stream.read(1)
+        return chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else chunk
+
+    return _decode_key(get)
+
+
+def _decode_key(get, esc_timeout=None) -> str:
+    """Shared token table behind `_read_key` and `_read_key_fd`.
+
+    `get(timeout=None)` fetches one decoded character, blocking unless the
+    caller gives `timeout` a meaning of its own. Only the byte immediately
+    after `ESC` is ever asked for with `esc_timeout` — that is the one place
+    a real terminal reader can be left hanging by a lone `Escape` press.
+    """
+    ch = get()
+    if ch == "":
+        return "cancel"
+    if ch == "\x1b":
+        nxt = get(esc_timeout)
+        if nxt != "[":
+            return "cancel"
+        final = ""
+        while True:
+            final = get()
+            if final == "" or "@" <= final <= "~":
+                break
+        return {"A": "up", "B": "down"}.get(final, "")
+    if ch == "k":
+        return "up"
+    if ch == "j":
+        return "down"
+    if ch in ("\r", "\n"):
+        return "enter"
+    if ch in ("q", "\x03"):
+        return "cancel"
+    return ch
+
+
+def _read_key_fd(fd, timeout: float = 0.05) -> str:
+    """Like `_read_key`, but reads a raw terminal fd directly.
+
+    A lone `ESC` — no `[` arriving within `timeout` seconds — cancels
+    immediately instead of leaving the picker waiting for a second key that
+    isn't coming (P0-R7.13 amendment). The timeout is implemented with
+    `select` on the fd, which only means what it says if the read behind it
+    is a raw, unbuffered `os.read` on that same fd — going through
+    `sys.stdin`'s buffered text wrapper could report a byte as "not ready"
+    when it is in fact already sitting in the wrapper's own buffer.
+    """
+    import select
+
+    def get(to=None) -> str:
+        if to is not None:
+            ready, _, _ = select.select([fd], [], [], to)
+            if not ready:
+                return ""
+        chunk = os.read(fd, 1)
+        return chunk.decode("utf-8", "replace") if chunk else ""
+
+    return _decode_key(get, timeout)
+
+
+def _select(options: list[tuple[str, str]], current: str, read_key) -> str | None:
+    """Cursor-pick a name out of `(name, description)` pairs.
+
+    `read_key()` drives it: `"up"`/`"down"` move the selection and stop at
+    either end (no wrap-around), `"enter"` returns the name under the cursor,
+    `"cancel"` returns `None`, and anything else is ignored. `current` is
+    selected on entry, or the first option if `current` is not among them.
+
+    No terminal is touched here — that is `_read_key` and its caller's job —
+    which is what lets this run against a scripted `read_key` in tests.
+    """
+    if not options:
+        return None
+    names = [name for name, _ in options]
+    idx = names.index(current) if current in names else 0
+    _draw_team_options(options, idx)
+    while True:
+        key = read_key()
+        if key == "up" and idx > 0:
+            idx -= 1
+            _draw_team_options(options, idx, redraw=True)
+        elif key == "down" and idx < len(options) - 1:
+            idx += 1
+            _draw_team_options(options, idx, redraw=True)
+        elif key == "enter":
+            return names[idx]
+        elif key == "cancel":
+            return None
+        # any other token is unrecognised and ignored
+
+
+def _draw_team_options(options: list[tuple[str, str]], idx: int,
+                        redraw: bool = False) -> None:
+    """Print the team list, with `>` marking the current selection."""
+    if redraw:
+        sys.stdout.write(f"\x1b[{len(options)}A")
+    for i, (name, description) in enumerate(options):
+        marker = "> " if i == idx else "  "
+        sys.stdout.write(f"\x1b[2K{marker}{name:<16} {description}\n")
+    sys.stdout.flush()
+
+
+def _pick_team(options: list[tuple[str, str]], current: str) -> str | None:
+    """Run `_select` against the real keyboard.
+
+    Raw mode is entered lazily, on the first keystroke `_select` actually
+    asks for, and restored in a `finally` on every exit path (P0-R7.13). That
+    laziness is also what keeps a test that replaces `_select` from ever
+    reaching the terminal at all: the real key reader is verified on its own,
+    against in-memory streams, never through here.
+
+    `tty.setcbreak` rather than `setraw`: raw mode also turns off output
+    post-processing, and once that's off every `\n` `_draw_team_options`
+    writes stops returning the carriage, so the redrawn list staircases down
+    the screen instead of landing back in place. cbreak leaves OPOST on and
+    only takes input out of canonical, echoed, line-buffered mode, which is
+    all a key-at-a-time reader needs. It leaves ISIG on too, so Ctrl-C
+    surfaces as `KeyboardInterrupt` rather than an `\x03` byte — caught below
+    and treated the same as any other cancel.
+    """
+    saved = None
+    fd = None
+
+    def read_key() -> str:
+        nonlocal saved, fd
+        if saved is None:
+            import termios
+            import tty
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        return _read_key_fd(fd)
+
+    try:
+        return _select(options, current, read_key)
+    except KeyboardInterrupt:
+        return None
+    finally:
+        if saved is not None:
+            import termios
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _choose_team(paths, config, requested: str | None):
+    """Resolve, and if needed apply, the team `init-agent` runs as.
+
+    Returns `(config, None)` to carry on with (possibly reloaded) `config`,
+    or `(config, code)` to stop with that exit code — so `cmd_init_agent`
+    stays a straight line instead of threading early returns through checks
+    that must never run after a cancel (P0-R7.4) or an unknown `--team`.
+    """
+    teams = config.teams
+    if requested is not None:
+        if requested not in teams:
+            print(f"unknown team {requested!r}; configured: "
+                  f"{', '.join(teams) or '(none configured)'}", file=sys.stderr)
+            return config, 2
+        chosen, prompted = requested, False
+    elif sys.stdin.isatty() and len(teams) >= 2:
+        options = [(name, str((spec or {}).get("description", "")))
+                   for name, spec in teams.items()]
+        chosen = _pick_team(options, config.team)
+        if chosen is None:
+            print("             nothing changed")
+            return config, 130
+        prompted = True
+    else:
+        chosen, prompted = config.team, False
+
+    if chosen != config.team:
+        if not _set_team(paths, chosen):
+            print(f"             no project.yaml to write the team into: "
+                  f"{paths.config / 'project.yaml'}")
+            return config, 2
+        config = load_config(paths)
+
+    suffix = "" if (prompted or requested is not None) else " (configured)"
+    print(f"team         {config.team}{suffix}")
+    return config, None
 
 
 def cmd_init_agent(args: argparse.Namespace) -> int:
@@ -81,6 +278,11 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
     waiting = Tree(paths.tree_file, paths.events_file).open_questions()
     if waiting:
         print(f"\n{len(waiting)} question(s) still open; answer with `multiagents ask`")
+
+    config, code = _choose_team(paths, config, getattr(args, "team", None))
+    if code is not None:
+        return code
+
     print()
     _report_catalog(config)
 
@@ -456,6 +658,40 @@ def _set_executor(paths, kind: str) -> bool:
                              lambda m: m.group(1) + kind, text, count=1)
     if not count:
         return False
+    config.write_text(updated)
+    return True
+
+
+def _set_team(paths, team: str) -> bool:
+    """Rewrite the top-level `team:` line in the project's own config.
+
+    Same shape as `_set_executor`, same reason: a line edit rather than a
+    YAML round trip, because the shipped file is mostly comments explaining
+    the choices and a round trip would throw them all away for a one-line
+    change. Only a `team:` key at column zero is touched — one nested under
+    another mapping, or merely mentioned in a comment, never matches. A
+    project that inherits `team:` from the defaults layer has no line to
+    substitute, so one is inserted instead, on its own line.
+    """
+    import re
+
+    config = paths.config / "project.yaml"
+    if not config.is_file():
+        return False
+    text = config.read_text()
+
+    def replace(match: re.Match) -> str:
+        comment = re.search(r"\s*#.*$", match.group(1))
+        return f"team: {team}{comment.group(0) if comment else ''}"
+
+    updated, count = re.subn(r"(?m)^team:[ \t]*(.*)$", replace, text, count=1)
+    if not count:
+        body = text
+        if body and not body.endswith("\n"):
+            body += "\n"
+        if body and not body.endswith("\n\n"):
+            body += "\n"
+        updated = body + f"team: {team}\n"
     config.write_text(updated)
     return True
 
@@ -2367,6 +2603,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="start even though the orchestrator is running")
     p.add_argument("--wait", action="store_true",
                    help="if the provider is exhausted, block until its quota resets")
+    p.add_argument("--team", default=None,
+                   help="use this team, skipping the interactive choice")
     p.set_defaults(func=cmd_init_agent)
 
     p = sub.add_parser("build", help="build and start the container environment")

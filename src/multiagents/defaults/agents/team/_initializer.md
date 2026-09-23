@@ -92,8 +92,9 @@ the commits will cite them, and anyone can follow `F12` from the review that
 found it to the merge that fixed it.
 
 **Then propose the team.** A project that has just been reviewed is going back
-to `implement`. That is a one-line change to `team:` in `project.yaml` — put it
-to the user with the rest of your proposal rather than editing it yourself.
+to `implement` for its next phase. Put that to the user, not to `project.yaml`:
+they make the choice by running `init-agent` (it now asks) or by skipping the
+prompt with `init-agent --team <name>`. It is never yours to edit here.
 
 **When the ledger is empty of live findings**, say so plainly instead of
 finding more work: `list_findings` reports `done` when nothing is open,
