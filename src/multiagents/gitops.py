@@ -193,6 +193,36 @@ def commits_on(repo: Path, branch: str, base: str) -> int:
         return 0
 
 
+def resolve_commit(repo: Path, ref: str) -> str:
+    """The full sha `ref` names, or "" when it names no commit."""
+    if not ref:
+        return ""
+    result = run(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    return result.out if result.ok else ""
+
+
+def short_sha(repo: Path, ref: str) -> str:
+    result = run(repo, "rev-parse", "--short", ref)
+    return result.out if result.ok else ""
+
+
+def holds_unmerged_commits(repo: Path, head: str, base: str) -> bool:
+    """Whether `head` has commits whose changes `base` does not already hold.
+
+    Absorbed means merging `head` into `base` would change no file, which is
+    what a squash merge leaves behind: the branch's own shas never reach base,
+    but its content does. A conflicting merge, or a git too old to answer, is
+    counted as holding work — the safe side of this question is "yes".
+    """
+    if run(repo, "merge-base", "--is-ancestor", head, base).ok:
+        return False
+    merged = run(repo, "merge-tree", "--write-tree", base, head)
+    if not merged.ok or not merged.out:
+        return True
+    base_tree = run(repo, "rev-parse", f"{base}^{{tree}}")
+    return not base_tree.ok or merged.out.splitlines()[0] != base_tree.out
+
+
 def diff_stat(repo: Path, branch: str, base: str) -> str:
     result = run(repo, "diff", "--stat", f"{base}...{branch}")
     return result.out if result.ok else ""

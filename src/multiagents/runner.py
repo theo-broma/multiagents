@@ -2243,6 +2243,110 @@ class Runner:
                     best = node
         return best
 
+    @contextlib.asynccontextmanager
+    async def _conversation_turn(self, agent_name: str, wait: float):
+        """Hold one conversation to one turn at a time (CF-R7).
+
+        The refresh and the turn it prepares are one unit: a second consult
+        landing mid-turn would otherwise move the worktree under a running
+        agent, or both would race for the worktree's index lock. The second one
+        waits. An flock rather than an asyncio.Lock because the callers are
+        often different processes — every nested agent consulting the same
+        advisor runs its own runner — and flock also excludes a second open in
+        this process, so one mechanism covers both. It dies with its holder.
+        """
+        import fcntl
+
+        self.paths.data.mkdir(parents=True, exist_ok=True)
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", agent_name)
+        handle = (self.paths.data / f"consult-{name}.lock").open("a+")
+        try:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        yield False
+                        return
+                    await asyncio.sleep(0.1)
+            yield True
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def _conversation_base(self) -> str:
+        """Base as it is now — resolved per turn, never remembered (CF terms)."""
+        return self.config.base_branch or gitops.current_branch(self.paths.root)
+
+    def _worktree_view(self, worktree: Path, base: str) -> dict[str, Any]:
+        """What a turn reads, for the caller (CF-R4)."""
+        base_sha = gitops.resolve_commit(self.paths.root, base)
+        behind = None
+        if base_sha:
+            behind = gitops.commits_on(worktree, base_sha, "HEAD")
+        base_commit = gitops.short_sha(self.paths.root, base_sha) if base_sha else ""
+        return {"commit": gitops.short_sha(worktree, "HEAD") or None,
+                "base_commit": base_commit or None, "behind": behind}
+
+    def _refresh_conversation(self, node: Node, worktree: Path) -> str:
+        """Bring a resumed conversation's worktree to base, if nothing is lost.
+
+        Returns the one-line notice for the turn's prompt, or "" when the view
+        neither moved nor is stale (CF-R3). Own work — uncommitted changes that
+        git does not ignore, or commits whose content base does not already
+        hold — is never touched (CF-R2); the turn then runs where it is and is
+        told how far behind that is. Any git failure takes the same path and is
+        recorded, rather than costing the turn (CF-R5).
+        """
+        base = self._conversation_base()
+        head = gitops.head_sha(worktree)
+
+        def not_updated(error: str, behind: int | None = None) -> str:
+            self.tree.emit(node.id, "worktree_refresh_failed", base=base,
+                           error=error[:500])
+            stale = (f"is {behind} commit{'s' if behind != 1 else ''} behind it"
+                     if behind else "may be behind it")
+            return (f"[system] Your worktree could not be updated to the current "
+                    f"{base or 'base'} and {stale}, still at "
+                    f"{head[:9] or 'its old commit'}: re-read a file before "
+                    f"relying on or quoting it.\n\n")
+
+        base_sha = gitops.resolve_commit(self.paths.root, base)
+        if not base_sha:
+            return not_updated(f"base {base!r} does not name a commit")
+        if not head:
+            return not_updated("the worktree has no readable HEAD")
+        behind = gitops.commits_on(worktree, base_sha, head)
+        if not behind:
+            return ""
+        status = gitops.run(worktree, "status", "--porcelain")
+        if not status.ok:
+            return not_updated(status.err or status.out, behind)
+        if status.out.strip() or gitops.holds_unmerged_commits(worktree, head, base_sha):
+            return (f"[system] Your worktree is {behind} "
+                    f"commit{'s' if behind != 1 else ''} behind {base} and was not "
+                    f"updated, because it holds work of your own (uncommitted "
+                    f"changes or commits not on {base}).\n\n")
+        # The move itself: the node's own branch, still checked out, now at
+        # base. `reset --keep` refuses rather than overwrites if anything
+        # changed since the check above, and keeps HEAD attached.
+        symref = gitops.run(worktree, "symbolic-ref", "-q", "HEAD")
+        if not symref.ok or symref.out != f"refs/heads/{node.branch}":
+            return not_updated(f"the worktree is not on its branch {node.branch!r} "
+                               f"(HEAD is {symref.out or 'detached'})", behind)
+        moved = gitops.run(worktree, "reset", "--keep", base_sha)
+        if not moved.ok:
+            return not_updated(moved.err or moved.out, behind)
+        self.tree.emit(node.id, "worktree_refreshed", base=base,
+                       old=head[:12], new=base_sha[:12])
+        return (f"[system] Your worktree was updated from {head[:9]} to "
+                f"{base_sha[:9]} (the current {base}) since your last turn; "
+                f"anything you read on earlier turns may have changed, so re-read "
+                f"a file before relying on or quoting it.\n\n")
+
     async def consult(
         self, agent_name: str, message: str, timeout: int | None = None,
     ) -> dict[str, Any]:
@@ -2263,6 +2367,18 @@ class Runner:
                 f"Agent {agent_name!r} is not conversational. Use start_agent for "
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
+        # Waiting for the other turn is bounded by how long that turn may run.
+        wait = (timeout or spec.timeout) + 60
+        async with self._conversation_turn(agent_name, wait) as ours:
+            if not ours:
+                return {"agent": agent_name,
+                        "error": f"{agent_name!r} was still answering another "
+                                 f"consult after {wait:.0f}s; this one did not run"}
+            return await self._consult_turn(agent_name, spec, message, timeout)
+
+    async def _consult_turn(
+        self, agent_name: str, spec: AgentSpec, message: str, timeout: int | None,
+    ) -> dict[str, Any]:
         node = self._find_conversation(agent_name)
         turn = 1
 
@@ -2323,7 +2439,9 @@ class Runner:
             # a container problem rather than a stale checkout. Cut a fresh
             # worktree and carry the session — the context lives in the
             # provider's session, not in the files.
+            recreated = False
             if not worktree_path.is_dir() and gitops.is_repo(self.paths.root):
+                recreated = True
                 base = self.config.base_branch or gitops.current_branch(self.paths.root)
                 worktree_path = self.paths.worktree(node_id)
                 branch = gitops.create_worktree(
@@ -2343,7 +2461,13 @@ class Runner:
                     f"cleaned up between turns. Anything you wrote there is "
                     f"gone; what you remember of this conversation is intact.\n\n"
                 ) + prompt
+            # The conversation outlives the code it last read: work merged into
+            # base between turns must reach this turn (bug-7f6ba7). A worktree
+            # just recreated above is already on base.
+            if not recreated and worktree_path.is_dir():
+                prompt = self._refresh_conversation(node, worktree_path) + prompt
 
+        view = self._worktree_view(worktree_path, self._conversation_base())
         self.tree.update(node_id, turns=turn)
         try:
             run = await self._launch(
@@ -2362,7 +2486,7 @@ class Runner:
             await self.stop(node_id)
             return {
                 "agent_id": node_id, "turn": turn, "timed_out": True,
-                "error": f"no reply within {limit}s",
+                "error": f"no reply within {limit}s", **view,
             }
 
         final = self.tree.get(node_id)
@@ -2379,6 +2503,7 @@ class Runner:
                 "partial_reply": reply[-2000:],
                 "note": "this agent asked a question instead of answering; "
                         "resolve it with answer_question before relying on this",
+                **view,
             }
         return {
             "agent_id": node_id,
@@ -2388,6 +2513,7 @@ class Runner:
             "reply": reply[-MAX_SUMMARY_CHARS:],
             "usage": final.usage if final else {},
             "note": "advisory only — you decide whether to act on this",
+            **view,
             **({"ticket": run.ticket} if run.ticket else {}),
         }
 
