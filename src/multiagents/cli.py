@@ -215,6 +215,16 @@ def _pick_team(options: list[tuple[str, str]], current: str) -> str | None:
             tty.setcbreak(fd)
         return _read_key_fd(fd)
 
+    # SIGTERM becomes an exit rather than a sudden death, so the `finally`
+    # still puts the terminal back (P0-R8f.10). Not caught below: the process
+    # was asked to end, not the picker to cancel.
+    def terminated(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, terminated)
+    except (ValueError, OSError):
+        previous = None
     try:
         return _select(options, current, read_key)
     except KeyboardInterrupt:
@@ -223,6 +233,8 @@ def _pick_team(options: list[tuple[str, str]], current: str) -> str | None:
         if saved is not None:
             import termios
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _choose_team(paths, config, requested: str | None):

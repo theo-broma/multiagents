@@ -36,6 +36,15 @@ fi
 # own instead of twenty-eight days of account access.
 VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
 
+# Where the CLI in THIS environment keeps its sessions: CLAUDE_CONFIG_DIR when
+# it is set, as `transcripts.default_root()` reads it, and ~/.claude otherwise.
+# Read, never exported: `compact` must find the transcript the running CLI
+# wrote (P0-R8f.16), which is not the same as choosing a profile for it. A
+# function, so an action that never looks does not need HOME set.
+claude_sessions_root() {
+    printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+
 # The project folder name Claude Code itself derives from a directory path:
 # every character outside [A-Za-z0-9] becomes '-'. Used wherever this script
 # has to find a transcript the CLI already wrote, rather than one it is about
@@ -498,14 +507,20 @@ compact)
         exit 2
     fi
     slug=$(claude_slug "$(pwd)")
-    transcript="$HOME/.claude/projects/$slug/$sid.jsonl"
+    transcript="$(claude_sessions_root)/$slug/$sid.jsonl"
     if [ ! -f "$transcript" ]; then
         echo "no transcript for session $sid at $transcript" >&2
         exit 1
     fi
+    # Readable, not merely present (P0-R8f.17): the figures below are read
+    # back from it, so a compaction on a transcript we cannot read must fail.
+    if [ ! -r "$transcript" ]; then
+        echo "transcript for session $sid is not readable: $transcript" >&2
+        exit 1
+    fi
     # Check mode (P0-R8f.1): the driver asks this before it stops a live
     # session, so it must answer from what is on disk and start nothing. A
-    # session id and its transcript are all a real call needs up front.
+    # session id and a readable transcript are all a real call needs up front.
     if [ "${MULTIAGENTS_COMPACT_CHECK:-}" = "1" ]; then
         exit 0
     fi
@@ -520,7 +535,7 @@ compact)
     out=$("$BIN" -p "/compact" --resume "$sid" --output-format json 2>&1)
     code=$?
     if [ "$code" -ne 0 ]; then
-        echo "compact failed: $(printf '%s' "$out" | tail -1 | head -c 200)" >&2
+        printf 'compact failed: %s\n' "$(printf '%s' "$out" | tail -1 | head -c 200)" >&2
         exit 1
     fi
     # Only lines APPENDED by this call count — a compaction record already in
@@ -550,8 +565,21 @@ for line in lines[before:]:
     pre, post = meta.get('preTokens'), meta.get('postTokens')
     if pre is not None and post is not None:
         print('%s -> %s tokens' % (pre, post))
+        # P0-R8f.15: a compaction that left the context no smaller did not
+        # do its job, and reporting it as one would have the caller stop the
+        # session for it again at the next boundary. Figures that are not
+        # numbers cannot say so; the record itself is genuine, as before.
+        try:
+            shrank = float(post) < float(pre)
+        except (TypeError, ValueError):
+            shrank = True
+        if not shrank:
+            print('the context did not shrink (%s -> %s tokens)' % (pre, post),
+                  file=sys.stderr)
+            sys.exit(3)
         break
 " "$transcript" "$before")
+    [ $? -eq 3 ] && exit 1
     if [ -z "$figures" ]; then
         echo "the CLI exited 0 but no compaction was recorded" >&2
         exit 1

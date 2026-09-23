@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 from collections.abc import Sequence
@@ -79,6 +80,35 @@ def _read_yaml(path: Path) -> dict:
         return {}
     with path.open() as handle:
         return yaml.safe_load(handle) or {}
+
+
+@lru_cache(maxsize=1)
+def shipped_limits() -> dict[str, Any]:
+    """The `limits` block of the package's own project.yaml, never a layer's."""
+    return dict(_read_yaml(shipped_defaults_dir() / "project.yaml").get("limits") or {})
+
+
+def limit_number(limits: dict, key: str, zero_ok: bool = False) -> float:
+    """A numeric `limits` value, or its shipped default when it is not usable.
+
+    The config is typed by a person: `120k`, `5m`, `inf`, NaN, a negative
+    number or a boolean must fall back to what the package ships rather than
+    raise out of a driver holding somebody's session — and not to 0, because
+    for the thresholds 0 means "off" and a typo must not switch a safety
+    feature off (P0-R8f.13). `zero_ok` is for the keys where 0 is a value
+    (off, no retry, no wait); elsewhere 0 is malformed too.
+    """
+    default = shipped_limits().get(key, 0)
+    value = limits.get(key, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number) or number < 0 or (number == 0 and not zero_ok):
+        return default
+    return number
 
 
 
