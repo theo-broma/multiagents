@@ -13,7 +13,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
@@ -95,24 +94,31 @@ def test_run_action_does_not_deadlock_on_simultaneous_large_stdout_and_stderr(tm
     assert err == "b" * 500000
 
 
-def test_run_action_raises_uncaught_on_non_utf8_stdout(tmp_path):
-    """F110 — the docstring says `run_action` "Never raises": a missing
-    script, a timeout, and an OSError all come back as a status tuple. A
-    script that writes bytes that are not valid UTF-8 is a fourth way for the
-    child to misbehave, and it is NOT caught: `subprocess.run(..., text=True)`
-    decodes with the process's default encoding and strict error handling, so
-    an invalid byte raises `UnicodeDecodeError` straight out of `run_action`,
-    past every caller that trusts the "never raises" contract."""
+def test_run_action_decodes_non_utf8_output_with_replacement_and_never_raises(tmp_path):
+    """A script that writes bytes that are not UTF-8 on either stream still
+    comes back as a status tuple: its exit code, the valid text intact, and
+    each invalid byte as U+FFFD. `run_action`'s "never raises" covers this
+    fourth way for a child to misbehave too.
+
+    Inverted deliberately: this pinned F110 (`UnicodeDecodeError` straight out
+    of `run_action`), fixed in d4ae4ec under
+    context/specs/phase0-context-and-team.md, P0-R8c attack finding 1 and the
+    "Decided, from the implementer's read (ag-829577)" block. The driver-level
+    consequence is covered by
+    test_phase0_contract_b_attack_driver.py::test_attack_r8c_3_non_utf8_output_from_compact_does_not_crash_the_driver;
+    this one pins the seam itself, for every captured action."""
     provider = h.make_provider("p")
     h.write_script(
         tmp_path, "p.sh",
         "#!/bin/sh\n"
         'case "$1" in\n'
-        "check) printf '\\377\\376\\200\\201' ;;\n"
+        "check) printf 'ok\\377\\376end'; printf 'err\\200\\201' >&2; exit 3 ;;\n"
         "esac\n",
     )
-    with pytest.raises(UnicodeDecodeError):
-        h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
+    assert code == 3
+    assert out == "ok\ufffd\ufffdend"
+    assert err == "err\ufffd\ufffd"
 
 
 # ---------------------------------------------------------------------------
@@ -129,26 +135,33 @@ def test_run_action_returns_124_on_timeout_with_the_reason_in_stderr(tmp_path):
     assert "timed out after 1 seconds" in err
 
 
-def test_run_action_timeout_kills_the_direct_child_but_not_a_backgrounded_grandchild(tmp_path):
-    """F111 — on timeout, `subprocess.run` kills the process it started (the
-    `sh script.sh` invocation) but has no process-group handle on anything
-    THAT process forked into the background. A script that backgrounds work
-    and `wait`s on it blocks the direct child for the full timeout window (so
-    the timeout fires as expected), but the backgrounded grandchild is
-    reparented and keeps running to completion after `run_action` has already
-    told its caller the action timed out and returned."""
+def test_run_action_timeout_kills_a_backgrounded_grandchild_too(tmp_path):
+    """On timeout the whole process group the action started is killed, not
+    only the direct child: work the script forked into the background does
+    not run on after `run_action` has reported the attempt timed out, and the
+    call returns at the timeout rather than when the grandchild would finish.
+
+    Inverted deliberately: this pinned F111 (the grandchild was reparented and
+    ran to completion), fixed in d4ae4ec under
+    context/specs/phase0-context-and-team.md, P0-R8c attack finding 3 and the
+    "Decided, from the implementer's read (ag-829577)" block ("on timeout the
+    whole process group is killed. This holds for every captured action").
+    The driver-level `compact` case is
+    test_phase0_contract_b_attack_driver.py::test_attack_r8c_3_a_timed_out_compaction_does_not_run_on_into_the_next_turn;
+    this one pins the seam with a shell-backgrounded grandchild."""
     provider = h.make_provider("p")
     marker = tmp_path / "marker"
     h.case_script(
         tmp_path, "p.sh",
         f'check) ( sleep 2; echo done > "{marker}" ) & wait ;;',
     )
+    started = time.monotonic()
     code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path, timeout=1)
+    elapsed = time.monotonic() - started
     assert code == 124
-    assert not marker.exists()  # not yet — the grandchild is still running
+    assert elapsed < 1.9, f"run_action returned after {elapsed:.1f}s, not at the timeout"
     time.sleep(2.5)
-    assert marker.exists()      # but it was never actually killed
-    assert marker.read_text() == "done\n"
+    assert not marker.exists(), "the backgrounded grandchild outlived the timeout"
 
 
 # ---------------------------------------------------------------------------
