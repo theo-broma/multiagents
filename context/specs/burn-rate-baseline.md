@@ -76,6 +76,20 @@ steer included) and several watcher passes: exactly one `wrap_up` event and
 one steer carrying the `WRAP_UP` text for that node. After a reading with
 recovered headroom and a new drain, a second wrap-up is allowed.
 
+## Decided, from the tester's questions (ag-6025f9)
+
+- **Key location:** `burn_min_span_seconds` and `burn_min_samples` live in
+  the `budget:` section, as BR-R1 names them. BR-R4's "next to
+  `wind_down_seconds`" was loose wording: they are documented in
+  `defaults/project.yaml` under `budget:`, with a line pointing at the
+  wind-down and wrap-up leads they gate.
+- **One sample:** `burn()` returns `headroom` whenever it has at least one
+  sample. It never returns `seconds_to_wall` from one.
+- **BR-R5 recovery:** a steer after recovery may re-arm the watcher. An
+  existing watcher does not have to re-arm by itself.
+- **BR-R5 cause confirmed** by the tester: 8 wrap-ups in about a second with
+  a 0.1 s poll.
+
 ## Out of scope, recorded
 
 - Gating the wind-down on absolute headroom (for example, "never below 20 %
