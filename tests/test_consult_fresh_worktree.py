@@ -128,7 +128,7 @@ class Project:
         if base_branch:
             git(self.root, "branch", base_branch)
         self.base = base_branch or self.root_branch
-        project = {"base_branch": base_branch} if base_branch else None
+        project = {"git": {"base_branch": base_branch}} if base_branch else None
         self.runner = h.make_runner(self.root, monkeypatch,
                                     agents={"advisor": spec},
                                     providers={"fake": provider},
