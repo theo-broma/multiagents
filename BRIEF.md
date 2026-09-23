@@ -1293,3 +1293,38 @@ not sent upstream.
 - **The tree is idle at ~21:50.** A good moment for the user to restart
   `multiagents run`: the server picks up the stuck fix, and R8f compaction
   becomes active.
+
+## Progress, 2026-09-24 ~02:30
+
+- The user restarted `multiagents run` at 21:43; the server now has the stuck fix
+  and R8f. User: pace claude on the 5 h window only, ignore the weekly one.
+- **Item 3 (defect 6):** implementation merged as 2a39b13 (implementer-deep
+  ag-009901). SM 49/49 pass, and the full suite shows only the 72 phase-2
+  failures. Adversary ag-da2c22's red tests are merged as e2585a9
+  (`tests/test_subagent_mcp_adversary.py`). Findings:
+  1. unquoted pid_file/`$@` in `_start_inside` (shell injection);
+  2. `DockerExecutor.inside()` trusts `MULTIAGENTS_CONTAINER` alone, so a
+     host process with that variable spawns agents outside docker (no proxy,
+     no cgroups);
+  3. `_hand_server` writes `runs/<id>/mcp.json` through a pre-planted
+     symlink into the user's config;
+  4. `provider.env` can override `MULTIAGENTS_AGENT_ID`, and the server env
+     does not pin it to node_id;
+  5. a leftover agy `mcp_config.json` in `homes/<id>` reaches a later
+     `can_spawn:false` run;
+  6. `OPENCODE_CONFIG` passthrough gives a `can_spawn:false` agent a config;
+  7. an unresolvable server command emits no `mcp_unavailable` on
+     opencode/agy.
+
+  Reviewer ag-9eacdb (rejected, 2):
+  - (1) `stale_mounts` uses `server_mounts([])`, so an explicit mount of an
+    install path causes an endless rebuild (`docker.py` ~741);
+  - (2) OSError in `_hand_server` crashes the run, contrary to SM-R5;
+  - (3) design: `_start_inside` is a hidden second executor;
+  - (4) the server env is built ad hoc and has no PATH.
+
+  **Next:** a fresh implementer-deep on all of these (ag-009901's worktree
+  is gone once merged: point it at `.multiagents/runs/ag-009901/`). Done =
+  `test_subagent_mcp.py` + `test_subagent_mcp_adversary.py` green. Then the
+  SM-R1 live check.
+- **Running:** ag-004177 (bug-2cebea fixes), ag-d5bc6d (bug-c050b0).
