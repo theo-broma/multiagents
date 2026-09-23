@@ -99,3 +99,12 @@ from CF-R4's added fields.
 - **CF-R3, wording extended.** The "updated" line also tells the agent to
   re-read a file before relying on or quoting it, because its memory of
   earlier reads may be stale.
+
+## Decided, from the tester's questions (ag-3e98ef)
+
+- **CF-R7:** today the code runs two consults to one node at the same time.
+  **The second consult waits** for the first to finish, then refreshes and
+  runs its own turn. It does not refuse.
+- **CF-R5:** the failure is recorded as an event of kind
+  `worktree_refresh_failed` on the node, carrying `base` (the base name) and
+  `error` (git's message, capped at 500 characters).

@@ -615,6 +615,36 @@ amendments narrow that window and make the warning impossible to miss.
     default's observable effect, and that an explicit `0` keeps its meaning
     where 0 means off.
 
+- **Decided, from the tester's questions (ag-c36b39):**
+  - **Explicit 0 (R8f.13).** For `restart_attempts`, `restart_delay_seconds`
+    and `limit_max_waits`, 0 is a valid value, not a malformed one: no
+    restart, no delay, no wait. For `compact_at_tokens` and
+    `context_wind_down_tokens`, 0 means off. For `compact_timeout_seconds`,
+    `compact_idle_seconds` and `compact_grace_seconds`, 0 is malformed and
+    falls back to the default.
+  - **SIGTERM and the child (R8f.10).** On SIGTERM, the attached driver also
+    ends the CLI it is holding (its process group) before it restores the
+    terminal and exits. It never leaves an orphan CLI on the terminal.
+- **Added from the adversary's attack on d4ae4ec (ag-43922d):**
+  - **P0-R8f.14 — a cancelled announcement can be proposed again.** After
+    an announced compaction is cancelled because the tree stopped being
+    idle, it is proposed again once R8f.2's conditions hold anew (idle tree,
+    rest measured afresh). It is not suppressed for the rest of the session
+    because the transcript did not change.
+  - **P0-R8f.15 — a compaction that did not shrink is a failure.** The
+    provider's `compact` action exits non-zero when the context after
+    compaction is not smaller than before. R8f.5 then applies: no loop in
+    the attached path, and the headless path (`_compact_if_due`) does not
+    compact again on every turn.
+  - **P0-R8f.16 — the transcript location follows the provider's config
+    directory.** `claude.sh compact`, and its check mode, find the
+    transcript where `transcripts.default_root()` does (`CLAUDE_CONFIG_DIR`
+    when set), not only under `$HOME/.claude`.
+  - **P0-R8f.17 — the probe answers for what compact will actually need.**
+    The check mode exits non-zero when the transcript exists but cannot be
+    read, so the session is never stopped for a compaction that must fail.
+  *Verified by:* `tests/test_phase0_r8f_adversary.py` (12d893f).
+
 ### P0-R8e — the automatic threshold, through the plugin seam
 
 **P0-R8e.1 — a per-agent key.** An agent entry in `agents.yaml` may carry
