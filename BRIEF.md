@@ -467,6 +467,36 @@ overwritten at the user's request.
   6. **agy agents end their turn** with a background test still running,
      which has happened repeatedly.
   7. **A live `claude.sh compact`** against a real session.
+  8. **Agents survive a restart of the orchestrator's CLI** (the user
+     agreed to this, 2026-09-23 ~20:50). Today the Runner lives in the MCP
+     server, a stdio child of the CLI. When the CLI stops cleanly, the
+     running agents are cancelled (`runner.py` ~1326-1353). After a crash,
+     the next `multiagents run` reaps them as `orphaned` (`cli.py`
+     ~970-1013). No spend runs away, but the work in progress is lost.
+     Cases where this costs us:
+     - R8f compaction can only fire while the tree is idle;
+     - a usage-limit restart of the orchestrator's own CLI
+       (`driver.py` ~1010-1030);
+     - a `multiagents run` restart to pick up new code or re-auth;
+     - a stray `/exit`.
+     The advisor's analysis is ag-25c350, turns 11-12. The smallest
+     version:
+     - agents write their stream to a file in their run dir, not to a pipe
+       owned by the server;
+     - on an intentional stop (compaction, limit wait, restart) the server
+       leaves live agents running;
+     - the next server adopts live nodes (replay the file, then follow it)
+       instead of reaping them.
+     Rejected, for now: a separate daemon (lifecycle, auth prompts), and
+     an HTTP MCP server hosted by the driver (the driver itself dies on
+     `/exit`). To settle in the contract:
+     - a lock on `tree.json` (two servers, if the old CLI was suspended);
+     - following a file across the docker bind mount;
+     - whether a docker agent really loses its output when its
+       `docker exec` dies (the advisor's claim, unverified);
+     - exactly what a limit restart does to agents in each mode.
+     Full pipeline, on `implementer-deep`. Adversary: yes, since it deals
+     with processes and concurrency.
 - **Researcher experiment:** the new brief is live (the project copy was
   overwritten). No researcher has run on it yet; compare the next run
   against ag-4548ac and ag-f2cb6d.
