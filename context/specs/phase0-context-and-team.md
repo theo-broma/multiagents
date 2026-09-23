@@ -514,6 +514,40 @@ ask the user for `/compact` when that mechanism is active, only when it is not
 - The token count in the announcement is free-form (`9000` or `9,000`). The
   cancel line must contain "cancel".
 
+**Amendments to P0-R8f, 2026-09-23, from the advisor's review (ag-25c350),
+decided with the user.** The driver cannot see keystrokes, only submitted
+messages. So a user who reads a diff and then composes a long reply can have
+the grace period run out while typing, and lose the unsubmitted text. These
+amendments narrow that window and make the warning impossible to miss.
+- **R8f.2.3, default changed:** `limits.compact_idle_seconds` now defaults to
+  `300`, not `60`, in `defaults/project.yaml`. The grace period stays
+  `limits.compact_grace_seconds: 30`.
+- **P0-R8f.8 — the announcement rings, configurably.** The announcement line
+  ends with a terminal bell (`\a`) when `limits.compact_bell` is true. It
+  defaults to `true` in `defaults/project.yaml`. With `false`, no bell
+  character is written.
+  *Verified by:* a test with the default config asserting the announcement
+  output contains `\a`, and one with `compact_bell: false` asserting it does
+  not.
+- **P0-R8f.3, wording changed:** the announcement must say that cancelling
+  needs a **sent** message, because typing without sending is invisible. It
+  replaces "type anything to keep it" with, for example,
+  `compacting this session in 30s (<tokens> tokens, nothing running) — send any message (e.g. "wait") to cancel`.
+  The line must contain "send" and "cancel". The number of seconds shown is
+  the configured grace period, not a literal 30.
+- **P0-R8f.9 — every R8f value comes from the config.** `compact_idle_seconds`,
+  `compact_grace_seconds` and `compact_bell` are read from the project's
+  `limits`, like `compact_at_tokens`. A project that overrides one gets its
+  value, and a project that omits one gets the shipped default. A malformed
+  value (not a number, negative, `inf`, not a boolean) falls back to the
+  default and never crashes the driver. This is the same safe parsing the
+  attack required of the existing limits (finding 5).
+  *Verified by:* tests overriding each key and asserting the observable effect
+  (the proposal time, the grace delay and the displayed seconds, the presence
+  of the bell), and a test per key with a malformed value asserting the
+  default is used.
+- R8f.7's brief text also says that only a sent message cancels.
+
 ### P0-R8e — the automatic threshold, through the plugin seam
 
 **P0-R8e.1 — a per-agent key.** An agent entry in `agents.yaml` may carry
