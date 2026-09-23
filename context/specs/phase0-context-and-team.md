@@ -452,6 +452,11 @@ recorded in BRIEF under "Awaiting the user".
   it there.
 - **Deferred tasks** block compaction whether or not they are already due.
 
+- **P0-R8a.3, decided from ag-6befca's NEED_INFO:** `budget_status` neither
+  carries nor consumes the `context_wind_down` notice — it already reports the
+  reading in its `context` block. The notice goes on the next *other* tool
+  response.
+
 ## Silences, answered
 
 - **Existing data.** A project.yaml without a `team:` line is R7.7; a project
