@@ -245,9 +245,46 @@ with a `select` timeout.
   two or three Opus/Sonnet agents; the wrap-up at 05:38 was legitimate. It
   resets at 09:59.
 
+**Progress, 2026-09-23 ~10:50, paused for a `multiagents run` restart
+(the user re-authenticated agy):**
+
+- **P0-R8f** (interactive compaction, stop → compact → resume, 30 s grace).
+  The user asked for it; it is in the contract, with the tester's amendments.
+  Its tests are merged (`tests/test_phase0_interactive_compact.py`, 56 tests,
+  30 red). **Not implemented yet. Next step:** `implementer-deep` on
+  P0-R8f.1–R8f.7, with `verifies` = ag-2c808f.
+- **The attack on R8a/R8c/R8d is merged** (`tests/test_phase0_contract_b_attack*.py`).
+  The adversary was unreachable (`model` cannot cross providers), so
+  `tester` ag-57985b stood in for it. Ten real defects, red, ranked:
+  1. A compaction that times out keeps running as an orphan while the next
+     turn starts on the same session.
+  2. The slug rule is wrong for paths with spaces or `+@~` or non-ASCII:
+     Claude replaces every non-alphanumeric character, and hashes paths
+     over 200 characters. This affects `watchdog.transcript_source` and
+     `claude.sh`.
+  3. Non-UTF-8 output from a script crashes `run_action`, which promises
+     never to raise.
+  4. `wc -l` is off by one on an unterminated last line, which yields a
+     false success.
+  5. A malformed limit (`120k`) crashes `_compact_if_due`.
+  6. One non-UTF-8 byte in the transcript turns a real compaction into a
+     failure.
+  7. A huge line is read in quadratic time.
+  8. `Infinity` in a usage field raises `OverflowError` on every tool call.
+  9. String usage fields are concatenated instead of added.
+  10. The failure line is printed unbounded.
+  Four findings are accepted as `xfail(strict)`, with reasons in the tests.
+  **Next step:** route 1, 3, 5, 10 (driver/scripts) and 2, 4, 6, 7, 8, 9
+  (reading/claude.sh) to an implementer. Finding 2 also touches the
+  pre-existing `launch` arm of `claude.sh`.
+- The reviewer and advisor pass on contract B is still to do, now that agy
+  is back.
+- `runaway_steps` fired falsely again (ag-57985b at 251), which confirms the
+  inflated step counter noted above.
+
 ### Awaiting the user
 
-- **agy cannot authenticate in the container (2026-09-23 05:03).** The stored
+- **(re-authenticated by the user ~10:40)** **agy could not authenticate in the container (2026-09-23 05:03).** The stored
   token expired at 00:10 UTC and the silent refresh fails with
   `Post "https://oauth2.googleapis.com/token": Unable to connect`
   (`~/.multiagents/container-state/shared/agy/.gemini/antigravity-cli/log/cli-20260923_030345.log`),
