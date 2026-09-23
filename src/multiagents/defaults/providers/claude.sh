@@ -430,6 +430,11 @@ launch)
         set -- "$@" --mcp-config "$MULTIAGENTS_MCP_CONFIG" --strict-mcp-config
     [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && \
         set -- "$@" --append-system-prompt-file "$MULTIAGENTS_PROMPT_FILE"
+    # The same per-agent key a spawned agent gets through `spawn.optional`
+    # (providers.yaml); a launched role receives it as environment instead,
+    # because `launch` builds argv here rather than through build_command.
+    [ -n "${MULTIAGENTS_AUTOCOMPACT:-}" ] && \
+        set -- "$@" --autocompact "$MULTIAGENTS_AUTOCOMPACT"
     # Each launched role owns a session id, because `--continue` resumes the
     # most recent conversation IN THE DIRECTORY and both roles share the project
     # root — so `init-agent` after `run` would reopen the orchestrator's
@@ -471,5 +476,63 @@ launch)
     fi
     exec "$BIN" "$@"
     ;;
-*)  echo "usage: $0 check|login|refresh|budget|usage|prepare|launch" >&2; exit 64 ;;
+compact)
+    # Triggered from OUTSIDE the running session, between turns — see BRIEF
+    # § R8. `claude -p "/compact" --resume <sid>` is consumed by the CLI
+    # itself, costs no turn, and appends a record to the session transcript;
+    # the caller learns success only by reading that record back, not by
+    # trusting the CLI's own exit code, because an exit of 0 here means
+    # "the call completed", not "something was compacted".
+    sid="${MULTIAGENTS_SESSION_ID:-}"
+    if [ -z "$sid" ]; then
+        echo "MULTIAGENTS_SESSION_ID is required to compact a session" >&2
+        exit 2
+    fi
+    slug=$(pwd | sed 's|[/._]|-|g')
+    transcript="$HOME/.claude/projects/$slug/$sid.jsonl"
+    if [ ! -f "$transcript" ]; then
+        echo "no transcript for session $sid at $transcript" >&2
+        exit 1
+    fi
+    before=$(wc -l < "$transcript" 2>/dev/null || echo 0)
+    out=$("$BIN" -p "/compact" --resume "$sid" --output-format json 2>&1)
+    code=$?
+    if [ "$code" -ne 0 ]; then
+        echo "compact failed: $(printf '%s' "$out" | tail -1 | head -c 200)" >&2
+        exit 1
+    fi
+    # Only lines APPENDED by this call count — a compaction record already in
+    # the transcript, manual or automatic, was somebody else's and proves
+    # nothing about this invocation.
+    figures=$(python3 -c "
+import json, sys
+path, before = sys.argv[1], int(sys.argv[2])
+with open(path) as fh:
+    lines = fh.readlines()
+for line in lines[before:]:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        record = json.loads(line)
+    except ValueError:
+        continue
+    if record.get('type') != 'system' or record.get('subtype') != 'compact_boundary':
+        continue
+    meta = record.get('compactMetadata')
+    if not isinstance(meta, dict) or meta.get('trigger') != 'manual':
+        continue
+    pre, post = meta.get('preTokens'), meta.get('postTokens')
+    if pre is not None and post is not None:
+        print('%s -> %s tokens' % (pre, post))
+        break
+" "$transcript" "$before")
+    if [ -z "$figures" ]; then
+        echo "the CLI exited 0 but no compaction was recorded" >&2
+        exit 1
+    fi
+    echo "$figures"
+    exit 0
+    ;;
+*)  echo "usage: $0 check|login|refresh|budget|usage|prepare|launch|compact" >&2; exit 64 ;;
 esac

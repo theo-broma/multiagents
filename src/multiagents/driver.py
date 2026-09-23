@@ -100,7 +100,7 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
 
     mcp_path = _write_mcp_config()
     server = json.loads(mcp_path.read_text())["mcpServers"]["multiagents"]
-    return {
+    context = {
         "MULTIAGENTS_MODEL": spec.model,
         "MULTIAGENTS_PROMPT_FILE": str(prompt_file),
         "MULTIAGENTS_MCP_CONFIG": str(mcp_path),
@@ -110,6 +110,13 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
         "MULTIAGENTS_LAUNCH_STATE": str(state),
         "MULTIAGENTS_PROJECT": str(paths.root),
     }
+    # Same key a spawned agent gets through `spawn.optional` (providers.yaml) —
+    # here it reaches the launch action as environment instead of argv, because
+    # `launch` is exec'd by the script, not built into a command list by us.
+    autocompact = spec.extra.get("autocompact")
+    if autocompact not in (None, ""):
+        context["MULTIAGENTS_AUTOCOMPACT"] = str(autocompact)
+    return context
 
 
 # Sent as the opening message of a RESTARTED interactive session. Shorter and

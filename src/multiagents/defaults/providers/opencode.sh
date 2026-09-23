@@ -175,5 +175,20 @@ launch)
     fi
     exec "$BIN" "$@"
     ;;
-*)  echo "usage: $0 check|login|budget|usage|prepare|launch" >&2; exit 64 ;;
+compact)
+    # Deferred. The route is `POST /session/{id}/summarize` on opencode's own
+    # HTTP server (`opencode serve`) — the literal string "/session/{id}/
+    # summarize" is in the binary, alongside session.compact, session.summarize
+    # and session.compacting, so the operation exists. It needs a server
+    # process this project does not run, and opencode's monthly quota was
+    # exhausted (until 2026-10-05) when this was measured, so it could not be
+    # verified end to end. The documented CLI route
+    # (`opencode run --command compact --session <sid>`) is not usable as it
+    # stands: it is recognised but returns an UnknownError against a healthy
+    # session, a third-party defect rather than ours. Exits 64 without
+    # starting the CLI; the day the HTTP route is wired, nothing in Python
+    # changes.
+    exit 64
+    ;;
+*)  echo "usage: $0 check|login|budget|usage|prepare|launch|compact" >&2; exit 64 ;;
 esac
