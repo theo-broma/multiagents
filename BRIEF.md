@@ -1193,3 +1193,11 @@ not sent upstream.
   uncached, 1.76M cache reads, 195 s, a correct answer). See memory.
 - Budget at 20:00: the claude session window has reset, weekly is at 69 %.
   opencode is at its monthly cap until Oct 05. agy is available.
+- ~20:30: tester ag-d88a82 ended its turn with two background suite runs still
+  in flight. Item 6 therefore also happens on claude, not only on agy. It was
+  resumed with steer_agent, told to run in the foreground and not to stop
+  before it has the totals. Orchestrator brief rule added (8a6a834): resume an
+  interrupted agent with steer_agent, never discard and restart from zero.
+- Add to the bug-c050b0 work: the wrap-up message was sent **6 times** to
+  ag-3b4d7a (runs/ag-3b4d7a/prompt.1-6.md). The config says once. Each resend
+  interrupted its turn, so it never started writing.
