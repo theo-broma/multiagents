@@ -222,7 +222,8 @@ def _node_view(node: dict, now: float) -> dict:
         # A standing conversation: no process, a resumable session, and the
         # orchestrator's way of asking the same advisor a second question.
         "parked": bool(node.get("status") in PAUSED and node.get("session_id")),
-        "last_spoke": node.get("last_event_at"),
+        "until": node.get("until"),
+        "last_spoke": node.get("last_event_at") if node.get("last_event_at") is not None else node.get("last_spoke"),
         "has_transcript": True,
     }
 
@@ -244,7 +245,14 @@ def agent_tree(nodes: dict, now: float) -> list[dict]:
     order = lambda v: v["started_at"] or 0          # noqa: E731
     for view in views.values():
         view["kids"].sort(key=order)
-    roots.sort(key=order, reverse=True)
+    root_order = lambda v: (                        # noqa: E731
+        v.get("last_spoke")
+        or v.get("until")
+        or v.get("ended_at")
+        or v.get("started_at")
+        or 0
+    )
+    roots.sort(key=root_order, reverse=True)
     return roots
 
 
