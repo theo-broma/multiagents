@@ -433,6 +433,44 @@ overwritten at the user's request.
   - implementer-deep again had no `consult` tool (ag-d67496), which is
     tooling defect 6, still without a ticket.
 
+**Handoff, 2026-09-23 ~17:30 (orchestrator wind-down at 205k):**
+- **CF verified live after the /mcp restart.** The advisor ag-25c350 was
+  moved from 7e6b8b1 to d5c9a82 and got the "updated" line. Its final
+  review of `22fed69..HEAD -- src/` found nothing to regret. bug-7f6ba7 is
+  resolved as fixed.
+- **Standing rule (user):** tickets are fixed here, not sent upstream.
+- **The merged base is sound:** 1548 passed and 4 failed. The 4 fail the
+  same way on 22fed69, because the orchestrator's environment leaks
+  `MULTIAGENTS_*` into them (3 `test_doctor_clear_*` tests and
+  `test_the_claude_script_uses_the_container_profile_only_where_it_should`).
+- **Next, in the order I would take them:**
+  1. **bug-2cebea:** finished runs marked `stuck` keep holding
+     `max_concurrent` slots, and the `stuck` label never clears. It costs a
+     manual discard several times a session. Also fold in the agy doom_loop
+     false positive: `view_file` arguments carry line ranges that the
+     comparison drops.
+  2. **Test isolation:** make `test_core.py` independent of the ambient
+     `MULTIAGENTS_*` / `CLAUDE_*` environment. That covers the 18
+     CAN_SPAWN tests and the 4 above. It is cheap, and it makes every
+     agent's "suite green" trustworthy.
+  3. **Tooling defect 6:** implementer-deep has no `consult` tool, so it
+     cannot reach dev-advisor (ag-829577, ag-d67496).
+  4. **R8f leftovers:**
+     - `claude.sh launch` should honour `CLAUDE_CONFIG_DIR`;
+     - the usage-limit stop has the same exit race as R8f.12;
+     - safe parsing for `limit_wait_seconds`,
+       `restart_min_runtime_seconds`, `supervised_turns` and
+       `spend_limit_pause_hours`.
+  5. **bug-c050b0:** the burn-rate projection is built from a 39 s burst,
+     which triggers a premature wrap-up and pause. Its proposed fix is in
+     the ticket.
+  6. **agy agents end their turn** with a background test still running,
+     which has happened repeatedly.
+  7. **A live `claude.sh compact`** against a real session.
+- **Researcher experiment:** the new brief is live (the project copy was
+  overwritten). No researcher has run on it yet; compare the next run
+  against ag-4548ac and ag-f2cb6d.
+
 ### Awaiting the user
 
 - **(re-authenticated by the user ~10:40)** **agy could not authenticate in the container (2026-09-23 05:03).** The stored
