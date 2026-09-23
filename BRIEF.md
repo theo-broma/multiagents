@@ -400,6 +400,12 @@ brief merged as 5603870, but the project copy
   cli.py, claude.sh, server.py);
 - a second implementer-deep, in parallel, on CF-R1 to CF-R7 (runner.py).
 The tickets bug-7f6ba7 and bug-2cebea are parked for the user.
+**15:01:** the R8f implementer-deep was DEFERRED (tree paused until 15:16,
+claude's reading still stale), and it restarts on the next `wait_for_agents`.
+The CF implementer-deep (runner.py, tests/test_consult_fresh_worktree.py,
+spec consult-fresh-worktree.md) has NOT been started yet: start it once the
+pause clears. The researcher brief is now live: the project copy was
+overwritten at the user's request.
 
 ### Awaiting the user
 
