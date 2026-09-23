@@ -140,7 +140,11 @@ not the one loaded before the write.
   `\r` and `\n` → `"enter"`; `q`, `\x03` (Ctrl-C), and an `ESC` that is not
   followed by `[` (including `ESC` then end of stream) → `"cancel"`; end of
   stream with nothing read → `"cancel"`; anything else → that character
-  (ignored by `_select`). Putting the terminal into raw mode and restoring it
+  (ignored by `_select`). Every read consumes exactly one whole key: an
+  `ESC [` sequence other than `A`/`B` is consumed through its final byte
+  (`@`–`~`) and returns `""`; after a lone `ESC` the next character is
+  consumed with it. Nothing left over may register as the next key.
+  Putting the terminal into raw mode and restoring it
   is the caller's job, done in a `try/finally`; that restoration is verified
   by review, not by a test.
   *Verified by:* unit tests feeding `io.BytesIO`/`io.StringIO` streams.
