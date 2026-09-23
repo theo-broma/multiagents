@@ -2,7 +2,10 @@
 compact, resume.
 
 Contract: `context/specs/phase0-context-and-team.md` § P0-R8f (amending
-P0-R8c.5), with R8a.2 (the reading) and R8c (the headless compaction).
+P0-R8c.5), with R8a.2 (the reading) and R8c (the headless compaction), as
+amended on 2026-09-23 by the tester's read (ag-2c808f) and the advisor's review
+(ag-25c350): idle default 300 s, the bell (R8f.8), every value from the config
+(R8f.9), and "send ... to cancel" wording.
 
 Two surfaces:
 
@@ -17,7 +20,7 @@ Two surfaces:
   otherwise exits by itself. Its `compact` action answers the probe (check
   mode) and the real call separately, and logs both.
 
-Time: nothing waits 30 or 60 real seconds. The project's limits set
+Time: nothing waits 30 or 300 real seconds. The project's limits set
 `compact_idle_seconds` and `compact_grace_seconds` to 1 s, and the attached
 child's poll interval (`driver.STALL_POLL_SECONDS`) is patched down. A child
 that is meant to be stopped lives long enough that a correct driver stops it
@@ -181,7 +184,8 @@ class Session:
 
     def __init__(self, tmp_path: Path, monkeypatch, capsys, *,
                  compact_at: int = COMPACT_AT, limits: dict | None = None,
-                 limit_markers: list | None = None, transcript_block: bool = True):
+                 limit_markers: list | None = None, transcript_block: bool = True,
+                 omit: tuple[str, ...] = ()):
         self.capsys = capsys
         self.root = (tmp_path / "proj").resolve()
         self.root.mkdir()
@@ -214,6 +218,8 @@ class Session:
                   "compact_grace_seconds": GRACE, "compact_timeout_seconds": 30,
                   "restart_attempts": 5, "restart_delay_seconds": 0,
                   **(limits or {})}
+        for key in omit:        # R8f.9: a project that does not set the key
+            merged.pop(key, None)
         self.provider = Provider.from_dict("fakeprov", data)
         self.config = Config(project={"limits": merged}, providers={"fakeprov": data},
                              agents={}, models={}, instruction_dirs=[])
@@ -314,6 +320,21 @@ def assert_stop_compact_resume(s: Session) -> None:
     after_probe = [a for a in s.seq() if a != "probe"]
     assert after_probe[:4] == ["launch", "sigterm", "compact", "launch"], (
         f"expected terminate -> compact -> relaunch, saw {s.seq()}")
+
+
+def announcements(out: str) -> list[str]:
+    """The R8f.3 announcement lines in the driver's output. The exact text is
+    free; what the contract fixes is that the line gives the token count
+    (`9000` or `9,000`) and says to *send* a message to *cancel*. The
+    `compacted` line carries the figures but neither word, so it is not one."""
+    return [line for line in out.split("\n")
+            if "send" in line.lower() and "cancel" in line.lower()
+            and re.search(r"(?<![\d,])(9000|9,000)(?![\d,])", line)]
+
+
+def shows_seconds(line: str, n: int) -> bool:
+    """`30s`, `30 s`, `30 sec`, `30 seconds` — but not `130s` or `300s`."""
+    return re.search(rf"(?<![\d.]){n}\s*(s\b|sec|second)", line) is not None
 
 
 # ============================================================== P0-R8f.1 ==
@@ -591,14 +612,18 @@ def test_p0_r8f_2_6_disabled_after_a_failure_for_the_rest_of_the_run(session):
 # ============================================================== P0-R8f.3 ==
 
 def test_p0_r8f_3_the_announcement_line_and_event(session):
+    """As amended by the advisor's review: one line that gives the tokens and
+    the configured grace seconds, and says a *sent* message cancels."""
     s = session()
     s.reading(OVER)
     _, out = s.run(stopped_then())
-    line = re.compile(
-        rf"compacting this session in {GRACE}s \((9000|9,000) tokens, nothing "
-        rf"running\) — type anything to keep it")
-    assert line.search(out), f"no announcement line in:\n{out}"
-    assert len(line.findall(out)) == 1
+    lines = announcements(out)
+    assert len(lines) == 1, (
+        f"expected one announcement line with the tokens, 'send' and 'cancel':\n{out}")
+    assert shows_seconds(lines[0], GRACE), (
+        f"the announcement does not show the grace period ({GRACE}s): {lines[0]!r}")
+    assert "type anything" not in out.lower(), (
+        "the withdrawn 'type anything to keep it' wording is still printed")
     scheduled = s.events("compact_scheduled")
     assert len(scheduled) == 1
     assert scheduled[0].get("tokens") == OVER
@@ -608,7 +633,9 @@ def test_p0_r8f_3_the_stop_comes_no_earlier_than_the_grace_period(session):
     s = session(limits={"compact_grace_seconds": 2})
     s.reading(OVER)
     _, out = s.run(stopped_then())
-    assert "compacting this session in 2s" in out
+    lines = announcements(out)
+    assert lines and shows_seconds(lines[0], 2), (
+        f"the announcement does not show the configured 2s:\n{out}")
     scheduled = s.events("compact_scheduled")
     assert scheduled and s.stops()
     waited = s.stops()[0]["t"] - scheduled[0]["t"]
@@ -645,7 +672,7 @@ def test_p0_r8f_3_after_a_cancel_it_is_proposed_again_once_back_at_rest(session)
 
 def test_p0_r8f_3_the_limit_keys_ship_with_their_defaults():
     limits = yaml.safe_load((ch.SHIPPED / "project.yaml").read_text())["limits"]
-    assert limits.get("compact_idle_seconds") == 60
+    assert limits.get("compact_idle_seconds") == 300
     assert limits.get("compact_grace_seconds") == 30
 
 
@@ -655,8 +682,9 @@ def test_p0_r8f_3_the_defaults_reach_a_project_that_does_not_set_them(tmp_path):
     paths = ProjectPaths(tmp_path)
     paths.ensure()
     limits = config_mod.load(paths).limits
-    assert limits.get("compact_idle_seconds") == 60
+    assert limits.get("compact_idle_seconds") == 300
     assert limits.get("compact_grace_seconds") == 30
+    assert limits.get("compact_bell") is True
 
 
 # ============================================================== P0-R8f.4 ==
@@ -915,7 +943,155 @@ def test_p0_r8f_7_compact_is_asked_for_only_where_the_driver_cannot():
             f"/compact is still advised unconditionally: {p!r}")
 
 
+def test_p0_r8f_7_only_a_sent_message_cancels():
+    """Advisor's amendment: the brief also says that only a *sent* message
+    cancels an announced compaction — typing without sending does not."""
+    hits = [p for p in _paragraphs(_section())
+            if "cancel" in p and ("sent" in p or "send" in p)]
+    assert hits, ("no paragraph of the brief says that only a sent message "
+                  "cancels the compaction")
+
+
 def test_p0_r8f_7_typed_but_unsubmitted_text_is_invisible():
     """R8f.3: text typed but not yet submitted cannot be seen; the brief says so."""
     section = " ".join(_section().split()).lower()
     assert "typed" in section and "submit" in section
+
+
+# ============================================================== P0-R8f.8 ==
+# The announcement rings: a `\a` on the announcement line when
+# `limits.compact_bell` is true (the default), none at all when false.
+
+def test_p0_r8f_8_the_announcement_rings_by_default(session):
+    """The project does not set `compact_bell`: the default, true, applies."""
+    s = session()
+    s.reading(OVER)
+    _, out = s.run(stopped_then())
+    lines = announcements(out)
+    assert len(lines) == 1, f"no announcement line in:\n{out!r}"
+    assert "\a" in lines[0], f"the announcement does not ring: {lines[0]!r}"
+
+
+def test_p0_r8f_8_the_announcement_rings_when_the_bell_is_on(session):
+    s = session(limits={"compact_bell": True})
+    s.reading(OVER)
+    _, out = s.run(stopped_then())
+    lines = announcements(out)
+    assert len(lines) == 1, f"no announcement line in:\n{out!r}"
+    assert "\a" in lines[0], f"the announcement does not ring: {lines[0]!r}"
+
+
+def test_p0_r8f_8_no_bell_at_all_when_it_is_off(session):
+    s = session(limits={"compact_bell": False})
+    s.reading(OVER)
+    _, out = s.run(stopped_then())
+    assert len(announcements(out)) == 1, f"no announcement line in:\n{out!r}"
+    assert "\a" not in out, "a bell was written with compact_bell: false"
+    assert_stop_compact_resume(s)
+
+
+def test_p0_r8f_8_the_bell_ships_on():
+    limits = yaml.safe_load((ch.SHIPPED / "project.yaml").read_text())["limits"]
+    assert limits.get("compact_bell") is True
+
+
+# ============================================================== P0-R8f.9 ==
+# Every R8f value comes from the project's `limits`: an override takes
+# effect, an omission gets the shipped default, a malformed value falls back
+# to the default and never crashes the driver. Only observable effects are
+# asserted: the proposal time, the grace delay and the seconds shown, the bell.
+#
+# The idle default (300 s) is too long to wait for, so for that key the
+# default is seen from one side only: a transcript at rest for 120 s — past a
+# 60 s default, past a zero or negative value taken literally — is not stopped.
+
+AT_REST_UNDER_DEFAULT = 120.0
+
+
+def test_p0_r8f_9_an_overridden_idle_period_sets_the_proposal_time(session):
+    s = session(limits={"compact_idle_seconds": 2})
+    s.reading(OVER)
+    s.run([{"life": STOPPED_BY, "appends": [[0.3, [ch.user("more")]]]}, {"life": 0}])
+    assert s.stops(), "never stopped: the configured idle period (2s) was not used"
+    assert_stop_compact_resume(s)
+    last = max(e["t"] for e in s.calls("append"))
+    waited = s.stops()[0]["t"] - last
+    assert waited >= 2 + GRACE - 0.05, (
+        f"stopped {waited:.2f}s after the last change; the configured idle 2s "
+        f"+ grace {GRACE}s had not passed")
+
+
+def test_p0_r8f_9_an_overridden_grace_period_is_waited_and_shown(session):
+    s = session(limits={"compact_grace_seconds": 3})
+    s.reading(OVER)
+    _, out = s.run([{"life": STOPPED_BY + 3}, {"life": 0}])
+    lines = announcements(out)
+    assert lines and shows_seconds(lines[0], 3), (
+        f"the announcement does not show the configured 3s:\n{out}")
+    scheduled = s.events("compact_scheduled")
+    assert scheduled and s.stops(), "never stopped with a 3s grace period"
+    waited = s.stops()[0]["t"] - scheduled[0]["t"]
+    assert waited >= 3 - 0.05, f"stopped {waited:.2f}s after the announcement"
+
+
+def test_p0_r8f_9_an_omitted_idle_period_is_the_default_not_zero(session):
+    s = session(omit=("compact_idle_seconds",))
+    s.reading(OVER, aged=AT_REST_UNDER_DEFAULT)
+    code, _ = s.run(KEEP)
+    assert code == 0
+    assert_not_stopped(s)
+
+
+def test_p0_r8f_9_an_omitted_grace_period_is_the_default(session):
+    """Grace 30 s: announced, showing 30, and not stopped within seconds."""
+    s = session(omit=("compact_grace_seconds",))
+    s.reading(OVER)
+    code, out = s.run(KEEP)
+    assert code == 0
+    lines = announcements(out)
+    assert lines and shows_seconds(lines[0], 30), (
+        f"the announcement does not show the default 30s:\n{out}")
+    assert s.stops() == [], "stopped long before the default 30s grace period"
+
+
+def test_p0_r8f_9_an_omitted_bell_is_the_default_on(session):
+    s = session(omit=("compact_bell",))
+    s.reading(OVER)
+    _, out = s.run(stopped_then())
+    lines = announcements(out)
+    assert lines and "\a" in lines[0], f"no bell on the announcement: {out!r}"
+
+
+@pytest.mark.parametrize("value", ["5m", -1, float("inf"), "inf"],
+                         ids=["not_a_number", "negative", "inf", "inf_string"])
+def test_p0_r8f_9_a_malformed_idle_period_falls_back_to_the_default(session, value):
+    s = session(limits={"compact_idle_seconds": value})
+    s.reading(OVER, aged=AT_REST_UNDER_DEFAULT)
+    code, _ = s.run(KEEP)
+    assert code == 0, "a malformed compact_idle_seconds ended the run"
+    assert_not_stopped(s)
+
+
+@pytest.mark.parametrize("value", ["soon", -5, float("inf"), "inf"],
+                         ids=["not_a_number", "negative", "inf", "inf_string"])
+def test_p0_r8f_9_a_malformed_grace_period_falls_back_to_the_default(session, value):
+    s = session(limits={"compact_grace_seconds": value})
+    s.reading(OVER)
+    code, out = s.run(KEEP)
+    assert code == 0, "a malformed compact_grace_seconds ended the run"
+    lines = announcements(out)
+    assert lines and shows_seconds(lines[0], 30), (
+        f"the announcement does not show the default 30s:\n{out}")
+    assert s.stops() == [], "stopped long before the default 30s grace period"
+
+
+@pytest.mark.parametrize("value", ["false", "yes", 0, None],
+                         ids=["string_false", "string_yes", "zero", "empty"])
+def test_p0_r8f_9_a_malformed_bell_falls_back_to_the_default_on(session, value):
+    s = session(limits={"compact_bell": value})
+    s.reading(OVER)
+    code, out = s.run(stopped_then())
+    assert code == 0, "a malformed compact_bell ended the run"
+    lines = announcements(out)
+    assert lines and "\a" in lines[0], (
+        f"a non-boolean compact_bell did not fall back to the bell: {out!r}")
