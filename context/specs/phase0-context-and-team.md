@@ -561,9 +561,13 @@ amendments narrow that window and make the warning impossible to miss.
   - **Rest (R8f.2.3)** starts no earlier than the latest launch of the CLI,
     even if the transcript is older. A user who has just been handed a
     session is the one most likely to be typing.
-  - **A malformed `compact_at_tokens`** falls back to 0, which means off. A
-    compaction is irreversible, so a threshold the config cannot state
-    safely disables the feature rather than guessing.
+  - ~~A malformed `compact_at_tokens` falls back to 0, which means off.~~
+    **Superseded after the advisor's review (ag-25c350, turn 5).** A malformed
+    value of any limit in this contract (`compact_at_tokens`,
+    `context_wind_down_tokens`, `compact_timeout_seconds`, and the R8f keys)
+    falls back to its **shipped default** in `defaults/project.yaml`, the same
+    rule as R8f.9. A typo such as `120k` must not silently switch off a safety
+    feature. Only an explicit `0` means off, for the keys where 0 means off.
   - **A probe answering 64** disables R8f silently, with no line and no
     event: anything printed would land on the live TUI.
   - **An announced compaction** is also cancelled if the tree stops being
