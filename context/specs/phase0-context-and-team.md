@@ -653,6 +653,36 @@ amendments narrow that window and make the warning impossible to miss.
   makes impossible for `claude.sh`, and which the driver cannot tell apart
   from a success.
 
+- **Added 2026-09-24, R8f leftovers (BRIEF item 4):**
+  - **P0-R8f.18 — `claude.sh launch` finds the session where the CLI keeps
+    it.** Wherever the `launch` action (and any other action of `claude.sh`)
+    reads the CLI's session or transcript files, it follows the same rule as
+    R8f.16: `CLAUDE_CONFIG_DIR` when set, `$HOME/.claude` otherwise. No action
+    of the script still hard-codes `$HOME/.claude` for reading sessions.
+    *Verified by:* a test running the `launch` action (or the part of it
+    that locates a session) with `CLAUDE_CONFIG_DIR` pointing at a fixture
+    directory and `HOME` pointing elsewhere, asserting that the fixture
+    session is the one found. Plus a grep-style check that no read of
+    sessions under `$HOME/.claude` remains outside the shared helper.
+  - **P0-R8f.19 — a user's own exit wins over a usage-limit stop too.** The
+    rule of R8f.12 applies to the usage-limit path as well. If the attached
+    CLI exits by itself while the driver is about to stop it for a usage
+    limit, or has just decided to, the driver ends the session as the user
+    asked. It does not wait out the window and does not relaunch. Only a CLI
+    the driver stopped for the limit is waited for and resumed.
+    *Verified by:* a test where the CLI exits 0 at the moment the limit is
+    detected, asserting that no limit wait and no relaunch happen. The
+    driver-stopped case still waits and relaunches.
+  - **P0-R8f.20 — the remaining driver limits parse safely.**
+    `limit_wait_seconds`, `restart_min_runtime_seconds`, `supervised_turns`
+    and `spend_limit_pause_hours` follow R8f.13: a malformed value (not a
+    number, negative, `inf`, NaN, a string, a list) falls back to the shipped
+    default and never crashes. Where 0 has a documented meaning in
+    `defaults/project.yaml`, it keeps it. Where it has none, 0 is malformed.
+    *Verified by:* one test per key with a malformed value, asserting the
+    default's observable effect. For each key whose 0 is meaningful, a test
+    that 0 keeps that meaning.
+
 ### P0-R8e — the automatic threshold, through the plugin seam
 
 **P0-R8e.1 — a per-agent key.** An agent entry in `agents.yaml` may carry
