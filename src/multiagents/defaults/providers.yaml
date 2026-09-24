@@ -122,6 +122,13 @@ providers:
       `view_file` again on the same `AbsolutePath` with `StartLine` set past
       what you already saw (and `EndLine` if you want a bounded chunk).
       Never treat a truncated read as the whole file.
+
+      Run long commands (a test suite) in the foreground and wait for their
+      output. Do not start them as background tasks and poll `manage_task`: a
+      background job is not observed once your turn ends, and repeated polls
+      are read as a loop. If one call cannot finish in time, split the work
+      into several foreground calls. Never end your turn while a command you
+      started is still running.
     spawn:
       # --print-timeout is NOT optional. Without it agy stops a turn at its own
       # default of 5 minutes, prints "print timeout after 5m0s with turn in
@@ -256,6 +263,18 @@ providers:
       Nests its reply in message.content[] as a list of typed blocks — thinking,
       tool_use and text interleaved, sometimes several in one event — which is
       why the rule engine addresses lists.
+    # Sent to the model itself (see P0-R3). Observed 2026-09-23/24: agents
+    # ended their turn with the suite still running, because the Bash tool
+    # backgrounds a command after 2 minutes unless the call passes `timeout`.
+    agent_guidance: >
+      Your Bash tool moves a command to the background after 2 minutes unless
+      you pass its `timeout` parameter. In this session nothing wakes you when
+      a background command finishes, and ScheduleWakeup and Monitor do not
+      bring you back. So for anything that can take longer (a test suite),
+      pass `timeout: 600000`. If the whole run can exceed 10 minutes, split it
+      into several foreground calls, for example by groups of test files.
+      Never end your turn while a command you started is still running, and
+      never report a result you did not see.
     # Where this CLI records the session it is running, so a supervisor can see
     # whether the orchestrator is doing anything without reading a word of the
     # conversation. `{slug}` is the working directory with `/`, `.` and `_`
