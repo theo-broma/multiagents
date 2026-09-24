@@ -395,8 +395,10 @@ class Tree:
             if node.get("status") == status and node.get("reason") == reason:
                 return
             node["status"] = status
-            if reason:
-                node["reason"] = reason
+            # Always written, including "": a clear (stuck -> running) or a
+            # clean finish (-> done) passes reason="" meaning "no reason
+            # now", and a stale trip message must not survive past it.
+            node["reason"] = reason
             if status == "running" and not node.get("started_at"):
                 node["started_at"] = now()
                 # The claim made when this agent was routed has done its job:
