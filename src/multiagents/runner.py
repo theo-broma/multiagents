@@ -36,7 +36,7 @@ from typing import Any
 from . import budget as budget_mod
 from . import gitops
 from . import config as config_mod
-from .config import AgentSpec, Config, matches_any
+from .config import AgentSpec, Config, budget_number, matches_any
 from .executor import build_env, get_executor, prepare_home, private_file
 from .executor.base import Handle
 from . import providers as providers_mod
@@ -263,7 +263,9 @@ class Run:
     internal_stop: bool = False       # steer() ending this turn to respawn it, not a real cancel
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
     ticket: dict | None = None        # a TICKET filed from the final message
-    wrap_up_asked: bool = False       # asked once to land its work before a wall
+    # bug-c050b0: "asked to wrap up" lives on the Node (tree.py), not here —
+    # steer()/_launch() replace the Run, and a flag kept there resets on every
+    # replacement, same trap the retry counter hit first.
     server_reported: bool = False     # SM-R5: an unavailable MCP server, recorded once
     # SL-R3: the live trip this run is currently marked `stuck` for, and the
     # supervisor state at the moment it fired — compared against the current
@@ -387,10 +389,14 @@ class Runner:
         handoff is cut off too.
         """
         lead = float(self.config.limits.get("wind_down_seconds", 300))
+        budget_cfg = self.config.project.get("budget") or {}
+        min_span = budget_number(budget_cfg, "burn_min_span_seconds", zero_ok=True)
+        min_samples = budget_number(budget_cfg, "burn_min_samples", zero_ok=True)
         for name, budget in budgets.items():
             if not budget.usable or budget.cooldown_until:
                 continue
-            burn = self.tree.burn(name)
+            burn = self.tree.burn(name, min_span_seconds=min_span,
+                                  min_samples=min_samples)
             left = burn.get("seconds_to_wall")
             if left is not None and left < lead:
                 budget.cooldown_until = now() + max(60.0, left)
@@ -1064,9 +1070,20 @@ class Runner:
         agents cut off that way, four branches discarded, the work re-derived
         from scratch by other agents.
 
-        Once per run, and only while the run is still going.
+        Once per NODE, not once per run: bug-c050b0 found the same drain send
+        the wrap-up 6 times to one agent in about a second, because the flag
+        lived on the Run and steer()/_launch() replace the Run on every resend
+        — each fresh Run started its own watcher with the flag clear. The flag
+        now lives on the node (`tree.py`, same fix as the free-retry counter),
+        so it survives every steer, relaunch and free retry that follows. It is
+        cleared only when a later reading shows more headroom than at the
+        moment of asking — a window reset — which lets a genuinely new drain
+        ask again.
         """
         interval = float(self.config.limits.get("wind_down_poll_seconds", 60))
+        budget_cfg = self.config.project.get("budget") or {}
+        min_span = budget_number(budget_cfg, "burn_min_span_seconds", zero_ok=True)
+        min_samples = budget_number(budget_cfg, "burn_min_samples", zero_ok=True)
         # Staggered, so N agents do not all decide to write their handoffs in
         # the same second — the spike would be what finally hits the wall.
         await asyncio.sleep(interval * (0.5 + random.random()))
@@ -1074,7 +1091,8 @@ class Runner:
             run = self.runs.get(node_id)
             if run is None or run.done.is_set() or run.awaiting:
                 return
-            if getattr(run, "wrap_up_asked", False):
+            node = self.tree.get(node_id)
+            if node is None:
                 return
             # Take a reading rather than trusting the last one. An advisor's
             # point, and a good one: budgets are sampled where they are already
@@ -1084,13 +1102,21 @@ class Runner:
             # threshold. The read is cached (60s in process, 5 min per machine),
             # so polling it is nearly free.
             await asyncio.to_thread(self._sample_headroom, run.provider)
-            burn = self.tree.burn(run.provider.name)
+            burn = self.tree.burn(run.provider.name, min_span_seconds=min_span,
+                                  min_samples=min_samples)
+            headroom = burn.get("headroom")
+            if node.wrap_up_asked:
+                recovered = (headroom is not None and node.wrap_up_headroom is not None
+                            and headroom > node.wrap_up_headroom)
+                if not recovered:
+                    return
+                self.tree.update(node_id, wrap_up_asked=False, wrap_up_headroom=None)
             left = burn.get("seconds_to_wall")
             lead = float(self.config.limits.get("wrap_up_seconds", 420))
             if left is None or left > lead:
                 await asyncio.sleep(interval)
                 continue
-            run.wrap_up_asked = True
+            self.tree.update(node_id, wrap_up_asked=True, wrap_up_headroom=headroom)
             self.tree.emit(node_id, "wrap_up", provider=run.provider.name,
                            seconds_left=round(left))
             try:
