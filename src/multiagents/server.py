@@ -79,9 +79,12 @@ def _tool_failed(name: str, exc: BaseException) -> str:
         except OSError:
             where = None
     if paths is not None:
-        Tree(paths.tree_file, paths.events_file).emit(
-            agent_id, "tool_error", tool=name, error=error,
-            traceback=str(where) if where else None)
+        try:
+            Tree(paths.tree_file, paths.events_file).emit(
+                agent_id, "tool_error", tool=name, error=error,
+                traceback=str(where) if where else None)
+        except OSError:
+            pass
     print(f"multiagents: tool {name} raised\n{trace}", file=sys.stderr, flush=True)
     return f"{error} (traceback: {where})" if where else error
 
