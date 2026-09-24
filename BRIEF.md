@@ -1401,3 +1401,20 @@ not sent upstream.
   decisions from the tester's questions are committed. The implementation
   (implementer-deep) waits until ag-996ff1 releases `executor/docker.py`.
 - **Step counter:** ag-8f28e2 is on it.
+- **Step counter: FIXED, and the cause was config drift, not code.**
+  - `.multiagents/config/providers.yaml` was a full copy of the shipped file
+    from 2026-09-16. Lists replace wholesale when layers merge, so it
+    shadowed P0-R4's turn rules (75bbd44) and every provider fix since.
+  - I emptied it to `providers: {}`; the backup is
+    `providers.yaml.stale-2026-09-16.bak`.
+  - Merged 04b585d: a `tool_progress` rule, plus a test from a real long-Bash
+    stream (3 turns = 3 steps, not 222).
+  - The global copy was resynced from the shipped file.
+  - **Systemic hazard, not scheduled:** any full copy of a shipped config
+    file (global `providers.yaml`, project `agents/*.md`) silently freezes
+    it. Worth a drift warning in `multiagents doctor` or at server start,
+    naming the files that shadow a newer shipped version.
+- **Item 6, new data point:** ag-996ff1 had the guidance in its prompt and
+  passed `timeout: 600000`, but on the FULL suite (~14 min > 10), so the
+  run still went to the background. Proposed fix: a repo script that runs
+  the suite in chunks under 10 min, named in the guidance.
