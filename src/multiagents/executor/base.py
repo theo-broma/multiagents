@@ -130,10 +130,6 @@ class Executor(ABC):
         """Problems that would make every run fail. Empty means ready."""
         return []
 
-    def agent_env(self) -> dict[str, str]:
-        """Environment every agent started here carries about where it runs."""
-        return {}
-
 
 # --------------------------------------------------------------------------
 # Environment preparation — shared, because the same decisions become `-e`

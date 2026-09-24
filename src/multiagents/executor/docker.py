@@ -47,6 +47,7 @@ from typing import Any
 
 from ..paths import ProjectPaths, server_install_paths, state_root
 from .base import Executor, Handle
+from .local import LocalExecutor
 
 
 class DockerHandle(Handle):
@@ -83,6 +84,17 @@ class DockerHandle(Handle):
                   f"kill -KILL {target} 2>/dev/null; pkill -KILL -P {target} 2>/dev/null; true"],
                  timeout=30)
         await super().stop(grace=grace)
+
+
+def _recording_pid(pid_file: Path, argv: list[str]) -> list[str]:
+    """`argv`, run through a shell that first writes its own pid to `pid_file`.
+
+    `exec "$@"` replaces the shell, so the recorded pid IS the agent. The path
+    goes in as the shell's `$0`, never into the script text: it is built from
+    the agent's id, and a quote in that would otherwise be shell syntax.
+    """
+    return ["sh", "-c", 'echo $$ > "$0"; exec "$@"', str(pid_file), *argv]
+
 
 PROXY_PORT = 8888
 
@@ -288,10 +300,6 @@ class DockerExecutor(Executor):
     def container(self) -> str:
         return self.config.get("container_name") or f"multiagents-{self.slug}"
 
-    def agent_env(self) -> dict[str, str]:
-        # Tells a server started inside the container that it is inside it.
-        return {"MULTIAGENTS_CONTAINER": self.container}
-
     def inside(self) -> bool:
         """Is this process already running in this project's container?
 
@@ -300,8 +308,22 @@ class DockerExecutor(Executor):
         the daemon with. Its own spawns are therefore started directly — they
         are in the container already, which is the whole of what `docker
         exec` would have given them.
+
+        Never decided by this process's own environment, which anything on
+        the host can set: a wrong True runs agents on the host, with no egress
+        proxy and no resource limits. The container's init process carries
+        its name from creation (`run_args`), and docker marks every container
+        with `/.dockerenv`; a host process can fake neither. A container
+        created before the name was given reads as outside, and its spawns
+        then go to `docker exec`, which is not in here and fails — closed.
         """
-        return os.environ.get("MULTIAGENTS_CONTAINER") == self.container
+        if not Path("/.dockerenv").exists():
+            return False
+        try:
+            init_env = Path("/proc/1/environ").read_bytes().split(b"\0")
+        except OSError:
+            return False
+        return f"MULTIAGENTS_CONTAINER={self.container}".encode() in init_env
 
     @property
     def auth_container(self) -> str:
@@ -739,8 +761,11 @@ class DockerExecutor(Executor):
             return []
         private = self.private_state()
         # The server's own install paths differ by entry point, so they are
-        # neither owed nor surplus: left out on both sides.
-        optional = {str(p) for p in self.server_mounts([])}
+        # neither owed nor surplus: left out on both sides. Only those
+        # `run_args` adds, though — one the configuration mounts itself is
+        # owed like any other, and dropping it from `have` alone would report
+        # it missing for ever.
+        optional = {str(p) for p in self.server_mounts(self.mounts())}
         have = {line.strip() for line in result.stdout.splitlines()
                 if line.strip() and line.strip().split(">")[-1] not in optional}
         want = {f"{private.get(path, path)}>{path}" for path, _ in self.mounts()}
@@ -1078,6 +1103,8 @@ class DockerExecutor(Executor):
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--workdir", str(self.paths.root) if self.paths else "/workspace",
             "--restart", "unless-stopped",
+            # What `inside` recognises the container by, from within it.
+            "--env", f"MULTIAGENTS_CONTAINER={self.container}",
         ]
         if self.network_mode == "none":
             argv += ["--network", "none"]
@@ -1308,11 +1335,8 @@ class DockerExecutor(Executor):
         command.append(self.container)
 
         # Record the agent's container-side pid so it can actually be stopped.
-        # `exec "$@"` replaces the shell, so $$ is the agent's own pid.
-        pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
-                    if self.paths is not None else Path("/tmp")) / "container.pid"
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        command += ["sh", "-c", f'echo $$ > "{pid_file}"; exec "$@"', "--", *argv]
+        pid_file = self._pid_file(env)
+        command += _recording_pid(pid_file, argv)
 
         proc = await asyncio.create_subprocess_exec(
             *command,
@@ -1324,24 +1348,19 @@ class DockerExecutor(Executor):
         )
         return DockerHandle(proc.pid, proc, self.container, pid_file)
 
-    async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
-        """Start `argv` from within the container, as `docker exec` would.
-
-        Through the same pid-recording shell, so `kill_detached` from the host
-        still reaches it; stopped as a local process group from in here.
-        """
+    def _pid_file(self, env: dict[str, str]) -> Path:
         pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
                     if self.paths is not None else Path("/tmp")) / "container.pid"
         pid_file.parent.mkdir(parents=True, exist_ok=True)
-        cwd.mkdir(parents=True, exist_ok=True)
-        proc = await asyncio.create_subprocess_exec(
-            "sh", "-c", f'echo $$ > "{pid_file}"; exec "$@"', "--", *argv,
-            limit=STREAM_LIMIT,
-            cwd=str(cwd),
-            env={**env, **self.agent_env()},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return Handle(pid=proc.pid, _proc=proc)
+        return pid_file
+
+    async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
+        """Start `argv` from within the container, as `docker exec` would.
+
+        Already in the container, a start is a local one: `LocalExecutor`
+        does it, and this adds only what `docker exec` would have added — the
+        same pid-recording shell, so `kill_detached` from the host still
+        reaches the agent. Stopped as a local process group from in here.
+        """
+        return await LocalExecutor().start(
+            _recording_pid(self._pid_file(env), argv), cwd, env)

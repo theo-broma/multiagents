@@ -26,6 +26,8 @@ import json
 import os
 import random
 import re
+import shutil
+import tempfile
 import textwrap
 import time
 import traceback
@@ -38,10 +40,11 @@ from . import gitops
 from . import config as config_mod
 from .config import AgentSpec, Config, budget_number, matches_any
 from .executor import build_env, get_executor, prepare_home, private_file
-from .executor.base import Handle
+from .executor.base import BASE_ENV_KEYS, Handle
 from . import providers as providers_mod
 from . import procs
-from .paths import ProjectPaths, global_config_dir, server_command, state_root
+from . import paths as paths_mod
+from .paths import ProjectPaths, global_config_dir, state_root
 from .providers import Event, Provider, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
@@ -283,6 +286,52 @@ class Run:
     trip_opaque_calls: int = 0
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def server_env(env: dict[str, str], node_id: str) -> dict[str, str]:
+    """The environment the multiagents MCP server of agent `node_id` runs with.
+
+    SM-R3: the server acts as this agent, so it carries the agent's identity
+    itself rather than trusting the CLI to pass it through — and its id is
+    pinned here, last, whatever `env` says. It RUNS as multiagents does,
+    though: in the user's HOME and the machine's state and config
+    directories, not the agent's private ones — otherwise it would look for
+    worktrees, and link the next agent's credentials, inside this agent's
+    HOME. And with the agent's PATH and locale, which carry no credentials,
+    so the tools it starts (git, docker) resolve.
+    """
+    out = {k: v for k, v in env.items() if k in BASE_ENV_KEYS}
+    out.update({k: v for k, v in env.items() if k.startswith("MULTIAGENTS_")})
+    out.update({
+        "HOME": str(Path.home()),
+        "MULTIAGENTS_STATE_DIR": str(state_root()),
+        "MULTIAGENTS_CONFIG_DIR": str(global_config_dir()),
+        "MULTIAGENTS_AGENT_ID": node_id,
+    })
+    out.setdefault("PATH", os.environ.get("PATH") or os.defpath)
+    return out
+
+
+def _resolves(command: str, path: str) -> bool:
+    """Would `command` start, looked up the way an exec looks it up?"""
+    return shutil.which(command, path=path or None) is not None
+
+
+def _write_own(target: Path, text: str) -> None:
+    """Write `text` to `target`, mode 0600, replacing whatever is there.
+
+    Written beside it and renamed over it, so a link planted at `target` is
+    replaced rather than followed into what it points at (SM-R4).
+    """
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 class Runner:
@@ -892,28 +941,36 @@ class Runner:
             home = prepare_home(self.paths.home(node_id), provider.home_links,
                                 "per-agent", agent=spec.name,
                                 copies=provider.home_copy)
+        identity = {
+            "MULTIAGENTS_AGENT_ID": node_id,
+            "MULTIAGENTS_PARENT_ID": parent or "",
+            "MULTIAGENTS_DEPTH": str(depth),
+            "MULTIAGENTS_BRANCH": branch,
+            "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
+            "MULTIAGENTS_ROOT": str(self.paths.data),
+            "MULTIAGENTS_PROJECT": str(self.paths.root),
+        }
         env = build_env(
             passthrough=self.config.env_passthrough,
             blocked=self.config.env_block,
             home=home,
-            identity={
-                "MULTIAGENTS_AGENT_ID": node_id,
-                "MULTIAGENTS_PARENT_ID": parent or "",
-                "MULTIAGENTS_DEPTH": str(depth),
-                "MULTIAGENTS_BRANCH": branch,
-                "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
-                "MULTIAGENTS_ROOT": str(self.paths.data),
-                "MULTIAGENTS_PROJECT": str(self.paths.root),
-            },
+            identity=identity,
         )
+        # SM-R2: the variables a provider is handed the server through are
+        # not inherited. Passed through, one would give an agent without spawn
+        # rights whatever server it names; a spawner gets ours below.
+        for key in (provider.mcp or {}).get("env") or {}:
+            env.pop(str(key), None)
         # The provider instance's own environment — the thing that makes a
         # second subscription a second account rather than the same one twice.
         # After build_env, because build_env starts from a clean slate and this
         # is not passthrough: it is configuration, not inheritance.
         for key, value in (provider.env or {}).items():
             env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+        # Identity last: it is what the server's gates trust (SM-R3), so no
+        # configuration may restate it.
+        env.update(identity)
         executor = self.executor(spec)
-        env.update(executor.agent_env())
 
         options = {"effort": spec.effort,
                    **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
@@ -930,6 +987,8 @@ class Runner:
             server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
             argv += server_argv
             env.update(server_env)
+        else:
+            self._withdraw_server(provider, home)
         turn = len(list(run_dir.glob("prompt*.md")))
         (run_dir / (f"prompt.{turn}.md" if turn else "prompt.md")).write_text(prompt)
         # Environment KEYS only — values may be secret and this file is on disk.
@@ -989,39 +1048,56 @@ class Runner:
 
         if not provider.mcp:
             return unavailable(f"provider {provider.name} declares no `mcp:` block")
-        command, *args = server_command()
-        # SM-R3: the server acts as this agent, so it carries the agent's
-        # identity itself rather than trusting the CLI to pass it through. It
-        # RUNS as multiagents does, though: in the user's HOME and the
-        # machine's state and config directories, not the agent's private ones
-        # — otherwise it would look for worktrees, and link the next agent's
-        # credentials, inside this agent's HOME.
-        server_env = {k: v for k, v in env.items() if k.startswith("MULTIAGENTS_")}
-        server_env.update({
-            "HOME": str(Path.home()),
-            "MULTIAGENTS_STATE_DIR": str(state_root()),
-            "MULTIAGENTS_CONFIG_DIR": str(global_config_dir()),
-        })
+        command, *args = paths_mod.server_command()
+        environment = server_env(env, node_id)
+        # SM-R5, for every provider alike: a CLI that cannot start the server
+        # may not say so in a way anything here reads. Checked on this side,
+        # where the same paths are mounted at the same place in a container.
+        if not _resolves(command, environment.get("PATH", "")):
+            return unavailable(f"its command {command!r} does not resolve")
         block = provider.mcp
-        if block.get("home_file"):
-            if home is None:
-                return unavailable(f"{provider.name} reads its MCP servers only from "
-                                   f"HOME, and home_policy is not per-agent")
-            target = private_file(home, str(block["home_file"]))
-        else:
-            target = run_dir / str(block.get("file") or "mcp.json")
-        launch = provider.mcp_launch({
-            "mcp_command": command, "mcp_args": args, "mcp_argv": [command, *args],
-            "mcp_env": server_env, "mcp_config": str(target),
-        })
-        config = launch["config"]
-        if launch["merge"]:
-            config = config_mod.deep_merge(
-                self._user_mcp_config(str(block["home_file"])), config)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(config, indent=2) + "\n")
-        target.chmod(0o600)
+        try:
+            if block.get("home_file"):
+                if home is None:
+                    return unavailable(f"{provider.name} reads its MCP servers only from "
+                                       f"HOME, and home_policy is not per-agent")
+                target = private_file(home, str(block["home_file"]))
+            else:
+                target = run_dir / str(block.get("file") or "mcp.json")
+                target.parent.mkdir(parents=True, exist_ok=True)
+            launch = provider.mcp_launch({
+                "mcp_command": command, "mcp_args": args, "mcp_argv": [command, *args],
+                "mcp_env": environment, "mcp_config": str(target),
+            })
+            config = launch["config"]
+            if launch["merge"]:
+                config = config_mod.deep_merge(
+                    self._user_mcp_config(str(block["home_file"])), config)
+            _write_own(target, json.dumps(config, indent=2) + "\n")
+        except OSError as exc:
+            return unavailable(f"its config could not be written: {exc}")
         return launch["args"], launch["env"]
+
+    def _withdraw_server(self, provider: Provider, home: Path | None) -> None:
+        """Take back a server config an earlier spawner turn left in `home` (SM-R2).
+
+        Only a file this run wrote: a real file reached through real
+        directories, never a link into the user's own configuration. Where the
+        user has a copy of their own, the link `prepare_home` would have made
+        to it is put back, so the agent has exactly what it had before.
+        """
+        relative = str((provider.mcp or {}).get("home_file") or "")
+        if home is None or not relative:
+            return
+        target = home / relative
+        with contextlib.suppress(OSError):
+            if (target.is_symlink() or not target.is_file()
+                    or home.resolve() not in target.resolve().parents):
+                return
+            target.unlink()
+            user_copy = Path.home() / relative
+            if user_copy.exists():
+                target.symlink_to(user_copy)
 
     @staticmethod
     def _user_mcp_config(relative: str) -> dict:
