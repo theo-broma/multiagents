@@ -58,6 +58,12 @@ class DockerHandle(Handle):
     nowhere. So the agent is launched through a shell that records its own pid to
     a file on a bind-mounted path, and stopping means signalling that pid from
     inside the container before killing the local client.
+
+    `stop()` uses `docker exec` unconditionally, and that is fine: this class
+    is only ever built by `start()`'s non-inside branch. A server running
+    inside the container takes the `_start_inside` branch instead, which hands
+    back a plain `Handle` from `LocalExecutor` — no container to exec into,
+    and no need for one.
     """
 
     def __init__(self, pid: int, proc, container: str, pid_file: Path):
@@ -1152,6 +1158,13 @@ class DockerExecutor(Executor):
         return argv + [self.image, "sleep", "infinity"]
 
     def ensure_running(self) -> dict:
+        if self.inside():
+            # Called from here, we ARE the container: it is by definition
+            # running, on the image it was built from, with no `docker` to
+            # ask. `start()` never reaches this for an inside spawn (it takes
+            # the `_start_inside` branch first) — this guard is for any other
+            # caller that assumes `ensure_running` is always safe to call.
+            return {"ok": True, "container": self.container, "existed": True}
         if not docker_available():
             return {"ok": False, "error": "docker is not on PATH"}
         self.seed_private_state()
@@ -1248,6 +1261,11 @@ class DockerExecutor(Executor):
         DockerHandle covers the case where we own the handle; this covers the
         other one — a nested server, or a restart — where all that survives is
         the pid the agent wrote inside the container.
+
+        A server running inside the container reaches its own children's pids
+        directly (SM-R1): `pid_file` was written by `_recording_pid` in
+        *this* process's pid namespace, so a plain `kill`/`pkill` here IS the
+        equivalent of `docker exec`, with no daemon to ask.
         """
         if self.paths is None:
             return False
@@ -1258,14 +1276,25 @@ class DockerExecutor(Executor):
             return False
         if not target.isdigit():
             return False
-        _run(["docker", "exec", self.container, "sh", "-c",
-              f"kill -TERM {target} 2>/dev/null; pkill -TERM -P {target} 2>/dev/null; true"],
-             timeout=30)
+        script = (f"kill -TERM {target} 2>/dev/null; "
+                  f"pkill -TERM -P {target} 2>/dev/null; true")
+        if self.inside():
+            _run(["sh", "-c", script], timeout=30)
+        else:
+            _run(["docker", "exec", self.container, "sh", "-c", script], timeout=30)
         return True
 
     # -------------------------------------------------------------- execute --
 
     def preflight(self) -> list[str]:
+        if self.inside():
+            # Every check below asks whether the container exists, is built
+            # from the right image, and is safe to start — all moot from in
+            # here: it exists (we are it), its image is what it was started
+            # from, and `mount_docker_socket` is a host-launch decision this
+            # process cannot itself have made. Nothing to check, no `docker`
+            # to check it with.
+            return []
         problems: list[str] = []
         if not docker_available():
             return ["docker is not on PATH"]
