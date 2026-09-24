@@ -130,16 +130,23 @@ def _occupies_slot(node: Node) -> bool:
     """SL-R4: does this node hold a concurrency slot (or belong in a wait)
     right now?
 
-    A `pending` node has no pid yet and always counts. A `running` or `stuck`
-    node counts only while its process is actually alive, checked by pid
-    identity (`procs.alive`, immune to pid reuse) rather than by the status
-    label alone — a trip that outlived its run must stop blocking new work
-    the moment the process behind it is gone.
+    A `pending` node has no pid yet and always counts. A `running` node
+    without a recorded pid also counts — that is the ordinary shape of a
+    just-launched or lightly-constructed node, and the historical behaviour
+    kept for it. A `stuck` node is different: a trip can only fire on a
+    process that was actually running, so a `stuck` node without a pid is
+    not a live agent that has yet to record one — it is a leftover or
+    malformed record, and per SL-R4 must not hold a slot forever. Both
+    `running` and `stuck` stop counting the moment a recorded pid is
+    checked and found dead, by pid identity (`procs.alive`, immune to pid
+    reuse) rather than by the status label alone.
     """
     if node.status == "pending":
         return True
-    if node.status in ("running", "stuck"):
+    if node.status == "running":
         return node.pid is None or procs.alive(node.pid, node.pid_start)
+    if node.status == "stuck":
+        return node.pid is not None and procs.alive(node.pid, node.pid_start)
     return False
 
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
@@ -273,6 +280,7 @@ class Run:
     trip_kind: str = ""
     trip_signature: str = ""
     trip_progress: str = ""
+    trip_opaque_calls: int = 0
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -619,7 +627,7 @@ class Runner:
 
         parent = self.self_id()
         if parent:
-            siblings = [c for c in self.tree.children_of(parent) if c.status in {"pending", "running", "stuck"}]
+            siblings = [c for c in self.tree.children_of(parent) if _occupies_slot(c)]
             cap = spec.max_children or int(limits.get("max_children", 2))
             if len(siblings) >= cap:
                 raise RuntimeError(f"This agent already has {len(siblings)} active children (max {cap}).")
@@ -863,12 +871,21 @@ class Runner:
         depth: int,
         session_id: str | None = None,
         timeout: int | None = None,
+        done: asyncio.Event | None = None,
     ) -> Run:
         """Build the environment and command for one turn and start the process.
 
         Shared by every path that runs an agent — a fresh task, a steer, and a
         turn of a standing conversation — so identity injection and credential
         handling cannot drift between them.
+
+        `done` lets a caller hand this launch an event a waiter already holds
+        (the free retry in `_finalize`) so the new Run is born already sharing
+        it — `self.runs[node_id]` is replaced with this Run before `_launch`
+        returns, so building it with the right event from the start closes the
+        window a post-hoc `retried.done = run.done` would leave open: anyone
+        reading `self.runs[node_id]` during that window would otherwise get a
+        fresh event nobody will ever set.
         """
         home = None
         if self.config.home_policy == "per-agent":
@@ -940,6 +957,7 @@ class Runner:
                 declares_turn=_declares_turn(provider),
                 opaque_tools=frozenset(provider.opaque_tools),
             ),
+            **({"done": done} if done is not None else {}),
         )
         self.runs[node_id] = run
         self.tree.update(node_id, pid=handle.pid,
@@ -1461,6 +1479,7 @@ class Runner:
                     run.trip_kind = trip.reason
                     run.trip_signature = run.supervisor.last_digest
                     run.trip_progress = run.supervisor.current_progress
+                    run.trip_opaque_calls = run.supervisor.opaque_calls
                 elif run.trip_kind:
                     self._maybe_clear_stuck(run, node_id)
 
@@ -1546,12 +1565,23 @@ class Runner:
         * `silence` clears on ANY stream event at all — the trip was exactly
           "nothing arrived", so anything arriving answers it.
         * `doom_loop`/`runaway_steps` clear on a different tool-call signature
-          (a genuinely new call, not the same one reported twice) or on the
-          working tree moving — the same two kinds of evidence the watchdog
-          itself uses to tell "repeating" from "working".
+          (a genuinely new call, not the same one reported twice), an opaque
+          tool call (SL-R6: its signature is unknowable, so it can never be
+          confirmed identical to the call that tripped), or on the working
+          tree moving — the same kinds of evidence the watchdog itself uses
+          to tell "repeating" from "working".
         """
         node = self.tree.get(node_id)
         if node is None or node.status != "stuck":
+            # Something else already moved this node off `stuck` — a steer, a
+            # stop — so the trip state this run is carrying no longer
+            # describes it. Drop it here rather than paying a tree.get() on
+            # every remaining event of a run that can never be `stuck` again
+            # under this trip.
+            run.trip_kind = ""
+            run.trip_signature = ""
+            run.trip_progress = ""
+            run.trip_opaque_calls = 0
             return
         supervisor = run.supervisor
         assert supervisor is not None
@@ -1559,12 +1589,14 @@ class Runner:
             run.trip_kind == "silence"
             or supervisor.last_digest != run.trip_signature
             or supervisor.current_progress != run.trip_progress
+            or supervisor.opaque_calls != run.trip_opaque_calls
         )
         if cleared:
             self.tree.set_status(node_id, "running")
             run.trip_kind = ""
             run.trip_signature = ""
             run.trip_progress = ""
+            run.trip_opaque_calls = 0
 
     @staticmethod
     def _with_trip(prior_stuck: str, reason: str) -> str:
@@ -1707,20 +1739,25 @@ class Runner:
                 # becomes an unbounded loop. Found by running it.
                 self.tree.update(node_id, retries=fresh.retries + 1)
                 with contextlib.suppress(Exception):
+                    # Continuity for whoever is waiting on the attempt that
+                    # just died: `_launch` starts every relaunch with a fresh
+                    # `Run`, but a caller that captured this run (consult(),
+                    # or a test driving the agent directly) before the retry
+                    # must still be woken when the SECOND attempt finishes,
+                    # not left waiting on an event nothing will ever set. Handed
+                    # in at construction, not assigned after the fact: `_launch`
+                    # publishes the new Run to `self.runs[node_id]` before it
+                    # returns, and a post-hoc `retried.done = run.done` would
+                    # leave a window where a concurrent reader gets a Run whose
+                    # `done` nobody but this line will ever fix up.
                     retried = await self._launch(
                         node_id=node_id, spec=run.spec, provider=run.provider,
                         prompt=(run_dir / "prompt.md").read_text(),
                         workdir=Path(fresh.worktree), branch=fresh.branch,
                         parent=fresh.parent, depth=fresh.depth,
                         session_id=session_id or None,
+                        done=run.done,
                     )
-                    # Continuity for whoever is waiting on the attempt that
-                    # just died: `_launch` starts every relaunch with a fresh
-                    # `Run`, but a caller that captured this run (consult(),
-                    # or a test driving the agent directly) before the retry
-                    # must still be woken when the SECOND attempt finishes,
-                    # not left waiting on an event nothing will ever set.
-                    retried.done = run.done
                     self.tree.set_status(node_id, "running", "retried once after "
                                          "an unexplained early exit")
                     return True
@@ -1934,6 +1971,7 @@ class Runner:
                     run.trip_kind = trip.reason
                     run.trip_signature = run.supervisor.last_digest
                     run.trip_progress = run.supervisor.current_progress
+                    run.trip_opaque_calls = run.supervisor.opaque_calls
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2763,6 +2801,13 @@ class Runner:
                                         timed_out=True,
                                         error=f"no reply within {limit}s")
 
+        # A free retry inside `_finalize` replaces `self.runs[node_id]` with a
+        # new Run sharing this same `done` event (see `_launch`'s `done=`), so
+        # the object this `run` name was bound to before the wait can be the
+        # dead first attempt — empty text_parts, no awaiting, no ticket. The
+        # live one, whichever attempt actually finished, is always the one
+        # `self.runs` holds now.
+        run = self.runs.get(node_id) or run
         final = self.tree.get(node_id)
         reply = "\n".join(run.text_parts).strip()
         if run.awaiting:
@@ -2989,7 +3034,15 @@ class Runner:
         # since that moment is now (waiting on it would otherwise be a no-op).
         # An agent that BECOMES stuck DURING the wait is a real state change
         # and is reported at once, as before.
-        baseline_stuck = {i for i in pending
+        #
+        # Recorded as (pid, reason), not just membership: this poll runs once
+        # a second, and a dead process's free retry, or a clear-then-re-trip,
+        # can both complete inside one gap between polls. Either one leaves
+        # the status reading "stuck" at every poll that ever sees it, with
+        # nothing to tell the old episode from the new one except that the
+        # pid changed (a relaunch) or the reason did (a different trip) —
+        # status and baseline-membership alone cannot catch that.
+        baseline_stuck = {i: (n.pid, n.reason) for i in pending
                           if (n := self.tree.get(i)) is not None and n.status == "stuck"}
 
         def classify() -> tuple[list[dict], list[str], list[dict]]:
@@ -3000,12 +3053,27 @@ class Runner:
                     continue
                 if node.status in {"pending", "running"}:
                     running_.append(agent_id)
+                    # It cleared and is live: no longer the baseline stuck
+                    # episode, so a later re-trip is a fresh state change.
+                    baseline_stuck.pop(agent_id, None)
                 elif node.status == "stuck" and agent_id in baseline_stuck:
-                    running_.append(agent_id)
-                    still_stuck_.append({
-                        "agent_id": agent_id, "agent": node.agent,
-                        "reason": node.reason,
-                    })
+                    # SL-R4/SL-R5: baseline_stuck is only "running-equivalent"
+                    # while it is actually live AND still the same episode
+                    # that was live at baseline (same pid, same trip reason).
+                    # A dead process, or a different pid/reason under the
+                    # same node_id, means the run this wait was watching has
+                    # ended and something else is now `stuck` in its place.
+                    if _occupies_slot(node) and (node.pid, node.reason) == baseline_stuck[agent_id]:
+                        running_.append(agent_id)
+                        still_stuck_.append({
+                            "agent_id": agent_id, "agent": node.agent,
+                            "reason": node.reason,
+                        })
+                    else:
+                        changed_.append({
+                            "agent_id": agent_id, "agent": node.agent,
+                            "status": node.status, "reason": node.reason,
+                        })
                 else:
                     changed_.append({
                         "agent_id": agent_id, "agent": node.agent,

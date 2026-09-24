@@ -70,6 +70,12 @@ class Supervisor:
     # whether the next event is a NEW call or the same one reported again.
     last_digest: str = ""
     last_step: int | None = None
+    # SL-R3/SL-R6: opaque tool calls skip the loop-signature tracking above
+    # entirely (that is what keeps them from tripping doom_loop on their
+    # own), so `last_digest` never moves for one. A node stuck on some other
+    # signature still needs a way to see "the agent called something new" —
+    # counted here instead, since an opaque call's own signature is unknowable.
+    opaque_calls: int = 0
     # Distinct turn ids already counted as a step, so only the first sighting
     # of each one moves the counter.
     _seen_turns: set[str] = field(default_factory=set)
@@ -110,7 +116,10 @@ class Supervisor:
             self.steps += 1
 
         trip: Trip | None = None
-        signature = None if event.name in self.opaque_tools else event.loop_signature()
+        is_opaque_call = event.kind == "tool" and event.name in self.opaque_tools
+        if is_opaque_call:
+            self.opaque_calls += 1
+        signature = None if is_opaque_call else event.loop_signature()
         if signature:
             digest = hashlib.sha1(signature.encode()).hexdigest()[:12]
             # ONE call, not one per lifecycle event. Providers report a tool
