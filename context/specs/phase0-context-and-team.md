@@ -683,6 +683,16 @@ amendments narrow that window and make the warning impossible to miss.
     default's observable effect. For each key whose 0 is meaningful, a test
     that 0 keeps that meaning.
 
+- **Decided, from the tester's questions (ag-283934):**
+  - **`supervised_turns`** is added to `defaults/project.yaml`, with today's
+    effective default of 50. It falls back to 50, never to 0.
+  - **0** keeps the rule of R8f.20. None of the four keys documents a
+    meaning for 0, so 0 is malformed for all of them, including
+    `restart_min_runtime_seconds` and `limit_wait_seconds`.
+  - **Numeric strings** (`"900"`) are accepted, as R8f.13's parser already
+    does. "A string" in R8f.20 means a non-numeric one.
+  - **`~` in `CLAUDE_CONFIG_DIR`** is out of scope.
+
 ### P0-R8e — the automatic threshold, through the plugin seam
 
 **P0-R8e.1 — a per-agent key.** An agent entry in `agents.yaml` may carry
