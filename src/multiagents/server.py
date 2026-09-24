@@ -12,9 +12,13 @@ Every tool result is scrubbed for credentials on the way out.
 from __future__ import annotations
 
 import contextvars
+import functools
+import inspect
 import os
 import stat
+import sys
 import threading
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +26,10 @@ from typing import Any
 # so support both rather than pinning to one line of the SDK.
 try:
     from mcp.server.mcpserver import MCPServer as _Server
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # pragma: no cover - mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
+    from mcp.server.fastmcp.exceptions import ToolError
 
 from . import __version__
 from . import auth as auth_mod
@@ -39,9 +45,81 @@ from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
 from .redact import scrub
 from .runner import Runner
+from .tree import Tree, now
 from .transcripts import session_context
 
 mcp = _Server("multiagents", version=__version__)
+
+
+def _tool_failed(name: str, exc: BaseException) -> str:
+    """Record a tool that raised, and say what raised.
+
+    The SDK answers an exception it did not expect with a bare `Error
+    executing tool <name>` and logs the traceback to the server's stderr —
+    which, for a subagent's server, is the agent CLI's, and read by nobody.
+    ag-c65ee1's consult failed exactly so, and left no trace of why. So the
+    type and message go back to the caller and into the event log, and a
+    subagent's traceback is written under its own run directory. Never
+    raises: this runs when something is already broken, possibly the runner
+    itself, so it does not use one.
+    """
+    error = scrub(f"{type(exc).__name__}: {exc}")
+    trace = scrub("".join(traceback.format_exception(exc)))
+    agent_id = os.environ.get("MULTIAGENTS_AGENT_ID") or ""
+    explicit = os.environ.get("MULTIAGENTS_PROJECT")
+    paths = (_runner.paths if _runner is not None
+             else ProjectPaths(Path(explicit).expanduser()) if explicit else None)
+    where = None
+    if paths is not None and agent_id:
+        where = paths.run_dir(agent_id) / "server-errors.log"
+        try:
+            where.parent.mkdir(parents=True, exist_ok=True)
+            with where.open("a") as handle:
+                handle.write(f"--- {now():.3f} tool {name}\n{trace}\n")
+        except OSError:
+            where = None
+    if paths is not None:
+        Tree(paths.tree_file, paths.events_file).emit(
+            agent_id, "tool_error", tool=name, error=error,
+            traceback=str(where) if where else None)
+    print(f"multiagents: tool {name} raised\n{trace}", file=sys.stderr, flush=True)
+    return f"{error} (traceback: {where})" if where else error
+
+
+def _reported(fn):
+    """`fn` as registered: an unexpected exception becomes a ToolError that
+    names it (`_tool_failed`). The SDK's own errors pass through untouched."""
+    def fail(exc: Exception):
+        if isinstance(exc, ToolError):
+            raise exc
+        raise ToolError(_tool_failed(fn.__name__, exc)) from exc
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:
+                fail(exc)
+    else:
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                fail(exc)
+    return wrapper
+
+
+def _tool():
+    """`mcp.tool()`, registering the reporting wrapper. The function itself is
+    returned unchanged, so calling a tool directly still raises what it raises."""
+    register = mcp.tool()
+
+    def decorate(fn):
+        register(_reported(fn))
+        return fn
+    return decorate
 
 _runner: Runner | None = None
 
@@ -164,7 +242,7 @@ def _refresh(run: Runner) -> None:
         if vanished:
             raise FileNotFoundError(
                 f"no longer a readable file: {', '.join(vanished)}")
-        run.reload(load_config(run.paths))
+        run.reload(load_config(run.paths, seed=_seeds()))
     except Exception as exc:
         _failed = current
         _load_error = (
@@ -187,6 +265,15 @@ def _refresh(run: Runner) -> None:
                          "started with."})
 
 
+def _seeds() -> bool:
+    """Does this server write the shipped defaults into the config layers?
+
+    Only the orchestrator's. Decided from the identity the executor pins on a
+    subagent's server (`runner.server_env`), since there is no runner yet.
+    """
+    return not os.environ.get("MULTIAGENTS_AGENT_ID")
+
+
 def runner() -> Runner:
     """Resolve the project and build the runner once; reload its config on change."""
     with _lock:
@@ -205,8 +292,15 @@ def _runner_locked() -> Runner:
     root = Path(explicit).expanduser() if explicit else (find_project_root() or Path.cwd())
     paths = ProjectPaths(root)
     paths.ensure()
-    seed_project(paths)
-    _runner = Runner(paths, load_config(paths))
+    # Seeding is the orchestrator's, done before any agent exists. A
+    # subagent's server only reads: under docker it runs in the container,
+    # where the machine's config directory is not mounted and the project's
+    # is read-only, so seeding from here raised PermissionError on the first
+    # call that built the runner (SM-R1, ag-c65ee1's consult).
+    seed = _seeds()
+    if seed:
+        seed_project(paths)
+    _runner = Runner(paths, load_config(paths, seed=seed))
     _loaded, _failed, _load_error = _fingerprint(_runner), None, ""
     return _runner
 
@@ -277,7 +371,7 @@ def _ok(payload: Any, wind_down: bool = True) -> Any:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool()
 def list_agents() -> dict:
     """List the configured subagents you can delegate to.
 
@@ -343,7 +437,7 @@ def list_agents() -> dict:
     return _ok(payload)
 
 
-@mcp.tool()
+@_tool()
 def list_models(provider: str = "") -> dict:
     """List models available to each provider CLI.
 
@@ -361,7 +455,7 @@ def list_models(provider: str = "") -> dict:
     })
 
 
-@mcp.tool()
+@_tool()
 def refresh_model_list() -> dict:
     """Regenerate models.yaml by asking each installed CLI what it offers.
 
@@ -377,7 +471,7 @@ def refresh_model_list() -> dict:
     return _ok(result)
 
 
-@mcp.tool()
+@_tool()
 def agent_tree() -> dict:
     """Show the project's agent tree: who spawned whom, and where each stands.
 
@@ -426,7 +520,7 @@ def _attach_contract(run, agent: str, result: dict) -> None:
     )
 
 
-@mcp.tool()
+@_tool()
 async def start_agent(
     agent: str,
     task: str,
@@ -497,7 +591,7 @@ async def start_agent(
         return _ok({"error": f"{type(exc).__name__}: {exc}"})
 
 
-@mcp.tool()
+@_tool()
 def how_to_call(agent: str) -> dict:
     """This agent's interface contract: how to write a task it can act on.
 
@@ -524,7 +618,7 @@ def how_to_call(agent: str) -> dict:
                 "contract": contract})
 
 
-@mcp.tool()
+@_tool()
 def record_findings(source: str) -> dict:
     """Ingest a merged findings file into the ledger.
 
@@ -548,7 +642,7 @@ def record_findings(source: str) -> dict:
                                    gitops.head_sha(run.paths.root)))
 
 
-@mcp.tool()
+@_tool()
 def set_finding_status(finding_id: str, status: str, note: str = "") -> dict:
     """Record what became of a finding.
 
@@ -576,7 +670,7 @@ def set_finding_status(finding_id: str, status: str, note: str = "") -> dict:
                                        by=role))
 
 
-@mcp.tool()
+@_tool()
 def list_findings(status: str = "", context: str = "") -> dict:
     """The ledger as an index — id, status, severity, class, one line each.
 
@@ -593,7 +687,7 @@ def list_findings(status: str = "", context: str = "") -> dict:
     return _ok(findings_mod.summary(runner().paths.root, status, context))
 
 
-@mcp.tool()
+@_tool()
 def read_finding(finding_id: str) -> dict:
     """One finding's full text and its history, pulled on demand.
 
@@ -604,7 +698,7 @@ def read_finding(finding_id: str) -> dict:
     return _ok(findings_mod.evidence(runner().paths.root, finding_id))
 
 
-@mcp.tool()
+@_tool()
 def budget_tag_status(tag: str = "") -> dict:
     """What a named slice of work has spent, and what it has left.
 
@@ -629,7 +723,7 @@ def budget_tag_status(tag: str = "") -> dict:
     ]})
 
 
-@mcp.tool()
+@_tool()
 def check_agent(agent_id: str, since: int = 0) -> dict:
     """Check a running agent's status and read new stream events.
 
@@ -645,7 +739,7 @@ def check_agent(agent_id: str, since: int = 0) -> dict:
         return _ok({"error": str(exc)})
 
 
-@mcp.tool()
+@_tool()
 async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300) -> dict:
     """Block until any of these agents finishes or gets stuck.
 
@@ -662,7 +756,7 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
     return _ok(await run.wait_for_any(agent_ids, float(timeout)))
 
 
-@mcp.tool()
+@_tool()
 def collect_agent(agent_id: str, mode: str = "summary") -> dict:
     """Collect a finished agent's result.
 
@@ -687,7 +781,7 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
         return _ok({"error": str(exc)})
 
 
-@mcp.tool()
+@_tool()
 async def steer_agent(agent_id: str, message: str) -> dict:
     """Redirect a running or stuck agent without losing its context.
 
@@ -703,7 +797,7 @@ async def steer_agent(agent_id: str, message: str) -> dict:
         return _ok({"error": str(exc)})
 
 
-@mcp.tool()
+@_tool()
 async def stop_agent(agent_id: str) -> dict:
     """Stop an agent and everything it spawned. Its branch and logs survive."""
     run = runner()
@@ -718,7 +812,7 @@ async def stop_agent(agent_id: str) -> dict:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool()
 def auth_status() -> dict:
     """Check whether each provider CLI has a usable credential.
 
@@ -826,7 +920,7 @@ def auth_status() -> dict:
     })
 
 
-@mcp.tool()
+@_tool()
 def check_model_catalog(provider: str = "opencode-go") -> dict:
     """Compare the local model-catalog snapshot against the live public catalog.
 
@@ -852,7 +946,7 @@ def check_model_catalog(provider: str = "opencode-go") -> dict:
     return _ok(result)
 
 
-@mcp.tool()
+@_tool()
 def update_model_catalog(provider: str = "opencode-go") -> dict:
     """Record the live catalog as the new local baseline.
 
@@ -870,7 +964,7 @@ def update_model_catalog(provider: str = "opencode-go") -> dict:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool()
 async def consult(agent: str, message: str, timeout: int = 0) -> dict:
     """Ask a conversational agent something and wait for its reply.
 
@@ -934,7 +1028,7 @@ def _root_only(action: str, initializer_too: bool = False) -> str | None:
     return None
 
 
-@mcp.tool()
+@_tool()
 def list_questions(agent_id: str = "") -> dict:
     """List questions agents have parked on, waiting for a decision.
 
@@ -956,7 +1050,7 @@ def list_questions(agent_id: str = "") -> dict:
     })
 
 
-@mcp.tool()
+@_tool()
 async def answer_question(question_id: str, answer: str) -> dict:
     """Answer a parked agent's question and resume it where it stopped.
 
@@ -968,7 +1062,7 @@ async def answer_question(question_id: str, answer: str) -> dict:
     return _ok(await run.answer_question(question_id, answer, answered_by="orchestrator"))
 
 
-@mcp.tool()
+@_tool()
 def list_tickets(status: str = "open") -> dict:
     """Bug tickets the bug-reporter has filed against multiagents itself.
 
@@ -1001,7 +1095,7 @@ def list_tickets(status: str = "open") -> dict:
     })
 
 
-@mcp.tool()
+@_tool()
 def submit_ticket(ticket_id: str) -> dict:
     """Report a filed bug upstream, or hand it to the user to send.
 
@@ -1039,7 +1133,7 @@ def submit_ticket(ticket_id: str) -> dict:
                 "url": result})
 
 
-@mcp.tool()
+@_tool()
 def resolve_ticket(ticket_id: str, outcome: str, note: str = "") -> dict:
     """Close a ticket you have dealt with locally.
 
@@ -1059,7 +1153,7 @@ def resolve_ticket(ticket_id: str, outcome: str, note: str = "") -> dict:
                 "note": "still worth reporting upstream" if outcome == "fixed" else ""})
 
 
-@mcp.tool()
+@_tool()
 def merge_agent(agent_id: str, into: str = "") -> dict:
     """Merge a finished agent's branch, then remove its worktree and branch.
 
@@ -1085,7 +1179,7 @@ def merge_agent(agent_id: str, into: str = "") -> dict:
         return _ok({"error": str(exc)})
 
 
-@mcp.tool()
+@_tool()
 def discard_agent(agent_id: str, force: bool = False) -> dict:
     """Throw away an agent's branch and worktree.
 
@@ -1102,7 +1196,7 @@ def discard_agent(agent_id: str, force: bool = False) -> dict:
         return _ok({"error": str(exc)})
 
 
-@mcp.tool()
+@_tool()
 def push_branch(agent_id: str = "", remote: str = "") -> dict:
     """Push a branch to the configured remote.
 
@@ -1117,7 +1211,7 @@ def push_branch(agent_id: str = "", remote: str = "") -> dict:
     return _ok(run.push_branch(agent_id or None, remote or None))
 
 
-@mcp.tool()
+@_tool()
 def git_status() -> dict:
     """Show the project's git state: branch, cleanliness, and agent branches."""
     run = runner()
@@ -1139,7 +1233,7 @@ def git_status() -> dict:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool()
 def budget_status() -> dict:
     """Report quota headroom and spend per provider, and what it implies.
 
@@ -1205,7 +1299,7 @@ def budget_status() -> dict:
     }, wind_down=False)
 
 
-@mcp.tool()
+@_tool()
 def mcp_overhead(hours: float = 24.0) -> dict:
     """What running this project costs the human's own Claude subscription.
 
