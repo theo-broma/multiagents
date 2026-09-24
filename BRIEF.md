@@ -1418,3 +1418,11 @@ not sent upstream.
   passed `timeout: 600000`, but on the FULL suite (~14 min > 10), so the
   run still went to the background. Proposed fix: a repo script that runs
   the suite in chunks under 10 min, named in the guidance.
+- **Item 3: DONE, verified live (2026-09-24 ~10:05).** ag-a3cfa5
+  (implementer, claude, in docker) → `consult("dev-advisor")` → ag-4a29a4
+  (agy) replied "PONG". Three layers were fixed on the way: 99be9d6,
+  5afd545, 18d90ee.
+- **Item 8:** implementer-deep ag-12951a is implementing SV-R1..R10 (SV-R11
+  later, alone). After that: docker variants on the host
+  (`SV_TEST_DOCKER=1`), adversary, reviewer, then SV-R11 (the tester first
+  updates `test_p0_r8f_2_2_...[running]`).
