@@ -104,6 +104,16 @@ def _recording_pid(pid_file: Path, argv: list[str]) -> list[str]:
 
 PROXY_PORT = 8888
 
+# The variable names `run_args` sets on the container itself (allowlist
+# networking's proxy, plus the auth proxy's base URL when it is on) — the one
+# place that decides which names carry network/auth-routing configuration
+# rather than a credential. `_start_inside` reads the same tuple to give an
+# agent spawned *inside* the container the values `run_args` already put in
+# its own environment, so the two cannot drift apart into "works from the
+# host, breaks from in here" the way SM-R1's live check found.
+PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+NETWORK_ENV_KEYS = PROXY_ENV_KEYS + ("NO_PROXY", "ANTHROPIC_BASE_URL")
+
 # The proxy's filter lines are POSIX EREs (tinyproxy is built with
 # `FilterType ere`), not Python regexes. An allowlist entry must become a
 # literal in *that* dialect, so we escape exactly the characters ERE gives
@@ -1135,7 +1145,7 @@ class DockerExecutor(Executor):
 
         if self.network_mode == "allowlist":
             proxy = f"http://{self.proxy_container}:{PROXY_PORT}"
-            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            for name in PROXY_ENV_KEYS:
                 argv += ["--env", f"{name}={proxy}"]
             # Built once. Two --env NO_PROXY flags work — docker takes the
             # last — but "works because of the order they happen to be in" is
@@ -1390,6 +1400,35 @@ class DockerExecutor(Executor):
         does it, and this adds only what `docker exec` would have added — the
         same pid-recording shell, so `kill_detached` from the host still
         reaches the agent. Stopped as a local process group from in here.
+
+        A `docker exec` from the host gets two things for free that a plain
+        `LocalExecutor.start` does not, because they are properties of the
+        container rather than of any one launch:
+
+        - The network/auth-proxy variables (`NETWORK_ENV_KEYS`) `run_args`
+          put on the container at `docker run` time. `docker exec` inherits
+          them from the container's own environment; `asyncio.create_subprocess_exec`
+          with an explicit `env=` does not inherit anything, this process's
+          included, and `build_env` builds `env` from a clean slate (SM-R4's
+          deny-by-default), so they are silently absent from a child spawned
+          in here. Filled in here from *this* process's own environment —
+          which is the container's environment, since nothing else could have
+          set it — and only for those names, so nothing else this process
+          happens to have (a credential included) rides along. An explicit
+          value already in `env` (identity, provider config) still wins.
+        - `_versioned_argv`'s resolution of a versioned launcher symlink to
+          the version current at spawn time (P0-R1.2): the host branch does
+          it before building its `docker exec` command; this branch skipped
+          it. Mount paths match the host exactly (module docstring), so the
+          same resolution is safe to do from in here too.
         """
+        env = dict(env)
+        for key in NETWORK_ENV_KEYS:
+            if key in env:
+                continue
+            value = os.environ.get(key)
+            if value is not None:
+                env[key] = value
+        argv = self._versioned_argv(argv)
         return await LocalExecutor().start(
             _recording_pid(self._pid_file(env), argv), cwd, env)
