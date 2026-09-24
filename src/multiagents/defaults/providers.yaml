@@ -476,6 +476,14 @@ providers:
         - match: {type: "rate_limit_event"}
           as: step
           fields: {}
+        # A heartbeat printed every 30s while one tool call (Bash, typically)
+        # is still running — added to the CLI after this file's other progress
+        # rules were written, so it fell through to `raw` unclassified. It
+        # carries no message id (it is not part of any turn), same as
+        # system/user/rate_limit_event above.
+        - match: {type: "tool_progress"}
+          as: step
+          fields: {}
 
   # ---------------------------------------------------------------------
   # Template for a new integration. Uncomment, fill in, then verify with
