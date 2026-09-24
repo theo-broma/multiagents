@@ -1378,3 +1378,14 @@ not sent upstream.
   node. implementer-deep ag-9c3192 is finding the cause and fixing it, with
   a test, and must also make tool exceptions visible to the agent. Merge
   it, then rerun the PONG check.
+- **Item 8:** contract `context/specs/agent-survival.md` (eed7db0), reviewed
+  by the advisor (turns 13-14). tester ag-0e7618 is writing the red suite.
+  Decision to confirm with the user: `/exit` detaches too; the wrapper's wall
+  clock and `multiagents stop --all` bound it.
+- **New defect, step counter (P0-R4 regression):** tester ag-0e7618 was
+  stopped at "251 steps > 250" after about 35 tool calls. Its stream shows
+  bursts of `step` events 3 ms apart during one long Bash call (68 in one
+  call). Every providers.yaml copy maps claude `system`, `user`,
+  `assistant` and `rate_limit_event` as `step`, so in-turn progress events
+  are counted as steps. To fix next (implementer): count one step per model
+  turn only, with a test built from a real long-Bash stream.
