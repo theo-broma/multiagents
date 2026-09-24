@@ -1426,3 +1426,12 @@ not sent upstream.
   later, alone). After that: docker variants on the host
   (`SV_TEST_DOCKER=1`), adversary, reviewer, then SV-R11 (the tester first
   updates `test_p0_r8f_2_2_...[running]`).
+- **Defect reported by the user (2026-09-24):** `multiagents run` was
+  refused as "credit exhausted" about 3 minutes AFTER the claude credit had
+  come back. Suspects: a cached quota reading or a cooldown that outlives
+  the reset (`blind_cooldown_seconds` 900, the budget cache, or the
+  paused/deferred state). Not yet investigated.
+- **Pause requested by the user (weekly usage 94 %):** finish what is in
+  flight (ag-12951a item 8, ag-4dabbf chunk script), then start nothing new.
+  The next steps for item 8 after the merge: docker variants on the host,
+  adversary, reviewer, SV-R11.
