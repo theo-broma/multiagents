@@ -1343,3 +1343,31 @@ not sent upstream.
   reason `content_filter`. Then the orchestrator is not told "done" for work
   that never happened. The adversary's calling contract now covers the wording
   side (6d17362).
+
+## Progress, 2026-09-24 ~05:00 — items 1-6 done; 3's live check and 7, 8 open
+
+- **Item 1, bug-2cebea:** DONE, ticket fixed. Commits: 904e7f0, d06bd8d,
+  d3dfa0a.
+- **Item 2, test isolation:** DONE (4d80cdf).
+- **Item 3, defect 6:** implemented (2a39b13). The 7 adversary findings and
+  4 reviewer points are fixed (e06a43d): 56 tests green.
+  - `inside()` now requires `/.dockerenv` plus `/proc/1/environ`, and the
+    container is created with the variable set. **Pending:** the live SM-R1
+    check. It needs the user's go-ahead to restart `multiagents run` and to
+    run `multiagents docker rm && multiagents docker up` (the old container
+    lacks the variable, so its inner spawns fail closed). Steps are in
+    `.multiagents/runs/ag-009901/result.json`.
+- **Item 4, R8f leftovers:** DONE (spec 1bf7123, 06962c3; tests 4c96b19;
+  implementation 2a64289; test stubs 3054953).
+  - R8f.19 uses the `stalled.stopping()` record, not exit codes: the
+    heuristic was rejected, since SIGKILL escalation and a CLI that traps
+    SIGTERM both break it.
+- **Item 5, bug-c050b0:** DONE, ticket fixed (ea06791, ef68cf1).
+- **Item 6:** agent guidance for claude (Bash `timeout`) and agy (no
+  `manage_task` polling), f5b5a18. Watch whether it holds.
+- **Full suite on the merged base** (before item 4): 1685 passed, 6 xfailed,
+  0 failed, excluding phase2's by-design reds.
+- **Open:** item 7 (live `claude.sh compact`; R8f is active in the driver
+  since the 21:43 restart, but has not fired yet); item 8 (agents survive a
+  CLI restart), still to be specified; the content-filter refusal reported
+  as `done`.
