@@ -1431,6 +1431,11 @@ not sent upstream.
   come back. Suspects: a cached quota reading or a cooldown that outlives
   the reset (`blind_cooldown_seconds` 900, the budget cache, or the
   paused/deferred state). Not yet investigated.
+  User's proposal: a `multiagents refresh-quota` command (name open) that
+  drops the cached quota readings and cooldowns, re-reads every provider,
+  prints the result, and lets `run` proceed. It complements fixing the
+  cause, it does not replace it: the refusal must also stop happening on
+  its own once the window has reset.
 - **Pause requested by the user (weekly usage 94 %):** finish what is in
   flight (ag-12951a item 8, ag-4dabbf chunk script), then start nothing new.
   The next steps for item 8 after the merge: docker variants on the host,
