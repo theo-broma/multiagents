@@ -1389,3 +1389,15 @@ not sent upstream.
   `assistant` and `rate_limit_event` as `step`, so in-turn progress events
   are counted as steps. To fix next (implementer): count one step per model
   turn only, with a test built from a real long-Bash stream.
+- **Item 3, layer by layer (09:00-10:00):**
+  - 99be9d6: a child's server tried to seed read-only config. Tool errors
+    now name their exception.
+  - 5afd545: the docker executor needed the `docker` binary even inside the
+    container.
+  - ag-996ff1 (running): an inside spawn loses `HTTPS_PROXY`/`NO_PROXY`/
+    `ANTHROPIC_BASE_URL`, so dev-advisor (agy) fails its DNS lookup.
+  - Rerun the PONG check after each merge.
+- **Item 8:** red suite merged (7a6004e, 45 tests, 37 red). The spec
+  decisions from the tester's questions are committed. The implementation
+  (implementer-deep) waits until ag-996ff1 releases `executor/docker.py`.
+- **Step counter:** ag-8f28e2 is on it.
