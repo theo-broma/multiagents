@@ -1336,3 +1336,10 @@ not sent upstream.
   long commands take `timeout: 600000` and are split to fit within 10 min;
   never end a turn with a background job pending. agy's equivalent is
   `manage_task` polling.
+- **Tooling defect seen 2026-09-24 (not yet scheduled):** agy run ag-da2c22's
+  result was "This request was blocked by Gemini's filters…", with 0 commits.
+  It was classified `done` with an empty reason. A provider-declared pattern
+  in `providers.yaml` (the plugin seam) should classify it as `failed` with
+  reason `content_filter`. Then the orchestrator is not told "done" for work
+  that never happened. The adversary's calling contract now covers the wording
+  side (6d17362).
