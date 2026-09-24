@@ -472,6 +472,17 @@ budget:
   # a real reset time from it.
   blind_cooldown_seconds: 900
 
+  # How much observation the burn rate (`Tree.burn()`) requires before it will
+  # project a wall (bug-c050b0): two headroom readings 39 s apart, taken while
+  # four agents loaded their first context, were read as 16.9 points a minute
+  # and a wall in 174 s — wound the provider down and cut short four agents'
+  # first two minutes with a wrap-up they had no work yet to land. Below either
+  # minimum, `burn()` still reports `headroom`, just not `seconds_to_wall`, and
+  # the wind-down and wrap-up watchers do nothing with that. 0 means no
+  # minimum: today's projection from as few as two samples.
+  burn_min_span_seconds: 300
+  burn_min_samples: 3
+
 # --------------------------------------------------------------------------
 # Reporting bugs in multiagents itself.
 #

@@ -83,8 +83,8 @@ def _read_yaml(path: Path) -> dict:
 
 
 @lru_cache(maxsize=1)
-def _shipped_limits_cached() -> dict[str, Any]:
-    return dict(_read_yaml(shipped_defaults_dir() / "project.yaml").get("limits") or {})
+def _shipped_section_cached(section: str) -> dict[str, Any]:
+    return dict(_read_yaml(shipped_defaults_dir() / "project.yaml").get(section) or {})
 
 
 def shipped_limits() -> dict[str, Any]:
@@ -94,11 +94,17 @@ def shipped_limits() -> dict[str, Any]:
     caller, and one caller mutating what it got back must not leak into the
     next.
     """
-    return dict(_shipped_limits_cached())
+    return dict(_shipped_section_cached("limits"))
 
 
-def limit_number(limits: dict, key: str, zero_ok: bool = False) -> float:
-    """A numeric `limits` value, or its shipped default when it is not usable.
+def shipped_budget() -> dict[str, Any]:
+    """The `budget` block of the package's own project.yaml, as `shipped_limits`
+    reads `limits`. A fresh copy each call, for the same reason."""
+    return dict(_shipped_section_cached("budget"))
+
+
+def _section_number(section: dict, key: str, shipped: dict, zero_ok: bool = False) -> float:
+    """A numeric config value, or its shipped default when it is not usable.
 
     The config is typed by a person: `120k`, `5m`, `inf`, NaN, a negative
     number or a boolean must fall back to what the package ships rather than
@@ -107,8 +113,8 @@ def limit_number(limits: dict, key: str, zero_ok: bool = False) -> float:
     feature off (P0-R8f.13). `zero_ok` is for the keys where 0 is a value
     (off, no retry, no wait); elsewhere 0 is malformed too.
     """
-    default = shipped_limits().get(key, 0)
-    value = limits.get(key, default)
+    default = shipped.get(key, 0)
+    value = section.get(key, default)
     if isinstance(value, bool):
         return default
     try:
@@ -118,6 +124,23 @@ def limit_number(limits: dict, key: str, zero_ok: bool = False) -> float:
     if not math.isfinite(number) or number < 0 or (number == 0 and not zero_ok):
         return default
     return number
+
+
+def limit_number(limits: dict, key: str, zero_ok: bool = False) -> float:
+    """A numeric `limits` value, or its shipped default when it is not usable.
+
+    See `_section_number`; `limits` is a person-typed section like every other.
+    """
+    return _section_number(limits, key, shipped_limits(), zero_ok=zero_ok)
+
+
+def budget_number(budget: dict, key: str, zero_ok: bool = False) -> float:
+    """A numeric `budget` value, read as safely as `limit_number` reads
+    `limits` (P0-R8f.13) — for the burn-rate minimums, bug-c050b0: a malformed
+    `burn_min_span_seconds` or `burn_min_samples` must fall back to the
+    shipped default rather than raise or silently disable the gate.
+    """
+    return _section_number(budget, key, shipped_budget(), zero_ok=zero_ok)
 
 
 

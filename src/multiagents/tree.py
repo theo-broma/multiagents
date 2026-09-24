@@ -172,6 +172,14 @@ class Node:
     # fresh Run, so a "have I retried?" flag kept there resets on every retry
     # and the guard becomes an infinite loop.
     retries: int = 0        # a standing dialogue, resumed each turn
+    # bug-c050b0: also survives a relaunch, and for the same reason. A
+    # "have I asked this node to wrap up?" flag kept on the in-process Run
+    # resets on every steer/relaunch, since those replace the Run — which is
+    # how one drain sent the same wrap-up 6 times in a second. `wrap_up_headroom`
+    # is the headroom reading at the moment it was asked, so a later reading
+    # showing MORE headroom (a window reset) can re-arm it.
+    wrap_up_asked: bool = False
+    wrap_up_headroom: float | None = None
     # Where this agent was MEANT to run, when that is not where it ran. Budget
     # routing silently moved work to a fallback provider and recorded nothing,
     # so the only way to find out why an implementer was on the wrong model was
@@ -927,7 +935,8 @@ class Tree:
                            round(float(spent or 0), 4)])
             del series[:-self.HEADROOM_SAMPLES]
 
-    def burn(self, provider: str, window: float = 3600.0) -> dict:
+    def burn(self, provider: str, window: float = 3600.0, *,
+             min_span_seconds: float = 300.0, min_samples: int = 3) -> dict:
         """How fast this provider's window is draining, and what that implies.
 
         Measured globally, which is the only way it means anything: the window
@@ -939,20 +948,34 @@ class Tree:
         `window_dollars` is derived the same way — from how much percentage a
         known amount of spending moved — because the provider never states what
         a window is worth. It is an estimate and is reported as one.
+
+        bug-c050b0: `seconds_to_wall` is withheld unless the samples it is
+        drawn from span at least `min_span_seconds` AND number at least
+        `min_samples`. Two readings 39 s apart, taken while four agents loaded
+        their first context, projected a wall in 174 s that was not real — a
+        burst is not a burn rate. `headroom` and `points_per_minute` are still
+        reported with as little as one sample; nothing acts on those alone.
+        Callers pass the configured minimums (`budget.burn_min_span_seconds`,
+        `budget.burn_min_samples`); a caller with no config, such as a bare
+        `Tree`, gets the shipped defaults.
         """
         series = [s for s in (self.read().get("headroom", {}).get(provider) or [])
                   if now() - s[0] <= window]
+        if not series:
+            return {"samples": 0}
+        out = {"samples": len(series), "headroom": series[-1][1]}
         if len(series) < 2:
-            return {"samples": len(series)}
+            return out
         first, last = series[0], series[-1]
-        minutes = (last[0] - first[0]) / 60
+        span = last[0] - first[0]
+        minutes = span / 60
         if minutes <= 0:
-            return {"samples": len(series)}
+            return out
         drop = (first[1] - last[1]) * 100          # percentage points spent
         rate = drop / minutes                       # points per minute
-        out = {"samples": len(series), "points_per_minute": round(rate, 3),
-               "headroom": last[1]}
-        if rate > 0.01:
+        out["points_per_minute"] = round(rate, 3)
+        if (rate > 0.01 and len(series) >= max(0, min_samples)
+                and span >= max(0.0, min_span_seconds)):
             out["seconds_to_wall"] = max(0.0, last[1] * 100 / rate * 60)
         spent = last[2] - first[2]
         if drop > 1 and spent > 0:
