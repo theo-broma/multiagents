@@ -7811,6 +7811,7 @@ def test_a_limit_is_confirmed_over_two_polls_before_the_session_is_ended(tmp_pat
     def attached(argv, env, stalled=None):
         seen.append(stalled())          # first poll: warns, does not act
         seen.append(stalled())          # second: the limit is still unanswered
+        stalled.stopping()              # as the real one does before stopping the child
         return -cli.signal.SIGTERM
 
     monkeypatch.setattr(cli.driver, "_run_attached", attached)
@@ -7870,6 +7871,7 @@ def test_waiting_out_a_window_does_not_spend_the_restart_attempts(tmp_path, monk
     def attached(argv, env, stalled=None):
         runs.append(1)
         stalled(); stalled()             # warn, then confirm
+        stalled.stopping()               # as the real one does before stopping the child
         return -cli.signal.SIGTERM
 
     monkeypatch.setattr(cli.driver, "_run_attached", attached)
