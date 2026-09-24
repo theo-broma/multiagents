@@ -637,6 +637,8 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
             return False                 # a pending limit wins (R8f.2.4)
         return compaction.due()
 
+    stopped_by_driver: list = []          # last _attached() call: did WE stop it?
+
     def _attached(run_env) -> tuple[int, float]:
         """Run the CLI until it ends for a reason other than a compaction.
 
@@ -653,6 +655,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
             stopped: list = []
             _stalled.stopping = lambda: stopped.append(True)
             code = _run_attached(argv, run_env, stalled=_stalled)
+            stopped_by_driver[:] = stopped
             if compaction.requested is None or not stopped:
                 # The user's own exit wins over a compaction that was due
                 # (R8f.12): only a CLI we stopped for it is compacted.
@@ -665,6 +668,13 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
             sys.stdout.flush()
 
     code, ran_for = _attached(env)
+    if limit and not stopped_by_driver:
+        # The user's own exit wins over a usage-limit stop too (R8f.19, the
+        # rule of R8f.12 extended): `stopping()` fires only when we actually
+        # had to stop a still-running child, so its absence here means the CLI
+        # ended on its own between the limit being detected and us acting on
+        # it — nothing is left to wait out or resume.
+        limit.clear()
     deliberate, why = _exit_was_deliberate(code)
     if limit:
         # We sent the SIGTERM, so the exit code says "deliberate" and means it
@@ -716,7 +726,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
 
     attempts = int(_limit_number(config, "restart_attempts", zero_ok=True))
     delay = _limit_number(config, "restart_delay_seconds", zero_ok=True)
-    survived = float(config.limits.get("restart_min_runtime_seconds", 60))
+    survived = _limit_number(config, "restart_min_runtime_seconds")
     # Waiting out a usage window is not a restart attempt and must not spend
     # them. The window is FIVE HOURS on this provider; five attempts backing off
     # from a minute would give up in the middle of it, having proved only that
@@ -762,6 +772,10 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                      "MULTIAGENTS_RESUME_PROMPT": RESUME_PROMPT}
         limit.clear()
         code, ran_for = _attached(retry_env)
+        if limit and not stopped_by_driver:
+            # The user's own exit wins over a usage-limit stop too (R8f.19):
+            # the same rule applies to the attached CLI of a retry.
+            limit.clear()
         deliberate, why = _exit_was_deliberate(code)
         if limit:
             # We sent the SIGTERM; "terminated" would be true about us and
@@ -810,7 +824,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     # The unattended loop already waits out a quota reset, backs off on repeated
     # failure, and stops when two turns change nothing.
     return _supervise(paths, config, role, spec, provider, executor, context,
-                      max_turns=int(config.limits.get("supervised_turns", 50)))
+                      max_turns=int(_limit_number(config, "supervised_turns")))
 
 
 def _role_session_id(paths, role: str, rotate: bool = False) -> str:
@@ -1264,7 +1278,7 @@ def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | Non
     said = (limit.get("said") or "").strip()
 
     if not limit.get("resets", True):
-        hours = float(config.limits.get("spend_limit_pause_hours", 12))
+        hours = _limit_number(config, "spend_limit_pause_hours")
         tree.pause(tree_now() + hours * 3600,
                    f"{spec.provider}: {detail}", [spec.provider])
         print(f"\n{spec.provider} has stopped: {detail}.")
@@ -1278,7 +1292,7 @@ def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | Non
     # Backs off across attempts: a window that has not reopened after fifteen
     # minutes is not about to, and retrying on the same clock only fills the
     # transcript with start-up-and-stop cycles.
-    wait = float(config.limits.get("limit_wait_seconds", 900)) * min(attempt, 4)
+    wait = _limit_number(config, "limit_wait_seconds") * min(attempt, 4)
     # Unless the provider says exactly when, in which case guessing is silly.
     # This is why the account is asked directly rather than through the CLI's
     # cache: a real timestamp turns a blind backoff into one wait of the right

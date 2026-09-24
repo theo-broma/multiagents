@@ -316,6 +316,9 @@ limits:
   # the same fault being read again.
   restart_min_runtime_seconds: 60
 
+  # How many turns the headless loop (a lost terminal, or `run --unattended`) runs before it stops on its own.
+  supervised_turns: 50
+
   # A usage limit never reaches the exit code. The CLI prints it into the chat
   # log and stays at the prompt, alive and idle, so every restart path — all of
   # which key on the process ENDING — waits for something that will not happen.
