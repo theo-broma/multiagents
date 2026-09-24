@@ -10195,9 +10195,14 @@ def test_no_new_work_is_sent_into_the_last_minutes_of_a_window(tmp_path):
     runner.config = Config(project={"limits": {"wind_down_seconds": 300}},
                            providers={}, agents={}, models={}, instruction_dirs=[])
 
+    # BR-R1 (burn-rate-baseline): a projection needs at least
+    # budget.burn_min_samples (3) samples spanning at least
+    # budget.burn_min_span_seconds (300 s). Two readings are a burst, not a
+    # burn rate, so this is a steady drain observed long enough to count.
     now = time.time()
     with runner.tree.transaction() as data:
         data["headroom"] = {"claude": [[now - 600, 0.90, 0.0],
+                                       [now - 330, 0.48, 4.5],
                                        [now - 60, 0.05, 9.0]]}
     budgets = {"claude": Budget("claude", known=True, headroom=0.05)}
     runner._wind_down(budgets)
@@ -10206,7 +10211,11 @@ def test_no_new_work_is_sent_into_the_last_minutes_of_a_window(tmp_path):
 
     # A window draining slowly is not winding down.
     with runner.tree.transaction() as data:
-        data["headroom"] = {"agy": [[now - 3600, 0.95, 0.0], [now - 60, 0.90, 1.0]]}
+        # Also a BR-R1-sized observation, inside burn()'s one-hour window, so
+        # a projection exists and it is the slow rate that keeps agy usable.
+        data["headroom"] = {"agy": [[now - 3000, 0.95, 0.0],
+                                    [now - 1500, 0.925, 0.5],
+                                    [now - 60, 0.90, 1.0]]}
     slow = {"agy": Budget("agy", known=True, headroom=0.90)}
     runner._wind_down(slow)
     assert slow["agy"].usable is True
