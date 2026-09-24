@@ -1440,3 +1440,29 @@ not sent upstream.
   flight (ag-12951a item 8, ag-4dabbf chunk script), then start nothing new.
   The next steps for item 8 after the merge: docker variants on the host,
   adversary, reviewer, SV-R11.
+
+## Handoff at the pause (2026-09-24, weekly usage 94 %)
+
+Nothing is running. Done today:
+- item 3, verified live;
+- the step counter;
+- the chunk script (c8be04d): `scripts/test-chunk.sh K 3` runs about
+  3.5 min per chunk, and the three chunks cover the suite.
+
+Resume in this order:
+1. **Item 8:** `steer_agent("ag-12951a", ...)`. The session is intact, no
+   code written yet, and its 10-step plan is in its result
+   (`.multiagents/runs/ag-12951a/result.json`). It read my weekly-limit
+   note as a stop, so the steer must say plainly to carry on: consult
+   dev-advisor on the wrapper first, then implement. Then run the docker
+   variants on the host (`SV_TEST_DOCKER=1`), then the adversary, the
+   reviewer, and SV-R11 (the tester first).
+2. **Item 6:** there is no project conventions file (no CLAUDE.md or
+   AGENTS.md), so every task that asks for a full run must name
+   `scripts/test-chunk.sh K 3` for K = 1..3. A project AGENTS.md saying it
+   once is worth considering.
+3. **The `run` refusal after a credit reset**, and the user's
+   `refresh-quota` proposal.
+4. **Item 7** (live compaction) is still unobserved. The content-filter
+   refusal is still reported as `done`. The config-drift warning is not
+   scheduled.
