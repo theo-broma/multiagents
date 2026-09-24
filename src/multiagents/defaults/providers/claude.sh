@@ -459,7 +459,7 @@ launch)
     # conversation. Naming the session removes the ambiguity: resume it if it
     # exists, create it under that id if it does not.
     if [ -n "${MULTIAGENTS_SESSION_ID:-}" ]; then
-        sessions="$HOME/.claude/projects/$(claude_slug "$(pwd)")"
+        sessions="$(claude_sessions_root)/$(claude_slug "$(pwd)")"
         if [ "${MULTIAGENTS_RESUME:-0}" = "1" ] \
            && [ -f "$sessions/$MULTIAGENTS_SESSION_ID.jsonl" ]; then
             set -- "$@" --resume "$MULTIAGENTS_SESSION_ID"
@@ -469,7 +469,7 @@ launch)
     elif [ "${MULTIAGENTS_RESUME:-0}" = "1" ]; then
         # No id: an install predating this. Fall back to the old behaviour,
         # which is still better than passing --continue into nothing.
-        sessions="$HOME/.claude/projects/$(claude_slug "$(pwd)")"
+        sessions="$(claude_sessions_root)/$(claude_slug "$(pwd)")"
         if ls "$sessions"/*.jsonl >/dev/null 2>&1; then
             set -- "$@" --continue
         else
