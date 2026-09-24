@@ -188,6 +188,27 @@ compaction fires, and the agent is adopted and finishes.
   today. The lock is per node (SV-R5).
 - **Depth ≥ 1 servers keep cancelling.** Only root servers detach (SV-R3).
 
+## Decided, from the tester's questions (ag-0e7618)
+
+- **When adoption happens (SV-R5/R6):** at a root server's startup, and
+  again while it runs, at least every 10 s. Adoption covers a node whose
+  owner died next to a live server, not only a node left by a previous
+  session.
+- **Timeout (SV-R4/R8):** either `status == "timeout"` or `failed` with a
+  reason that names the timeout. The developer picks one and uses it on both
+  paths.
+- **SV-R11 "unseen result":** a final node's result is seen once
+  `wait_for_agents`, `check_agent` or `collect_agent` has returned that
+  final status to the orchestrator's server. Until then, compaction waits.
+  This must be recorded durably, since compaction follows. When SV-R11
+  lands, the tester (not the developer) updates
+  `test_p0_r8f_2_2_a_live_agent_blocks_it[running]`, which asserts the
+  opposite.
+- **Startup notice (SV-R10):** `run --no-launch` counts as a startup. The
+  wording is free, as long as it names the ids and the count.
+- **Docker variants:** run on the host with `SV_TEST_DOCKER=1` before
+  delivery. The orchestrator checks they actually ran.
+
 ## Out of scope, recorded
 
 - **Token-budget ceilings while detached.** The wall clock bounds them; a
