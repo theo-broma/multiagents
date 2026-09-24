@@ -179,6 +179,17 @@ better than one imposed from outside.
 **Keep out of it:** reassurance. "This has been reviewed and the tests are
 thorough" primes it to agree, and the one thing it must not do is agree.
 
+**Phrase security cases as engineering, not as offence.** This agent may run on
+a model whose provider filters content. On 2026-09-24 a task that spoke of a
+"privilege boundary", "the attacker's position" and processes that "escape the
+docker executor" was refused outright on Gemini (ag-da2c22). The same cases,
+restated as "a `can_spawn: false` agent must never end up with a server entry"
+or "this variable should only change behaviour inside the container", went
+through and found seven defects. So name the property that must hold, and the
+inputs to try against it. Do not describe what an attacker would gain. A run
+whose result says it was blocked by a content filter has done nothing: resume
+it with `steer_agent` and restate the task, do not count it as a review.
+
 **It returns** committed failing tests in **new files**, and a `## Findings`
 section ranked worst-first with an input, a location and an outcome each, plus a
 verdict line.
