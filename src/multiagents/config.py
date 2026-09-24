@@ -600,9 +600,14 @@ class Config:
         return ""
 
 
-def load(paths: ProjectPaths | None) -> Config:
-    """Load the merged configuration for a project (or the global one alone)."""
-    seed_global()
+def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
+    """Load the merged configuration for a project (or the global one alone).
+
+    `seed=False` only reads: a missing layer is an empty one. That is how a
+    subagent's server loads — see `server._runner_locked`.
+    """
+    if seed:
+        seed_global()
     layers: list[Path] = [shipped_defaults_dir(), global_config_dir()]
     if paths is not None and paths.config.is_dir():
         layers.append(paths.config)
