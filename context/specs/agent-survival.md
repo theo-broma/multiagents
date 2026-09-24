@@ -204,6 +204,14 @@ compaction fires, and the agent is adopted and finishes.
   lands, the tester (not the developer) updates
   `test_p0_r8f_2_2_a_live_agent_blocks_it[running]`, which asserts the
   opposite.
+- **`multiagents stop` (SV-R10), per the user, 2026-09-24.** It already
+  exists (`cli.py` `cmd_stop`): it stops the drivers, then every agent
+  (committing their work in progress), then the container. It stays the
+  explicit "stop everything" command. With no argument it must also stop
+  DETACHED agents, with no server alive. `--all` is accepted as a synonym
+  for no argument, and `stop <id>` stops just one agent. Detaching applies
+  only to implicit ends of the CLI: `/exit`, a crash, compaction, a
+  limit restart. It never applies to `multiagents stop`.
 - **Startup notice (SV-R10):** `run --no-launch` counts as a startup. The
   wording is free, as long as it names the ids and the count.
 - **Docker variants:** run on the host with `SV_TEST_DOCKER=1` before
