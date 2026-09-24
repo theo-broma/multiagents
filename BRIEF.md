@@ -1371,3 +1371,10 @@ not sent upstream.
   since the 21:43 restart, but has not fired yet); item 8 (agents survive a
   CLI restart), still to be specified; the content-filter refusal reported
   as `done`.
+- **Item 3 live check (2026-09-24 ~08:54, user approved, container
+  recreated):** it FAILS. Run ag-c65ee1 got the multiagents tools through
+  `--mcp-config` (the transport works), but `consult("dev-advisor")`
+  returned a bare `Error executing tool consult` within 3 s and created no
+  node. implementer-deep ag-9c3192 is finding the cause and fixing it, with
+  a test, and must also make tool exceptions visible to the agent. Merge
+  it, then rerun the PONG check.
