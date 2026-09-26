@@ -1084,8 +1084,14 @@ class Runner:
         # SV-R1/R4: under the launch wrapper, which writes the output and the
         # exit status to the run dir and ends the run at its wall clock even
         # when no server is left to.
-        handle = await executor.start(argv, workdir, env, run_dir=run_dir,
-                                      deadline=launched + wall if wall else 0)
+        try:
+            handle = await executor.start(argv, workdir, env, run_dir=run_dir,
+                                          deadline=launched + wall if wall else 0)
+        except BaseException:
+            # Nothing started, so nothing is followed: a lock kept here would
+            # make the node unadoptable for this server's whole lifetime.
+            self._release(node_id)
+            raise
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
             supervisor=self._supervisor(spec, provider, wall),
@@ -2534,7 +2540,17 @@ class Runner:
     async def _adopt_one(self, node) -> bool:
         run_dir = self.paths.run_dir(node.id)
         output, status_file = run_dir / "output.ndjson", run_dir / "exit_status"
+        executor = self.executor(self.config.agents.get(node.agent))
+        stopper = probe = None
+        if getattr(executor, "kind", "local") == "docker" and not executor.inside():
+            # The pid on the node is the host's `docker exec` client, which
+            # can be gone while the wrapper it started runs on: whether the
+            # agent lives is asked of the container, and so is stopping it.
+            stopper = lambda grace: executor.kill_detached(node.id, grace)  # noqa: E731
+            probe = executor.liveness(node.id)
         live = bool(node.pid) and running(node.pid, getattr(node, "pid_start", ""))
+        if not live and probe is not None:
+            live = await asyncio.to_thread(probe)
         if live and not output.is_file():
             return False          # started before the wrapper: nothing to follow
         # SV-R8: one already past its wall clock is not taken. Unowned, its
@@ -2572,13 +2588,9 @@ class Runner:
             with stream.open("r+b") as fh:
                 fh.truncate(int(follow["log"]))
 
-        executor = self.executor(spec)
-        stopper = None
-        if getattr(executor, "kind", "local") == "docker" and not executor.inside():
-            stopper = lambda grace: executor.kill_detached(node.id, grace)  # noqa: E731
         handle = FollowHandle(pid=node.pid or 0, run_dir=run_dir, offset=turn,
                               pid_start=getattr(node, "pid_start", "") or "",
-                              stopper=stopper)
+                              stopper=stopper, probe=probe)
         supervisor = self._supervisor(spec, provider, wall)
         # SV-R8: the wall clock runs from the launch, whoever watched it; the
         # silence clock runs from now, because nobody was listening before.
@@ -2645,6 +2657,19 @@ class Runner:
             with contextlib.suppress(Exception):
                 if executor.kill_detached(node.id):
                     return True
+            inside = getattr(executor, "inside", None)
+            if not (inside and inside()):
+                # Every pid in the run dir but `node.pid` was recorded in the
+                # container's pid namespace, where it names nothing of ours:
+                # signalled from the host it could reach any process group.
+                # All the host owns is the `docker exec` client, and ending
+                # that alone is the one safe thing left to do.
+                start = getattr(node, "pid_start", "")
+                if not running(node.pid, start):
+                    return False
+                with contextlib.suppress(OSError):
+                    os.kill(node.pid, signal.SIGTERM)
+                return True
         run_dir = self.paths.run_dir(node.id)
         if (run_dir / "wrapper.pid").is_file():
             return stop_wrapped(run_dir, node.pid, getattr(node, "pid_start", ""))

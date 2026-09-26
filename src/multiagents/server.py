@@ -1392,6 +1392,10 @@ async def _adopt_forever() -> None:
     """SV-R6: at startup, before any handshake, and every few seconds after —
     an owner that dies while this server runs leaves its nodes to it (SV-R5)."""
     from .runner import ADOPT_SECONDS
+    # A failing pass is retried, not fatal — but said once per distinct error
+    # on stderr (stdout is the protocol), so a pass that can never succeed is
+    # visible instead of being retried silently forever.
+    reported: set[str] = set()
     while True:
         try:
             await asyncio.get_running_loop().run_in_executor(None, runner)
@@ -1399,8 +1403,13 @@ async def _adopt_forever() -> None:
                 await _runner.adopt()
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            if error not in reported:
+                reported.add(error)
+                print(f"multiagents: adoption pass failed, retrying every "
+                      f"{ADOPT_SECONDS}s\n{traceback.format_exc()}",
+                      file=sys.stderr, flush=True)
         await asyncio.sleep(ADOPT_SECONDS)
 
 

@@ -127,6 +127,28 @@ exit 0
 """
 
 
+# SV-R1/R6: is the wrapper whose pid `$0` holds still alive, in the pid
+# namespace it was recorded in? 0 yes, 1 no (no pid, no process, a zombie).
+_ALIVE_SCRIPT = r"""
+w=$(cat "$0" 2>/dev/null); case "$w" in ''|*[!0-9]*) exit 1 ;; esac
+kill -0 "$w" 2>/dev/null || exit 1
+s=$(sed 's/.*) //' "/proc/$w/stat" 2>/dev/null | cut -c1)
+[ "$s" = Z ] || [ "$s" = X ] && exit 1
+exit 0
+"""
+# How long the container may go unanswerable before a wrapper nobody can
+# see is taken for dead: a daemon restart is seconds, a removed container
+# is forever.
+UNKNOWN_ALIVE_SECONDS = 60.0
+
+
+# SV-R1: run the launch wrapper (`$0`, its source) under the container's
+# system interpreter, not whichever `python3` the host's PATH names first.
+_WRAPPER_ENTRY = ('for p in /usr/bin/python3 /usr/local/bin/python3; do '
+                  '[ -x "$p" ] && exec "$p" {flag} "$0" "$@"; done; '
+                  'exec python3 {flag} "$0" "$@"')
+
+
 def _kill_argv(run_dir: Path, grace: int) -> list[str]:
     return ["sh", "-c", _KILL_SCRIPT, str(run_dir / "container.pid"),
             str(run_dir / "wrapper.pid"), str(max(1, int(grace)))]
@@ -1320,6 +1342,41 @@ class DockerExecutor(Executor):
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    def wrapper_alive(self, agent_id: str) -> bool | None:
+        """Whether an agent's wrapper is alive in the container, asked from
+        there — the host cannot tell: the `docker exec` client it holds can
+        die while the wrapper carries on. None when the container cannot be
+        asked. Blocking."""
+        if self.paths is None:
+            return None
+        argv = ["sh", "-c", _ALIVE_SCRIPT,
+                str(self.paths.run_dir(agent_id) / "wrapper.pid")]
+        if not self.inside():
+            argv = ["docker", "exec", self.container, *argv]
+        try:
+            code = _run(argv, timeout=30).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return {0: True, 1: False}.get(code)
+
+    def liveness(self, agent_id: str):
+        """A `FollowHandle.probe` for a wrapped agent in the container. An
+        unanswerable container counts as alive for `UNKNOWN_ALIVE_SECONDS`,
+        then as dead: long enough to ride out a daemon restart, short enough
+        that a removed container does not leave a run followed forever."""
+        state = {"unknown_since": None}
+
+        def probe() -> bool:
+            answer = self.wrapper_alive(agent_id)
+            if answer is not None:
+                state["unknown_since"] = None
+                return answer
+            if state["unknown_since"] is None:
+                state["unknown_since"] = time.monotonic()
+            return time.monotonic() - state["unknown_since"] < UNKNOWN_ALIVE_SECONDS
+
+        return probe
+
     # -------------------------------------------------------------- execute --
 
     def preflight(self) -> list[str]:
@@ -1434,17 +1491,22 @@ class DockerExecutor(Executor):
         (run_dir / "exit_status").unlink(missing_ok=True)
         offset = _size(run_dir / "output.ndjson")
         # Entered through `sh`, as every other command here enters the
-        # container, so `python3` is found on the container's own PATH.
+        # container. The PATH it sees is the host's, carried in `env` for
+        # the agent's sake (its launcher is mounted at its host path), and a
+        # `python3` found first on it may be a host interpreter mounted in
+        # along with a home directory. The wrapper needs only the stdlib, so
+        # the image's own interpreter is preferred; PATH is the fallback.
         _, flag, source, *rest = wrapper_argv("python3", run_dir, deadline, pid_file,
                                               argv, inline=True)
-        command = command + ["sh", "-c", f'exec python3 {flag} "$0" "$@"', source, *rest]
+        command = command + ["sh", "-c", _WRAPPER_ENTRY.format(flag=flag), source, *rest]
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                                 start_new_session=True)
         agent_id = env.get("MULTIAGENTS_AGENT_ID", "run")
         return FollowHandle(pid=proc.pid, run_dir=run_dir, offset=offset,
                             pid_start=procs.start_time(proc.pid), _proc=proc,
-                            stopper=lambda grace: self.kill_detached(agent_id, grace))
+                            stopper=lambda grace: self.kill_detached(agent_id, grace),
+                            probe=self.liveness(agent_id))
 
     def _pid_file(self, env: dict[str, str]) -> Path:
         pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))

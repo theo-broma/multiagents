@@ -129,6 +129,8 @@ class Handle:
 # --------------------------------------------------------------------------
 
 FOLLOW_POLL_SECONDS = 0.2
+# How often a handle's `probe` may be asked: it can cost a `docker exec`.
+PROBE_SECONDS = 5.0
 # Where the wrapper records the agent's process group: `agent.pid` locally,
 # `container.pid` under docker, where `kill_detached` has always read it.
 AGENT_PID_FILES = ("agent.pid", "container.pid")
@@ -159,6 +161,13 @@ def read_exit_status(run_dir: Path) -> str | None:
         return None
 
 
+def _pid_namespace() -> str | None:
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
 def agent_group(run_dir: Path) -> int | None:
     """The agent's process group, if it is provably still that agent's.
 
@@ -166,13 +175,18 @@ def agent_group(run_dir: Path) -> int | None:
     is only trusted while the leader is alive, or while the group survives its
     leader — Linux does not hand out a pid still in use as a group id, so a
     live group with no leader is still the one the wrapper made.
+
+    The wrapper records its pid namespace beside the pid, and a pid from any
+    other namespace — a container's, read from the host across the bind
+    mount — is refused outright: there it names an unrelated process.
     """
+    own = _pid_namespace()
     for name in AGENT_PID_FILES:
         try:
-            token = (run_dir / name).read_text().split()[0]
-        except (OSError, IndexError):
+            token, namespace = (run_dir / name).read_text().split()[:2]
+        except (OSError, ValueError):
             continue
-        if not token.isdigit():
+        if not token.isdigit() or own is None or namespace != own:
             continue
         pgid = int(token)
         try:
@@ -246,12 +260,39 @@ class FollowHandle:
     _proc: Any = None
     timed_out: bool = False
     stopper: Any = None               # executor-specific stop, if any
+    # Executor-specific liveness, asked only once `pid` is gone, for a pid
+    # that is not the wrapper: a host's `docker exec` client can die while
+    # the wrapper it started carries on inside the container.
+    probe: Any = None
+    _probed_at: float = float("-inf")
+    _probed: bool = True
 
-    def _ended(self) -> bool:
+    def _alive(self, ask: bool = True) -> bool:
+        """Blocking when `ask` and a probe is due — call it off the loop."""
         if self._proc is not None:
             self._proc.poll()             # reap it, if it was ours to reap
-        return read_exit_status(self.run_dir) is not None or not running(
-            self.pid, self.pid_start)
+        if running(self.pid, self.pid_start):
+            return True
+        if self.probe is None:
+            return False
+        if ask and time.monotonic() - self._probed_at >= PROBE_SECONDS:
+            self._probed_at = time.monotonic()
+            self._probed = bool(self.probe())
+        return self._probed
+
+    def _ended(self) -> bool:
+        return read_exit_status(self.run_dir) is not None or not self._alive()
+
+    def _read(self, fh, path: Path):
+        """One poll, off the loop: whether the run has ended — decided BEFORE
+        the read, so a line written just ahead of the exit is still read —
+        then the next chunk of output."""
+        ended = self._ended()
+        if fh is None and path.exists():
+            fh = path.open("rb")
+            fh.seek(self.offset)
+        chunk = fh.read(1 << 20) if fh is not None else b""
+        return ended, fh, chunk
 
     async def lines(self) -> AsyncIterator[str]:
         path = self.run_dir / "output.ndjson"
@@ -259,11 +300,7 @@ class FollowHandle:
         buf = b""
         try:
             while True:
-                ended = self._ended()
-                if fh is None and path.exists():
-                    fh = path.open("rb")
-                    fh.seek(self.offset)
-                chunk = fh.read(1 << 20) if fh is not None else b""
+                ended, fh, chunk = await asyncio.to_thread(self._read, fh, path)
                 if chunk:
                     buf += chunk
                     while True:
@@ -303,12 +340,10 @@ class FollowHandle:
         without one — killed by the kernel, or its wrapper killed — which is
         the caller's to judge from the stream (SV-R6 decided)."""
         while True:
-            if self._proc is not None:
-                self._proc.poll()
-            status = read_exit_status(self.run_dir)
-            if status is None and not running(self.pid, self.pid_start):
+            status = await asyncio.to_thread(read_exit_status, self.run_dir)
+            if status is None and not await asyncio.to_thread(self._alive):
                 await asyncio.sleep(FOLLOW_POLL_SECONDS)
-                status = read_exit_status(self.run_dir)
+                status = await asyncio.to_thread(read_exit_status, self.run_dir)
                 if status is None:
                     return None
             if status is not None:
@@ -323,7 +358,8 @@ class FollowHandle:
 
     @property
     def returncode(self) -> int | None:
-        if read_exit_status(self.run_dir) is None and running(self.pid, self.pid_start):
+        # The last probe's answer, not a fresh one: this is read on the loop.
+        if read_exit_status(self.run_dir) is None and self._alive(ask=False):
             return None
         return 0
 
@@ -338,7 +374,7 @@ class FollowHandle:
     async def _settle(self) -> None:
         # Give the wrapper a moment to record the exit it just saw.
         for _ in range(20):
-            if self._ended():
+            if await asyncio.to_thread(self._ended):
                 return
             await asyncio.sleep(0.1)
 
