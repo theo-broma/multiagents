@@ -1559,3 +1559,36 @@ The container now runs on a second Claude account (weekly 0 %, resets
   runs are in flight. **QF:** 58/58 green on ag-bec80b's branch; its full chunks
   are running (the agent ended its turn with a background test running, which
   is known defect 9, now seen on claude too). SP tester: ag-9c02be.
+
+## Handoff, 2026-09-26 ~17:50 UTC (claude 5 h window at 88 %, resets 21:59 UTC)
+
+Nothing new was started after this point. Still running when written:
+ag-a29f15 (SV-R11 targeted tests), ag-4fe3ea (R8f test update + unseen
+test), ag-9c02be (SP red suite). They may be wrapped up by the quota: resume
+each one with `steer_agent`, never discard it.
+
+Resume in this order:
+1. **QF (ag-bec80b)**: the implementation is complete, 58/58 green on its
+   branch. It was interrupted before merging the base (0f9800b; expect
+   conflicts in `runner.py`/`tree.py` around `cause=`) and before the full
+   suite ran. Steer it: merge the base, delete `HANDOFF-QF.md`, run the 3
+   chunks in the FOREGROUND one at a time (4 GiB container; re-run on 137),
+   and report. Then merge it. QF does not touch untrusted input, so no
+   adversary run; the reviewer is optional (about 475 lines; budget.py is the
+   core).
+2. **SV-R11 (ag-a29f15, 7a1b484)**: collect its targeted counts. Merge it
+   together with ag-4fe3ea's test update (it updates all 3
+   `test_p0_r8f_2_2_a_live_agent_blocks_it` variants and adds the
+   unseen-result test). Then one full-suite run. After that, item 8 needs
+   only the host docker variants: tell the user to run
+   `SV_TEST_DOCKER=1 uv run --frozen pytest tests/test_agent_survival.py`
+   while no agent is running.
+3. **SP (bug-4a0446)**: merge the ag-9c02be red suite, then implementer-deep
+   on SP-R1..R5 (docker.py, runner.steer, cli docker rm). Then the adversary.
+   Once it lands, propose to the user: raise `memory: "4g"` →
+   `"8g"` in project.yaml plus a container recreate (with nothing running).
+4. The `commit_all` silent failure without a git identity (small,
+   `implementer`).
+5. The rest of the earlier queue: item 6 (AGENTS.md), item 7 (a live
+   compaction), the content-filter refusal reported as `done`, and the
+   config-drift warning.
