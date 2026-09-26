@@ -31,8 +31,15 @@ from . import procs
 IDLE_AFTER = 180.0
 
 
-def transcript_source(provider: Any, cwd: Path) -> tuple[Path, str] | None:
-    """`(directory, glob)` where this provider records the session, if it says."""
+def transcript_source(provider: Any, cwd: Path,
+                      executor: Any = None) -> tuple[Path, str] | None:
+    """`(directory, glob)` where this provider records the session, if it says.
+
+    The directory as the host reads it. Given the executor the agent ran
+    under, the declared path is followed to where that executor really keeps
+    it (SP-R2): a docker agent's `~/.claude/projects` is the container's, and
+    the host's own `~/.claude` never saw a line of it.
+    """
     spec = getattr(provider, "transcript", None) or {}
     directory = spec.get("dir")
     if not directory:
@@ -41,11 +48,31 @@ def transcript_source(provider: Any, cwd: Path) -> tuple[Path, str] | None:
     # '_': a project path with a space, or any other punctuation, used to
     # slug to a directory the CLI never wrote to.
     slug = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
-    return Path(directory.format(slug=slug)).expanduser(), spec.get("glob", "*")
+    path = Path(directory.format(slug=slug)).expanduser()
+    if executor is not None:
+        path = executor.host_path(path)
+    return path, spec.get("glob", "*")
 
 
-def newest_transcript(provider: Any, cwd: Path) -> Path | None:
-    source = transcript_source(provider, cwd)
+def transcript_prefix(provider: Any) -> Path | None:
+    """The static part of the provider's declared transcript directory: the
+    path up to the first component holding a placeholder (SP-R1). One store
+    for it covers every agent's session, whatever its slug."""
+    directory = (getattr(provider, "transcript", None) or {}).get("dir")
+    if not directory:
+        return None
+    parts: list[str] = []
+    for part in Path(directory).parts:
+        if "{" in part:
+            break
+        parts.append(part)
+    if not parts:
+        return None
+    return Path(*parts).expanduser()
+
+
+def newest_transcript(provider: Any, cwd: Path, executor: Any = None) -> Path | None:
+    source = transcript_source(provider, cwd, executor)
     if source is None:
         return None
     directory, pattern = source

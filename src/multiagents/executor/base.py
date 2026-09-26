@@ -406,6 +406,11 @@ class Executor(ABC):
         """Problems that would make every run fail. Empty means ready."""
         return []
 
+    def host_path(self, path: Path) -> Path:
+        """Where `path`, as an agent run by this executor sees it, lives on
+        the host. The same path for an executor that runs on the host."""
+        return path
+
 
 # --------------------------------------------------------------------------
 # Environment preparation — shared, because the same decisions become `-e`
