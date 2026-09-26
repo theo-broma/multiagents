@@ -225,3 +225,17 @@ compaction fires, and the agent is adopted and finishes.
   rejected in BRIEF item 8.
 - **Adoption across session roles,** for example the initializer adopting
   the orchestrator's agents.
+
+## Clarification, 2026-09-26 (SV-R4, decided by the orchestrator)
+
+The wrapper kills at the deadline **only while no server holds the node's
+supervision lock**. A supervised run past its wall clock is reported `stuck:
+timeout` and left to the orchestrator, as the watchdog always has been. A
+watchdog never kills. Once the lock is released (the server detached or died),
+the deadline applies again and the wrapper enforces it. Adoption skips a node
+already past its wall clock, so the wrapper ends it and the next pass records
+the timeout. This came from ag-a29f15, whose reading kept the
+`test_phase0_watchdog.py` timeout tests valid.
+
+Also accepted: `stuck` nodes are adoptable like `running` and `detached` ones.
+When an agent exits, the wrapper kills whatever is left in its process group.
