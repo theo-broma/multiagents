@@ -1648,3 +1648,10 @@ Resume in this order:
   context/specs/commit-identity.md (CI-R1/R2); ag-8d967d bug-reporter (steer false-negative after
   runaway_steps, doom_loop false positives on agy task polling, wait_for_agents omitting a startup failure).
 - After ag-7697c2 merges: full suite once (chunks), then resolve bug-4a0446 fixed (b6610ca + fix commit).
+- ~23:17 local: claude 5 h window at 93 % (resets Sep 27 03:00 UTC). Tree paused; a tester (amend
+  `test_sp_r1_path_traversal_…` per the "After ag-7697c2" decision) is deferred and restarts by itself.
+  Running: ag-7697c2 (steered: vocabulary invariant + per-file checks; branch has 2c26e36, 17/18 adversary
+  tests green), ag-f233a2 (CI-R1/R2), ag-1d9832 (bug-d6310f + bug-8615db).
+  Tickets open: bug-4a0446 (resolve fixed after 7697c2 merges), bug-1b2612 (steer false negative +
+  cumulative runaway_steps; touches supervisor.py and runner.steer, so start after 7697c2 merges),
+  bug-8615db, bug-d6310f (ag-1d9832). Reporting is off, and `gh` is missing, so tickets are fixed here.
