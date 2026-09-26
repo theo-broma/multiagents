@@ -1548,3 +1548,14 @@ The container now runs on a second Claude account (weekly 0 %, resets
   Contract for bug-4a0446 written: `context/specs/session-persistence.md`
   (SP-R1..R5), under advisor review. Its tester can start in parallel. Its
   implementer starts after SV-R11 merges.
+- **Container memory (2026-09-26 ~21:00):** the container is capped at
+  4 GiB, and the kernel logged 3 OOM kills. A pytest run died with exit 137
+  (ag-a29f15) when several agents ran the chunks at once. Until the limit is
+  raised: one full-suite run at a time, and other agents run their own files
+  only. Raising it needs a container recreate, so do it only AFTER
+  session-persistence (SP-R1) lands, or transcripts are lost again, and
+  ask the user.
+- **SV-R11** is written (7a1b484 on ag-a29f15's branch) but untested; targeted
+  runs are in flight. **QF:** 58/58 green on ag-bec80b's branch; its full chunks
+  are running (the agent ended its turn with a background test running, which
+  is known defect 9, now seen on claude too). SP tester: ag-9c02be.
