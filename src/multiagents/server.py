@@ -731,6 +731,28 @@ def budget_tag_status(tag: str = "") -> dict:
     ]})
 
 
+def _seen(run: Runner, result: dict) -> dict:
+    """SV-R11: record that the final statuses in `result` reached the caller.
+
+    wait_for_agents, check_agent and collect_agent, per the spec; consult too,
+    since its reply is the idle agent's result, and nothing else would ever
+    return that to the orchestrator.
+
+    Only for the node's own parent — the root server for a root agent — since
+    what this guards is the orchestrator compacting away a result it was never
+    shown, and a sibling reading it shows the orchestrator nothing. Written to
+    the tree, not held here: a compaction restarts this server.
+    """
+    caller = run.self_id()
+    entries = [result, *result.get("changed", []), *result.get("already_finished", [])]
+    for entry in entries:
+        agent_id = entry.get("agent_id") if isinstance(entry, dict) else None
+        node = run.tree.get(agent_id) if agent_id else None
+        if node is not None and node.unseen and (node.parent or None) == caller:
+            run.tree.mark_seen(agent_id, entry.get("status"))
+    return result
+
+
 @_tool()
 def check_agent(agent_id: str, since: int = 0) -> dict:
     """Check a running agent's status and read new stream events.
@@ -742,7 +764,7 @@ def check_agent(agent_id: str, since: int = 0) -> dict:
     """
     run = runner()
     try:
-        return _ok(run.check(agent_id, since))
+        return _ok(_seen(run, run.check(agent_id, since)))
     except KeyError as exc:
         return _ok({"error": str(exc)})
 
@@ -761,7 +783,7 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
     active agent.
     """
     run = runner()
-    return _ok(await run.wait_for_any(agent_ids, float(timeout)))
+    return _ok(_seen(run, await run.wait_for_any(agent_ids, float(timeout))))
 
 
 @_tool()
@@ -784,7 +806,7 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
     """
     run = runner()
     try:
-        return _ok(run.collect(agent_id, mode))
+        return _ok(_seen(run, run.collect(agent_id, mode)))
     except KeyError as exc:
         return _ok({"error": str(exc)})
 
@@ -990,7 +1012,7 @@ async def consult(agent: str, message: str, timeout: int = 0) -> dict:
     """
     run = runner()
     try:
-        return _ok(await run.consult(agent, message, timeout or None))
+        return _ok(_seen(run, await run.consult(agent, message, timeout or None)))
     except (ValueError, KeyError, FileNotFoundError, PermissionError, RuntimeError) as exc:
         return _ok({"error": f"{type(exc).__name__}: {exc}"})
 

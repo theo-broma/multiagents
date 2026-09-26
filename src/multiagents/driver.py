@@ -498,7 +498,12 @@ class _AttachedCompaction:
                     self.spec.name)
 
     def _busy(self) -> bool:
-        return bool(self.tree.active() or self.tree.read().get("deferred"))
+        # SV-R11: an agent still running no longer holds compaction back — the
+        # server detaches it (SV-R3) and the resumed one adopts it (SV-R6).
+        # What does is a result the orchestrator has not been shown yet, which
+        # the compacted conversation would never learn it has to look for.
+        session = self.context.get("MULTIAGENTS_SESSION_ID", "")
+        return bool(self.tree.unseen(session) or self.tree.read().get("deferred"))
 
     def _state(self):
         path = session_transcript(self.provider, self.paths.root,
