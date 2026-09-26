@@ -1525,3 +1525,13 @@ The container now runs on a second Claude account (weekly 0 %, resets
   as ag-90d8ab (opencode failed 3× at startup: ag-d34838, ag-cdb2c0,
   ag-852615). QF implementer ag-bec80b was hit by a server-side rate limit and
   resumed; its branch has a HANDOFF-QF.md that must not be merged.
+- **~18:30:** all 7 review findings confirmed and fixed by ag-a29f15, merged
+  (ce1e11d). Tester ag-7acb79 is fixing the SV-R9 merge/discard test (no git
+  identity in the harness; discard needs force). The adversary ag-90d8ab is
+  still running (its doom_loop alert was a false positive: it was polling
+  its own test task).
+- **New gap to schedule (from ag-a29f15):** `gitops.commit_all` silently
+  fails without a git identity. The agent's work stays staged, never reaches
+  its branch, and nothing reports it. Small; `implementer` after item 8.
+- **SV-R11** red tests already exist (4 `test_sv_r11_*`); the implementation
+  comes after the adversary's findings are fixed.
