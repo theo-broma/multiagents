@@ -52,6 +52,7 @@ from .redact import scrub
 from .auth import looks_like_auth_failure
 from .supervisor import Supervisor, looks_like_quota_failure
 from .tree import Node, Tree, new_id, now
+from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
 
@@ -2825,10 +2826,25 @@ class Runner:
         # fresh worktree the same way a pruned conversation gets one back in
         # `consult()`.
         workdir = Path(node.worktree) if node.worktree else None
-        if workdir is not None and (not workdir.is_absolute() or not workdir.is_dir()):
+        if workdir is not None and not workdir.is_absolute():
             workdir = None
+        # The directory the session was recorded in, and the one it resumes
+        # in: the provider keys its transcripts by it, so a checkout that has
+        # to come back comes back HERE.
+        cwd = workdir or self.paths.worktree(agent_id)
+
+        # SP-R3: nothing is stopped, cut or relaunched for a session that is
+        # not there to resume. Resuming it anyway fails inside the CLI with
+        # "No conversation found", after the node has been reported running
+        # and its branch forked. A live run is not asked: its CLI holds the
+        # session and may not have flushed it yet.
+        if node.status not in ("running", "pending"):
+            refusal = self._missing_session(node, spec, provider, cwd)
+            if refusal:
+                return {"agent_id": agent_id, "steered": False, "error": refusal}
+
         branch = node.branch
-        if workdir is None:
+        if workdir is None or not workdir.is_dir():
             if not gitops.is_repo(self.paths.root):
                 return {
                     "agent_id": agent_id, "steered": False,
@@ -2836,15 +2852,34 @@ class Runner:
                              "project is not a git repository, so a new one "
                              "cannot be cut.",
                 }
-            base = self.config.base_branch or gitops.current_branch(self.paths.root)
-            workdir = self.paths.worktree(agent_id)
-            branch = gitops.create_worktree(
-                self.paths.root, workdir,
-                f"{self.config.branch_prefix}/{node.agent}/"
-                f"{agent_id.removeprefix('ag-')}",
-                base,
-            )
-            self.tree.update(agent_id, worktree=str(workdir), branch=branch)
+            workdir = cwd
+            if branch:
+                # SP-R4: the node's own branch, never a new `-2` cut off base
+                # beside it. Its commits are the work being resumed.
+                if not gitops.branch_exists(self.paths.root, branch):
+                    return {
+                        "agent_id": agent_id, "steered": False,
+                        "error": f"this run's worktree is gone and its branch "
+                                 f"{branch!r} no longer exists, so there is no "
+                                 f"work to resume it on. Start a fresh run with "
+                                 f"start_agent instead.",
+                    }
+                try:
+                    gitops.attach_worktree(self.paths.root, workdir, branch)
+                except gitops.GitError as exc:
+                    return {"agent_id": agent_id, "steered": False,
+                            "error": f"could not check {branch!r} out again at "
+                                     f"{workdir}: {exc}"}
+                self.tree.update(agent_id, worktree=str(workdir))
+            else:
+                base = self.config.base_branch or gitops.current_branch(self.paths.root)
+                branch = gitops.create_worktree(
+                    self.paths.root, workdir,
+                    f"{self.config.branch_prefix}/{node.agent}/"
+                    f"{agent_id.removeprefix('ag-')}",
+                    base,
+                )
+                self.tree.update(agent_id, worktree=str(workdir), branch=branch)
 
         # `internal=True`: this ends the turn to respawn the very same run, not
         # a cancellation, and must not report the run as `cancelled` while
@@ -2914,6 +2949,25 @@ class Runner:
                 f"one looks like. Check it again before assuming the steer landed; "
                 f"if it is still silent, stop_agent keeps the branch and worktree.")
         return result
+
+    def _missing_session(self, node, spec: AgentSpec, provider: Provider,
+                         cwd: Path) -> str:
+        """Why `node`'s session cannot be resumed from `cwd`, or "" if it can.
+
+        Only for a provider that declares where its sessions live; one that
+        declares nothing is not second-guessed. Looked for where the host
+        really finds it, through the executor the node runs under (SP-R2): a
+        docker agent's transcript is in the container's profile, not the
+        host's.
+        """
+        path = session_transcript(provider, cwd, node.session_id, self.executor(spec))
+        if path is None or path.is_file():
+            return ""
+        return (f"session {node.session_id} cannot be resumed: no transcript "
+                f"for it in {path.parent} (looked for {path.name}). It was "
+                f"lost or never written, and resuming it would start a run with "
+                f"no conversation behind it. Nothing was changed; start a fresh "
+                f"run with start_agent instead.")
 
     # ---------------------------------------------------------- conversation --
 

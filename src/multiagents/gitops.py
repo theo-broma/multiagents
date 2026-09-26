@@ -144,6 +144,23 @@ def create_worktree(repo: Path, path: Path, branch: str, base: str = "") -> str:
     return branch
 
 
+def attach_worktree(repo: Path, path: Path, branch: str) -> None:
+    """Check out the EXISTING `branch` at `path` as a worktree, commits intact.
+
+    The counterpart of `create_worktree` for a run that already has a branch
+    and lost its checkout: cutting a new one would fork the node's work
+    (SP-R4). A registration left behind by a deleted directory is pruned
+    first, or git refuses the branch as still checked out there. A branch
+    genuinely checked out somewhere else is refused, never forced away.
+    """
+    ensure_repo(repo)
+    if not branch_exists(repo, branch):
+        raise GitError(f"branch {branch!r} no longer exists")
+    run(repo, "worktree", "prune")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run(repo, "worktree", "add", str(path), branch, check=True, timeout=300)
+
+
 def remove_worktree(repo: Path, path: Path, force: bool = False) -> GitResult:
     args = ["worktree", "remove", str(path)]
     if force:

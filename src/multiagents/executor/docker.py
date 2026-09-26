@@ -544,6 +544,11 @@ class DockerExecutor(Executor):
         for host_path, private_path in self.private_state().items():
             private_path.mkdir(parents=True, exist_ok=True)
             mounts.append((host_path, False))
+        # And a provider's session transcripts, where no private home already
+        # holds them (SP-R1): in the container layer they die with it.
+        for container_path, store in self.transcript_state().items():
+            store.mkdir(parents=True, exist_ok=True)
+            mounts.append((container_path, False))
 
         # Same trick, for the opposite reason: the project root is mounted
         # writable because agents commit in it, and `.multiagents/config` sits
@@ -827,7 +832,7 @@ class DockerExecutor(Executor):
                        self.container])
         if result.returncode != 0:
             return []
-        private = self.private_state()
+        private = self.backing()
         # The server's own install paths differ by entry point, so they are
         # neither owed nor surplus: left out on both sides. Only those
         # `run_args` adds, though — one the configuration mounts itself is
@@ -918,6 +923,68 @@ class DockerExecutor(Executor):
             for relative in getattr(entry, "container_private_home", []) or []:
                 out[Path.home() / relative] = root / name / relative
         return out
+
+    def transcript_state(self, provider: str = "") -> dict[Path, Path]:
+        """{static transcript prefix in the container: its store on the host}.
+
+        SP-R1. Every provider that declares where it writes its sessions gets
+        that place backed by the host, or a `docker rm` deletes every
+        conversation an agent could have been resumed from — which is how
+        they were all lost on 2026-09-24. Generic: the only input is the
+        provider's own `transcript:` declaration.
+
+        Only where nothing else holds it. A prefix inside a container-private
+        home (claude's `~/.claude/projects`, inside `~/.claude`) is host-backed
+        already, and a second mount over it would split one profile across two
+        stores. The transcript directory alone, never the profile around it:
+        credentials must not become reachable through this.
+
+        Per project, whatever `credential_scope` says: sessions are work, not
+        an account.
+        """
+        if self.paths is None:
+            return {}
+        from ..watchdog import transcript_prefix
+
+        held = list(self.private_state())
+        root = state_root() / "transcripts" / self.slug
+        home = Path.home()
+        out: dict[Path, Path] = {}
+        for name, entry in self.providers.items():
+            if provider and name != provider:
+                continue
+            prefix = transcript_prefix(entry)
+            if prefix is None or not prefix.is_absolute():
+                continue
+            if any(prefix == p or p in prefix.parents for p in held):
+                continue
+            relative = (prefix.relative_to(home) if home in prefix.parents
+                        else prefix.relative_to(prefix.anchor))
+            out[prefix] = root / name / relative
+        return out
+
+    def backing(self) -> dict[Path, Path]:
+        """{path in the container: the host directory mounted there}, for every
+        mount whose source is not the path itself."""
+        return {**self.private_state(), **self.transcript_state()}
+
+    def host_path(self, path: Path) -> Path:
+        """Where `path`, as the container sees it, lives on the host (SP-R2).
+
+        Followed through the deepest mount that relocates it; every other
+        mount is at its own path, so anything else is where it says. From
+        inside the container the container's view is the one to read.
+        """
+        if self.paths is None or self.inside():
+            return path
+        best = None
+        for destination, source in self.backing().items():
+            if path == destination or destination in path.parents:
+                if best is None or len(destination.parts) > len(best[0].parts):
+                    best = (destination, source)
+        if best is None:
+            return path
+        return best[1] / path.relative_to(best[0])
 
     def vault_state(self, provider: str = "") -> dict[str, Path]:
         """{provider: the host-only profile holding its REAL credential}.
@@ -1185,7 +1252,7 @@ class DockerExecutor(Executor):
             if value:
                 argv += [flag, str(value)]
 
-        private = self.private_state()
+        private = self.backing()
         mounts = self.mounts()
         for path, read_only in mounts:
             source = private.get(path, path)
@@ -1254,14 +1321,16 @@ class DockerExecutor(Executor):
             # config change reads as "did nothing" — the toolchain is still
             # missing, the read-only path is still writable, and nothing says
             # why. Refusing is the only way that stops being silent.
+            warning = self.recreation_warning()
             return {"ok": False,
                     "error": f"this container was created without {stale[0]}"
                              + (f" (and {len(stale) - 1} other change(s))"
                                 if len(stale) > 1 else "")
                              + ". A mount list is fixed at creation, so "
-                               "`docker up` cannot add it: run `multiagents "
-                               "docker rm && multiagents docker up`. That ends "
-                               "any agent still inside."}
+                               "`docker up` cannot add it"
+                             + (f". {warning}" if warning else
+                                ": run `multiagents docker rm && multiagents "
+                                "docker up`. That ends any agent still inside.")}
         if state == "running":
             return {"ok": True, "container": self.container, "existed": True}
         if state in ("exited", "created", "paused"):
@@ -1274,6 +1343,39 @@ class DockerExecutor(Executor):
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:600]}
         return {"ok": True, "container": self.container, "created": True}
+
+    # What a container recreation ends: an agent whose process is in it.
+    ENDED_BY_RECREATION = ("running", "detached", "stuck")
+
+    def agents_inside(self) -> list[tuple[str, str]]:
+        """`(id, status)` of every agent `docker rm` would end (SP-R5).
+
+        Every live node of the project: a node records no executor of its own,
+        so under this one they are taken to be in here. The launched sessions
+        (drivers) run on the host and are not.
+        """
+        if self.paths is None or not self.paths.tree_file.is_file():
+            return []
+        from ..tree import DRIVER_ROLES, Tree
+        try:
+            nodes = Tree(self.paths.tree_file, self.paths.events_file).read()["nodes"]
+        except Exception:
+            return []
+        return sorted((agent_id, raw.get("status", "")) for agent_id, raw in nodes.items()
+                      if raw.get("status") in self.ENDED_BY_RECREATION
+                      and raw.get("role", "") not in DRIVER_ROLES)
+
+    def recreation_warning(self) -> str:
+        """The agents a recreation would end, and what to do first; "" for
+        none. A prescription of `docker rm` that `docker rm` itself then
+        refuses is no prescription at all (SP-R5)."""
+        inside = self.agents_inside()
+        if not inside:
+            return ""
+        listed = ", ".join(f"{agent_id} ({status})" for agent_id, status in inside)
+        return (f"Recreating it ends the agents still inside: {listed}. Run "
+                f"`multiagents stop` first, then `multiagents docker rm && "
+                f"multiagents docker up`.")
 
     def stale_mounts(self) -> list[str]:
         """Mounts the config asks for that this container does not have.

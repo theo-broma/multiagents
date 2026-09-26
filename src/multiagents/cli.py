@@ -900,11 +900,13 @@ def _executor_problems(paths, config) -> list[str]:
         problems = executor.preflight()
         stale = executor.mount_drift()
         if stale:
+            warning = executor.recreation_warning()
             problems.append(
                 f"the running container predates the current configuration "
                 f"({len(stale)} mount(s) differ, e.g. {stale[0]}). Mounts are "
-                f"fixed at CREATION, so `down` and `up` will not change them — "
-                f"`multiagents docker rm && multiagents docker up` replaces it.")
+                f"fixed at CREATION, so `down` and `up` will not change them"
+                + (f". {warning}" if warning else
+                   " — `multiagents docker rm && multiagents docker up` replaces it."))
         return problems
     except Exception as exc:                 # never block a launch on the check
         return [f"could not check the docker executor: {type(exc).__name__}: {exc}"]
@@ -1471,10 +1473,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                   f"configuration ({len(stale_mounts)} mount(s) differ):")
             for line in stale_mounts[:4]:
                 print(f"  {'':5}{line}")
+            try:
+                warning = _docker_executor(paths).recreation_warning()
+            except Exception:
+                warning = ""
             print(f"  {'':5}Mounts are fixed at CREATION — `down` and `up` only "
                   f"stop and start.\n"
-                  f"  {'':5}`multiagents docker rm && multiagents docker up` "
-                  f"replaces it.")
+                  + (f"  {'':5}{warning}" if warning else
+                     f"  {'':5}`multiagents docker rm && multiagents docker up` "
+                     f"replaces it."))
             problems += 1
         try:
             drift = _docker_executor(paths).credential_drift()
@@ -2578,6 +2585,19 @@ def cmd_docker(args: argparse.Namespace) -> int:
               f"{result['container']} running ({ex.network_mode} networking)")
         return 0 if result.get("ok") else 1
 
+    if args.action == "rm" and not getattr(args, "force", False):
+        # SP-R5: removing the container ends every agent in it, and a session
+        # it was writing is only resumable if it is stopped first.
+        inside = ex.agents_inside()
+        if inside:
+            print("refusing: removing the container ends the agents still "
+                  "inside it:", file=sys.stderr)
+            for agent_id, status in inside:
+                print(f"  {agent_id}  {status}", file=sys.stderr)
+            print("Run `multiagents stop` first, which leaves them resumable, "
+                  "or pass --force to end them anyway.", file=sys.stderr)
+            return 1
+
     if args.action in ("down", "rm"):
         print(ex.stop(remove=args.action == "rm"))
         return 0
@@ -2898,6 +2918,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="provider to act on; only used by `login` (default: agy)")
     p.add_argument("--all", action="store_true",
                    help="with `status`: every project's containers on this machine")
+    p.add_argument("--force", action="store_true",
+                   help="with `rm`: remove it even with agents still inside")
     p.set_defaults(func=cmd_docker)
 
     p = sub.add_parser("catalog", help="compare the local model catalog against the live one")

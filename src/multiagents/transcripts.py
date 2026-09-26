@@ -434,17 +434,19 @@ def _last_reading(handle, start: int, end: int) -> int | None:
     return None
 
 
-def session_transcript(provider: Any, cwd: Path, session_id: str) -> Path | None:
+def session_transcript(provider: Any, cwd: Path, session_id: str,
+                       executor: Any = None) -> Path | None:
     """The file the provider declares for this session in `cwd`, or None.
 
     None when there is no session id or the provider declares no transcript;
-    the file itself may not exist yet.
+    the file itself may not exist yet. Given the executor the session ran
+    under, the path is where the host finds it (SP-R2).
     """
     from .watchdog import transcript_source
 
     if not session_id:
         return None
-    source = transcript_source(provider, Path(cwd))
+    source = transcript_source(provider, Path(cwd), executor)
     if source is None:
         return None
     directory, pattern = source
