@@ -1471,8 +1471,13 @@ Resume in this order:
 
 The container now runs on a second Claude account (weekly 0 %, resets
 2026-10-02 12:00 UTC); agy's Gemini weekly pool is at 83 %.
-- **Item 8:** ag-12951a steered to carry on: dev-advisor first, then
-  implement, full suite via the chunk script.
-- **Run refusal after a credit reset:** researcher ag-d34838 is tracing
+- **Item 8:** ag-12951a could NOT be resumed ("No conversation found":
+  the container's claude profile holds no transcripts; container-state was
+  recreated 2026-09-24 22:16). Discarded; restarted cold as ag-a29f15
+  (implementer-deep, SV-R1..R10, given ag-12951a's plan as a proposal).
+  Next after it: docker variants on the host, adversary, reviewer, then
+  tester for SV-R11. Bug-reporter ag-32b8ac is filing the lost-transcript
+  defect.
+- **Run refusal after a credit reset:** researcher ag-cdb2c0 (retry of ag-d34838, opencode server error) is tracing
   the refusal path and every stale state (read-only). Its answer feeds the
   contract for the fix and for `refresh-quota`.
