@@ -377,7 +377,12 @@ class Project:
         self.stub.chmod(self.stub.stat().st_mode | stat.S_IEXEC)
         genv = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
-        for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"]):
+        # `.multiagents/` is gitignored in a real project; untracked here it
+        # would leave the root dirty and `gitops.merge` refuses a dirty target
+        # tree (SV-R9: merge_agent on an adopted node).
+        (self.root / ".gitignore").write_text(".multiagents/\n")
+        for args in (["init", "-q", "-b", "main"], ["add", ".gitignore"],
+                     ["commit", "-q", "-m", "init"]):
             subprocess.run(["git", "-C", str(self.root), *args], env=genv,
                            check=True, capture_output=True)
 
