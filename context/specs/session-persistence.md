@@ -37,6 +37,20 @@ land in a directory backed by the host, one that survives
   own `~/.claude` (or any other provider's user profile) on the host.
 - The executor does this generically, from the provider's declaration: no
   provider is named in the executor.
+- `transcript.dir` contains a per-agent placeholder (`{slug}`, the folded
+  worktree path). What is backed is its **static prefix**: the path up to the
+  first component that contains a placeholder (for claude,
+  `~/.claude/projects`). One container-wide mount then covers every agent.
+  The worktree path is identical inside and outside the container, so the
+  slugs match.
+- **Resolve a contradiction first.** `providers.yaml` already declares
+  `.claude` as a container-private home that is host-backed
+  (`container_private_home`), yet on 2026-09-26
+  `~/.multiagents/container-state/shared/claude/.claude/` held no
+  `projects/`. Find out where the CLI in the container actually writes
+  (`HOME` and `CLAUDE_CONFIG_DIR` at exec time, a per-agent copy, and so
+  on), and back THAT path. The docker variant below is what proves it.
+
 Verified by:
 - a unit test that, for a provider declaring a transcript dir, the docker run
   command or mounts back that dir with a host path under the project's or
@@ -81,9 +95,13 @@ refusal (`DockerExecutor` stale mounts, and `run`'s preflight) and
 `detached` or `stuck` under the docker executor, since recreation ends them.
 - `docker rm` with such nodes present refuses, with that list, unless
   `--force` is given.
+- The drift refusal must not prescribe a command that would then refuse.
+  With such nodes present, it says to run `multiagents stop` first, then
+  `docker rm && docker up`. With none, it keeps today's prescription.
 - The refusal message suggests `multiagents stop` first.
 - With none present, both behave as today.
-Verified by: CLI tests with seeded tree nodes, covering: the refusal and its
+Verified by: CLI tests with seeded tree nodes, covering:
+- the drift refusal's wording with and without such nodes; the refusal and its
 exit code, `--force` proceeding, and the message listing the ids.
 
 ## Out of scope
