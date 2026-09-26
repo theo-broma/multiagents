@@ -448,7 +448,8 @@ class Runner:
             from .budget import read_provider
 
             budget = read_provider(provider.name, provider, self.executor(),
-                                   global_config_dir(), self.paths.config)
+                                   global_config_dir(), self.paths.config,
+                                   limits=self.config.limits)
             self.tree.note_headroom(provider.name, budget.headroom,
                                     self.tree.rollup_usage().get("cost_usd", 0))
         except Exception:
@@ -1381,6 +1382,7 @@ class Runner:
             # container context, so the project default is the right answer.
             lambda _provider_name: self.executor(),
             global_config_dir(), self.paths.config, None, cooldowns,
+            limits=self.config.limits,
         )
         self._half_open(budgets, cooldowns)
         spend_now = self.tree.rollup_usage().get("cost_usd", 0)
@@ -2259,7 +2261,7 @@ class Runner:
             from .budget import read_provider
             budget = read_provider(provider.name, provider, self.executor(),
                                    global_config_dir(), self.paths.config,
-                                   use_cache=False)
+                                   use_cache=False, limits=self.config.limits)
         except Exception:
             budget = None
         if budget is not None and budget.known:
