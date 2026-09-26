@@ -65,7 +65,7 @@ class LocalExecutor(Executor):
         """
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "exit_status").unlink(missing_ok=True)
-        offset = _size(run_dir / "output.ndjson")
+        offset = _turn_start(run_dir / "output.ndjson")
         # A plain Popen, not asyncio's: an asyncio subprocess transport kills
         # its process when it is closed or collected, which is at the latest
         # when this server exits — exactly what must not happen (SV-R3).
@@ -82,6 +82,24 @@ class LocalExecutor(Executor):
         )
         return FollowHandle(pid=proc.pid, run_dir=run_dir, offset=offset,
                             pid_start=procs.start_time(proc.pid), _proc=proc)
+
+
+def _turn_start(path: Path) -> int:
+    """Where a new turn's output will begin in `path` (SV-R1/R7): its end, on
+    a line of its own. A previous turn can end mid-line — killed between a
+    write and its newline — and the wrapper appends, so without this the new
+    turn's first event would be glued onto that fragment and lost with it."""
+    try:
+        with path.open("rb+") as fh:
+            end = fh.seek(0, 2)
+            if end:
+                fh.seek(end - 1)
+                if fh.read(1) != b"\n":
+                    fh.write(b"\n")
+                    end += 1
+            return end
+    except FileNotFoundError:
+        return 0
 
 
 def _size(path: Path) -> int:
