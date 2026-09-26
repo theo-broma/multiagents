@@ -1466,3 +1466,13 @@ Resume in this order:
 4. **Item 7** (live compaction) is still unobserved. The content-filter
    refusal is still reported as `done`. The config-drift warning is not
    scheduled.
+
+## Resumed (2026-09-26)
+
+The container now runs on a second Claude account (weekly 0 %, resets
+2026-10-02 12:00 UTC); agy's Gemini weekly pool is at 83 %.
+- **Item 8:** ag-12951a steered to carry on: dev-advisor first, then
+  implement, full suite via the chunk script.
+- **Run refusal after a credit reset:** researcher ag-d34838 is tracing
+  the refusal path and every stale state (read-only). Its answer feeds the
+  contract for the fix and for `refresh-quota`.
