@@ -1661,3 +1661,6 @@ Resume in this order:
 - ag-f233a2 (CI) and ag-1d9832 (bug-d6310f/8615db) were cut by the claude quota with NO code written: steer
   them after 03:00 UTC ("window reset, carry on"; 1d9832 left HANDOFF.md on its branch — tell it not to merge
   that file). They finished before the wait began and wait_for_agents never reported them: bug-d6310f live.
+- Reviewer ag-39521a rejected 7697c2 (10 findings). Accepted #1-8, #10; DECLINED #9 (runtime symlinks inside
+  the container image: provider declarations are trusted config; the lexical guard targets mistakes). Steered
+  ag-7697c2 to fix them. Merge after that + a re-check; then resolve bug-4a0446 fixed.
