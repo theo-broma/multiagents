@@ -1854,8 +1854,17 @@ class Runner:
         status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
         if not run.awaiting and (timed_out or (unrecorded and not run.final_result)):
             status = "failed"
+        # SV-R10: `cancelled` here was written by someone else — this run's own
+        # stop never reaches `_finalize` — so the exit being judged is that
+        # stop's kill, and the stop is the verdict.
+        stopped_elsewhere = bool(stuck_before and stuck_before.status == "cancelled")
+        if stopped_elsewhere:
+            status = "cancelled"
 
-        status, limited = await self._provider_health_after(run, status, text, stderr)
+        if not stopped_elsewhere:
+            status, limited = await self._provider_health_after(run, status, text, stderr)
+        else:
+            limited = None
 
         # Commit anything the agent left uncommitted so no work is stranded on
         # an unreferenced worktree. Skipped while parked on a question: the
@@ -1894,7 +1903,9 @@ class Runner:
         ticket = self._file_ticket(node_id, text) if not run.awaiting else None
         if ticket:
             run.ticket = {k: ticket[k] for k in ("id", "severity", "title", "status")}
-        if run.awaiting:
+        if stopped_elsewhere:
+            pass                          # its reason is the stopper's to give
+        elif run.awaiting:
             question = self.tree.add_question(
                 node_id, run.awaiting["topic"], run.awaiting["question"],
                 run.awaiting["proposed"],
@@ -2033,8 +2044,9 @@ class Runner:
             await self._merge_pending_children(node_id)
             await self._maybe_merge_into_parent(node_id)
 
-        if not run.awaiting:
-            # A parked agent still owns its worktree and will resume in it.
+        if not run.awaiting and not stopped_elsewhere:
+            # A parked agent still owns its worktree and will resume in it, and
+            # a stopped one is left as a stop leaves it: resumable.
             self._drop_if_empty(node_id, run.spec)
         return False
 
@@ -2532,10 +2544,42 @@ class Runner:
                 if await self._adopt_one(node):
                     taken.append(node.id)
             except Exception as exc:
-                self._release(node.id)
-                self.tree.emit(node.id, "adopt_failed",
-                               detail=f"{type(exc).__name__}: {exc}")
+                await self._unadoptable(node, exc)
         return taken
+
+    async def _unadoptable(self, node, exc: Exception) -> None:
+        """SV-R6: a node adoption raised on — its spec gone, its command.json
+        corrupt — ends here, with the reason, instead of staying adoptable and
+        failing again every pass. Its process, if any, is stopped first: a
+        `failed` node must not go on spending with nobody reading it.
+
+        Only if this server still holds it, or can take it: a node another
+        server has just adopted is that server's to judge."""
+        detail = f"{type(exc).__name__}: {exc}"
+        run = self.runs.get(node.id)
+        if run is not None and run.task is not None:
+            # It raised after the follow began: the node IS adopted, and its
+            # own `_consume` finishes it and releases the lock.
+            self.tree.emit(node.id, "adopt_failed", detail=detail)
+            return
+        self.runs.pop(node.id, None)
+        try:
+            if node.id not in self._locks and not self._claim(node.id):
+                return
+        except OSError:
+            return
+        try:
+            self.tree.emit(node.id, "adopt_failed", detail=detail)
+            current = self.tree.get(node.id)
+            if current is None or current.status not in self.ADOPTABLE:
+                return
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self.stop_detached, current)
+            self.tree.set_status(node.id, "failed",
+                                 f"could not be adopted after its server exited: "
+                                 f"{detail}")
+        finally:
+            self._release(node.id)
 
     async def _adopt_one(self, node) -> bool:
         run_dir = self.paths.run_dir(node.id)
@@ -2724,6 +2768,12 @@ class Runner:
             # in, then fall back to the local pid.
             node = self.tree.get(agent_id)
             if node:
+                # SV-R10: the verdict before the kill. A server still following
+                # this node (another process: `multiagents stop <id>`) sees the
+                # exit a moment later, and `_finalize` keeps a `cancelled` it
+                # finds rather than filing the kill as a failure.
+                if not internal:
+                    self.tree.set_status(agent_id, "cancelled", "stopped by parent")
                 await asyncio.to_thread(self.stop_detached, node)
         if internal:
             return {"agent_id": agent_id, "status": "stopping"}
@@ -2828,6 +2878,14 @@ class Runner:
                     break
                 await asyncio.sleep(0.05)
         node = self.tree.get(agent_id)
+        if heard and node is not None and node.status in ("done", "idle"):
+            # Not a run that died: one that heard the message, answered it and
+            # finished inside the window. Read from a file (SV-R1), a short
+            # turn arrives in a single poll, so this is the common case for a
+            # quick reply, not a corner of one.
+            self.tree.emit(agent_id, "steered", message=message[:400], confirmed=True)
+            return {"agent_id": agent_id, "steered": True, "status": node.status,
+                    "confirmed": True}
         if node is not None and node.status not in ("running", "pending"):
             return {
                 "agent_id": agent_id, "steered": False, "status": node.status,

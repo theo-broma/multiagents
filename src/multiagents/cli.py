@@ -2359,6 +2359,29 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _with_descendants(tree: Tree, active: list, root: str) -> list:
+    """`root` and every active node below it, deepest first (SV-R10: the node
+    and its children). Children go before their parent, so none is orphaned
+    while the parent's own server is still there to cancel it on its way out.
+    Parent links come from the whole tree, so a child is still found through
+    a parent that has already ended."""
+    parent_of = {key: value.get("parent") for key, value in tree.read()["nodes"].items()}
+
+    def depth_under(node_id: str | None) -> int | None:
+        depth, seen = 0, set()
+        while node_id and node_id not in seen:
+            if node_id == root:
+                return depth
+            seen.add(node_id)
+            node_id = parent_of.get(node_id)
+            depth += 1
+        return None
+
+    ranked = [(depth_under(n.id), n) for n in active]
+    return [n for d, n in sorted((pair for pair in ranked if pair[0] is not None),
+                                 key=lambda pair: -pair[0])]
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
     """Bring everything to a halt without losing any of it.
 
@@ -2410,7 +2433,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
     # --- the agents --------------------------------------------------------
     # Detached ones included (they are active): with no server attached,
     # `Runner.stop` ends them through their wrapper, escalating to KILL.
-    active = [n for n in tree.active() if not only or n.id == only]
+    active = tree.active()
+    if only:
+        active = _with_descendants(tree, active, only)
     stopped_agents = []
     if active:
         runner = Runner(paths, config)

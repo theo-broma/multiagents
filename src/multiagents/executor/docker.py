@@ -48,7 +48,7 @@ from typing import Any
 from ..paths import ProjectPaths, server_install_paths, state_root
 from .. import procs
 from .base import Executor, FollowHandle, Handle, wrapper_argv
-from .local import LocalExecutor, _size
+from .local import LocalExecutor, _turn_start
 
 
 class DockerHandle(Handle):
@@ -1489,7 +1489,7 @@ class DockerExecutor(Executor):
         """
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "exit_status").unlink(missing_ok=True)
-        offset = _size(run_dir / "output.ndjson")
+        offset = _turn_start(run_dir / "output.ndjson")
         # Entered through `sh`, as every other command here enters the
         # container. The PATH it sees is the host's, carried in `env` for
         # the agent's sake (its launcher is mounted at its host path), and a
