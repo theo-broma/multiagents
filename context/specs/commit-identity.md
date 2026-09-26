@@ -39,3 +39,15 @@ the commit reports it:
 Verified by: a unit test on `commit_all` with a commit made to fail (e.g. a
 failing `pre-commit` hook in the test repo): it raises or returns an error
 naming the stderr. Also a test that a clean tree is not an error.
+
+## Decisions, 2026-09-26 (orchestrator, after tester ag-862edc)
+
+- **How `commit_all` learns the role and agent id:** the implementer's
+  choice, for example optional keyword arguments. The runner-level test is
+  what binds the naming.
+- **Partial identity:** the fallback fills only the missing half (name or
+  email). A configured half is kept.
+- **CI-R2 reporting:** it covers the runner's end-of-run commit. The CLI
+  callers already check `result.ok` and are unchanged.
+- **Node status:** a failed commit does not by itself change the run's
+  status. It is reported in the result text and in an event.
