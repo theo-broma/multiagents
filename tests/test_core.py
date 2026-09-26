@@ -7892,12 +7892,23 @@ def test_waiting_out_a_window_does_not_spend_the_restart_attempts(tmp_path, monk
 # The shape GET /api/oauth/usage returns, trimmed to what is read. It is also
 # exactly what the CLI stores under cachedUsageUtilization, because that key is
 # a cache of this response — which is why one parser serves both.
+#
+# resets_at is relative to now, not a literal date: under QF-R1/R2 a window
+# past its reset voids a cached reading and forces a fetch, so a literal date
+# turns this fixture stale the day it passes.
+import datetime as _datetime
+
+_FIVE_HOUR_RESET = (_datetime.datetime.now(_datetime.timezone.utc)
+                    + _datetime.timedelta(days=180)).isoformat()
+_SEVEN_DAY_RESET = (_datetime.datetime.now(_datetime.timezone.utc)
+                    + _datetime.timedelta(days=181)).isoformat()
+
 USAGE_PAYLOAD = {
-    "five_hour": {"utilization": 96.0, "resets_at": "2026-09-09T16:50:00+00:00"},
-    "seven_day": {"utilization": 40.0, "resets_at": "2026-09-14T14:00:00+00:00"},
+    "five_hour": {"utilization": 96.0, "resets_at": _FIVE_HOUR_RESET},
+    "seven_day": {"utilization": 40.0, "resets_at": _SEVEN_DAY_RESET},
     "limits": [
-        {"kind": "session", "percent": 96, "resets_at": "2026-09-09T16:50:00+00:00"},
-        {"kind": "weekly_all", "percent": 40, "resets_at": "2026-09-14T14:00:00+00:00"},
+        {"kind": "session", "percent": 96, "resets_at": _FIVE_HOUR_RESET},
+        {"kind": "weekly_all", "percent": 40, "resets_at": _SEVEN_DAY_RESET},
     ],
     "extra_usage": {"is_enabled": False, "monthly_limit": 8500,
                     "used_credits": 8603.0, "spend_limit_reached": True},
@@ -7934,7 +7945,7 @@ def test_a_fresh_cache_is_read_and_the_account_is_not_asked(tmp_path, monkeypatc
                         lambda config_dir=None: pytest.fail("asked the account for a fresh cache"))
     b = budget_mod.read_claude()
     assert b.known and round(b.headroom, 2) == 0.04
-    assert b.resets_at == "2026-09-09T16:50:00+00:00"
+    assert b.resets_at == _FIVE_HOUR_RESET
 
 
 def test_a_missing_cache_asks_the_account_instead_of_going_blind(tmp_path, monkeypatch):
