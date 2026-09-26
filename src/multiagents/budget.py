@@ -151,6 +151,89 @@ class Budget:
         return data
 
 
+def _reset_is_past(resets_at: Any, margin: float, now_: float) -> bool:
+    """Is a window's own reset far enough in the past to say it has reset?
+
+    A reading carries its own expiry: once ``now`` is at least ``margin``
+    seconds past ``resets_at``, the window counts as reset even if the cache
+    holding the reading still calls itself fresh. Naive (no timezone) or
+    unparseable timestamps never count as past-reset — see
+    ``context/specs/quota-freshness.md``.
+    """
+    if not resets_at:
+        return False
+    try:
+        when = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if when.tzinfo is None:
+        return False
+    return now_ - when.timestamp() >= margin
+
+
+def _effective_windows(b: Budget) -> dict[str, dict]:
+    """``b.windows``, or a synthesized single-window view for a bare reading.
+
+    A single-window budget never populates ``windows`` (a builtin reader
+    only does that once there is more than one bucket), so a reading with a
+    top-level ``resets_at`` and no ``windows`` is treated as one window here,
+    per the spec's Decisions section.
+    """
+    if b.windows:
+        return {name: detail for name, detail in b.windows.items()
+                if isinstance(detail, dict)}
+    if b.headroom is not None and b.resets_at:
+        return {"_default": {"percent": (1 - b.headroom) * 100,
+                             "resets_at": b.resets_at}}
+    return {}
+
+
+def _apply_reset_margin(b: Budget, margin: float, now_: float) -> Budget:
+    """Recompute a Budget so a window past its own reset never counts.
+
+    Applied uniformly to every provider's reading on every retrieval — a
+    cache hit or a fresh fetch alike — and never cached itself, so the
+    margin is always judged against the CURRENT clock (QF-R1).
+    """
+    windows = _effective_windows(b)
+    if not windows:
+        return b
+    past = {name for name, detail in windows.items()
+            if _reset_is_past(detail.get("resets_at"), margin, now_)}
+    if not past:
+        return b
+    remaining = {name: detail for name, detail in windows.items() if name not in past}
+    new_windows = dict(b.windows)
+    for name in past:
+        if name in new_windows:
+            new_windows[name] = {**new_windows[name], "percent": 0.0, "resets_at": None}
+    if not remaining:
+        return replace(b, headroom=1.0, resets_at=None, severity="normal",
+                      windows=new_windows)
+    worst = max(remaining, key=lambda name: remaining[name].get("percent") or 0)
+    worst_percent = remaining[worst].get("percent") or 0
+    return replace(
+        b, headroom=max(0.0, 1.0 - worst_percent / 100.0),
+        resets_at=remaining[worst].get("resets_at"),
+        severity=("critical" if worst_percent >= 90
+                  else "warning" if worst_percent >= 75 else "normal"),
+        windows=new_windows,
+    )
+
+
+def _reset_margin(project_config: Path | None) -> float:
+    """``limits.quota_reset_margin_seconds``, layered like every other limit."""
+    from .config import _read_yaml, deep_merge, limit_number
+    from .paths import global_config_dir, shipped_defaults_dir
+
+    merged: dict = {}
+    for layer in (shipped_defaults_dir(), global_config_dir(), project_config):
+        if layer is None:
+            continue
+        merged = deep_merge(merged, _read_yaml(Path(layer) / "project.yaml"))
+    return limit_number(merged.get("limits") or {}, "quota_reset_margin_seconds")
+
+
 # --------------------------------------------------------------------------
 # claude — real subscription state
 # --------------------------------------------------------------------------
@@ -330,24 +413,69 @@ def _refused_for(note: str) -> float:
     return 0.0
 
 
-def _shared_usage(config_dir: Path | None = None) -> tuple[dict | None, str]:
-    """The machine's shared copy of the usage payload, refreshed by one caller."""
+def _usage_windows(utilization: dict | None) -> dict[str, dict]:
+    """Every readable bucket in a utilization payload, by name."""
+    windows: dict[str, Any] = {}
+    for i, entry in enumerate((utilization or {}).get("limits") or []):
+        percent = entry.get("percent")
+        if not isinstance(percent, (int, float)):
+            continue
+        windows[str(entry.get("kind") or i)] = {
+            "percent": float(percent), "resets_at": entry.get("resets_at")}
+    if not windows:
+        for key in ("five_hour", "seven_day"):
+            bucket = (utilization or {}).get(key) or {}
+            percent = bucket.get("utilization")
+            if isinstance(percent, (int, float)):
+                windows[key] = {"percent": float(percent), "resets_at": bucket.get("resets_at")}
+    return windows
+
+
+def _payload_past_reset(payload: dict | None, margin: float, now_: float) -> bool:
+    """Does a utilization payload hold a window past its own reset?"""
+    if not payload:
+        return False
+    return any(_reset_is_past(detail.get("resets_at"), margin, now_)
+              for detail in _usage_windows(payload).values())
+
+
+def _shared_usage(config_dir: Path | None = None, *, force: bool = False,
+                  margin: float | None = None, now_: float | None = None,
+                  reset_suspected: bool = False) -> tuple[dict | None, str]:
+    """The machine's shared copy of the usage payload, refreshed by one caller.
+
+    Normally bound by `SHARED_TTL` (jittered). But a reading's own `resets_at`
+    can lapse well inside that window, so when a past reset is suspected —
+    either because the caller just read one from the CLI's own cache, or
+    because this shared record's own stored payload holds one — a tighter
+    60s-per-machine bound applies instead (QF-R2). `force=True`
+    (`refresh-quota`) skips both bounds outright, but a backoff already in
+    force (`blocked_until`, from a 429/401/403) always still wins.
+    """
     import fcntl
     import random
 
+    now_ = time.time() if now_ is None else now_
     path = _shared_cache_file(config_dir)
     record = None
     try:
         record = json.loads(path.read_text())
-        # Jittered, so N machines and N restarts do not settle into one exact
-        # heartbeat. A perfectly periodic request is a signature; an irregular
-        # one is a person using a tool.
-        if time.time() - float(record["at"]) < SHARED_TTL + random.uniform(0, 60):
-            return record.get("payload"), record.get("note", "")
-        if time.time() < float(record.get("blocked_until") or 0):
-            return record.get("payload"), record.get("note", "")
     except (OSError, ValueError, KeyError, TypeError):
         record = None
+
+    if record is not None:
+        age = now_ - float(record.get("at", 0))
+        reset_due = reset_suspected or (
+            margin is not None and _payload_past_reset(record.get("payload"), margin, now_))
+        # Jittered at the ordinary bound, so N machines and N restarts do not
+        # settle into one exact heartbeat. Not jittered at the tight bound — a
+        # suspected reset is worth asking about promptly, not irregularly.
+        bound = 60.0 if reset_due else SHARED_TTL + random.uniform(0, 60)
+        if not force and age < bound:
+            return record.get("payload"), record.get("note", "")
+        if now_ < float(record.get("blocked_until") or 0):
+            stamp = time.strftime("%H:%M", time.localtime(record["blocked_until"]))
+            return record.get("payload"), f"not re-read: rate-limited until {stamp}"
 
     if not _fetching_allowed():
         return None, ("asking the provider for usage is off "
@@ -380,19 +508,26 @@ def _shared_usage(config_dir: Path | None = None) -> tuple[dict | None, str]:
                     continue
             return None, "another process is refreshing the usage reading"
         payload, note = fetch()
+        if payload is None and record is not None:
+            # A failed refresh must not erase a stale-but-still-meaningful
+            # reading — QF-R1's margin correction can still act on it, which
+            # is strictly better than reporting "unknown" over a transient
+            # network failure.
+            payload = record.get("payload")
         refused = _refused_for(note)
         if refused:
             note += f"; not asking again for {refused / 3600:.0f}h"
         with contextlib.suppress(OSError):
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps({
-                "at": time.time(), "payload": payload, "note": note,
-                "blocked_until": time.time() + refused if refused else 0}))
+                "at": now_, "payload": payload, "note": note,
+                "blocked_until": now_ + refused if refused else 0}))
             tmp.replace(path)
         return payload, note
 
 
-def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Budget:
+def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
+                project_config: Path | None = None, force: bool = False) -> Budget:
     """What is left on the claude account — WHICH account depends on where.
 
     `config_dir` is the instance's CLAUDE_CONFIG_DIR. With two subscriptions on
@@ -400,10 +535,15 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Bud
     account's headroom while the work spends the other's: the numbers would
     look right and mean nothing.
 
+    `project_config` is unrelated: it is this project's own config directory,
+    used only to look up `limits.quota_reset_margin_seconds`.
+
     Prefers the CLI's own cache — free, and no request against somebody's rate
-    limit — and asks the account directly when that cache is missing or stale.
-    Defensive throughout: an undocumented surface must degrade to
-    ``known=False`` rather than raise.
+    limit — and asks the account directly when that cache is missing or stale,
+    or when the cache itself is past its own reset (QF-R2). `force=True`
+    (`refresh-quota`) always asks, bypassing the shared file's freshness
+    bounds — though not an active rate-limit backoff. Defensive throughout: an
+    undocumented surface must degrade to ``known=False`` rather than raise.
     """
     budget = Budget(provider="claude", known=False, source="cachedUsageUtilization")
     profile = Path(config_dir).expanduser() if config_dir else None
@@ -422,11 +562,16 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Bud
     cached = data.get("cachedUsageUtilization") or {}
     utilization = cached.get("utilization") or {}
     fetched_ms = cached.get("fetchedAtMs")
+    now_ = time.time()
     if isinstance(fetched_ms, (int, float)):
-        budget.stale_seconds = max(0.0, time.time() - fetched_ms / 1000.0)
+        budget.stale_seconds = max(0.0, now_ - fetched_ms / 1000.0)
 
-    if fetch and (not utilization or (budget.stale_seconds or 0) > STALE_AFTER):
-        fresh, note = _shared_usage(profile)
+    margin = _reset_margin(project_config)
+    reset_suspected = bool(utilization) and _payload_past_reset(utilization, margin, now_)
+    if fetch and (force or not utilization or reset_suspected
+                 or (budget.stale_seconds or 0) > STALE_AFTER):
+        fresh, note = _shared_usage(profile, force=force, margin=margin, now_=now_,
+                                    reset_suspected=reset_suspected)
         if fresh:
             utilization, budget.stale_seconds = fresh, 0.0
             budget.source = "api/oauth/usage"
@@ -437,31 +582,16 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None) -> Bud
         return budget
 
     # The normalised `limits` array is the friendliest surface; fall back to the
-    # individual buckets if it is absent. Every readable bucket is collected
-    # into `windows` as we go, keyed by whatever names it (falling back to its
-    # position) — the worst-of-them logic below is unchanged, `windows` is
-    # purely additional bookkeeping.
+    # individual buckets if it is absent — `_usage_windows` tries
+    # both. Every readable bucket comes back keyed by whatever names it
+    # (falling back to its position); the worst-of-them logic below is
+    # unchanged, `windows` is purely additional bookkeeping.
+    windows = _usage_windows(utilization)
     worst_percent, worst_reset = None, None
-    windows: dict[str, Any] = {}
-    for i, entry in enumerate(utilization.get("limits") or []):
-        percent = entry.get("percent")
-        if not isinstance(percent, (int, float)):
-            continue
-        resets_at = entry.get("resets_at")
-        windows[str(entry.get("kind") or i)] = {"percent": float(percent), "resets_at": resets_at}
+    for name, detail in windows.items():
+        percent = detail.get("percent")
         if worst_percent is None or percent > worst_percent:
-            worst_percent, worst_reset = float(percent), resets_at
-
-    if worst_percent is None:
-        for key in ("five_hour", "seven_day"):
-            bucket = utilization.get(key) or {}
-            percent = bucket.get("utilization")
-            if not isinstance(percent, (int, float)):
-                continue
-            resets_at = bucket.get("resets_at")
-            windows[key] = {"percent": float(percent), "resets_at": resets_at}
-            if worst_percent is None or percent > worst_percent:
-                worst_percent, worst_reset = float(percent), resets_at
+            worst_percent, worst_reset = percent, detail.get("resets_at")
 
     if worst_percent is None:
         budget.note = "utilisation present but no readable bucket"
@@ -672,14 +802,19 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
 def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
                   project_config: Path | None = None,
                   spent: dict[str, int] | None = None,
-                  use_cache: bool = True) -> Budget:
+                  use_cache: bool = True, force: bool = False) -> Budget:
     now_ = time.time()
     source = str(config_dir)
-    if use_cache:
+    margin = _reset_margin(project_config)
+    if use_cache and not force:
         cached = _cache.get(name)
         if (cached and now_ - cached[0] < _CACHE_TTL
                 and _cache_source.get(name) == source):
-            budget = cached[1]
+            # QF-R1: the margin is re-applied fresh on every retrieval, cache
+            # hit or not — a window's own reset can lapse while the cache
+            # entry is still within `_CACHE_TTL`. The margin-adjusted result
+            # is never itself cached.
+            budget = _apply_reset_margin(cached[1], margin, now_)
             # R16: never hand out the cache's own object — copy with
             # independent spent/windows dicts so item assignment by a
             # caller cannot reach the cached entry.  R17: merge the
@@ -690,7 +825,7 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
         budget = _from_script(name, provider, executor, config_dir, project_config)
         if budget is None:
             builtin = _BUILTIN.get(name)
-            budget = builtin() if builtin is read_claude else (
+            budget = builtin(project_config=project_config, force=force) if builtin is read_claude else (
                 builtin(spent) if builtin else
                 Budget(provider=name, known=False, source="none",
                        note="no budget action and no built-in reader")
@@ -698,10 +833,13 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     except Exception as exc:              # telemetry must never break a run
         budget = Budget(provider=name, known=False,
                         note=f"{type(exc).__name__}: {exc}")
-    # Cache the reader's own budget BEFORE merging the caller's spent —
-    # the caller's keys are a per-call overlay, not durable state (R17).
+    # Cache the reader's own RAW budget BEFORE merging the caller's spent —
+    # the caller's keys are a per-call overlay, not durable state (R17) — and
+    # before the margin is applied, so a later cache hit re-judges the margin
+    # against ITS OWN current clock rather than reusing a stale verdict.
     _cache[name] = (now_, budget)
     _cache_source[name] = source
+    budget = _apply_reset_margin(budget, margin, now_)
     # R16: return a copy so the fresh-read caller cannot poison the cache
     # either (Amendment 2 — F171).  Merge the caller's spent onto the copy.
     merged = {**budget.spent, **spent} if spent else dict(budget.spent)
@@ -714,7 +852,8 @@ def read_all(providers: dict[str, Any] | None = None,
              project_config: Path | None = None,
              spend_by_provider: dict[str, dict[str, int]] | None = None,
              cooldowns: dict[str, dict] | None = None,
-             use_cache: bool = True) -> dict[str, Budget]:
+             use_cache: bool = True,
+             force: bool = False) -> dict[str, Budget]:
     """Read every provider's budget, driven by the loaded providers map.
 
     Previously a hardcoded three-name table that never consulted the providers
@@ -739,7 +878,7 @@ def read_all(providers: dict[str, Any] | None = None,
             continue
         executor = executor_for(name) if callable(executor_for) else _NullExecutor()
         budget = read_provider(name, provider, executor, config_dir, project_config,
-                               spend_by_provider.get(name), use_cache)
+                               spend_by_provider.get(name), use_cache, force)
         entry = cooldowns.get(name)
         if entry and entry.get("until", 0) > time.time():
             budget.cooldown_until = entry["until"]

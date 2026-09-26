@@ -536,7 +536,7 @@ class Runner:
                 reason = (f"{name} is not authenticated — run "
                           f"`multiagents auth login {name}`")
                 self.tree.set_cooldown(name, now() + auth_window, reason,
-                                       needs_login=True)
+                                       needs_login=True, cause="auth")
                 budget.cooldown_until = now() + auth_window
                 budget.note = reason
 
@@ -578,7 +578,8 @@ class Runner:
                     name, now() + seconds,
                     f"{family}: {tripped} and {cooling[0]} both failed — pausing "
                     f"the family briefly, which looks like the integration "
-                    f"rather than either account")
+                    f"rather than either account",
+                    cause="family")
         self.tree.emit("system", "family_down", family=family,
                        members=sorted([tripped, *members]))
 
@@ -1927,7 +1928,8 @@ class Runner:
             cooldown = now() + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
             )
-            self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run")
+            self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run",
+                                   cause="quota")
             self.tree.set_status(node_id, "failed", self._with_trip(prior_stuck, "quota exhausted"))
         elif run.spec.conversational and status == "done":
             # A conversation is not finished just because a turn is. Park it as
@@ -2076,7 +2078,7 @@ class Runner:
             if limited:
                 status = "limited"
                 self.tree.set_cooldown(run.provider.name, limited["until"],
-                                       limited["reason"])
+                                       limited["reason"], cause="quota")
                 self.tree.emit(node_id, "limited", provider=run.provider.name,
                                until=limited["until"], detail=limited["reason"])
 
@@ -2119,7 +2121,9 @@ class Runner:
                               f"`multiagents auth login {name}` and "
                               f"`multiagents doctor`")
                 self.tree.set_cooldown(name, now() + seconds, reason,
-                                       needs_login=authenticated is False)
+                                       needs_login=authenticated is False,
+                                       cause="auth" if authenticated is False
+                                       else "provider_down")
                 self._maybe_cool_family(name, seconds)
         return status, limited
 

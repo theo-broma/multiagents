@@ -254,6 +254,10 @@ limits:
   # Further repeats (one pair, for a two-step cycle) before doom_loop re-arms.
   doom_loop_rearm: 5
   budget_tokens: 0          # 0 = unlimited; otherwise tree-wide ceiling
+  # A quota window's own `resets_at` overrides how fresh the cache holding it
+  # claims to be: once now is this far past the reset, the window counts as
+  # reset even if nothing has fetched since. See context/specs/quota-freshness.md.
+  quota_reset_margin_seconds: 120
 
   # `start_agent(workdir=...)` puts an agent in a directory of its choosing
   # instead of its own worktree — no branch, no isolation from siblings, and
