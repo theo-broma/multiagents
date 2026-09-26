@@ -1511,3 +1511,10 @@ The container now runs on a second Claude account (weekly 0 %, resets
   guards); decisions on the tester's points in 3c4009f. Implementer
   (`implementer` tier) starts AFTER item 8 merges: it touches `tree.py` and
   `runner.py` cooldown call sites, which item 8 also changed.
+- **Item 8 MERGED (1eb16f2, 2026-09-26).** Crash guard included; mid-run lock
+  release verified by hand. Running on it now: adversary ag-852615, reviewer
+  ag-f48509. QF implementer ag-bec80b started on top of it. Still open for
+  item 8: the harness fix (ag-653182), the host docker variants
+  (`SV_TEST_DOCKER=1`, needs the user), SV-R11 (tester first), then
+  bug-4a0446. The running MCP server still runs pre-merge code until the
+  next restart.
