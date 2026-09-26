@@ -148,3 +148,13 @@ the user's HOME profile.
 - **The SP-R2 API:** the implementer may give `transcript_source` an executor
   argument, or add a resolver beside it. Tests go through steer and the
   resolver, not through a private signature.
+
+**2026-09-26, landed (b6610ca).** Accepted from ag-261e5d:
+- SP-R3's pre-check is skipped for `running`/`pending` nodes, because a live
+  CLI may not have written its session file yet;
+- SP-R4 reuses the node's old worktree path, because the transcript slug is
+  keyed on it;
+- `claude.sh compact` stays host-only. Compacting docker agents is not a
+  feature today.
+Open: a provider declaring a `~/…` transcript without a matching `home_links`
+entry writes into its per-agent home, which host tooling does not read.

@@ -1617,3 +1617,19 @@ Resume in this order:
   work. Fix: restart the MCP server once NO agent is running (the old code
   cancels agents on exit). Lasting fix: `Tree` must ignore unknown node
   fields (forward compatibility). Add that to the small-fixes list.
+- **~23:00:** merged the QF test fixes (e769a14) and SP-R1..R5 (b6610ca,
+  bug-4a0446). The full suite on 5e962d9 had no unexpected reds apart from
+  **one QF regression**: `test_p0_r5_4_a_spawn_under_a_broken_config_…`. A
+  malformed project.yaml crashes `start_agent` through `budget._reset_margin`
+  (it parses without a guard). Next, after the MCP restart:
+  1. implementer-quick: guard `_reset_margin` (P0-R5.4: old limits + a report);
+  2. tester: the sp_harness `wait_until` re-export
+     (`test_sp_r2_docker_node_session_at_the_host_backed_path_is_resumed`);
+  3. adversary on SP (steer pre-check, worktree reattach, docker rm);
+  4. `Tree` ignores unknown node fields (the forward-compat defect above);
+  5. resolve ticket bug-4a0446 as fixed (b6610ca) once 2-3 are done;
+  6. ask the user: host docker variants (SV_TEST_DOCKER=1 and
+     SP_TEST_DOCKER=1), and 4g → 8g with a container recreate;
+  7. `commit_all` without a git identity.
+- **Waiting on the user:** `/mcp` reconnect of multiagents. Nothing is running;
+  the server is still on the 11:56 code.
