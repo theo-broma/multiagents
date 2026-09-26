@@ -1592,3 +1592,10 @@ Resume in this order:
 5. The rest of the earlier queue: item 6 (AGENTS.md), item 7 (a live
    compaction), the content-filter refusal reported as `done`, and the
    config-drift warning.
+- **After the reset (2026-09-26 evening):** SV-R11 is done (0c9876e on
+  ag-a29f15's branch; targeted runs green apart from the 3 old R8f variants).
+  It merges TOGETHER with ag-4fe3ea's test update. SP: premise corrected
+  (21e564e). Since 2026-09-24 22:16, claude transcripts ARE host-backed via
+  container_private_home. The SP tester ag-9c02be is reworking SP-R1 to
+  assert the guarantee, not the mechanism. QF: ag-bec80b is merging the base
+  and running the chunks.
