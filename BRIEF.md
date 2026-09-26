@@ -1535,3 +1535,9 @@ The container now runs on a second Claude account (weekly 0 %, resets
   its branch, and nothing reports it. Small; `implementer` after item 8.
 - **SV-R11** red tests already exist (4 `test_sv_r11_*`); the implementation
   comes after the adversary's findings are fixed.
+- **~19:00:** SV-R9 test fixed (4870b3b): survival 38 pass / 4 SV-R11 red /
+  3 docker skip. Adversary ag-90d8ab: VERDICT rejected, 4 findings with red
+  tests (fdf012b): stop <id> leaves children, an unterminated last line breaks
+  steer, `cancelled` overwritten by `failed`, and adoption retries a corrupt
+  node forever. Sent to ag-a29f15. Held behind it (both touch runner.py):
+  the commit_all gap, bug-4a0446, SV-R11.
