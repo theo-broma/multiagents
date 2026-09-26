@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import signal
 import hashlib
 import json
@@ -40,7 +41,8 @@ from . import gitops
 from . import config as config_mod
 from .config import AgentSpec, Config, budget_number, matches_any
 from .executor import build_env, get_executor, prepare_home, private_file
-from .executor.base import BASE_ENV_KEYS, Handle
+from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_status,
+                            running, stop_wrapped)
 from . import providers as providers_mod
 from . import procs
 from . import paths as paths_mod
@@ -58,6 +60,10 @@ MAX_SUMMARY_CHARS = 6000
 # affecting supervision; it only delays what another process sees in
 # check_agent by at most this long.
 TREE_FLUSH_SECONDS = 2.0
+# SV-R5: the flock on this file in a run dir is "this server supervises it".
+SUPERVISOR_LOCK = "supervisor.lock"
+# SV-R6: how often a root server looks for runs nobody is supervising.
+ADOPT_SECONDS = 5.0
 # How long a steer waits for the resumed run to show it is alive — the
 # first stream event, or its death, whichever arrives. Only the ceiling;
 # a healthy agent usually settles it in well under a second.
@@ -116,6 +122,13 @@ def _worktree_state(worktree: Path) -> str:
     if not result.ok:
         return ""
     return hashlib.sha1(result.out.encode()).hexdigest()[:12]
+
+
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _declares_turn(provider: Provider) -> bool:
@@ -284,6 +297,15 @@ class Run:
     trip_signature: str = ""
     trip_progress: str = ""
     trip_opaque_calls: int = 0
+    # SV-R6/R7: where this turn starts in `output.ndjson`, and — for a run
+    # adopted from a server that is gone — how far that server had already
+    # accounted for. Lines up to `replay_to` rebuild this run's state without
+    # being counted, logged or acted on a second time.
+    turn_start: int = 0
+    replay_to: int = -1
+    adopted: bool = False
+    final_result: bool = False        # the stream held the provider's result event
+    detaching: bool = False           # SV-R3: the server is leaving it running
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -907,6 +929,54 @@ class Runner:
             node_id, title, rest.strip(), severity, fix, project_root=self.paths.root,
         )
 
+    # ------------------------------------------------------------ ownership --
+
+    @property
+    def _locks(self) -> dict[str, Any]:
+        return self.__dict__.setdefault("_supervision_locks", {})
+
+    def _claim(self, node_id: str) -> bool:
+        """SV-R5: take the exclusive lock on supervising this node.
+
+        An advisory flock on a file in its run dir, held for as long as this
+        server follows the node. The kernel drops it when the holder dies, so a
+        crashed server's nodes become adoptable by themselves, while a live —
+        or merely suspended — one keeps them. Re-entrant within this process.
+        """
+        if node_id in self._locks:
+            return True
+        run_dir = self.paths.run_dir(node_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        handle = (run_dir / SUPERVISOR_LOCK).open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return False
+        self._locks[node_id] = handle
+        return True
+
+    def _release(self, node_id: str) -> None:
+        handle = self._locks.pop(node_id, None)
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def _supervisor(self, spec: AgentSpec, provider: Provider,
+                    wall_timeout: float) -> Supervisor:
+        loop_repeats = int(self.config.limits.get("doom_loop_repeats", 5))
+        return Supervisor(
+            silence_timeout=spec.silence_timeout,
+            wall_timeout=wall_timeout,
+            max_steps=spec.max_steps or int(
+                self.config.limits.get("max_steps", 250)),
+            loop_repeats=loop_repeats,
+            loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
+            declares_turn=_declares_turn(provider),
+            opaque_tools=frozenset(provider.opaque_tools),
+        )
+
     async def _launch(
         self,
         *,
@@ -991,36 +1061,44 @@ class Runner:
             self._withdraw_server(provider, home)
         turn = len(list(run_dir.glob("prompt*.md")))
         (run_dir / (f"prompt.{turn}.md" if turn else "prompt.md")).write_text(prompt)
+        wall = timeout or spec.timeout
+        launched = now()
         # Environment KEYS only — values may be secret and this file is on disk.
+        # `launched_at` and `timeout` are what a server adopting this run
+        # restarts its wall clock from (SV-R8).
         (run_dir / "command.json").write_text(json.dumps(scrub({
             "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
             "provider": provider.name, "model": spec.model,
             "permission": spec.permission, "resumed": bool(session_id),
+            "launched_at": launched, "timeout": wall,
         }), indent=2))
 
         problems = executor.preflight()
         if problems:
             raise RuntimeError("; ".join(problems))
+        # SV-R5: owned before it exists, so no other server's adoption pass
+        # can find it running and unowned in between.
+        if not self._claim(node_id):
+            raise RuntimeError(f"{node_id} is supervised by another server")
 
-        handle = await executor.start(argv, workdir, env)
-        loop_repeats = int(self.config.limits.get("doom_loop_repeats", 5))
+        # SV-R1/R4: under the launch wrapper, which writes the output and the
+        # exit status to the run dir and ends the run at its wall clock even
+        # when no server is left to.
+        handle = await executor.start(argv, workdir, env, run_dir=run_dir,
+                                      deadline=launched + wall if wall else 0)
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
-            supervisor=Supervisor(
-                silence_timeout=spec.silence_timeout,
-                wall_timeout=timeout or spec.timeout,
-                max_steps=spec.max_steps or int(
-                    self.config.limits.get("max_steps", 250)),
-                loop_repeats=loop_repeats,
-                loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
-                declares_turn=_declares_turn(provider),
-                opaque_tools=frozenset(provider.opaque_tools),
-            ),
+            supervisor=self._supervisor(spec, provider, wall),
+            turn_start=getattr(handle, "offset", 0),
             **({"done": done} if done is not None else {}),
         )
         self.runs[node_id] = run
         self.tree.update(node_id, pid=handle.pid,
-                         pid_start=procs.start_time(handle.pid))
+                         pid_start=getattr(handle, "pid_start", "")
+                         or procs.start_time(handle.pid),
+                         follow={"turn": run.turn_start, "offset": run.turn_start,
+                                 "log": _size(run_dir / "stream.jsonl")},
+                         adopted_at=None)
         self.tree.set_status(node_id, "running")
         run.task = asyncio.create_task(self._consume(run))
         # Owned by the Runner, not by the run: asking an agent to wrap up means
@@ -1454,11 +1532,26 @@ class Runner:
                         and gitops.is_repo(Path(node.worktree)) else None)
         last_progress = 0.0
 
+        def follow() -> dict[str, int]:
+            # SV-R7: written in the same transaction as the counts it stands
+            # for, so a server that dies between the two cannot exist.
+            return {"turn": run.turn_start, "offset": getattr(handle, "offset", 0),
+                    "log": _size(run_dir / "stream.jsonl") if stream_log.closed
+                    else stream_log.tell()}
+
         try:
             async for line in handle.lines():
                 event = provider.parse_line(line)
                 if event is None:
                     continue
+                # SV-R6/R7: a line the server before us already accounted for.
+                # It rebuilds what this run knows — text, usage, session,
+                # step count, loop signatures — and nothing else: it is not
+                # logged, counted, or acted on again.
+                replayed = (run.replay_to >= 0
+                            and getattr(handle, "offset", 0) <= run.replay_to)
+                if event.kind == "result":
+                    run.final_result = True
 
                 record = scrub({
                     "t": now(), "kind": event.kind, "name": event.name,
@@ -1480,8 +1573,9 @@ class Runner:
                     # otherwise redacted, and an unparsed line is exactly where
                     # something unexpected would be.
                     record["raw"] = scrub(json.dumps(event.raw, default=str)[:4000])
-                stream_log.write(json.dumps(record) + "\n")
-                stream_log.flush()
+                if not replayed:
+                    stream_log.write(json.dumps(record) + "\n")
+                    stream_log.flush()
                 run.events.append(record)
 
                 if event.text:
@@ -1499,6 +1593,9 @@ class Runner:
                     session_id = event.session_id
                 if event.status:
                     run.final_status = event.status
+                if replayed:
+                    run.supervisor.observe(event)
+                    continue
                 # SM-R5: the CLI carries on without a server that did not
                 # start, and so does the run — but the orchestrator is told,
                 # or a consult that never happened has no visible reason.
@@ -1520,7 +1617,7 @@ class Runner:
                     self.tree.note_event(
                         node_id, steps=run.supervisor.steps or None,
                         usage=usage or None, session_id=session_id or None,
-                        events=batch,
+                        events=batch, follow=follow(),
                     )
 
                 # A decision only a human can make: stop now rather than let
@@ -1561,6 +1658,19 @@ class Runner:
 
             code = await handle.wait()
         except asyncio.CancelledError:
+            if run.detaching:
+                # SV-R3: the server is going and the agent is not. What this
+                # server counted is written down with where it got to, and the
+                # process is left alone for the next server to follow.
+                with contextlib.suppress(Exception):
+                    remainder = flush.drain()
+                    if remainder:
+                        self.tree.note_event(
+                            node_id, steps=run.supervisor.steps or None,
+                            usage=usage or None, session_id=session_id or None,
+                            events=remainder, follow=follow())
+                    self.tree.update(node_id, follow=follow())
+                raise
             await handle.stop()
             # Both an explicit stop_agent() and the event loop shutting down
             # arrive here as a CancelledError, but they mean different things
@@ -1588,6 +1698,7 @@ class Runner:
                 # information to label the commit as an interruption rather than a
                 # result.
                 self.tree.set_status(node_id, "cancelled", reason)
+                self._release(node_id)
             raise
         except Exception as exc:
             self.tree.set_status(node_id, "failed", f"{type(exc).__name__}: {exc}")
@@ -1609,7 +1720,7 @@ class Runner:
             if remainder:
                 self.tree.note_event(node_id, steps=run.supervisor.steps or None,
                                      usage=usage or None, session_id=session_id or None,
-                                     events=remainder)
+                                     events=remainder, follow=follow())
             relaunched = await self._finalize(run, code, usage, session_id)
         except Exception as exc:
             # The traceback is the only thing that makes this debuggable, and
@@ -1622,13 +1733,19 @@ class Runner:
             # overwrite a verdict already recorded: `failed` over `done`
             # discards work that is merged and correct, over `awaiting_user`
             # loses the question, over `limited` loses a resumable session.
+            # `detached` and `stuck` too (SV-R6): an adopted node can still
+            # carry either when its post-mortem runs, and both are statuses
+            # adoption picks up again — left as they are, a finalisation that
+            # crashes would be retried every pass, forever.
             node = self.tree.get(node_id)
-            if node and node.status in ("running", "pending", "steered"):
+            if node and node.status in ("running", "pending", "steered",
+                                        "detached", "stuck"):
                 self.tree.set_status(
                     node_id, "failed",
                     f"the post-mortem crashed: {type(exc).__name__}: {exc}")
         finally:
             if not relaunched:
+                self._release(node_id)
                 run.done.set()
 
     def _maybe_clear_stuck(self, run: Run, node_id: str) -> None:
@@ -1688,7 +1805,7 @@ class Runner:
             return f"was stuck: {prior_stuck}"
         return f"{reason} (was stuck: {prior_stuck})"
 
-    async def _finalize(self, run: Run, code: int, usage: dict[str, Any],
+    async def _finalize(self, run: Run, code: int | None, usage: dict[str, Any],
                         session_id: str) -> bool:
         """Decide what a finished run meant, and record it.
 
@@ -1705,6 +1822,15 @@ class Runner:
         rule a reader had to know.
         """
         node_id = run.node_id
+        # SV-R4: the wrapper ended it at its wall clock. SV-R6: the process is
+        # gone and left no exit status — killed with its wrapper, or the file
+        # lost — so the stream is the only evidence: a run that got as far as
+        # the provider's own result event is judged by it as if it exited 0,
+        # one that did not has nothing to be judged by.
+        timed_out = bool(getattr(run.handle, "timed_out", False))
+        unrecorded = code is None
+        if unrecorded:
+            code = 0 if run.final_result else -1
         # SL-R1/SL-R2: `stuck` is a label on a run still in flight, not a
         # verdict — once the run is over it must get the SAME terminal status
         # it would have gotten had it never tripped, with the trip folded into
@@ -1720,6 +1846,8 @@ class Runner:
         # silence trip in the window before exit would otherwise leave the node
         # `stuck` with the question invisible.
         status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
+        if not run.awaiting and (timed_out or (unrecorded and not run.final_result)):
+            status = "failed"
 
         status, limited = await self._provider_health_after(run, status, text, stderr)
 
@@ -1804,7 +1932,10 @@ class Runner:
             # tripped — a trip does not disqualify a death from being cheap
             # and unexplained.
             fresh = self.tree.get(node_id)
+            # A timeout or a lost exit status is not a cheap glitch: the first
+            # spent the whole wall clock, the second is not known to have died.
             if (status == "failed" and said_nothing
+                    and not timed_out and not unrecorded
                     and fresh and not fresh.retries
                     and fresh.elapsed() < float(self.config.limits.get(
                         "retry_silent_failure_under_seconds", 60))):
@@ -1871,6 +2002,13 @@ class Runner:
                     f"UNFINISHED work and has not been merged. RESUMABLE: "
                     f"steer_agent({node_id!r}, ...) continues this session on "
                     f"its branch, which is far cheaper than reissuing the task.")
+            elif status == "failed" and timed_out:
+                wall = run.supervisor.wall_timeout if run.supervisor else 0
+                reason = (f"timeout: ended at its {wall:.0f}s wall clock" if wall
+                          else "timeout: ended at its wall clock")
+            elif status == "failed" and unrecorded and not run.final_result:
+                reason = ("process ended without an exit status, before the "
+                          "provider reported a result")
             elif status == "failed":
                 if run.final_status and run.final_status.upper() not in {
                         "SUCCESS", "OK", "COMPLETED"}:
@@ -2342,6 +2480,153 @@ class Runner:
 
     # ---------------------------------------------------------------- control --
 
+    def _spec_of(self, node) -> tuple[AgentSpec, Provider]:
+        """The spec and provider a node is running as, rebuilt from the node
+        the same way `start()` built them: a run routed to a fallback carries
+        the fallback's model and options, not the configured ones."""
+        spec = self.config.agent(node.agent)
+        if node.provider != spec.provider:
+            alternative, overrides = spec.fallback_for(node.provider)
+            spec = AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
+        return spec, self.providers[node.provider]
+
+    # ------------------------------------------------------------- survival --
+
+    ADOPTABLE = ("running", "detached", "stuck")
+
+    def _role_of(self, session: str) -> str:
+        """The session ROLE a session id belongs to (orchestrator, initializer),
+        read off the driver node `driver.py` recorded for it; "" for none."""
+        if not session:
+            return ""
+        for driver in self.tree.drivers():
+            if driver.session == session:
+                return driver.role
+        return ""
+
+    async def adopt(self) -> list[str]:
+        """SV-R6: take over the runs a previous server of this role left.
+
+        Only a root server adopts: a nested one's agents are its own spawns,
+        and it cancels them when it goes (SV-R3). Only nodes of its own
+        session role: the initializer's agents are not the orchestrator's to
+        finish. Only nodes nobody holds (SV-R5) — the lock, not the status,
+        decides that, so a live but slow server is never robbed.
+        """
+        if self.self_id():
+            return []
+        mine = self._role_of(self.session())
+        taken = []
+        for node in self.tree.active():
+            if node.status not in self.ADOPTABLE or node.id in self._locks:
+                continue
+            if self._role_of(node.session) != mine:
+                continue
+            try:
+                if await self._adopt_one(node):
+                    taken.append(node.id)
+            except Exception as exc:
+                self._release(node.id)
+                self.tree.emit(node.id, "adopt_failed",
+                               detail=f"{type(exc).__name__}: {exc}")
+        return taken
+
+    async def _adopt_one(self, node) -> bool:
+        run_dir = self.paths.run_dir(node.id)
+        output, status_file = run_dir / "output.ndjson", run_dir / "exit_status"
+        live = bool(node.pid) and running(node.pid, getattr(node, "pid_start", ""))
+        if live and not output.is_file():
+            return False          # started before the wrapper: nothing to follow
+        # SV-R8: one already past its wall clock is not taken. Unowned, its
+        # wrapper ends it within a second (SV-R4), and the next pass finalises
+        # it as the timeout it is; owned, the wrapper would leave it to a
+        # watchdog that only reports.
+        if live and self._past_deadline(run_dir):
+            return False
+        agent_id = node.id
+        if not self._claim(agent_id):
+            return False
+        node = self.tree.get(agent_id)
+        if node is None or node.status not in self.ADOPTABLE:
+            self._release(agent_id)
+            return False
+        if not live and not output.is_file() and not status_file.is_file():
+            self.tree.set_status(node.id, "orphaned",
+                                 "the process is gone and left neither output "
+                                 "nor an exit status")
+            self._release(node.id)
+            return False
+
+        spec, provider = self._spec_of(node)
+        command: dict[str, Any] = {}
+        with contextlib.suppress(OSError, ValueError):
+            command = json.loads((run_dir / "command.json").read_text())
+        launched = float(command.get("launched_at") or node.started_at or now())
+        wall = float(command.get("timeout") or spec.timeout)
+        follow = node.follow or {}
+        turn = int(follow.get("turn", 0))
+        # SV-R7: what the last server logged past the point it recorded, it
+        # never counted; the lines are read again and logged once.
+        stream = run_dir / "stream.jsonl"
+        if "log" in follow and _size(stream) > int(follow["log"]):
+            with stream.open("r+b") as fh:
+                fh.truncate(int(follow["log"]))
+
+        executor = self.executor(spec)
+        stopper = None
+        if getattr(executor, "kind", "local") == "docker" and not executor.inside():
+            stopper = lambda grace: executor.kill_detached(node.id, grace)  # noqa: E731
+        handle = FollowHandle(pid=node.pid or 0, run_dir=run_dir, offset=turn,
+                              pid_start=getattr(node, "pid_start", "") or "",
+                              stopper=stopper)
+        supervisor = self._supervisor(spec, provider, wall)
+        # SV-R8: the wall clock runs from the launch, whoever watched it; the
+        # silence clock runs from now, because nobody was listening before.
+        supervisor.started = time.monotonic() - max(0.0, now() - launched)
+        run = Run(node_id=node.id, provider=provider, spec=spec, handle=handle,
+                  supervisor=supervisor, turn_start=turn,
+                  replay_to=int(follow.get("offset", turn)), adopted=True)
+        self.runs[node.id] = run
+        if live:
+            self.tree.update(node.id, adopted_at=now())
+            self.tree.set_status(node.id, "running", "adopted")
+            self.tree.emit(node.id, "adopted", pid=node.pid)
+        run.task = asyncio.create_task(self._consume(run))
+        if live:
+            asyncio.create_task(self._wrap_up_watch(node.id))
+            self._start_credential_watch()
+        return True
+
+    @staticmethod
+    def _past_deadline(run_dir: Path) -> bool:
+        with contextlib.suppress(OSError, ValueError, TypeError):
+            command = json.loads((run_dir / "command.json").read_text())
+            wall = float(command.get("timeout") or 0)
+            return bool(wall) and now() >= float(command["launched_at"]) + wall
+        return False
+
+    async def shutdown(self, *, detach: bool) -> None:
+        """This server is going. SV-R3: a root server leaves its agents
+        running and says so; a nested one ends them, as it always has."""
+        runs = [run for run in self.runs.values() if run.task and not run.task.done()]
+        for run in runs:
+            run.detaching = detach
+            run.task.cancel()
+        for run in runs:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await run.task
+        if not detach:
+            return
+        for run in runs:
+            node = self.tree.get(run.node_id)
+            if node and node.status in ("running", "stuck", "pending"):
+                self.tree.set_status(
+                    run.node_id, "detached",
+                    f"left running when its server exited at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.tree.emit(run.node_id, "detached", pid=node.pid)
+            self._release(run.node_id)
+
     def stop_detached(self, node) -> bool:
         """Kill an agent this process never started, synchronously.
 
@@ -2351,12 +2636,18 @@ class Runner:
         reach them from outside — through the container for a docker agent,
         because killing the `docker exec` client would leave the agent inside
         running.
+
+        SV-R10: a wrapped agent is ended through its wrapper and its recorded
+        process group, escalating to KILL, so an agent that ignores TERM goes.
         """
         executor = self.executor(self.config.agents.get(node.agent))
         if getattr(executor, "kind", "local") == "docker":
             with contextlib.suppress(Exception):
                 if executor.kill_detached(node.id):
                     return True
+        run_dir = self.paths.run_dir(node.id)
+        if (run_dir / "wrapper.pid").is_file():
+            return stop_wrapped(run_dir, node.pid, getattr(node, "pid_start", ""))
         # Checked, not merely attempted. The suppression below makes a signal
         # to a stranger indistinguishable from a signal to the agent, and this
         # runs after a restart — the one moment when every recorded pid may
@@ -2408,15 +2699,7 @@ class Runner:
             # in, then fall back to the local pid.
             node = self.tree.get(agent_id)
             if node:
-                executor = self.executor()
-                killer = getattr(executor, "kill_detached", None)
-                if killer is not None:
-                    killer(agent_id)
-                if procs.alive(node.pid, getattr(node, "pid_start", "")):
-                    try:
-                        os.killpg(os.getpgid(node.pid), 15)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
+                await asyncio.to_thread(self.stop_detached, node)
         if internal:
             return {"agent_id": agent_id, "status": "stopping"}
         self.tree.set_status(agent_id, "cancelled", "stopped by parent")
@@ -2454,11 +2737,7 @@ class Runner:
         if run is not None:
             spec, provider = run.spec, run.provider
         else:
-            spec = self.config.agent(node.agent)
-            if node.provider != spec.provider:
-                alternative, overrides = spec.fallback_for(node.provider)
-                spec = AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
-            provider = self.providers[node.provider]
+            spec, provider = self._spec_of(node)
 
         # A truncated `writes: false` agent may have had its worktree reclaimed
         # by `_drop_if_empty` once its empty branch made it look worth nothing

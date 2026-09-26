@@ -46,8 +46,9 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import ProjectPaths, server_install_paths, state_root
-from .base import Executor, Handle
-from .local import LocalExecutor
+from .. import procs
+from .base import Executor, FollowHandle, Handle, wrapper_argv
+from .local import LocalExecutor, _size
 
 
 class DockerHandle(Handle):
@@ -100,6 +101,35 @@ def _recording_pid(pid_file: Path, argv: list[str]) -> list[str]:
     the agent's id, and a quote in that would otherwise be shell syntax.
     """
     return ["sh", "-c", 'echo $$ > "$0"; exec "$@"', str(pid_file), *argv]
+
+
+# SV-R10: end a wrapped agent inside the container, from its recorded pids.
+# `$0` is the agent's pid file (its process group), `$1` the wrapper's, `$2`
+# the grace in seconds — paths as arguments, never as script text. TERM the
+# group, the agent and its direct children (what a pre-wrapper spawn recorded
+# was a bare pid, not a group), and the wrapper, which forwards it; then KILL,
+# the wrapper last, since it is what records the exit (SV-R2).
+_KILL_SCRIPT = r"""
+a=$(cut -d' ' -f1 "$0" 2>/dev/null); w=$(cat "$1" 2>/dev/null)
+case "$a" in ''|*[!0-9]*) a= ;; esac
+case "$w" in ''|*[!0-9]*) w= ;; esac
+[ -z "$a$w" ] && exit 3
+hit() { [ -n "$a" ] && { kill -$1 -- -$a; kill -$1 $a; pkill -$1 -P $a; }; }
+hit TERM
+[ -n "$w" ] && kill -TERM $w
+i=0; while [ $i -lt "$2" ]; do
+  kill -0 $a 2>/dev/null || kill -0 -- -$a 2>/dev/null || { [ -n "$w" ] && kill -0 $w 2>/dev/null; } || exit 0
+  sleep 1; i=$((i+1)); done
+hit KILL
+sleep 1
+[ -n "$w" ] && kill -KILL $w
+exit 0
+"""
+
+
+def _kill_argv(run_dir: Path, grace: int) -> list[str]:
+    return ["sh", "-c", _KILL_SCRIPT, str(run_dir / "container.pid"),
+            str(run_dir / "wrapper.pid"), str(max(1, int(grace)))]
 
 
 PROXY_PORT = 8888
@@ -1265,7 +1295,7 @@ class DockerExecutor(Executor):
                              else ["docker", "stop", name]).returncode == 0
         return {"ok": True, "acted_on": out}
 
-    def kill_detached(self, agent_id: str) -> bool:
+    def kill_detached(self, agent_id: str, grace: float = 3.0) -> bool:
         """Stop an agent this process did not spawn, from its recorded pid file.
 
         DockerHandle covers the case where we own the handle; this covers the
@@ -1276,23 +1306,19 @@ class DockerExecutor(Executor):
         directly (SM-R1): `pid_file` was written by `_recording_pid` in
         *this* process's pid namespace, so a plain `kill`/`pkill` here IS the
         equivalent of `docker exec`, with no daemon to ask.
+
+        SV-R10: escalates to KILL after `grace` seconds, since an agent that
+        ignores TERM must still end; blocks for at most `grace` + 1 seconds.
         """
         if self.paths is None:
             return False
-        pid_file = self.paths.run_dir(agent_id) / "container.pid"
+        argv = _kill_argv(self.paths.run_dir(agent_id), grace)
+        if not self.inside():
+            argv = ["docker", "exec", self.container, *argv]
         try:
-            target = pid_file.read_text().strip()
-        except OSError:
+            return _run(argv, timeout=int(grace) + 30).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
             return False
-        if not target.isdigit():
-            return False
-        script = (f"kill -TERM {target} 2>/dev/null; "
-                  f"pkill -TERM -P {target} 2>/dev/null; true")
-        if self.inside():
-            _run(["sh", "-c", script], timeout=30)
-        else:
-            _run(["docker", "exec", self.container, "sh", "-c", script], timeout=30)
-        return True
 
     # -------------------------------------------------------------- execute --
 
@@ -1344,9 +1370,11 @@ class DockerExecutor(Executor):
             break
         return argv
 
-    async def start(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
+    async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
+                    run_dir: Path | None = None, deadline: float = 0) -> Handle:
         if self.inside():
-            return await self._start_inside(argv, cwd, env)
+            return await self._start_inside(argv, cwd, env, run_dir=run_dir,
+                                            deadline=deadline)
         state = self.ensure_running()
         if not state.get("ok"):
             raise RuntimeError(f"docker executor: {state.get('error')}")
@@ -1373,8 +1401,10 @@ class DockerExecutor(Executor):
                 command += ["--env", f"{key}={value}"]
         command.append(self.container)
 
-        # Record the agent's container-side pid so it can actually be stopped.
         pid_file = self._pid_file(env)
+        if run_dir is not None:
+            return self._start_wrapped(command, argv, run_dir, deadline, pid_file, env)
+        # Record the agent's container-side pid so it can actually be stopped.
         command += _recording_pid(pid_file, argv)
 
         proc = await asyncio.create_subprocess_exec(
@@ -1387,13 +1417,43 @@ class DockerExecutor(Executor):
         )
         return DockerHandle(proc.pid, proc, self.container, pid_file)
 
+    def _start_wrapped(self, command: list[str], argv: list[str], run_dir: Path,
+                       deadline: float, pid_file: Path, env: dict[str, str]) -> FollowHandle:
+        """SV-R1 on the host: the wrapper runs in the container, under its
+        `python3`, and writes to the run dir on the shared bind mount.
+
+        The `docker exec` client stays attached but holds no pipe — every one
+        of its streams is /dev/null — so it neither carries the agent's output
+        nor dies with this server (its own session). It is the pid recorded
+        for the node: it lives exactly as long as the wrapper inside, which
+        writes `exit_status` before it exits, the same guarantee the local
+        executor's wrapper pid gives. Stopping goes through `docker exec`,
+        since killing the client does not stop what it started.
+        """
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "exit_status").unlink(missing_ok=True)
+        offset = _size(run_dir / "output.ndjson")
+        # Entered through `sh`, as every other command here enters the
+        # container, so `python3` is found on the container's own PATH.
+        _, flag, source, *rest = wrapper_argv("python3", run_dir, deadline, pid_file,
+                                              argv, inline=True)
+        command = command + ["sh", "-c", f'exec python3 {flag} "$0" "$@"', source, *rest]
+        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+        agent_id = env.get("MULTIAGENTS_AGENT_ID", "run")
+        return FollowHandle(pid=proc.pid, run_dir=run_dir, offset=offset,
+                            pid_start=procs.start_time(proc.pid), _proc=proc,
+                            stopper=lambda grace: self.kill_detached(agent_id, grace))
+
     def _pid_file(self, env: dict[str, str]) -> Path:
         pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
                     if self.paths is not None else Path("/tmp")) / "container.pid"
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         return pid_file
 
-    async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
+    async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str], *,
+                            run_dir: Path | None = None, deadline: float = 0) -> Handle:
         """Start `argv` from within the container, as `docker exec` would.
 
         Already in the container, a start is a local one: `LocalExecutor`
@@ -1430,5 +1490,10 @@ class DockerExecutor(Executor):
             if value is not None:
                 env[key] = value
         argv = self._versioned_argv(argv)
+        if run_dir is not None:
+            # The wrapper records the agent's pid where `kill_detached` reads it.
+            return await LocalExecutor().start(argv, cwd, env, run_dir=run_dir,
+                                               deadline=deadline,
+                                               pid_file=self._pid_file(env))
         return await LocalExecutor().start(
             _recording_pid(self._pid_file(env), argv), cwd, env)

@@ -11,10 +11,13 @@ Every tool result is scrubbed for credentials on the way out.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import contextvars
 import functools
 import inspect
 import os
+import signal
 import stat
 import sys
 import threading
@@ -489,7 +492,9 @@ def agent_tree() -> dict:
         "nodes": len(data.get("nodes", {})),
         "active": [
             {"agent_id": n.id, "agent": n.agent, "status": n.status,
-             "elapsed_seconds": round(n.elapsed()), "reason": n.reason}
+             "elapsed_seconds": round(n.elapsed()), "reason": n.reason,
+             # SV-R10: followed by this server across a restart of the last.
+             **({"adopted": True} if n.adopted_at else {})}
             for n in run.tree.active()
         ],
         "deferred": len(data.get("deferred", [])),
@@ -1383,8 +1388,58 @@ def _reset() -> None:
     _notice.set(None)
 
 
+async def _adopt_forever() -> None:
+    """SV-R6: at startup, before any handshake, and every few seconds after —
+    an owner that dies while this server runs leaves its nodes to it (SV-R5)."""
+    from .runner import ADOPT_SECONDS
+    while True:
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, runner)
+            if _runner is not None:
+                await _runner.adopt()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(ADOPT_SECONDS)
+
+
+async def _serve() -> None:
+    loop = asyncio.get_running_loop()
+    serving = asyncio.create_task(mcp.run_stdio_async())
+    # SV-R3: stdin EOF, SIGTERM and SIGHUP all end the server the same way —
+    # through the shutdown below, never by dying with the agents' fate
+    # decided by whatever the default signal action happens to do to them.
+    # The transport is not cancelled, only abandoned: it reads stdin on a
+    # worker thread, and cancelling it waits for a read that may never return.
+    signalled = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(sig, signalled.set)
+    root = not os.environ.get("MULTIAGENTS_AGENT_ID")
+    adopter = asyncio.create_task(_adopt_forever()) if root else None
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait({serving, asyncio.create_task(signalled.wait())},
+                               return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if adopter is not None:
+            adopter.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await adopter
+        if _runner is not None:
+            with contextlib.suppress(Exception):
+                await _runner.shutdown(detach=root)
+        with contextlib.suppress(Exception):
+            sys.stdout.flush()
+            sys.stderr.flush()
+        # Not a normal return, for the same reason: that thread would keep
+        # this process alive until the client closes a pipe it may never close.
+        os._exit(0)
+
+
 def main() -> None:
-    mcp.run()
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":

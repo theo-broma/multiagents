@@ -37,7 +37,7 @@ from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
 from .providers import load_providers
 from .runner import Runner
-from .tree import Tree
+from .tree import ACTIVE, Tree
 
 GITIGNORE_LINE = ".multiagents/"
 
@@ -971,6 +971,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     # supervisor, nothing remembers that the last session was cut off.
     unclean = watchdog.ended_uncleanly(paths, "orchestrator")
     reclaimed, reaped, saved = 0, 0, 0
+    left_running: list[str] = []      # SV-R6/R10: the next server adopts these
+    ended_alone: list[str] = []       # finished with nobody watching; ditto
     for node in tree.active():
         # `procs.alive`, not `os.kill(pid, 0)`. This loop runs after a restart,
         # and after a REBOOT every pid here was issued by a kernel that is gone
@@ -980,6 +982,19 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # damage: a false alive sends SIGTERM to a stranger's process group
         # below, and a false alive on the orchestrator skips the whole pass.
         alive = procs.alive(node.pid, node.pid_start)
+        run_dir = paths.run_dir(node.id)
+        wrapped = (run_dir / "output.ndjson").is_file()
+        # SV-R3/R6: an agent under the launch wrapper does not need its
+        # server. Its output and exit status are on disk, and the next root
+        # server follows it from there — so it is left alone and reported,
+        # neither reaped nor written off.
+        if not alive and (wrapped or (run_dir / "exit_status").is_file()):
+            ended_alone.append(node.id)
+            continue
+        if alive and wrapped and not orchestrator_live:
+            left_running.append(node.id)
+            unclean = unclean or node.status != "detached"
+            continue
         if alive and not orchestrator_live:
             # An orphan: nobody is reading its stream, so it is spending tokens
             # into a closed pipe. Leaving it running would also let it mutate a
@@ -1020,6 +1035,15 @@ def cmd_resume(args: argparse.Namespace) -> int:
         print(f"reaped       {reaped} orphaned agent process(es) still running")
     if saved:
         print(f"committed    interrupted work in {saved} worktree(s)")
+    if left_running:
+        print(f"still running {len(left_running)} agent(s) left running by the "
+              f"previous session, followed again once it starts: "
+              f"{', '.join(left_running)}")
+        print("             `multiagents stop <id>` ends one, "
+              "`multiagents stop --all` ends them all")
+    if ended_alone:
+        print(f"ended        {len(ended_alone)} agent(s) finished with no session "
+              f"attached, recorded once it starts: {', '.join(ended_alone)}")
     if unclean:
         print("\nlast session ended without recording an ending — a crash, a "
               "kill, or\n             a power cut. The orchestrator is told so "
@@ -2346,11 +2370,25 @@ def cmd_stop(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     config = load_config(paths)
     tree = Tree(paths.tree_file, paths.events_file)
+    # SV-R10: `stop <id>` ends that one agent — wherever it runs, whether or
+    # not a session is attached — and leaves the sessions and the rest alone.
+    only = getattr(args, "agent_id", "") or ""
+    if only and getattr(args, "all", False):
+        print("give an agent id or --all, not both", file=sys.stderr)
+        return 2
+    if only:
+        node = tree.get(only)
+        if node is None:
+            print(f"no agent {only!r} in this project", file=sys.stderr)
+            return 1
+        if node.status not in ACTIVE:
+            print(f"{only} is not running ({node.status})")
+            return 0
 
     # --- whatever is driving the project -----------------------------------
     stopped_drivers = []
-    for role in ("orchestrator", "orchestrator-turn", "initializer",
-                 "initializer-turn"):
+    for role in () if only else ("orchestrator", "orchestrator-turn", "initializer",
+                                 "initializer-turn"):
         path = driver._pid_file(paths, role)
         if not path.is_file():
             continue
@@ -2370,7 +2408,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
         path.unlink(missing_ok=True)
 
     # --- the agents --------------------------------------------------------
-    active = tree.active()
+    # Detached ones included (they are active): with no server attached,
+    # `Runner.stop` ends them through their wrapper, escalating to KILL.
+    active = [n for n in tree.active() if not only or n.id == only]
     stopped_agents = []
     if active:
         runner = Runner(paths, config)
@@ -2400,7 +2440,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     # --- the container, last: the agents were inside it --------------------
     container = ""
-    if config.executor == "docker" and not args.keep_containers:
+    if config.executor == "docker" and not args.keep_containers and not only:
         from .executor.docker import docker_available
         if docker_available():
             container = _docker_executor(paths).stop(remove=False)
@@ -2732,6 +2772,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_supervise)
 
     p = sub.add_parser("stop", help="stop everything for this project, resumably")
+    p.add_argument("agent_id", nargs="?", default="",
+                   help="stop only this agent, and nothing else")
+    p.add_argument("--all", action="store_true",
+                   help="everything, including agents left running with no "
+                        "session attached (the default when no id is given)")
     p.add_argument("--keep-containers", action="store_true",
                    help="leave the container running")
     p.set_defaults(func=cmd_stop)
