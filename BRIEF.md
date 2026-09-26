@@ -1541,3 +1541,10 @@ The container now runs on a second Claude account (weekly 0 %, resets
   steer, `cancelled` overwritten by `failed`, and adoption retries a corrupt
   node forever. Sent to ag-a29f15. Held behind it (both touch runner.py):
   the commit_all gap, bug-4a0446, SV-R11.
+- **~20:00:** the adversary's 4 findings were fixed and merged (0f9800b):
+  survival + adversary files are 42 pass / 4 SV-R11 red / 3 docker skip.
+  In flight: ag-a29f15 on SV-R11; tester ag-4fe3ea updating
+  `test_p0_r8f_2_2[running]` for SV-R11; QF implementer ag-bec80b.
+  Contract for bug-4a0446 written: `context/specs/session-persistence.md`
+  (SP-R1..R5), under advisor review. Its tester can start in parallel. Its
+  implementer starts after SV-R11 merges.
