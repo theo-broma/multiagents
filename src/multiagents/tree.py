@@ -39,7 +39,9 @@ from .redact import depersonalise, scrub
 # nothing about the provider's health.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned",
             "limited", "truncated"}
-ACTIVE = {"pending", "running", "stuck"}
+# "detached": still running, left by a root server that exited (SV-R3), and
+# waiting for the next one to adopt it (SV-R6). Work in flight, so ACTIVE.
+ACTIVE = {"pending", "running", "stuck", "detached"}
 # `run` and `init-agent` exec into a CLI, so neither is an agent and neither
 # must be counted as one. See Node.role.
 DRIVER_ROLES = {"orchestrator", "initializer"}
@@ -206,6 +208,14 @@ class Node:
     ended_at: float | None = None
     last_event_at: float | None = None
     summary: str = ""
+    # SV-R7: how far into `runs/<id>/output.ndjson` the usage, steps and
+    # events above account for — `offset` — plus where the current turn
+    # starts in it (`turn`) and how long `stream.jsonl` was at that point
+    # (`log`). Written in the same transaction as what it accounts for, so a
+    # server that adopts the node resumes exactly where the last one stopped.
+    follow: dict[str, int] = field(default_factory=dict)
+    # SV-R10: when this node was last adopted by a server that did not start it.
+    adopted_at: float | None = None
 
     def elapsed(self) -> float:
         start = self.started_at or self.created_at
@@ -424,7 +434,7 @@ class Tree:
 
     def note_event(self, agent_id: str, steps: int | None = None,
                    usage: dict | None = None, session_id: str | None = None,
-                   events: int = 1) -> None:
+                   events: int = 1, follow: dict | None = None) -> None:
         """Flush accumulated stream progress for one agent.
 
         `events` is a batch count, not a single increment. Every call here
@@ -444,6 +454,8 @@ class Tree:
                 node["steps"] = steps
             if usage:
                 node["usage"] = usage
+            if follow is not None:
+                node["follow"] = follow
             if session_id and not node.get("session_id"):
                 node["session_id"] = session_id
                 learned = session_id

@@ -12,11 +12,14 @@ import asyncio
 import contextlib
 import os
 import shutil
+import signal
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
+from .. import procs
 from ..redact import register_environment
 
 # Always forwarded: without these, most CLIs cannot even locate a terminal or a
@@ -117,13 +120,250 @@ class Handle:
                         pass
 
 
+# --------------------------------------------------------------------------
+# SV-R1/R2: an agent started under the launch wrapper (`multiagents.agentwrap`)
+# writes to files, and this is the handle that reads them. It holds no pipe,
+# so the agent does not care whether the server that started it is alive —
+# and a server that did NOT start it can build one of these from the files
+# alone, which is what adoption is (SV-R6).
+# --------------------------------------------------------------------------
+
+FOLLOW_POLL_SECONDS = 0.2
+# Where the wrapper records the agent's process group: `agent.pid` locally,
+# `container.pid` under docker, where `kill_detached` has always read it.
+AGENT_PID_FILES = ("agent.pid", "container.pid")
+# The value `exit_status` holds when the wrapper ended the run at its deadline.
+TIMEOUT_STATUS = "timeout"
+
+
+def running(pid: int | None, start: str = "") -> bool:
+    """`procs.alive`, except that a zombie is dead.
+
+    A wrapper whose parent server died is reparented, and whatever inherits it
+    may not reap it at once. It has already written everything it ever will.
+    """
+    if not procs.alive(pid, start):
+        return False
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
+    except (OSError, IndexError):
+        return True
+    return state not in ("Z", "X")
+
+
+def read_exit_status(run_dir: Path) -> str | None:
+    """The wrapper's verdict, or None while there is none (SV-R2)."""
+    try:
+        return (run_dir / "exit_status").read_text().strip() or None
+    except OSError:
+        return None
+
+
+def agent_group(run_dir: Path) -> int | None:
+    """The agent's process group, if it is provably still that agent's.
+
+    The wrapper writes the group leader's pid; a pid alone is a number, so it
+    is only trusted while the leader is alive, or while the group survives its
+    leader — Linux does not hand out a pid still in use as a group id, so a
+    live group with no leader is still the one the wrapper made.
+    """
+    for name in AGENT_PID_FILES:
+        try:
+            token = (run_dir / name).read_text().split()[0]
+        except (OSError, IndexError):
+            continue
+        if not token.isdigit():
+            continue
+        pgid = int(token)
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError, OSError):
+            return None
+        try:
+            fields = Path(f"/proc/{pgid}/stat").read_text().rpartition(")")[2].split()
+        except OSError:
+            return pgid                    # leader gone, group still alive
+        # Field 5 is the process group: a live process holding this pid in a
+        # different group is a recycled number, not our agent.
+        return pgid if len(fields) > 2 and fields[2] == str(pgid) else None
+    return None
+
+
+def _signal(pid: int | None, start: str, pgid: int | None, sig: int) -> None:
+    if pgid:
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, sig)
+    if pid and running(pid, start):
+        with contextlib.suppress(OSError):
+            os.kill(pid, sig)
+
+
+def stop_wrapped(run_dir: Path, pid: int | None, start: str = "",
+                 grace: float = 3.0) -> bool:
+    """End a wrapped agent from anywhere — no handle, no server (SV-R10).
+
+    TERM to the wrapper (which forwards it) and to the agent's group; KILL to
+    the group after `grace`, then to the wrapper if it has not recorded the
+    exit and gone. The wrapper is killed last because it is what writes
+    `exit_status`. Blocking: at most `grace` plus two seconds. Returns whether
+    there was anything to stop.
+    """
+    pgid = agent_group(run_dir)
+    if not pgid and not running(pid, start):
+        return False
+    _signal(pid, start, pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not running(pid, start) and not agent_group(run_dir):
+            return True
+        time.sleep(0.1)
+    pgid = agent_group(run_dir)
+    if pgid:
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, signal.SIGKILL)
+    deadline = time.monotonic() + 2.0
+    while running(pid, start) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    _signal(pid, start, None, signal.SIGKILL)
+    return True
+
+
+@dataclass
+class FollowHandle:
+    """A wrapped agent, read from `runs/<id>/output.ndjson` (SV-R1).
+
+    `offset` is the byte position just past the last line handed out, which is
+    what a server persists so the next one can resume the file there (SV-R7).
+    The stream ends once the wrapper has written `exit_status`, or its process
+    is gone, AND the file has been read to its end — in that order, so a line
+    written just before the exit is never lost.
+    """
+
+    pid: int
+    run_dir: Path
+    offset: int = 0
+    pid_start: str = ""
+    _proc: Any = None
+    timed_out: bool = False
+    stopper: Any = None               # executor-specific stop, if any
+
+    def _ended(self) -> bool:
+        if self._proc is not None:
+            self._proc.poll()             # reap it, if it was ours to reap
+        return read_exit_status(self.run_dir) is not None or not running(
+            self.pid, self.pid_start)
+
+    async def lines(self) -> AsyncIterator[str]:
+        path = self.run_dir / "output.ndjson"
+        fh = None
+        buf = b""
+        try:
+            while True:
+                ended = self._ended()
+                if fh is None and path.exists():
+                    fh = path.open("rb")
+                    fh.seek(self.offset)
+                chunk = fh.read(1 << 20) if fh is not None else b""
+                if chunk:
+                    buf += chunk
+                    while True:
+                        cut = buf.find(b"\n")
+                        if cut < 0:
+                            break
+                        line, buf = buf[:cut], buf[cut + 1:]
+                        self.offset += cut + 1
+                        yield line.decode("utf-8", errors="replace").rstrip("\r")
+                    continue
+                if ended:
+                    if buf:
+                        # The last line, unterminated: it is all there will be.
+                        self.offset += len(buf)
+                        text, buf = buf.decode("utf-8", errors="replace"), b""
+                        yield text
+                    return
+                await asyncio.sleep(FOLLOW_POLL_SECONDS)
+        finally:
+            if fh is not None:
+                fh.close()
+
+    async def drain_stderr(self) -> None:
+        """Nothing to drain: stderr goes to a file, read when asked for."""
+
+    @property
+    def stderr_tail(self) -> str:
+        try:
+            raw = (self.run_dir / "stderr.log").read_bytes()[-64 * 1024:]
+        except OSError:
+            return ""
+        lines = [x for x in raw.decode("utf-8", errors="replace").splitlines() if x]
+        return "\n".join(lines[-40:])
+
+    async def wait(self) -> int | None:
+        """The exit code, from `exit_status`. None if the process is gone
+        without one — killed by the kernel, or its wrapper killed — which is
+        the caller's to judge from the stream (SV-R6 decided)."""
+        while True:
+            if self._proc is not None:
+                self._proc.poll()
+            status = read_exit_status(self.run_dir)
+            if status is None and not running(self.pid, self.pid_start):
+                await asyncio.sleep(FOLLOW_POLL_SECONDS)
+                status = read_exit_status(self.run_dir)
+                if status is None:
+                    return None
+            if status is not None:
+                if status == TIMEOUT_STATUS:
+                    self.timed_out = True
+                    return 124
+                try:
+                    return int(status)
+                except ValueError:
+                    return None
+            await asyncio.sleep(FOLLOW_POLL_SECONDS)
+
+    @property
+    def returncode(self) -> int | None:
+        if read_exit_status(self.run_dir) is None and running(self.pid, self.pid_start):
+            return None
+        return 0
+
+    async def stop(self, grace: float = 3.0) -> None:
+        if self.stopper is not None:
+            await asyncio.to_thread(self.stopper, grace)
+        else:
+            await asyncio.to_thread(stop_wrapped, self.run_dir, self.pid,
+                                    self.pid_start, grace)
+        await self._settle()
+
+    async def _settle(self) -> None:
+        # Give the wrapper a moment to record the exit it just saw.
+        for _ in range(20):
+            if self._ended():
+                return
+            await asyncio.sleep(0.1)
+
+
+def wrapper_argv(python: str, run_dir: Path, deadline: float, pid_file: Path,
+                 argv: list[str], inline: bool = False) -> list[str]:
+    """`argv`, run under the launch wrapper. `inline` passes the wrapper's
+    source rather than its path, for an interpreter (a container's) that may
+    not see this package."""
+    from .. import agentwrap
+    source = Path(agentwrap.__file__)
+    head = [python, "-c", source.read_text()] if inline else [python, str(source)]
+    return [*head, str(run_dir), f"{deadline:.3f}", str(pid_file), "--", *argv]
+
+
 class Executor(ABC):
     """Starts a command and returns a :class:`Handle`."""
 
     kind = "base"
 
     @abstractmethod
-    async def start(self, argv: list[str], cwd: Path, env: dict[str, str]) -> Handle:
+    async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
+                    run_dir: Path | None = None, deadline: float = 0) -> Handle:
+        """Start `argv`. Given `run_dir`, under the launch wrapper, returning
+        a `FollowHandle` (SV-R1); without one, on pipes, as before."""
         ...
 
     def preflight(self) -> list[str]:
