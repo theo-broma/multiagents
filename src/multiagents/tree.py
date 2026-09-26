@@ -834,16 +834,24 @@ class Tree:
     # its own server process, and a pause only one of them knows about is not a
     # pause.
 
-    def pause(self, until: float, reason: str, providers: list[str] | None = None) -> dict:
+    def pause(self, until: float, reason: str, providers: list[str] | None = None,
+             cause: str | None = None) -> dict:
         """Record that there is nothing to run `providers` work on until `until`.
 
         Keeps the EARLIEST reset of any active pause, not the latest. Waking
         early costs one wasted check and an immediate re-pause; waking late
         blocks tasks whose provider came back ten minutes ago, and nothing
         would notice.
+
+        `cause` names why: `"quota"`, `"auth"`, `"provider_down"`, `"family"`,
+        `"spend_limit"`, or omitted. A pause with no cause, or written before
+        this parameter existed, is never treated as a quota pause — see
+        `context/specs/quota-freshness.md`.
         """
         record = {"until": until, "reason": reason, "since": now(),
                   "providers": sorted(providers or [])}
+        if cause is not None:
+            record["cause"] = cause
         with self.transaction() as data:
             existing = data.get("pause") or {}
             if existing.get("until", 0) and existing["until"] <= until:
@@ -898,7 +906,7 @@ class Tree:
             return len(data["deferred"]) < before
 
     def set_cooldown(self, provider: str, until: float, reason: str,
-                     needs_login: bool = False) -> None:
+                     needs_login: bool = False, cause: str | None = None) -> None:
         record = {"until": until, "reason": reason}
         if needs_login:
             # Recorded because it changes what recovery means. A rate limit
@@ -906,6 +914,10 @@ class Tree:
             # tests it should be the provider's own `check`, not somebody's
             # agent run.
             record["needs_login"] = True
+        if cause is not None:
+            # See `pause`'s cause note — same taxonomy, same "no cause means
+            # not quota" rule.
+            record["cause"] = cause
         with self.transaction() as data:
             data["cooldowns"][provider] = record
         self.emit("-", "cooldown", provider=provider, until=until, reason=reason,
@@ -930,6 +942,35 @@ class Tree:
         if entry and entry.get("until", 0) > now():
             return entry
         return None
+
+    def clear_quota(self, usable: set[str] | frozenset[str]) -> dict:
+        """Lift cooldowns and the pause caused by a provider's quota, once a
+        fresh reading proves it has room again (QF-R4/QF-R6).
+
+        `usable` names the providers a fresh read has just proven both known
+        and usable — only cooldowns/pauses whose `cause` is `"quota"` AND
+        whose provider(s) are all in `usable` are touched. A pause naming
+        several providers is a single fact about the whole set it names, so it
+        is lifted only when every one of them is in `usable`, not just one.
+        Anything with another cause, or none, is left alone.
+        """
+        cleared: dict[str, Any] = {"cooldowns": [], "pause": False}
+        with self.transaction() as data:
+            for provider in list(data["cooldowns"]):
+                entry = data["cooldowns"][provider]
+                if provider in usable and entry.get("cause") == "quota":
+                    del data["cooldowns"][provider]
+                    cleared["cooldowns"].append(provider)
+            pause = data.get("pause") or {}
+            if (pause.get("cause") == "quota" and pause.get("providers")
+                    and all(p in usable for p in pause["providers"])):
+                data["pause"] = {}
+                cleared["pause"] = True
+        for provider in cleared["cooldowns"]:
+            self.emit("-", "cooldown_cleared", provider=provider)
+        if cleared["pause"]:
+            self.emit("system", "resumed", reason="fresh reading shows quota room")
+        return cleared
 
     # How a provider's window is being spent, sampled wherever a budget is
     # already being read. Kept in the tree because every agent runs its own

@@ -1196,11 +1196,23 @@ def _orchestrator_hold(paths, config) -> tuple[str, float | None] | None:
     budgets = read_all({spec.provider: provider}, executor_of,
                        global_config_dir(), paths.config, {}, {}, use_cache=False)
     budget = budgets.get(spec.provider)
-    if budget is None or budget.usable:
+    if budget is None:
         return None
+    if budget.usable:
+        Tree(paths.tree_file, paths.events_file).clear_quota({spec.provider})
+        return None
+    window = None
+    if budget.windows:
+        window = max(budget.windows, key=lambda n: budget.windows[n].get("percent") or 0)
+    window_bit = f" on its {window} window" if window else ""
     when = f", resets {reset_label(budget.resets_at)}" if budget.resets_at else ""
+    age_bit = (f"; read {budget.stale_seconds:.0f}s ago via {budget.source}"
+              if budget.source and budget.stale_seconds is not None else
+              f"; read via {budget.source}" if budget.source else "")
     return (f"paused       {spec.provider} has no headroom for the "
-            f"orchestrator{when}", budget.cooldown_until)
+            f"orchestrator{window_bit}{when}{age_bit}. "
+            f"Run `multiagents refresh-quota {spec.provider}` to re-check now.",
+            budget.cooldown_until)
 
 
 def _wait_for_reset(paths, config, until: float | None, poll: int = 120) -> bool:
@@ -1280,7 +1292,7 @@ def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | Non
     if not limit.get("resets", True):
         hours = _limit_number(config, "spend_limit_pause_hours")
         tree.pause(tree_now() + hours * 3600,
-                   f"{spec.provider}: {detail}", [spec.provider])
+                   f"{spec.provider}: {detail}", [spec.provider], cause="spend_limit")
         print(f"\n{spec.provider} has stopped: {detail}.")
         if said:
             print(f"  it said: {said}")
@@ -1303,7 +1315,7 @@ def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | Non
         wait = max(60.0, min(exact - time.time() + 30, 6 * 3600))
         print(f"\n{spec.provider} says its window resets at "
               f"{time.strftime('%H:%M', time.localtime(exact))}.")
-    tree.pause(tree_now() + wait, f"{spec.provider}: {detail}", [spec.provider])
+    tree.pause(tree_now() + wait, f"{spec.provider}: {detail}", [spec.provider], cause="quota")
     print(f"\n{spec.provider} has stopped: {detail}.")
     if said:
         print(f"  it said: {said}")

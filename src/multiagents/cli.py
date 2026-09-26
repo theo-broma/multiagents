@@ -2155,6 +2155,65 @@ def cmd_usage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refresh_quota_line(name: str, b, cleared: dict, lifted_pause_for: set[str]) -> str:
+    """One line: what a forced re-read of `name` found, and what it lifted."""
+    if b is None or not b.known:
+        note = (b.note if b is not None else "") or "no reading"
+        return f"{name:14} unknown      {note}"
+    window = None
+    if b.windows:
+        window = max(b.windows, key=lambda w: b.windows[w].get("percent") or 0)
+    window_bit = f" {window}" if window else ""
+    when = f", resets {reset_label(b.resets_at)}" if b.resets_at else ""
+    source_bit = f" via {b.source}" if b.source else ""
+    bits = []
+    if name in (cleared.get("cooldowns") or []):
+        bits.append("cooldown cleared")
+    if name in lifted_pause_for:
+        bits.append("pause lifted")
+    cleared_bit = f" — {', '.join(bits)}" if bits else ""
+    return (f"{name:14} {b.headroom * 100:.0f}% headroom{window_bit}{when}"
+            f"{source_bit}{cleared_bit}")
+
+
+def cmd_refresh_quota(args: argparse.Namespace) -> int:
+    """Re-read one or more providers' quotas past every cache, and lift any
+    cooldown/pause a fresh reading proves is no longer warranted (QF-R4)."""
+    paths = _resolve(args.path)
+    config = load_config(paths)
+    providers = load_providers(config.providers)
+    names = list(args.providers) if args.providers else sorted(providers)
+    unknown = [n for n in names if n not in providers]
+    if unknown:
+        print(f"unknown provider(s): {', '.join(unknown)}")
+        return 2
+
+    executor_of = executor_for(paths, config, providers)
+    to_read = {n: providers[n] for n in names}
+    budgets = read_all(to_read, executor_of, global_config_dir(), paths.config, {}, {},
+                       use_cache=False, force=True)
+
+    tree = Tree(paths.tree_file, paths.events_file)
+    prior_pause_providers = set(tree.pause_state().get("providers") or [])
+    usable = {n for n, b in budgets.items() if b is not None and b.known and b.usable}
+    cleared = tree.clear_quota(usable) if usable else {"cooldowns": [], "pause": False}
+    lifted_pause_for = prior_pause_providers if cleared.get("pause") else set()
+
+    for name in names:
+        print(_refresh_quota_line(name, budgets.get(name), cleared, lifted_pause_for))
+
+    spec = driver._launched_spec(config, "orchestrator", config.team)
+    if spec is not None and spec.provider in providers:
+        if spec.provider in budgets:
+            own = budgets[spec.provider]
+        else:
+            own = read_all({spec.provider: providers[spec.provider]}, executor_of,
+                           global_config_dir(), paths.config, {}, {}).get(spec.provider)
+        if own is not None and own.known and not own.usable:
+            return 3
+    return 0
+
+
 def cmd_tickets(args: argparse.Namespace) -> int:
     """Review and submit bug tickets the agents filed against multiagents.
 
@@ -2815,6 +2874,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hours", type=float, default=24.0,
                    help="window for --mcp, in hours (default 24)")
     p.set_defaults(func=cmd_usage)
+
+    p = sub.add_parser("refresh-quota",
+                       help="re-read a provider's quota past every cache, and lift any "
+                            "cooldown/pause it disproves")
+    p.add_argument("providers", nargs="*", help="providers to re-read (default: all)")
+    p.set_defaults(func=cmd_refresh_quota)
 
     p = sub.add_parser("tickets", help="review bugs agents filed against multiagents")
     p.add_argument("action", nargs="?", default="list",
