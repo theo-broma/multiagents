@@ -120,3 +120,31 @@ exit code, `--force` proceeding, and the message listing the ids.
   the current code.
 - Credentials must not become readable through the new mount. Persist the
   transcript directory only, not the whole CLI profile.
+
+## Decision, 2026-09-26 (orchestrator, after tester ag-9c02be)
+
+**SP-R1's premise was partly wrong.** Since `auth_proxy` was enabled (on
+2026-09-24 at 22:16), the container's own claude profile is host-backed
+through `container_private_home: [".claude"]`, at
+`~/.multiagents/container-state/shared/claude/.claude/`. Its `projects/`
+holds every transcript written since then. ag-12951a's transcript predates
+that change: it was in the container layer, and that is why it was lost.
+
+So SP-R1 is satisfied for a provider when **either**:
+- its transcript prefix lies inside a host-backed container-private home.
+  This is today's claude path. It is multiagents' own container profile,
+  never the user's `~/.claude`, and keeping credentials there is the
+  existing design, not a regression;
+- **or** the executor backs the static prefix with its own mount.
+
+The executor must guarantee one of the two for every provider that declares
+a transcript location. It must not add a second mount where the first
+already holds. The unit tests assert the guarantee, not the mechanism: the
+container path of the transcript prefix resolves to a host path that is not
+the user's HOME profile.
+
+- **SP-R2's "docker node":** a node run while the project's executor is
+  docker. Nodes do not record their executor. That is acceptable for now.
+- **The SP-R2 API:** the implementer may give `transcript_source` an executor
+  argument, or add a resolver beside it. Tests go through steer and the
+  resolver, not through a private signature.
