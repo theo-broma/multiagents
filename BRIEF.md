@@ -1633,3 +1633,11 @@ Resume in this order:
   7. `commit_all` without a git identity.
 - **Waiting on the user:** `/mcp` reconnect of multiagents. Nothing is running;
   the server is still on the 11:56 code.
+
+### 2026-09-26, after MCP reconnect
+- Host docker variants (SV+SP): 71/72 passed; only failure is the known sp_harness `wait_until` gap.
+- Container memory raised 4g -> 8g (user-approved), container recreated.
+- In flight: ag-a51827 implementer-quick (`_reset_margin` guard, P0-R5.4); ag-b760dc tester
+  (sp_harness `wait_until` + red test tests/test_tree_forward_compat.py); ag-18167b adversary on SP (b6610ca).
+- Next: after tester merges, implementer-quick on Tree ignoring unknown fields; findings from the adversary go
+  back to implementer-deep; then resolve bug-4a0446 as fixed (b6610ca).
