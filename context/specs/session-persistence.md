@@ -158,3 +158,40 @@ the user's HOME profile.
   feature today.
 Open: a provider declaring a `~/…` transcript without a matching `home_links`
 entry writes into its per-agent home, which host tooling does not read.
+
+## Decisions, 2026-09-26 (orchestrator, after adversary ag-18167b)
+
+All eight findings are accepted. Their tests are in
+`tests/test_session_persistence_adversary.py`.
+
+- **SP-R1, the prefix is a proper subdirectory.** The static transcript
+  prefix is resolved lexically: `~` is expanded and `..` is normalised.
+  - It is refused (no mount, no host path) when it is:
+    - the filesystem root;
+    - the container HOME itself;
+    - an ancestor of HOME;
+    - a path that leaves a container-private home once normalised.
+  - A refused prefix is logged, and the provider is treated as declaring no
+    transcript location. It is never mounted.
+  - A placeholder other than `{slug}` gets the same treatment, and never
+    raises.
+- **SP-R2 covers `transcripts.session_context`,** and every other
+  transcript reader: they resolve through the executor like `steer`.
+- **SP-R2, slugs:** the slug is computed from the worktree path with
+  symlinks resolved. If that finds no transcript, the unresolved path is
+  tried as well.
+- **SP-R3, what counts as present:** a session file counts as present only
+  if it holds at least one complete (newline-terminated) line that parses as
+  JSON. A missing file, an empty one, or one with no complete line is
+  refused.
+  - A truncated LAST line after complete ones is normal mid-write and is
+    accepted.
+- **SP-R4, what "missing worktree" covers:** the worktree counts as missing
+  when its path does not exist, or exists but is not a git worktree on
+  `node.branch`.
+  - A non-git directory, or a worktree on another branch, at that path is
+    moved aside (renamed with a suffix, never deleted), then the worktree is
+    reattached.
+  - A node with an empty `branch` reattaches `agents/<role>/<id>` if that
+    branch exists. Otherwise steer refuses with the reason. It never creates
+    a suffixed branch.
