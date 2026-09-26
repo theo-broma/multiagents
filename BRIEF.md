@@ -1500,3 +1500,10 @@ The container now runs on a second Claude account (weekly 0 %, resets
   writing red tests; then implementer.
   Runs in parallel with item 8: budget.py/driver.py are free, cli.py only
   gets a new subcommand.
+- **Item 8 status (2026-09-26 ~16:00):** ag-a29f15 done, SV-R1..R10 on
+  its branch (5 commits); survival file 37 pass / 3 skip (docker) / 5 fail
+  (4 SV-R11 out of scope + the harness bug). SV-R4 decision recorded
+  (af1a759). In flight: ag-a29f15 steered for the detached crash guard and
+  lock-release enforcement; tester ag-653182 fixing the `.gitignore` harness
+  bug. Then: merge both → adversary + reviewer on the merged range → user runs
+  `SV_TEST_DOCKER=1` on the host → tester for SV-R11 → bug-4a0446.
