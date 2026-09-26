@@ -1518,3 +1518,10 @@ The container now runs on a second Claude account (weekly 0 %, resets
   (`SV_TEST_DOCKER=1`, needs the user), SV-R11 (tester first), then
   bug-4a0446. The running MCP server still runs pre-merge code until the
   next restart.
+- **~17:30:** harness fix merged (78f5050). Reviewer ag-f48509: VERDICT
+  rejected, 7 findings (worst: a docker stop fallback could `killpg` a
+  container PID on the HOST; a dead `docker exec` client is read as a dead
+  agent). They were sent to ag-a29f15 to verify and fix. Adversary retried on agy
+  as ag-90d8ab (opencode failed 3× at startup: ag-d34838, ag-cdb2c0,
+  ag-852615). QF implementer ag-bec80b was hit by a server-side rate limit and
+  resumed; its branch has a HANDOFF-QF.md that must not be merged.
