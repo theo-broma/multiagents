@@ -216,6 +216,11 @@ class Node:
     follow: dict[str, int] = field(default_factory=dict)
     # SV-R10: when this node was last adopted by a server that did not start it.
     adopted_at: float | None = None
+    # SV-R11: a run of this node ended with a result its parent's server has
+    # not yet returned to the caller (wait_for_agents, check_agent,
+    # collect_agent — see `mark_seen`). Durable, because what it guards is a
+    # compaction, after which nothing in memory is left to remember it.
+    unseen: bool = False
 
     def elapsed(self) -> float:
         start = self.started_at or self.created_at
@@ -404,6 +409,7 @@ class Tree:
                 return
             if node.get("status") == status and node.get("reason") == reason:
                 return
+            previous = node.get("status")
             node["status"] = status
             # Always written, including "": a clear (stuck -> running) or a
             # clean finish (-> done) passes reason="" meaning "no reason
@@ -424,7 +430,42 @@ class Tree:
                 # node's elapsed() stays frozen at the moment of the stop for the
                 # rest of its life. answer_question() uses the same path.
                 node["ended_at"] = None
+            # SV-R11: leaving ACTIVE is a run producing a result, except a
+            # cancel, which is somebody's stop and carries no result to read.
+            # Anything after that (done -> merged) is not a new result, and
+            # entering ACTIVE again starts a run whose result is still to come.
+            if status in ACTIVE:
+                node["unseen"] = False
+            elif previous in ACTIVE and status != "cancelled":
+                node["unseen"] = True
         self.emit(agent_id, "status", status=status, reason=reason)
+
+    def mark_seen(self, agent_id: str, status: str | None = None) -> None:
+        """SV-R11: the node's result has been returned to its parent's server.
+
+        Cleared only while the node still holds the status that was returned
+        (`None`: any status outside ACTIVE), so a result read just before a
+        newer run ended does not hide the newer one.
+        """
+        with self.transaction() as data:
+            node = data["nodes"].get(agent_id)
+            if node is None or not node.get("unseen"):
+                return
+            current = node.get("status")
+            if (current == status) if status is not None else current not in ACTIVE:
+                node["unseen"] = False
+
+    def unseen(self, session: str = "") -> list[Node]:
+        """Root agents with a result the orchestrator has not seen (SV-R11).
+
+        Only parentless nodes: a nested agent's result goes to the agent that
+        started it, not to the orchestrator. With `session`, only that
+        session's agents, and those recorded before sessions were.
+        """
+        return [Node(**n) for n in self.read()["nodes"].values()
+                if n.get("unseen") and not n.get("parent")
+                and n.get("role", "") not in DRIVER_ROLES
+                and (not session or n.get("session", "") in {"", session})]
 
     def _spend_claim(self, data: dict, provider: str) -> None:
         """Drop one claim: the node it stood in for is now visible as running."""
