@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
 import p0_context_harness as ch  # noqa: E402
 
-from multiagents import driver, scripts, watchdog  # noqa: E402
+from multiagents import driver, scripts, server, watchdog  # noqa: E402
 from multiagents.config import AgentSpec, Config  # noqa: E402
 from multiagents.paths import ProjectPaths, global_config_dir  # noqa: E402
 from multiagents.providers import Provider  # noqa: E402
@@ -187,6 +187,7 @@ class Session:
                  limit_markers: list | None = None, transcript_block: bool = True,
                  omit: tuple[str, ...] = ()):
         self.capsys = capsys
+        self.monkeypatch = monkeypatch
         self.root = (tmp_path / "proj").resolve()
         self.root.mkdir()
         self.paths = ProjectPaths(self.root)
@@ -248,10 +249,44 @@ class Session:
         past = time.time() - aged
         os.utime(self.transcript, (past, past))
 
-    def node(self, status: str) -> None:
-        self.tree.add(Node(id=f"ag-{status[:3]}{len(self.tree.read()['nodes']):03d}",
-                           agent="coder", provider="fakeprov", model="m", parent=None,
-                           depth=1, status=status, task="t", session=SID))
+    def node(self, status: str) -> str:
+        agent_id = f"ag-{status[:3]}{len(self.tree.read()['nodes']):03d}"
+        self.tree.add(Node(id=agent_id, agent="coder", provider="fakeprov", model="m",
+                           parent=None, depth=1, status=status, task="t", session=SID))
+        return agent_id
+
+    def finished(self, status: str) -> str:
+        """A node that ran and ended with `status`, as every real one does: it
+        is created in flight and moves to its final status afterwards."""
+        agent_id = self.node("running")
+        if status == "merged":
+            self.tree.set_status(agent_id, "done")
+        self.tree.set_status(agent_id, status)
+        return agent_id
+
+    def see(self, agent_id: str, via: str = "check_agent") -> dict:
+        """SV-R11: the orchestrator's server returns the node's status to it,
+        through one of the three tools that count as seeing a result. The
+        server is then discarded, so what it saw survives only if it was
+        recorded durably (the spec requires that, as compaction follows)."""
+        with self.monkeypatch.context() as m:
+            m.setenv("MULTIAGENTS_SESSION_ID", SID)
+            m.setenv("MULTIAGENTS_ROLE", "orchestrator")
+            # The provider readers are not under test and must not reach the network.
+            m.setattr(server.budget_mod, "read_all", lambda *a, **k: {})
+            server._reset()
+            try:
+                if via == "check_agent":
+                    got = server.check_agent(agent_id)
+                elif via == "collect_agent":
+                    got = server.collect_agent(agent_id)
+                else:
+                    import asyncio
+                    got = asyncio.run(server.wait_for_agents([agent_id], 5))
+            finally:
+                server._reset()
+        assert agent_id in json.dumps(got) and "error" not in got, got
+        return got
 
     # ------------------------------------------------------------- run --
 
@@ -508,11 +543,52 @@ def test_p0_r8f_2_1_the_reading_is_this_sessions_not_the_newest(session):
     assert_not_stopped(s)
 
 
-@pytest.mark.parametrize("status", ["running", "pending", "stuck"])
-def test_p0_r8f_2_2_a_live_agent_blocks_it(session, status):
+# SV-R11 (context/specs/agent-survival.md) replaced R8f.2.2's idle-tree
+# condition: what blocks a compaction is a final result the orchestrator has
+# not yet seen, not an agent that is running. That a running, detached, stuck
+# or pending agent no longer blocks is asserted once, in
+# test_agent_survival.py::test_sv_r11_an_agent_without_an_unseen_result_does_
+# not_block_compaction. What was `test_p0_r8f_2_2_a_live_agent_blocks_it`,
+# whose [running] case asserted the opposite, now asserts the blocking half.
+
+@pytest.mark.parametrize("status", ["done", "failed"])
+def test_p0_r8f_2_2_sv_r11_an_unseen_final_result_blocks_it(session, status):
+    """The agent finished and nothing has returned that to the orchestrator:
+    compacting now would drop the one context that has to read it."""
     s = session()
     s.reading(OVER)
-    s.node(status)
+    s.finished(status)
+    s.run(KEEP)
+    assert_not_stopped(s)
+
+
+@pytest.mark.parametrize("via", ["check_agent", "wait_for_agents", "collect_agent"])
+def test_p0_r8f_2_2_sv_r11_a_result_the_orchestrator_has_seen_does_not(session, via):
+    s = session()
+    s.reading(OVER)
+    agent_id = s.finished("done")
+    assert s.see(agent_id, via).get("status", "done") == "done"
+    s.run(stopped_then())
+    assert_stop_compact_resume(s)
+
+
+def test_p0_r8f_2_2_sv_r11_seeing_it_running_is_not_seeing_its_result(session):
+    """Seen means the *final* status was returned. A check while the agent was
+    still running does not cover the result it produced afterwards."""
+    s = session()
+    s.reading(OVER)
+    agent_id = s.node("running")
+    s.see(agent_id, "check_agent")
+    s.tree.set_status(agent_id, "done")
+    s.run(KEEP)
+    assert_not_stopped(s)
+
+
+def test_p0_r8f_2_2_sv_r11_one_unseen_result_blocks_despite_a_seen_one(session):
+    s = session()
+    s.reading(OVER)
+    s.see(s.finished("done"))
+    s.finished("failed")
     s.run(KEEP)
     assert_not_stopped(s)
 
@@ -528,9 +604,10 @@ def test_p0_r8f_2_2_a_deferred_task_blocks_it_due_or_not(session, retry_in):
 
 @pytest.mark.parametrize("status", ["done", "failed", "merged", "interrupted"])
 def test_p0_r8f_2_2_finished_agents_do_not_block_it(session, status):
+    """Finished, and (SV-R11) already returned to the orchestrator."""
     s = session()
     s.reading(OVER)
-    s.node(status)
+    s.see(s.finished(status))
     s.run(stopped_then())
     assert_stop_compact_resume(s)
 
