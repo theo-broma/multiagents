@@ -151,10 +151,12 @@ def test_read_provider_headroom_below_0_is_accepted_unclamped_and_reads_as_criti
     assert b.severity == "critical"
 
 
-def test_read_provider_reset_time_already_in_the_past_is_stored_as_is(tmp_path):
-    # Nothing in the parse path notices resets_at is stale or clears headroom;
-    # it is carried through verbatim. See resets_soon tests below for what
-    # downstream code does (and does not) do with an already-past reset.
+def test_read_provider_reset_time_already_in_the_past_is_corrected(tmp_path):
+    # Pinned the pre-QF behaviour (a past resets_at carried through verbatim,
+    # still critical) until QF-R1 (context/specs/quota-freshness.md): a window
+    # past its reset by more than the margin does not count. A script's own
+    # reading is already the fresh read, so the fallback applies, and with
+    # every window past its reset that is headroom 1.0, resets_at none.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(
@@ -162,8 +164,9 @@ def test_read_provider_reset_time_already_in_the_past_is_stored_as_is(tmp_path):
         'budget) printf \'{"known": true, "headroom": 0.0, "resets_at": "2020-01-01T00:00:00+00:00"}\'; exit 0 ;;',
     )
     b = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, use_cache=False)
-    assert b.resets_at == "2020-01-01T00:00:00+00:00"
-    assert b.severity == "critical"
+    assert b.resets_at is None
+    assert b.headroom == 1.0
+    assert b.severity == "normal"
 
 
 def test_read_provider_nonzero_exit_reports_stderr_over_stdout(tmp_path):
