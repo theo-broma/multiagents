@@ -1496,6 +1496,7 @@ The container now runs on a second Claude account (weekly 0 %, resets
 - **Run refusal after a reset:** traced by ag-92d428 (stale CLI cache 900 s,
   shared usage file 300 s, tree cooldowns; no command clears them).
   Contract `context/specs/quota-freshness.md` (QF-R1..R5, incl. the user's
-  `refresh-quota`). Under advisor review (ag-25c350); then tester → implementer.
+  `refresh-quota`, QF-R6 pause lift). Advisor-reviewed (ef29219); tester ag-00375d
+  writing red tests; then implementer.
   Runs in parallel with item 8: budget.py/driver.py are free, cli.py only
   gets a new subcommand.
