@@ -25,29 +25,41 @@ the cache that holds it.
 
 ## Behaviours
 
-**QF-R1 — a window past its reset does not count.** When any budget reading,
-from any source or cache layer, contains a window whose `resets_at` is at or
-before now, the reading is not used as it stands. It is replaced by a fresh
+**QF-R1 — a window past its reset does not count.** A window is *past its
+reset* when its `resets_at` carries a timezone and lies at least
+`quota_reset_margin_seconds` before now. That is a new project limit, default
+120 s, which absorbs clock skew. A `resets_at` with no timezone, or one that
+cannot be parsed, is never past its reset. When any budget reading, from any
+source or cache layer, contains a window that is past its reset, the reading
+is not used as it stands. It is replaced by a fresh
 read of that provider when one can be made (see QF-R2). If no fresh read can be
 made, that window counts as 0 % used, and the provider's headroom and
 `resets_at` are recomputed from the remaining windows.
 A window that has no `resets_at` is unaffected.
 Verified by: unit tests on `budget` with a cached reading (CLI cache, shared
 file and in-process cache, each separately) holding a window at 99 % with
-`resets_at` in the past. `usable` is then true, or the fresh read is used.
-Also: a window in the past next to another window at 99 % in the future stays
-unusable.
+`resets_at` past the margin. `usable` is then true, or the fresh read is used.
+Also:
+- a window in the past next to another window at 99 % in the future stays
+  unusable;
+- a `resets_at` 60 s in the past (inside the margin) is still counted;
+- a naive `resets_at` is still counted.
 
 **QF-R2 — a fresh read after a reset is attempted, and bounded.** On the claude
 path, a reading with a past `resets_at` triggers one fetch of the usage
 endpoint, even inside `SHARED_TTL`, and the shared file is rewritten with the
 result. The existing back-off still wins. After a 429 or a `Retry-After` that
 has not elapsed, there is no fetch and QF-R1's fallback applies. At most one
-such fetch is made per provider per process per 60 s, so a reset cannot become
-a fetch storm across agents.
+such fetch is made per provider **per machine** per 60 s, whether it succeeds or
+fails. The attempt is recorded where every process on the host sees it (the
+shared usage file or a sibling of it, not process memory), because every agent
+runs its own server process. A failed attempt therefore backs off every process
+for 60 s, and the reset cannot become a fetch storm.
 Verified by: tests with the fetch stubbed, counting calls. A past reset inside
 TTL gives exactly 1 fetch. An unelapsed Retry-After gives 0 fetches and the
-fallback is used. Repeated reads within 60 s give 1 fetch.
+fallback is used. Repeated reads within 60 s give 1 fetch. Two independent reader instances
+(simulating two processes sharing the state directory) give 1 fetch between
+them, including when the first fetch failed.
 
 **QF-R3 — the refusal says what it is based on.** When `run` refuses on quota
 grounds, the message names the provider, the window that is full, that
@@ -62,8 +74,14 @@ fresh read of the named providers, or of all of them when none are named:
 - a Retry-After or 429 back-off is still honoured: the provider is then
   reported as "not re-read: rate-limited until <time>", never hammered;
 - for each provider whose fresh reading is known and usable, it clears that
-  provider's cooldown in `tree.json` and any tree pause whose cause is that
-  provider's quota;
+  provider's **quota** cooldowns and any tree pause whose cause is that
+  provider's quota. It never clears a cooldown with another cause: an auth
+  failure (`needs_login`), a crash loop (`provider_down_cooldown_seconds`),
+  or a correlated integration failure (`_maybe_cool_family`). A usage API
+  answering proves the account has quota, not that the CLI works. If a
+  cooldown or pause record does not carry its cause today, it must from now
+  on. A record with no cause is treated as not a quota record, and is left
+  alone;
 - a provider whose fresh reading is unusable, or unknown, keeps its cooldown
   and pause.
 
@@ -77,6 +95,7 @@ Exit codes:
 It changes no config and starts nothing.
 Verified by: CLI tests with the providers stubbed, covering:
 - a clear after a usable read;
+- a non-quota cooldown (auth, crash loop) surviving a usable read;
 - no clear after an unusable read;
 - no clear after an unknown read;
 - a rate-limited provider not fetched;
@@ -88,6 +107,22 @@ the provider's `resets_at` once the provider reports room. It must not wait for
 a cache TTL to expire as well.
 Verified by: a driver test with a stubbed clock and a reading that resets
 between two polls.
+
+**QF-R6 — a quota pause ends when fresh room is seen.** A tree pause whose
+cause is a provider's quota is lifted as soon as a fresh reading (QF-R1/R2) of
+that provider is known and usable, rather than at its `until`. This happens in
+three places:
+- at `run` startup, after `_orchestrator_hold` passes;
+- when the `--wait` loop proceeds, because today it proceeds without clearing
+  the pause, and the first spawn is then refused by the runner's preflight
+  pause check;
+- in `refresh-quota` (QF-R4).
+
+The same rule as QF-R4 applies: pauses with another cause, or with none
+recorded, are untouched, and so are pauses from `spend_limit_pause_hours` or
+a user `stop`.
+Verified by: a driver test in which `--wait` proceeds and the first
+`start_agent` then succeeds, and a test in which a non-quota pause survives.
 
 ## Out of scope
 
