@@ -139,3 +139,27 @@ Verified by: a driver test in which `--wait` proceeds and the first
   time and holds `cli.py` (`cmd_stop`, `cmd_resume`, the parser near `stop`),
   `runner.py`, `server.py` and the executors. Keep the `cli.py` change to a new
   subcommand and its parser entry, plus the QF-R3 message.
+
+## Decisions, 2026-09-26 (orchestrator, answering tester ag-00375d)
+
+- **Cause of a cooldown or pause:** `Tree.set_cooldown(..., cause=...)` and
+  `Tree.pause(..., cause=...)`, a string. The values are `"quota"`, `"auth"`
+  (today's `needs_login`), `"provider_down"` (crash loop) and `"family"`
+  (correlated integration failure). A record written before this change has no
+  cause, and is treated as not quota.
+- **Clock:** every "now" in this feature comes from `time.time()`.
+- **`quota_reset_margin_seconds`** lives under `limits:` in `project.yaml`
+  (default 120).
+- **`refresh-quota` and the 60 s bound:** the command is an explicit user
+  request, so it is NOT held back by QF-R2's 60 s bound. It still honours a
+  429 or an unelapsed `Retry-After`, and it records its attempt so that other
+  processes' 60 s bound counts from it.
+- **A pause naming several providers** is lifted only when every provider it
+  names has a fresh, known, usable reading.
+- **Exit code of `refresh-quota` when the orchestrator's provider is not
+  named:** it still reflects that provider's usability afterwards, read the
+  ordinary way (QF-R1 applies; no forced fetch).
+- **A reading with a top-level `resets_at` and no `windows`** is one window
+  for QF-R1.
+- **Every window past its reset, no fresh read possible:** 0 % used, headroom
+  1.0, `resets_at` none.
