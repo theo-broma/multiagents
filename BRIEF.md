@@ -1599,3 +1599,11 @@ Resume in this order:
   container_private_home. The SP tester ag-9c02be is reworking SP-R1 to
   assert the guarantee, not the mechanism. QF: ag-bec80b is merging the base
   and running the chunks.
+- **QF MERGED (5e962d9).** The implementer's edits to 2 existing tests
+  (a characterization test and `test_core` fixture dates voided by QF-R1)
+  were reverted at the gate. Tester ag-ff3382 is vetting and re-applying
+  them, then running the ONLY full suite. After it: `refresh-quota`
+  exists; close the user's proposal. SP tests merged (8fa5507). SP
+  implementer-deep ag-261e5d is running. SV-R11 merges with ag-4fe3ea. Known
+  defect 9 (a turn ending with a background test running) now also hits
+  claude/sonnet: ag-bec80b did it twice.
