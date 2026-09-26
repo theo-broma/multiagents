@@ -1655,3 +1655,9 @@ Resume in this order:
   Tickets open: bug-4a0446 (resolve fixed after 7697c2 merges), bug-1b2612 (steer false negative +
   cumulative runaway_steps; touches supervisor.py and runner.steer, so start after 7697c2 merges),
   bug-8615db, bug-d6310f (ag-1d9832). Reporting is off, and `gh` is missing, so tickets are fixed here.
+- ag-7697c2 done (2c26e36, 4a786fd, 2ed752a): 8 SP findings fixed, per-file checks green except the traversal
+  test (tester amendment deferred) and test_adversary_tree_busy_mid_grace_… (pre-existing at a83ee30). Reviewer
+  ag-39521a (agy) on it before merge.
+- ag-f233a2 (CI) and ag-1d9832 (bug-d6310f/8615db) were cut by the claude quota with NO code written: steer
+  them after 03:00 UTC ("window reset, carry on"; 1d9832 left HANDOFF.md on its branch — tell it not to merge
+  that file). They finished before the wait began and wait_for_agents never reported them: bug-d6310f live.
