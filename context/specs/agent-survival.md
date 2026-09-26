@@ -239,3 +239,11 @@ the timeout. This came from ag-a29f15, whose reading kept the
 
 Also accepted: `stuck` nodes are adoptable like `running` and `detached` ones.
 When an agent exits, the wrapper kills whatever is left in its process group.
+
+**2026-09-26, SV-R11 landed** (a5568a9, tests ade9966).
+`test_p0_r8f_2_2_a_live_agent_blocks_it` was removed rather than rewritten,
+since `test_sv_r11_an_agent_without_an_unseen_result_does_not_block_compaction`
+covers the same cases. The seen/unseen tests live in
+`tests/test_phase0_interactive_compact.py` under `test_p0_r8f_2_2_sv_r11_*`.
+R8c (headless `_compact_if_due`) is unchanged, as specified.
+`consult` also marks an idle conversational agent's reply as seen.

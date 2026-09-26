@@ -1607,3 +1607,13 @@ Resume in this order:
   implementer-deep ag-261e5d is running. SV-R11 merges with ag-4fe3ea. Known
   defect 9 (a turn ending with a background test running) now also hits
   claude/sonnet: ag-bec80b did it twice.
+- **SV-R11 MERGED (a5568a9 + ade9966).** Item 8 is code-complete. Remaining:
+  the host docker variants (the user runs them) and the MCP restart below.
+- **Tooling defect (2026-09-26 ~22:25):** `wait_for_agents` crashes with
+  `Node.__init__() got an unexpected keyword argument 'adopted_at'`. The root
+  MCP server still runs the pre-merge code (started 11:56). A process on the
+  new code (probably a nested server started from a worktree) wrote the new
+  SV fields into the shared `tree.json`. `check_agent` and `merge_agent` still
+  work. Fix: restart the MCP server once NO agent is running (the old code
+  cancels agents on exit). Lasting fix: `Tree` must ignore unknown node
+  fields (forward compatibility). Add that to the small-fixes list.
