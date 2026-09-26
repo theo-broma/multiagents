@@ -195,3 +195,12 @@ All eight findings are accepted. Their tests are in
   - A node with an empty `branch` reattaches `agents/<role>/<id>` if that
     branch exists. Otherwise steer refuses with the reason. It never creates
     a suffixed branch.
+- **After ag-7697c2 (2c26e36):**
+  - A prefix that leaves a private home once normalised is refused (logged,
+    no mount, no host path), as decided above. The adversary test that
+    expects a mount for it is amended by a tester, not coded around.
+  - A `writes: false` node with an empty `branch` and no
+    `agents/<role>/<id>` branch gets exactly that branch created
+    (`unique=False`). It has no commits, so nothing is forked. A
+    `writes: true` node in that state is refused. This keeps bug-97a0c7's
+    read-only resume.
