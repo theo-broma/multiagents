@@ -1493,3 +1493,9 @@ The container now runs on a second Claude account (weekly 0 %, resets
 - **opencode** failed twice in 4 s with "Unexpected server error"
   (ag-d34838, ag-cdb2c0); the router now falls back to agy. The refusal
   trace is ag-92d428 on agy.
+- **Run refusal after a reset:** traced by ag-92d428 (stale CLI cache 900 s,
+  shared usage file 300 s, tree cooldowns; no command clears them).
+  Contract `context/specs/quota-freshness.md` (QF-R1..R5, incl. the user's
+  `refresh-quota`). Under advisor review (ag-25c350); then tester → implementer.
+  Runs in parallel with item 8: budget.py/driver.py are free, cli.py only
+  gets a new subcommand.
