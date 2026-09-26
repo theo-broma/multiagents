@@ -31,6 +31,7 @@ from typing import Any
 import yaml
 
 import sv_harness as sv   # also puts src/ on sys.path
+from sv_harness import wait_until   # noqa: F401  (re-exported for tests)
 
 from multiagents.tree import Node, Tree, now as tree_now   # noqa: E402
 
