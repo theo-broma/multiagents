@@ -1641,3 +1641,10 @@ Resume in this order:
   (sp_harness `wait_until` + red test tests/test_tree_forward_compat.py); ag-18167b adversary on SP (b6610ca).
 - Next: after tester merges, implementer-quick on Tree ignoring unknown fields; findings from the adversary go
   back to implementer-deep; then resolve bug-4a0446 as fixed (b6610ca).
+- ~later: merged 3815982 (sp_harness wait_until + red tree forward-compat tests), 9896790 (Tree ignores
+  unknown fields, incl. runner.py), 8d3af4c (P0-R5.4 regression: limits threaded to `_reset_margin`),
+  fa07d3c (SP adversary tests, 8 findings, all accepted; decisions a83ee30).
+- In flight: ag-7697c2 implementer-deep fixing the 8 SP findings; ag-862edc tester on the new
+  context/specs/commit-identity.md (CI-R1/R2); ag-8d967d bug-reporter (steer false-negative after
+  runaway_steps, doom_loop false positives on agy task polling, wait_for_agents omitting a startup failure).
+- After ag-7697c2 merges: full suite once (chunks), then resolve bug-4a0446 fixed (b6610ca + fix commit).
