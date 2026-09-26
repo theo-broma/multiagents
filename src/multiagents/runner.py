@@ -51,7 +51,7 @@ from .providers import Event, Provider, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
 from .supervisor import Supervisor, looks_like_quota_failure
-from .tree import Node, Tree, new_id, now
+from .tree import Node, Tree, new_id, node_from_raw, now
 from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
@@ -2982,7 +2982,7 @@ class Runner:
             if raw.get("agent") != agent_name or not raw.get("conversation"):
                 continue
             if raw.get("status") in {"idle", "running", "stuck"} and raw.get("session_id"):
-                node = Node(**raw)
+                node = node_from_raw(raw)
                 if best is None or node.created_at > best.created_at:
                     best = node
         return best
