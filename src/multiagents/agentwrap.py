@@ -92,6 +92,13 @@ def _supervised(run_dir):
     return False
 
 
+def _pid_namespace():
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return "unknown"
+
+
 def main(argv):
     if len(argv) < 5 or argv[3] != "--":
         sys.stderr.write("usage: agentwrap RUN_DIR DEADLINE PID_FILE -- ARGV...\n")
@@ -110,13 +117,16 @@ def main(argv):
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out,
                                 stderr=err, preexec_fn=os.setpgrp)
     except OSError as exc:
+        out.close()
         err.write(("agentwrap: could not start %s: %s\n" % (command[0], exc)).encode())
         err.close()
         _write_atomic(status_path, "127\n")
         return 0
     out.close()
     err.close()
-    _write_atomic(pid_file, "%d\n" % proc.pid)
+    # The pid namespace goes with the pid: the file sits on a mount a host
+    # process can read too, and there this number names something else.
+    _write_atomic(pid_file, "%d %s\n" % (proc.pid, _pid_namespace()))
 
     state = {"kill_at": None, "timed_out": False, "probed": 0.0}
 
