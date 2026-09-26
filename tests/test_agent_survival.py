@@ -641,13 +641,18 @@ def test_sv_r9_merge_and_discard_work_on_an_adopted_node(project, action):
     b, agent_id = _adopt_live(p, steps=steps)
     go(p)
     assert terminal(p, agent_id) == "done", p.describe(agent_id)
-    result = b.call(action, agent_id=agent_id)
-    assert "error" not in json.dumps(result).lower() or action == "discard_agent", result
+    # Discarding an agent's work is the deliberate act, so it is asked for with
+    # force: the adopted node's work is committed, and SV-R9 is about the node
+    # being actionable, not about the unmerged-commit guard.
+    kw = {"force": True} if action == "discard_agent" else {}
+    result = b.call(action, agent_id=agent_id, **kw)
+    assert "error" not in json.dumps(result).lower(), result
     if action == "merge_agent":
         assert (p.root / "sv-r9-work.txt").is_file(), f"not merged: {result}"
         assert p.status(agent_id) == "merged", p.describe(agent_id)
     else:
         assert p.status(agent_id) == "discarded", f"{p.describe(agent_id)} {result}"
+        assert not (p.root / "sv-r9-work.txt").exists(), f"discarded work landed: {result}"
 
 
 # ===========================================================================

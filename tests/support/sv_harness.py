@@ -448,6 +448,10 @@ class Project:
             "MULTIAGENTS_STATE_DIR": os.environ["MULTIAGENTS_STATE_DIR"],
             "MULTIAGENTS_CONFIG_DIR": os.environ["MULTIAGENTS_CONFIG_DIR"],
             "PYTHONUNBUFFERED": "1",
+            # HOME is a bare temp dir: without an identity git cannot commit
+            # the agent's work, and merge/discard would see no commits at all.
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid",
         })
         if session:
             env["MULTIAGENTS_SESSION_ID"] = session
