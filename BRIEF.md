@@ -1507,3 +1507,7 @@ The container now runs on a second Claude account (weekly 0 %, resets
   lock-release enforcement; tester ag-653182 fixing the `.gitignore` harness
   bug. Then: merge both → adversary + reviewer on the merged range → user runs
   `SV_TEST_DOCKER=1` on the host → tester for SV-R11 → bug-4a0446.
+- **Quota freshness:** red suite merged (aa5ad84, 58 tests, 45 red + 13
+  guards); decisions on the tester's points in 3c4009f. Implementer
+  (`implementer` tier) starts AFTER item 8 merges: it touches `tree.py` and
+  `runner.py` cooldown call sites, which item 8 also changed.
