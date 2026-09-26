@@ -1481,3 +1481,15 @@ The container now runs on a second Claude account (weekly 0 %, resets
 - **Run refusal after a credit reset:** researcher ag-cdb2c0 (retry of ag-d34838, opencode server error) is tracing
   the refusal path and every stale state (read-only). Its answer feeds the
   contract for the fix and for `refresh-quota`.
+- **Ticket bug-4a0446 (blocking, open):** the mount-drift refusal prescribes
+  `docker rm`, which wipes claude transcripts (they live in the container
+  layer, not in container-state). Also: `steer_agent` reports success before
+  the resume fails, and a steer with a missing worktree cuts a `-2` branch
+  off base instead of reattaching `node.branch`. The proposed fix is in the
+  ticket. Schedule: right AFTER item 8 merges, because it touches
+  `executor/docker.py` and `runner.py` (steer), both of which item 8 holds.
+  Full pipeline. Until then: no `docker rm` while a session matters. The
+  running ag-a29f15's own transcript is exposed the same way.
+- **opencode** failed twice in 4 s with "Unexpected server error"
+  (ag-d34838, ag-cdb2c0); the router now falls back to agy. The refusal
+  trace is ag-92d428 on agy.
