@@ -221,16 +221,40 @@ def _apply_reset_margin(b: Budget, margin: float, now_: float) -> Budget:
     )
 
 
-def _reset_margin(project_config: Path | None) -> float:
-    """``limits.quota_reset_margin_seconds``, layered like every other limit."""
-    from .config import _read_yaml, deep_merge, limit_number
+def _reset_margin(project_config: Path | None, limits: dict | None = None) -> float:
+    """``limits.quota_reset_margin_seconds``, layered like every other limit.
+
+    ``limits`` is the caller's own already-loaded (last-good) config, when it
+    has one — a `Runner` always does. Given one, this trusts it outright
+    rather than re-reading `project.yaml` itself: re-reading is exactly what
+    crashed `start_agent` under a broken project.yaml (P0-R5.4), since a
+    caller reaching this function already survived that same file being
+    unreadable and is holding the limits that survived it.
+
+    Only a caller with no last-good config to hand (a one-shot CLI read, a
+    provider script probe) falls through to reading the layers itself, and a
+    parse error there — the one failure this project.yaml is actually prone
+    to — falls back to the shipped default rather than propagating, since
+    there is no previous reading to prefer instead.
+    """
+    from .config import limit_number
+
+    if limits is not None:
+        return limit_number(limits, "quota_reset_margin_seconds")
+
+    import yaml
+
+    from .config import _read_yaml, deep_merge
     from .paths import global_config_dir, shipped_defaults_dir
 
     merged: dict = {}
     for layer in (shipped_defaults_dir(), global_config_dir(), project_config):
         if layer is None:
             continue
-        merged = deep_merge(merged, _read_yaml(Path(layer) / "project.yaml"))
+        try:
+            merged = deep_merge(merged, _read_yaml(Path(layer) / "project.yaml"))
+        except yaml.YAMLError:
+            continue
     return limit_number(merged.get("limits") or {}, "quota_reset_margin_seconds")
 
 
@@ -527,7 +551,8 @@ def _shared_usage(config_dir: Path | None = None, *, force: bool = False,
 
 
 def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
-                project_config: Path | None = None, force: bool = False) -> Budget:
+                project_config: Path | None = None, force: bool = False,
+                limits: dict | None = None) -> Budget:
     """What is left on the claude account — WHICH account depends on where.
 
     `config_dir` is the instance's CLAUDE_CONFIG_DIR. With two subscriptions on
@@ -536,7 +561,9 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
     look right and mean nothing.
 
     `project_config` is unrelated: it is this project's own config directory,
-    used only to look up `limits.quota_reset_margin_seconds`.
+    used only to look up `limits.quota_reset_margin_seconds` — unless `limits`
+    (the caller's own already-loaded config) is given, in which case that is
+    trusted instead and `project_config` is not re-read for it (P0-R5.4).
 
     Prefers the CLI's own cache — free, and no request against somebody's rate
     limit — and asks the account directly when that cache is missing or stale,
@@ -566,7 +593,7 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
     if isinstance(fetched_ms, (int, float)):
         budget.stale_seconds = max(0.0, now_ - fetched_ms / 1000.0)
 
-    margin = _reset_margin(project_config)
+    margin = _reset_margin(project_config, limits)
     reset_suspected = bool(utilization) and _payload_past_reset(utilization, margin, now_)
     if fetch and (force or not utilization or reset_suspected
                  or (budget.stale_seconds or 0) > STALE_AFTER):
@@ -802,10 +829,11 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
 def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
                   project_config: Path | None = None,
                   spent: dict[str, int] | None = None,
-                  use_cache: bool = True, force: bool = False) -> Budget:
+                  use_cache: bool = True, force: bool = False,
+                  limits: dict | None = None) -> Budget:
     now_ = time.time()
     source = str(config_dir)
-    margin = _reset_margin(project_config)
+    margin = _reset_margin(project_config, limits)
     if use_cache and not force:
         cached = _cache.get(name)
         if (cached and now_ - cached[0] < _CACHE_TTL
@@ -825,7 +853,7 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
         budget = _from_script(name, provider, executor, config_dir, project_config)
         if budget is None:
             builtin = _BUILTIN.get(name)
-            budget = builtin(project_config=project_config, force=force) if builtin is read_claude else (
+            budget = builtin(project_config=project_config, force=force, limits=limits) if builtin is read_claude else (
                 builtin(spent) if builtin else
                 Budget(provider=name, known=False, source="none",
                        note="no budget action and no built-in reader")
@@ -853,12 +881,18 @@ def read_all(providers: dict[str, Any] | None = None,
              spend_by_provider: dict[str, dict[str, int]] | None = None,
              cooldowns: dict[str, dict] | None = None,
              use_cache: bool = True,
-             force: bool = False) -> dict[str, Budget]:
+             force: bool = False,
+             limits: dict | None = None) -> dict[str, Budget]:
     """Read every provider's budget, driven by the loaded providers map.
 
     Previously a hardcoded three-name table that never consulted the providers
     at all, so a newly added provider could never appear and a non-claude
     orchestrator's quota could never be read.
+
+    `limits` is the caller's own already-loaded (last-good) config, when it has
+    one — see `_reset_margin`. A caller with no config of its own (a one-shot
+    CLI read) can leave it unset; `quota_reset_margin_seconds` is then read
+    from `project_config` itself, same as before.
     """
     from .paths import global_config_dir
 
@@ -878,7 +912,8 @@ def read_all(providers: dict[str, Any] | None = None,
             continue
         executor = executor_for(name) if callable(executor_for) else _NullExecutor()
         budget = read_provider(name, provider, executor, config_dir, project_config,
-                               spend_by_provider.get(name), use_cache, force)
+                               spend_by_provider.get(name), use_cache, force,
+                               limits=limits)
         entry = cooldowns.get(name)
         if entry and entry.get("until", 0) > time.time():
             budget.cooldown_until = entry["until"]
