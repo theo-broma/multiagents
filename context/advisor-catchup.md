@@ -84,6 +84,22 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
    the host. See `context/specs/sandbox-git.md`. It is waiting on the user.
    Your view on the three directions is wanted.
 
+11. **cb7e50d, CI-R7 and the fix-turn NEED_DECISION (ag-c2af1d):**
+   - the trace is read with O_NONBLOCK and O_NOFOLLOW, regular files only,
+     at most 4 MB, and otherwise falls back to the hook's presence;
+   - `commit_all` runs through `asyncio.to_thread`;
+   - a question in a fix turn parks the run `awaiting_user`.
+
+   27d2fe4: the tester fixed its own helper, which waited only for terminal
+   statuses.
+12. **The user approved sandbox-git.** The contract SG-R1..R6 is in
+    10826c4, written without you. Please review it for silences, above all:
+    - SG-R3, which moves agent commits into the executor;
+    - SG-R5, where the base's hooks run on a merge, and a hook that runs the
+      tests over the merged tree is accepted as a deliberate act;
+    - whether SG-R4, pinning GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE, is
+      sufficient.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
