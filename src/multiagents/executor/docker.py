@@ -480,16 +480,22 @@ class DockerExecutor(Executor):
     def mounts(self) -> list[tuple[Path, bool]]:
         """(host path, read_only) pairs, each mounted at its own path.
 
-        Three groups: the project and its git worktrees (writable, and required
-        at identical paths for git to resolve); the CLI binaries (read-only);
+        Three groups: the project and its git worktrees (required at identical
+        paths for git to resolve; the worktrees writable, the project root split
+        by `project_mounts`); the CLI binaries (read-only);
         and each provider's credential/state directory, taken from the
         ``home_links`` already declared in providers.yaml so this list cannot
         drift from what the per-agent HOME expects to find.
         """
         if self.paths is None:
             return []
+        # Listed whether or not they exist yet: `protect_project` creates the
+        # missing ones before a container is created, and a protection that
+        # vanished from the list because its path was absent would be a
+        # protection nobody asked to drop (SG-R2).
+        project = self.project_mounts()
         out: list[tuple[Path, bool]] = [
-            (self.paths.root, False),
+            *project,
             (self.paths.worktrees, False),
             (self.paths.homes, False),
         ]
@@ -532,9 +538,10 @@ class DockerExecutor(Executor):
                     # and agy writes conversation state. Read-only breaks them.
                     out.append((Path.home() / relative, False))
 
+        required = {path for path, _ in project}
         seen: dict[Path, bool] = {}
         for path, read_only in out:
-            if path.exists() and path not in seen:
+            if (path.exists() or path in required) and path not in seen:
                 seen[path] = read_only
         mounts = sorted(seen.items())
 
@@ -549,25 +556,153 @@ class DockerExecutor(Executor):
         for container_path, store in self.transcript_state().items():
             store.mkdir(parents=True, exist_ok=True)
             mounts.append((container_path, False))
-
-        # Same trick, for the opposite reason: the project root is mounted
-        # writable because agents commit in it, and `.multiagents/config` sits
-        # inside it — so `project.yaml` was writable by every agent in here.
-        # That file IS this container's boundary: egress_allowlist, extra_mounts,
-        # mount_docker_socket. An agent could widen its own sandbox.
-        #
-        # Not an immediate escape, because none of it takes effect until the
-        # container restarts and nothing in here can restart it. That makes it
-        # worse to reason about rather than better: the damage lands on a later
-        # run, under a user who did not make the change and has no reason to
-        # re-read a config file they already wrote.
-        #
-        # Mounted read-only OVER the writable root, after it, so the narrower
-        # mount wins. The rest of `.multiagents` — run dirs, the event stream,
-        # tree.json — stays writable, because agents genuinely do write there.
-        if self.paths.config.is_dir():
-            mounts.append((self.paths.config, True))
         return mounts
+
+    # Under `.git`, read-only from the container (SG-R2). Each one is
+    # something host-side git trusts: what it executes (hooks, config,
+    # submodule config), what it takes the main checkout to be (HEAD, index,
+    # info/exclude), and which commits the user's branches and tags name.
+    GIT_PROTECTED = ("config", "config.worktree", "hooks", "info", "modules",
+                     "HEAD", "index", "refs/heads", "refs/tags")
+    # Inside `refs/heads`, the namespace agent branches are created in.
+    AGENT_REFS = "refs/heads/agents"
+
+    def project_mounts(self) -> list[tuple[Path, bool]]:
+        """The project root's mounts: what the container may change in it and
+        what it may not (SG-R2).
+
+        The project root was once mounted writable whole, `.git` included, so
+        an agent could write a hook, `core.fsmonitor` or a filter driver that
+        host-side git then ran outside the container, or edit the main
+        checkout and `project.yaml`, which is this container's own boundary.
+
+        So the root is read-only, and what the container genuinely writes is
+        reopened below it, each at its own path, where the deepest mount wins:
+        `.git` itself (packed-refs and loose refs are rewritten by
+        lock-and-rename in it, and objects, reflogs and `worktrees/` live
+        there), the agent-branch namespace, and `.multiagents` runtime state
+        (run dirs, the event stream, tree.json). Then the protected paths are
+        closed again inside those, as file or directory bind mounts.
+
+        A project whose `.git` is a file is not covered: `ensure_running`
+        refuses it, and nothing under it is listed here.
+        """
+        root = self.paths.root
+        git = root / ".git"
+        out: list[tuple[Path, bool]] = [(root, True)]
+        if git.is_dir():
+            # `refs` is writable like the rest of `.git`, but mounted in its
+            # own right: a mount point cannot be renamed, and renaming a plain
+            # `refs` away would take the read-only `refs/heads` with it and
+            # leave room for a new one.
+            out += [(git, False), (git / "refs", False)]
+            out += [(git / rel, True) for rel in self.GIT_PROTECTED]
+            out.append((git / self.AGENT_REFS, False))
+        out += [(self.paths.data, False), (self.paths.config, True)]
+        return out
+
+    def protect_project(self) -> str:
+        """Make every path `project_mounts` protects exist, and unpack the base
+        branch; the error that stops a container being used, or "".
+
+        A bind mount's source must exist, and one docker creates for itself is
+        a root-owned directory, whatever the path was meant to be. So missing
+        directories are created empty. `config.worktree` is created empty,
+        which git reads as a config with nothing in it. A missing index is
+        written by git itself: a zero-byte one makes every host git command
+        fail, and an empty index is exactly what a missing one means.
+
+        The base branch, the one checked out in the main checkout, gets a
+        loose ref file, since `packed-refs` stays writable and a loose ref wins
+        over a packed one: without it an agent could rewrite `packed-refs` and
+        move the user's branch with no merge. Run on every call rather than
+        only at creation, because the user may check out another branch while
+        the container runs; `refs/heads` is a directory mount, so a ref file
+        written there later is protected as well.
+        """
+        if self.paths is None:
+            return ""
+        git = self.paths.root / ".git"
+        if git.is_file():
+            return (f"{git} is a file, not a directory: this project is itself a "
+                    "linked worktree or uses a separate git dir, and the docker "
+                    "executor cannot protect its repository from the container. "
+                    "Run it from a main checkout, or use the local executor.")
+        try:
+            if git.is_dir():
+                for rel in ("hooks", "info", "modules", "refs", "refs/heads", "refs/tags",
+                            self.AGENT_REFS):
+                    (git / rel).mkdir(parents=True, exist_ok=True)
+                for rel in ("config", "config.worktree"):
+                    (git / rel).touch(exist_ok=True)
+                if not (git / "index").exists():
+                    error = self._create_index(git)
+                    if error:
+                        return error
+                error = self._unpack_base(git)
+                if error:
+                    return error
+            self.paths.config.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return f"cannot prepare {self.paths.root} for the container: {e}"
+        return ""
+
+    @staticmethod
+    def _create_index(git: Path) -> str:
+        """An empty index, written by git, with nothing the repository
+        configures run on the way: no hook (`post-index-change` fires on any
+        index write) and no fsmonitor."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        result = subprocess.run(
+            ["git", f"--git-dir={git}", "-c", "core.hooksPath=/dev/null",
+             "-c", "core.fsmonitor=false", "read-tree", "--empty"],
+            cwd=git.parent, env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"cannot create {git / 'index'}: {result.stderr.strip()[:300]}"
+        return ""
+
+    @staticmethod
+    def _unpack_base(git: Path) -> str:
+        """Give the checked-out branch a loose ref if it only has a packed one.
+
+        Read from the files rather than asked of git: this runs on the host,
+        in a repository the container could write to until now. Nothing moves:
+        the loose file holds the sha `packed-refs` already names, written by
+        lock-and-rename as git itself does. A detached HEAD has no branch to
+        unpack, and an unborn branch has no sha: both are left alone.
+        """
+        head = (git / "HEAD").read_text().strip() if (git / "HEAD").is_file() else ""
+        if not head.startswith("ref: refs/heads/"):
+            return ""
+        name = head[len("ref: "):]
+        loose = git / name
+        heads = git / "refs" / "heads"
+        if heads not in loose.parents or ".." in Path(name).parts:
+            return f"{git / 'HEAD'} names an unexpected ref: {name}"
+        if loose.exists():
+            return ""
+        packed = git / "packed-refs"
+        sha = ""
+        if packed.is_file():
+            for line in packed.read_text().splitlines():
+                if line[:1] in ("#", "^"):
+                    continue
+                value, _, ref = line.partition(" ")
+                if ref.strip() == name:
+                    sha = value.strip()
+                    break
+        if not sha:
+            return ""
+        loose.parent.mkdir(parents=True, exist_ok=True)
+        lock = loose.with_name(loose.name + ".lock")
+        try:
+            with open(lock, "x") as f:
+                f.write(sha + "\n")
+        except FileExistsError:
+            return (f"cannot unpack the base branch {name}: {lock} exists, so "
+                    "another git process holds it. Try again once it is done.")
+        os.replace(lock, loose)
+        return ""
 
     # Keys never carried into a container-private profile. `env` and an
     # api-key helper are how a settings file hands out credentials, and this
@@ -1310,6 +1445,12 @@ class DockerExecutor(Executor):
             # the `_start_inside` branch first) — this guard is for any other
             # caller that assumes `ensure_running` is always safe to call.
             return {"ok": True, "container": self.container, "existed": True}
+        # Before anything is created or started: a container must never run
+        # with a protected path missing, and a project it cannot protect is
+        # refused outright (SG-R2).
+        error = self.protect_project()
+        if error:
+            return {"ok": False, "error": error}
         if not docker_available():
             return {"ok": False, "error": "docker is not on PATH"}
         self.seed_private_state()
