@@ -7,8 +7,8 @@ docker CLI is faked at the subprocess boundary, and the container is modelled
 as "created from the mount list computed at creation time".
 
 The host layout is built in a temp directory, deliberately OUTSIDE the project
-root (the project root is mounted writable, and would otherwise "contain"
-everything):
+root (the project root is mounted, read-only since SG-R2, and would otherwise
+"contain" everything):
 
     host/.local/bin/fakecli            -> host/.local/share/fakecli/versions/1.0.0
     host/.local/bin/unrelated-tool        (a bystander; must never be mounted)
@@ -362,15 +362,19 @@ def test_p0_r1_3_a_real_mount_addition_is_still_refused_after_a_retarget(
 def test_p0_r1_3_a_read_only_change_is_still_refused_after_a_retarget(
         tmp_path, layout, fake_docker):
     ex = _executor(tmp_path)
+    # The project root is read-only since SG-R2, so the "wrong" state is taken
+    # from a path the config still wants writable: the worktrees directory.
+    ex.paths.worktrees.mkdir(parents=True, exist_ok=True)
     created = ex.mounts()
-    # The container got the project root read-only; the config wants it writable.
-    tampered = [(p, True if p == ex.paths.root else ro) for p, ro in created]
+    assert dict(created)[ex.paths.worktrees] is False
+    # The container got the worktrees read-only; the config wants them writable.
+    tampered = [(p, True if p == ex.paths.worktrees else ro) for p, ro in created]
     fake_docker(ex, tampered)
     layout.install("1.0.1")
     layout.retarget("1.0.1")
 
     stale = ex.stale_mounts()
-    assert stale == [f"{ex.paths.root} as writable"], stale
+    assert stale == [f"{ex.paths.worktrees} as writable"], stale
 
 
 # ===========================================================================
@@ -399,9 +403,12 @@ def test_p0_r1_4_launcher_path_stays_mounted_read_only_and_resolvable(tmp_path, 
 # ===========================================================================
 
 def _todays_list(ex, *cli_paths: Path) -> list[tuple[Path, bool]]:
-    """Today's full mount list for this fixture: project root writable, the
-    CLI path(s) read-only, sorted; nothing else exists to be mounted."""
-    return sorted([(ex.paths.root, False), *[(p, True) for p in cli_paths]])
+    """Today's full mount list for this fixture: the project root's SG-R2
+    layout (the root read-only, `.multiagents` reopened writable, its config
+    closed again; the fixture has no `.git`, so nothing under it), the CLI
+    path(s) read-only, sorted; nothing else exists to be mounted."""
+    project = [(ex.paths.root, True), (ex.paths.data, False), (ex.paths.config, True)]
+    return sorted([*project, *[(p, True) for p in cli_paths]])
 
 
 def test_p0_r1_5_plain_binary_is_mounted_byte_identically(tmp_path, layout):
