@@ -356,3 +356,9 @@ one breaks SG-R1 or SG-R4:
 - **Not pursued:** `.gitattributes` on the merge path has no built-in
   behaviour that executes anything. Filters and drivers need config, which
   is protected, and `core.attributesFile` is config too.
+- **A failed pinned read is never "clean"** (found by tester ag-080955).
+  When git fails under a pinned read, because of a corrupt index or any
+  other error, `is_dirty`, `uncommitted_entries` and `status` raise
+  `GitError`. They never return "clean" or an empty list. Before the cap,
+  an index that is a FIFO or a symlink also raises `GitError`, rather than
+  being skipped.
