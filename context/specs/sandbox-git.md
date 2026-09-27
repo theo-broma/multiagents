@@ -230,3 +230,40 @@ first delegation, and names the command.
   itself, reads the merged working tree and so runs the branch's helper.
   SG-R5 does not cover that. It falls under "a hook that runs the project's
   files over the merged tree is the orchestrator's deliberate act".
+
+## Decisions, 2026-09-27 (orchestrator, after testers ag-2e9add on SG-R2/R6 and ag-4c3dd4 on SG-R4)
+
+- **SG-R4 keyword renamed:** the five functions already name their first
+  parameter `repo`. The new keyword is **`root`**, the project root; the first
+  parameter keeps its name. This replaces "`repo: Path`" above.
+- **SG-R4, path equal to root:** when the path given is the root itself (the
+  main checkout), the pinned resolution is git dir = common dir =
+  `<root>/.git`, and work tree = root, with the same neutralisation.
+- **SG-R4, missing git dir:** if the derived git dir does not exist, the
+  function raises `gitops.GitError` naming the path. It never falls back to
+  unpinned resolution.
+- **SG-R4, nothing written:** pinned reads write no git config.
+- **SG-R2, index:** a missing `.git/index` is never created as a zero-byte
+  file, which breaks git. It is created by git itself as a valid index. Host
+  `git status` output must be unchanged by that step (the tester's test holds).
+- **SG-R2, protected-path additions:**
+  - `.git/config.worktree`;
+  - `.git/modules` (submodule config);
+  - `.git/refs/heads` and `.git/refs/tags`, while `.git/refs/heads/agents`,
+    the agent-branch namespace, stays writable;
+  - the base branch, meaning the branch checked out in the main checkout.
+    It always has a loose ref file, unpacked by the host before the
+    container starts if needed, so that a rewritten `packed-refs` cannot
+    move it. A loose ref wins over a packed one.
+
+  Otherwise an agent could move the base branch, and its commits would reach
+  the user's branch without a merge.
+- **Accepted limitations** (documented, not tested):
+  - a user branch that is only in `packed-refs` and is not the base can
+    still be rewritten through `packed-refs`;
+  - `.git/objects/info/alternates` stays writable, which is data only and
+    executes nothing;
+  - a project whose `.git` is a file rather than a directory is out of scope
+    for SG-R2, and the executor refuses to start with a clear message.
+- **Mount paths:** every mount is at its own host path (source equals
+  destination), as today.
