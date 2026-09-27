@@ -1917,7 +1917,10 @@ class Runner:
         # `status`: a commit failure doesn't by itself make the run failed.
         if commit_result is not None and not commit_result.ok:
             detail = commit_result.err or commit_result.out
-            text = f"{text}\n\ncommit failed: {detail}".strip()
+            # CI-R4: bound the git output carried into the result text, so a
+            # noisy hook can't bury the agent's own answer.
+            detail_for_text = detail if len(detail) <= 500 else detail[:500] + " [truncated]"
+            text = f"{text}\n\ncommit failed: {detail_for_text}".strip()
             self.tree.emit(node_id, "commit_failed", detail=detail[:400])
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
