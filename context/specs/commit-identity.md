@@ -198,3 +198,17 @@ path. CI-R6 is independent.
   success. A failed `git add` is a failed commit under CI-R2 and is reported.
   Verified by: an end-of-run commit with `index.lock` held and unstaged work
   reports `commit_failed`.
+
+## Decisions, 2026-09-27 (orchestrator, after implementer ag-b7c2ff on CI-R5)
+
+- **Any quota or auth cut propagates:** a fix turn that ends `quota` (no
+  reset time known) or `unauthenticated` gives the run that same status, as
+  that cut would for any run. It does not keep the original `done`. "Limited
+  wins" means any status telling the orchestrator to wait or re-authenticate
+  wins over a commit failure. The commit failure is still appended.
+- **A failed run is still eligible:** a run whose own status is `failed`, for
+  example a timeout, still gets the fix loop when a hook refused its commit.
+- **Detection is broad on purpose:** the hooks `pre-commit`,
+  `prepare-commit-msg` and `commit-msg` all count. The failing hook is found
+  with a `GIT_TRACE2_EVENT` trace, and on a git too old for the trace, the
+  hook's presence alone decides.
