@@ -320,35 +320,76 @@ def test_sp_r4_branch_checked_out_elsewhere_refuses_without_forking(local):
 # SP-R1 / SP-R2: transcript resolution attacks
 # ---------------------------------------------------------------------------
 
-def test_sp_r1_path_traversal_escaping_private_home_is_not_silently_unbacked(tmp_path, home):
-    """Attack: transcript.dir uses '..' to traverse outside container_private_home.
+def _assert_escape_refused(tmp_path, home, capfd, name: str, declared: str,
+                           escaped: Path) -> None:
+    """SP-R1, decided 2026-09-26 and after ag-7697c2: a transcript dir whose
+    '..' takes it out of a container-private home is refused. Logged, never
+    mounted, no host path for it, and the provider reads as declaring no
+    transcript location at all."""
+    from multiagents.watchdog import transcript_source
 
-    e.g. container_private_home: ['.claude'], transcript.dir: '~/.claude/../secret/{slug}'.
-    In DockerExecutor.transcript_state:
-        if any(prefix == p or p in prefix.parents for p in held):
-    Because ~/.claude is in prefix.parents, transcript_state incorrectly thinks
-    the prefix is inside .claude and skips backing it.
-    Furthermore, host_path resolves path.relative_to(held[0]) with '..' which
-    escapes the private home storage on the host!
-    """
-    block = _provider(tmp_path, "claude", "~/.claude/../secret/{slug}")
+    block = _provider(tmp_path, name, declared)
     block["container_private_home"] = [".claude"]
-    providers = {"claude": block}
+    providers = {name: block}
     ex = _executor(tmp_path, "proj", providers)
+    provider = load_providers(providers)[name]
+    worktree = tmp_path / "proj"
 
-    # The transcript directory must be backed:
-    container_dir = home / "secret" / "slug"
-    resolved = ex.host_path(container_dir)
-
-    # Must be backed and not escape multiagents state:
-    private_store = ex.private_state()[home / ".claude"]
-    assert str(resolved.resolve()).startswith(
-        str(Path(os.environ["MULTIAGENTS_STATE_DIR"]).resolve())
-    ), f"{resolved} escaped multiagents state storage!"
-    # It must not resolve inside private_store while escaping it:
-    assert not str(resolved).startswith(str(private_store) + "/.."), (
-        f"{resolved} escapes private store with unnormalized '..'!"
+    # Never mounted: no store for this provider's transcripts, and nothing in
+    # the run arguments over the escaped path or a directory holding it
+    # below HOME.
+    assert ex.transcript_state(name) == {}, (
+        f"refused transcript dir {declared!r} was given a store: "
+        f"{ex.transcript_state(name)}"
     )
+    covering = [dst for _, dst, _ in _mounts(ex.run_args())
+                if (dst == escaped or dst in escaped.parents) and home in dst.parents]
+    assert not covering, f"{escaped} is mounted via {covering}"
+
+    # No host path: the escaped path is not relocated into multiagents state.
+    state = Path(os.environ["MULTIAGENTS_STATE_DIR"]).resolve()
+    resolved = ex.host_path(escaped)
+    assert ".." not in resolved.parts, f"{resolved} carries an unnormalised '..'"
+    assert state not in resolved.resolve().parents, (
+        f"refused path {escaped} was given a host store at {resolved}"
+    )
+
+    # Treated as declaring no transcript location, so a reader never looks in
+    # the user's host HOME for what the container wrote.
+    for executor in (None, ex):
+        source = transcript_source(provider, worktree, executor)
+        assert source is None, (
+            f"refused transcript dir {declared!r} still resolves to {source} "
+            f"(executor={executor!r})"
+        )
+
+    # Logged: the refusal names the declaration.
+    err = capfd.readouterr().err
+    assert declared in err, (
+        f"no refusal reported on stderr for {declared!r}; stderr was: {err!r}"
+    )
+
+
+def test_sp_r1_path_traversal_escaping_private_home_is_refused(tmp_path, home, capfd):
+    """'..' before {slug}: '~/.claude/../secret/{slug}' with '.claude' private.
+
+    Normalised, the static prefix is ~/secret — outside the private home it
+    names. Refused rather than mounted (amended per the 2026-09-26 decisions;
+    the original version of this test required a mount).
+    """
+    _assert_escape_refused(tmp_path, home, capfd, "escapebefore",
+                           "~/.claude/../secret/{slug}", home / "secret" / "slug")
+
+
+def test_sp_r1_path_traversal_after_slug_is_refused(tmp_path, home, capfd):
+    """'..' after {slug}: '~/.claude/{slug}/../../escaped'.
+
+    The static prefix (~/.claude) looks harmless, but every resolved path
+    normalises to ~/escaped, outside the private home and in the host's own
+    HOME. Any '..' component in a declared transcript dir is refused.
+    """
+    _assert_escape_refused(tmp_path, home, capfd, "escapeafter",
+                           "~/.claude/{slug}/../../escaped", home / "escaped")
 
 
 def test_sp_r1_unusual_placeholder_root_does_not_mount_over_container_root(tmp_path, home):
