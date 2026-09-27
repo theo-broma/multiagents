@@ -451,6 +451,7 @@ class Runner:
         self.providers = load_providers(config.providers)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.runs: dict[str, Run] = {}
+        reap_pending_branches(paths.root, self.tree)
 
     def reload(self, config: Config) -> None:
         """Swap in a freshly loaded config and everything derived from it.
@@ -2440,8 +2441,11 @@ class Runner:
             self.git_unreadable(node_id, root, exc)
             return                            # unread is not empty: kept
         if commits == 0:
-            self._cleanup(node)
-            self.tree.update(node_id, branch="", worktree="")
+            pending = self._cleanup(node)
+            # A branch the container could not delete stays on the node until
+            # the host has deleted it (SG-R2), which then clears it.
+            self.tree.update(node_id, worktree="",
+                             **({} if pending else {"branch": ""}))
         else:
             self.tree.emit(
                 node_id, "unexpected_commits",
@@ -2644,16 +2648,26 @@ class Runner:
         elif status == "conflict":
             self.tree.set_status(node_id, "done", "merge conflict; branch kept for parent")
 
-    def _cleanup(self, node: Node) -> None:
+    def _cleanup(self, node: Node) -> bool:
         """Remove a finished agent's worktree and branch.
 
         Only ever called after a successful merge or an explicit discard, so
         force-deleting the branch is safe: its commits are already elsewhere.
+        True when the branch is left for the host to delete (SG-R2).
         """
         if node.worktree and Path(node.worktree).is_dir():
             gitops.remove_worktree(self.paths.root, Path(node.worktree), force=True)
         if node.branch:
-            gitops.delete_branch(self.paths.root, node.branch, force=True)
+            result = gitops.delete_branch(self.paths.root, node.branch, force=True)
+            if gitops.refused_by_packed_refs_lock(result):
+                # SG-R2: in the container `.git` is read-only, so no branch
+                # can be deleted from here. Not an error: the host deletes it
+                # once this node is merged or discarded.
+                self.tree.update(node.id, branch_pending_delete=node.branch)
+                self.tree.emit(node.id, "branch_pending_delete", branch=node.branch,
+                               detail=result.err[:400])
+                return True
+        return False
 
     # ----------------------------------------------------------------- query --
 
@@ -4074,6 +4088,7 @@ class Runner:
         if status == "merged":
             self.tree.set_status(agent_id, "merged")
             self._cleanup(node)
+        reap_pending_branches(self.paths.root, self.tree)
         payload = {"agent_id": agent_id, "result": status, "detail": detail[:1000],
                    "branch": node.branch}
         if reverted:
@@ -4111,6 +4126,7 @@ class Runner:
             }
         self._cleanup(node)
         self.tree.set_status(agent_id, "discarded", "discarded by parent")
+        reap_pending_branches(self.paths.root, self.tree)
         return {"agent_id": agent_id, "discarded": True, "branch": node.branch}
 
     def push_branch(self, agent_id: str | None, remote: str | None = None) -> dict[str, Any]:
@@ -4134,6 +4150,62 @@ class Runner:
         result = gitops.push(self.paths.root, target_remote, branch)
         return {"pushed": result.ok, "branch": branch, "remote": target_remote,
                 "detail": (result.err or result.out)[:500]}
+
+
+def _branch_released(node: dict) -> bool:
+    """Whether a node's branch is no longer anyone's work (SG-R2): its status
+    is terminal, and a `done` node's worktree is gone too. A `done` node that
+    still has one is waiting on its parent to merge or discard it."""
+    status = node.get("status")
+    if status not in TERMINAL:
+        return False
+    if status == "done":
+        worktree = node.get("worktree")
+        return not (isinstance(worktree, str) and worktree and Path(worktree).is_dir())
+    return True
+
+
+def reap_pending_branches(root: Path, tree: Tree) -> int:
+    """Delete the branches a container could not (SG-R2), and clear the marks.
+
+    `tree.json` is written by the container too, so a mark is only a request.
+    It is carried out when it names the branch of the very node that holds it,
+    that node is terminal (a `done` one only once its worktree is gone), no
+    node still at work holds the same branch, and the branch is under
+    `refs/heads/agents/`. Anything else is left alone, mark included. Once the
+    branch is gone, the mark and the node's `branch` are both cleared. Never
+    raises: it runs on every Runner start. Returns how many were cleared.
+    """
+    try:
+        nodes = tree.read().get("nodes", {})
+    except Exception:
+        return 0
+    marked = [(node_id, n) for node_id, n in nodes.items()
+              if isinstance(n, dict) and n.get("branch_pending_delete")]
+    if not marked:
+        return 0
+    held = {n.get("branch") for n in nodes.values()
+            if isinstance(n, dict) and not _branch_released(n)}
+    cleared = 0
+    for node_id, node in marked:
+        branch = node.get("branch_pending_delete")
+        if (not isinstance(branch, str) or branch != node.get("branch")
+                or not _branch_released(node) or branch in held
+                or not branch.startswith("agents/")):
+            continue
+        try:
+            if not gitops.run(root, "check-ref-format", f"refs/heads/{branch}").ok:
+                continue
+            if gitops.branch_exists(root, branch):
+                result = gitops.delete_branch(root, branch, force=True)
+                if not result.ok and gitops.branch_exists(root, branch):
+                    continue                  # kept, and so is the mark
+            tree.update(node_id, branch_pending_delete="", branch="")
+        except Exception:
+            continue
+        tree.emit(node_id, "branch_deleted", branch=branch)
+        cleared += 1
+    return cleared
 
 
 def _merge_usage(current: dict[str, Any], incoming: dict[str, Any],

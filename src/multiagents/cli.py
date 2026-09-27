@@ -36,7 +36,7 @@ from .models import refresh_models, validate_agent_models
 from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
 from .providers import load_providers
-from .runner import Runner
+from .runner import Runner, reap_pending_branches
 from .tree import ACTIVE, Tree
 
 GITIGNORE_LINE = ".multiagents/"
@@ -1030,6 +1030,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # those and a git call in it can hang for its whole timeout.
         if _save_interrupted(node, paths.root):
             saved += 1
+
+    # SG-R2: branches a container could not delete, now that the host can.
+    reap_pending_branches(paths.root, tree)
 
     # Reclaiming a node is itself proof of an ending nobody recorded: a clean
     # teardown marks its agents cancelled, so a node still claiming to run
