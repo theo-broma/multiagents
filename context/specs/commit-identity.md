@@ -63,3 +63,23 @@ Verified by: the existing `tests/test_core.py` merge-gate tests and
 `tests/test_c3_lifecycle_harness.py` merge tests pass with no git identity in
 the environment (HOME pointed at an empty directory), plus a direct
 `gitops.merge` test in a new file.
+
+**CI-R4 — the reported failure is bounded.** Added 2026-09-27, after the
+advisor's catch-up review (ag-25c350). When CI-R2 appends the commit failure
+to the result text, the git output it carries is truncated to at most 500
+characters, with a marker saying it was truncated. The event already
+truncates its copy. A hook that prints a thousand lines must not bury the
+agent's own answer.
+Verified by: a runner-level test where the commit fails with more than
+500 characters of stderr. The result text keeps the agent's answer and
+carries at most 500 characters of the git output.
+
+## Decisions, 2026-09-27 (orchestrator, after advisor ag-25c350)
+
+- **Fallback identity on orchestrator merges run in a container:** kept.
+  CI-R3 says so on purpose, and failing the merge is worse. A user who wants
+  their own name on merges configures git or `GIT_AUTHOR_*`.
+- **`EMAIL` precedence (`gitops.py`):** correct, kept.
+- **Hooks and signing on agent commits (`commit.gpgsign`, pre-commit hooks):**
+  bypassing them overrides the user's repository policy, so the user decides.
+  Open. Until then, a failure from either is reported per CI-R2.
