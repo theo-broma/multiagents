@@ -52,6 +52,14 @@ class Supervisor:
     # repeating one must never trip doom_loop by itself. silence/runaway_steps
     # /timeout are unaffected — only the loop-signature check is skipped.
     opaque_tools: frozenset[str] = field(default_factory=frozenset)
+    # bug-8615db: like `opaque_tools`, but only for a call matching specific
+    # argument values — see `Provider.opaque_tool_args`. Each entry is
+    # `{"tool": <name>, "match": {<arg key>: [<opaque values>]}}`; a call is
+    # opaque under this if its name is `tool` and, for every key in `match`,
+    # the call's own argument value is one of the listed ones. Kept separate
+    # from `opaque_tools` rather than folded in: that one is unconditional on
+    # the tool name and a tuple of dicts cannot live in the same frozenset.
+    opaque_tool_args: tuple[dict, ...] = field(default_factory=tuple)
 
     started: float = field(default_factory=time.monotonic)
     last_event: float = field(default_factory=time.monotonic)
@@ -116,7 +124,8 @@ class Supervisor:
             self.steps += 1
 
         trip: Trip | None = None
-        is_opaque_call = event.kind == "tool" and event.name in self.opaque_tools
+        is_opaque_call = event.kind == "tool" and (
+            event.name in self.opaque_tools or self._matches_opaque_args(event))
         if is_opaque_call:
             self.opaque_calls += 1
         signature = None if is_opaque_call else event.loop_signature()
@@ -142,6 +151,25 @@ class Supervisor:
             self._runaway_reported = True
             return Trip("runaway_steps", f"{self.steps} steps exceeds max_steps={self.max_steps}")
         return None
+
+    def _matches_opaque_args(self, event: Event) -> bool:
+        """bug-8615db: does this call match one of `opaque_tool_args`?
+
+        A poll like agy's `manage_task {Action: status, TaskId: X}` reports
+        the SAME TaskId on every check of one task, so an ordinary wait for a
+        background job to finish looks identical to a real doom loop under
+        the plain tool-name-and-args signature. Matching is scoped to the
+        argument values that make a call a poll (`Action: status` or `list`),
+        not the tool as a whole — `Action: run` re-launching the same command
+        must still trip, same as any other tool.
+        """
+        for rule in self.opaque_tool_args:
+            if event.name != rule.get("tool"):
+                continue
+            match = rule.get("match") or {}
+            if all(event.args.get(key) in values for key, values in match.items()):
+                return True
+        return False
 
     def note_progress(self, state: str) -> None:
         """Record the agent's working tree as it is right now.

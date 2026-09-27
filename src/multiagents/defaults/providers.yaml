@@ -193,6 +193,17 @@ providers:
     # available to check, it never does. Declared opaque instead of mapped.
     opaque_tools:
       - view_file
+    # bug-8615db: `manage_task` is agy's background-task tool. Checking on a
+    # task already started (`Action: status`, or `Action: list` for every
+    # task) reports the same TaskId each time by design while a backgrounded
+    # command still runs — that repetition is the wait for it to finish, not
+    # a doom loop, and must not trip on its own. `Action: run`, which starts
+    # a task, is deliberately left off this list: repeating THAT is exactly
+    # the loop doom_loop exists to catch.
+    opaque_tool_args:
+      - tool: manage_task
+        match:
+          Action: [status, list]
     # Under docker, do NOT mount the host's copy of these paths. A private
     # directory is mounted over each one instead, so the container keeps its own
     # credentials and can never overwrite or downgrade the host's.

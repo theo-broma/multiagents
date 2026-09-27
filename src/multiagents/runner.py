@@ -1000,6 +1000,7 @@ class Runner:
             loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
             declares_turn=_declares_turn(provider),
             opaque_tools=frozenset(provider.opaque_tools),
+            opaque_tool_args=tuple(provider.opaque_tool_args),
         )
 
     async def _launch(
@@ -3583,6 +3584,18 @@ class Runner:
             watched = [n.id for n in self.tree.active()]
             watched += [q["agent"] for q in self.tree.open_questions()
                         if q["agent"] not in watched]
+            # bug-d6310f: an agent that already failed or finished before this
+            # call (e.g. a provider crash within the first few seconds of
+            # start()) is in neither set above, so it was reported nowhere at
+            # all — not here, not in already_finished, not in still_running.
+            # tree.unseen() is exactly "parentless nodes with a result nobody
+            # has been told about yet", scoped by session the same way
+            # driver.py's _busy() scopes it. Folding it in surfaces the miss
+            # through the already-finished path below, and server.py's
+            # _seen() marks it seen once reported, so it does not repeat on
+            # the next wait_for_any(None) call.
+            watched += [n.id for n in self.tree.unseen(self.session())
+                        if n.id not in watched]
         watched += [r["agent_id"] for r in revived.get("restarted", [])
                     if r.get("agent_id") and r["agent_id"] not in watched]
         if not watched:
