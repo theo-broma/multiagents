@@ -122,15 +122,22 @@ def _both_ends(text: str, keep: int = 80, tail: int = 200) -> str:
 PROGRESS_SAMPLE_SECONDS = 3.0
 
 
-def _worktree_state(worktree: Path) -> str:
+def _worktree_state(worktree: Path, root: Path) -> str:
     """A cheap hash of what the agent has actually changed on disk.
 
     This is the ground truth the tool stream cannot give: a CLI that reports a
     write as {"TargetFile": "..."} with no content makes three different edits
     indistinguishable, while the tree itself is never ambiguous about whether
     anything happened.
+
+    Pinned to project `root`'s trusted paths (SG-R4): polled while the agent
+    runs, it executes nothing the agent wrote. A tree that cannot be read
+    that way has no state, as a tree with no repository has none.
     """
-    result = gitops.run(worktree, "status", "--porcelain")
+    try:
+        result = gitops.status(worktree, root=root)
+    except gitops.GitError:
+        return ""
     if not result.ok:
         return ""
     return hashlib.sha1(result.out.encode()).hexdigest()[:12]
@@ -1706,7 +1713,8 @@ class Runner:
                         and time.monotonic() - last_progress >= PROGRESS_SAMPLE_SECONDS:
                     last_progress = time.monotonic()
                     run.supervisor.note_progress(
-                        await asyncio.to_thread(_worktree_state, progress_dir)
+                        await asyncio.to_thread(_worktree_state, progress_dir,
+                                                self.paths.root)
                     )
 
                 trip = run.supervisor.observe(event)
@@ -2421,7 +2429,8 @@ class Runner:
                 if (progress_dir is not None
                         and run.supervisor.quiet_for >= run.supervisor.silence_timeout):
                     run.supervisor.note_progress(
-                        await asyncio.to_thread(_worktree_state, progress_dir))
+                        await asyncio.to_thread(_worktree_state, progress_dir,
+                                                self.paths.root))
                 trip = run.supervisor.check_timers()
                 if trip:
                     self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
@@ -3339,7 +3348,9 @@ class Runner:
                        behind: int | None) -> dict[str, Any]:
         """What a turn reads, for the caller (CF-R4), from what the turn
         already resolved — base is looked up once per turn, not per use."""
-        return {"commit": (gitops.short_sha(worktree, head) if head else "") or None,
+        # The root, not the worktree: a sha names the same commit in both, and
+        # the root's git is the one the host trusts (SG-R4).
+        return {"commit": (gitops.short_sha(self.paths.root, head) if head else "") or None,
                 "base_commit": (gitops.short_sha(self.paths.root, base_sha)
                                 if base_sha else "") or None,
                 "behind": behind}
@@ -3366,7 +3377,11 @@ class Runner:
         tracks with other content. Any git failure takes the same path and is
         recorded, rather than costing the turn (CF-R5).
         """
-        head = gitops.head_sha(worktree)
+        # SG-R4: every git call here is pinned to the project's own paths, and
+        # the move runs with nothing the agent wrote executing. A tree that
+        # cannot be read that way is not moved: it may hold work.
+        root = self.paths.root
+        head = ""
         behind: int | None = None
 
         def not_updated(error: str) -> tuple[str, str, int | None]:
@@ -3385,15 +3400,18 @@ class Runner:
             return (f"[system] Your worktree {stale} and was not updated, "
                     f"because {why}.\n\n", head, behind)
 
+        try:
+            head = gitops.head_sha(worktree, root=root)
+        except gitops.GitError as exc:
+            self.git_unreadable(node.id, worktree, exc)
+            return not_updated(str(exc))
         if not base_sha:
             return not_updated(f"base {base!r} does not name a commit")
         if not head:
             return not_updated("the worktree has no readable HEAD")
         if head == base_sha:
             return "", head, 0
-        # SG-R4: pinned to the project's own paths. A tree that cannot be read
-        # that way is not moved: it may hold work.
-        root = self.paths.root
+        current, in_the_way = False, ""
         try:
             behind = gitops.commits_on(worktree, base_sha, head, root=root)
             status = gitops.status(worktree, root=root)
@@ -3402,21 +3420,24 @@ class Runner:
             # towards not moving. Its first move records one.
             own_work = status.ok and bool(status.out.strip() or gitops.holds_unmerged_commits(
                 worktree, head, base_sha, since=node.placed_on, root=root))
+            if status.ok and own_work:
+                # Ahead of base with work of its own: current, not stale —
+                # unless base went back past where this worktree was placed.
+                current = not behind and not (node.placed_on and not gitops.is_ancestor(
+                    worktree, node.placed_on, base_sha, root=root))
+            elif status.ok:
+                in_the_way = gitops.untracked_in_the_way(worktree, head, base_sha,
+                                                         root=root)
         except gitops.GitError as exc:
             self.git_unreadable(node.id, worktree, exc)
             return not_updated(str(exc))
         if not status.ok:
             return not_updated(status.err or status.out)
         if own_work:
-            if not behind and not (node.placed_on and not gitops.run(
-                    worktree, "merge-base", "--is-ancestor", node.placed_on,
-                    base_sha).ok):
-                # Ahead of base with work of its own: current, not stale —
-                # unless base went back past where this worktree was placed.
+            if current:
                 return "", head, behind
             return kept(f"it holds work of your own (uncommitted changes or "
                         f"commits not on {base})")
-        in_the_way = gitops.untracked_in_the_way(worktree, head, base_sha)
         if in_the_way:
             return kept(f"{base} now tracks {in_the_way}, which your worktree "
                         f"holds as a file git does not track (an ignored one, "
@@ -3424,12 +3445,13 @@ class Runner:
                         f"overwrite it")
         # The move itself: the node's own branch, still checked out, now at
         # base. `reset --keep` refuses rather than overwrites if a tracked
-        # file changed since the check above, and keeps HEAD attached.
-        symref = gitops.run(worktree, "symbolic-ref", "-q", "HEAD")
-        if not symref.ok or symref.out != f"refs/heads/{node.branch}":
-            return not_updated(f"the worktree is not on its branch {node.branch!r} "
-                               f"(HEAD is {symref.out or 'detached'})")
-        moved = gitops.run(worktree, "reset", "--keep", base_sha)
+        # file changed since the check above, and keeps HEAD attached. It
+        # checks HEAD is still the branch, and says what it is if not.
+        try:
+            moved = gitops.reset_keep(worktree, base_sha, node.branch, root=root)
+        except gitops.GitError as exc:
+            self.git_unreadable(node.id, worktree, exc)
+            return not_updated(str(exc))
         if not moved.ok:
             return not_updated(moved.err or moved.out)
         self.tree.update(node.id, placed_on=base_sha)

@@ -152,8 +152,43 @@ _WRAPPER_ENTRY = ('for p in /usr/bin/python3 /usr/local/bin/python3; do '
 
 
 # SG-R3: git enters the container through `sh`, as every other command here
-# does, with its arguments as the shell's, never in the script text.
-_GIT_ENTRY = 'exec git "$@"'
+# does, with its arguments as the shell's, never in the script text. `$0` is
+# `git`, `$1` the call's timeout in seconds and `$2` the watchdog's script
+# (SG-R7): killing the `docker exec` client does not stop what it started in
+# the container, so the timeout is kept in there. The watchdog runs without the call's variable,
+# so that it is not among what it ends, and exits 124 when it fired.
+_GIT_CALL_KEY = "MULTIAGENTS_GIT_CALL"
+_GIT_ENTRY = r"""
+t=$1; dog=$2; shift 2
+git "$@" & g=$!
+env -u MULTIAGENTS_GIT_CALL sh -c "$dog" "$MULTIAGENTS_GIT_CALL" "$t" "$$" & w=$!
+wait "$g"; rc=$?
+kill "$w" 2>/dev/null; wait "$w"; [ $? -eq 124 ] && exit 124
+exit $rc
+"""
+# `$0` is the call's token, `$1` the timeout, `$2` the entry shell, which is
+# spared. Every process carrying the token is stopped with each descendant (one
+# that dropped the variable included), top down so none can fork past the
+# walk; then all are killed. Repeated, for a process not started at the first
+# pass. Read from /proc: the image has no procps.
+_GIT_WATCHDOG = r"""
+i=0
+while [ "$i" -lt "$1" ]; do
+  sleep 1; i=$((i+1)); kill -0 "$2" 2>/dev/null || exit 0
+done
+walk() { kill -STOP "$1" 2>/dev/null; echo "$1"
+  for c in $(cat /proc/"$1"/task/*/children 2>/dev/null); do walk "$c"; done; }
+n=0
+while [ "$n" -lt 3 ]; do
+  [ "$n" -gt 0 ] && sleep 1
+  roots=$(grep -lzx "MULTIAGENTS_GIT_CALL=$0" /proc/[0-9]*/environ 2>/dev/null \
+          | cut -d/ -f3)
+  all=$(for r in $roots; do [ "$r" = "$2" ] || walk "$r"; done)
+  [ -n "$all" ] && kill -KILL $all 2>/dev/null
+  n=$((n+1))
+done
+exit 124
+"""
 # An agent's env file bigger than this is not read (SG-R3): it is under
 # `.multiagents`, which the container can write.
 ENV_FILE_MAX_BYTES = 1024 * 1024
@@ -195,7 +230,8 @@ class ContainerGit(gitops.Git):
 
     That environment is read back from the env file `start` wrote. The file
     is under `.multiagents`, which the container can write, so it is read as
-    such a file is: only a regular one, never through a link, never blocking,
+    such a file is: only a regular one, through no link at any depth, never
+    blocking,
     and bounded. What it says only ever reaches the container, which is where
     whoever could have changed it already is. The environment handed to
     `docker exec` is a fresh file in this host's temporary directory, which
@@ -208,8 +244,10 @@ class ContainerGit(gitops.Git):
 
     def environ(self) -> dict[str, str]:
         env: dict[str, str] = {}
-        raw = gitops._read_regular(self.executor.env_file(self.agent_id),
-                                   ENV_FILE_MAX_BYTES)
+        root = self.executor.paths.root
+        path = self.executor.env_file(self.agent_id)
+        raw = gitops._read_beneath(root, path.parent.relative_to(root).parts,
+                                   path.name, ENV_FILE_MAX_BYTES)
         for line in (raw or b"").decode("utf-8", errors="replace").splitlines():
             key, sep, value = line.partition("=")
             if sep and key:
@@ -220,24 +258,37 @@ class ContainerGit(gitops.Git):
 
     def run(self, repo: Path, *args: str, env: dict[str, str] | None = None,
             timeout: int = 120, strip: bool = True) -> gitops.GitResult:
-        environment = {**self.environ(), **(env or {})}
+        # Every process of this call carries the token, which is how the
+        # watchdog finds them in the container (SG-R7).
+        token = os.urandom(12).hex()
+        environment = {**self.environ(), **(env or {}), _GIT_CALL_KEY: token}
         fd, env_file = tempfile.mkstemp(prefix="multiagents-git-", suffix=".env")
         try:
             with os.fdopen(fd, "w") as fh:
                 fh.write("".join(f"{k}={v}\n" for k, v in environment.items()
                                  if "\n" not in v))
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 ["docker", "exec", "--workdir", str(repo),
                  "--user", f"{os.getuid()}:{os.getgid()}", "--env-file", env_file,
                  self.executor.container, "sh", "-c", _GIT_ENTRY, "git",
-                 "-C", str(repo), *args],
-                capture_output=True, text=True, timeout=timeout,
+                 str(max(1, int(timeout))), _GIT_WATCHDOG, "-C", str(repo), *args],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 stdin=subprocess.DEVNULL,
             )
+            try:
+                # The watchdog ends it first; this is for a container that
+                # does not answer at all.
+                stdout, stderr = proc.communicate(timeout=timeout + 30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise
         finally:
             os.unlink(env_file)
-        out = proc.stdout.strip() if strip else proc.stdout
-        return gitops.GitResult(proc.returncode == 0, out, proc.stderr.strip(),
+        if proc.returncode == 124:
+            raise subprocess.TimeoutExpired(proc.args, timeout, stdout, stderr)
+        out = stdout.strip() if strip else stdout
+        return gitops.GitResult(proc.returncode == 0, out, stderr.strip(),
                                 proc.returncode)
 
     def scratch(self):
@@ -1866,12 +1917,15 @@ class DockerExecutor(Executor):
         # never appear in the host process list.
         env_file = None
         if self.paths is not None:
+            # SG-R7: under `.multiagents`, which the container can write. Never
+            # through a link or into a FIFO an agent left at that path.
             env_file = self.env_file(env.get("MULTIAGENTS_AGENT_ID", "run"))
-            env_file.parent.mkdir(parents=True, exist_ok=True)
-            env_file.write_text(
-                "".join(f"{k}={v}\n" for k, v in env.items() if "\n" not in str(v))
-            )
-            env_file.chmod(0o600)
+            gitops._write_beneath(
+                self.paths.root, env_file.parent.relative_to(self.paths.root).parts,
+                env_file.name,
+                "".join(f"{k}={v}\n" for k, v in env.items()
+                        if "\n" not in str(v)).encode(),
+                mode=0o600, create=True)
 
         command = ["docker", "exec", "-i", "--workdir", str(cwd),
                    "--user", f"{os.getuid()}:{os.getgid()}"]

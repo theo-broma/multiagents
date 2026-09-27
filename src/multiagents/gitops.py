@@ -137,6 +137,102 @@ def _read_regular(path: Path, limit: int) -> bytes | None:
         os.close(fd)
 
 
+def _open_beneath(base: Path, parts: tuple[str, ...], *, create: bool = False) -> int:
+    """A directory fd for ``base/parts...``, each part opened without following
+    a link (SG-R7). `base` is trusted; the parts are where a container writes.
+
+    With `create`, a missing part is made, and one that is not a directory —
+    a link, a FIFO, a file an agent planted — is removed and made afresh.
+    Otherwise such a part raises `OSError`.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            if part in ("", ".", "..") or "/" in part:
+                raise OSError(f"not a plain path component: {part!r}")
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except OSError:
+                if not create:
+                    raise
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(part, dir_fd=fd)
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _write_beneath(base: Path, parts: tuple[str, ...], name: str, data: bytes, *,
+                   mode: int = 0o600, create: bool = False) -> None:
+    """Replace ``base/parts.../name`` with `data`, never through a link (SG-R7).
+
+    Written to a fresh file beside it and renamed over it, so whatever stood
+    at `name` — a symlink to a host file, a FIFO — is replaced, never written
+    through or opened. Raises `OSError` when that cannot be done.
+    """
+    if name in ("", ".", "..") or "/" in name:
+        raise OSError(f"not a plain file name: {name!r}")
+    dfd = _open_beneath(base, parts, create=create)
+    try:
+        tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      mode, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as fh:
+                fh.write(data)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        try:
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=dfd)
+            raise
+    finally:
+        os.close(dfd)
+
+
+def _read_beneath(base: Path, parts: tuple[str, ...], name: str,
+                  limit: int) -> bytes | None:
+    """:func:`_read_regular` for ``base/parts.../name``, with no link followed
+    anywhere below `base` (SG-R7), not only at the last component."""
+    try:
+        dfd = _open_beneath(base, parts)
+    except OSError:
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=dfd)
+    except OSError:
+        return None
+    finally:
+        os.close(dfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= limit:
+            chunk = os.read(fd, min(1 << 20, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        return None if size > limit else b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 # An index bigger than this is not copied for a pinned read (SG-R4): the read
 # raises instead, and it is polled every few seconds.
 INDEX_MAX_BYTES = 128 * 1024 * 1024
@@ -248,8 +344,9 @@ def current_branch(repo: Path) -> str:
     return result.out if result.ok else ""
 
 
-def head_sha(repo: Path) -> str:
-    result = run(repo, "rev-parse", "HEAD")
+def head_sha(repo: Path, *, root: Path | None = None) -> str:
+    """With `root`, resolution is pinned to the project's trusted paths (SG-R4)."""
+    result = _read(repo, root, "rev-parse", "HEAD")
     return result.out if result.ok else ""
 
 
@@ -456,6 +553,15 @@ def commits_on(repo: Path, branch: str, base: str, *,
         return 0
 
 
+def is_ancestor(repo: Path, ancestor: str, descendant: str, *,
+                root: Path | None = None) -> bool:
+    """Whether `ancestor` is one of `descendant`'s; False when git cannot say.
+
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4).
+    """
+    return _read(repo, root, "merge-base", "--is-ancestor", ancestor, descendant).ok
+
+
 def resolve_commit(repo: Path, ref: str) -> str:
     """The full sha `ref` names, or "" when it names no commit."""
     if not ref:
@@ -507,7 +613,8 @@ def _holds_unmerged(git, head: str, base: str, since: str) -> bool:
     return not base_tree.ok or merged.out.splitlines()[0] != base_tree.out
 
 
-def untracked_in_the_way(worktree: Path, head: str, target: str) -> str:
+def untracked_in_the_way(worktree: Path, head: str, target: str, *,
+                         root: Path | None = None) -> str:
     """A path moving `worktree` from `head` to `target` would overwrite, or "".
 
     Such a path is one `target` tracks and `head` does not, which exists in
@@ -516,9 +623,23 @@ def untracked_in_the_way(worktree: Path, head: str, target: str) -> str:
     an untracked file there but overwrites an ignored one. A file (or a
     directory) standing where `target` needs a directory counts too. When git
     cannot answer, the first path it could not rule out is returned.
+
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4),
+    and the worktree's content is hashed with no filter: which filter applies
+    is the worktree's `.gitattributes` to say, and the host runs none of its
+    choosing. A path a filter would have made equal is then in the way, which
+    is the side of the question that loses nothing.
     """
-    diff = run(worktree, "diff", "--raw", "--no-abbrev", "--no-renames", "-z",
-               head, target)
+    with _pinned(worktree, root) as (extra, env):
+        return _untracked_in_the_way(
+            worktree, head, target,
+            lambda *args: run(worktree, *extra, *args, env=env),
+            ["--no-filters"] if root is not None else [])
+
+
+def _untracked_in_the_way(worktree: Path, head: str, target: str, git,
+                          hash_args: list[str]) -> str:
+    diff = git("diff", "--raw", "--no-abbrev", "--no-renames", "-z", head, target)
     if not diff.ok:
         return diff.err or "git diff failed"
     fields = diff.out.split("\0")
@@ -545,10 +666,78 @@ def untracked_in_the_way(worktree: Path, head: str, target: str) -> str:
             continue
         if spot.is_symlink() or not spot.is_file():
             return path
-        same = run(worktree, "hash-object", "--", path)
+        same = git("hash-object", *hash_args, "--", path)
         if not same.ok or same.out != blob:
             return path
     return ""
+
+
+def _no_filter_args(git) -> list[str]:
+    """``-c`` overrides that empty every filter driver the trusted config
+    defines, so that a checkout runs none of them."""
+    listed = git("config", "--name-only", "--get-regexp", r"^filter\.")
+    args: list[str] = []
+    names = {key.rsplit(".", 1)[0] for key in listed.out.splitlines()
+             if listed.ok and key.count(".") >= 2}
+    for name in sorted(names):
+        args += ["-c", f"{name}.clean=", "-c", f"{name}.smudge=",
+                 "-c", f"{name}.process=", "-c", f"{name}.required=false"]
+    return args
+
+
+def reset_keep(worktree: Path, target: str, branch: str, *, root: Path) -> GitResult:
+    """Move `worktree`, on `branch`, to `target` with ``reset --keep``, from
+    the host (SG-R4).
+
+    The command writes an agent's worktree, so it runs pinned as a read is,
+    with no hook, no fsmonitor and no filter: nothing the agent wrote runs.
+    HEAD is checked again inside that pinning — it must still be `branch` —
+    so the branch moved is the one that was checked. The branch ref moves in
+    the real repository. The worktree's index is locked as git locks it, by
+    creating ``index.lock`` beside it (refused if another git holds it), and
+    the index git wrote replaces it by renaming that lock, never through a
+    link.
+    """
+    root = Path(root).resolve()
+    tree = Path(worktree).resolve()
+    parts = () if tree == root else ("worktrees", tree.name)
+    try:
+        dfd = _open_beneath(root / ".git", parts)
+    except OSError as exc:
+        raise GitError(f"no git directory for {tree}: {exc}") from exc
+    try:
+        try:
+            lock = os.open("index.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                           | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+        except OSError as exc:
+            return GitResult(False, "", f"could not lock the worktree's index "
+                             f"(index.lock): {exc}", 128)
+        locked = True
+        try:
+            with _pinned(worktree, root) as (extra, env):
+                def git(*args):
+                    return run(worktree, *extra, *args, env=env)
+
+                symref = git("symbolic-ref", "-q", "HEAD")
+                if not symref.ok or symref.out != f"refs/heads/{branch}":
+                    return GitResult(False, "", f"the worktree is not on its branch "
+                                     f"{branch!r} (HEAD is {symref.out or 'detached'})",
+                                     symref.code or 1)
+                moved = git(*_no_filter_args(git), "reset", "--keep", target)
+                if not moved.ok:
+                    return moved
+                with os.fdopen(lock, "wb", closefd=False) as fh:
+                    fh.write(Path(env["GIT_INDEX_FILE"]).read_bytes())
+                os.replace("index.lock", "index", src_dir_fd=dfd, dst_dir_fd=dfd)
+                locked = False
+                return moved
+        finally:
+            os.close(lock)
+            if locked:
+                with contextlib.suppress(OSError):
+                    os.unlink("index.lock", dir_fd=dfd)
+    finally:
+        os.close(dfd)
 
 
 def diff_stat(repo: Path, branch: str, base: str, *,
