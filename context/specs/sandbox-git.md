@@ -478,3 +478,9 @@ single-file bind mount inside a writable `.git` is not a protection.**
   - "reconcile" means `cmd_resume --no-launch`, and "runner start" means
     constructing `Runner`;
   - once the host has deleted the branch, the mark is cleared.
+- **`_drop_if_empty` keeps `node.branch` while a deletion is pending.** The
+  host deletes a marked branch when the node is in any terminal status, the
+  mark equals the node's own `branch`, and the branch is under
+  `refs/heads/agents/`. It then clears the mark and the branch. Only merge,
+  discard and drop-if-empty ever set the mark. (Decided after
+  implementer ag-bb429d.)
