@@ -1684,3 +1684,8 @@ Resume in this order:
 - Merged 081409e (host fixtures: docker-less PATH, commit-tree identity), 8ef266e (r8f adversary test made busy
   the SV-R11 way — driver was right, ag-a7494f), 47e10e0 (CI-R3 fallback identity on every gitops commit +
   vocabulary rewording). Host full suite rerunning (r2chunk*.log in the scratchpad).
+- 2026-09-27 host full suite at a7bb2f5: chunk 1 553 passed, chunk 2 960 passed, chunk 3 72 failed / 473 passed —
+  the 72 are exactly phase2's by-design reds; nothing else fails. This phase's work is done.
+  Left for the next phase (not started): AGENTS.md naming scripts/test-chunk.sh (item 6), live compaction (item 7),
+  content-filter refusal reported as done, config-drift warning, opencode startup failures ("Unexpected server
+  error", router still prefers opencode), idle nodes ag-4a29a4 / ag-cb1c70 to clean up.
