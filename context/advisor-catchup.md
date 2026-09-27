@@ -53,6 +53,24 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
    ` [truncated]`. It keeps the head, not the tail, and hook errors are often
    at the tail; the contract allows either. Merged after my own read.
 
+7. **721642e, tests (tester ag-32983e):** the CI-R2 `git add` gap, plus CI-R5
+   amendments pinning the `attempt` field, the cut-off fix turn and the fresh
+   loop on steer.
+8. **CI-R5 built by implementer-deep ag-b7c2ff (opus), commits 921dfe1 and
+   eb88ab2 plus a follow-up after a steer:**
+   - Hook detection: an executable `pre-commit`, `prepare-commit-msg` or
+     `commit-msg` hook exists, and a `GIT_TRACE2_EVENT` trace shows a hook
+     child exiting non-zero. On an old git, the hook's presence alone decides.
+   - The loop runs inside the original run's `_finalize`, via
+     `_launch(..., done=run.done)`, which is your advice #3.
+   - The loop kills an overrunning fix turn itself, because the watchdog only
+     marks a run `stuck`.
+   - Decisions: a `quota` or `unauthenticated` status from a fix turn is
+     propagated, and a failed run is still eligible for the loop.
+   - To check: the trace-based detection; the reliability of the
+     kill-at-timeout; the run's `done` never being set on a steer during a
+     fix turn.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
