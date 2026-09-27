@@ -1704,3 +1704,14 @@ Resume in this order:
   gemini overrides; route to claude. Log every decision the advisor would have seen in
   context/advisor-catchup.md, to put to it in one consult later. The deferred CI-R4 task (gemini override) must be
   stopped if it starts; relaunch CI-R4 on claude.
+
+## Feature ideas from the user (not scheduled; for the next phase via `multiagents init-agent`)
+
+- **Limit-hit notices (user, 2026-09-27).** Whenever a limit set in a config file is reached and actually
+  constrains execution, write a log entry that says so. The user must also be told, with the config file's
+  path and the line of the limiting setting, so they can change it easily if they want. Examples:
+  `limits.max_concurrent`, `max_depth`, `max_children`, a watchdog timeout/step cap, `commit_fix_attempts`, a
+  budget tag ceiling, container `memory`.
+  Open questions for the contract: where the notice surfaces (event, tool result, `multiagents run` terminal,
+  tree); de-duplication so a limit hit every second does not flood; and the defaults case, i.e. which file and
+  line to show when the value comes from a built-in default rather than the user's file.
