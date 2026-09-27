@@ -1762,3 +1762,7 @@ Resume in this order:
   test_sandbox_git_branch_delete.py (was started, fell back to opencode, crashed), then implementer-deep for revised
   SG-R2 + branch_pending_delete, then host live tests, recreate container, smoke again.
   DO NOT run agents for other work until the container is fixed. Claude at 99% until 23:00 UTC; wake-up armed 23:01.
+- 2026-09-27 ~23:50 UTC: revised SG-R2 merged (acc54d2) + host-routed branch deletion (36c37b5). Live tests 8/8 on
+  host incl. host-rewrite-by-rename check. Container recreated with .git ro (mountinfo verified). The MCP server
+  still runs pre-acc54d2 code and refuses the container as drift (ag-609011) → needs another /mcp reconnect by the
+  user, then smoke test (SMOKE.txt commit + write probes on root, .git/config, .git/).
