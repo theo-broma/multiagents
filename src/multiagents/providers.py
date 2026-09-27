@@ -195,6 +195,15 @@ class Provider:
     # file-viewer that never reports which range it viewed) — repeating one
     # must not trip doom_loop on its own. See Supervisor.opaque_tools.
     opaque_tools: list[str] = field(default_factory=list)
+    # bug-8615db: some tools are only a poll under ONE argument value and a
+    # real repeat under another — agy's `manage_task` reports Action: status
+    # identically on every check of a task it already started (legitimate,
+    # must not trip) but Action: run launching the same command again is
+    # exactly the loop doom_loop exists to catch. `opaque_tools` cannot make
+    # that distinction (it is unconditional on the tool name alone), so this
+    # is scoped: each entry is `{tool: <name>, match: {<arg key>: [<values
+    # that make it a poll>]}}`. See Supervisor.opaque_tool_args.
+    opaque_tool_args: list[dict[str, Any]] = field(default_factory=list)
     # SM-R1: how this CLI is handed the multiagents MCP server when the agent it
     # runs may spawn. Declared, like everything else here; see `mcp_launch` and
     # the `mcp:` blocks in providers.yaml. Empty means the CLI cannot be given
@@ -233,6 +242,7 @@ class Provider:
             family=data.get("family") or data.get("extends") or name,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             opaque_tools=list(data.get("opaque_tools", []) or []),
+            opaque_tool_args=list(data.get("opaque_tool_args", []) or []),
             mcp=dict(data.get("mcp") or {}),
         )
 
