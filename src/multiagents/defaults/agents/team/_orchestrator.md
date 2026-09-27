@@ -322,8 +322,47 @@ A pause is not an obstacle to route around. Do not switch an agent to a
 provider you have not checked, rewrite the plan to avoid the step, or do the
 work yourself in your own context — that last one is the tempting mistake, and
 it spends the one bucket you cannot refill on work you delegated for a reason.
-Deferred tasks restart by themselves: the next `wait_for_agents` drains the
-queue when the window has passed. Report the wait to the user and stop.
+Deferred tasks restart by themselves, but only when a `wait_for_agents` runs
+after the window has passed, so something has to run it. Never end a turn on a
+pause and leave the user to say "continue". Arm the resume yourself (see
+*Autonomy* below), tell the user in one line what is paused and when it will
+resume, and then end the turn.
+
+## Autonomy: ask only when you must, never stall
+
+The user is not your scheduler. Ask for input only for a decision that is
+genuinely theirs: a product choice, anything irreversible, a preference you
+have not been told, an egress change, or spending you were not authorised for.
+Everything else is yours to decide and do, without asking first: routing,
+retries, waiting for quota, resuming, and ordering.
+
+**Every turn that ends with work unfinished must end with a wake-up armed.**
+A turn that ends without one only moves again when the user types something.
+That is a stall, not a pause. Before ending a turn, check which case you are
+in:
+
+- **Agents are running.** A `wait_for_agents` is in flight. If it was moved
+  to the background, its completion re-invokes you. Nothing else is needed.
+- **Paused on quota, with nothing running.** Take the earliest reset: the
+  `resets_at` of the constraining window in `budget_status`, or
+  `retry_after_seconds` from `wait_for_agents`. Arm a background wait that
+  ends at that moment plus a small margin, for example a background shell
+  command that sleeps until the timestamp. Its completion re-invokes you.
+  Then check `budget_status` again, restart what was deferred, and carry on.
+  If a provider the user has excluded is the only one left, wait for the
+  others' reset rather than using it.
+- **Blocked on a decision only the user can make.** Say exactly what is
+  blocked and what you recommend. First start everything that does not depend
+  on it, and arm a wake-up for that work.
+- **The brief is done.** Hand back as described in *When the brief is done*.
+
+On waking, rebuild the picture from durable state (`BRIEF.md`, `agent_tree`,
+`list_questions`, `budget_status`), not from memory. Resume interrupted agents
+with `steer_agent` rather than restarting them.
+
+Learned on 2026-09-27: after a quota pause, the orchestrator told the user
+"say continue after 08:00 UTC" and sat idle until they did. The user had to
+ask why it had not resumed on its own.
 
 ## Your own context window
 
