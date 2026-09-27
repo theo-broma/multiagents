@@ -100,6 +100,21 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
     - whether SG-R4, pinning GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE, is
       sufficient.
 
+13. **83e6bb0, SG-R2/R6 (ag-ab5211):**
+   - `project_mounts()`: the root is read-only, with nested writable and
+     read-only mounts beneath it;
+   - an extra writable mount on `.git/refs`, so `refs` cannot be renamed
+     aside;
+   - `protect_project()`, which runs before any docker call: it refuses a
+     `.git` file, creates missing protected paths, builds the index with
+     `read-tree --empty`, and unpacks the base branch by lock-and-rename.
+
+   Known limits: file mounts freeze, so the container can see a stale main
+   HEAD, index or config after the host replaces them; protection starts
+   only at recreation. 12 old tests asserted a writable root, and the tester
+   (ag-a32e5e) is updating them. To check: whether freezing single-file
+   mounts matters for nested orchestration.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
