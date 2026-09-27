@@ -1724,3 +1724,10 @@ Resume in this order:
   read-only researcher (facts for the sandbox-git contract). Next: write the SG contract, tester, then implement
   after CI-R5 merges (both touch commit_all). Adversary/reviewer/researcher have no claude model; opencode is
   broken (~10 days), agy is user-excluded → tester/implementer on claude stand in.
+- 2026-09-27 SG progress: contract + decisions in context/specs/sandbox-git.md. Red tests merged: merge (SG-R5,
+  8983445), mounts (SG-R2 static/R6, ff88125), reads (SG-R4, 1500b45 — uses `repo=`; must be renamed to `root=` per
+  decision 5b9e633). Deferred (claude exhausted): tester for SG-R5 refusal-cleanup + docker-live file.
+  Next when claude is back: tester to (1) rename repo=→root= in test_sandbox_git_reads.py, add root-path, missing
+  gitdir, and new SG-R2 protected paths (config.worktree, modules, refs/heads|tags except agents/, base loose ref)
+  to test_sandbox_git_mounts.py; then implementer-deep for SG (after tests), host-run of docker-live tests,
+  adversarial tester, then container recreate (only when idle).
