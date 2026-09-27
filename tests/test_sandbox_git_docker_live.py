@@ -39,6 +39,15 @@ host's bytes unchanged. Each attack has a control on a path the contract
 leaves writable, so a broken exec (no shell, wrong uid) cannot pass for
 protection.
 
+SG-R2 as revised "after the live smoke test": `.git` is read-only, and only
+directories are reopened writable beneath it: `objects` (with `objects/info`
+closed again), `refs/heads/agents` (inside `refs`), `logs` and `worktrees`.
+No single-file mounts, so no control writes in `.git/` itself, and deleting
+any branch from the container fails (git takes `packed-refs.lock` in `.git/`)
+and is left to the host. The protection is checked again after the host
+rewrites `config`, `index` and `HEAD` by rename, which is what dropped the
+old single-file mounts.
+
 Not covered here: SG-R2's "a nested child spawn and merge still succeed"
 needs the MCP server and a spawning provider inside the image, which this
 stub setup does not have. The CI-R5 fix-loop commits (SG-R3) are not driven
@@ -356,6 +365,10 @@ PROTECTED = [
     (".git/modules/x", ".git/modules/x"),
     (".git/refs/tags/x", ".git/refs/tags/x"),
     (".git/refs/heads/x (a non-agent branch)", ".git/refs/heads/x"),
+    # Decisions, "after the live smoke test": `.git` itself is read-only.
+    (".git/packed-refs", ".git/packed-refs"),
+    ("new file in .git/", ".git/sg-new"),
+    (".git/objects/info/x", ".git/objects/info/x"),
 ]
 PROTECTED_DIRS = [".git/hooks", ".git/info", ".multiagents/config"]
 
@@ -396,23 +409,24 @@ def test_sg_r2_live_writing_each_protected_path_fails(box):
 
 
 def test_sg_r2_live_replacing_each_protected_path_by_rename_fails(box):
-    """The replacement is written in `.git/`, which stays writable (packed-refs
-    is rewritten by lock-and-rename), then renamed over the target. A
-    protected directory is also moved aside wholesale."""
-    staging = box.root / ".git"
+    """The replacement is written in `.git/logs`, one of the directories the
+    revised SG-R2 leaves writable (`.git/` itself is read-only), then renamed
+    over the target. A protected directory is also moved aside wholesale."""
+    staging = box.root / ".git" / "logs"
     breached = []
     for n, (label, rel) in enumerate(PROTECTED):
         target = box.root / rel
         tmp = staging / f"sg-rename-{n}"
         made = box.exec('printf "sg-evil\\n" > "$1"', str(tmp))
         assert made.returncode == 0, (
-            f"control: `.git/` must stay writable from the container: {made.stderr}")
+            f"control: `.git/logs` must stay writable from the container: {made.stderr}")
         before = _state(target)
         got = box.exec('mv -f "$1" "$2"', str(tmp), str(target))
         after = _state(target)
         if got.returncode == 0 or after != before:
             breached.append(f"{label}: exit {got.returncode}, "
                             f"{'replaced on the host' if after != before else 'unchanged'}")
+        tmp.unlink(missing_ok=True)
     for rel in PROTECTED_DIRS:
         target = box.root / rel
         aside = target.with_name(target.name + ".sg-old")
@@ -426,7 +440,8 @@ def test_sg_r2_live_replacing_each_protected_path_by_rename_fails(box):
 def test_sg_r2_live_git_cannot_move_the_base_or_the_main_head(box):
     """The same attacks through git itself: `update-ref` on the base,
     `symbolic-ref HEAD`, and a rewritten `packed-refs` naming another commit
-    for the base (the base keeps a loose ref, which wins)."""
+    for the base, which the revised SG-R2 refuses outright (`.git` is
+    read-only)."""
     head = host_git(box.root, "rev-parse", "main").stdout.strip()
     symbolic = host_git(box.root, "symbolic-ref", "HEAD").stdout.strip()
     evil = box.exec('git -C "$1" commit-tree -m evil "$(git -C "$1" rev-parse main^{tree})"',
@@ -440,17 +455,24 @@ def test_sg_r2_live_git_cannot_move_the_base_or_the_main_head(box):
     box.exec('git -C "$1" symbolic-ref HEAD refs/heads/agents/sg-evil', str(box.root))
     assert host_git(box.root, "symbolic-ref", "HEAD").stdout.strip() == symbolic, \
         "the container moved the main checkout's HEAD"
+    packed = box.root / ".git" / "packed-refs"
+    before = _state(packed)
     wrote = box.exec('printf "%s refs/heads/main\\n" "$2" >> "$1/.git/packed-refs"',
                      str(box.root), evil_sha)
-    assert wrote.returncode == 0, f"control: packed-refs must stay writable: {wrote.stderr}"
+    assert wrote.returncode != 0 and _state(packed) == before, (
+        f"packed-refs is writable from the container (exit {wrote.returncode}, "
+        f"{'changed' if _state(packed) != before else 'unchanged'} on the host)")
     assert host_git(box.root, "rev-parse", "main").stdout.strip() == head, \
         "a rewritten packed-refs moved the base branch"
 
 
 def test_sg_r2_live_worktree_and_branch_operations_still_succeed(live):
-    """What worktrees and nested orchestration need: a worktree add, a commit
-    in it, lock/unlock, prune, and creating and deleting `agents/...`
-    branches, one of them packed so that deleting it rewrites packed-refs."""
+    """What worktrees and nested orchestration need still works from the
+    container: a worktree add, a commit in it, lock/unlock, prune, and
+    creating an `agents/...` branch. Deleting any branch, loose or packed,
+    now fails (git takes `packed-refs.lock` in the read-only `.git/`), and
+    fails cleanly: the ref and `packed-refs` are unchanged, and the host can
+    still delete it afterwards."""
     lv = live()
     _seed(lv.root, {"src/app.py": "print('base')\n"})
     host_git(lv.root, "branch", "agents/sg-packed", "main")
@@ -476,15 +498,91 @@ def test_sg_r2_live_worktree_and_branch_operations_still_succeed(live):
     ok("git worktree prune", 'rm -rf "$2" && git -C "$1" worktree prune', root, str(wt))
     assert str(wt) not in host_git(lv.root, "worktree", "list", "--porcelain").stdout, \
         "the pruned worktree is still registered on the host"
-    ok("deleting the worktree's branch", 'git -C "$1" branch -q -D agents/sg-live', root)
-    ok("creating and deleting an agents/ branch",
-       'git -C "$1" branch agents/sg-new main && git -C "$1" branch -q -D agents/sg-new', root)
-    ok("deleting a packed agents/ branch", 'git -C "$1" branch -q -D agents/sg-packed', root)
+    ok("creating an agents/ branch", 'git -C "$1" branch agents/sg-new main', root)
+    assert host_git(lv.root, "rev-parse", "agents/sg-new").stdout.strip() == head, \
+        "the agents/ branch created in the container is not on the host"
 
+    packed = lv.root / ".git" / "packed-refs"
+    branches = ["agents/sg-live", "agents/sg-new", "agents/sg-packed"]
+    shas = {b: host_git(lv.root, "rev-parse", b).stdout.strip() for b in branches}
+    packed_before = packed.read_bytes()
+    deleted = []
+    for b in branches:
+        got = lv.exec('git -C "$1" branch -q -D "$2"', root, b)
+        now = host_git(lv.root, "rev-parse", "--verify", "-q", b, check=False).stdout.strip()
+        if got.returncode == 0 or now != shas[b]:
+            deleted.append(f"{b}: exit {got.returncode}, ref {shas[b]} -> {now or 'gone'}")
+    assert not deleted, ("a branch deletion from the container did not fail cleanly "
+                         "(SG-R2: `.git` is read-only, the host deletes branches):\n  "
+                         + "\n  ".join(deleted))
+    assert packed.read_bytes() == packed_before, "packed-refs changed on the host"
+    assert not (lv.root / ".git" / "packed-refs.lock").exists(), \
+        "a failed deletion left packed-refs.lock behind"
+
+    # The failed deletions left nothing the host's own deletion trips over.
+    host_git(lv.root, "branch", "-q", "-D", *branches)
     refs = host_git(lv.root, "for-each-ref", "--format=%(refname)", "refs/heads/agents").stdout
-    assert not refs.strip(), f"agents/ branches survived their deletion: {refs}"
-    assert "agents/sg-packed" not in (lv.root / ".git" / "packed-refs").read_text(), \
-        "packed-refs was not rewritten"
+    assert not refs.strip(), f"agents/ branches survived the host's deletion: {refs}"
     assert host_git(lv.root, "rev-parse", "main").stdout.strip() == head, \
         "the base branch moved"
     assert host_git(lv.root, "fsck", "--no-progress", "--connectivity-only").returncode == 0
+
+
+def test_sg_r2_live_protection_survives_the_host_rewriting_files_by_rename(box):
+    """The defect found live: a single-file mount on `.git/config` or
+    `.git/index` vanished once the host replaced the file by rename. After the
+    container is up, the host rewrites each by rename (`git config`, a
+    `git status` that refreshes the index, a checkout away and back that
+    rewrites HEAD). After each step the container, as the agent's uid, still
+    cannot write `config`, `index` or `HEAD`, nor create a file in `.git/`."""
+    git = box.root / ".git"
+    control = box.exec('printf ok > "$1"', str(box.p.sv / "sg-control"))
+    assert control.returncode == 0 and (box.p.sv / "sg-control").read_text() == "ok", (
+        f"control: the agent could not write its runtime state at all: {control.stderr}")
+
+    def touch_tracked() -> None:
+        app = box.root / "src" / "app.py"
+        st = app.stat()
+        os.utime(app, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+
+    def refresh_index() -> None:
+        touch_tracked()
+        host_git(box.root, "status", "--porcelain")
+
+    def checkout_away_and_back() -> None:
+        host_git(box.root, "checkout", "-q", "-b", "sg-other")
+        host_git(box.root, "checkout", "-q", "main")
+
+    steps = [
+        ("host `git config some.key value`", "config",
+         lambda: host_git(box.root, "config", "some.key", "value")),
+        ("host `git status` refreshing the index", "index", refresh_index),
+        ("host checkout of another branch and back", "HEAD", checkout_away_and_back),
+    ]
+    breached = []
+    for n, (step, rewritten, act) in enumerate(steps):
+        inode = (git / rewritten).stat().st_ino
+        act()
+        assert (git / rewritten).stat().st_ino != inode, (
+            f"precondition: the {step} did not replace .git/{rewritten} by rename, "
+            f"so this step tests nothing")
+
+        for name in ("config", "index", "HEAD"):
+            target = git / name
+            before = _state(target)
+            got = box.exec('printf "sg-evil\\n" >> "$1"', str(target))
+            after = _state(target)
+            if got.returncode == 0 or after != before:
+                breached.append(f"after the {step}: .git/{name}: exit {got.returncode}, "
+                                f"{'changed on the host' if after != before else 'unchanged'}")
+        config = _state(git / "config")
+        got = box.exec('git -C "$1" config sg.evil 1', str(box.root))
+        if got.returncode == 0 or _state(git / "config") != config:
+            breached.append(f"after the {step}: `git config` from the container: "
+                            f"exit {got.returncode}")
+        new = git / f"sg-new-{n}"
+        got = box.exec('printf "sg-evil\\n" > "$1"', str(new))
+        if got.returncode == 0 or new.exists():
+            breached.append(f"after the {step}: created .git/{new.name}: exit {got.returncode}")
+    assert not breached, ("writable from the container once the host rewrote a file by "
+                          "rename:\n  " + "\n  ".join(breached))
