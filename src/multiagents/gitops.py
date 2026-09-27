@@ -137,8 +137,9 @@ def _read_regular(path: Path, limit: int) -> bytes | None:
         os.close(fd)
 
 
-# An index bigger than this is not copied for a pinned read (SG-R4).
-INDEX_MAX_BYTES = 512 * 1024 * 1024
+# An index bigger than this is not copied for a pinned read (SG-R4): the read
+# raises instead, and it is polled every few seconds.
+INDEX_MAX_BYTES = 128 * 1024 * 1024
 
 
 @contextlib.contextmanager
@@ -153,7 +154,9 @@ def _pinned(repo: Path, root: Path | None):
     file even with ``GIT_COMMON_DIR`` set, so the git dir handed to git is a
     private one: the derived dir's HEAD and index copied into it, and a
     ``commondir`` of our own writing. No hook and no fsmonitor runs, the index
-    is never written back, and no config is written anywhere.
+    is never written back, and no config is written anywhere. An index that
+    is over `INDEX_MAX_BYTES`, or is not a regular file (a symlink, a FIFO),
+    raises `GitError`; only a missing one is read as git reads it.
 
     Without `root`, plain git: ``([], None)``.
     """
@@ -174,9 +177,13 @@ def _pinned(repo: Path, root: Path | None):
         private.mkdir()
         (private / "HEAD").write_bytes(head)
         (private / "commondir").write_text(f"{common}\n")
-        index = _read_regular(gitdir / "index", INDEX_MAX_BYTES)
+        index_path = gitdir / "index"
+        index = _read_regular(index_path, INDEX_MAX_BYTES)
         if index is not None:
             (private / "index").write_bytes(index)
+        elif index_path.is_symlink() or index_path.exists():
+            raise GitError(f"unreadable index for {tree}: {index_path} is not a "
+                           f"regular file of at most {INDEX_MAX_BYTES} bytes")
         hooks = Path(tmp) / "hooks"
         hooks.mkdir()
         env = {"GIT_DIR": str(private), "GIT_WORK_TREE": str(tree),
@@ -186,10 +193,16 @@ def _pinned(repo: Path, root: Path | None):
         yield args, env
 
 
-def _read(repo: Path, root: Path | None, *args: str, strip: bool = True) -> GitResult:
-    """`run`, pinned to `root`'s trusted paths when `root` is given (SG-R4)."""
+def _read(repo: Path, root: Path | None, *args: str, strip: bool = True,
+          check: bool = False) -> GitResult:
+    """`run`, pinned to `root`'s trusted paths when `root` is given (SG-R4).
+
+    With `check`, a pinned read that git fails raises `GitError`: a tree that
+    could not be read is never reported clean. Unpinned reads never raise.
+    """
     with _pinned(repo, root) as (extra, env):
-        return run(repo, *extra, *args, env=env, strip=strip)
+        return run(repo, *extra, *args, env=env, strip=strip,
+                   check=check and root is not None)
 
 
 def uncommitted_entries(repo: Path, *, root: Path | None = None) -> list[str]:
@@ -198,10 +211,12 @@ def uncommitted_entries(repo: Path, *, root: Path | None = None) -> list[str]:
     Collapsing matters for the caller: a first commit of a project with
     ``node_modules`` is one line to show the user, not forty thousand.
 
-    With `root`, resolution is pinned to the project's trusted paths (SG-R4).
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4),
+    and a failure raises `GitError` rather than reading as no entries.
     """
     # Unstripped: a leading space is the first entry's status column.
-    result = _read(repo, root, "status", "--porcelain", "-unormal", strip=False)
+    result = _read(repo, root, "status", "--porcelain", "-unormal", strip=False,
+                   check=True)
     return [line[3:].strip().strip('"') for line in result.out.splitlines() if line[3:].strip()]
 
 
@@ -242,13 +257,16 @@ def status(repo: Path, *, root: Path | None = None) -> GitResult:
     """``git status --porcelain``, the result whole: a caller that must tell
     "clean" from "could not tell" reads `ok` as well as the output.
 
-    With `root`, resolution is pinned to the project's trusted paths (SG-R4).
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4),
+    and a failure raises `GitError` rather than coming back not `ok`.
     """
-    return _read(repo, root, "status", "--porcelain")
+    return _read(repo, root, "status", "--porcelain", check=True)
 
 
 def is_dirty(repo: Path, *, root: Path | None = None) -> bool:
-    result = _read(repo, root, "status", "--porcelain")
+    """Whether ``git status`` reports anything. With `root`, pinned (SG-R4),
+    and a tree git cannot read raises `GitError`: it is never clean."""
+    result = _read(repo, root, "status", "--porcelain", check=True)
     return bool(result.out.strip())
 
 
