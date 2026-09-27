@@ -1736,3 +1736,8 @@ Resume in this order:
   In flight: ag-ab5211 (SG-R2/R6 docker mounts), ag-9e10d8 (SG-R4/R5 gitops). Next: SG-R3 (commit_all/restore_paths
   inside the executor) after 9e10d8 merges; then docker-live on host, adversarial tester, container recreate when idle.
   Note: user asked to exclude untracked codex-plugin/ locally (.git/info/exclude) — it is theirs.
+- 2026-09-27 ~13:55 UTC: SG-R3 merged (4b9dbda; docker-live 7/7 on host). Follow-up tests merged 88f4b0d
+  (bounds, objects/info, protect_project symlink/FIFO). Tester ag-281f2b finishing runner_reads + env_files (SG-R7).
+  Claude at 96% until 18:00 UTC → next implementer (for 88f4b0d tests, then runner_reads/env) after the reset.
+  An implementer-deep started with model=opus was silently routed to opencode/minimax (claude constrained) and
+  crashed: an explicit model override did not pin the provider — possible ticket.
