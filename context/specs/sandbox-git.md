@@ -393,3 +393,11 @@ one breaks SG-R1 or SG-R4:
     `pkill -P` comes too late. The fix must work with the image as it is,
     with no new package required, for example the same `/proc` walk as the
     `ContainerGit` watchdog.
+- **Open, after ag-5fb684:** a few host writes under `.multiagents` still use
+  plain paths:
+  - the driver's `launch/` files;
+  - the watchdog's `{role}-status.json`;
+  - `monitor-launch.log`;
+  - the runner's `consult-*.lock` (around `runner.py:3319`).
+
+  They are in SG-R7's scope, and are the next small follow-up.
