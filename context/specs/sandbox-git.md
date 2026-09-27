@@ -302,3 +302,36 @@ first delegation, and names the command.
   self-contained. Not fixed.
 - **The server's `git_status` tool and `monitor/snapshot.py` are pinned
   too** (the implementer went beyond the task). Kept.
+
+## Decisions, 2026-09-27 (orchestrator, after implementer ag-ce8b54 on SG-R3)
+
+Host run: `tests/test_sandbox_git_docker_live.py` passes 7/7 at 4b9dbda.
+The gaps below were found by the implementer and are in scope, because each
+one breaks SG-R1 or SG-R4:
+
+- **SG-R4 applies to every host-side git command that touches an agent
+  worktree:**
+  - `runner._worktree_state`, the `git status` polled about every 3 s;
+  - every git call in `_refresh_conversation`: `head_sha`, `merge-base`,
+    `untracked_in_the_way`, `symbolic-ref` and `reset --keep`.
+
+  Reads are pinned. A command that WRITES an agent worktree, such as
+  `reset --keep`, runs inside the agent's executor, like SG-R3, or pinned
+  with filters and hooks disabled. The implementer chooses, but no agent
+  config may execute on the host.
+- **SG-R7 — files the host writes or reads for an agent never sit where the
+  container can write.** Today `start()` writes the agent's env file under
+  `.multiagents/env`, which the container can write, and it follows
+  symlinks. An agent could then redirect a host write anywhere, or feed the
+  host a FIFO. Such files are either:
+  - created with no-follow semantics, never through a pre-existing symlink,
+    and read bounded and non-blocking; or
+  - moved to a host-only location that is not mounted writable.
+
+  This applies to env files, and to any other host-written file under
+  `.multiagents` that the container can write.
+  Verified by: an agent that replaces its env file path, or the directory
+  holding it, with a symlink to a host file cannot cause the host to write
+  that file, and a FIFO in its place does not hang `start()`.
+- **A `docker exec` timeout** kills the process inside the container too.
+  It must not leave git running.
