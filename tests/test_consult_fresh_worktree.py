@@ -90,12 +90,16 @@ sys.stdout.flush()
 # Scaffolding
 # --------------------------------------------------------------------------
 
+# An explicit identity for every git call the test itself makes, so a host
+# without a global git identity can still commit.
+_IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+
 def git(cwd, *args, check=True):
-    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
     import os
     p = subprocess.run([GIT, "-C", str(cwd), *args], capture_output=True,
-                       text=True, env={**os.environ, **env})
+                       text=True, env={**os.environ, **_IDENTITY})
     if check and p.returncode != 0:
         raise AssertionError(f"git {args} failed: {p.stderr}")
     return p.stdout.strip()
@@ -172,7 +176,7 @@ class Project:
                                   capture_output=True, check=True).stdout.strip()
             tmp_index = self.root / ".git" / "cf-index"
             import os
-            env = {**os.environ, "GIT_INDEX_FILE": str(tmp_index)}
+            env = {**os.environ, **_IDENTITY, "GIT_INDEX_FILE": str(tmp_index)}
             run = lambda *a: subprocess.run([GIT, "-C", str(self.root), *a],
                                             env=env, text=True, capture_output=True,
                                             check=True).stdout.strip()

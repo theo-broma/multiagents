@@ -64,25 +64,40 @@ from test_subagent_mcp_live import _with_advisor  # noqa: E402
 # "docker absent from PATH", for real — not merely unmocked
 # ---------------------------------------------------------------------------
 
-def _path_without_docker(raw: str) -> str:
+def _path_without_docker(raw: str, mirrors: Path) -> str:
+    """`raw` with `docker` gone from every entry. A directory holding a
+    `docker` binary is replaced, in place, by a mirror of symlinks to
+    everything else in it: on a host docker sits in /usr/bin beside `git`,
+    `sleep` and the rest, and dropping the whole directory would take those
+    with it."""
     kept = []
-    for entry in raw.split(os.pathsep):
+    for i, entry in enumerate(raw.split(os.pathsep)):
         if not entry:
             continue
-        if (Path(entry) / "docker").exists():
+        d = Path(entry)
+        if not os.path.lexists(d / "docker"):
+            kept.append(entry)
             continue
-        kept.append(entry)
+        mirror = mirrors / str(i)
+        mirror.mkdir()
+        for child in d.iterdir():
+            if child.name != "docker":
+                (mirror / child.name).symlink_to(child)
+        kept.append(str(mirror))
     return os.pathsep.join(kept)
 
 
 @pytest.fixture
-def no_docker_on_path(monkeypatch):
-    """Whatever this machine's PATH is, strip any directory that actually has
-    a `docker` binary in it. `docker_available()` (`shutil.which`) then finds
-    nothing, and `subprocess.run(["docker", ...])` raises `FileNotFoundError`
-    rather than quietly succeeding against a real install — so a leftover
-    unguarded `docker` call in the code under test fails the test loudly."""
-    monkeypatch.setenv("PATH", _path_without_docker(os.environ.get("PATH", "")))
+def no_docker_on_path(monkeypatch, tmp_path_factory):
+    """Whatever this machine's PATH is, make sure no `docker` is on it while
+    everything else stays reachable. `docker_available()` (`shutil.which`)
+    then finds nothing, and `subprocess.run(["docker", ...])` raises
+    `FileNotFoundError` rather than quietly succeeding against a real
+    install — so a leftover unguarded `docker` call in the code under test
+    fails the test loudly."""
+    mirrors = tmp_path_factory.mktemp("path-without-docker")
+    monkeypatch.setenv("PATH", _path_without_docker(os.environ.get("PATH", ""),
+                                                    mirrors))
     assert docker_mod.docker_available() is None
 
 
