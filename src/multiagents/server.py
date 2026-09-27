@@ -328,7 +328,7 @@ def _context_reading(run: Runner) -> int | None:
     provider = run.providers.get(spec.provider) if spec is not None else None
     if provider is None:
         return None
-    return session_context(provider, run.paths.root, session)
+    return session_context(provider, run.paths.root, session, run.executor(spec))
 
 
 def _limit(run: Runner, key: str) -> int:

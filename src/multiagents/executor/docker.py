@@ -934,7 +934,7 @@ class DockerExecutor(Executor):
         provider's own `transcript:` declaration.
 
         Only where nothing else holds it. A prefix inside a container-private
-        home (claude's `~/.claude/projects`, inside `~/.claude`) is host-backed
+        home (a `~/.<cli>/projects` inside a private `~/.<cli>`) is host-backed
         already, and a second mount over it would split one profile across two
         stores. The transcript directory alone, never the profile around it:
         credentials must not become reachable through this.
@@ -948,12 +948,12 @@ class DockerExecutor(Executor):
 
         held = list(self.private_state())
         root = state_root() / "transcripts" / self.slug
-        home = Path.home()
+        home = self.container_home()
         out: dict[Path, Path] = {}
         for name, entry in self.providers.items():
             if provider and name != provider:
                 continue
-            prefix = transcript_prefix(entry)
+            prefix = transcript_prefix(entry, home)
             if prefix is None or not prefix.is_absolute():
                 continue
             if any(prefix == p or p in prefix.parents for p in held):
@@ -968,15 +968,31 @@ class DockerExecutor(Executor):
         mount whose source is not the path itself."""
         return {**self.private_state(), **self.transcript_state()}
 
+    def container_home(self) -> Path:
+        """HOME inside the container: the host's, by construction.
+
+        Every host path is mounted at its own location, so a per-agent HOME's
+        links to `~/<x>` resolve to the same `Path.home() / x` in here as on
+        the host. And an agent given no HOME (home_policy shared or host) is
+        handed the host's at exec time (`start`) — the uid it runs as has no
+        passwd entry in the image, so it would otherwise get `/`.
+        """
+        return Path.home()
+
     def host_path(self, path: Path) -> Path:
         """Where `path`, as the container sees it, lives on the host (SP-R2).
 
         Followed through the deepest mount that relocates it; every other
         mount is at its own path, so anything else is where it says. From
         inside the container the container's view is the one to read.
+
+        `..` is normalised first, as the container would: compared as written,
+        `~/.profile/../x` sits under `~/.profile` and maps to a host path that
+        climbs out of its store.
         """
         if self.paths is None or self.inside():
             return path
+        path = Path(os.path.normpath(path))
         best = None
         for destination, source in self.backing().items():
             if path == destination or destination in path.parents:
@@ -1538,6 +1554,10 @@ class DockerExecutor(Executor):
         if not state.get("ok"):
             raise RuntimeError(f"docker executor: {state.get('error')}")
         argv = self._versioned_argv(argv)
+        if "HOME" not in env:
+            # What `container_home` promises. Locally the CLI falls back to the
+            # passwd entry, which is this; in the image there is none.
+            env = {**env, "HOME": str(self.container_home())}
 
         # Environment goes through a file rather than --env flags so that values
         # never appear in the host process list.

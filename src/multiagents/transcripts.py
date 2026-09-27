@@ -440,21 +440,26 @@ def session_transcript(provider: Any, cwd: Path, session_id: str,
 
     None when there is no session id or the provider declares no transcript;
     the file itself may not exist yet. Given the executor the session ran
-    under, the path is where the host finds it (SP-R2).
+    under, the path is where the host finds it (SP-R2); without one, the
+    executor of the project `cwd` belongs to. Of the slugs `cwd` may have
+    been recorded under, the first that holds the file, else the first.
     """
-    from .watchdog import transcript_source
+    from .watchdog import transcript_sources
 
     if not session_id:
         return None
-    source = transcript_source(provider, Path(cwd), executor)
-    if source is None:
-        return None
-    directory, pattern = source
-    name = pattern.replace("*", session_id, 1) if "*" in pattern else session_id
-    return directory / name
+    found = None
+    for directory, pattern in transcript_sources(provider, Path(cwd), executor):
+        name = pattern.replace("*", session_id, 1) if "*" in pattern else session_id
+        path = directory / name
+        if path.is_file():
+            return path
+        found = found or path
+    return found
 
 
-def session_context(provider: Any, cwd: Path, session_id: str) -> int | None:
+def session_context(provider: Any, cwd: Path, session_id: str,
+                    executor: Any = None) -> int | None:
     """Tokens the most recent request of this session carried, or None.
 
     Reads the transcript the provider declares for `cwd`, the file named by
@@ -464,10 +469,13 @@ def session_context(provider: Any, cwd: Path, session_id: str) -> int | None:
     for "plenty of room". A compaction needs no handling of its own: the
     request after it already reports the smaller context.
 
+    Read where the executor keeps it, as `session_transcript` finds it
+    (SP-R2): a docker agent's transcript is not in the host's own profile.
+
     Cheap to call on every tool call: an unchanged file is not opened, and one
     that grew has only its new tail read.
     """
-    path = session_transcript(provider, cwd, session_id)
+    path = session_transcript(provider, cwd, session_id, executor)
     if path is None:
         return None
     key = str(path)

@@ -507,7 +507,8 @@ class _AttachedCompaction:
 
     def _state(self):
         path = session_transcript(self.provider, self.paths.root,
-                                  self.context.get("MULTIAGENTS_SESSION_ID", ""))
+                                  self.context.get("MULTIAGENTS_SESSION_ID", ""),
+                                  self.executor)
         if path is None:
             return None
         try:
@@ -543,7 +544,8 @@ class _AttachedCompaction:
         if state is None:
             return False
         tokens = session_context(self.provider, self.paths.root,
-                                 self.context.get("MULTIAGENTS_SESSION_ID", ""))
+                                 self.context.get("MULTIAGENTS_SESSION_ID", ""),
+                                 self.executor)
         if tokens is None:
             return False
         if tokens < self.threshold:
@@ -1124,7 +1126,7 @@ def _compact_if_due(paths, config, spec, provider, executor, context: dict,
     if threshold <= 0 or unsupported:
         return
     session = context.get("MULTIAGENTS_SESSION_ID", "")
-    tokens = session_context(provider, paths.root, session)
+    tokens = session_context(provider, paths.root, session, executor)
     if tokens is None or tokens < threshold:
         return
     if tree.active() or tree.read().get("deferred"):
