@@ -29,6 +29,17 @@ checked out in the main checkout — as a loose ref file, unpacked from
 `packed-refs` cannot move it (a loose ref wins over a packed one). A project
 whose `.git` is a file is refused with a clear message.
 
+SG-R2 was revised after the live smoke test (last Decisions section): a
+single-file bind mount inside a writable `.git` vanishes as soon as the host
+replaces the file by rename (every `git config`, every index refresh), which
+left `.git/config` and `.git/index` writable in a real container. So `.git`
+itself is read-only, and only DIRECTORIES beneath it are reopened writable:
+`objects` (with `objects/info` read-only), `refs` (with `refs/heads` and
+`refs/tags` read-only and `refs/heads/agents` writable), `logs` and
+`worktrees`. There are no single-file mounts under `.git` at all: `config`,
+`HEAD`, `index`, `packed-refs` and the rest are protected by their read-only
+directory. The container can therefore no longer rewrite `packed-refs`.
+
 SG-R6 uses a fake daemon holding one running container created with a given
 mount list. The old layout is today's: project root writable, the worktrees
 and homes directories writable, `.multiagents/config` read-only.
@@ -60,13 +71,20 @@ RECREATE = "multiagents docker rm && multiagents docker up"
 # Relative to the project root.
 PROTECTED_GIT = [".git/config", ".git/hooks", ".git/info", ".git/HEAD", ".git/index",
                  ".git/config.worktree", ".git/modules",
-                 ".git/refs/heads", ".git/refs/tags"]
+                 ".git/refs/heads", ".git/refs/tags",
+                 # SG-R2 revised: `.git` itself, and so `packed-refs`.
+                 ".git", ".git/packed-refs"]
 PROTECTED = PROTECTED_GIT + [".multiagents/config"]
 # Protected paths a fresh repository does not have: created before the
 # container starts (SG-R2 "Missing paths"), absent from the fixture.
 NOT_IN_A_FRESH_REPO = {".git/config.worktree", ".git/modules"}
 # The agent-branch namespace, writable inside the read-only `.git/refs/heads`.
 AGENTS_NS = ".git/refs/heads/agents"
+# SG-R2 revised: the only directories reopened writable beneath `.git`.
+WRITABLE_GIT_DIRS = [".git/objects", ".git/refs", AGENTS_NS, ".git/logs", ".git/worktrees"]
+# Files git keeps directly in `.git` or in `refs/heads`: none may be a mount.
+GIT_FILES = {"config", "config.worktree", "HEAD", "ORIG_HEAD", "FETCH_HEAD", "index",
+             "packed-refs", "description", "COMMIT_EDITMSG", "shallow", "main"}
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +324,17 @@ def test_sg_r2_control_run_args_parse_to_the_projects_own_paths(project):
                                              ".git/refs/heads/main",
                                              ".git/refs/heads/feature/x",
                                              ".git/refs/tags/v1",
-                                             ".multiagents/config/project.yaml"])
+                                             ".multiagents/config/project.yaml",
+                                             # SG-R2 revised: `.git` is read-only,
+                                             # so is any new name directly in it,
+                                             # a lock file included.
+                                             ".git/sg-new",
+                                             ".git/config.lock",
+                                             ".git/index.lock",
+                                             ".git/HEAD.lock",
+                                             ".git/packed-refs.lock",
+                                             ".git/ORIG_HEAD",
+                                             ".git/FETCH_HEAD"])
 def test_sg_r2_protected_path_is_read_only_at_its_own_path(project, rel):
     """Paths below a protected directory need not exist: a branch or tag
     created later, or a submodule's config, is read-only all the same."""
@@ -334,13 +362,15 @@ def test_sg_r2_main_checkout_working_files_are_read_only(project):
 
 
 @pytest.mark.parametrize("rel", [
-    ".git",                     # packed-refs and loose refs use lock-and-rename in it
+    # SG-R2 revised: `.git` and `packed-refs` are no longer here; the
+    # writable directories beneath `.git` are.
     ".git/objects", ".git/objects/pack",
     ".git/refs", ".git/refs/remotes",
     ".git/refs/heads/agents", ".git/refs/heads/agents/tester/5e7a91",
-    ".git/packed-refs", ".git/packed-refs.lock",
-    ".git/logs",
-    ".git/worktrees", ".git/worktrees/ag-000001",
+    ".git/refs/heads/agents/tester/5e7a91.lock",
+    ".git/logs", ".git/logs/HEAD", ".git/logs/refs/heads/agents/tester/5e7a91",
+    ".git/worktrees", ".git/worktrees/ag-000001", ".git/worktrees/ag-000001/index",
+    ".git/worktrees/ag-000002",
     ".multiagents", ".multiagents/tree.json", ".multiagents/events.jsonl",
     ".multiagents/runs",
 ])
@@ -364,11 +394,76 @@ def test_sg_r2_protected_and_writable_together(project):
     root = project.paths.root
     mounts = parse_mounts(project.run_args())
     assert seen_as(mounts, root / ".git/config")[0] == "ro"
-    assert seen_as(mounts, root / ".git")[0] == "rw"
+    assert seen_as(mounts, root / ".git")[0] == "ro"          # SG-R2 revised
+    assert seen_as(mounts, root / ".git/objects")[0] == "rw"
+    assert seen_as(mounts, root / ".git/objects/info")[0] == "ro"
     assert seen_as(mounts, root / "BRIEF.md")[0] == "ro"
     assert seen_as(mounts, root / ".multiagents")[0] == "rw"
     assert seen_as(mounts, root / ".git/refs/heads/main")[0] == "ro"
     assert seen_as(mounts, root / ".git/refs/heads/agents/x/1")[0] == "rw"
+
+
+def _mounts_under_git(ex, mounts):
+    git = ex.paths.root / ".git"
+    return [(s, d, ro) for s, d, ro in mounts if Path(d) == git or git in Path(d).parents]
+
+
+def test_sg_r2_no_single_file_mount_under_git_statically(project):
+    """SG-R2 revised: a file bind mount inside `.git` is dropped by the kernel
+    the moment the host renames a new file over it, so none may exist. Every
+    mount under `.git` that exists on the host is a directory, and none is at
+    a name git keeps as a file."""
+    root = project.paths.root
+    _check_out(root, "main")
+    project.protect_project()
+    bad = []
+    for src, dst, _ in _mounts_under_git(project, parse_mounts(project.run_args())):
+        d = Path(dst)
+        if d.name in GIT_FILES or d.name.endswith(".lock"):
+            bad.append(f"{d.relative_to(root)} (a file name git uses)")
+        elif src is not None and Path(src).exists() and not Path(src).is_dir():
+            bad.append(f"{d.relative_to(root)} (a file on the host)")
+    assert not bad, "single-file mounts under .git (SG-R2 revised):\n  " + "\n  ".join(bad)
+
+
+def test_sg_r2_every_mount_under_git_is_a_directory_at_docker_run(project, fake_docker):
+    """The same, as the container is really created: at `docker run`, every
+    mount source under `.git` is a directory on the host. The base branch is
+    loose by then (a file in `refs/heads`), and it must be protected by its
+    directory, not by a mount of its own."""
+    root = project.paths.root
+    _check_out(root, "main")
+    fake = fake_docker(project, None)
+    assert project.ensure_running().get("ok") is True
+    assert (root / ".git/refs/heads/main").is_file()
+    under = _mounts_under_git(project, parse_mounts(fake.run_argv))
+    files = [d for s, d, _ in under if s is None or not Path(s).is_dir()]
+    assert files == [], f"mounts under .git that are not directories: {files}"
+
+
+@pytest.mark.parametrize("rel", WRITABLE_GIT_DIRS)
+def test_sg_r2_writable_git_directory_is_its_own_mount(project, rel):
+    """`.git` is read-only, so each directory the container writes in must be
+    reopened by a writable mount at exactly that directory's own path."""
+    root = project.paths.root
+    mounts = parse_mounts(project.run_args())
+    assert (str(root / rel), str(root / rel), False) in mounts, (
+        f"no writable mount of {rel} at its own path (SG-R2 revised)")
+
+
+@pytest.mark.parametrize("rel", [".git/logs", ".git/worktrees"])
+def test_sg_r2_missing_writable_git_directory_exists_at_docker_run(project, fake_docker, rel):
+    """Contract silence, flagged: under a read-only `.git` the container cannot
+    create `logs` or `worktrees` itself, and docker would create a missing
+    bind source as a root-owned directory. So a missing one exists, as a
+    directory the agent can write, when the container is created."""
+    root = project.paths.root
+    subprocess.run(["rm", "-rf", str(root / rel)], check=True)
+    fake = fake_docker(project, None)
+    assert project.ensure_running().get("ok") is True
+    assert (root / rel).is_dir() and not (root / rel).is_symlink(), f"{rel} not created"
+    assert os.access(root / rel, os.W_OK), f"{rel} was created, but not writable"
+    assert seen_as(parse_mounts(fake.run_argv), root / rel / "x") == ("rw", root / rel / "x")
 
 
 def _strip_protected(ex) -> None:
@@ -498,9 +593,11 @@ def test_sg_r2_unpacking_the_base_leaves_host_git_unchanged(project, fake_docker
 
 
 def test_sg_r2_rewriting_packed_refs_cannot_move_the_unpacked_base(project, fake_docker):
-    """What the loose ref is for: `packed-refs` stays writable, and an agent
-    that rewrites the base's line in it must not move the base, because the
-    loose file (read-only from the container) wins."""
+    """What the loose ref is for: an agent that rewrites the base's line in
+    `packed-refs` must not move the base, because the loose file (read-only
+    from the container) wins. Since the revised SG-R2, `packed-refs` is
+    read-only from the container as well; the loose base stays as a second
+    guard, and this test simulates the rewrite on the host."""
     root = project.paths.root
     sha = _check_out(root, "main")
     fake_docker(project, None)
@@ -618,7 +715,8 @@ def test_sg_r6_old_layout_container_is_reported_as_drift(project, fake_docker):
 
 
 @pytest.mark.parametrize("rel", [".git/config", ".git/index", ".multiagents/config",
-                                 ".git/refs/heads", ".git/modules"])
+                                 ".git/refs/heads", ".git/modules",
+                                 ".git/objects/info", ".git/packed-refs"])
 def test_sg_r6_a_container_missing_one_protection_is_refused(project, fake_docker, rel):
     """Not only the whole old layout: a container whose mounts leave any one
     protected path writable is refused as well."""
@@ -630,6 +728,29 @@ def test_sg_r6_a_container_missing_one_protection_is_refused(project, fake_docke
                 for s, d, ro in current]
     fake = fake_docker(project, weakened)
     _assert_refused(project.ensure_running(), fake)
+
+
+def _single_file_layout(ex) -> list[tuple[str, str, bool]]:
+    """What a container created under the first SG-R2 has: the current mounts
+    outside `.git`, and inside it a writable `.git` with the protected files
+    closed again by single-file read-only mounts."""
+    root = ex.paths.root
+    git = root / ".git"
+    outside = [m for m in _current_layout(ex) if m not in _mounts_under_git(ex, _current_layout(ex))]
+    inside = [(git, False), (git / "refs", False)]
+    inside += [(git / rel, True) for rel in (
+        "config", "config.worktree", "HEAD", "index", "hooks", "info", "modules",
+        "objects/info", "refs/heads", "refs/tags", "refs/heads/main")]
+    inside.append((git / "refs/heads/agents", False))
+    return outside + [(str(p), str(p), ro) for p, ro in inside]
+
+
+def test_sg_r6_single_file_layout_container_is_refused(project, fake_docker):
+    """SG-R2 revised: the container made under the first SG-R2 differs in
+    layout, and is refused until recreated."""
+    fake = fake_docker(project, _single_file_layout(project))
+    _assert_refused(project.ensure_running(), fake)
+    assert project.mount_drift() != []
 
 
 def test_sg_r6_refusal_is_repeatable_and_never_recreates(project, fake_docker):
