@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import procs
+from . import gitops, procs
 
 # How long a live session may produce nothing before it is called idle rather
 # than working. Long enough to cover a slow tool call or a big file read.
@@ -327,18 +327,25 @@ def status_file(paths, role: str = "orchestrator") -> Path:
     return paths.data / f"{role}-status.json"
 
 
+# SG-R7: the status file is under `.multiagents`, which a docker agent can
+# write, so it is written and read with no link followed and no FIFO blocked on.
+STATUS_MAX_BYTES = 1024 * 1024
+
+
 def write_status(paths, record: dict, role: str = "") -> None:
     path = status_file(paths, role or record.get("role") or "orchestrator")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record, indent=2) + "\n")
-    os.replace(tmp, path)
+    # Written to a fresh temporary beside it and renamed over it (SG-R7).
+    gitops._write_beneath(path.parent, (), path.name,
+                          (json.dumps(record, indent=2) + "\n").encode(), mode=0o644)
 
 
 def read_status(paths, role: str = "orchestrator") -> dict | None:
+    path = status_file(paths, role)
+    raw = gitops._read_beneath(path.parent, (), path.name, STATUS_MAX_BYTES)
     try:
-        return json.loads(status_file(paths, role).read_text())
-    except (OSError, ValueError):
+        return None if raw is None else json.loads(raw)
+    except ValueError:
         return None
 
 

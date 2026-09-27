@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import procs, scripts
+from . import gitops, procs, scripts
 from .budget import read_all, reset_label
 from .config import limit_number
 from .executor import executor_for
@@ -87,6 +87,24 @@ def _launched_spec(config, role: str, team: str = ""):
     return None
 
 
+# SG-R7: `launch/` is under `.multiagents`, which a docker agent can write.
+# What the driver writes or reads there goes through these: no link followed,
+# no FIFO blocked on, reads bounded.
+LAUNCH_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _launch_write(paths, name: str, text: str) -> None:
+    """Replace `name` in `launch/` with `text`, never through a link (SG-R7)."""
+    gitops._write_beneath(paths.data, ("launch",), name, text.encode(),
+                          mode=0o644, create=True)
+
+
+def _launch_read(paths, name: str, limit: int = LAUNCH_FILE_MAX_BYTES) -> str | None:
+    """`name` in `launch/` if it is a regular file of a sane size, else None."""
+    raw = gitops._read_beneath(paths.data, ("launch",), name, limit)
+    return None if raw is None else raw.decode("utf-8", errors="replace")
+
+
 def _launch_context(paths, config, spec) -> dict[str, str]:
     """Everything a provider's launch script needs, as environment.
 
@@ -94,10 +112,9 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
     through the same three config layers as every other agent's — write it out
     fresh each run so edits take effect without any copying step.
     """
+    _launch_write(paths, "orchestrator-prompt.md", config.instructions_for(spec) or "")
     state = paths.data / "launch"
-    state.mkdir(parents=True, exist_ok=True)
     prompt_file = state / "orchestrator-prompt.md"
-    prompt_file.write_text(config.instructions_for(spec) or "")
 
     mcp_path = _write_mcp_config()
     server = json.loads(mcp_path.read_text())["mcpServers"]["multiagents"]
@@ -388,8 +405,8 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # Resuming is only possible if this role has been launched here before.
     # Passing --continue on a first run makes the CLI error out with no prior
     # conversation, which would make `run` fail exactly once per project.
-    marker = paths.data / "launch" / f"{role}.launched"
-    first_time = not marker.is_file()
+    marker = f"{role}.launched"
+    first_time = _launch_read(paths, marker) is None
     context["MULTIAGENTS_RESUME"] = "0" if (first_time or not resume) else "1"
     # A session that was stopped without anything left to record the ending
     # comes back knowing nothing about it: the reconciliation `run` just did is
@@ -404,8 +421,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # that already has a transcript would collide with the session it names.
     context["MULTIAGENTS_SESSION_ID"] = _role_session_id(
         paths, role, rotate=not resume)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(str(time.time()))
+    _launch_write(paths, marker, str(time.time()))
     _driver_node(paths, role, spec, context["MULTIAGENTS_SESSION_ID"])
 
     code, out, err = scripts.run_action(
@@ -844,17 +860,13 @@ def _role_session_id(paths, role: str, rotate: bool = False) -> str:
     """
     import uuid as _uuid
 
-    path = paths.data / "launch" / f"{role}.session"
+    name = f"{role}.session"
     if not rotate:
-        try:
-            existing = path.read_text().strip()
-            if existing:
-                return existing
-        except OSError:
-            pass
+        existing = (_launch_read(paths, name, 4096) or "").strip()
+        if existing:
+            return existing
     fresh = str(_uuid.uuid4())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(fresh)
+    _launch_write(paths, name, fresh)
     return fresh
 
 
@@ -945,9 +957,8 @@ def _write_pid(paths, role: str, pid: int) -> None:
     see :mod:`multiagents.procs`. A file written by an older install has one
     field and still reads, with the guard simply unavailable for it.
     """
-    path = _pid_file(paths, role)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{pid} {procs.start_time(pid)}".strip())
+    _launch_write(paths, _pid_file(paths, role).name,
+                  f"{pid} {procs.start_time(pid)}".strip())
 
 
 def _read_pid(paths, role: str) -> tuple[int, str] | None:
@@ -957,14 +968,15 @@ def _read_pid(paths, role: str) -> tuple[int, str] | None:
     and a second field would have been silently dropped by three of them.
     """
     try:
-        parts = _pid_file(paths, role).read_text().split()
+        parts = (_launch_read(paths, _pid_file(paths, role).name, 4096) or "").split()
         return int(parts[0]), (parts[1] if len(parts) > 1 else "")
     except (OSError, ValueError, IndexError):
         return None
 
 
 def _clear_pid(paths, role: str) -> None:
-    _pid_file(paths, role).unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        gitops._unlink_beneath(paths.data, ("launch",), _pid_file(paths, role).name)
 
 
 def _role_alive(paths, role: str) -> bool:
