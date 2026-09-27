@@ -204,3 +204,11 @@ first delegation, and names the command.
 - **Vacuous controls:** where a vector does not fire even under plain git
   (for example `rev-list` or `diff --stat` between commits), no SG-R1 test is
   needed for it. Say so in the test file's docstring.
+- **SG-R4, how gitops finds the root** (tester's NEED_INFO sg-r4-root). The
+  gitops read functions (`is_dirty`, `uncommitted_entries`, `commits_on`,
+  `diff_stat`, `changed_paths`) gain a keyword argument, `repo: Path`, which is
+  the project root. When it is given, resolution is pinned as above.
+  Host-side callers in the runner and the CLI always pass it, because they
+  know `paths.root`. Without it, the behaviour stays as today, for callers
+  that are not about agent trees. This replaces "the signatures are
+  unchanged" above.
