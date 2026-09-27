@@ -71,6 +71,19 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
      kill-at-timeout; the run's `done` never being set on a steer during a
      fix turn.
 
+9. **Adversarial pass (tester ag-6ceb2b, since the adversary's providers are
+   down or excluded): 2 defects.**
+   - HIGH: a hook swaps the `GIT_TRACE2_EVENT` file for a FIFO, and the
+     runner freezes. This became CI-R7.
+   - MEDIUM: a `NEED_DECISION` in a fix turn is dropped.
+
+   Both fixes were delegated to ag-c2af1d. CI-R5 was merged (989621d) with
+   these two known defects, so that the fix could build on it.
+10. **A security problem found in passing:** the whole project root, `.git`
+   included, is mounted writable, so agent-written hooks and config run on
+   the host. See `context/specs/sandbox-git.md`. It is waiting on the user.
+   Your view on the three directions is wanted.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
