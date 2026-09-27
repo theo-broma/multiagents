@@ -382,3 +382,14 @@ one breaks SG-R1 or SG-R4:
 - **Accepted:** `gitops.is_repo(node.worktree)` and `head_sha` just after
   creation stay unpinned. They execute nothing, since config and hooks are
   protected and read-only.
+- **After tester ag-6466bc:**
+  - SG-R7 covers `Tree`'s files (`tree.json`, `.bak`, `.tmp`, `tree.lock`
+    and `events.jsonl`) and every file in a run dir (`command.json`,
+    `prompt.md`, `result.json`, `stream.jsonl`, `supervisor.lock`,
+    `output.ndjson`, `exit_status`). All in scope.
+  - **Stopping a docker agent ends its whole process tree,** including a
+    child that left the group with `setsid`. Today it is broken: dash's
+    builtin `kill` rejects `--`, the image has no `pkill`, and
+    `pkill -P` comes too late. The fix must work with the image as it is,
+    with no new package required, for example the same `/proc` walk as the
+    `ContainerGit` watchdog.
