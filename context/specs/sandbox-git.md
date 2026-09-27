@@ -335,3 +335,24 @@ one breaks SG-R1 or SG-R4:
   that file, and a FIFO in its place does not hang `start()`.
 - **A `docker exec` timeout** kills the process inside the container too.
   It must not leave git running.
+
+## Decisions, 2026-09-27 (orchestrator, after the stopped adversarial reading ag-044d7b)
+
+- **Pinned-read copy cap:** `_pinned` copies a worktree's `index` that the
+  agent can write, and today accepts up to 512 MiB, at every 3 s status poll.
+  The cap drops to 128 MiB. Above it, the read raises `GitError`, which the
+  runner handles as `git_unreadable`. `HEAD` stays capped small.
+- **SG-R2 addition:** `.git/objects/info` is read-only from the container,
+  so the container cannot write `alternates` or `http-alternates`. An
+  `alternates` entry pointing to a FIFO or elsewhere would make every
+  host-side git read hang or read foreign objects. A `commit-graph` write
+  from the container then fails, which is harmless.
+- **`protect_project` runs on the host before docker starts:** it must never
+  write through a symlink, nor block on a FIFO, that an agent planted while
+  the old layout was writable. That covers `.git/hooks`, `info`, `modules`,
+  `config.worktree`, `index`, `refs/heads/<base>` and `.multiagents/config`.
+  A protected path that is a symlink or a FIFO makes it refuse, with the
+  path named, rather than create or unpack through it.
+- **Not pursued:** `.gitattributes` on the merge path has no built-in
+  behaviour that executes anything. Filters and drivers need config, which
+  is protected, and `core.attributesFile` is config too.
