@@ -169,3 +169,38 @@ hook, and the marker is absent.
 
 Verified by: the mount-drift check with an old-layout container refuses the
 first delegation, and names the command.
+
+## Decisions, 2026-09-27 (orchestrator, after tester ag-689232)
+
+- **SG-R4, where the trusted paths come from:** derived, not recorded. The
+  host knows the project root, so the common dir is `<root>/.git`. The git dir
+  is `<root>/.git/worktrees/<basename of the worktree path>`, since
+  multiagents names every worktree directory after its unique node id. It
+  must exist, and the work tree is the path given. Nothing is read from
+  `tree.json` or from any file in the worktree or `.git/worktrees/<id>/` to
+  find them. The gitops read functions keep their signatures (a path in).
+  With `GIT_DIR` and `GIT_COMMON_DIR` pinned, config comes only from the
+  trusted `<root>/.git/config`, plus global and system.
+- **SG-R4 covers every hook, not only commit hooks:** host-side reads run
+  with hooks disabled. That includes `post-index-change`, which a plain
+  `git status` fires, as well as `core.fsmonitor`.
+- **SG-R4 on read results:** when the agent's files try to redirect the
+  repository, a host-side read returns what the real repository says, not
+  what the agent's files claim. Nothing is executed either way.
+- **SG-R2 addition:** the main checkout's `.git/HEAD` and `.git/index` are also
+  read-only from the container. Nothing the container does needs them, and
+  an agent that moved the main HEAD would redirect the orchestrator's merges.
+  `.git/` itself stays writable, because packed-refs is rewritten by
+  lock-and-rename. The protected files are protected as file or directory
+  bind mounts.
+- **SG-R5, hook directory as a whole:** the base's version of the whole hooks
+  directory is used, including helpers a hook calls next to itself. A hook
+  that exists only on the branch being merged is not run.
+- **Test placement:** SG-R1 and SG-R3 for `commit_all` and `restore_paths` need
+  real docker, because the local executor still runs hooks by design (CI-R5).
+  They are opt-in and run on the host. SG-R4 and SG-R5 are tested directly
+  through gitops. SG-R6 uses the FakeDocker pattern, and SG-R2 is checked
+  statically on `run_args()`, plus opt-in real-docker checks.
+- **Vacuous controls:** where a vector does not fire even under plain git
+  (for example `rev-list` or `diff --stat` between commits), no SG-R1 test is
+  needed for it. Say so in the test file's docstring.
