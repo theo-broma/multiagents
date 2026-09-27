@@ -88,7 +88,7 @@ class Supervisor:
     # of each one moves the counter.
     _seen_turns: set[str] = field(default_factory=set)
     # bug-1b2612: the step index carried by the first tagged event this
-    # Supervisor ever sees. Providers such as agy number steps monotonically
+    # Supervisor ever sees. Some providers number steps monotonically
     # across a resumed session, not from zero per run, so a steer that
     # respawns a run whose stream had already reached step 100 handed this
     # class an `event.step` of ~100 on its very first event — instantly
@@ -168,10 +168,11 @@ class Supervisor:
     def _matches_opaque_args(self, event: Event) -> bool:
         """bug-8615db: does this call match one of `opaque_tool_args`?
 
-        A poll like agy's `manage_task {Action: status, TaskId: X}` reports
-        the SAME TaskId on every check of one task, so an ordinary wait for a
-        background job to finish looks identical to a real doom loop under
-        the plain tool-name-and-args signature. Matching is scoped to the
+        A poll like a task-status tool call `{Action: status, TaskId: X}`
+        reports the SAME TaskId on every check of one task, so an ordinary
+        wait for a background job to finish looks identical to a real doom
+        loop under the plain tool-name-and-args signature. Matching is
+        scoped to the
         argument values that make a call a poll (`Action: status` or `list`),
         not the tool as a whole — `Action: run` re-launching the same command
         must still trip, same as any other tool.

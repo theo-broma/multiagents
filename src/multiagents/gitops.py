@@ -62,7 +62,10 @@ def initial_commit(repo: Path, message: str = "initial commit") -> GitResult:
     commit: without one there is nothing to branch a worktree from.
     """
     run(repo, "add", "-A")
-    return run(repo, "commit", "--allow-empty", "-m", message)
+    # CI-R3: same fallback identity as the other commits multiagents itself
+    # makes — a brand-new project has no git identity configured either.
+    extra = _identity_fallback_args(repo, "multiagents", "orchestrator@multiagents.invalid")
+    return run(repo, *extra, "commit", "--allow-empty", "-m", message)
 
 
 def uncommitted_entries(repo: Path) -> list[str]:
@@ -423,39 +426,56 @@ def restore_paths(worktree: Path, base: str, paths: list[str],
         return restore
     if run(worktree, "diff", "--cached", "--quiet").ok:
         return GitResult(True, "paths already matched base", "", 0)
-    return run(worktree, "commit", "-m", message)
+    # CI-R3: this reverts an agent's edits before its branch merges, so it is
+    # the merging side's own commit, not the agent's — same fallback identity
+    # as `merge`'s squash commit below.
+    extra = _identity_fallback_args(worktree, "multiagents", "orchestrator@multiagents.invalid")
+    return run(worktree, *extra, "commit", "-m", message)
 
 
 def _config_missing(worktree: Path, key: str) -> bool:
     return not run(worktree, "config", "--get", key).ok
 
 
+def _identity_fallback_args(worktree: Path, name: str, email: str) -> list[str]:
+    """`-c` overrides for one `git commit`, filling only whatever half of the
+    identity is missing (CI-R1, CI-R3 — context/specs/commit-identity.md).
+
+    A fresh container HOME has no git identity anywhere — no config, no
+    GIT_AUTHOR_*/GIT_COMMITTER_*/EMAIL — and `git commit` refuses to run.
+    This scopes a fallback identity to this one invocation, never writing it
+    to any config file, and only for whichever half is actually missing. A
+    half that IS configured (repo, global, or env) is left alone: `-c`
+    outranks config files but env vars (GIT_AUTHOR_*/GIT_COMMITTER_*) outrank
+    `-c`, so an env-supplied identity passes through unchanged.
+    """
+    extra: list[str] = []
+    if _config_missing(worktree, "user.name"):
+        extra += ["-c", f"user.name={name}"]
+    # EMAIL is git's own last-resort fallback for email before it would guess
+    # from passwd+hostname; a bare `-c user.email=` outranks it, so it must
+    # be excluded here or we'd clobber an identity the user already has.
+    if _config_missing(worktree, "user.email") and "EMAIL" not in os.environ:
+        extra += ["-c", f"user.email={email}"]
+    return extra
+
+
 def commit_all(worktree: Path, message: str, *,
                role: str | None = None, agent_id: str | None = None) -> GitResult:
     """Commit whatever an agent left uncommitted, so no work is stranded.
 
-    CI-R1: a fresh container HOME has no git identity anywhere — no config,
-    no GIT_AUTHOR_*/GIT_COMMITTER_*/EMAIL — and `git commit` refuses to run.
-    Rather than let the agent's work sit stranded, uncommitted, in its
-    worktree, fall back to an identity naming the agent, scoped to this one
-    `git commit` invocation via `-c` (never written to any config file), and
-    only for whichever half — name or email — is actually missing. A half
-    that IS configured (repo, global, or env) is left alone: `-c` outranks
-    config files but env vars (GIT_AUTHOR_*/GIT_COMMITTER_*) outrank `-c`, so
-    an env-supplied identity passes through unchanged.
+    CI-R1: falls back to an identity naming the agent when none is
+    configured, via :func:`_identity_fallback_args`.
     """
     run(worktree, "add", "-A")
     if run(worktree, "diff", "--cached", "--quiet").ok:
         return GitResult(True, "nothing to commit", "", 0)
 
-    extra: list[str] = []
-    if _config_missing(worktree, "user.name"):
-        extra += ["-c", f"user.name={f'multiagents {role}' if role else 'multiagents'}"]
-    # EMAIL is git's own last-resort fallback for email before it would guess
-    # from passwd+hostname; a bare `-c user.email=` outranks it, so it must
-    # be excluded here or we'd clobber an identity the user already has.
-    if _config_missing(worktree, "user.email") and "EMAIL" not in os.environ:
-        extra += ["-c", f"user.email={agent_id or 'agent'}@multiagents.invalid"]
+    extra = _identity_fallback_args(
+        worktree,
+        f"multiagents {role}" if role else "multiagents",
+        f"{agent_id or 'agent'}@multiagents.invalid",
+    )
     return run(worktree, *extra, "commit", "-m", message)
 
 
@@ -477,12 +497,16 @@ def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple
             return "conflict", result.err or result.out
         if run(repo, "diff", "--cached", "--quiet").ok:
             return "empty", "branch introduced no changes"
-        commit = run(repo, "commit", "-m", message, timeout=120)
+        # CI-R3: same fallback as commit_all, but named for the merging side
+        # rather than the agent — this commit is multiagents', not theirs.
+        extra = _identity_fallback_args(repo, "multiagents", "orchestrator@multiagents.invalid")
+        commit = run(repo, *extra, "commit", "-m", message, timeout=120)
         if not commit.ok:
             return "failed", commit.err or commit.out
         return "merged", commit.out
 
-    result = run(repo, "merge", "--no-ff", "-m", message, branch, timeout=300)
+    extra = _identity_fallback_args(repo, "multiagents", "orchestrator@multiagents.invalid")
+    result = run(repo, *extra, "merge", "--no-ff", "-m", message, branch, timeout=300)
     if result.ok:
         return "merged", result.out
     run(repo, "merge", "--abort")
