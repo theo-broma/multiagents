@@ -484,3 +484,6 @@ single-file bind mount inside a writable `.git` is not a protection.**
   `refs/heads/agents/`. It then clears the mark and the branch. Only merge,
   discard and drop-if-empty ever set the mark. (Decided after
   implementer ag-bb429d.)
+  Amended: a `done` node qualifies only once its worktree is gone. A `done`
+  node that still has its worktree is waiting on its parent's merge or
+  discard, and is treated as live.
