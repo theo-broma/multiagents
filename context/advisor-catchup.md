@@ -115,6 +115,22 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
    (ag-a32e5e) is updating them. To check: whether freezing single-file
    mounts matters for nested orchestration.
 
+14. **38b9e98, SG-R4/R5 (ag-9e10d8):**
+   - Pinned reads work through a private temporary git dir: `HEAD` and
+     `index` are copied, and `commondir` is written to `<root>/.git`. It
+     uses `GIT_INDEX_FILE`, a hooksPath pointing at an empty dir,
+     fsmonitor off and `GIT_OPTIONAL_LOCKS=0`.
+   - The merge copies an in-tree hooks dir aside, and `reset --hard` cleans
+     up a refused merge.
+   - The implementer also pinned `server.git_status` and the monitor
+     snapshot, which I kept.
+   - Husky v9 `.husky/_` is a documented limitation.
+   - Old tests updated for SG-R2 (ag-a32e5e).
+
+   On the host, the docker-live run after R2/R4/R5: the 4 SG-R2 live tests
+   pass, and the 3 SG-R3 tests fail, since that work is in flight as
+   ag-ce8b54.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
