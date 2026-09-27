@@ -153,12 +153,26 @@ def running(pid: int | None, start: str = "") -> bool:
     return state not in ("Z", "X")
 
 
+# A run-dir file the host reads only a few bytes of (SG-R7).
+SMALL_FILE_MAX_BYTES = 4096
+
+
+def _read_small(run_dir: Path, name: str) -> str | None:
+    """`name` in `run_dir`, which a docker agent can write (SG-R7): read
+    through no link, never blocking, and bounded. None if it is not so."""
+    raw = gitops._read_beneath(*gitops.beneath(run_dir), name, SMALL_FILE_MAX_BYTES)
+    return None if raw is None else raw.decode("utf-8", errors="replace")
+
+
+def _open_run_file(run_dir: Path, name: str):
+    """`name` in `run_dir` opened for reading, as `_read_small` reads it."""
+    fd = gitops._open_file_beneath(*gitops.beneath(run_dir), name, os.O_RDONLY)
+    return os.fdopen(fd, "rb")
+
+
 def read_exit_status(run_dir: Path) -> str | None:
     """The wrapper's verdict, or None while there is none (SV-R2)."""
-    try:
-        return (run_dir / "exit_status").read_text().strip() or None
-    except OSError:
-        return None
+    return (_read_small(run_dir, "exit_status") or "").strip() or None
 
 
 def _pid_namespace() -> str | None:
@@ -183,8 +197,8 @@ def agent_group(run_dir: Path) -> int | None:
     own = _pid_namespace()
     for name in AGENT_PID_FILES:
         try:
-            token, namespace = (run_dir / name).read_text().split()[:2]
-        except (OSError, ValueError):
+            token, namespace = (_read_small(run_dir, name) or "").split()[:2]
+        except ValueError:
             continue
         if not token.isdigit() or own is None or namespace != own:
             continue
@@ -288,9 +302,10 @@ class FollowHandle:
         the read, so a line written just ahead of the exit is still read —
         then the next chunk of output."""
         ended = self._ended()
-        if fh is None and path.exists():
-            fh = path.open("rb")
-            fh.seek(self.offset)
+        if fh is None:
+            with contextlib.suppress(OSError):
+                fh = _open_run_file(path.parent, path.name)
+                fh.seek(self.offset)
         chunk = fh.read(1 << 20) if fh is not None else b""
         return ended, fh, chunk
 
@@ -329,7 +344,9 @@ class FollowHandle:
     @property
     def stderr_tail(self) -> str:
         try:
-            raw = (self.run_dir / "stderr.log").read_bytes()[-64 * 1024:]
+            with _open_run_file(self.run_dir, "stderr.log") as fh:
+                fh.seek(max(0, os.fstat(fh.fileno()).st_size - 64 * 1024))
+                raw = fh.read(64 * 1024)
         except OSError:
             return ""
         lines = [x for x in raw.decode("utf-8", errors="replace").splitlines() if x]

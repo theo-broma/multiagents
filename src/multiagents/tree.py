@@ -18,7 +18,6 @@ import contextlib
 import fcntl
 import json
 import os
-import shutil
 import sys
 import time
 import uuid
@@ -26,6 +25,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from . import gitops
 from .redact import depersonalise, scrub
 
 # Terminal states never transition again.
@@ -238,6 +238,11 @@ def node_from_raw(raw: dict[str, Any]) -> Node:
 _node_from_raw = node_from_raw
 
 
+# A tree file bigger than this is not read (SG-R7): it is under `.multiagents`,
+# which a docker agent can write, and it is read on every transaction.
+TREE_MAX_BYTES = 256 * 1024 * 1024
+
+
 class Tree:
     """Read/modify/write access to ``tree.json`` under an exclusive lock."""
 
@@ -254,13 +259,53 @@ class Tree:
                 "pause": {}, "provider_health": {},
                 "questions": [], "tickets": []}
 
-    def _read_unlocked(self) -> dict:
-        if not self.path.is_file():
-            return self._empty()
+    # SG-R7: every file here sits under `.multiagents`, which a docker agent
+    # can write, and the tree is written by the host and by the nested server
+    # in the container alike. So each is opened relative to its directory
+    # (trusted: the container cannot replace it), through no link and never
+    # blocking; a link or a FIFO planted in place of one is never gone
+    # through, and a file the tree owns is replaced rather than written into.
+
+    def _raw(self, path: Path) -> bytes | None:
+        """`path`'s bytes, if it is a regular file of a sane size."""
+        return gitops._read_beneath(path.parent, (), path.name, TREE_MAX_BYTES)
+
+    def _replace(self, path: Path, data: bytes, *, durable: bool = False) -> None:
+        """Replace `path` with `data` through a temp file beside it, renamed
+        over it. Only ever under the lock, so the temp file's one name is
+        safe; whatever stands there is removed first, never opened."""
+        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            with self.path.open() as handle:
-                data = json.load(handle)
-        except (json.JSONDecodeError, OSError):
+            tmp = self.path.with_suffix(".tmp").name
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp, dir_fd=dfd)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_CLOEXEC, 0o666, dir_fd=dfd)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                if durable:
+                    os.fsync(handle.fileno())
+            os.replace(tmp, path.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            if durable:
+                try:
+                    os.fsync(dfd)
+                except OSError:
+                    pass                  # not all filesystems allow it
+        finally:
+            os.close(dfd)
+
+    def _read_unlocked(self) -> dict:
+        try:
+            os.lstat(self.path)
+        except FileNotFoundError:
+            return self._empty()
+        raw = self._raw(self.path)
+        try:
+            if raw is None:
+                raise OSError(f"{self.path} is not a readable regular file")
+            data = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             data = self._recover()
         if data is None:
             return self._empty()
@@ -284,17 +329,20 @@ class Tree:
         """
         stamp = time.strftime("%Y%m%d-%H%M%S")
         kept = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        damaged = self._raw(self.path)
         try:
-            shutil.copy2(self.path, kept)
+            if damaged is None:
+                raise OSError("nothing readable to keep")
+            self._replace(kept, damaged)
         except OSError:
             kept = None
 
         restored = None
-        if self.backup_path.is_file():
+        backup = self._raw(self.backup_path)
+        if backup is not None:
             try:
-                with self.backup_path.open() as handle:
-                    restored = json.load(handle)
-            except (json.JSONDecodeError, OSError):
+                restored = json.loads(backup)
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 restored = None
 
         where = f" kept at {kept.name}" if kept else ""
@@ -330,30 +378,24 @@ class Tree:
         it, so there has to be something to fall back to.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.is_file() and self.path.stat().st_size > 0:
+        previous = self._raw(self.path)
+        if previous:
             try:
-                shutil.copy2(self.path, self.backup_path)
+                self._replace(self.backup_path, previous)
             except OSError:
                 pass                      # a missing backup must not stop a write
-        tmp = self.path.with_suffix(".tmp")
-        with tmp.open("w") as handle:
-            json.dump(scrub(data), handle, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, self.path)
-        try:
-            dir_fd = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass                          # not all filesystems allow it
+        self._replace(self.path,
+                      json.dumps(scrub(data), indent=2, sort_keys=True).encode(),
+                      durable=True)
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[Any]:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.lock_path.open("a+")
+        # A regular file is never replaced, so every process flocks the same
+        # one; only a link or a FIFO planted in its place is (SG-R7).
+        handle = os.fdopen(gitops._open_file_beneath(
+            self.lock_path.parent, (), self.lock_path.name,
+            os.O_RDWR | os.O_CREAT, replace=True), "a+")
         try:
             fcntl.flock(handle, fcntl.LOCK_EX)
             yield handle
@@ -381,7 +423,10 @@ class Tree:
         entry = scrub({"t": now(), "agent": agent_id, "kind": kind, **fields})
         try:
             self.events_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.events_path.open("a") as handle:
+            fd = gitops._open_file_beneath(
+                self.events_path.parent, (), self.events_path.name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT, replace=True)
+            with os.fdopen(fd, "a") as handle:
                 handle.write(json.dumps(entry) + "\n")
         except OSError:
             pass

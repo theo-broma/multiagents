@@ -1249,13 +1249,22 @@ def git_status() -> dict:
     if not gitops.is_repo(repo):
         return _ok({"error": f"{repo} is not a git repository"})
     branches = gitops.run(repo, "branch", "--list", f"{run.config.branch_prefix}/*")
-    return _ok({
+    # A failed pinned read is reported, never raised and never "clean" (SG-R4).
+    try:
+        dirty: bool | None = gitops.is_dirty(repo, root=repo)
+        unreadable = None
+    except gitops.GitError as e:
+        dirty, unreadable = None, str(e)
+    result = {
         "branch": gitops.current_branch(repo),
-        "dirty": gitops.is_dirty(repo, root=repo),
+        "dirty": dirty,
         "head": gitops.head_sha(repo)[:12],
         "remote": run.config.remote or None,
         "agent_branches": [b.strip("* ").strip() for b in branches.out.splitlines() if b.strip()],
-    })
+    }
+    if unreadable is not None:
+        result["error"] = unreadable
+    return _ok(result)
 
 
 # --------------------------------------------------------------------------
