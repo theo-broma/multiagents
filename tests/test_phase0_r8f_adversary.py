@@ -52,16 +52,19 @@ def manual_record(pre: int = 10000, post: int = 1000) -> str:
 # ==============================================================================
 
 def test_adversary_tree_busy_mid_grace_permanently_blocks_compaction_once_quiet(session):
-    """Attack on P0-R8f.2 / P0-R8f.3:
+    """Attack on P0-R8f.2 / P0-R8f.3 / R8f.14:
     When compaction conditions hold, `due()` runs the probe and schedules compaction.
-    If the tree becomes busy during grace (e.g. background agent starts), `due()` cancels
-    compaction and prints:
+    If the tree becomes busy during grace, `due()` cancels compaction and prints:
       'compaction cancelled — the session is in use; it will be proposed again once it is quiet.'
-    However, `_cancel()` does NOT clear `self.probed`.
-    Because the cancellation was caused by tree activity rather than a user message,
-    the session transcript has not changed (state == self.probed).
-    When the tree becomes quiet again, `due()` evaluates `if self._busy() or state == self.probed: return False`.
-    Compaction is NEVER proposed again once quiet for the remainder of this rest episode.
+    The attack: `_cancel()` not clearing `self.probed`. The cancellation was caused
+    by tree activity rather than a user message, so the transcript is unchanged
+    (state == self.probed), and once the tree is quiet again compaction would never
+    be proposed again for the remainder of this rest episode.
+
+    Busy is SV-R11's (context/specs/agent-survival.md): a finished result the
+    orchestrator has not yet seen. A running agent deliberately does not block
+    compaction, so this makes the tree busy with an unseen `done` result, and quiet
+    again by having the orchestrator see it through check_agent.
     """
     s = session()
     s.reading(OVER)
@@ -82,18 +85,15 @@ def test_adversary_tree_busy_mid_grace_permanently_blocks_compaction_once_quiet(
         assert res is False
         assert comp.scheduled is not None, "compaction should be scheduled"
 
-        # Tree becomes busy mid-grace
-        s.node("running")  # adds active node to tree
+        # Tree becomes busy mid-grace (SV-R11): an agent finishes, result unseen
+        agent_id = s.finished("done")
         # Poll 2: cancels because tree is busy
         res = comp.due()
         assert res is False
         assert comp.scheduled is None, "compaction should be cancelled while tree is busy"
 
-        # Tree becomes quiet again (node finishes)
-        nodes = s.tree.read()["nodes"]
-        for nid in nodes:
-            s.tree.update(nid, status="merged")
-        assert not s.tree.active()
+        # Tree becomes quiet again: the orchestrator sees the result
+        s.see(agent_id, "check_agent")
 
         # Session is still at rest and over threshold; tree is quiet.
         # Compaction must be proposed again once quiet!
