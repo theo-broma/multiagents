@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from .. import procs
+from .. import gitops, procs
 from ..redact import register_environment
 
 # Always forwarded: without these, most CLIs cannot even locate a terminal or a
@@ -417,6 +417,12 @@ class Executor(ABC):
         given a private HOME reaches the provider's state in it only through
         links to exactly these paths (`prepare_home`)."""
         return Path.home()
+
+    def git(self, agent_id: str) -> gitops.Git:
+        """Where agent `agent_id`'s own commits run, and their hooks (SG-R3):
+        the end-of-run commit, the CI-R5 fix-loop commits and the merge gate's
+        revert. On the host for an executor that runs agents there."""
+        return gitops.HOST
 
 
 # --------------------------------------------------------------------------

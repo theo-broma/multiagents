@@ -57,6 +57,35 @@ def run(repo: Path, *args: str, check: bool = False, timeout: int = 120,
     return result
 
 
+class Git:
+    """Where an agent's own commits run (SG-R3): here, on the host.
+
+    `commit_all` and `restore_paths` commit on an agent's branch, and a commit
+    runs the repository's hooks — code the agent can write. An executor with
+    a sandbox hands those functions its own `Git`, which runs each command in
+    there instead (`Executor.git`); this one is the local executor's, which
+    has no sandbox and keeps today's behaviour.
+    """
+
+    def run(self, repo: Path, *args: str, env: dict[str, str] | None = None,
+            timeout: int = 120, strip: bool = True) -> GitResult:
+        """:func:`run`, wherever this `Git` runs git. `env` is added to the
+        environment git runs with there."""
+        return run(repo, *args, env=env, timeout=timeout, strip=strip)
+
+    def environ(self) -> dict[str, str]:
+        """The environment git runs with, before `env` is added."""
+        return dict(os.environ)
+
+    def scratch(self):
+        """A context manager yielding a directory git writes to there and this
+        process reads here — where a commit's trace goes (CI-R5)."""
+        return tempfile.TemporaryDirectory(prefix="multiagents-commit-")
+
+
+HOST = Git()
+
+
 def is_repo(path: Path) -> bool:
     return run(path, "rev-parse", "--git-dir").ok
 
@@ -207,6 +236,15 @@ def current_branch(repo: Path) -> str:
 def head_sha(repo: Path) -> str:
     result = run(repo, "rev-parse", "HEAD")
     return result.out if result.ok else ""
+
+
+def status(repo: Path, *, root: Path | None = None) -> GitResult:
+    """``git status --porcelain``, the result whole: a caller that must tell
+    "clean" from "could not tell" reads `ok` as well as the output.
+
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4).
+    """
+    return _read(repo, root, "status", "--porcelain")
 
 
 def is_dirty(repo: Path, *, root: Path | None = None) -> bool:
@@ -413,7 +451,8 @@ def short_sha(repo: Path, ref: str) -> str:
     return result.out if result.ok else ""
 
 
-def holds_unmerged_commits(repo: Path, head: str, base: str, since: str = "") -> bool:
+def holds_unmerged_commits(repo: Path, head: str, base: str, since: str = "", *,
+                           root: Path | None = None) -> bool:
     """Whether `head` has commits whose changes `base` does not already hold.
 
     Absorbed means merging `head` into `base` would change no file, which is
@@ -425,20 +464,28 @@ def holds_unmerged_commits(repo: Path, head: str, base: str, since: str = "") ->
     after it are the branch's own: without it, a base that was amended or
     moved backwards leaves the commit the branch was cut from looking like
     work of its own.
+
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4).
     """
-    if run(repo, "merge-base", "--is-ancestor", head, base).ok:
+    with _pinned(repo, root) as (extra, env):
+        return _holds_unmerged(lambda *args: run(repo, *extra, *args, env=env),
+                               head, base, since)
+
+
+def _holds_unmerged(git, head: str, base: str, since: str) -> bool:
+    if git("merge-base", "--is-ancestor", head, base).ok:
         return False
     args = ["merge-tree", "--write-tree"]
     if since:
-        own = run(repo, "rev-list", "--count", head, "--not", base, since)
+        own = git("rev-list", "--count", head, "--not", base, since)
         if own.ok and own.out == "0":
             return False
-        if run(repo, "merge-base", "--is-ancestor", since, head).ok:
+        if git("merge-base", "--is-ancestor", since, head).ok:
             args.append(f"--merge-base={since}")
-    merged = run(repo, *args, base, head)
+    merged = git(*args, base, head)
     if not merged.ok or not merged.out:
         return True
-    base_tree = run(repo, "rev-parse", f"{base}^{{tree}}")
+    base_tree = git("rev-parse", f"{base}^{{tree}}")
     return not base_tree.ok or merged.out.splitlines()[0] != base_tree.out
 
 
@@ -511,33 +558,38 @@ def changed_paths(repo: Path, branch: str, base: str,
 
 
 def restore_paths(worktree: Path, base: str, paths: list[str],
-                  message: str) -> GitResult:
+                  message: str, *, git: Git = HOST) -> GitResult:
     """Put these paths back to their `base` content and commit, in a worktree.
 
     Used to undo an agent's edits to files it was not allowed to modify, before
     its branch is merged. Runs in the agent's own worktree because that is
     where its branch is checked out; the caller has already established that
     the worktree still exists.
+
+    SG-R3: the commit is on the agent's branch and runs its hooks, so it runs
+    wherever `git` runs it — the agent's sandbox, given its executor's.
     """
     if not paths:
         return GitResult(True, "nothing to restore", "", 0)
-    restore = run(worktree, "checkout", base, "--", *paths)
+    restore = git.run(worktree, "checkout", base, "--", *paths)
     if not restore.ok:
         return restore
-    if run(worktree, "diff", "--cached", "--quiet").ok:
+    if git.run(worktree, "diff", "--cached", "--quiet").ok:
         return GitResult(True, "paths already matched base", "", 0)
     # CI-R3: this reverts an agent's edits before its branch merges, so it is
     # the merging side's own commit, not the agent's — same fallback identity
     # as `merge`'s squash commit below.
-    extra = _identity_fallback_args(worktree, "multiagents", "orchestrator@multiagents.invalid")
-    return run(worktree, *extra, "commit", "-m", message)
+    extra = _identity_fallback_args(worktree, "multiagents",
+                                    "orchestrator@multiagents.invalid", git)
+    return git.run(worktree, *extra, "commit", "-m", message)
 
 
-def _config_missing(worktree: Path, key: str) -> bool:
-    return not run(worktree, "config", "--get", key).ok
+def _config_missing(worktree: Path, key: str, git: Git = HOST) -> bool:
+    return not git.run(worktree, "config", "--get", key).ok
 
 
-def _identity_fallback_args(worktree: Path, name: str, email: str) -> list[str]:
+def _identity_fallback_args(worktree: Path, name: str, email: str,
+                            git: Git = HOST) -> list[str]:
     """`-c` overrides for one `git commit`, filling only whatever half of the
     identity is missing (CI-R1, CI-R3 — context/specs/commit-identity.md).
 
@@ -550,18 +602,19 @@ def _identity_fallback_args(worktree: Path, name: str, email: str) -> list[str]:
     `-c`, so an env-supplied identity passes through unchanged.
     """
     extra: list[str] = []
-    if _config_missing(worktree, "user.name"):
+    if _config_missing(worktree, "user.name", git):
         extra += ["-c", f"user.name={name}"]
     # EMAIL is git's own last-resort fallback for email before it would guess
     # from passwd+hostname; a bare `-c user.email=` outranks it, so it must
     # be excluded here or we'd clobber an identity the user already has.
-    if _config_missing(worktree, "user.email") and "EMAIL" not in os.environ:
+    if _config_missing(worktree, "user.email", git) and "EMAIL" not in git.environ():
         extra += ["-c", f"user.email={email}"]
     return extra
 
 
 def commit_all(worktree: Path, message: str, *,
-               role: str | None = None, agent_id: str | None = None) -> GitResult:
+               role: str | None = None, agent_id: str | None = None,
+               git: Git = HOST) -> GitResult:
     """Commit whatever an agent left uncommitted, so no work is stranded.
 
     CI-R1: falls back to an identity naming the agent when none is
@@ -572,31 +625,36 @@ def commit_all(worktree: Path, message: str, *,
     command line outranks every config source (files, `GIT_CONFIG_*` in the
     environment) and writes nothing to disk, so a user who wants signing
     elsewhere is unaffected.
+
+    SG-R3: every git command here runs wherever `git` runs it. The commit runs
+    the agent's hooks, so an executor with a sandbox passes its own `Git` and
+    they run in there; the hook trace is written where both sides reach it.
     """
     # CI-R2: a failed `git add` is a failed commit. Ignored, it left the work
     # unstaged and the staged diff empty, which then read as a clean tree.
-    added = run(worktree, "add", "-A")
+    added = git.run(worktree, "add", "-A")
     if not added.ok:
         return added
-    if run(worktree, "diff", "--cached", "--quiet").ok:
+    if git.run(worktree, "diff", "--cached", "--quiet").ok:
         return GitResult(True, "nothing to commit", "", 0)
 
     extra = _identity_fallback_args(
         worktree,
         f"multiagents {role}" if role else "multiagents",
         f"{agent_id or 'agent'}@multiagents.invalid",
+        git,
     )
     args = ("-c", "commit.gpgsign=false", *extra, "commit", "-m", message)
-    hooks = _active_commit_hooks(worktree)
+    hooks = _active_commit_hooks(worktree, git)
     if not hooks:
-        return run(worktree, *args)
+        return git.run(worktree, *args)
     # CI-R5: whether a hook is what refused it. Git prints nothing of its own
     # when a hook fails, so the evidence is its trace: a hook child that
     # exited non-zero. A git too old to trace falls back to the hook's
     # presence alone.
-    with tempfile.TemporaryDirectory(prefix="multiagents-commit-") as tmp:
+    with git.scratch() as tmp:
         trace = Path(tmp) / "trace2.json"
-        result = run(worktree, *args, env={"GIT_TRACE2_EVENT": str(trace)})
+        result = git.run(worktree, *args, env={"GIT_TRACE2_EVENT": str(trace)})
         if not result.ok:
             result.hook = _refusing_hook(trace, hooks)
     return result
@@ -607,12 +665,12 @@ def commit_all(worktree: Path, message: str, *,
 COMMIT_HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg")
 
 
-def _active_commit_hooks(worktree: Path) -> list[str]:
+def _active_commit_hooks(worktree: Path, git: Git = HOST) -> list[str]:
     """The commit hooks git would run here: executable files in the hooks
     directory (`core.hooksPath` if set, else the repository's own, which a
     linked worktree shares). A `.sample` file, or a hook without its
     executable bit, is ignored by git and so here too."""
-    found = run(worktree, "rev-parse", "--git-path", "hooks")
+    found = git.run(worktree, "rev-parse", "--git-path", "hooks")
     if not found.ok or not found.out:
         return []
     hooks_dir = Path(os.path.expanduser(found.out))
