@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import string
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -37,30 +39,85 @@ def transcript_source(provider: Any, cwd: Path,
 
     The directory as the host reads it. Given the executor the agent ran
     under, the declared path is followed to where that executor really keeps
-    it (SP-R2): a docker agent's `~/.claude/projects` is the container's, and
-    the host's own `~/.claude` never saw a line of it.
+    it (SP-R2): a docker agent's `~/.<cli>/…` is the container's, and the
+    host's own profile never saw a line of it. Without one, the
+    executor of the project `cwd` belongs to is looked up.
+
+    The first of `transcript_sources`: the slug of `cwd` with symlinks
+    resolved, which is the one the CLI writes to.
     """
-    spec = getattr(provider, "transcript", None) or {}
-    directory = spec.get("dir")
-    if not directory:
-        return None
-    # Every character outside [A-Za-z0-9] becomes '-', not only '/', '.' and
-    # '_': a project path with a space, or any other punctuation, used to
-    # slug to a directory the CLI never wrote to.
-    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
-    path = Path(directory.format(slug=slug)).expanduser()
-    if executor is not None:
-        path = executor.host_path(path)
-    return path, spec.get("glob", "*")
+    sources = transcript_sources(provider, cwd, executor)
+    return sources[0] if sources else None
 
 
-def transcript_prefix(provider: Any) -> Path | None:
+def transcript_sources(provider: Any, cwd: Path,
+                       executor: Any = None) -> list[tuple[Path, str]]:
+    """Every `(directory, glob)` this session may be recorded in, best first.
+
+    The CLI keys its directory on the working directory with symlinks
+    resolved, so that slug comes first; a worktree reached through a symlink
+    also tries the path as given, in case the CLI did not (SP-R2).
+    """
+    if executor is None:
+        from .executor import executor_at
+        executor = executor_at(cwd, getattr(provider, "name", ""))
+    home = container_home(executor)
+    directory = _declared_dir(provider, home)
+    if directory is None:
+        return []
+    cwd = Path(cwd)
+    try:
+        resolved = cwd.resolve()
+    except OSError:
+        resolved = cwd
+    glob = (getattr(provider, "transcript", None) or {}).get("glob", "*")
+    out: list[tuple[Path, str]] = []
+    for candidate in (resolved, cwd):
+        # Every character outside [A-Za-z0-9] becomes '-', not only '/', '.'
+        # and '_': a project path with a space, or any other punctuation, used
+        # to slug to a directory the CLI never wrote to.
+        slug = re.sub(r"[^a-zA-Z0-9]", "-", str(candidate))
+        path = _expand(directory.format(slug=slug), home)
+        host_path = getattr(executor, "host_path", None)
+        if host_path is not None:
+            path = host_path(path)
+        if (path, glob) not in out:
+            out.append((path, glob))
+    return out
+
+
+def container_home(executor: Any = None) -> Path:
+    """HOME as an agent run by `executor` sees it: what a declared `~` means.
+
+    The executor's to say, not this process's: the declaration describes the
+    agent's view. An executor that says nothing runs agents on the host."""
+    home = getattr(executor, "container_home", None)
+    return Path(home()) if home is not None else Path.home()
+
+
+def _expand(directory: str, home: Path) -> Path:
+    """`directory` with a leading `~` taken as `home`, lexically normalised."""
+    if directory == "~" or directory.startswith("~/"):
+        directory = str(home) + directory[1:]
+    return Path(os.path.normpath(directory))
+
+
+def transcript_prefix(provider: Any, home: Path | None = None) -> Path | None:
     """The static part of the provider's declared transcript directory: the
     path up to the first component holding a placeholder (SP-R1). One store
-    for it covers every agent's session, whatever its slug."""
-    directory = (getattr(provider, "transcript", None) or {}).get("dir")
-    if not directory:
+    for it covers every agent's session, whatever its slug.
+
+    `~` is `home`, the agent's HOME (the host's when not given). None when
+    nothing is declared, or when the declaration is refused (see
+    `_declared_dir`)."""
+    home = Path(home) if home is not None else Path.home()
+    directory = _declared_dir(provider, home)
+    if directory is None:
         return None
+    return _static_prefix(directory, home)
+
+
+def _static_prefix(directory: str, home: Path) -> Path | None:
     parts: list[str] = []
     for part in Path(directory).parts:
         if "{" in part:
@@ -68,19 +125,80 @@ def transcript_prefix(provider: Any) -> Path | None:
         parts.append(part)
     if not parts:
         return None
-    return Path(*parts).expanduser()
+    return _expand(str(Path(*parts)), home)
+
+
+# Declarations already reported as refused, so a reader called on every tool
+# call says so once rather than on every call.
+_refused: set[tuple[str, str, str]] = set()
+
+
+def _declared_dir(provider: Any, home: Path) -> str | None:
+    """The provider's `transcript.dir`, or None if it declares none or the
+    declaration is refused (SP-R1).
+
+    The static prefix is what the docker executor mounts a store over, so a
+    prefix that is not a proper subdirectory would put that store over the
+    container's root or its whole HOME. Refused, and treated as no
+    declaration at all, when the prefix is the filesystem root, HOME or an
+    ancestor of it; when any component, before or after a placeholder, is
+    `..`, which could walk the sessions out of whatever holds them; and when
+    the directory holds any placeholder but `{slug}`, which nothing here can
+    fill in.
+    """
+    directory = (getattr(provider, "transcript", None) or {}).get("dir")
+    if not directory:
+        return None
+    why = _refusal(str(directory), home)
+    if not why:
+        return str(directory)
+    key = (getattr(provider, "name", ""), str(directory), str(home))
+    if key not in _refused:
+        _refused.add(key)
+        print(f"multiagents: ignoring transcript dir {directory!r} of provider "
+              f"{key[0] or '?'}: {why}", file=sys.stderr)
+    return None
+
+
+def _refusal(directory: str, home: Path) -> str:
+    try:
+        fields = {name for _, name, _, _ in string.Formatter().parse(directory)
+                  if name is not None}
+    except ValueError as exc:
+        return f"it is not a valid template ({exc})"
+    if fields - {"slug"}:
+        return (f"placeholder(s) {sorted(fields - {'slug'})} are not supported; "
+                f"only {{slug}} is")
+    if ".." in Path(directory).parts:
+        return "it has a '..' component"
+    prefix = _static_prefix(directory, home)
+    if prefix is None or not prefix.is_absolute():
+        return ""
+    home = Path(os.path.normpath(home))
+    if prefix == Path(prefix.anchor):
+        return "its static prefix is the filesystem root"
+    if prefix == home:
+        return "its static prefix is HOME itself"
+    if prefix in home.parents:
+        return "its static prefix is an ancestor of HOME"
+    return ""
 
 
 def newest_transcript(provider: Any, cwd: Path, executor: Any = None) -> Path | None:
-    source = transcript_source(provider, cwd, executor)
-    if source is None:
-        return None
-    directory, pattern = source
-    try:
-        files = [p for p in directory.glob(pattern) if p.is_file()]
-    except OSError:
-        return None
-    return max(files, key=lambda p: p.stat().st_mtime, default=None)
+    for directory, pattern in transcript_sources(provider, cwd, executor):
+        try:
+            files = [p for p in directory.glob(pattern) if p.is_file()]
+        except OSError:
+            continue
+        stamped = []
+        for path in files:
+            try:
+                stamped.append((path.stat().st_mtime, path))
+            except OSError:          # gone between the listing and now
+                continue
+        if stamped:
+            return max(stamped, key=lambda pair: pair[0])[1]
+    return None
 
 
 def alive(pid: int | None, start: str = "") -> bool:
@@ -146,12 +264,13 @@ def verdict(*, running: bool, quiet_for: float | None, quota_known: bool,
 
 
 def sample(paths, config, provider, role: str, pid: int | None,
-           budget: Any = None) -> dict:
-    """One observation, as a plain dict."""
+           budget: Any = None, executor: Any = None) -> dict:
+    """One observation, as a plain dict. Transcripts are read through
+    `executor`, the one the role runs under (SP-R2)."""
     from .tree import Tree
 
-    supported = provider is not None and transcript_source(provider, paths.root) is not None
-    transcript = newest_transcript(provider, paths.root) if provider else None
+    supported = provider is not None and transcript_source(provider, paths.root, executor) is not None
+    transcript = newest_transcript(provider, paths.root, executor) if provider else None
     quiet_for = None
     record = {}
     if transcript is not None:
@@ -168,7 +287,7 @@ def sample(paths, config, provider, role: str, pid: int | None,
     quota_known = bool(getattr(budget, "known", False))
     quota_left = getattr(budget, "headroom", None)
 
-    limit = limit_reached(provider, paths.root) if provider is not None else None
+    limit = limit_reached(provider, paths.root, executor) if provider is not None else None
     state, detail = verdict(running=running, quiet_for=quiet_for,
                             quota_known=quota_known, quota_left=quota_left,
                             active_agents=active, supported=supported,
@@ -290,12 +409,15 @@ def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
     """
     from .budget import invalidate_cache, read_provider
     from .paths import global_config_dir
+    from .executor import executor_for
     from .providers import load_providers
 
     providers = load_providers(config.providers)
     spec = next((a for a in config.agents.values()
                  if a.launch and a.role == role), None)
     provider = providers.get(spec.provider) if spec else None
+    executor = (executor_for(paths, config, providers)(spec.provider)
+                if provider is not None else None)
     started = time.time()
     budget = None
     last_quota = 0.0
@@ -313,7 +435,7 @@ def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
             except Exception:
                 budget = None
 
-        record = sample(paths, config, provider, role, pid, budget)
+        record = sample(paths, config, provider, role, pid, budget, executor)
         write_status(paths, record, role)
         if not record["running"]:
             return 0
@@ -322,7 +444,7 @@ def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
         time.sleep(interval)
 
 
-def has_human_turn(provider: Any, cwd: Path) -> bool | None:
+def has_human_turn(provider: Any, cwd: Path, executor: Any = None) -> bool | None:
     """Did anyone actually say anything in this session? None if unknowable.
 
     The headless handover replays the session with a nudge as its user turn, so
@@ -334,7 +456,7 @@ def has_human_turn(provider: Any, cwd: Path) -> bool | None:
     result is a `user` record whose content is a list of tool_result blocks.
     Structure again, not content: this reads the shape and never the words.
     """
-    path = newest_transcript(provider, cwd)
+    path = newest_transcript(provider, cwd, executor)
     if path is None:
         return None
     try:
@@ -372,7 +494,7 @@ def _typed_by_a_person(record: dict) -> bool:
         for block in content)
 
 
-def limit_reached(provider: Any, cwd: Path) -> dict | None:
+def limit_reached(provider: Any, cwd: Path, executor: Any = None) -> dict | None:
     """The CLI's own "I have stopped" message, if it is the last thing said.
 
     Not a classifier over model prose. These strings are hardcoded by the CLI's
@@ -388,7 +510,7 @@ def limit_reached(provider: Any, cwd: Path) -> dict | None:
     markers = (getattr(provider, "transcript", None) or {}).get("limit_markers") or []
     if not markers:
         return None
-    path = newest_transcript(provider, cwd)
+    path = newest_transcript(provider, cwd, executor)
     if path is None:
         return None
     try:

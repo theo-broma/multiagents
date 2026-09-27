@@ -132,6 +132,28 @@ def _size(path: Path) -> int:
         return 0
 
 
+def _holds_a_record(path: Path) -> bool:
+    """Does this session file hold at least one complete line of JSON (SP-R3)?
+
+    A file that is empty, or holds only an unterminated line, has no
+    conversation a CLI could resume. A truncated LAST line after complete
+    ones is a write in progress and does not count against it.
+    """
+    try:
+        with path.open("rb") as handle:
+            for line in handle:
+                if not line.endswith(b"\n"):
+                    return False
+                try:
+                    json.loads(line)
+                except ValueError:
+                    continue
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _declares_turn(provider: Provider) -> bool:
     """Does this provider's stream tag events with a model-turn id?
 
@@ -2858,9 +2880,21 @@ class Runner:
             if refusal:
                 return {"agent_id": agent_id, "steered": False, "error": refusal}
 
+        # SP-R4: the checkout counts only if it is a worktree on the node's own
+        # branch. A plain directory left at that path, or a checkout of some
+        # other branch, is not the work being resumed, and launching into it
+        # would resume the session detached from every commit it made. A
+        # directory the run was given (no branch of its own) is taken as is.
         branch = node.branch
+        root_is_repo = gitops.is_repo(self.paths.root)
         if workdir is None or not workdir.is_dir():
-            if not gitops.is_repo(self.paths.root):
+            missing = True
+        elif branch and root_is_repo:
+            missing = gitops.worktree_branch(workdir) != branch
+        else:
+            missing = False
+        if missing:
+            if not root_is_repo:
                 return {
                     "agent_id": agent_id, "steered": False,
                     "error": "this run has no working directory left and the "
@@ -2868,6 +2902,12 @@ class Runner:
                              "cannot be cut.",
                 }
             workdir = cwd
+            own = (f"{self.config.branch_prefix}/{node.agent}/"
+                   f"{agent_id.removeprefix('ag-')}")
+            if not branch and gitops.branch_exists(self.paths.root, own):
+                # A node whose branch field was cleared still has its branch
+                # under the name it was cut with.
+                branch = own
             if branch:
                 # SP-R4: the node's own branch, never a new `-2` cut off base
                 # beside it. Its commits are the work being resumed.
@@ -2879,21 +2919,47 @@ class Runner:
                                  f"work to resume it on. Start a fresh run with "
                                  f"start_agent instead.",
                     }
+                aside = None
+                if workdir.exists() or workdir.is_symlink():
+                    # Kept, never deleted: it may hold the only copy of
+                    # something.
+                    try:
+                        aside = gitops.move_aside(self.paths.root, workdir)
+                    except gitops.GitError as exc:
+                        return {"agent_id": agent_id, "steered": False,
+                                "error": f"{workdir} is not a checkout of "
+                                         f"{branch!r} and could not be moved "
+                                         f"aside: {exc}"}
                 try:
                     gitops.attach_worktree(self.paths.root, workdir, branch)
                 except gitops.GitError as exc:
+                    moved = (f" What was at that path is now at {aside}."
+                             if aside is not None else "")
                     return {"agent_id": agent_id, "steered": False,
                             "error": f"could not check {branch!r} out again at "
-                                     f"{workdir}: {exc}"}
-                self.tree.update(agent_id, worktree=str(workdir))
+                                     f"{workdir}: {exc}{moved}"}
+                self.tree.update(agent_id, worktree=str(workdir), branch=branch)
+            elif spec.writes:
+                return {
+                    "agent_id": agent_id, "steered": False,
+                    "error": f"this run's worktree is gone and it has no branch "
+                             f"recorded, nor a branch {own!r}, so there is no "
+                             f"work to resume it on. Start a fresh run with "
+                             f"start_agent instead.",
+                }
             else:
+                # A `writes: false` run whose empty branch `_drop_if_empty`
+                # reclaimed (bug-97a0c7): it had no commits, so there is no
+                # work to fork. It gets a checkout under its own name again,
+                # exactly that name and never a suffixed one.
                 base = self.config.base_branch or gitops.current_branch(self.paths.root)
-                branch = gitops.create_worktree(
-                    self.paths.root, workdir,
-                    f"{self.config.branch_prefix}/{node.agent}/"
-                    f"{agent_id.removeprefix('ag-')}",
-                    base,
-                )
+                try:
+                    branch = gitops.create_worktree(self.paths.root, workdir, own,
+                                                    base, unique=False)
+                except gitops.GitError as exc:
+                    return {"agent_id": agent_id, "steered": False,
+                            "error": f"could not cut {own!r} again at "
+                                     f"{workdir}: {exc}"}
                 self.tree.update(agent_id, worktree=str(workdir), branch=branch)
 
         # `internal=True`: this ends the turn to respawn the very same run, not
@@ -2976,13 +3042,20 @@ class Runner:
         host's.
         """
         path = session_transcript(provider, cwd, node.session_id, self.executor(spec))
-        if path is None or path.is_file():
+        if path is None:
             return ""
-        return (f"session {node.session_id} cannot be resumed: no transcript "
-                f"for it in {path.parent} (looked for {path.name}). It was "
-                f"lost or never written, and resuming it would start a run with "
-                f"no conversation behind it. Nothing was changed; start a fresh "
-                f"run with start_agent instead.")
+        if not path.is_file():
+            return (f"session {node.session_id} cannot be resumed: no transcript "
+                    f"for it in {path.parent} (looked for {path.name}). It was "
+                    f"lost or never written, and resuming it would start a run "
+                    f"with no conversation behind it. Nothing was changed; start "
+                    f"a fresh run with start_agent instead.")
+        if not _holds_a_record(path):
+            return (f"session {node.session_id} cannot be resumed: its "
+                    f"transcript {path} holds no complete record, so there is "
+                    f"no conversation to resume. Nothing was changed; start a "
+                    f"fresh run with start_agent instead.")
+        return ""
 
     # ---------------------------------------------------------- conversation --
 

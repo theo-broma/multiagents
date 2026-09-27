@@ -411,6 +411,13 @@ class Executor(ABC):
         the host. The same path for an executor that runs on the host."""
         return path
 
+    def container_home(self) -> Path:
+        """HOME as an agent run by this executor sees it: what a `~` in a
+        provider's declarations means. On the host, the user's own — an agent
+        given a private HOME reaches the provider's state in it only through
+        links to exactly these paths (`prepare_home`)."""
+        return Path.home()
+
 
 # --------------------------------------------------------------------------
 # Environment preparation — shared, because the same decisions become `-e`

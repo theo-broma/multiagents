@@ -128,15 +128,20 @@ def unique_branch(repo: Path, desired: str) -> str:
     raise GitError(f"could not find a free branch name near {desired!r}")
 
 
-def create_worktree(repo: Path, path: Path, branch: str, base: str = "") -> str:
-    """Create `path` as a new worktree on a fresh `branch` cut from `base`."""
+def create_worktree(repo: Path, path: Path, branch: str, base: str = "",
+                    unique: bool = True) -> str:
+    """Create `path` as a new worktree on a fresh `branch` cut from `base`.
+
+    With `unique=False` exactly `branch`, failing if it exists, rather than a
+    suffixed name beside it."""
     ensure_repo(repo)
     if not has_commits(repo):
         raise GitError(
             "This repository has no commits yet. Make an initial commit before "
             "spawning agents — a worktree cannot be branched from nothing."
         )
-    branch = unique_branch(repo, branch)
+    if unique:
+        branch = unique_branch(repo, branch)
     path.parent.mkdir(parents=True, exist_ok=True)
     args = ["worktree", "add", str(path), "-b", branch]
     if base:
@@ -160,6 +165,88 @@ def attach_worktree(repo: Path, path: Path, branch: str) -> None:
     run(repo, "worktree", "prune")
     path.parent.mkdir(parents=True, exist_ok=True)
     run(repo, "worktree", "add", str(path), branch, check=True, timeout=300)
+
+
+def worktree_branch(path: Path) -> str | None:
+    """The branch checked out in the worktree whose top level is `path`.
+
+    None when `path` is not the top of a git checkout at all — missing, a
+    plain directory, or a subdirectory of some other repository, which git
+    would happily answer for. "" for a detached HEAD.
+    """
+    top = run(path, "rev-parse", "--show-toplevel")
+    if not top.ok or not top.out:
+        return None
+    try:
+        if Path(top.out).resolve() != Path(path).resolve():
+            return None
+    except OSError:
+        return None
+    head = run(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    return head.out if head.ok else ""
+
+
+def move_aside(repo: Path, path: Path) -> Path:
+    """Move whatever occupies `path` out of the way, and return where it went.
+
+    For a checkout that is not the one a run needs there: it is kept, never
+    deleted, because it may hold the only copy of something (SP-R4). It goes
+    into a sibling `<name>.aside[-N]` directory created for it — created, not
+    merely found free, so two callers cannot pick the same one and nothing is
+    ever renamed over. A registered worktree of `repo` is moved only by git,
+    so the registry follows it; if git cannot, nothing moves and this raises.
+    Anything else is renamed.
+    """
+    path = Path(path)
+    for n in range(1, 1000):
+        holder = path.with_name(f"{path.name}.aside" + (f"-{n}" if n > 1 else ""))
+        try:
+            holder.mkdir()
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise GitError(f"could not move {path} aside: {exc}") from exc
+        break
+    else:
+        raise GitError(f"no free name to move {path} aside to")
+    target = holder / path.name
+    try:
+        if not path.is_symlink() and _registered_worktree(repo, path):
+            moved = run(repo, "worktree", "move", str(path), str(target), timeout=300)
+            if not moved.ok:
+                raise GitError(f"git worktree move {path} failed: "
+                               f"{moved.err or moved.out}")
+        else:
+            try:
+                path.rename(target)
+            except OSError as exc:
+                raise GitError(f"could not move {path} aside: {exc}") from exc
+    except BaseException:
+        try:
+            holder.rmdir()
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def _registered_worktree(repo: Path, path: Path) -> bool:
+    """Whether `repo`'s worktree registry has an entry at `path`."""
+    listed = run(repo, "worktree", "list", "--porcelain")
+    if not listed.ok:
+        return False
+    try:
+        want = path.resolve()
+    except OSError:
+        return False
+    for line in listed.out.splitlines():
+        if line.startswith("worktree "):
+            try:
+                if Path(line[len("worktree "):]).resolve() == want:
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def remove_worktree(repo: Path, path: Path, force: bool = False) -> GitResult:
