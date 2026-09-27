@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -535,10 +536,7 @@ def _refusing_hook(trace: Path, hooks: list[str]) -> str:
     Only the top-level git's own events count: a hook that runs git itself
     writes its children's events to the same file, under a nested `sid`.
     """
-    try:
-        lines = trace.read_text().splitlines()
-    except OSError:
-        lines = []
+    lines = _read_trace(trace).splitlines()
     started: dict[int, str] = {}
     traced = False
     for line in lines:
@@ -557,6 +555,44 @@ def _refusing_hook(trace: Path, hooks: list[str]) -> str:
                 and event.get("code") != 0:
             return started[event["child_id"]]
     return "" if traced else hooks[0]
+
+
+# CI-R7: a trace bigger than this is not read at all. The hook writes into it,
+# so its size is the agent's to choose.
+TRACE_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _read_trace(trace: Path) -> str:
+    """The trace's contents, or "" for "no trace" (CI-R7).
+
+    The hook ran with this path in its environment, so it may have replaced
+    the file with anything: a FIFO (a blocking read never returns), a device,
+    a symlink, or a flood. Only a regular file within `TRACE_MAX_BYTES` is
+    read, opened non-blocking and without following a link; anything else is
+    "no trace", which falls back to the hook's presence.
+    """
+    try:
+        fd = os.open(trace, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        chunks: list[bytes] = []
+        size = 0
+        while size <= TRACE_MAX_BYTES:
+            chunk = os.read(fd, min(1 << 20, TRACE_MAX_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > TRACE_MAX_BYTES:
+            return ""
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
 
 
 def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple[str, str]:
