@@ -212,3 +212,21 @@ first delegation, and names the command.
   know `paths.root`. Without it, the behaviour stays as today, for callers
   that are not about agent trees. This replaces "the signatures are
   unchanged" above.
+
+## Decisions, 2026-09-27 (orchestrator, after tester ag-708d52 on SG-R5)
+
+- **`--no-ff`:** git runs `pre-merge-commit` and `commit-msg` for a merge
+  commit, not `pre-commit`. `gitops.merge` runs whatever git itself would
+  run, taken from the base. It adds no extra hook.
+- **Refusal status:** unchanged from today. A squash merge refused by a hook
+  returns `failed`, and a `--no-ff` one returns `conflict`. Neither is ever
+  `merged`.
+- **Refusal cleanup:** a merge refused by a hook leaves the base checkout as
+  it was before: HEAD unchanged, nothing staged, and the working tree
+  restored. The branch's changes must not be left staged on the user's base.
+  This is a new requirement, to be tested by the tester.
+- **Documented limitation:** a base hook that calls a helper through a path
+  relative to the repository (`.hooks/helper`), rather than one next to
+  itself, reads the merged working tree and so runs the branch's helper.
+  SG-R5 does not cover that. It falls under "a hook that runs the project's
+  files over the merged tree is the orchestrator's deliberate act".
