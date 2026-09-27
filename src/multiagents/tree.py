@@ -221,6 +221,11 @@ class Node:
     # collect_agent — see `mark_seen`). Durable, because what it guards is a
     # compaction, after which nothing in memory is left to remember it.
     unseen: bool = False
+    # SG-R2: the branch a deletion could not remove, because the container's
+    # `.git` is read-only and git takes `packed-refs.lock` there for every ref
+    # deletion. The host deletes it once the node is merged or discarded
+    # (`runner.reap_pending_branches`) and clears this.
+    branch_pending_delete: str = ""
 
     def elapsed(self) -> float:
         start = self.started_at or self.created_at

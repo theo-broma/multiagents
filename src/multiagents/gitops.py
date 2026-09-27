@@ -616,6 +616,13 @@ def delete_branch(repo: Path, branch: str, force: bool = False) -> GitResult:
     return run(repo, "branch", "-D" if force else "-d", branch)
 
 
+def refused_by_packed_refs_lock(result: GitResult) -> bool:
+    """Whether a ref deletion failed only because `packed-refs.lock` could not
+    be created: git takes it in `.git/` for every deletion, and the
+    container's `.git` is read-only (SG-R2)."""
+    return not result.ok and "packed-refs.lock" in (result.err or result.out)
+
+
 def commits_on(repo: Path, branch: str, base: str, *,
                root: Path | None = None) -> int:
     """How many commits `branch` has that `base` does not."""
