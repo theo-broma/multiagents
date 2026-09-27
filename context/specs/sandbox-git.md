@@ -411,3 +411,43 @@ one breaks SG-R1 or SG-R4:
     removes a link itself and writes nothing;
   - the provider launch scripts write under `launch/` as shell, on the
     orchestrator's host-side launch path, not for agents.
+
+## Decisions, 2026-09-27 (orchestrator, after the live smoke test)
+
+**Defect found live: the protection on single files disappears.** In the
+recreated container, `.git/config` and `.git/index` were writable. A smoke
+agent appended a line to the host's `.git/config`; it has been removed. The
+container's mountinfo no longer lists those two mounts, although
+`docker inspect` still shows them.
+
+The cause: `.git` is itself a writable bind of the host directory. When the
+host replaces a file by rename (every `git config` write, VS Code's
+`vscode-merge-base`, every host `git status` that refreshes the index), the
+kernel drops the mount sitting on that file. So **protection by
+single-file bind mount inside a writable `.git` is not a protection.**
+`HEAD` survives only until the host next rewrites it.
+
+**SG-R2 revised:**
+- **`.git` itself is read-only** from the container.
+- **Writable directory mounts beneath it,** only where worktrees and nested
+  orchestration need them:
+  - `.git/objects`, with `.git/objects/info` read-only;
+  - `.git/refs`, with `refs/heads` and `refs/tags` read-only and
+    `refs/heads/agents` writable, as today;
+  - `.git/logs`;
+  - `.git/worktrees`.
+- **No single-file mounts at all.** `config`, `config.worktree`, `HEAD`,
+  `index`, `packed-refs` and `hooks/*` are protected because their directory,
+  `.git`, is read-only.
+- **Accepted consequence:** the container can no longer rewrite
+  `packed-refs`, so deleting or renaming a branch that exists only in
+  `packed-refs` fails from the container. Branch deletion is normally done by
+  the host (`merge_agent` and `discard_agent`). A nested orchestrator that
+  discards a packed child branch gets an error, which it reports. The base
+  branch still gets unpacked to a loose ref by `protect_project`.
+- **Verified by:** the live tests must check the protection **after the host
+  rewrites the file by rename** (`git config`, `git status`, and a checkout
+  that rewrites `HEAD`), not only right after the container is created. Any
+  test that relies on a single-file mount is wrong.
+- **SG-R6** then refuses the current container, because the layout differs.
+  It is recreated when idle.
