@@ -1731,3 +1731,8 @@ Resume in this order:
   gitdir, and new SG-R2 protected paths (config.worktree, modules, refs/heads|tags except agents/, base loose ref)
   to test_sandbox_git_mounts.py; then implementer-deep for SG (after tests), host-run of docker-live tests,
   adversarial tester, then container recreate (only when idle).
+- 2026-09-27 ~13:30 UTC: all SG red tests merged (reads b4a8890, mounts b4a8890, merge+docker-live 9c8ff0a).
+  Host baseline of docker-live: 6 failed / 1 passed — the escape is real (container moved `main` via update-ref).
+  In flight: ag-ab5211 (SG-R2/R6 docker mounts), ag-9e10d8 (SG-R4/R5 gitops). Next: SG-R3 (commit_all/restore_paths
+  inside the executor) after 9e10d8 merges; then docker-live on host, adversarial tester, container recreate when idle.
+  Note: user asked to exclude untracked codex-plugin/ locally (.git/info/exclude) — it is theirs.
