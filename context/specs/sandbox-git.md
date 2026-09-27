@@ -1,7 +1,7 @@
 # Sandbox and git: agent-written code executed on the host
 
-Status: **problem statement, 2026-09-27. Not yet a contract.** It waits for
-the user's go-ahead, because it extends the brief. It was found by the
+Status: **contract, 2026-09-27.** The user approved this work the same day. Ids `SG-R1`… are stable;
+never renumber. It was found by the
 adversarial tester ag-6ceb2b while attacking CI-R5.
 
 ## The problem
@@ -45,3 +45,127 @@ before its commit runs the hooks.
    branch being merged, or declare in-tree hooks unsupported for merges.
 
 The advisor has not seen this yet; it is in context/advisor-catchup.md.
+
+## Facts (researcher stand-in ag-f8b8f7, 2026-09-27)
+
+- **What the container writes under the root:**
+  - a worktree commit writes `.git/objects`, `.git/refs`, `.git/logs`,
+    `packed-refs` and `.git/worktrees/<id>/`;
+  - nested orchestration, meaning the MCP server run inside the container
+    (`docker.py:371-394`), also runs `git worktree add`/`prune`, creates and
+    deletes branches, merges children, and writes `.multiagents/`
+    (`tree.json`, `events.jsonl`, `runs/`).
+- **`.multiagents/config` is already mounted read-only**
+  (`docker.py:568-569`).
+- **Worktrees and homes live outside the root,** under
+  `~/.multiagents/{worktrees,homes}/<slug>`.
+- **Host-side git on agent-controlled trees:**
+  - `commit_all` (runner `_finalize`, the CI-R5 loop);
+  - `restore_paths` and `merge` (`merge_agent`);
+  - `is_dirty`, `uncommitted_entries`, `diff_stat`, `changed_paths` and
+    `commits_on` (`git status`/`diff`/`rev-list`).
+
+  All of them honour `core.fsmonitor` and hooks.
+- **The mount check does not recreate the container.** `mount_drift()`
+  only warns (before the first delegation); only `docker rm` followed by
+  `up` recreates it.
+
+## Why protecting `.git/config` is not enough
+
+An agent controls its worktree's `.git` file, and `.git/worktrees/<id>/`
+(`commondir`, `gitdir`) is writable from the container. So a host-side git
+run in an agent's worktree can be redirected to a git directory the agent
+wrote, with its own config (`core.fsmonitor`, hooks). In-tree hooks
+(`core.hooksPath=.husky`) and hooks that run the project's tools (linters,
+tests) execute agent-written content by design.
+
+## Behaviours
+
+This contract covers the docker executor. The local executor has no sandbox,
+and its agents are trusted by construction. This contract does not change it.
+
+**SG-R1 — nothing an agent can write is executed by a host-side process.**
+The host-side processes are the runner, the MCP server on the host and the
+orchestrator's tools. "Can write" covers:
+- anything in its worktree (tracked or not), including its `.git` file;
+- anything writable from the container.
+
+That rules out git hooks, git config (`core.fsmonitor`, `core.hooksPath`,
+filter and diff drivers, aliases, `include`), and a redirection of the
+repository through `gitdir` or `commondir`.
+
+Verified by, for each host-side git entry point listed under Facts: an agent
+worktree prepared to execute a marker program through each of those vectors
+(a hook, `core.fsmonitor` in a redirected gitdir, a `commondir` pointing to
+an agent-written dir, a filter driver) never runs the marker on the host.
+
+**SG-R2 — the container cannot change what the host trusts.**
+- **Read-only from the container:** the main checkout's working files,
+  `.git/config`, `.git/hooks`, `.git/info`, and `.multiagents/config`, as
+  today.
+- **Still writable, because worktrees and nested orchestration need it:**
+  - the repository data: objects, refs (loose and packed), reflogs;
+  - `.git/worktrees/`, for creating, pruning, locking and updating
+    worktrees;
+  - `.multiagents/` runtime state.
+- **Missing paths:** a protected path that does not exist yet is created, as
+  an empty directory or file, before the container starts, so it can be
+  protected.
+
+Verified by:
+- from inside the container, writing each protected path fails, and replacing
+  it by rename fails;
+- a worktree commit, `git worktree add`/`prune`, a branch create and delete
+  (packed-refs rewritten), and a nested child spawn and merge all still
+  succeed.
+
+**SG-R3 — an agent's own commits, and their hooks, run inside its sandbox.**
+- **What moves:** the runner's end-of-run commit, the CI-R5 fix-loop commits,
+  and `restore_paths`' commit on an agent branch all execute inside the
+  agent's executor, not on the host.
+- **Hooks:** they still run (CI-R5 is unchanged: no `--no-verify`), with the
+  container's filesystem and network limits.
+- **Unchanged contract:** CI-R1 to CI-R7 keep their observable behaviour,
+  including hook detection and the fix loop.
+
+Verified by: the commit-identity suites stay green under the local executor,
+and a docker-executor test (host suite) shows the end-of-run commit's hook
+running inside the container, for example by writing its hostname or
+cgroup.
+
+**SG-R4 — host-side git on an agent tree resolves the repository only from
+what multiagents recorded.**
+- **Resolution:** every host-side git command that reads an agent's worktree
+  or branch uses the git directory, common directory and work tree
+  multiagents recorded when it created the worktree. It never follows the
+  worktree's `.git` file, nor `.git/worktrees/<id>/{gitdir,commondir}`.
+- **Neutralised:** such commands run with `core.fsmonitor` off, and they
+  execute no hooks, since they are reads or orchestrator-side bookkeeping.
+
+Verified by: the SG-R1 vectors, applied to `is_dirty`, `diff_stat`,
+`changed_paths`, `commits_on` and `uncommitted_entries`.
+
+**SG-R5 — a host-side merge runs the base's hooks, never the branch's.**
+- **The rule:** `gitops.merge` still runs the user's commit hooks on the
+  merge commit, but it runs them as they are on the base branch before the
+  merge. When `core.hooksPath` points inside the working tree, it uses that
+  directory's content as of the base's HEAD, not the merged version.
+- **Accepted:** a hook that runs the project's tools over the merged tree, a
+  linter or the tests, does execute the merged content on the host. That is
+  the orchestrator's deliberate act after review, the same as a human
+  merging. It is documented, and it is not treated as a sandbox escape.
+
+Verified by: a repo with `core.hooksPath=.hooks`, and an agent branch that
+modifies `.hooks/pre-commit` to write a marker. The merge runs the base's
+hook, and the marker is absent.
+
+**SG-R6 — existing containers are brought in line safely.**
+- **When:** a container created before SG-R2 has the old mounts. It is
+  recreated only when no agent runs in it, in keeping with the provisioning
+  rule.
+- **Until then:** delegation to the docker executor is refused, with a
+  message naming `multiagents docker rm && multiagents docker up`. This is a
+  stricter form of today's mount-drift warning.
+
+Verified by: the mount-drift check with an old-layout container refuses the
+first delegation, and names the command.
