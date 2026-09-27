@@ -1755,3 +1755,10 @@ Resume in this order:
   Still open: adversary/reviewer passes on sandbox-git by a proper adversary (providers down/excluded; testers
   stood in), advisor catch-up consult when agy is back (context/advisor-catchup.md), leftover test containers
   multiagents-proj-* (from harness runs, not ours to delete without asking).
+- 2026-09-27 ~19:55 UTC: LIVE DEFECT found by smoke test after /mcp reconnect: single-file ro mounts vanish when the
+  host renames the file, so .git/config and .git/index were writable from the container (a smoke agent appended a
+  line to .git/config; removed; backup in session scratchpad). SG-R2 revised: .git ro + writable dirs only; branch
+  deletion from container routed to host (branch_pending_delete). Tests updated 4ef3985. Next: tester for
+  test_sandbox_git_branch_delete.py (was started, fell back to opencode, crashed), then implementer-deep for revised
+  SG-R2 + branch_pending_delete, then host live tests, recreate container, smoke again.
+  DO NOT run agents for other work until the container is fixed. Claude at 99% until 23:00 UTC; wake-up armed 23:01.
