@@ -182,3 +182,19 @@ path. CI-R6 is independent.
   docker is absent inside the container. The docker executor must forward
   the same override into the container. The implementer states how, and the
   host suite covers it.
+
+## Decisions, 2026-09-27 (orchestrator, after tester ag-c057bd on CI-R5)
+
+- **Event field:** the `commit_fix_attempt` event carries the attempt number
+  in a field named `attempt`, counted from 1.
+- **A steered run is a new end of run:** when a run is steered, its own
+  end-of-run commit gets a fresh CI-R5 loop with its own attempt count.
+- **A fix turn cut off by `commit_fix_timeout`:** it counts as one attempt,
+  and the loop continues or ends as usual. The run's status stays the one the
+  original run ended with, not `timeout`. If the commit never succeeds, the
+  failure is reported as `commit_failed`.
+- **CI-R2 gap (new):** `gitops.commit_all` ignores a failed `git add -A`, for
+  example when `index.lock` is held. It then reports "nothing to commit" as a
+  success. A failed `git add` is a failed commit under CI-R2 and is reported.
+  Verified by: an end-of-run commit with `index.lock` held and unstaged work
+  reports `commit_failed`.
