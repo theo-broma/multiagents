@@ -1670,3 +1670,8 @@ Resume in this order:
   pytest). If so, every "green" an agent reported may have tested base code: fix the pytest config and re-verify.
 - opencode startup failures: 6 so far (latest ag-a51827, ag-6f2868, ag-2c8dfc). Router keeps picking it; use
   `model:` overrides to agy/claude for opencode-default roles until fixed.
+- Merged b2ef5f4 (SP adversary + review fixes; advisor checked the docker HOME change: no host-file exposure),
+  946ca10 (pytest `pythonpath = ["src"]`: bare pytest in a worktree tested MAIN's src), 68f1c62 (bug-d6310f,
+  bug-8615db). Tickets fixed: bug-4a0446, bug-d6310f, bug-8615db (reporting off, gh missing).
+- In flight: ag-b12784 (bug-1b2612: resumed-run step counting + steer false negative). Full suite running on
+  the HOST in 3 chunks (logs in the session scratchpad).
