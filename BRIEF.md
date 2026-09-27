@@ -1719,3 +1719,8 @@ Resume in this order:
   implementer-deep ag-b7c2ff (claude opus) on CI-R5 + CI-R2 add gap. Next: adversary (claude, not agy) and reviewer
   (agy-only? route to claude or skip and log in advisor-catchup), then merge. Orchestrator brief gained an
   "Autonomy" section (f041f27): never end a paused turn without an armed wake-up.
+- 2026-09-27: USER APPROVED sandbox-git (context/specs/sandbox-git.md) as the next item after CI-R5. In flight:
+  ag-c2af1d implementer-deep (CI-R7 FIFO hang + fix-turn NEED_DECISION), ag-f8b8f7 implementer on sonnet as
+  read-only researcher (facts for the sandbox-git contract). Next: write the SG contract, tester, then implement
+  after CI-R5 merges (both touch commit_all). Adversary/reviewer/researcher have no claude model; opencode is
+  broken (~10 days), agy is user-excluded → tester/implementer on claude stand in.
