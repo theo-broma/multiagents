@@ -167,3 +167,18 @@ Addition to CI-R6:
 
 Order: CI-R4 merges before CI-R5, since both edit the same end-of-run
 path. CI-R6 is independent.
+
+## Decisions, 2026-09-27 (orchestrator, after tester ag-bccbf0 on CI-R6)
+
+- **CI-R6 wins over the user's environment:** a user `GIT_CONFIG_*` entry
+  asking for `commit.gpgsign=true` does not make agent commits signed. The
+  key is not in the container anyway. The user's other entries still apply.
+- **Merges an agent makes itself:** an agent's own `git merge --no-ff` on its
+  branch counts as a commit on an agent's branch, so it is unsigned.
+- **Not specified:** `git commit -S` run explicitly, `tag.gpgsign`,
+  `commit-tree`/`rebase`, and `restore_paths`, which only commits on the
+  agent branch before a squash. These are left as they are.
+- **Docker executor:** the tests cover the local executor only, because
+  docker is absent inside the container. The docker executor must forward
+  the same override into the container. The implementer states how, and the
+  host suite covers it.
