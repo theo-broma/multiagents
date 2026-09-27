@@ -1251,7 +1251,7 @@ def git_status() -> dict:
     branches = gitops.run(repo, "branch", "--list", f"{run.config.branch_prefix}/*")
     return _ok({
         "branch": gitops.current_branch(repo),
-        "dirty": gitops.is_dirty(repo),
+        "dirty": gitops.is_dirty(repo, root=repo),
         "head": gitops.head_sha(repo)[:12],
         "remote": run.config.remote or None,
         "agent_branches": [b.strip("* ").strip() for b in branches.out.splitlines() if b.strip()],

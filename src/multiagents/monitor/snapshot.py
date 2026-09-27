@@ -513,8 +513,9 @@ def branches(paths: ProjectPaths, config: Config) -> list[dict]:
             "agent": node.get("agent"),
             "status": node.get("status"),
             "merged": name in merged_set,
-            "commits": gitops.commits_on(paths.root, name, base),
-            "diffstat": gitops.diff_stat(paths.root, name, base).strip()[-200:],
+            "commits": gitops.commits_on(paths.root, name, base, root=paths.root),
+            "diffstat": gitops.diff_stat(paths.root, name, base,
+                                         root=paths.root).strip()[-200:],
         })
     return out
 

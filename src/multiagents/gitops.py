@@ -17,8 +17,10 @@ The parent performs every operation here. Subagents only commit.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -42,13 +44,14 @@ class GitResult:
 
 
 def run(repo: Path, *args: str, check: bool = False, timeout: int = 120,
-        env: dict[str, str] | None = None) -> GitResult:
+        env: dict[str, str] | None = None, strip: bool = True) -> GitResult:
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True, text=True, timeout=timeout,
         env={**os.environ, **env} if env else None,
     )
-    result = GitResult(proc.returncode == 0, proc.stdout.strip(), proc.stderr.strip(), proc.returncode)
+    out = proc.stdout.strip() if strip else proc.stdout
+    result = GitResult(proc.returncode == 0, out, proc.stderr.strip(), proc.returncode)
     if check and not result.ok:
         raise GitError(f"git {' '.join(args)} failed: {result.err or result.out}")
     return result
@@ -76,13 +79,100 @@ def initial_commit(repo: Path, message: str = "initial commit") -> GitResult:
     return run(repo, *extra, "commit", "--allow-empty", "-m", message)
 
 
-def uncommitted_entries(repo: Path) -> list[str]:
+def _read_regular(path: Path, limit: int) -> bytes | None:
+    """`path`'s bytes if it is a regular file of at most `limit` bytes, else None.
+
+    For files a container can write: opened without following a link and
+    non-blocking, so a symlink, a FIFO or a device is refused rather than read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= limit:
+            chunk = os.read(fd, min(1 << 20, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        return None if size > limit else b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+# An index bigger than this is not copied for a pinned read (SG-R4).
+INDEX_MAX_BYTES = 512 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def _pinned(repo: Path, root: Path | None):
+    """``(args, env)`` for a host-side read of `repo`, a tree of project `root`.
+
+    SG-R4 (context/specs/sandbox-git.md): with `root`, git resolves only paths
+    derived from it — common dir ``<root>/.git``, git dir
+    ``<root>/.git/worktrees/<basename>`` (``<root>/.git`` for the root itself),
+    work tree `repo` — never the worktree's ``.git`` file nor the ``gitdir``
+    and ``commondir`` files an agent can rewrite. Git follows a ``commondir``
+    file even with ``GIT_COMMON_DIR`` set, so the git dir handed to git is a
+    private one: the derived dir's HEAD and index copied into it, and a
+    ``commondir`` of our own writing. No hook and no fsmonitor runs, the index
+    is never written back, and no config is written anywhere.
+
+    Without `root`, plain git: ``([], None)``.
+    """
+    if root is None:
+        yield [], None
+        return
+    root = Path(root).resolve()
+    tree = Path(repo).resolve()
+    common = root / ".git"
+    gitdir = common if tree == root else common / "worktrees" / tree.name
+    if not gitdir.is_dir() or gitdir.is_symlink():
+        raise GitError(f"no git directory for {tree}: {gitdir} does not exist")
+    head = _read_regular(gitdir / "HEAD", 4096)
+    if head is None:
+        raise GitError(f"no readable HEAD for {tree} in {gitdir}")
+    with tempfile.TemporaryDirectory(prefix="multiagents-read-") as tmp:
+        private = Path(tmp) / "gitdir"
+        private.mkdir()
+        (private / "HEAD").write_bytes(head)
+        (private / "commondir").write_text(f"{common}\n")
+        index = _read_regular(gitdir / "index", INDEX_MAX_BYTES)
+        if index is not None:
+            (private / "index").write_bytes(index)
+        hooks = Path(tmp) / "hooks"
+        hooks.mkdir()
+        env = {"GIT_DIR": str(private), "GIT_WORK_TREE": str(tree),
+               "GIT_INDEX_FILE": str(private / "index"),
+               "GIT_OPTIONAL_LOCKS": "0"}
+        args = ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={hooks}"]
+        yield args, env
+
+
+def _read(repo: Path, root: Path | None, *args: str, strip: bool = True) -> GitResult:
+    """`run`, pinned to `root`'s trusted paths when `root` is given (SG-R4)."""
+    with _pinned(repo, root) as (extra, env):
+        return run(repo, *extra, *args, env=env, strip=strip)
+
+
+def uncommitted_entries(repo: Path, *, root: Path | None = None) -> list[str]:
     """Paths ``git status`` reports, directories collapsed to one entry.
 
     Collapsing matters for the caller: a first commit of a project with
     ``node_modules`` is one line to show the user, not forty thousand.
+
+    With `root`, resolution is pinned to the project's trusted paths (SG-R4).
     """
-    result = run(repo, "status", "--porcelain", "-unormal")
+    # Unstripped: a leading space is the first entry's status column.
+    result = _read(repo, root, "status", "--porcelain", "-unormal", strip=False)
     return [line[3:].strip().strip('"') for line in result.out.splitlines() if line[3:].strip()]
 
 
@@ -119,8 +209,8 @@ def head_sha(repo: Path) -> str:
     return result.out if result.ok else ""
 
 
-def is_dirty(repo: Path) -> bool:
-    result = run(repo, "status", "--porcelain")
+def is_dirty(repo: Path, *, root: Path | None = None) -> bool:
+    result = _read(repo, root, "status", "--porcelain")
     return bool(result.out.strip())
 
 
@@ -300,9 +390,10 @@ def delete_branch(repo: Path, branch: str, force: bool = False) -> GitResult:
     return run(repo, "branch", "-D" if force else "-d", branch)
 
 
-def commits_on(repo: Path, branch: str, base: str) -> int:
+def commits_on(repo: Path, branch: str, base: str, *,
+               root: Path | None = None) -> int:
     """How many commits `branch` has that `base` does not."""
-    result = run(repo, "rev-list", "--count", f"{base}..{branch}")
+    result = _read(repo, root, "rev-list", "--count", f"{base}..{branch}")
     try:
         return int(result.out) if result.ok else 0
     except ValueError:
@@ -395,13 +486,14 @@ def untracked_in_the_way(worktree: Path, head: str, target: str) -> str:
     return ""
 
 
-def diff_stat(repo: Path, branch: str, base: str) -> str:
-    result = run(repo, "diff", "--stat", f"{base}...{branch}")
+def diff_stat(repo: Path, branch: str, base: str, *,
+              root: Path | None = None) -> str:
+    result = _read(repo, root, "diff", "--stat", f"{base}...{branch}")
     return result.out if result.ok else ""
 
 
 def changed_paths(repo: Path, branch: str, base: str,
-                  filters: str = "MDR") -> list[str]:
+                  filters: str = "MDR", *, root: Path | None = None) -> list[str]:
     """Repo-relative paths `branch` changed, restricted to those change kinds.
 
     The default excludes additions on purpose. A protected file that an agent
@@ -411,7 +503,7 @@ def changed_paths(repo: Path, branch: str, base: str,
     filesystem permission: `chmod -w` cannot express "you may add but not
     rewrite", and this can.
     """
-    result = run(repo, "diff", "--name-only", f"--diff-filter={filters}",
+    result = _read(repo, root, "diff", "--name-only", f"--diff-filter={filters}",
                  f"{base}...{branch}")
     if not result.ok:
         return []
@@ -595,37 +687,97 @@ def _read_trace(trace: Path) -> str:
         os.close(fd)
 
 
+@contextlib.contextmanager
+def _base_hooks(repo: Path):
+    """`-c` args that make git run the hooks directory as it is right now.
+
+    SG-R5: a merge runs the base's hooks, never the branch's. A hooks
+    directory inside the working tree (`core.hooksPath=.hooks`) is changed
+    by the merge itself before its commit runs them, so it is copied aside
+    first — whole, helpers next to a hook included — and git is pointed at
+    the copy. The caller has checked the tree is clean, so the copy is the
+    base's HEAD content. A hooks directory outside the tree is left alone:
+    the merge does not change it. A hook that reaches files outside its own
+    directory by a relative path does not find them in the copy.
+    """
+    found = run(repo, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
+    if not found.ok or not found.out:
+        yield []
+        return
+    hooks = Path(os.path.expanduser(found.out))
+    if not hooks.is_absolute():
+        hooks = Path(repo) / hooks
+    top = Path(repo_root(repo) or repo)
+    lexical = Path(os.path.abspath(hooks))
+    inside = (lexical.is_relative_to(Path(os.path.abspath(top)))
+              or hooks.resolve().is_relative_to(top.resolve()))
+    if not inside:
+        yield []
+        return
+    with tempfile.TemporaryDirectory(prefix="multiagents-hooks-") as tmp:
+        copy = Path(tmp) / "hooks"
+        if hooks.is_dir():
+            shutil.copytree(hooks, copy, ignore_dangling_symlinks=True)
+        else:
+            copy.mkdir()
+        yield ["-c", f"core.hooksPath={copy}"]
+
+
+def _undo_merge(repo: Path, hooks: list[str]) -> None:
+    """Put a clean base checkout back as it was before a merge that failed:
+    no merge in progress, nothing staged, tracked files at HEAD. Only for a
+    tree that was clean when the merge started, which `merge` checks."""
+    run(repo, *hooks, "merge", "--abort")
+    run(repo, *hooks, "reset", "--hard", "--quiet")
+    squash_msg = run(repo, "rev-parse", "--path-format=absolute",
+                     "--git-path", "SQUASH_MSG")
+    if squash_msg.ok and squash_msg.out:
+        Path(squash_msg.out).unlink(missing_ok=True)
+
+
 def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple[str, str]:
     """Merge `branch` into whatever `repo` currently has checked out.
 
     Returns ``(status, detail)`` where status is ``merged``, ``empty``,
     ``conflict`` or ``failed``. A conflict is aborted cleanly and reported —
     the branch survives so the caller can decide what to do with it.
+
+    SG-R5: the hooks git runs are the base's, taken before the merge (see
+    :func:`_base_hooks`). A merge a hook refuses leaves the base checkout as
+    it was: HEAD unchanged, nothing staged, the working tree restored.
     """
     if is_dirty(repo):
         return "failed", "target worktree has uncommitted changes; commit or stash first"
+    try:
+        with _base_hooks(repo) as hooks:
+            return _merge(repo, branch, message, style, hooks)
+    except OSError as exc:
+        return "failed", f"could not set the base's hooks aside: {exc}"
 
+
+def _merge(repo: Path, branch: str, message: str, style: str,
+           hooks: list[str]) -> tuple[str, str]:
     if style == "squash":
-        result = run(repo, "merge", "--squash", branch, timeout=300)
+        result = run(repo, *hooks, "merge", "--squash", branch, timeout=300)
         if not result.ok:
-            run(repo, "merge", "--abort")
-            run(repo, "reset", "--hard")
+            _undo_merge(repo, hooks)
             return "conflict", result.err or result.out
         if run(repo, "diff", "--cached", "--quiet").ok:
             return "empty", "branch introduced no changes"
         # CI-R3: same fallback as commit_all, but named for the merging side
         # rather than the agent — this commit is multiagents', not theirs.
         extra = _identity_fallback_args(repo, "multiagents", "orchestrator@multiagents.invalid")
-        commit = run(repo, *extra, "commit", "-m", message, timeout=120)
+        commit = run(repo, *hooks, *extra, "commit", "-m", message, timeout=120)
         if not commit.ok:
+            _undo_merge(repo, hooks)
             return "failed", commit.err or commit.out
         return "merged", commit.out
 
     extra = _identity_fallback_args(repo, "multiagents", "orchestrator@multiagents.invalid")
-    result = run(repo, *extra, "merge", "--no-ff", "-m", message, branch, timeout=300)
+    result = run(repo, *hooks, *extra, "merge", "--no-ff", "-m", message, branch, timeout=300)
     if result.ok:
         return "merged", result.out
-    run(repo, "merge", "--abort")
+    _undo_merge(repo, hooks)
     return "conflict", result.err or result.out
 
 
