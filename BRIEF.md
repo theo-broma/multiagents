@@ -1675,3 +1675,9 @@ Resume in this order:
   bug-8615db). Tickets fixed: bug-4a0446, bug-d6310f, bug-8615db (reporting off, gh missing).
 - In flight: ag-b12784 (bug-1b2612: resumed-run step counting + steer false negative). Full suite running on
   the HOST in 3 chunks (logs in the session scratchpad).
+- Merged 98b95be (bug-1b2612, ticket fixed). Host full suite + bisect (researcher ag-bb371e): host-only failures
+  from missing git identity (gitops.merge commit → CI-R3 added to commit-identity spec) and a test fixture that
+  strips /usr/bin on hosts; regressions: `agy` named in supervisor/providers comments (68f1c62, 98b95be);
+  pre-existing: r8f adversary test (driver `_AttachedCompaction._cancel`).
+  In flight: ag-d0c34f (CI-R3 + vocabulary), ag-a409db tester (host fixtures), ag-a7494f deep (r8f driver).
+  After merge: rerun the host full suite in chunks; expect only phase2's 72 by-design reds.
