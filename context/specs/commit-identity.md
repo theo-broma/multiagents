@@ -142,3 +142,28 @@ Verified by: with `commit.gpgsign=true` and an unusable `gpg.program`
 configured, the end-of-run commit and an agent-side `git commit` both
 succeed, while `gitops.merge` still tries to sign (and so fails) in the same
 setup.
+
+## Decisions, 2026-09-27 (orchestrator, after advisor ag-25c350 on CI-R5/R6)
+
+Additions to CI-R5:
+- **One result:** the fix loop runs before the run is finalised. `result.json`
+  is written once, after the loop ends. The node never shows a terminal
+  status during the loop, so there is no done-then-running flicker.
+- **Quota wins:** if a fix turn hits quota, the run ends `limited`, as any
+  quota cut does, so it stays resumable. The commit failure is still
+  appended to the result text. It never turns a `limited` run into `failed`.
+- **Own time bound:** a fix turn is not refused because the original run's
+  wall clock is spent. Each fix turn has its own wall-clock bound,
+  `limits.commit_fix_timeout`, 300 s by default.
+- **Orchestrator actions take over:** a `stop_agent` or `steer_agent` from the
+  orchestrator during a fix turn ends the loop. It does not count as another
+  attempt, and the orchestrator's action is handled as for any live run.
+
+Addition to CI-R6:
+- **The user's settings survive:** git config the user already passes
+  through the environment (`GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`,
+  `GIT_CONFIG_PARAMETERS`) is preserved. The signing override is added to
+  it, never replaces it.
+
+Order: CI-R4 merges before CI-R5, since both edit the same end-of-run
+path. CI-R6 is independent.
