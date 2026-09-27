@@ -90,9 +90,10 @@ def isolated_git(tmp_path, monkeypatch):
 
 
 def build(tmp_path: Path, *, absolute: bool = False, base_exit: int = 0,
-          branch_deletes_pre_commit: bool = False) -> dict:
+          branch_deletes_pre_commit: bool = False, branch_rewrites_hooks: bool = True) -> dict:
     """A repo on `main` with in-tree hooks at `.hooks`, and a branch `agent`
-    that rewrites them. Hook setup is committed without running any hook."""
+    that rewrites them (unless `branch_rewrites_hooks` is False, when it only
+    changes `app.txt`). Hook setup is committed without running any hook."""
     log = tmp_path / "hooks.log"
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -112,12 +113,15 @@ def build(tmp_path: Path, *, absolute: bool = False, base_exit: int = 0,
 
     git(repo, "checkout", "-q", "-b", "agent")
     (repo / "app.txt").write_text("agent\n")
-    if branch_deletes_pre_commit:
+    if not branch_rewrites_hooks:
+        pass
+    elif branch_deletes_pre_commit:
         (hooks / "pre-commit").unlink()
     else:
         write_exec(hooks / "pre-commit", pre_commit(log, BRANCH_PRE_COMMIT, 0))
-    write_exec(hooks / "helper", helper(log, BRANCH_HELPER))
-    write_exec(hooks / "commit-msg", f"#!/bin/sh\necho '{BRANCH_COMMIT_MSG}' >> '{log}'\n")
+    if branch_rewrites_hooks:
+        write_exec(hooks / "helper", helper(log, BRANCH_HELPER))
+        write_exec(hooks / "commit-msg", f"#!/bin/sh\necho '{BRANCH_COMMIT_MSG}' >> '{log}'\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "--no-verify", "-m", "agent rewrites hooks")
     git(repo, "checkout", "-q", "main")
@@ -231,3 +235,72 @@ def test_sg_r5_after_the_merge_the_working_tree_holds_the_merged_hooks(tmp_path,
     assert os.access(hooks / "pre-commit", os.X_OK)
     assert BRANCH_PRE_COMMIT in (hooks / "pre-commit").read_text()
     assert BRANCH_HELPER in (hooks / "helper").read_text()
+
+
+# --------------------------------------------------------------------------
+# Decision "Refusal cleanup": a merge refused by a hook leaves the base
+# checkout as it was before. HEAD unchanged, nothing staged, working tree
+# restored, and no merge left in progress.
+# --------------------------------------------------------------------------
+
+def _tree_snapshot(repo: Path) -> dict[str, bytes]:
+    """Every file under the working tree outside `.git`, with its bytes."""
+    out = {}
+    for p in sorted(repo.rglob("*")):
+        rel = p.relative_to(repo)
+        if rel.parts[0] == ".git" or not p.is_file():
+            continue
+        out[str(rel)] = p.read_bytes()
+    return out
+
+
+BRANCH_HOOKS = [pytest.param(False, id="branch-keeps-hooks"),
+                pytest.param(True, id="branch-rewrites-hooks")]
+
+
+@pytest.mark.parametrize("rewrites", BRANCH_HOOKS)
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative-hookspath", "absolute-hookspath"])
+@pytest.mark.parametrize("style", STYLES)
+def test_sg_r5_a_merge_refused_by_a_base_hook_leaves_the_base_checkout_as_it_was(
+        tmp_path, style, absolute, rewrites):
+    """`branch-keeps-hooks` refuses under plain git too, so it isolates the
+    cleanup from SG-R5's choice of hooks; `branch-rewrites-hooks` is the
+    same refusal reached only because the base's hooks are the ones run."""
+    fx = build(tmp_path, absolute=absolute, base_exit=1, branch_rewrites_hooks=rewrites)
+    repo = fx["repo"]
+    before = _tree_snapshot(repo)
+
+    status, detail = gitops.merge(repo, "agent", "merge agent", style=style)
+
+    assert status != "merged", f"a refusing base hook must stop the merge: {detail}"
+    assert BASE_PRE_COMMIT in log_lines(fx["log"]), "control: the base hook must have refused"
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == fx["base_head"], "HEAD moved"
+    assert git(repo, "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/main", \
+        "the base checkout no longer has main checked out"
+    staged = git(repo, "diff", "--cached", "--name-status").stdout
+    assert not staged.strip(), f"the refused merge left the branch's changes staged:\n{staged}"
+    status_out = git(repo, "status", "--porcelain", "--untracked-files=all").stdout
+    assert not status_out.strip(), f"the base checkout is not clean after a refusal:\n{status_out}"
+    assert _tree_snapshot(repo) == before, "the working tree was not restored"
+    assert (repo / "app.txt").read_text() == "base\n"
+    assert git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode != 0, \
+        "a merge is left in progress on the base"
+
+
+@pytest.mark.parametrize("rewrites", BRANCH_HOOKS)
+@pytest.mark.parametrize("style", STYLES)
+def test_sg_r5_after_a_refused_merge_the_base_can_commit_normally(tmp_path, style, rewrites):
+    """The refusal must not leave a half-merge the user's next commit picks
+    up: a commit made on the base afterwards carries only what the user
+    staged, not the branch's changes."""
+    fx = build(tmp_path, base_exit=1, branch_rewrites_hooks=rewrites)
+    repo = fx["repo"]
+    status, detail = gitops.merge(repo, "agent", "merge agent", style=style)
+    assert status != "merged", detail
+    (repo / "user.txt").write_text("user\n")
+    git(repo, "add", "user.txt")
+    git(repo, "commit", "-q", "--no-verify", "-m", "user work")
+    changed = git(repo, "diff", "--name-only", fx["base_head"], "HEAD").stdout.split()
+    assert changed == ["user.txt"], f"the user's next commit swept in the branch's changes: {changed}"
+    assert len(git(repo, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()) == 2, \
+        "the user's next commit became a merge commit"
