@@ -39,7 +39,7 @@ from typing import Any
 from . import budget as budget_mod
 from . import gitops
 from . import config as config_mod
-from .config import AgentSpec, Config, budget_number, matches_any
+from .config import AgentSpec, Config, budget_number, limit_number, matches_any
 from .executor import build_env, get_executor, prepare_home, private_file
 from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_status,
                             running, stop_wrapped)
@@ -86,6 +86,17 @@ WRAP_UP = (
     "of this conversation: after the window resets, that memory costs more to "
     "reload than it is worth."
 )
+# CI-R5: what a fix turn is told. The hook's output is the tail, and at least
+# the last 4000 characters of it — a formatter's complaint is at the end.
+COMMIT_FIX_OUTPUT_CHARS = 8000
+COMMIT_FIX = (
+    "Your end-of-run commit was refused by the repository's `{hook}` git hook "
+    "(fix attempt {attempt} of {allowed}). Your work is still in the worktree, "
+    "uncommitted. Fix what the hook reports below, then end your turn: the "
+    "runner commits again afterwards, and committing it yourself is fine too. "
+    "Do not bypass the hook — never use --no-verify.\n\n"
+    "The hook's output (its last {chars} characters at most):\n\n{output}"
+).replace("{chars}", str(COMMIT_FIX_OUTPUT_CHARS))
 
 
 def _both_ends(text: str, keep: int = 80, tail: int = 200) -> str:
@@ -329,6 +340,13 @@ class Run:
     adopted: bool = False
     final_result: bool = False        # the stream held the provider's result event
     detaching: bool = False           # SV-R3: the server is leaving it running
+    # CI-R5: this run is a fix turn — the same session resumed to satisfy a
+    # git hook that refused the end-of-run commit. Its `_finalize` only
+    # records `fix_verdict` for the loop in the original run's `_finalize`,
+    # which owns the result.
+    fix_turn: bool = False
+    fix_verdict: dict | None = None
+    fix_timed_out: bool = False       # CI-R5: ended at `commit_fix_timeout`
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -1855,6 +1873,8 @@ class Runner:
         rule a reader had to know.
         """
         node_id = run.node_id
+        if run.fix_turn:
+            return await self._finalize_fix_turn(run, code, usage)
         # SV-R4: the wrapper ended it at its wall clock. SV-R6: the process is
         # gone and left no exit status — killed with its wrapper, or the file
         # lost — so the stream is the only evidence: a run that got as far as
@@ -1906,6 +1926,30 @@ class Runner:
         else:
             commit_result = None
 
+        # CI-R5: a commit a git hook refused goes back to the agent, in the
+        # same session and worktree, before anything here is recorded — so
+        # the node stays `running` and `result.json` is written once.
+        fix_attempts = 0
+        if (commit_result is not None and not commit_result.ok and commit_result.hook
+                and not stopped_elsewhere
+                and status not in ("limited", "quota", "unauthenticated")
+                and session_id and run.provider.spawn.get("resume")):
+            commit_result, fix_attempts, ended_by, fix_usage, fix_cut = \
+                await self._commit_fix_loop(run, node, commit_result, session_id)
+            if ended_by in ("stopped", "steered", "detached"):
+                # The orchestrator's action is handled as for any live run: a
+                # stop has already recorded `cancelled`, a steer has a new run
+                # of its own (with its own loop), and a detach is adoption's.
+                # Only a stop has released this run; the others still hold it.
+                return ended_by != "stopped"
+            usage = _merge_usage(usage, fix_usage, run.provider.usage_mode)
+            if fix_cut is not None:
+                # A status that tells the orchestrator to wait or to
+                # re-authenticate wins over the commit failure, which is still
+                # reported: the run ends as the cut would end any run, and a
+                # `limited` one stays resumable.
+                status, limited = fix_cut["status"], fix_cut["limited"]
+
         # A run that ends with nothing to say still ended for a reason.
         said_nothing = not text.strip()
         if status not in ("done", "merged", "awaiting_user") and said_nothing:
@@ -1921,7 +1965,13 @@ class Runner:
             # noisy hook can't bury the agent's own answer.
             detail_for_text = detail if len(detail) <= 500 else detail[:500] + " [truncated]"
             text = f"{text}\n\ncommit failed: {detail_for_text}".strip()
+            if fix_attempts:
+                text += (f"\n(the agent was resumed {fix_attempts} time(s) to "
+                         f"satisfy the git hook; it still refused the commit)")
             self.tree.emit(node_id, "commit_failed", detail=detail[:400])
+        elif fix_attempts:
+            text = (f"{text}\n\ncommit: a git hook refused the end-of-run commit; "
+                    f"it succeeded after {fix_attempts} fix attempt(s).").strip()
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
         (run_dir / "result.json").write_text(json.dumps(scrub({
@@ -2093,6 +2143,101 @@ class Runner:
             # a stopped one is left as a stop leaves it: resumable.
             self._drop_if_empty(node_id, run.spec)
         return False
+
+    async def _commit_fix_loop(self, run: Run, node: Node, failed: gitops.GitResult,
+                               session_id: str
+                               ) -> tuple[gitops.GitResult, int, str, dict, dict | None]:
+        """CI-R5: resume the agent until the hook accepts the commit, or the
+        attempts run out.
+
+        Each fix turn is a relaunch of this same run, as `_finalize`'s free
+        retry is: it shares `run.done`, and its own `_finalize` records a
+        verdict and hands back to here rather than finishing the run.
+
+        Returns the last commit result, the attempts made, how the loop ended
+        ("" when it ran its course, else "stopped", "steered" or "detached"),
+        the fix turns' usage, and — when a fix turn was cut off by its
+        provider (`limited`, `quota`, `unauthenticated`) — that turn's
+        verdict, whose status becomes the run's.
+        """
+        node_id = run.node_id
+        limits = self.config.limits
+        allowed = int(limit_number(limits, "commit_fix_attempts", zero_ok=True))
+        wall = int(limit_number(limits, "commit_fix_timeout"))
+        result, attempt, usage = failed, 0, {}
+        while not result.ok and result.hook and attempt < allowed:
+            attempt += 1
+            output = result.err or result.out
+            self.tree.emit(node_id, "commit_fix_attempt", attempt=attempt,
+                           hook=result.hook, detail=output[-400:])
+            try:
+                fix = await self._launch(
+                    node_id=node_id, spec=run.spec, provider=run.provider,
+                    prompt=COMMIT_FIX.format(
+                        hook=result.hook, attempt=attempt, allowed=allowed,
+                        output=output[-COMMIT_FIX_OUTPUT_CHARS:]),
+                    workdir=Path(node.worktree), branch=node.branch,
+                    parent=node.parent, depth=node.depth,
+                    session_id=session_id, timeout=wall, done=run.done,
+                )
+            except Exception as exc:
+                self.tree.emit(node_id, "commit_fix_failed",
+                               detail=f"could not resume: {type(exc).__name__}: {exc}"[:400])
+                break
+            # Set before anything yields: `_launch` has only scheduled the
+            # task that will read it.
+            fix.fix_turn = True
+            # Bounded here: while this server supervises a run, its wall clock
+            # is only reported, never enforced. Ending the process lets the
+            # turn finish through `_consume` like any other, so it is still
+            # accounted — and it counts as an attempt.
+            finished, _ = await asyncio.wait({fix.task}, timeout=wall)
+            if not finished and fix.handle is not None:
+                fix.fix_timed_out = True
+                await fix.handle.stop()
+                await asyncio.wait({fix.task})
+            if fix.detaching:
+                return result, attempt, "detached", usage, None
+            if fix.stop_requested:
+                return result, attempt, ("steered" if fix.internal_stop else "stopped"), \
+                    usage, None
+            verdict = fix.fix_verdict
+            if verdict is None:
+                break                                  # its post-mortem crashed
+            usage = _merge_usage(usage, verdict["usage"], run.provider.usage_mode)
+            fresh = self.tree.get(node_id)
+            if fresh is not None and fresh.status == "cancelled":
+                # SV-R10: stopped from another process.
+                return result, attempt, "stopped", usage, None
+            if verdict["status"] in ("limited", "quota", "unauthenticated"):
+                return result, attempt, "", usage, verdict   # cannot be resumed again
+            result = gitops.commit_all(
+                Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
+                role=node.agent, agent_id=node_id)
+        return result, attempt, "", usage, None
+
+    async def _finalize_fix_turn(self, run: Run, code: int | None,
+                                 usage: dict[str, Any]) -> bool:
+        """The end of a CI-R5 fix turn: what the loop needs, nothing more.
+
+        Accounted like any turn — its usage, and what it says about its
+        provider — but a turn cut off by `commit_fix_timeout` is our own
+        bound, not the provider's failure, and is not held against it.
+        Returns True: the run is not over, the loop that launched it is.
+        """
+        timed_out = run.fix_timed_out or bool(getattr(run.handle, "timed_out", False))
+        text = "\n".join(run.text_parts).strip()
+        stderr = run.handle.stderr_tail if run.handle else ""
+        status = self._classify(run, -1 if code is None else code, text, stderr)
+        limited = None
+        if timed_out:
+            # Our bound ended it, so nothing it printed on the way out is the
+            # provider's verdict: the run keeps the status it ended with.
+            status = "timeout"
+        else:
+            status, limited = await self._provider_health_after(run, status, text, stderr)
+        run.fix_verdict = {"status": status, "limited": limited, "usage": usage}
+        return True
 
     async def _provider_health_after(self, run: Run, status: str, text: str,
                                      stderr: str) -> tuple[str, dict | None]:

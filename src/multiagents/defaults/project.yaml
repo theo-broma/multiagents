@@ -441,6 +441,15 @@ limits:
   # never retry.
   retry_silent_failure_under_seconds: 60
 
+  # CI-R5: when a git hook (pre-commit, commit-msg, ...) refuses the runner's
+  # end-of-run commit, the agent's session is resumed with the hook's output
+  # and the commit is tried again — at most this many times. 0 disables it,
+  # and the refusal is reported as a failed commit straight away.
+  commit_fix_attempts: 2
+  # Each of those fix turns has its own wall clock, in seconds: the original
+  # run's may already be spent.
+  commit_fix_timeout: 300
+
   provider_failure_threshold: 3
   provider_down_cooldown_seconds: 1800
 

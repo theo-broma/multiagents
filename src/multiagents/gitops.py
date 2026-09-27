@@ -17,8 +17,10 @@ The parent performs every operation here. Subagents only commit.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,12 +35,17 @@ class GitResult:
     out: str
     err: str
     code: int
+    # CI-R5: set by `commit_all` to the name of the git hook that refused the
+    # commit (`pre-commit`, `commit-msg`, ...); empty for any other failure.
+    hook: str = ""
 
 
-def run(repo: Path, *args: str, check: bool = False, timeout: int = 120) -> GitResult:
+def run(repo: Path, *args: str, check: bool = False, timeout: int = 120,
+        env: dict[str, str] | None = None) -> GitResult:
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True, text=True, timeout=timeout,
+        env={**os.environ, **env} if env else None,
     )
     result = GitResult(proc.returncode == 0, proc.stdout.strip(), proc.stderr.strip(), proc.returncode)
     if check and not result.ok:
@@ -473,7 +480,11 @@ def commit_all(worktree: Path, message: str, *,
     environment) and writes nothing to disk, so a user who wants signing
     elsewhere is unaffected.
     """
-    run(worktree, "add", "-A")
+    # CI-R2: a failed `git add` is a failed commit. Ignored, it left the work
+    # unstaged and the staged diff empty, which then read as a clean tree.
+    added = run(worktree, "add", "-A")
+    if not added.ok:
+        return added
     if run(worktree, "diff", "--cached", "--quiet").ok:
         return GitResult(True, "nothing to commit", "", 0)
 
@@ -482,7 +493,70 @@ def commit_all(worktree: Path, message: str, *,
         f"multiagents {role}" if role else "multiagents",
         f"{agent_id or 'agent'}@multiagents.invalid",
     )
-    return run(worktree, "-c", "commit.gpgsign=false", *extra, "commit", "-m", message)
+    args = ("-c", "commit.gpgsign=false", *extra, "commit", "-m", message)
+    hooks = _active_commit_hooks(worktree)
+    if not hooks:
+        return run(worktree, *args)
+    # CI-R5: whether a hook is what refused it. Git prints nothing of its own
+    # when a hook fails, so the evidence is its trace: a hook child that
+    # exited non-zero. A git too old to trace falls back to the hook's
+    # presence alone.
+    with tempfile.TemporaryDirectory(prefix="multiagents-commit-") as tmp:
+        trace = Path(tmp) / "trace2.json"
+        result = run(worktree, *args, env={"GIT_TRACE2_EVENT": str(trace)})
+        if not result.ok:
+            result.hook = _refusing_hook(trace, hooks)
+    return result
+
+
+# The hooks that can refuse a `git commit`. `post-commit` runs after the commit
+# exists and cannot.
+COMMIT_HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg")
+
+
+def _active_commit_hooks(worktree: Path) -> list[str]:
+    """The commit hooks git would run here: executable files in the hooks
+    directory (`core.hooksPath` if set, else the repository's own, which a
+    linked worktree shares). A `.sample` file, or a hook without its
+    executable bit, is ignored by git and so here too."""
+    found = run(worktree, "rev-parse", "--git-path", "hooks")
+    if not found.ok or not found.out:
+        return []
+    hooks_dir = Path(os.path.expanduser(found.out))
+    if not hooks_dir.is_absolute():
+        hooks_dir = worktree / hooks_dir
+    return [name for name in COMMIT_HOOKS
+            if (hooks_dir / name).is_file() and os.access(hooks_dir / name, os.X_OK)]
+
+
+def _refusing_hook(trace: Path, hooks: list[str]) -> str:
+    """The hook a traced `git commit` ran that exited non-zero, or "".
+
+    Only the top-level git's own events count: a hook that runs git itself
+    writes its children's events to the same file, under a nested `sid`.
+    """
+    try:
+        lines = trace.read_text().splitlines()
+    except OSError:
+        lines = []
+    started: dict[int, str] = {}
+    traced = False
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if "/" in str(event.get("sid", "")):
+            continue
+        traced = True
+        if event.get("event") == "child_start" and event.get("child_class") == "hook":
+            argv = event.get("argv") or [""]
+            started[event.get("child_id")] = (event.get("hook_name")
+                                              or Path(str(argv[0])).name)
+        elif event.get("event") == "child_exit" and event.get("child_id") in started \
+                and event.get("code") != 0:
+            return started[event["child_id"]]
+    return "" if traced else hooks[0]
 
 
 def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple[str, str]:
