@@ -1741,3 +1741,8 @@ Resume in this order:
   Claude at 96% until 18:00 UTC → next implementer (for 88f4b0d tests, then runner_reads/env) after the reset.
   An implementer-deep started with model=opus was silently routed to opencode/minimax (claude constrained) and
   crashed: an explicit model override did not pin the provider — possible ticket.
+- 2026-09-27 ~14:00 UTC: all SG follow-up red tests merged (5a4de9c: runner_reads, env_files; 88f4b0d: bounds,
+  objects_info, protect_project). Nothing running. Wake-up armed for 18:01 UTC (claude reset). Then: implementer-deep
+  on 88f4b0d files (gitops._pinned + docker.py protect_project/mounts), then implementer-deep on runner_reads +
+  env_files (runner.py + docker.py start/ContainerGit) — sequential, both touch docker.py. Then host docker-live,
+  host full suite, container recreate when idle (inspect .git/hooks and .git/config for agent-written content first).
