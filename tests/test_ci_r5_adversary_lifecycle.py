@@ -163,21 +163,24 @@ def on_branch(project: Path, branch: str, rel: str):
     return shown.stdout if shown.returncode == 0 else None
 
 
-from multiagents.tree import TERMINAL                               # noqa: E402
+from multiagents.tree import AWAITING, TERMINAL                     # noqa: E402
 
 
-def ended(r, agent_id: str) -> bool:
+# `statuses` is the set a run may settle in. Every test requires a terminal
+# status, except the one where the contract parks the run `awaiting_user`.
+def ended(r, agent_id: str, statuses=TERMINAL) -> bool:
     node = r.tree.get(agent_id)
-    return (node is not None and node.status in TERMINAL
+    return (node is not None and node.status in statuses
             and (r.paths.run_dir(agent_id) / "result.json").exists())
 
 
-async def settle(r, agent_id: str, timeout: float = 60) -> None:
+async def settle(r, agent_id: str, timeout: float = 60,
+                 statuses=TERMINAL) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if ended(r, agent_id):
+        if ended(r, agent_id, statuses):
             await asyncio.sleep(0.75)
-            if ended(r, agent_id):
+            if ended(r, agent_id, statuses):
                 return
         await asyncio.sleep(0.05)
     node = r.tree.get(agent_id)
@@ -194,11 +197,11 @@ async def stop_all(r) -> None:
                 pass
 
 
-def run_to_end(r, timeout: float = 60) -> str:
+def run_to_end(r, timeout: float = 60, statuses=TERMINAL) -> str:
     async def go():
         started = await r.start("worker", "go")
         try:
-            await settle(r, started["agent_id"], timeout)
+            await settle(r, started["agent_id"], timeout, statuses)
         finally:
             await stop_all(r)
         return started["agent_id"]
@@ -302,13 +305,23 @@ def test_ci_r5_a_need_decision_from_a_fix_turn_is_not_silently_lost(tmp_path, mo
     prov, probe = fake_provider(tmp_path, [FIRST, ask, ask, ask])
     r, project = make(tmp_path, monkeypatch, prov, limits={"commit_fix_attempts": 2})
 
-    agent = run_to_end(r)
+    # The decision parks the run `awaiting_user`, which is not terminal, so
+    # this test alone settles on it (result.json present, as ever).
+    agent = run_to_end(r, statuses=TERMINAL | {AWAITING})
 
-    surfaced = bool(r.tree.open_questions(agent)) or bool(events(r, agent, "question"))
-    assert surfaced, (
+    assert r.tree.get(agent).status == AWAITING, (
+        f"a NEED_DECISION from a fix turn parks the run {AWAITING!r}, as an "
+        f"ordinary turn does; got {r.tree.get(agent).status!r}")
+    assert r.tree.open_questions(agent), (
         "a NEED_DECISION raised during a commit-fix turn was silently dropped: "
-        "no open question and no `question` event, so the human never sees it "
-        "and the loop burns its attempts on a turn that was asking, not fixing")
+        "no open question, so the human never sees it")
+    # The loop ends at the asking turn: the first turn plus one fix turn,
+    # though two attempts were allowed.
+    assert invocations(probe) == 2, (
+        f"the fix loop must stop at the turn that asked; saw "
+        f"{invocations(probe) - 1} fix turns")
+    assert events(r, agent, "commit_failed"), (
+        "the commit is still refused, so the failure is appended")
 
 
 # ==========================================================================
