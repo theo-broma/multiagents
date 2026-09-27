@@ -1920,7 +1920,10 @@ class Runner:
         # _drop_if_empty decides for every later run.
         node = self.tree.get(node_id)
         if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
-            commit_result = gitops.commit_all(
+            # CI-R7: off the event loop — a git hook is the agent's code, and
+            # nothing it does may freeze every other run this server supervises.
+            commit_result = await asyncio.to_thread(
+                gitops.commit_all,
                 Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
                 role=node.agent, agent_id=node_id)
         else:
@@ -2211,7 +2214,15 @@ class Runner:
                 return result, attempt, "stopped", usage, None
             if verdict["status"] in ("limited", "quota", "unauthenticated"):
                 return result, attempt, "", usage, verdict   # cannot be resumed again
-            result = gitops.commit_all(
+            if verdict["status"] == "awaiting_user":
+                # The fix turn asked rather than fixed: the question is the
+                # run's, as an ordinary turn's is, and nothing is committed
+                # while the agent is parked mid-thought.
+                run.awaiting = fix.awaiting
+                return result, attempt, "", usage, verdict
+            # CI-R7: off the event loop, as `_finalize`'s own commit is.
+            result = await asyncio.to_thread(
+                gitops.commit_all,
                 Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
                 role=node.agent, agent_id=node_id)
         return result, attempt, "", usage, None
@@ -2228,13 +2239,18 @@ class Runner:
         timed_out = run.fix_timed_out or bool(getattr(run.handle, "timed_out", False))
         text = "\n".join(run.text_parts).strip()
         stderr = run.handle.stderr_tail if run.handle else ""
-        status = self._classify(run, -1 if code is None else code, text, stderr)
         limited = None
-        if timed_out:
+        if run.awaiting:
+            # Checked first, as in `_finalize`: the stop that followed the
+            # question is not a failure. A question from a fix turn parks the
+            # run like any other (CI-R5, after adversarial tester ag-6ceb2b).
+            status = "awaiting_user"
+        elif timed_out:
             # Our bound ended it, so nothing it printed on the way out is the
             # provider's verdict: the run keeps the status it ended with.
             status = "timeout"
         else:
+            status = self._classify(run, -1 if code is None else code, text, stderr)
             status, limited = await self._provider_health_after(run, status, text, stderr)
         run.fix_verdict = {"status": status, "limited": limited, "usage": usage}
         return True
