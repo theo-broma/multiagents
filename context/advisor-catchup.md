@@ -48,6 +48,11 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
      `index.lock` held it reports "nothing to commit"). That is to be
      reported as `commit_failed`.
 
+6. **5558946, CI-R4 implemented (ag-63bfb0, sonnet, 4 lines):** the result
+   text keeps the first 500 characters of the git output plus
+   ` [truncated]`. It keeps the head, not the tail, and hook errors are often
+   at the tail; the contract allows either. Merged after my own read.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
