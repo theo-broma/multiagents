@@ -3363,7 +3363,18 @@ class Runner:
 
         self.paths.data.mkdir(parents=True, exist_ok=True)
         name = re.sub(r"[^A-Za-z0-9._-]+", "-", agent_name)
-        handle = (self.paths.data / f"consult-{name}.lock").open("a+")
+        # SG-R7: `.multiagents` is writable from a container. A link or a FIFO
+        # planted as the lock is replaced, never opened; anything that still
+        # cannot be opened as a regular file refuses the turn, which never
+        # runs unlocked.
+        try:
+            handle = os.fdopen(gitops._open_file_beneath(
+                self.paths.data, (), f"consult-{name}.lock", os.O_RDWR | os.O_CREAT,
+                0o644, replace=True), "a+")
+        except OSError as exc:
+            raise _ConsultLockError(
+                f"could not open the lock for {agent_name!r} "
+                f"({exc.strerror or exc}); this one did not run") from exc
         try:
             deadline = time.monotonic() + wait
             while True:

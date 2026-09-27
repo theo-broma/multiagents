@@ -28,7 +28,7 @@ import sys
 from typing import Any, Callable
 
 from ..config import load as load_config
-from .. import procs
+from .. import gitops, procs
 from ..tree import Tree
 
 # Actions a front end must confirm before calling. Losing an agent's work and
@@ -216,9 +216,13 @@ def _command(paths, argv: list[str], done: str, detach: bool = False) -> dict:
         if detach:
             log = paths.data / "monitor-launch.log"
             log.parent.mkdir(parents=True, exist_ok=True)
-            handle = log.open("a")
-            subprocess.Popen(full, stdout=handle, stderr=handle,
-                             stdin=subprocess.DEVNULL, start_new_session=True)
+            # SG-R7: `.multiagents` is writable from a container, so a link or
+            # a FIFO planted as the log is replaced, never appended through.
+            with os.fdopen(gitops._open_file_beneath(
+                    log.parent, (), log.name, os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                    0o644, replace=True), "a") as handle:
+                subprocess.Popen(full, stdout=handle, stderr=handle,
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
             return {"ok": True, "message": f"{done}; output in {log}"}
         result = subprocess.run(full, capture_output=True, text=True, timeout=120)
         return {"ok": result.returncode == 0,
