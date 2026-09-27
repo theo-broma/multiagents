@@ -1700,3 +1700,7 @@ Resume in this order:
   opencode failing at startup. Tester ag-7ecd49 (CI-R2 add gap + r5 amendments) fell back to opencode, crashed →
   stopped; relaunch its task on claude after 08:00. CI-R4 implementer-quick still deferred (gemini override).
   Then: implementer-deep on CI-R5 (+ CI-R2 add gap), adversary, reviewer.
+- USER RULE 2026-09-27: do not use agy (low credit) — no advisor/reviewer/researcher/implementer-quick on agy, no
+  gemini overrides; route to claude. Log every decision the advisor would have seen in
+  context/advisor-catchup.md, to put to it in one consult later. The deferred CI-R4 task (gemini override) must be
+  stopped if it starts; relaunch CI-R4 on claude.
