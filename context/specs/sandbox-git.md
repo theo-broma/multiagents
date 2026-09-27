@@ -267,3 +267,20 @@ first delegation, and names the command.
     for SG-R2, and the executor refuses to start with a clear message.
 - **Mount paths:** every mount is at its own host path (source equals
   destination), as today.
+
+## Decisions, 2026-09-27 (orchestrator, after tester ag-115a7c)
+
+- **`GitError` "naming the path":** either the path given or the missing
+  derived git dir is fine.
+- **A `.git` file is refused** at `ensure_running()`, with an error that
+  mentions `.git` and "file".
+- **Detached main HEAD:** there is no base branch to unpack. `refs/heads` is
+  still read-only apart from `agents/`, and HEAD stays read-only.
+- **Paths:** the path and root are resolved (symlinks, relative paths) before
+  they are compared.
+- **Fix required alongside SG-R4:** `gitops.uncommitted_entries` drops the
+  first entry when it starts with a space, because `run()` strips the output.
+  That is a pre-existing bug, and it is fixed with SG-R4.
+- **Redirected `commondir`:** git follows the `commondir` file even when
+  `GIT_COMMON_DIR` is set. The pinned resolution must therefore not rely on
+  environment variables alone. The mechanism is the implementer's choice.
