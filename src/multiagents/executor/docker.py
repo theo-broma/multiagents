@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -156,6 +157,33 @@ _GIT_ENTRY = 'exec git "$@"'
 # An agent's env file bigger than this is not read (SG-R3): it is under
 # `.multiagents`, which the container can write.
 ENV_FILE_MAX_BYTES = 1024 * 1024
+# A `packed-refs` bigger than this stops `protect_project` (SG-R2): the
+# container can write it, and it is read on the host to unpack the base.
+PACKED_REFS_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _mkdirs_nofollow(root: Path, path: Path) -> None:
+    """`path` and its missing parents below `root`, as directories. `mkdir`
+    never follows a link at the path it creates; one found on the way raises
+    rather than being gone through."""
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        try:
+            os.mkdir(current)
+        except FileExistsError:
+            if not stat.S_ISDIR(os.lstat(current).st_mode):
+                raise NotADirectoryError(f"{current} is not a directory") from None
+
+
+def _create_nofollow(path: Path) -> None:
+    """`path` as an empty file if nothing is there; never through a link,
+    never opening what is there already (a FIFO would block)."""
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_NONBLOCK, 0o644))
+    except FileExistsError:
+        pass
 
 
 class ContainerGit(gitops.Git):
@@ -635,8 +663,14 @@ class DockerExecutor(Executor):
     # something host-side git trusts: what it executes (hooks, config,
     # submodule config), what it takes the main checkout to be (HEAD, index,
     # info/exclude), and which commits the user's branches and tags name.
+    # `objects/info` holds `alternates`, which every git process follows: an
+    # entry the container wrote could hang a host read or feed it foreign
+    # objects. The rest of `objects` stays writable.
     GIT_PROTECTED = ("config", "config.worktree", "hooks", "info", "modules",
-                     "HEAD", "index", "refs/heads", "refs/tags")
+                     "HEAD", "index", "refs/heads", "refs/tags", "objects/info")
+    # The protected paths that are directories; the rest are files.
+    GIT_PROTECTED_DIRS = ("hooks", "info", "modules", "refs/heads", "refs/tags",
+                          "objects/info")
     # Inside `refs/heads`, the namespace agent branches are created in.
     AGENT_REFS = "refs/heads/agents"
 
@@ -695,7 +729,8 @@ class DockerExecutor(Executor):
         """
         if self.paths is None:
             return ""
-        git = self.paths.root / ".git"
+        root = self.paths.root
+        git = root / ".git"
         if git.is_file():
             return (f"{git} is a file, not a directory: this project is itself a "
                     "linked worktree or uses a separate git dir, and the docker "
@@ -703,21 +738,61 @@ class DockerExecutor(Executor):
                     "Run it from a main checkout, or use the local executor.")
         try:
             if git.is_dir():
-                for rel in ("hooks", "info", "modules", "refs", "refs/heads", "refs/tags",
-                            self.AGENT_REFS):
-                    (git / rel).mkdir(parents=True, exist_ok=True)
+                dirs = ("refs", *self.GIT_PROTECTED_DIRS, self.AGENT_REFS)
+                files = [rel for rel in self.GIT_PROTECTED if rel not in dirs]
+                for rel in dirs:
+                    error = self._plain(root, git / rel, directory=True)
+                    if error:
+                        return error
+                for rel in files:
+                    error = self._plain(root, git / rel, directory=False)
+                    if error:
+                        return error
+                for rel in dirs:
+                    _mkdirs_nofollow(root, git / rel)
                 for rel in ("config", "config.worktree"):
-                    (git / rel).touch(exist_ok=True)
-                if not (git / "index").exists():
+                    _create_nofollow(git / rel)
+                if not os.path.lexists(git / "index"):
                     error = self._create_index(git)
                     if error:
                         return error
-                error = self._unpack_base(git)
+                error = self._unpack_base(root, git)
                 if error:
                     return error
-            self.paths.config.mkdir(parents=True, exist_ok=True)
+            error = self._plain(root, self.paths.config, directory=True)
+            if error:
+                return error
+            _mkdirs_nofollow(root, self.paths.config)
         except OSError as e:
-            return f"cannot prepare {self.paths.root} for the container: {e}"
+            return f"cannot prepare {root} for the container: {e}"
+        return ""
+
+    @staticmethod
+    def _plain(root: Path, path: Path, directory: bool) -> str:
+        """Why `path` cannot be protected, or "" when it is safe to create or
+        use: every component below `root` is absent or a real directory, and
+        `path` itself is absent or a real directory (`directory`) or regular
+        file. A symlink or a FIFO there was planted while the container could
+        write it, and `protect_project` must neither write through it nor
+        block on it. Checked with `lstat` only, which never follows nor opens.
+        """
+        current = root
+        for part in path.relative_to(root).parts:
+            current = current / part
+            try:
+                mode = os.lstat(current).st_mode
+            except FileNotFoundError:
+                return ""
+            if stat.S_ISLNK(mode):
+                return (f"{current} is a symlink; refusing to protect {path} "
+                        "through it. Remove it and try again.")
+            last = current == path
+            if stat.S_ISDIR(mode) and (not last or directory):
+                continue
+            if last and not directory and stat.S_ISREG(mode):
+                continue
+            return (f"{current} is not a plain {'directory' if directory or not last else 'file'}; "
+                    f"refusing to protect {path}. Remove it and try again.")
         return ""
 
     @staticmethod
@@ -734,17 +809,22 @@ class DockerExecutor(Executor):
             return f"cannot create {git / 'index'}: {result.stderr.strip()[:300]}"
         return ""
 
-    @staticmethod
-    def _unpack_base(git: Path) -> str:
+    @classmethod
+    def _unpack_base(cls, root: Path, git: Path) -> str:
         """Give the checked-out branch a loose ref if it only has a packed one.
 
         Read from the files rather than asked of git: this runs on the host,
         in a repository the container could write to until now. Nothing moves:
         the loose file holds the sha `packed-refs` already names, written by
         lock-and-rename as git itself does. A detached HEAD has no branch to
-        unpack, and an unborn branch has no sha: both are left alone.
+        unpack, and an unborn branch has no sha: both are left alone. The
+        files are read without following a link and without blocking, since
+        the container can still write `packed-refs`.
         """
-        head = (git / "HEAD").read_text().strip() if (git / "HEAD").is_file() else ""
+        raw = gitops._read_regular(git / "HEAD", 4096)
+        if raw is None and os.path.lexists(git / "HEAD"):
+            return f"{git / 'HEAD'} is not a readable regular file"
+        head = (raw or b"").decode(errors="replace").strip()
         if not head.startswith("ref: refs/heads/"):
             return ""
         name = head[len("ref: "):]
@@ -752,12 +832,19 @@ class DockerExecutor(Executor):
         heads = git / "refs" / "heads"
         if heads not in loose.parents or ".." in Path(name).parts:
             return f"{git / 'HEAD'} names an unexpected ref: {name}"
-        if loose.exists():
+        error = cls._plain(root, loose, directory=False)
+        if error:
+            return error
+        if os.path.lexists(loose):
             return ""
         packed = git / "packed-refs"
         sha = ""
-        if packed.is_file():
-            for line in packed.read_text().splitlines():
+        if os.path.lexists(packed):
+            data = gitops._read_regular(packed, PACKED_REFS_MAX_BYTES)
+            if data is None:
+                return (f"{packed} is not a regular file of at most "
+                        f"{PACKED_REFS_MAX_BYTES} bytes; cannot unpack {name}")
+            for line in data.decode(errors="replace").splitlines():
                 if line[:1] in ("#", "^"):
                     continue
                 value, _, ref = line.partition(" ")
@@ -766,14 +853,16 @@ class DockerExecutor(Executor):
                     break
         if not sha:
             return ""
-        loose.parent.mkdir(parents=True, exist_ok=True)
+        _mkdirs_nofollow(root, loose.parent)
         lock = loose.with_name(loose.name + ".lock")
         try:
-            with open(lock, "x") as f:
-                f.write(sha + "\n")
+            # O_EXCL: never through a link someone left at the lock's path.
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
         except FileExistsError:
             return (f"cannot unpack the base branch {name}: {lock} exists, so "
                     "another git process holds it. Try again once it is done.")
+        with os.fdopen(fd, "w") as f:
+            f.write(sha + "\n")
         os.replace(lock, loose)
         return ""
 
