@@ -439,6 +439,19 @@ class Runner:
             config_dir=global_config_dir(),
         )
 
+    def agent_git(self, node: Node) -> gitops.Git:
+        """Where this agent's own commits run, and their hooks (SG-R3): its
+        executor's sandbox. The end-of-run commit, the CI-R5 fix-loop commits
+        and the merge gate's revert all commit on its branch."""
+        return self.executor(self.config.agents.get(node.agent)).git(node.id)
+
+    def git_unreadable(self, node_id: str, path: Path, exc: Exception) -> None:
+        """Record that a pinned read (SG-R4) could not read an agent's tree.
+        The caller then takes its conservative branch: it neither merges nor
+        takes the tree for clean."""
+        self.tree.emit(node_id, "git_unreadable", path=str(path),
+                       detail=str(exc)[:400])
+
     # ------------------------------------------------------------- identity --
 
     def self_id(self) -> str | None:
@@ -1925,7 +1938,7 @@ class Runner:
             commit_result = await asyncio.to_thread(
                 gitops.commit_all,
                 Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
-                role=node.agent, agent_id=node_id)
+                role=node.agent, agent_id=node_id, git=self.agent_git(node))
         else:
             commit_result = None
 
@@ -2224,7 +2237,7 @@ class Runner:
             result = await asyncio.to_thread(
                 gitops.commit_all,
                 Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
-                role=node.agent, agent_id=node_id)
+                role=node.agent, agent_id=node_id, git=self.agent_git(node))
         return result, attempt, "", usage, None
 
     async def _finalize_fix_turn(self, run: Run, code: int | None,
@@ -2366,7 +2379,12 @@ class Runner:
             return                            # a live conversation keeps its worktree
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         root = self.paths.root
-        if gitops.commits_on(root, node.branch, base, root=root) == 0:
+        try:
+            commits = gitops.commits_on(root, node.branch, base, root=root)
+        except gitops.GitError as exc:
+            self.git_unreadable(node_id, root, exc)
+            return                            # unread is not empty: kept
+        if commits == 0:
             self._cleanup(node)
             self.tree.update(node_id, branch="", worktree="")
         else:
@@ -2428,6 +2446,8 @@ class Runner:
                 if gitops.commits_on(self.paths.root, branch, base,
                                      root=self.paths.root) > 0:
                     return True
+            except gitops.GitError as exc:
+                self.git_unreadable(run.node_id, self.paths.root, exc)
             except Exception:
                 pass
         return (run.supervisor.steps or 0) >= int(
@@ -2688,12 +2708,20 @@ class Runner:
         if node.branch and gitops.is_repo(self.paths.root):
             base = self.config.base_branch or gitops.current_branch(self.paths.root)
             root = self.paths.root
-            payload["commits"] = gitops.commits_on(root, node.branch, base, root=root)
-            payload["diff_stat"] = gitops.diff_stat(root, node.branch, base, root=root)[:2000]
-            # Surfaced HERE as well as at the merge gate, so the orchestrator
-            # learns about it while it is still deciding rather than as a
-            # surprise in the merge result. The revert happens at merge.
-            violations = self.readonly_violations(node, base)
+            try:
+                payload["commits"] = gitops.commits_on(root, node.branch, base, root=root)
+                payload["diff_stat"] = gitops.diff_stat(root, node.branch, base,
+                                                        root=root)[:2000]
+                # Surfaced HERE as well as at the merge gate, so the
+                # orchestrator learns about it while it is still deciding
+                # rather than as a surprise in the merge result. The revert
+                # happens at merge.
+                violations = self.readonly_violations(node, base)
+            except gitops.GitError as exc:
+                self.git_unreadable(agent_id, root, exc)
+                payload["commits"] = None
+                payload["git_unreadable"] = str(exc)[:400]
+                violations = []
             if violations:
                 payload["readonly_violations"] = violations[:50]
                 payload["readonly_note"] = (
@@ -3363,15 +3391,23 @@ class Runner:
             return not_updated("the worktree has no readable HEAD")
         if head == base_sha:
             return "", head, 0
-        behind = gitops.commits_on(worktree, base_sha, head, root=self.paths.root)
-        status = gitops.run(worktree, "status", "--porcelain")
+        # SG-R4: pinned to the project's own paths. A tree that cannot be read
+        # that way is not moved: it may hold work.
+        root = self.paths.root
+        try:
+            behind = gitops.commits_on(worktree, base_sha, head, root=root)
+            status = gitops.status(worktree, root=root)
+            # A node from before start points were recorded falls back to
+            # "commits base does not hold": the old rule, which can only err
+            # towards not moving. Its first move records one.
+            own_work = status.ok and bool(status.out.strip() or gitops.holds_unmerged_commits(
+                worktree, head, base_sha, since=node.placed_on, root=root))
+        except gitops.GitError as exc:
+            self.git_unreadable(node.id, worktree, exc)
+            return not_updated(str(exc))
         if not status.ok:
             return not_updated(status.err or status.out)
-        # A node from before start points were recorded falls back to "commits
-        # base does not hold": the old rule, which can only err towards not
-        # moving. Its first move records one.
-        if status.out.strip() or gitops.holds_unmerged_commits(
-                worktree, head, base_sha, since=node.placed_on):
+        if own_work:
             if not behind and not (node.placed_on and not gitops.run(
                     worktree, "merge-base", "--is-ancestor", node.placed_on,
                     base_sha).ok):
@@ -3543,9 +3579,13 @@ class Runner:
                     head, behind = "", None
 
         if placed:
-            behind = (gitops.commits_on(worktree_path, base_sha, head,
-                                        root=self.paths.root)
-                      if base_sha and head else None)
+            try:
+                behind = (gitops.commits_on(worktree_path, base_sha, head,
+                                            root=self.paths.root)
+                          if base_sha and head else None)
+            except gitops.GitError as exc:
+                self.git_unreadable(node_id, worktree_path, exc)
+                behind = None
         view = self._worktree_view(worktree_path, head, base_sha, behind)
         self.tree.update(node_id, turns=turn)
         try:
@@ -3905,7 +3945,16 @@ class Runner:
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         reverted: list[str] = []
         revert_failed = ""
-        violations = self.readonly_violations(node, base)
+        try:
+            violations = self.readonly_violations(node, base)
+        except gitops.GitError as exc:
+            # Which protected files it changed is unknown, so nothing merges.
+            self.git_unreadable(agent_id, self.paths.root, exc)
+            self.tree.emit(agent_id, "merge", result="blocked", detail=str(exc)[:400])
+            return {"agent_id": agent_id, "result": "blocked", "branch": node.branch,
+                    "detail": f"the repository could not be read to check "
+                              f"{node.agent}'s changes to protected files: {exc}. "
+                              f"Nothing was merged."}
         if violations:
             worktree = Path(node.worktree) if node.worktree else None
             if worktree and worktree.is_dir():
@@ -3913,6 +3962,7 @@ class Runner:
                     worktree, base, violations,
                     f"revert {node.agent}'s changes to {len(violations)} protected "
                     f"file(s)\n\n{chr(10).join(violations[:50])}",
+                    git=self.agent_git(node),
                 )
                 if result.ok:
                     reverted = violations
@@ -3962,8 +4012,17 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
-        unmerged = (gitops.commits_on(self.paths.root, node.branch, base,
-                                      root=self.paths.root) if node.branch else 0)
+        try:
+            unmerged = (gitops.commits_on(self.paths.root, node.branch, base,
+                                          root=self.paths.root) if node.branch else 0)
+        except gitops.GitError as exc:
+            self.git_unreadable(agent_id, self.paths.root, exc)
+            if not force:
+                return {"agent_id": agent_id, "discarded": False,
+                        "error": f"could not read the branch to count its unmerged "
+                                 f"commits: {exc}. Pass force=true to delete it "
+                                 f"anyway."}
+            unmerged = 0
         if unmerged and not force:
             return {
                 "agent_id": agent_id, "discarded": False, "unmerged_commits": unmerged,

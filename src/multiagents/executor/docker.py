@@ -41,12 +41,13 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from ..paths import ProjectPaths, server_install_paths, state_root
-from .. import procs
+from .. import gitops, procs
 from .base import Executor, FollowHandle, Handle, wrapper_argv
 from .local import LocalExecutor, _turn_start
 
@@ -147,6 +148,78 @@ UNKNOWN_ALIVE_SECONDS = 60.0
 _WRAPPER_ENTRY = ('for p in /usr/bin/python3 /usr/local/bin/python3; do '
                   '[ -x "$p" ] && exec "$p" {flag} "$0" "$@"; done; '
                   'exec python3 {flag} "$0" "$@"')
+
+
+# SG-R3: git enters the container through `sh`, as every other command here
+# does, with its arguments as the shell's, never in the script text.
+_GIT_ENTRY = 'exec git "$@"'
+# An agent's env file bigger than this is not read (SG-R3): it is under
+# `.multiagents`, which the container can write.
+ENV_FILE_MAX_BYTES = 1024 * 1024
+
+
+class ContainerGit(gitops.Git):
+    """Git for an agent's own commits, run in the project container (SG-R3).
+
+    As the agent itself runs: `docker exec` as its uid, in its worktree, with
+    the environment `start` handed it — so the hooks those commits run are as
+    sandboxed as the agent that wrote them, filesystem and network alike.
+
+    That environment is read back from the env file `start` wrote. The file
+    is under `.multiagents`, which the container can write, so it is read as
+    such a file is: only a regular one, never through a link, never blocking,
+    and bounded. What it says only ever reaches the container, which is where
+    whoever could have changed it already is. The environment handed to
+    `docker exec` is a fresh file in this host's temporary directory, which
+    the container cannot reach.
+    """
+
+    def __init__(self, executor: "DockerExecutor", agent_id: str):
+        self.executor = executor
+        self.agent_id = agent_id
+
+    def environ(self) -> dict[str, str]:
+        env: dict[str, str] = {}
+        raw = gitops._read_regular(self.executor.env_file(self.agent_id),
+                                   ENV_FILE_MAX_BYTES)
+        for line in (raw or b"").decode("utf-8", errors="replace").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key:
+                env[key] = value
+        # What `start` adds for an agent given no HOME of its own.
+        env.setdefault("HOME", str(self.executor.container_home()))
+        return env
+
+    def run(self, repo: Path, *args: str, env: dict[str, str] | None = None,
+            timeout: int = 120, strip: bool = True) -> gitops.GitResult:
+        environment = {**self.environ(), **(env or {})}
+        fd, env_file = tempfile.mkstemp(prefix="multiagents-git-", suffix=".env")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write("".join(f"{k}={v}\n" for k, v in environment.items()
+                                 if "\n" not in v))
+            proc = subprocess.run(
+                ["docker", "exec", "--workdir", str(repo),
+                 "--user", f"{os.getuid()}:{os.getgid()}", "--env-file", env_file,
+                 self.executor.container, "sh", "-c", _GIT_ENTRY, "git",
+                 "-C", str(repo), *args],
+                capture_output=True, text=True, timeout=timeout,
+                stdin=subprocess.DEVNULL,
+            )
+        finally:
+            os.unlink(env_file)
+        out = proc.stdout.strip() if strip else proc.stdout
+        return gitops.GitResult(proc.returncode == 0, out, proc.stderr.strip(),
+                                proc.returncode)
+
+    def scratch(self):
+        """In the agent's run dir: on the shared bind mount, at the same path
+        on both sides. The hook may have replaced what is in it by the time
+        it is cleaned up, which must not fail the commit."""
+        run_dir = self.executor.paths.run_dir(self.agent_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return tempfile.TemporaryDirectory(prefix="commit-", dir=run_dir,
+                                           ignore_cleanup_errors=True)
 
 
 def _kill_argv(run_dir: Path, grace: int) -> list[str]:
@@ -1704,9 +1777,8 @@ class DockerExecutor(Executor):
         # never appear in the host process list.
         env_file = None
         if self.paths is not None:
-            env_dir = self.paths.data / "env"
-            env_dir.mkdir(parents=True, exist_ok=True)
-            env_file = env_dir / f"{env.get('MULTIAGENTS_AGENT_ID', 'run')}.env"
+            env_file = self.env_file(env.get("MULTIAGENTS_AGENT_ID", "run"))
+            env_file.parent.mkdir(parents=True, exist_ok=True)
             env_file.write_text(
                 "".join(f"{k}={v}\n" for k, v in env.items() if "\n" not in str(v))
             )
@@ -1770,6 +1842,17 @@ class DockerExecutor(Executor):
                             pid_start=procs.start_time(proc.pid), _proc=proc,
                             stopper=lambda grace: self.kill_detached(agent_id, grace),
                             probe=self.liveness(agent_id))
+
+    def env_file(self, agent_id: str) -> Path:
+        """Where `start` writes the environment agent `agent_id` runs with."""
+        return self.paths.data / "env" / f"{agent_id}.env"
+
+    def git(self, agent_id: str) -> gitops.Git:
+        """SG-R3: in the container, as the agent runs. From inside it, git
+        already runs there."""
+        if self.paths is None or self.inside():
+            return gitops.HOST
+        return ContainerGit(self, agent_id)
 
     def _pid_file(self, env: dict[str, str]) -> Path:
         pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
