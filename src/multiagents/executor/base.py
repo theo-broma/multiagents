@@ -468,8 +468,25 @@ def build_env(
         env["XDG_DATA_HOME"] = str(home / ".local" / "share")
         env["XDG_CACHE_HOME"] = str(home / ".cache")
 
+    _add_git_config_override(env, "commit.gpgsign", "false")
     env.update(identity)
     return env
+
+
+def _add_git_config_override(env: dict[str, str], key: str, value: str) -> None:
+    """Append one `GIT_CONFIG_PARAMETERS` entry that wins over anything else
+    the agent's environment already carries (CI-R6 — commit-identity.md).
+
+    `GIT_CONFIG_PARAMETERS` outranks the `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`
+    mechanism regardless of which one a passed-through user setting used, and
+    within `GIT_CONFIG_PARAMETERS` itself the last entry for a given key wins
+    — so appending here, after whatever passthrough already put in `env`,
+    always overrides it without touching any config file. Never written to
+    `os.environ`: this only ever mutates the child's own env dict.
+    """
+    entry = f"'{key}'='{value}'"
+    existing = env.get("GIT_CONFIG_PARAMETERS")
+    env["GIT_CONFIG_PARAMETERS"] = f"{existing} {entry}" if existing else entry
 
 
 def prepare_home(home: Path, links: list[str], policy: str = "per-agent",

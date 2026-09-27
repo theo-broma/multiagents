@@ -466,6 +466,12 @@ def commit_all(worktree: Path, message: str, *,
 
     CI-R1: falls back to an identity naming the agent when none is
     configured, via :func:`_identity_fallback_args`.
+
+    CI-R6: this is the runner's own commit on an agent's branch, so it is
+    never signed — the key is not in the container regardless. `-c` on the
+    command line outranks every config source (files, `GIT_CONFIG_*` in the
+    environment) and writes nothing to disk, so a user who wants signing
+    elsewhere is unaffected.
     """
     run(worktree, "add", "-A")
     if run(worktree, "diff", "--cached", "--quiet").ok:
@@ -476,7 +482,7 @@ def commit_all(worktree: Path, message: str, *,
         f"multiagents {role}" if role else "multiagents",
         f"{agent_id or 'agent'}@multiagents.invalid",
     )
-    return run(worktree, *extra, "commit", "-m", message)
+    return run(worktree, "-c", "commit.gpgsign=false", *extra, "commit", "-m", message)
 
 
 def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple[str, str]:
