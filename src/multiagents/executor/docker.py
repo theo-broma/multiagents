@@ -783,12 +783,22 @@ class DockerExecutor(Executor):
     # info/exclude), and which commits the user's branches and tags name.
     # `objects/info` holds `alternates`, which every git process follows: an
     # entry the container wrote could hang a host read or feed it foreign
-    # objects. The rest of `objects` stays writable.
+    # objects. None is a mount of its own: they are protected because `.git`
+    # is read-only, or, for the directories, by the mount that closes them
+    # again inside a writable one. They are listed because `protect_project`
+    # checks them and makes them exist.
     GIT_PROTECTED = ("config", "config.worktree", "hooks", "info", "modules",
                      "HEAD", "index", "refs/heads", "refs/tags", "objects/info")
     # The protected paths that are directories; the rest are files.
     GIT_PROTECTED_DIRS = ("hooks", "info", "modules", "refs/heads", "refs/tags",
                           "objects/info")
+    # The directories reopened writable beneath the read-only `.git`, and the
+    # ones closed again inside them. Directories only: a single-file bind
+    # mount inside a directory the host writes vanishes the moment the host
+    # replaces that file by rename, as every `git config` and index refresh
+    # does, and the protection goes with it.
+    GIT_WRITABLE_DIRS = ("objects", "refs", "logs", "worktrees")
+    GIT_CLOSED_DIRS = ("objects/info", "refs/heads", "refs/tags")
     # Inside `refs/heads`, the namespace agent branches are created in.
     AGENT_REFS = "refs/heads/agents"
 
@@ -801,13 +811,17 @@ class DockerExecutor(Executor):
         host-side git then ran outside the container, or edit the main
         checkout and `project.yaml`, which is this container's own boundary.
 
-        So the root is read-only, and what the container genuinely writes is
-        reopened below it, each at its own path, where the deepest mount wins:
-        `.git` itself (packed-refs and loose refs are rewritten by
-        lock-and-rename in it, and objects, reflogs and `worktrees/` live
-        there), the agent-branch namespace, and `.multiagents` runtime state
-        (run dirs, the event stream, tree.json). Then the protected paths are
-        closed again inside those, as file or directory bind mounts.
+        So the root is read-only, and `.git` with it. What the container
+        genuinely writes is reopened below it, each at its own path, where the
+        deepest mount wins, and only ever as a directory: `objects`, `refs`,
+        `logs` and `worktrees` in `.git`, the agent-branch namespace, and
+        `.multiagents` runtime state (run dirs, the event stream, tree.json).
+        `objects/info`, `refs/heads` and `refs/tags` are closed again inside
+        those. There is no single-file mount: one inside a writable directory
+        disappears when the host renames a new file over it (found live, on
+        `.git/config` and `.git/index`). The cost is that the container cannot
+        rewrite `packed-refs`, nor take `packed-refs.lock`, which every ref
+        deletion does.
 
         A project whose `.git` is a file is not covered: `ensure_running`
         refuses it, and nothing under it is listed here.
@@ -816,12 +830,9 @@ class DockerExecutor(Executor):
         git = root / ".git"
         out: list[tuple[Path, bool]] = [(root, True)]
         if git.is_dir():
-            # `refs` is writable like the rest of `.git`, but mounted in its
-            # own right: a mount point cannot be renamed, and renaming a plain
-            # `refs` away would take the read-only `refs/heads` with it and
-            # leave room for a new one.
-            out += [(git, False), (git / "refs", False)]
-            out += [(git / rel, True) for rel in self.GIT_PROTECTED]
+            out.append((git, True))
+            out += [(git / rel, False) for rel in self.GIT_WRITABLE_DIRS]
+            out += [(git / rel, True) for rel in self.GIT_CLOSED_DIRS]
             out.append((git / self.AGENT_REFS, False))
         out += [(self.paths.data, False), (self.paths.config, True)]
         return out
@@ -832,18 +843,22 @@ class DockerExecutor(Executor):
 
         A bind mount's source must exist, and one docker creates for itself is
         a root-owned directory, whatever the path was meant to be. So missing
-        directories are created empty. `config.worktree` is created empty,
-        which git reads as a config with nothing in it. A missing index is
-        written by git itself: a zero-byte one makes every host git command
-        fail, and an empty index is exactly what a missing one means.
+        mounted directories are created empty, and so are the other protected
+        ones (`hooks`, `info`, `modules`), so that a container which could once
+        write `.git` has not left something of its own there. `config.worktree`
+        is created empty, which git reads as a config with nothing in it. A
+        missing index is written by git itself: a zero-byte one makes every
+        host git command fail, and an empty index is exactly what a missing
+        one means.
 
         The base branch, the one checked out in the main checkout, gets a
-        loose ref file, since `packed-refs` stays writable and a loose ref wins
-        over a packed one: without it an agent could rewrite `packed-refs` and
-        move the user's branch with no merge. Run on every call rather than
-        only at creation, because the user may check out another branch while
-        the container runs; `refs/heads` is a directory mount, so a ref file
-        written there later is protected as well.
+        loose ref file, since a loose ref wins over a packed one. `packed-refs`
+        is read-only from the container now that `.git` is, but it was not
+        always, and the loose ref is what the base branch's protection rests
+        on inside the `refs/heads` directory mount. Run on every call rather
+        than only at creation, because the user may check out another branch
+        while the container runs; a ref file written in `refs/heads` later is
+        protected as well.
         """
         if self.paths is None:
             return ""
@@ -856,7 +871,8 @@ class DockerExecutor(Executor):
                     "Run it from a main checkout, or use the local executor.")
         try:
             if git.is_dir():
-                dirs = ("refs", *self.GIT_PROTECTED_DIRS, self.AGENT_REFS)
+                dirs = (*self.GIT_WRITABLE_DIRS, *self.GIT_PROTECTED_DIRS,
+                        self.AGENT_REFS)
                 files = [rel for rel in self.GIT_PROTECTED if rel not in dirs]
                 for rel in dirs:
                     error = self._plain(root, git / rel, directory=True)
