@@ -212,3 +212,23 @@ path. CI-R6 is independent.
   `prepare-commit-msg` and `commit-msg` all count. The failing hook is found
   with a `GIT_TRACE2_EVENT` trace, and on a git too old for the trace, the
   hook's presence alone decides.
+
+## Decisions, 2026-09-27 (orchestrator, after adversarial tester ag-6ceb2b on CI-R5)
+
+- **CI-R7 — the runner never blocks on anything an agent controls.** A hook
+  runs with the environment of the runner's `git commit`, so it can replace
+  the trace file with a FIFO, or flood it. The trace is therefore read
+  without ever blocking: a regular file only, opened non-blocking, and
+  size-capped (a few MB). Anything else counts as "no trace", which falls
+  back to the hook's presence. The runner's end-of-run git work (`commit_all`
+  and hook detection) never runs on the event loop thread, so one agent's
+  commit cannot freeze the server.
+  Verified by: `tests/test_ci_r5_adversary_hooks.py` (the FIFO case). A flood
+  case is welcome, but not required.
+- **A question from a fix turn parks the run:** a `NEED_DECISION` emitted
+  in a fix turn parks the run `awaiting_user` and records the question, as an
+  ordinary turn does. The loop ends there, and the commit failure is appended.
+  Verified by: `tests/test_ci_r5_adversary_lifecycle.py`.
+- **Out of CI-R5's scope, recorded separately:** a hook the agent wrote runs
+  outside the sandbox, because host-side git runs the repository's hooks. See
+  `context/specs/sandbox-git.md`.
