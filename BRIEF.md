@@ -1664,3 +1664,9 @@ Resume in this order:
 - Reviewer ag-39521a rejected 7697c2 (10 findings). Accepted #1-8, #10; DECLINED #9 (runtime symlinks inside
   the container image: provider declarations are trusted config; the lexical guard targets mistakes). Steered
   ag-7697c2 to fix them. Merge after that + a re-check; then resolve bug-4a0446 fixed.
+- 2026-09-27: merged 655c2ec (traversal test amended + `..`-after-slug case) and 954c207 (CI-R1/R2, commit
+  identity). Running: ag-7697c2 (reviewer fixes), ag-1d9832 (bug-d6310f/8615db), researcher ag-a339c3: do tests
+  run from a worktree import the MAIN checkout's src via the editable install? (ag-f233a2 says yes for bare
+  pytest). If so, every "green" an agent reported may have tested base code: fix the pytest config and re-verify.
+- opencode startup failures: 6 so far (latest ag-a51827, ag-6f2868, ag-2c8dfc). Router keeps picking it; use
+  `model:` overrides to agy/claude for opencode-default roles until fixed.
