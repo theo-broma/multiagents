@@ -1877,12 +1877,25 @@ class Runner:
         # _drop_if_empty decides for every later run.
         node = self.tree.get(node_id)
         if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
-            gitops.commit_all(Path(node.worktree), f"{node.agent}: work in progress ({node_id})")
+            commit_result = gitops.commit_all(
+                Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
+                role=node.agent, agent_id=node_id)
+        else:
+            commit_result = None
 
         # A run that ends with nothing to say still ended for a reason.
         said_nothing = not text.strip()
         if status not in ("done", "merged", "awaiting_user") and said_nothing:
             text = self._no_output_summary(run, code)
+
+        # CI-R2: a failed end-of-run commit must never be a silent no-op —
+        # the agent's work would otherwise be stranded, uncommitted, with
+        # nothing telling anyone. Reported here rather than by changing
+        # `status`: a commit failure doesn't by itself make the run failed.
+        if commit_result is not None and not commit_result.ok:
+            detail = commit_result.err or commit_result.out
+            text = f"{text}\n\ncommit failed: {detail}".strip()
+            self.tree.emit(node_id, "commit_failed", detail=detail[:400])
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
         (run_dir / "result.json").write_text(json.dumps(scrub({
