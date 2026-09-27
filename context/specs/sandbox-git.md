@@ -451,3 +451,24 @@ single-file bind mount inside a writable `.git` is not a protection.**
   test that relies on a single-file mount is wrong.
 - **SG-R6** then refuses the current container, because the layout differs.
   It is recreated when idle.
+- **Branch deletion, after tester ag-438693.** Git takes `packed-refs.lock`
+  in `.git/` for EVERY ref deletion, loose or packed. With `.git` read-only,
+  no branch can be deleted from the container. A nested orchestrator (the MCP
+  server in the container) does delete branches, on `merge_agent`,
+  `discard_agent` and the consult worktree cleanup. Decision:
+  - **Inside the container,** a branch deletion that fails for this reason
+    is not an error. The node's operation still succeeds. The branch is
+    recorded as `branch_pending_delete` on the node, and an event is emitted.
+  - **The host** deletes every `agents/*` branch recorded as
+    `branch_pending_delete` whose node is merged or discarded. It does so on
+    its own `merge_agent`, `discard_agent`, `reconcile` and runner start,
+    and never deletes a branch whose node is still live. The tree is
+    written by the container too, so the host deletes only branches under
+    `refs/heads/agents/` that belong to a node in its tree with a terminal
+    status.
+  - Branch creation from the container works: loose refs under
+    `refs/heads/agents/`.
+  Verified by: a fake-git or local test in which a deletion fails with the
+  lock error and the operation still succeeds with the branch recorded; a
+  host-side cleanup test; and the live test, where a container deletion
+  fails cleanly and the host cleanup then removes the branch.
