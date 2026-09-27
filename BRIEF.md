@@ -1695,3 +1695,8 @@ Resume in this order:
   In flight: tester ag-c057bd (CI-R5 tests); CI-R4 implementer-quick deferred (agy exhausted, restarts itself).
   Next: merge CI-R4, then implementer-deep on CI-R5 (end-of-run path, use _finalize's relaunch pattern per advisor),
   then adversary + reviewer on CI-R5.
+- 2026-09-27 ~07:30 UTC: CI-R5 tests merged (df5ed22). Decisions on CI-R5 silences + CI-R2 `git add` gap in spec
+  (eeb376f). All providers down: claude session 93% (resets 08:00 UTC), agy gemini weekly 98% (resets Sep 30),
+  opencode failing at startup. Tester ag-7ecd49 (CI-R2 add gap + r5 amendments) fell back to opencode, crashed →
+  stopped; relaunch its task on claude after 08:00. CI-R4 implementer-quick still deferred (gemini override).
+  Then: implementer-deep on CI-R5 (+ CI-R2 add gap), adversary, reviewer.
