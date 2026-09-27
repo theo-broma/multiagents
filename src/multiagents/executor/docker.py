@@ -75,23 +75,22 @@ class DockerHandle(Handle):
         self.pid_file = pid_file
 
     def _container_pid(self) -> str | None:
-        try:
-            value = self.pid_file.read_text().strip()
-        except OSError:
-            return None
+        # SG-R7: the agent's shell wrote it, where the container can write:
+        # read through no link, never blocking, and bounded.
+        base, parts = gitops.beneath(self.pid_file.parent)
+        raw = gitops._read_beneath(base, parts, self.pid_file.name, PID_FILE_MAX_BYTES)
+        value = (raw or b"").decode("ascii", errors="replace").strip()
         return value if value.isdigit() else None
 
     async def stop(self, grace: float = 10.0) -> None:
         target = self._container_pid()
         if target:
-            # TERM the agent and its children, then KILL anything left.
-            _run(["docker", "exec", self.container, "sh", "-c",
-                  f"kill -TERM {target} 2>/dev/null; pkill -TERM -P {target} 2>/dev/null; true"],
-                 timeout=30)
-            await asyncio.sleep(min(grace, 5.0))
-            _run(["docker", "exec", self.container, "sh", "-c",
-                  f"kill -KILL {target} 2>/dev/null; pkill -KILL -P {target} 2>/dev/null; true"],
-                 timeout=30)
+            # TERM the agent and everything it started, then KILL what is left.
+            wait = int(min(grace, 5.0))
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                await asyncio.to_thread(
+                    _run, ["docker", "exec", self.container,
+                           *_kill_argv(target, "", wait)], timeout=wait + 30)
         await super().stop(grace=grace)
 
 
@@ -105,26 +104,52 @@ def _recording_pid(pid_file: Path, argv: list[str]) -> list[str]:
     return ["sh", "-c", 'echo $$ > "$0"; exec "$@"', str(pid_file), *argv]
 
 
-# SV-R10: end a wrapped agent inside the container, from its recorded pids.
-# `$0` is the agent's pid file (its process group), `$1` the wrapper's, `$2`
-# the grace in seconds — paths as arguments, never as script text. TERM the
-# group, the agent and its direct children (what a pre-wrapper spawn recorded
-# was a bare pid, not a group), and the wrapper, which forwards it; then KILL,
-# the wrapper last, since it is what records the exit (SV-R2).
+# SV-R10: end an agent inside the container. `$0` is the agent's pid (the
+# leader of its process group, for a wrapped one), `$1` the wrapper's, either
+# possibly empty, `$2` the grace in seconds — as arguments, never as script
+# text. The pids are read by the caller: the files are where the agent can
+# write. TERM the agent's group, the agent and every process under it, and
+# the wrapper, which forwards it; then KILL, the wrapper last, since it is
+# what records the exit (SV-R2).
+#
+# Only what the image has: `sh` (dash, whose builtin `kill` takes no `--`),
+# `cat`, `cut`, `sed` and `sleep`; no procps. The tree is read from /proc and
+# stopped top down as it is walked, so nothing forks past the walk, and it is
+# remembered by pid and start time: once the agent is gone its children are
+# someone else's, a child in a session of its own (`setsid`) included, and
+# only the walk made before still names them.
 _KILL_SCRIPT = r"""
-a=$(cut -d' ' -f1 "$0" 2>/dev/null); w=$(cat "$1" 2>/dev/null)
+a=$0; w=$1; g=$2
 case "$a" in ''|*[!0-9]*) a= ;; esac
 case "$w" in ''|*[!0-9]*) w= ;; esac
 [ -z "$a$w" ] && exit 3
-hit() { [ -n "$a" ] && { kill -$1 -- -$a; kill -$1 $a; pkill -$1 -P $a; }; }
+start() { sed 's/.*) //' /proc/"$1"/stat 2>/dev/null | cut -d' ' -f20; }
+live() { s=$(sed 's/.*) //' /proc/"$1"/stat 2>/dev/null | cut -d' ' -f1,20)
+  [ -n "$s" ] && [ "${s%% *}" != Z ] && [ "${s%% *}" != X ] \
+    && { [ -z "$2" ] || [ "${s#* }" = "$2" ]; }; }
+walk() { kill -STOP "$1" 2>/dev/null; echo "$1:$(start "$1")"
+  for c in $(cat /proc/"$1"/task/*/children 2>/dev/null); do walk "$c"; done; }
+seen=
+hit() {
+  [ -n "$a" ] && live "$a" && seen="$seen $(walk "$a")"
+  for e in $seen; do live "${e%%:*}" "${e#*:}" && kill -$1 "${e%%:*}" 2>/dev/null; done
+  [ -n "$a" ] && kill -$1 -"$a" 2>/dev/null
+  for e in $seen; do kill -CONT "${e%%:*}" 2>/dev/null; done
+  [ -n "$a" ] && kill -CONT -"$a" 2>/dev/null
+}
+alive() {
+  { [ -n "$a" ] && { live "$a" || kill -0 -"$a" 2>/dev/null; }; } && return 0
+  for e in $seen; do live "${e%%:*}" "${e#*:}" && return 0; done
+  [ -n "$w" ] && live "$w"
+}
 hit TERM
-[ -n "$w" ] && kill -TERM $w
-i=0; while [ $i -lt "$2" ]; do
-  kill -0 $a 2>/dev/null || kill -0 -- -$a 2>/dev/null || { [ -n "$w" ] && kill -0 $w 2>/dev/null; } || exit 0
+[ -n "$w" ] && kill -TERM "$w" 2>/dev/null
+i=0; while [ $i -lt "$g" ]; do
+  alive || exit 0
   sleep 1; i=$((i+1)); done
 hit KILL
 sleep 1
-[ -n "$w" ] && kill -KILL $w
+[ -n "$w" ] && kill -KILL "$w" 2>/dev/null
 exit 0
 """
 
@@ -189,6 +214,8 @@ while [ "$n" -lt 3 ]; do
 done
 exit 124
 """
+# A pid file bigger than this is not read (SG-R7).
+PID_FILE_MAX_BYTES = 256
 # An agent's env file bigger than this is not read (SG-R3): it is under
 # `.multiagents`, which the container can write.
 ENV_FILE_MAX_BYTES = 1024 * 1024
@@ -221,6 +248,24 @@ def _create_nofollow(path: Path) -> None:
         pass
 
 
+def _turn_start_beneath(base: Path, parts: tuple[str, ...], name: str) -> int:
+    """`_turn_start` for a file the container can write (SG-R7): opened
+    through no link and never blocking. Whatever is there that is not a
+    regular file is removed, and the turn starts a fresh one at 0."""
+    try:
+        fd = gitops._open_file_beneath(base, parts, name, os.O_RDWR, replace=True)
+    except FileNotFoundError:
+        return 0
+    with os.fdopen(fd, "rb+") as fh:
+        end = fh.seek(0, 2)
+        if end:
+            fh.seek(end - 1)
+            if fh.read(1) != b"\n":
+                fh.write(b"\n")
+                end += 1
+        return end
+
+
 class ContainerGit(gitops.Git):
     """Git for an agent's own commits, run in the project container (SG-R3).
 
@@ -244,9 +289,9 @@ class ContainerGit(gitops.Git):
 
     def environ(self) -> dict[str, str]:
         env: dict[str, str] = {}
-        root = self.executor.paths.root
+        data = self.executor.paths.data
         path = self.executor.env_file(self.agent_id)
-        raw = gitops._read_beneath(root, path.parent.relative_to(root).parts,
+        raw = gitops._read_beneath(data, path.parent.relative_to(data).parts,
                                    path.name, ENV_FILE_MAX_BYTES)
         for line in (raw or b"").decode("utf-8", errors="replace").splitlines():
             key, sep, value = line.partition("=")
@@ -291,19 +336,41 @@ class ContainerGit(gitops.Git):
         return gitops.GitResult(proc.returncode == 0, out, stderr.strip(),
                                 proc.returncode)
 
+    @contextlib.contextmanager
     def scratch(self):
         """In the agent's run dir: on the shared bind mount, at the same path
         on both sides. The hook may have replaced what is in it by the time
-        it is cleaned up, which must not fail the commit."""
+        it is cleaned up, which must not fail the commit.
+
+        SG-R7: the run dir is reached through no link, and the directory is
+        made and removed relative to it, so a link the agent plants on the
+        way meanwhile never sends either somewhere else on the host."""
         run_dir = self.executor.paths.run_dir(self.agent_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        return tempfile.TemporaryDirectory(prefix="commit-", dir=run_dir,
-                                           ignore_cleanup_errors=True)
+        dfd = gitops._open_beneath(*gitops.beneath(run_dir), create=True)
+        try:
+            name = f"commit-{os.urandom(6).hex()}"
+            os.mkdir(name, 0o700, dir_fd=dfd)
+            try:
+                yield str(run_dir / name)
+            finally:
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(name, dir_fd=dfd)
+        finally:
+            os.close(dfd)
 
 
-def _kill_argv(run_dir: Path, grace: int) -> list[str]:
-    return ["sh", "-c", _KILL_SCRIPT, str(run_dir / "container.pid"),
-            str(run_dir / "wrapper.pid"), str(max(1, int(grace)))]
+def _kill_argv(agent: str, wrapper: str, grace: float) -> list[str]:
+    return ["sh", "-c", _KILL_SCRIPT, agent, wrapper, str(max(1, int(grace)))]
+
+
+def _recorded_pid(run_dir: Path, name: str, data: Path | None = None) -> str:
+    """The pid at the head of `name` in `run_dir`, or "" (SG-R7: read through
+    no link beneath `data`, never blocking, bounded — the agent can write it)."""
+    base, parts = ((data, run_dir.relative_to(data).parts) if data is not None
+                   else gitops.beneath(run_dir))
+    raw = gitops._read_beneath(base, parts, name, PID_FILE_MAX_BYTES) or b""
+    head = raw.decode("ascii", errors="replace").split()[:1]
+    return head[0] if head and head[0].isdigit() else ""
 
 
 PROXY_PORT = 8888
@@ -1806,7 +1873,12 @@ class DockerExecutor(Executor):
         """
         if self.paths is None:
             return False
-        argv = _kill_argv(self.paths.run_dir(agent_id), grace)
+        run_dir = self.paths.run_dir(agent_id)
+        agent = _recorded_pid(run_dir, "container.pid", self.paths.data)
+        wrapper = _recorded_pid(run_dir, "wrapper.pid", self.paths.data)
+        if not (agent or wrapper):
+            return False
+        argv = _kill_argv(agent, wrapper, grace)
         if not self.inside():
             argv = ["docker", "exec", self.container, *argv]
         try:
@@ -1920,8 +1992,9 @@ class DockerExecutor(Executor):
             # SG-R7: under `.multiagents`, which the container can write. Never
             # through a link or into a FIFO an agent left at that path.
             env_file = self.env_file(env.get("MULTIAGENTS_AGENT_ID", "run"))
+            self.paths.data.mkdir(parents=True, exist_ok=True)
             gitops._write_beneath(
-                self.paths.root, env_file.parent.relative_to(self.paths.root).parts,
+                self.paths.data, env_file.parent.relative_to(self.paths.data).parts,
                 env_file.name,
                 "".join(f"{k}={v}\n" for k, v in env.items()
                         if "\n" not in str(v)).encode(),
@@ -1965,9 +2038,12 @@ class DockerExecutor(Executor):
         executor's wrapper pid gives. Stopping goes through `docker exec`,
         since killing the client does not stop what it started.
         """
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "exit_status").unlink(missing_ok=True)
-        offset = _turn_start(run_dir / "output.ndjson")
+        # SG-R7: the run dir is where the container writes; nothing in it is
+        # made, removed or written through a link, and no FIFO blocks here.
+        base, parts = gitops.beneath(run_dir)
+        os.close(gitops._open_beneath(base, parts, create=True))
+        gitops._unlink_beneath(base, parts, "exit_status")
+        offset = _turn_start_beneath(base, parts, "output.ndjson")
         # Entered through `sh`, as every other command here enters the
         # container. The PATH it sees is the host's, carried in `env` for
         # the agent's sake (its launcher is mounted at its host path), and a
@@ -2000,7 +2076,14 @@ class DockerExecutor(Executor):
     def _pid_file(self, env: dict[str, str]) -> Path:
         pid_file = (self.paths.run_dir(env.get("MULTIAGENTS_AGENT_ID", "run"))
                     if self.paths is not None else Path("/tmp")) / "container.pid"
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        # SG-R7: the run dir is made through no link an agent planted, every
+        # part of it beneath `.multiagents` — an agent id can hold a `/`.
+        if self.paths is not None:
+            self.paths.data.mkdir(parents=True, exist_ok=True)
+            base, parts = self.paths.data, pid_file.parent.relative_to(self.paths.data).parts
+        else:
+            base, parts = gitops.beneath(pid_file.parent)
+        os.close(gitops._open_beneath(base, parts, create=True))
         return pid_file
 
     async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str], *,

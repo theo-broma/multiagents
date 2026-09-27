@@ -233,6 +233,79 @@ def _read_beneath(base: Path, parts: tuple[str, ...], name: str,
         os.close(fd)
 
 
+def beneath(directory: Path) -> tuple[Path, tuple[str, ...]]:
+    """`directory` as the primitives above take it (SG-R7): its last two
+    components beneath the directory that holds them. For a run dir that is
+    `.multiagents`, trusted, then `runs/<id>`, which a container can write."""
+    directory = Path(directory)
+    base = directory.parents[1] if len(directory.parts) > 2 else Path(directory.anchor or ".")
+    return base, directory.relative_to(base).parts
+
+
+def _open_file_beneath(base: Path, parts: tuple[str, ...], name: str, flags: int,
+                       mode: int = 0o666, *, create: bool = False,
+                       replace: bool = False) -> int:
+    """A file descriptor for the regular file ``base/parts.../name`` (SG-R7).
+
+    No link is followed below `base`, and the open never blocks: a symlink, a
+    FIFO or a device at `name` is refused with `OSError`. With `replace`, for
+    a file the host owns, such an entry is removed first, and the open is
+    tried once more (with `flags`, so `O_CREAT` makes it afresh). `create`
+    makes missing directories, as :func:`_open_beneath` does.
+    """
+    if name in ("", ".", "..") or "/" in name:
+        raise OSError(f"not a plain file name: {name!r}")
+    flags |= os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    dfd = _open_beneath(base, parts, create=create)
+    try:
+        for last in (False, True):
+            try:
+                fd = os.open(name, flags, mode, dir_fd=dfd)
+            except OSError:
+                # ELOOP for a link, ENXIO for a FIFO nobody reads, and so on:
+                # whatever is there, it is not a regular file to open.
+                if last or not replace or not _drop_irregular(dfd, name):
+                    raise
+                continue
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                return fd
+            os.close(fd)
+            if last or not replace or not _drop_irregular(dfd, name):
+                raise OSError(f"not a regular file: {name!r}")
+        raise AssertionError("unreachable")
+    finally:
+        os.close(dfd)
+
+
+def _drop_irregular(dfd: int, name: str) -> bool:
+    """Remove `name` from `dfd` if it is there and neither a regular file nor
+    a directory; whether it is worth trying the open again."""
+    try:
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    if stat.S_ISREG(st.st_mode):
+        return True                     # made by someone else meanwhile
+    if stat.S_ISDIR(st.st_mode):
+        return False
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(name, dir_fd=dfd)
+    return True
+
+
+def _unlink_beneath(base: Path, parts: tuple[str, ...], name: str) -> None:
+    """Remove ``base/parts.../name`` if it is there, through no link (SG-R7)."""
+    try:
+        dfd = _open_beneath(base, parts)
+    except FileNotFoundError:
+        return
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
 # An index bigger than this is not copied for a pinned read (SG-R4): the read
 # raises instead, and it is polled every few seconds.
 INDEX_MAX_BYTES = 128 * 1024 * 1024

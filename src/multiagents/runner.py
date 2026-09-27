@@ -28,6 +28,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import tempfile
 import textwrap
 import time
@@ -144,10 +145,49 @@ def _worktree_state(worktree: Path, root: Path) -> str:
 
 
 def _size(path: Path) -> int:
+    # A run-dir file: whatever an agent put in its place is not followed.
     try:
-        return path.stat().st_size
+        st = os.lstat(path)
     except OSError:
         return 0
+    return st.st_size if stat.S_ISREG(st.st_mode) else 0
+
+
+# SG-R7: a run dir is under `.multiagents`, which a docker agent can write.
+# What the host writes or reads in it goes through these: no link followed
+# below `.multiagents`, no FIFO blocked on, reads bounded.
+RUN_FILE_MAX_BYTES = 64 * 1024 * 1024
+STREAM_LOG_MAX_BYTES = 1024 * 1024 * 1024
+
+
+def _run_dir_fd(run_dir: Path) -> int:
+    """A directory fd for `run_dir`, made if missing (SG-R7)."""
+    return gitops._open_beneath(*gitops.beneath(run_dir), create=True)
+
+
+def _run_write(run_dir: Path, name: str, text: str, mode: int = 0o644) -> None:
+    """Replace `name` in `run_dir` with `text` (SG-R7)."""
+    base, parts = gitops.beneath(run_dir)
+    sub = Path(name)
+    gitops._write_beneath(base, parts + sub.parent.parts, sub.name, text.encode(),
+                          mode=mode, create=True)
+
+
+def _run_read(run_dir: Path, name: str, limit: int = RUN_FILE_MAX_BYTES) -> str:
+    """`name` in `run_dir`, if it is a regular file of a sane size (SG-R7);
+    `OSError` otherwise, a missing file included."""
+    raw = gitops._read_beneath(*gitops.beneath(run_dir), name, limit)
+    if raw is None:
+        raise OSError(f"{run_dir / name} is not a readable regular file")
+    return raw.decode("utf-8", errors="replace")
+
+
+def _run_open(run_dir: Path, name: str, flags: int, mode: str) -> Any:
+    """`name` in `run_dir` as a file object, for a file the host owns: a link
+    or FIFO in its place is replaced, never opened (SG-R7)."""
+    fd = gitops._open_file_beneath(*gitops.beneath(run_dir), name, flags,
+                                   create=True, replace=True)
+    return os.fdopen(fd, mode)
 
 
 def _holds_a_record(path: Path) -> bool:
@@ -1009,8 +1049,7 @@ class Runner:
         if node_id in self._locks:
             return True
         run_dir = self.paths.run_dir(node_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        handle = (run_dir / SUPERVISOR_LOCK).open("a+")
+        handle = _run_open(run_dir, SUPERVISOR_LOCK, os.O_RDWR | os.O_CREAT, "a+")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -1115,7 +1154,11 @@ class Runner:
         )
 
         run_dir = self.paths.run_dir(node_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
+        dfd = _run_dir_fd(run_dir)
+        try:
+            existing = os.listdir(dfd)
+        finally:
+            os.close(dfd)
         # SM-R1/R2: the server goes to an agent that may spawn, and only to one.
         if spec.can_spawn:
             server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
@@ -1123,14 +1166,14 @@ class Runner:
             env.update(server_env)
         else:
             self._withdraw_server(provider, home)
-        turn = len(list(run_dir.glob("prompt*.md")))
-        (run_dir / (f"prompt.{turn}.md" if turn else "prompt.md")).write_text(prompt)
+        turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
+        _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
         wall = timeout or spec.timeout
         launched = now()
         # Environment KEYS only — values may be secret and this file is on disk.
         # `launched_at` and `timeout` are what a server adopting this run
         # restarts its wall clock from (SV-R8).
-        (run_dir / "command.json").write_text(json.dumps(scrub({
+        _run_write(run_dir, "command.json", json.dumps(scrub({
             "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
             "provider": provider.name, "model": spec.model,
             "permission": spec.permission, "resumed": bool(session_id),
@@ -1212,7 +1255,6 @@ class Runner:
                 target = private_file(home, str(block["home_file"]))
             else:
                 target = run_dir / str(block.get("file") or "mcp.json")
-                target.parent.mkdir(parents=True, exist_ok=True)
             launch = provider.mcp_launch({
                 "mcp_command": command, "mcp_args": args, "mcp_argv": [command, *args],
                 "mcp_env": environment, "mcp_config": str(target),
@@ -1221,7 +1263,11 @@ class Runner:
             if launch["merge"]:
                 config = config_mod.deep_merge(
                     self._user_mcp_config(str(block["home_file"])), config)
-            _write_own(target, json.dumps(config, indent=2) + "\n")
+            if block.get("home_file"):
+                _write_own(target, json.dumps(config, indent=2) + "\n")
+            else:
+                _run_write(run_dir, str(target.relative_to(run_dir)),
+                           json.dumps(config, indent=2) + "\n", mode=0o600)
         except OSError as exc:
             return unavailable(f"its config could not be written: {exc}")
         return launch["args"], launch["env"]
@@ -1588,7 +1634,8 @@ class Runner:
         node_id, provider, handle = run.node_id, run.provider, run.handle
         assert handle is not None and run.supervisor is not None
         run_dir = self.paths.run_dir(node_id)
-        stream_log = (run_dir / "stream.jsonl").open("a")
+        stream_log = _run_open(run_dir, "stream.jsonl",
+                               os.O_WRONLY | os.O_APPEND | os.O_CREAT, "a")
         stderr_task = asyncio.create_task(handle.drain_stderr())
         watchdog = asyncio.create_task(self._watch_timers(run))
         usage: dict[str, Any] = {}
@@ -1799,7 +1846,7 @@ class Runner:
             # the node's reason can hold one line. Written where someone
             # reading a bad run already looks.
             with contextlib.suppress(OSError):
-                (run_dir / "postmortem-crash.txt").write_text(traceback.format_exc())
+                _run_write(run_dir, "postmortem-crash.txt", traceback.format_exc())
             # Only a node still claiming to be in flight. A crash in the last
             # few lines — filing a ticket, reclaiming a worktree — must not
             # overwrite a verdict already recorded: `failed` over `done`
@@ -1998,7 +2045,7 @@ class Runner:
                     f"it succeeded after {fix_attempts} fix attempt(s).").strip()
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
-        (run_dir / "result.json").write_text(json.dumps(scrub({
+        _run_write(run_dir, "result.json", json.dumps(scrub({
             "status": status, "exit_code": code, "session_id": session_id,
             "usage": usage, "text": text, "stderr_tail": stderr,
         }), indent=2))
@@ -2094,7 +2141,7 @@ class Runner:
                     # `done` nobody but this line will ever fix up.
                     retried = await self._launch(
                         node_id=node_id, spec=run.spec, provider=run.provider,
-                        prompt=(run_dir / "prompt.md").read_text(),
+                        prompt=_run_read(run_dir, "prompt.md"),
                         workdir=Path(fresh.worktree), branch=fresh.branch,
                         parent=fresh.parent, depth=fresh.depth,
                         session_id=session_id or None,
@@ -2649,16 +2696,17 @@ class Runner:
         return result
 
     def _read_stream(self, agent_id: str) -> list[dict]:
-        path = self.paths.run_dir(agent_id) / "stream.jsonl"
-        if not path.is_file():
+        try:
+            text = _run_read(self.paths.run_dir(agent_id), "stream.jsonl",
+                             STREAM_LOG_MAX_BYTES)
+        except OSError:
             return []
         out = []
-        with path.open() as handle:
-            for line in handle:
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+        for line in text.splitlines():
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
         return out
 
     def readonly_violations(self, node, base: str) -> list[str]:
@@ -2686,13 +2734,11 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         run_dir = self.paths.run_dir(agent_id)
-        result_file = run_dir / "result.json"
         data: dict[str, Any] = {}
-        if result_file.is_file():
-            try:
-                data = json.loads(result_file.read_text())
-            except json.JSONDecodeError:
-                data = {}
+        try:
+            data = json.loads(_run_read(run_dir, "result.json"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
 
         text = data.get("text", "") or node.summary
         payload = {
@@ -2868,7 +2914,7 @@ class Runner:
         spec, provider = self._spec_of(node)
         command: dict[str, Any] = {}
         with contextlib.suppress(OSError, ValueError):
-            command = json.loads((run_dir / "command.json").read_text())
+            command = json.loads(_run_read(run_dir, "command.json"))
         launched = float(command.get("launched_at") or node.started_at or now())
         wall = float(command.get("timeout") or spec.timeout)
         follow = node.follow or {}
@@ -2877,7 +2923,8 @@ class Runner:
         # never counted; the lines are read again and logged once.
         stream = run_dir / "stream.jsonl"
         if "log" in follow and _size(stream) > int(follow["log"]):
-            with stream.open("r+b") as fh:
+            with contextlib.suppress(FileNotFoundError), \
+                    _run_open(run_dir, "stream.jsonl", os.O_RDWR, "r+b") as fh:
                 fh.truncate(int(follow["log"]))
 
         handle = FollowHandle(pid=node.pid or 0, run_dir=run_dir, offset=turn,
@@ -2904,7 +2951,7 @@ class Runner:
     @staticmethod
     def _past_deadline(run_dir: Path) -> bool:
         with contextlib.suppress(OSError, ValueError, TypeError):
-            command = json.loads((run_dir / "command.json").read_text())
+            command = json.loads(_run_read(run_dir, "command.json"))
             wall = float(command.get("timeout") or 0)
             return bool(wall) and now() >= float(command["launched_at"]) + wall
         return False
