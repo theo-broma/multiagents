@@ -80,6 +80,65 @@ carries at most 500 characters of the git output.
   CI-R3 says so on purpose, and failing the merge is worse. A user who wants
   their own name on merges configures git or `GIT_AUTHOR_*`.
 - **`EMAIL` precedence (`gitops.py`):** correct, kept.
-- **Hooks and signing on agent commits (`commit.gpgsign`, pre-commit hooks):**
-  bypassing them overrides the user's repository policy, so the user decides.
-  Open. Until then, a failure from either is reported per CI-R2.
+- **Hooks and signing on agent commits:** decided by the user on 2026-09-27.
+  Signing is skipped on agent commits (CI-R6). Hooks are kept, and a hook
+  failure is fed back to the agent (CI-R5). `--no-verify` is never used.
+
+**CI-R5 — a hook failure is fed back to the agent, a bounded number of
+times.** Added 2026-09-27 at the user's request. This covers the runner's
+end-of-run commit, when it fails because a git hook refused it
+(`pre-commit`, `commit-msg`, ...).
+- **Resume:** the runner resumes the same agent session in the same worktree,
+  as `steer_agent` does. The message says that the end-of-run commit was
+  refused by a hook and carries the hook's output: its tail, at least the last
+  4000 characters, not the CI-R4-truncated copy.
+- **Retry:** after that turn, the runner tries the end-of-run commit again.
+  If the agent committed during the turn and nothing is left, that counts as
+  success.
+- **Bound:** at most `limits.commit_fix_attempts` resumes. The default is 2,
+  and 0 disables CI-R5. When they are used up, or the session cannot be
+  resumed (the provider has no resume, or quota), the failure is reported as
+  in CI-R2 and CI-R4.
+- **Only hook failures:** a failure that is not caused by a hook (identity,
+  lock, disk, ...) is never fed back, and goes straight to CI-R2. How a hook
+  failure is recognised is the implementer's choice, but a repository with no
+  active hook must never trigger a resume.
+- **Recorded:** each attempt emits a `commit_fix_attempt` event, with the
+  attempt number and a truncated detail. The final outcome is either
+  success, or `commit_failed` as in CI-R2.
+- **Result text:** it keeps the agent's original answer. It says how many fix
+  attempts were made, and whether the commit finally succeeded.
+- **Accounting:** the fix turns count toward the run's usage, its budget tag
+  and its watchdogs like any other turn. The node stays `running` during
+  them.
+- **Hooks still apply:** the fix turns are ordinary turns. Read-only paths
+  stay read-only, and `--no-verify` is never used.
+
+Verified by: runner-level tests with a real failing `pre-commit` hook and a
+scripted or fake agent:
+- the hook is satisfied on the first fix turn: commit succeeds, one
+  `commit_fix_attempt` event;
+- the hook is never satisfied: exactly `commit_fix_attempts` resumes, then
+  `commit_failed`;
+- `commit_fix_attempts: 0`: no resume;
+- a non-hook failure: no resume;
+- the resume message carries the hook's output.
+
+**CI-R6 — agent commits are never GPG-signed.** Added 2026-09-27 by the
+user's decision. The key never enters the container: `~/.gnupg` is a
+credential store and is never mounted.
+- **What is unsigned:** every commit made on an agent's branch, both the
+  runner's end-of-run commit and the commits an agent makes itself inside its
+  executor. It is as if `commit.gpgsign=false` were set for them. The
+  mechanism is the implementer's choice, for example an option on the commit,
+  or `GIT_CONFIG_*` in the agent's environment. The user's config is never
+  written.
+- **What is unchanged:** the orchestrator-side commits, meaning `gitops.merge`
+  (squash and `--no-ff`) and `initial_commit`. They keep the user's signing
+  configuration. With a squash merge, the default, only that merge commit
+  reaches the base branch.
+
+Verified by: with `commit.gpgsign=true` and an unusable `gpg.program`
+configured, the end-of-run commit and an agent-side `git commit` both
+succeed, while `gitops.merge` still tries to sign (and so fails) in the same
+setup.
