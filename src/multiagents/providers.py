@@ -196,9 +196,10 @@ class Provider:
     # must not trip doom_loop on its own. See Supervisor.opaque_tools.
     opaque_tools: list[str] = field(default_factory=list)
     # bug-8615db: some tools are only a poll under ONE argument value and a
-    # real repeat under another — agy's `manage_task` reports Action: status
-    # identically on every check of a task it already started (legitimate,
-    # must not trip) but Action: run launching the same command again is
+    # real repeat under another — a task-status tool call reports
+    # Action: status identically on every check of a task it already
+    # started (legitimate, must not trip) but Action: run launching the
+    # same command again is
     # exactly the loop doom_loop exists to catch. `opaque_tools` cannot make
     # that distinction (it is unconditional on the tool name alone), so this
     # is scoped: each entry is `{tool: <name>, match: {<arg key>: [<values
