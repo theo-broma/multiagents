@@ -17,6 +17,7 @@ The parent performs every operation here. Subagents only commit.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -338,12 +339,37 @@ def restore_paths(worktree: Path, base: str, paths: list[str],
     return run(worktree, "commit", "-m", message)
 
 
-def commit_all(worktree: Path, message: str) -> GitResult:
-    """Commit whatever an agent left uncommitted, so no work is stranded."""
+def _config_missing(worktree: Path, key: str) -> bool:
+    return not run(worktree, "config", "--get", key).ok
+
+
+def commit_all(worktree: Path, message: str, *,
+               role: str | None = None, agent_id: str | None = None) -> GitResult:
+    """Commit whatever an agent left uncommitted, so no work is stranded.
+
+    CI-R1: a fresh container HOME has no git identity anywhere — no config,
+    no GIT_AUTHOR_*/GIT_COMMITTER_*/EMAIL — and `git commit` refuses to run.
+    Rather than let the agent's work sit stranded, uncommitted, in its
+    worktree, fall back to an identity naming the agent, scoped to this one
+    `git commit` invocation via `-c` (never written to any config file), and
+    only for whichever half — name or email — is actually missing. A half
+    that IS configured (repo, global, or env) is left alone: `-c` outranks
+    config files but env vars (GIT_AUTHOR_*/GIT_COMMITTER_*) outrank `-c`, so
+    an env-supplied identity passes through unchanged.
+    """
     run(worktree, "add", "-A")
-    if not run(worktree, "diff", "--cached", "--quiet").ok:
-        return run(worktree, "commit", "-m", message)
-    return GitResult(True, "nothing to commit", "", 0)
+    if run(worktree, "diff", "--cached", "--quiet").ok:
+        return GitResult(True, "nothing to commit", "", 0)
+
+    extra: list[str] = []
+    if _config_missing(worktree, "user.name"):
+        extra += ["-c", f"user.name={f'multiagents {role}' if role else 'multiagents'}"]
+    # EMAIL is git's own last-resort fallback for email before it would guess
+    # from passwd+hostname; a bare `-c user.email=` outranks it, so it must
+    # be excluded here or we'd clobber an identity the user already has.
+    if _config_missing(worktree, "user.email") and "EMAIL" not in os.environ:
+        extra += ["-c", f"user.email={agent_id or 'agent'}@multiagents.invalid"]
+    return run(worktree, *extra, "commit", "-m", message)
 
 
 def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple[str, str]:
