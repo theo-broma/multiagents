@@ -3736,8 +3736,11 @@ def test_the_config_that_defines_the_sandbox_is_not_writable_inside_it(tmp_path)
     assert (paths.config, True) in mounts, "config must be mounted read-only"
     root = [ro for path, ro in mounts if path == paths.root]
     assert root == [True], "the project root is read-only (SG-R2)"
+    # SG-R2, revised after the live smoke test: `.git` itself is read-only
+    # (whether by its own mount or by the root's); only directories beneath
+    # it are reopened writable.
     git = [ro for path, ro in mounts if path == tmp_path / ".git"]
-    assert git == [False], "`.git` stays writable; agents commit there"
+    assert all(git), "`.git` itself is read-only (SG-R2, revised)"
     data = [ro for path, ro in mounts if path == paths.data]
     assert data == [False], "`.multiagents` runtime state stays writable"
     # The narrow mount must come after the writable data dir it masks, and
