@@ -1681,3 +1681,6 @@ Resume in this order:
   pre-existing: r8f adversary test (driver `_AttachedCompaction._cancel`).
   In flight: ag-d0c34f (CI-R3 + vocabulary), ag-a409db tester (host fixtures), ag-a7494f deep (r8f driver).
   After merge: rerun the host full suite in chunks; expect only phase2's 72 by-design reds.
+- Merged 081409e (host fixtures: docker-less PATH, commit-tree identity), 8ef266e (r8f adversary test made busy
+  the SV-R11 way — driver was right, ag-a7494f), 47e10e0 (CI-R3 fallback identity on every gitops commit +
+  vocabulary rewording). Host full suite rerunning (r2chunk*.log in the scratchpad).
