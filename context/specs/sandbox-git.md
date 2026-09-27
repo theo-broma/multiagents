@@ -401,3 +401,13 @@ one breaks SG-R1 or SG-R4:
   - the runner's `consult-*.lock` (around `runner.py:3319`).
 
   They are in SG-R7's scope, and are the next small follow-up.
+- **Closed, ag-2e2613:** the four remaining writers now use no-follow
+  primitives. The consult lock, when planted, is replaced rather than
+  refused: a refusal would let one symlink block the advisor forever. The
+  consult never runs without the lock.
+
+  Accepted:
+  - `cli.py stop` calls `is_file` and `unlink` on a plain path; `unlink`
+    removes a link itself and writes nothing;
+  - the provider launch scripts write under `launch/` as shell, on the
+    orchestrator's host-side launch path, not for agents.
