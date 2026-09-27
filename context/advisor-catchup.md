@@ -131,6 +131,26 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
    pass, and the 3 SG-R3 tests fail, since that work is in flight as
    ag-ce8b54.
 
+15. **SG-R3 (4b9dbda, ag-ce8b54):** the `gitops.Git` seam, with `HOST` for
+    the local executor and `ContainerGit` running `docker exec` as the agent,
+    carrying the agent's env file and a trace under the run dir.
+
+    Follow-ups merged:
+    - dd12859 (ag-3c75c1): the index cap is 128 MiB, and a FIFO, symlink or
+      git failure raises `GitError`; `objects/info` is read-only;
+      `protect_project` uses no-follow primitives and `_plain` checks.
+    - edccaad (ag-b65538): the runner's poll and refresh are pinned;
+      `reset_keep` runs pinned with filters off; SG-R7 env files use
+      `_write_beneath` and `_read_beneath`; a watchdog inside the container
+      handles the exec timeout by walking `/proc`, because the image has no
+      `pkill`.
+
+    On the host, docker-live passes 7/7 at edccaad. Twice, the safety
+    classifier stopped testers given an "adversary stand-in" framing;
+    narrow contract-test framing worked. Worth your view on: `reset_keep`
+    running on the host rather than in the container; the filters-off
+    trade-off for LFS; the `/proc` watchdog.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
