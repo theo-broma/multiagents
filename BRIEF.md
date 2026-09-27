@@ -1746,3 +1746,12 @@ Resume in this order:
   on 88f4b0d files (gitops._pinned + docker.py protect_project/mounts), then implementer-deep on runner_reads +
   env_files (runner.py + docker.py start/ContainerGit) — sequential, both touch docker.py. Then host docker-live,
   host full suite, container recreate when idle (inspect .git/hooks and .git/config for agent-written content first).
+- 2026-09-27 ~20:00 UTC: sandbox-git COMPLETE and merged (SG-R1..R7, through 5e56bc8). Host full suite at 7a32ff0:
+  665 + 1053 passed, chunk 3 only the 72 phase2 by-design reds. docker-live 7/7 + host_writes_more on host.
+  Pre-recreate inspection: .git/hooks empty, .git/config clean, no alternates, main == origin/main.
+  Project container recreated with the SG layout (root ro, verified by a write probe).
+  BLOCKER: the running multiagents MCP server still has pre-SG code and refuses the new container as drift
+  (ag-0f07a1). Needs the user to reconnect the MCP server (/mcp) so it loads the new code; then smoke-test.
+  Still open: adversary/reviewer passes on sandbox-git by a proper adversary (providers down/excluded; testers
+  stood in), advisor catch-up consult when agy is back (context/advisor-catchup.md), leftover test containers
+  multiagents-proj-* (from harness runs, not ours to delete without asking).
