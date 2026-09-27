@@ -2365,7 +2365,8 @@ class Runner:
         if node is None or not node.branch or spec.writes or spec.conversational:
             return                            # a live conversation keeps its worktree
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
-        if gitops.commits_on(self.paths.root, node.branch, base) == 0:
+        root = self.paths.root
+        if gitops.commits_on(root, node.branch, base, root=root) == 0:
             self._cleanup(node)
             self.tree.update(node_id, branch="", worktree="")
         else:
@@ -2424,7 +2425,8 @@ class Runner:
         if branch:
             try:
                 base = self.config.base_branch or gitops.current_branch(self.paths.root)
-                if gitops.commits_on(self.paths.root, branch, base) > 0:
+                if gitops.commits_on(self.paths.root, branch, base,
+                                     root=self.paths.root) > 0:
                     return True
             except Exception:
                 pass
@@ -2646,7 +2648,8 @@ class Runner:
         patterns = self.config.readonly_paths_for(spec)
         if not patterns:
             return []
-        changed = gitops.changed_paths(self.paths.root, node.branch, base)
+        changed = gitops.changed_paths(self.paths.root, node.branch, base,
+                                       root=self.paths.root)
         return [path for path in changed if matches_any(patterns, path)]
 
     def collect(self, agent_id: str, mode: str = "summary") -> dict[str, Any]:
@@ -2684,8 +2687,9 @@ class Runner:
                 payload["hint"] = f"full transcript: {run_dir}/result.json, or collect(mode='full')"
         if node.branch and gitops.is_repo(self.paths.root):
             base = self.config.base_branch or gitops.current_branch(self.paths.root)
-            payload["commits"] = gitops.commits_on(self.paths.root, node.branch, base)
-            payload["diff_stat"] = gitops.diff_stat(self.paths.root, node.branch, base)[:2000]
+            root = self.paths.root
+            payload["commits"] = gitops.commits_on(root, node.branch, base, root=root)
+            payload["diff_stat"] = gitops.diff_stat(root, node.branch, base, root=root)[:2000]
             # Surfaced HERE as well as at the merge gate, so the orchestrator
             # learns about it while it is still deciding rather than as a
             # surprise in the merge result. The revert happens at merge.
@@ -3359,7 +3363,7 @@ class Runner:
             return not_updated("the worktree has no readable HEAD")
         if head == base_sha:
             return "", head, 0
-        behind = gitops.commits_on(worktree, base_sha, head)
+        behind = gitops.commits_on(worktree, base_sha, head, root=self.paths.root)
         status = gitops.run(worktree, "status", "--porcelain")
         if not status.ok:
             return not_updated(status.err or status.out)
@@ -3539,7 +3543,8 @@ class Runner:
                     head, behind = "", None
 
         if placed:
-            behind = (gitops.commits_on(worktree_path, base_sha, head)
+            behind = (gitops.commits_on(worktree_path, base_sha, head,
+                                        root=self.paths.root)
                       if base_sha and head else None)
         view = self._worktree_view(worktree_path, head, base_sha, behind)
         self.tree.update(node_id, turns=turn)
@@ -3957,7 +3962,8 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
-        unmerged = gitops.commits_on(self.paths.root, node.branch, base) if node.branch else 0
+        unmerged = (gitops.commits_on(self.paths.root, node.branch, base,
+                                      root=self.paths.root) if node.branch else 0)
         if unmerged and not force:
             return {
                 "agent_id": agent_id, "discarded": False, "unmerged_commits": unmerged,

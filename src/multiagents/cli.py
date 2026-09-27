@@ -570,7 +570,7 @@ def _offer_git(root: Path) -> None:
     # that and is still wrong for a project that already has files: agents check
     # out their branch and find none of them. So the first commit is the project.
     print("\ngit          repository has no commits")
-    entries = gitops.uncommitted_entries(root)
+    entries = gitops.uncommitted_entries(root, root=root)
     unsafe = [e for e in entries if e in UNSAFE_FIRST_COMMIT]
     if entries:
         print(f"             agents see only committed files; "
@@ -587,7 +587,7 @@ def _offer_git(root: Path) -> None:
                                            default=True):
             _gitignore_add(root, unsafe, "# added by multiagents init")
             print(f"             added to .gitignore: {', '.join(unsafe)}")
-            entries = gitops.uncommitted_entries(root)
+            entries = gitops.uncommitted_entries(root, root=root)
 
     question = ("             make an empty initial commit?" if not entries else
                 "             commit them all as the initial commit?")
@@ -933,7 +933,7 @@ INTERRUPTED_COMMIT = (
 )
 
 
-def _save_interrupted(node) -> bool:
+def _save_interrupted(node, root: Path | None = None) -> bool:
     """Commit an interrupted agent's worktree, marked as what it is.
 
     A cancelled node is TERMINAL, and `clean --branches` removes worktrees for
@@ -943,11 +943,17 @@ def _save_interrupted(node) -> bool:
     The message matters as much as the commit. Without it the orchestrator can
     pick the branch up later, run tests against half-written files, and spend
     tokens debugging syntax errors caused entirely by the termination.
+
+    `root`, the project root, pins the dirtiness check to the repository's
+    trusted paths (SG-R4); a worktree it cannot resolve is left alone.
     """
     worktree = Path(node.worktree) if node.worktree else None
     if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree):
         return False
-    if not gitops.is_dirty(worktree):
+    try:
+        if not gitops.is_dirty(worktree, root=root):   # SG-R4
+            return False
+    except gitops.GitError:
         return False
     result = gitops.commit_all(worktree, INTERRUPTED_COMMIT.format(
         agent=node.agent, agent_id=node.id))
@@ -1022,7 +1028,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # Committed HERE rather than in the cancellation handler: this runs with
         # time, a live loop and full information, where a teardown has none of
         # those and a git call in it can hang for its whole timeout.
-        if _save_interrupted(node):
+        if _save_interrupted(node, paths.root):
             saved += 1
 
     # Reclaiming a node is itself proof of an ending nobody recorded: a clean
@@ -1060,7 +1066,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
         print(f"\n{len(stale)} branch(es) still held by unfinished agents:")
         for node in stale:
             commits = gitops.commits_on(
-                paths.root, node["branch"], gitops.current_branch(paths.root)
+                paths.root, node["branch"], gitops.current_branch(paths.root),
+                root=paths.root,
             )
             print(f"  {node['id']:10} {node['agent']:14} {node['branch']:38} {commits} commit(s)")
         print("  merge with merge_agent, or drop with `multiagents clean --branches`")
@@ -1730,7 +1737,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
             branch = node.get("branch")
             if not branch or node.get("status") in {"running", "pending"}:
                 continue
-            commits = gitops.commits_on(paths.root, branch, base)
+            commits = gitops.commits_on(paths.root, branch, base, root=paths.root)
             if commits and not args.force:
                 print(f"keep   {branch} ({commits} unmerged commit(s); --force to delete)")
                 continue
@@ -2522,7 +2529,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
         worktree = Path(node.worktree) if node.worktree else None
         if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree):
             continue
-        if not gitops.is_dirty(worktree):
+        try:
+            if not gitops.is_dirty(worktree, root=paths.root):   # SG-R4
+                continue
+        except gitops.GitError:
             continue
         result = gitops.commit_all(worktree, f"{node.agent}: work in progress "
                                              f"when stopped ({node.id})")
