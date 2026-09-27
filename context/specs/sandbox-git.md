@@ -362,3 +362,23 @@ one breaks SG-R1 or SG-R4:
   `GitError`. They never return "clean" or an empty list. Before the cap,
   an index that is a FIFO or a symlink also raises `GitError`, rather than
   being skipped.
+
+## Decisions, 2026-09-27 (orchestrator, after implementers ag-3c75c1 and ag-b65538)
+
+- **The rest of SG-R7:** every file or directory the HOST creates or writes
+  under `.multiagents` is written with the same no-follow primitives
+  (`gitops._write_beneath` or equivalent). That includes the run-dir
+  `mkdir`s, the pid file (`_pid_file`), and `scratch()`.
+- **`server.py` `git_status`:** a `GitError` from a pinned read is reported in
+  the tool's result, as an error field, and never raised as a tool failure.
+  It is never reported as `dirty: false`.
+- **The image has no `pkill`,** yet `DockerHandle.stop` and `_KILL_SCRIPT` use
+  it. Check the result: if stopping a docker agent is silently broken, fix
+  it with the same `/proc` walk that `ContainerGit` uses.
+- **Filters are off during `reset --keep`** (ag-b65538). With filters
+  disabled, LFS-style filters do not run while a conversation's worktree is
+  moved. Accepted: the move only happens when the files are identical to
+  the base, and the worktree is kept, not moved, when that cannot be shown.
+- **Accepted:** `gitops.is_repo(node.worktree)` and `head_sha` just after
+  creation stay unpinned. They execute nothing, since config and hooks are
+  protected and read-only.
