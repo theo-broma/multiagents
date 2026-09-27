@@ -1715,3 +1715,7 @@ Resume in this order:
   Open questions for the contract: where the notice surfaces (event, tool result, `multiagents run` terminal,
   tree); de-duplication so a limit hit every second does not flood; and the defaults case, i.e. which file and
   line to show when the value comes from a built-in default rather than the user's file.
+- 2026-09-27: CI-R4 merged 5558946. Tests for CI-R2 add gap + CI-R5 decisions merged 721642e. In flight:
+  implementer-deep ag-b7c2ff (claude opus) on CI-R5 + CI-R2 add gap. Next: adversary (claude, not agy) and reviewer
+  (agy-only? route to claude or skip and log in advisor-catchup), then merge. Orchestrator brief gained an
+  "Autonomy" section (f041f27): never end a paused turn without an armed wake-up.
