@@ -1,7 +1,8 @@
 """CI-R5 — a hook failure is fed back to the agent, a bounded number of times.
 
 Contract: context/specs/commit-identity.md, CI-R5 plus "Decisions, 2026-09-27
-(orchestrator, after advisor ag-25c350 on CI-R5/R6)".
+(orchestrator, after advisor ag-25c350 on CI-R5/R6)" and "Decisions,
+2026-09-27 (orchestrator, after tester ag-c057bd on CI-R5)".
 
 Black box. A real Runner runs a scripted fake agent CLI (a small Python script
 standing in for the provider binary), and the project repository carries a
@@ -289,16 +290,10 @@ def run_to_end(r, timeout: float = 60) -> str:
     return asyncio.run(go())
 
 
-def attempt_numbers(evts: list[dict]) -> list[int]:
-    """The attempt number each `commit_fix_attempt` event carries. The
-    contract does not name the field, so any integer-valued field other than
-    the timestamp counts."""
-    nums = []
-    for e in evts:
-        ints = [v for k, v in e.items()
-                if isinstance(v, int) and not isinstance(v, bool) and k not in ("ts", "time")]
-        nums.append(ints)
-    return nums
+def attempt_numbers(evts: list[dict]) -> list:
+    """The attempt number each `commit_fix_attempt` event carries, in the field
+    `attempt`, counted from 1 (decision after tester ag-c057bd)."""
+    return [e.get("attempt") for e in evts]
 
 
 def appended(result_text: str) -> str:
@@ -361,7 +356,7 @@ def test_ci_r5_hook_satisfied_on_the_first_fix_turn_commits_with_one_attempt(tmp
     # Recorded: one attempt, and no failure.
     fixes = events(r, agent, "commit_fix_attempt")
     assert len(fixes) == 1, fixes
-    assert 1 in attempt_numbers(fixes)[0], f"the attempt number must be recorded: {fixes}"
+    assert attempt_numbers(fixes) == [1], f"the attempt number must be recorded: {fixes}"
     assert events(r, agent, "commit_failed") == []
     # Status and result text.
     assert node.status == "done", (node.status, node.reason)
@@ -392,8 +387,8 @@ def test_ci_r5_never_satisfied_resumes_exactly_n_times_then_commit_failed(
     assert all(resumed_with(c) == SID for c in calls[1:])
     fixes = events(r, agent, "commit_fix_attempt")
     assert len(fixes) == expected, fixes
-    assert [n for nums in attempt_numbers(fixes) for n in nums if n in range(1, expected + 1)] \
-        == list(range(1, expected + 1)), f"attempts numbered 1..{expected}: {fixes}"
+    assert attempt_numbers(fixes) == list(range(1, expected + 1)), \
+        f"attempts numbered 1..{expected} in the field `attempt`: {fixes}"
     assert events(r, agent, "commit_failed"), "the final outcome must be commit_failed"
     node = r.tree.get(agent)
     assert on_branch(project, node.branch, "work.txt") is None
@@ -678,7 +673,40 @@ def test_ci_r5_commit_fix_timeout_bounds_each_fix_turn(tmp_path, monkeypatch):
     assert took < 30, f"a fix turn bounded at 2 s held the run for {took:.0f}s"
     assert events(r, agent, "commit_failed"), \
         "the hook was never satisfied, so the failure is reported"
-    assert ORIGINAL in result_of(r, agent)["text"]
+    # Decision after tester ag-c057bd: the cut-off turn is one attempt, and the
+    # run keeps the status it ended with, not `timeout`.
+    assert attempt_numbers(events(r, agent, "commit_fix_attempt")) == [1]
+    node = r.tree.get(agent)
+    assert node.status == "done", (node.status, node.reason)
+    result = result_of(r, agent)
+    assert result["status"] == "done", result["status"]
+    assert ORIGINAL in result["text"]
+    assert HOOK_MARKER in result["text"]
+    assert on_branch(project, node.branch, "work.txt") is None
+
+
+def test_ci_r5_a_fix_turn_cut_off_by_commit_fix_timeout_counts_and_the_loop_goes_on(
+        tmp_path, monkeypatch):
+    """Decision after tester ag-c057bd: the timed-out fix turn is attempt 1,
+    and the loop continues to attempt 2, which fixes the hook."""
+    hung_fix = [["touch_probe", "in-fix"], ["gate", "never"], ["rm", "BLOCK"],
+                text("fixed"), ["exit", 0]]
+    prov, probe = fake_provider(tmp_path, [FIRST, hung_fix, FIX])
+    r, project = make(tmp_path, monkeypatch, prov,
+                      limits={"commit_fix_attempts": 2, "commit_fix_timeout": 2},
+                      silence_timeout=120)
+
+    agent = run_to_end(r, timeout=45)
+
+    calls = invocations(probe)
+    assert len(calls) == 3, f"a timed-out fix turn, then one more: {len(calls)} runs"
+    assert all(resumed_with(c) == SID for c in calls[1:])
+    assert attempt_numbers(events(r, agent, "commit_fix_attempt")) == [1, 2]
+    node = r.tree.get(agent)
+    assert on_branch(project, node.branch, "work.txt") == "agent output\n"
+    assert events(r, agent, "commit_failed") == []
+    assert node.status == "done", (node.status, node.reason)
+    assert result_of(r, agent)["status"] == "done"
 
 
 def test_ci_r5_stop_during_a_fix_turn_ends_the_loop(tmp_path, monkeypatch):
@@ -749,3 +777,45 @@ def test_ci_r5_fix_turns_count_toward_the_runs_usage(tmp_path, monkeypatch):
     assert len(invocations(probe)) == 2
     total = r.tree.rollup_usage().get("total", 0)
     assert total >= 1100, f"the fix turn's usage was not counted: {total}"
+
+
+def test_ci_r5_a_steered_runs_own_commit_gets_a_fresh_loop(tmp_path, monkeypatch):
+    """Decision after tester ag-c057bd: a steered run is a new end of run. The
+    original run uses up both attempts (the second fixes the hook). The steered
+    turn leaves `BLOCK` again; its commit gets its own loop, counted from 1 —
+    with a shared count, the budget of 2 would already be spent."""
+    steered = [["touch", "more.txt", "steered output\n"], ["touch", "BLOCK", "x"],
+               text("CI_R5_STEERED_ANSWER"), ["exit", 0]]
+    prov, probe = fake_provider(tmp_path, [FIRST, NO_FIX, FIX, steered, FIX, NO_FIX])
+    r, project = make(tmp_path, monkeypatch, prov, limits={"commit_fix_attempts": 2})
+
+    async def go():
+        started = await r.start("worker", "go")
+        agent = started["agent_id"]
+        try:
+            await settle(r, agent)
+            assert len(invocations(probe)) == 3, "CI-R5: the original run's loop takes two attempts"
+            node = r.tree.get(agent)
+            assert on_branch(project, node.branch, "work.txt") == "agent output\n", \
+                "CI-R5: the original run's commit succeeds on its second attempt"
+            res = await r.steer(agent, "CI_R5_ORCHESTRATOR_STEER one more thing")
+            assert res.get("steered") is True, res
+            await until(lambda: len(invocations(probe)) >= 5, 30)
+            await settle(r, agent)
+        finally:
+            await stop_all(r)
+        return agent
+    agent = asyncio.run(go())
+
+    calls = invocations(probe)
+    assert prompt_of(calls[3]) == "CI_R5_ORCHESTRATOR_STEER one more thing"
+    assert len(calls) == 5, (
+        f"the steered run's refused commit must get its own fix turn: {len(calls)} runs")
+    assert resumed_with(calls[4]) == SID
+    assert attempt_numbers(events(r, agent, "commit_fix_attempt")) == [1, 2, 1], \
+        "the steered run's loop counts its attempts from 1"
+    node = r.tree.get(agent)
+    assert on_branch(project, node.branch, "more.txt") == "steered output\n"
+    assert on_branch(project, node.branch, "BLOCK") is None
+    assert events(r, agent, "commit_failed") == []
+    assert node.status == "done", (node.status, node.reason)
