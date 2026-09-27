@@ -153,14 +153,18 @@ def test_mounts_with_no_extra_config_and_nonexistent_worktrees_homes_is_root_onl
     # worktrees/homes live under the machine-wide state root, not under the
     # project root, and are not created just by constructing ProjectPaths.
     # mounts()'s existence guard (`path.exists()`) silently drops them until
-    # something else has created them — only `paths.root` (== tmp_path,
-    # which pytest already created) survives here.
+    # something else has created them — only the project root's own mounts
+    # survive here. Since SG-R2 those are the root READ-ONLY, with
+    # `.multiagents` runtime state reopened writable and its config closed
+    # again; they are listed whether or not they exist yet, because
+    # `protect_project` creates them before a container starts. tmp_path has
+    # no `.git`, so nothing under `.git` is listed.
     ex = h.make_docker_executor(tmp_path)
     paths = ex.paths
     result = ex.mounts()
     dests = {p for p, _ in result}
-    assert dests == {paths.root}
-    assert dict(result)[paths.root] is False
+    assert dests == {paths.root, paths.data, paths.config}
+    assert dict(result) == {paths.root: True, paths.data: False, paths.config: True}
 
 
 def test_mounts_includes_worktrees_and_homes_once_they_exist(tmp_path):
@@ -169,7 +173,8 @@ def test_mounts_includes_worktrees_and_homes_once_they_exist(tmp_path):
     paths.worktrees.mkdir(parents=True, exist_ok=True)
     paths.homes.mkdir(parents=True, exist_ok=True)
     dests = {p for p, ro in ex.mounts()}
-    assert dests == {paths.root, paths.worktrees, paths.homes}
+    assert dests == {paths.root, paths.data, paths.config, paths.worktrees, paths.homes}
+    assert dict(ex.mounts())[paths.root] is True        # SG-R2: root read-only
 
 
 def test_mounts_returns_empty_list_when_paths_is_none():
@@ -230,19 +235,21 @@ def test_extra_mounts_path_with_colon_and_spaces_passes_through_unvalidated(tmp_
 
 
 def test_extra_mounts_read_only_is_silently_dropped_when_path_collides_with_root(tmp_path):
-    # WIDEN-THE-BOUNDARY finding (see F30 in C1-sandbox-executor.md): `out`
-    # starts with (paths.root, False) BEFORE extra_mounts is appended, and the
+    # WIDEN-THE-BOUNDARY finding (see F30 in C1-sandbox-executor.md): the
+    # built-in project mounts come BEFORE extra_mounts is appended, and the
     # dedup loop's `path not in seen` guard means the FIRST occurrence of a
-    # path wins. A config author who names paths.root itself in extra_mounts
-    # with read_only: true does not get a read-only root — the built-in
-    # writable mount silently wins and the read_only request is dropped with
-    # no error or warning.
+    # path wins. Since SG-R2 the built-in root mount is read-only, so the
+    # collision is tested in the direction that still matters: a config
+    # author who names paths.root in extra_mounts WITHOUT read_only (a bare
+    # string, always writable) does not get a writable root — the built-in
+    # read-only mount wins and the extra entry is dropped.
     ex = h.make_docker_executor(
         tmp_path,
-        extra_mounts=[{"path": str(tmp_path), "read_only": True}],
+        extra_mounts=[str(tmp_path), {"path": str(tmp_path), "read_only": False}],
     )
-    result = dict(ex.mounts())
-    assert result[ex.paths.root] is False        # NOT True, despite the request
+    result = ex.mounts()
+    assert dict(result)[ex.paths.root] is True        # NOT False, despite the request
+    assert [p for p, _ in result].count(ex.paths.root) == 1
     assert ex.paths.root == tmp_path
 
 
@@ -294,13 +301,18 @@ def test_config_dir_is_mounted_read_only_after_root_and_wins_at_its_own_path(tmp
     ex = h.make_docker_executor(tmp_path)
     ex.paths.config.mkdir(parents=True, exist_ok=True)
     result = ex.mounts()
-    # Both entries exist: the writable root, and the narrower read-only
+    # All three exist: the read-only root (SG-R2), the writable
+    # `.multiagents` data dir reopened below it, and the narrower read-only
     # config dir mounted at its own (different, nested) destination path.
     as_dict = dict(result)
-    assert as_dict[ex.paths.root] is False
+    assert as_dict[ex.paths.root] is True
+    assert as_dict[ex.paths.data] is False
     assert as_dict[ex.paths.config] is True
-    # config mount comes after root in the returned list (appended last).
-    assert result.index((ex.paths.config, True)) > [p for p, _ in result].index(ex.paths.root)
+    # config comes after both the root and the writable data dir that
+    # encloses it in the returned list.
+    dests = [p for p, _ in result]
+    assert result.index((ex.paths.config, True)) > dests.index(ex.paths.root)
+    assert result.index((ex.paths.config, True)) > dests.index(ex.paths.data)
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +401,11 @@ def test_run_args_mount_flags_use_dash_v_source_colon_dest_ro_suffix(tmp_path):
     v_values = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
     root_entries = [v for v in v_values if v.startswith(f"{root}:")]
     assert len(root_entries) == 1
-    assert root_entries[0] == f"{root}:{root}"     # writable: no ":ro" suffix
+    assert root_entries[0] == f"{root}:{root}:ro"  # read-only (SG-R2): ":ro" suffix
+    # A writable mount carries no suffix at all: the reopened data dir.
+    data = ex.paths.data
+    data_entries = [v for v in v_values if v.startswith(f"{data}:")]
+    assert data_entries == [f"{data}:{data}"]
     del idx
 
 

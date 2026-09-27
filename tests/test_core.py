@@ -3716,26 +3716,35 @@ def test_a_literal_env_value_can_be_set_and_is_still_blockable():
 
 
 def test_the_config_that_defines_the_sandbox_is_not_writable_inside_it(tmp_path):
-    """The project root is mounted writable because agents commit in it, and
-    `.multiagents/config` sits inside it — so project.yaml, which carries
-    egress_allowlist and extra_mounts and mount_docker_socket, was writable by
-    every agent. Not an immediate escape, because nothing in there can restart
-    the container; the change lands on a later run, under a user who did not
-    make it."""
+    """`.multiagents/config` sits inside the project root, and `.multiagents`
+    runtime state is reopened writable below the (read-only, SG-R2) root — so
+    project.yaml, which carries egress_allowlist and extra_mounts and
+    mount_docker_socket, would be writable by every agent without its own
+    read-only mount. Not an immediate escape, because nothing in there can
+    restart the container; the change lands on a later run, under a user who
+    did not make it."""
     from multiagents.executor.docker import DockerExecutor
     from multiagents.paths import ProjectPaths
 
     paths = ProjectPaths(tmp_path)
     paths.config.mkdir(parents=True, exist_ok=True)
+    # A git project, so the SG-R2 layout includes where agents' commits land.
+    (tmp_path / ".git").mkdir()
     ex = DockerExecutor(config={}, providers={}, paths=paths)
 
     mounts = ex.mounts()
     assert (paths.config, True) in mounts, "config must be mounted read-only"
     root = [ro for path, ro in mounts if path == paths.root]
-    assert root == [False], "the project root stays writable; agents commit there"
-    # The narrow mount must come after the root it masks, so it wins.
-    assert mounts.index((paths.config, True)) > \
-        next(i for i, (path, _) in enumerate(mounts) if path == paths.root)
+    assert root == [True], "the project root is read-only (SG-R2)"
+    git = [ro for path, ro in mounts if path == tmp_path / ".git"]
+    assert git == [False], "`.git` stays writable; agents commit there"
+    data = [ro for path, ro in mounts if path == paths.data]
+    assert data == [False], "`.multiagents` runtime state stays writable"
+    # The narrow mount must come after the writable data dir it masks, and
+    # the root, so it wins.
+    for outer in (paths.root, paths.data):
+        assert mounts.index((paths.config, True)) > \
+            next(i for i, (path, _) in enumerate(mounts) if path == outer)
 
 
 def test_a_skill_is_attached_to_both_places_the_orchestrator_is_composed():
