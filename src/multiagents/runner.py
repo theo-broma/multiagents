@@ -51,7 +51,7 @@ from .providers import Event, Provider, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
 from .supervisor import Supervisor, looks_like_quota_failure
-from .tree import Node, Tree, new_id, node_from_raw, now
+from .tree import TERMINAL, Node, Tree, new_id, node_from_raw, now
 from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
@@ -3007,7 +3007,13 @@ class Runner:
             self.tree.emit(agent_id, "steered", message=message[:400], confirmed=True)
             return {"agent_id": agent_id, "steered": True, "status": node.status,
                     "confirmed": True}
-        if node is not None and node.status not in ("running", "pending"):
+        # bug-1b2612: `stuck` is not terminal — a trip only fires on a process
+        # that is actually running, so a respawned run the watchdog flags
+        # `stuck` within the confirm window is still live and may go on to
+        # finish the instructed work. Only a status in TERMINAL means the
+        # process actually ended without acting; `stuck` (and any other
+        # ACTIVE/PAUSED status) is reported as steered, not as a failure.
+        if node is not None and node.status in TERMINAL:
             return {
                 "agent_id": agent_id, "steered": False, "status": node.status,
                 "error": f"the respawned run ended immediately "
@@ -3021,9 +3027,16 @@ class Runner:
         # agents were steered, all three returned `steered: true`, one resumed
         # and two never produced another event — and there was no way to tell
         # the cases apart except waiting several more minutes by hand.
-        result = {"agent_id": agent_id, "steered": True, "status": "running",
+        status = node.status if node is not None else "running"
+        result = {"agent_id": agent_id, "steered": True, "status": status,
                   "confirmed": heard}
-        if not heard:
+        if node is not None and node.status == "stuck":
+            result["note"] = (
+                f"the respawned run is alive but the watchdog already flagged "
+                f"it stuck ({node.reason or 'no reason recorded'}). That does "
+                f"not mean the message was ignored — check it again before "
+                f"assuming the steer failed.")
+        elif not heard:
             result["note"] = (
                 f"the process restarted and is alive, but said nothing within "
                 f"{STEER_CONFIRM_SECONDS:.0f}s. That is normal for an agent whose "

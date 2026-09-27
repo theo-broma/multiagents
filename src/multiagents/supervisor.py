@@ -87,6 +87,17 @@ class Supervisor:
     # Distinct turn ids already counted as a step, so only the first sighting
     # of each one moves the counter.
     _seen_turns: set[str] = field(default_factory=set)
+    # bug-1b2612: the step index carried by the first tagged event this
+    # Supervisor ever sees. Providers such as agy number steps monotonically
+    # across a resumed session, not from zero per run, so a steer that
+    # respawns a run whose stream had already reached step 100 handed this
+    # class an `event.step` of ~100 on its very first event — instantly
+    # tripping runaway_steps against a `max_steps` sized for a single run.
+    # Each run gets its own Supervisor (see `_supervisor`), so subtracting
+    # the first step index seen makes THIS run start counting at 0, exactly
+    # like a fresh one, while a genuinely fresh run (first step is 0) is
+    # unaffected.
+    _step_offset: int | None = None
     # runaway_steps and timeout are terminal: reported at most once per run.
     # doom_loop and silence are not latched here — they re-arm on their own
     # rules (see _check_loop and check_timers).
@@ -112,7 +123,9 @@ class Supervisor:
         self.progress_when_last_quiet = None
 
         if event.step is not None:
-            self.steps = max(self.steps, event.step + 1)
+            if self._step_offset is None:
+                self._step_offset = event.step
+            self.steps = max(self.steps, event.step - self._step_offset + 1)
         elif self.declares_turn:
             # A step is one model turn, not one stream line. Untagged events —
             # including anything before the provider's first turn — never
