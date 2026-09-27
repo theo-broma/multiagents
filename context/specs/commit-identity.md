@@ -51,3 +51,15 @@ naming the stderr. Also a test that a clean tree is not an error.
   callers already check `result.ok` and are unchanged.
 - **Node status:** a failed commit does not by itself change the run's
   status. It is reported in the result text and in an event.
+
+**CI-R3 — every commit multiagents makes has the same fallback.** Added
+2026-09-27, after researcher ag-bb371e. CI-R1's fallback applies to every
+`git commit` / `commit-tree` that multiagents itself runs, not only
+`commit_all`. That includes `gitops.merge`'s squash commit and any
+revert-then-commit step of the merge gate. For a merge, the identity is
+named after the merging side, `multiagents` / `orchestrator@multiagents.invalid`,
+unless one is configured.
+Verified by: the existing `tests/test_core.py` merge-gate tests and
+`tests/test_c3_lifecycle_harness.py` merge tests pass with no git identity in
+the environment (HOME pointed at an empty directory), plus a direct
+`gitops.merge` test in a new file.
