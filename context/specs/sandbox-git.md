@@ -472,3 +472,9 @@ single-file bind mount inside a writable `.git` is not a protection.**
   lock error and the operation still succeeds with the branch recorded; a
   host-side cleanup test; and the live test, where a container deletion
   fails cleanly and the host cleanup then removes the branch.
+- **Branch-deletion details, after tester ag-b391b7:**
+  - `branch_pending_delete` on the node holds the branch name, as a string;
+  - the event is named `branch_pending_delete`;
+  - "reconcile" means `cmd_resume --no-launch`, and "runner start" means
+    constructing `Runner`;
+  - once the host has deleted the branch, the mark is cleared.
