@@ -1689,3 +1689,9 @@ Resume in this order:
   Left for the next phase (not started): AGENTS.md naming scripts/test-chunk.sh (item 6), live compaction (item 7),
   content-filter refusal reported as done, config-drift warning, opencode startup failures ("Unexpected server
   error", router still prefers opencode), idle nodes ag-4a29a4 / ag-cb1c70 to clean up.
+- 2026-09-27 catch-up advisor review of commit-identity → CI-R4 (bounded failure text), CI-R5 (hook failure fed
+  back to the agent, bounded), CI-R6 (agent commits unsigned). User decided hooks kept, signing skipped on agent
+  commits. Tests merged: r4 (459e5ec), r6 (97c9708). CI-R6 merged ed3696c (reviewed by me, small diff; no adversary).
+  In flight: tester ag-c057bd (CI-R5 tests); CI-R4 implementer-quick deferred (agy exhausted, restarts itself).
+  Next: merge CI-R4, then implementer-deep on CI-R5 (end-of-run path, use _finalize's relaunch pattern per advisor),
+  then adversary + reviewer on CI-R5.
