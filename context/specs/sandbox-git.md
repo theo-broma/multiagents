@@ -284,3 +284,21 @@ first delegation, and names the command.
 - **Redirected `commondir`:** git follows the `commondir` file even when
   `GIT_COMMON_DIR` is set. The pinned resolution must therefore not rely on
   environment variables alone. The mechanism is the implementer's choice.
+
+## Decisions, 2026-09-27 (orchestrator, after implementer ag-9e10d8)
+
+- **Pinned reads in the runner too:** the raw `status --porcelain` in
+  `runner._refresh_conversation` and `holds_unmerged_commits` on an agent
+  worktree go through pinned resolution, as SG-R4 requires. They are done
+  with SG-R3.
+- **`GitError` from a pinned read in the runner:** it never crashes the
+  runner. The tree is treated as unreadable, a `git_unreadable` event is
+  emitted with the path, and the operation takes its conservative branch:
+  it does not merge, and it does not assume the tree is clean.
+- **Documented limitation (SG-R5):** a hook in the in-tree copy that reaches
+  outside its own directory by a relative path finds nothing during a merge.
+  Husky v9 (`core.hooksPath=.husky/_`) is one such case, and its wrapper then
+  skips the user's hook on merges. Users of such setups should keep hooks
+  self-contained. Not fixed.
+- **The server's `git_status` tool and `monitor/snapshot.py` are pinned
+  too** (the implementer went beyond the task). Kept.
