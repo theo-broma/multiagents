@@ -1958,3 +1958,34 @@ Resume in this order:
 - 2026-09-28: after /mcp reconnect, smoke test ag-849cf5 PASSED: commit in the container works; writes to the root,
   .git/config and .git/ all refused ("Read-only file system"). Discard deleted the branch on the host. A harmless
   stderr line on commit: git tried packed-refs.lock (auto-maintenance), commit still succeeded. sandbox-git is closed.
+
+### tmux to watch the tasks (the user, 2026-09-28)
+
+- **The idea.** Launch subagents and their commands inside tmux, so that
+  their progress can be watched on demand. Nothing is attached by default.
+  The monitor would have one button to attach to a task, and one to copy
+  the attach command.
+- **The orchestrator's notes, for whoever designs it:**
+  - **What a pane would show.** Agents run headless (`-p`/`exec --json`),
+    so a raw pane shows NDJSON. It is only worth watching through a pretty
+    viewer that follows `runs/<id>/stream.jsonl`: text, tool calls, tests
+    running.
+  - **Read-only by default** (`tmux attach -r`). Keystrokes typed into a
+    pane could reach the agent's stdin; codex reads its prompt from stdin.
+  - **Synergy with "agents survive a restart of the orchestrator's CLI"**
+    (Handoff 2026-09-23, item 8). A tmux server outlives the CLI, and so
+    would be a natural process supervisor. It is the same "stream to a
+    file, adopt on restart" design.
+  - **Suggested in two steps:**
+    1. Viewer windows only. The runner keeps owning the process, and tmux
+       only runs the viewer. Low risk.
+    2. Only after that, tmux as the supervisor, which touches `runner.py`,
+       adoption and the docker `exec` path.
+  - **To decide:**
+    - one tmux session per project, or one per tree;
+    - where the tmux socket lives on the host, with permissions 0700;
+    - whether the command tools (tests, builds) launched by an agent get
+      their own window, which is harder: they are the agent's child
+      processes inside the container;
+    - which providers have to be excluded;
+    - the fallback when tmux is not installed.
