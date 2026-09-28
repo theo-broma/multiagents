@@ -121,6 +121,17 @@ finished, and nothing new goes there.
      `multiagents auth login codex`, and codex re-enabled with a container
      recreate.
 
+**Incident, 2026-09-28 ~21:25 UTC (orchestrator error, repaired).**
+- A stray `git checkout 9d34847 --` in the project root detached HEAD at
+  the pre-codex commit.
+- One spec commit (9f21895) and tester ag-3d32c4's branch were then based
+  on it.
+- **Repaired:** HEAD is back on `main`, CX-C27 is re-applied (3095671), the
+  test update is cherry-picked (7b644a4), and ag-3d32c4 is discarded.
+- `main` itself was never affected.
+- **Lesson:** never pass a commit to `git checkout` in the project root.
+  Use `git show <rev>:<path>` or a worktree.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
