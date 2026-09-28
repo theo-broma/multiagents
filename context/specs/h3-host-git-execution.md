@@ -60,8 +60,17 @@ call.**
 - It never resolves them from:
   - the worktree's `.git` file;
   - `commondir`;
-  - `gitdir`;
   - `config.worktree`.
+- **The worktree registry is the exception** (advisor, turn 10). The
+  maintenance commands `worktree remove`, `move` and `prune` necessarily
+  read `.git/worktrees/<id>/gitdir`.
+  - Before each one, the host validates that registration against H1's
+    record: the recorded path and the recorded branch. It refuses a
+    mismatch with `host_authority_mismatch`.
+  - There is no unscoped `git worktree prune`. Pruning touches only the
+    registration of the node being cleaned, never entries beyond it.
+  - Verified by: a forged `gitdir` in another node's registration is not
+    acted on, and a cleanup prunes only its own entry.
 
   The existing `_pinned` mechanism is one way to meet this, not a mandated
   one.
@@ -115,24 +124,53 @@ host bookkeeping call to spawn it.
 - Verified by: a trusted `core.fsmonitor` program writing a sentinel never
   runs during the calls in HG-R1's scope.
 
-**HG-R4: content programs come only from trusted config, and filters are
-not applied to agent content on commit or checkout.**
-- `commit_all` (`add -A`) and `worktree add` on the host must not run a
-  clean, smudge or process filter over agent content. The effect is what
-  `_pinned` reset already does: every configured filter is emptied for
-  those calls.
-- The trade is stated here, and in a comment beside the code: a project
-  using LFS gets its pointer files committed or checked out as they are,
-  without conversion. The agent's container-side commits went through the
-  container's own git, so its branch is already in its final form.
-- Merge drivers (`merge.*.driver`), textconv and `diff.external` come only
-  from trusted config, and HG-R1 guarantees that.
-- They stay permitted during merges. They are programs the user chose, run
-  over data. Running one is not the same as running the agent's code.
-- Verified by:
-  - a trusted `filter.x.clean` writing a sentinel, selected by an
-    agent-written `.gitattributes`, does not run during `commit_all`;
-  - the committed content is the raw file.
+**HG-R4: no content program runs over agent content on the host by
+default.** A trusted config can still name a program that the agent
+*selects* through `.gitattributes`, and whose script may live in the merged
+tree. So "trusted config" is not enough (advisor, turn 10).
+
+By default, every host git call runs with all external content programs
+disabled:
+- `filter.*.clean`, `smudge` and `process`;
+- `merge.*.driver`;
+- `diff.*.textconv`;
+- `diff.external`.
+
+The opt-in is `git.merge.host_content_programs: true`, default `false`.
+- It re-enables the trusted-config programs **only** for `merge_agent` into
+  the base branch. That is the LFS case.
+- It is documented beside the setting. The comment warns that with the
+  opt-in, an agent-written `.lfsconfig` (`lfs.url`) can steer where LFS
+  makes network requests.
+- It never applies to `commit_all`, to worktree operations, or to merges
+  into agent worktrees.
+
+Where disabling a program would silently change content semantics, the
+host refuses visibly instead:
+- **`commit_all` on stop or resume.** When any path it would stage has a
+  `filter` attribute, the host does not commit. The worktree is left as it
+  is, uncommitted and intact. It emits one event and one line naming the
+  paths.
+  - The reason: committing a raw file in place of its filtered form, such
+    as an LFS binary, would corrupt the branch.
+  - Where the executor provides a container, committing inside the
+    container, where the agent's code already runs, is an acceptable way
+    to satisfy the same behaviour.
+- **`worktree add` on the host,** during recovery. It checks out with
+  filters disabled. When the checked-out tree has `filter` attributes, it
+  says once that those paths are unconverted.
+- **Merges.** With the opt-in off, a merge whose paths select a filter or
+  a merge driver runs without them. The `merge_agent` result says so in one
+  line naming the setting.
+
+Verified by:
+- a trusted `filter.x.clean` that writes a sentinel, selected by an
+  agent-written `.gitattributes`, never runs during `commit_all`, and
+  `commit_all` refuses visibly;
+- a trusted `merge.x.driver` whose command runs a script *from the merged
+  tree*, selected by the branch's `.gitattributes`. It does not run during
+  `merge_agent` by default. With `host_content_programs: true` it runs for
+  a merge into base, and it never runs for a merge into a parent worktree.
 
 **HG-R5: push and transport.** `push_branch` takes its remote from trusted
 project config (`git.remote`), never from agent-writable config (HG-R1).
