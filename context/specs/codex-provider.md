@@ -945,3 +945,32 @@ failures:
     as the description of that drift item.
   - Verified by: the two SP-R5 tests above, green on a host with codex
     installed, plus the existing CX-C19 tests.
+
+## Live results
+
+- **2026-09-28 ~21:40 UTC:**
+  - `multiagents auth login codex` succeeded, into the docker backing.
+  - **L5, partly checked.** `budget_status` shows codex `known: true`,
+    `source: app-server`, bucket `codex`, 5h 0% and weekly 15%. The live
+    `account/rateLimits/read` works from the host against the backing
+    profile.
+  - `refresh-models` fails until Codex has been used once in the profile,
+    because `models_cache.json` does not exist yet. The first app-server
+    read creates it. This is a minor finding.
+- **L6/L1, first probe (ag-7270de, codex-probe on gpt-5.6-luna).** It failed
+  with 401 "Missing bearer".
+  - The adapter ran in the container.
+  - `MULTIAGENTS_BIN` resolved.
+  - The network reached `api.openai.com`, and the thread started.
+  - **Cause: a contract error, mine.** CX-C8 revised says that under docker
+    `CODEX_HOME=$HOME/.codex`. But an agent's HOME is its own per-agent home
+    (`~/.multiagents/homes/<slug>/<agent>`), not the user's. So Codex got an
+    empty profile. The backing is mounted at `MULTIAGENTS_PRIVATE_HOME`
+    (`/home/theobroma/.codex`).
+- **CX-C8, revised again:**
+  - Under `MULTIAGENTS_EXECUTOR=docker`, the adapter sets
+    `CODEX_HOME=$MULTIAGENTS_PRIVATE_HOME`.
+  - If that variable is missing under docker, it refuses with a `codex:`
+    line.
+  - It never falls back to `$HOME/.codex`.
+  - The tests that assert `$HOME/.codex` for docker change deliberately.
