@@ -1096,3 +1096,16 @@ The same task was given to every model.
      explicit opt-in (decision #12).
   3. **Nested codex spawns (depth ≥ 2) get the launcher path** and fail on
      `codex-code-mode-host`. Every codex role has `can_spawn: false` today.
+
+### Decisions on the CX-C28 tester's questions (ag-2c3f2b; 9 tests, 8 red)
+
+- **The note** can be any single extra line. The wording is free.
+- **The event:** `conversation_replaced` carries the old node id in the
+  field `old_agent_id`.
+- **An empty fallback model** is an invalid route. The conversation is then
+  replaced on the current provider, exactly as in scenario 1. Nothing runs
+  with an empty `--model`.
+- **A node on a sibling instance of the roster provider's family** (the same
+  `family`, a different instance) is resumed on that sibling, with the
+  roster's model, since a family shares model ids. It is never routed
+  through an empty fallback.
