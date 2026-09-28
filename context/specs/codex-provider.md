@@ -443,3 +443,151 @@ outcome in this file under "Live results".
 - **L8** — CX-R11, the measurement: one fixed probe task per candidate model,
   recording the 5 h window used. Then the user pins the models (CX-Q1), and
   the roster change goes to the user (CX-D4).
+
+## Amendments after the contract review (2026-09-28, ag-5b326a)
+
+A claude opus stand-in reviewed the contract, because the advisor is on agy
+and agy is excluded. Its findings were checked against the code. Where an
+amendment conflicts with the text above, **the amendment wins**.
+
+- **CX-C8, revised: the adapter chooses the profile, not `env:`.** `env:` is
+  expanded on the host and applied under every executor. So
+  `CODEX_HOME=~/.multiagents/profiles/codex` would reach the container as a
+  host path that nothing mounts there.
+  - The shipped block sets **no** `CODEX_HOME` in `env:`. It declares
+    `container_private_home: [.codex]`, which mounts the private backing at
+    `$HOME/.codex` inside the container and masks the user's own.
+  - The adapter sets `CODEX_HOME` for the native CLI:
+    - under `MULTIAGENTS_EXECUTOR=docker`, to `$HOME/.codex`, which is the
+      backing;
+    - otherwise, to `$MULTIAGENTS_CODEX_PROFILE` if set (so an `extends:`
+      second account can override it through `env:`), else
+      `~/.multiagents/profiles/codex`.
+  - `MULTIAGENTS_CODEX_PROFILE` is provider vocabulary. It lives in
+    `providers.yaml` and in the adapter, never in core.
+  - A `CODEX_HOME` already present in the environment is ignored and
+    overwritten, so the user's own shell setting cannot leak in.
+  - **The collision with CX-C3 to watch in L4.** The versions root lives
+    under the host's `~/.codex/packages/…`, and that path is masked by the
+    backing inside the container. The versions-root mount therefore nests
+    inside the backing mount. Docker creates the empty mount-point
+    directories in the backing on the host, which is acceptable. The mount
+    order must be the backing first, then the versions root. A docker
+    mount-list test pins that order.
+
+- **CX-C2, revised: the executor is the layer that resolves the binary.**
+  - `MULTIAGENTS_BIN` is set by the executor inside `start()` (local and
+    docker) and inside `_start_inside()`. The runner does not set it.
+  - The existing `_versioned_argv` matches on `provider.bin == argv[0]`. It
+    must keep working for providers without `adapter:`. With `adapter:`, the
+    resolved `bin` goes into `MULTIAGENTS_BIN`, and argv[0] (the adapter) is
+    left alone.
+  - Agent runs also get `MULTIAGENTS_PRIVATE_HOME`, as actions do, whenever
+    the executor has one.
+  - **Spawns from inside the container (depth ≥ 2).** A spawn started from
+    inside the container cannot see the host's launcher symlink. Its
+    `MULTIAGENTS_BIN` is the launcher path as mounted, which is the version
+    current when the container was created. It works, but it may be stale.
+    This is a documented limitation, not a failure.
+
+- **CX-C3, pinned.** The versions root is `resolved.parents[N-1]`, where
+  `resolved` is the fully resolved target of `bin`. N = 1 is the target's
+  own directory. Tests cover N = 1 and N = 3. `_versions_dir` is the hook to
+  extend. The codex layout example belongs in the block's comment, not in
+  code or in test names.
+
+- **CX-C4, replaced.** Instead of running `models_cmd` under `build_env`:
+  - a provider with **no `models_cmd`**, whose action script (or adapter)
+    implements `models`, has `refresh_models()` run that action through
+    `scripts.run_action`, which applies env and resolution;
+  - exit 64 means "not implemented", and the provider is then skipped
+    quietly;
+  - a provider that still declares `models_cmd` behaves as today.
+  - The codex block declares no `models_cmd`.
+  - Any signature change to `refresh_models` is the implementer's.
+
+- **CX-C5, replaced: `billing:`, a provider field.**
+  - It takes `metered` (the default) or `plan`.
+  - For a `plan` provider:
+    - the monitor (`tui.py`) shows `plan` wherever it would show a dollar
+      figure for that provider's runs;
+    - `multiagents usage` labels it the same way;
+    - each `budget_status.by_model` entry gains `"billing": "plan"`, and
+      `cost_usd` stays a number;
+    - the rendered tree keeps hiding a zero cost, as it does today.
+  - Shipped: `codex` and `agy` are `billing: plan`, a change to YAML only.
+  - Verified by: monitor rendering tests and `by_model` shape tests.
+
+- **CX-C15 (new) — `stale_seconds` from a budget script is kept.**
+  `budget._from_script` parses an optional numeric `stale_seconds` into
+  `Budget`, and `budget_status` reports it. It follows the same convention
+  as claude's `stale_seconds`. A malformed value is ignored.
+  - Verified by: a `_from_script` unit test.
+
+- **CX-C9, amended.**
+  - **`check` follows the same profile rule as `login`**, the executor-implied
+    one. So `auth_status` reports on the profile that agents actually use.
+  - **The exact stderr line** for an auth failure in a run is
+    `codex: not authenticated — run: multiagents auth login codex`. It
+    matches the existing `_AUTH_MARKERS` ("not authenticated",
+    "auth login"), so no marker is added.
+
+- **CX-C10, amended.**
+  - **Docker permissions.** The offline tests pin the interim mapping,
+    everything to `danger-full-access`. That test is changed deliberately
+    after L3, by `tester`.
+  - **Self-update off.** Every invocation of the native CLI passes the
+    option that disables its update check or self-update. The exact `-c`
+    key is confirmed from `codex --help` or the config reference during
+    implementation, and recorded here. A test asserts the flag is present.
+  - **A resume whose thread is gone fails loudly.** It does not silently
+    start fresh. The result is an error whose text starts
+    `codex: resume failed:`, so an advisor never loses its context without
+    anyone knowing.
+  - **A run killed before `thread.started`** has no session id. Its retry
+    is an ordinary fresh run, which is existing engine behaviour and needs
+    nothing new.
+
+- **CX-C11, made testable.**
+  - It examines at most **8** rollout files per profile, the newest by
+    mtime, and reads at most **1 MiB** from the tail of each.
+  - If none of them carries `rate_limits`, it returns `known: false`.
+    Tests assert the file count and byte count through a counting fixture;
+    there is no time-based assertion.
+  - "Newer", between a rollout event and the optional L5 file, means the
+    **event timestamp**, never the file mtime.
+  - `multiagents refresh-quota` for codex runs the `budget` action and never
+    a model call.
+  - **Extra read-only homes (the user decides the default).** The adapter
+    reads, metadata only, the rollout files of each directory listed in
+    `MULTIAGENTS_CODEX_QUOTA_HOMES` (colon-separated) in addition to the
+    profiles in use. This exists because the 5 h and weekly windows are
+    **per account**: the user's own Codex use in `~/.codex` spends the same
+    quota, and without it the reading runs low. Whether the shipped block
+    sets it to `~/.codex` is CX-Q3.
+
+- **CX-C6, amended.**
+  - A roster fallback that names a provider with `enabled: false` is
+    skipped by routing, not crashed on. A test asserts it.
+  - Disabling codex is `enabled: false` in the project's `providers.yaml`.
+  - Removing it entirely also means deleting `~/.multiagents/profiles/codex`
+    and the docker backing. This goes in the block's `notes:`.
+
+- **Migration: nothing to migrate.** The proposal was never installed.
+  There is no `codex` entry in the project or global `providers.yaml`, and
+  no `codex.py` under `.multiagents/config/providers/` or
+  `~/.config/multiagents/providers/` (checked on 2026-09-28). Note, though,
+  that the global directory holds copies of `agy.sh`, `claude.sh` and
+  `opencode.sh`, and those shadow the shipped defaults. That is an existing
+  hazard, and it is out of scope here.
+
+- **L2, extended.** Also run **two concurrent codex agents** across a token
+  expiry. If one of them fails on a rotated refresh token, the provider must
+  not sit in `needs_login` while the profile is actually logged in. Decide
+  the fix from what is observed.
+
+- **CX-Q3 (new, the user's decision).** Should the budget action also read
+  rate-limit metadata from the user's own `~/.codex/sessions`? It would read
+  only the `rate_limits` block, on the host only, and never mount anything
+  in agents. DEFAULT, pending the answer: unset, so it reads only the
+  dedicated profile and the backing.
