@@ -1,0 +1,57 @@
+# Proposition à fusionner dans .multiagents/providers.yaml, pas activée ici.
+providers:
+  codex:
+    bin: multiagents-codex
+    script: codex.py
+    family: codex
+    enabled: true
+    spawn:
+      args: [run, --prompt, '{prompt}', --model, '{model}', --workdir, '{workdir}']
+      resume: [--session, '{session_id}']
+      permission:
+        full: [--permission, full]
+        sandbox: [--permission, sandbox]
+        readonly: [--permission, readonly]
+      optional:
+        effort: [--effort, '{effort}']
+    models_cmd: [multiagents-codex, models]
+    models_parse: tsv
+    usage_mode: delta
+    # Répertoire entier : les renouvellements atomiques restent partagés.
+    home_links: [.codex]
+    container_private_home: [.codex]
+    mcp:
+      file: codex-mcp.json
+      config:
+        mcpServers:
+          multiagents:
+            command: '{mcp_command}'
+            args: '{mcp_args}'
+            env: '{mcp_env}'
+      args: [--mcp-config, '{mcp_config}']
+    stream:
+      format: ndjson
+      session_id_paths: [session_id]
+      rules:
+        - match: {kind: text}
+          as: text
+          fields: {text: text, turn: turn}
+        - match: {kind: tool}
+          as: tool
+          fields: {name: name, args: args, state: state, turn: turn}
+        - match: {kind: result}
+          as: result
+          fields: {status: status, text: text, tokens: tokens}
+        - match: {kind: error}
+          as: error
+          fields: {text: text}
+        - match: {kind: step}
+          as: step
+          fields: {state: state, turn: turn}
+    notes: >-
+      Adaptateur Python externe requis. Codex CLI 0.157.1 ciblé.
+      Quotas inconnus, coût non fourni, compact externe non implémenté.
+      Pas de lecture des transcripts par le watchdog générique.
+    agent_guidance: >-
+      Use the multiagents MCP tools for delegation when they are provided.
+      Do not launch another agent CLI yourself. Keep tool calls scoped to your task.

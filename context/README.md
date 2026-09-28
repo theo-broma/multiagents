@@ -38,6 +38,15 @@ making. Both halves of the seam are tracked and readable from a worktree:
 The live copies under `.multiagents/config/` are gitignored and you will not see
 them. Review the tracked defaults; that is where a new provider starts from.
 
+## The Codex provider (Phase 5, from 2026-09-28)
+
+- `specs/codex-provider.md` — requirements and decisions (`CX-*`). Read it
+  first.
+- `codex-proposal/` — the user's original integration proposal (adapter,
+  provider block, examples, 21 offline tests). It is kept verbatim as input.
+  It predates sandbox-git, and several of its choices are superseded by the
+  spec (profile, quota, launch).
+
 ## What is NOT here, and where it lives instead
 
 - **Requirements and specs.** This project does not specify before it builds.

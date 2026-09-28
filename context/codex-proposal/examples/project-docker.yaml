@@ -1,0 +1,20 @@
+# FRAGMENT indicatif, à adapter. Les listes remplacent les listes existantes :
+# AJOUTER ces éléments aux listes actuelles, ne pas les écraser.
+executor:
+  docker:
+    extra_mounts:
+      # Le provider monte automatiquement multiagents-codex, pas son enfant codex.
+      # Remplacer par le vrai binaire NATIF, pas un lanceur npm isolé.
+      - path: /REPLACE/WITH/NATIVE/codex
+        read_only: true
+    egress_allowlist:
+      - chatgpt.com
+      - api.openai.com
+      - auth.openai.com
+
+# Déclarer aussi le chemin natif dans providers.yaml si absent du PATH :
+# providers:
+#   codex:
+#     env:
+#       MULTIAGENTS_CODEX_BIN: /REPLACE/WITH/NATIVE/codex
+# Ne pas activer le proxy d'authentification Claude pour Codex.

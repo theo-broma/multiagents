@@ -169,6 +169,30 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
     layout and the host-side branch cleanup, which trusts a tree the
     container can write.
 
+17. **Phase 5 planned, Codex provider (2026-09-28, initializer):**
+    - `refactor/split-consume` was fast-forwarded into `main`, and a stray
+      22 MB ImageMagick screenshot named `sys` was removed (b3f3910).
+    - Requirements are in `context/specs/codex-provider.md`. The decisions
+      were taken without you:
+      - ship Codex as a default provider;
+      - a dedicated profile rather than the user's `~/.codex`;
+      - the quota read from rollout files (`rate_limits`: a 300 min and a
+        10080 min window);
+      - Docker permissions settled live, falling back to
+        `danger-full-access` as claude does;
+      - no interactive launch.
+    - The user chose Codex for adversary, reviewer, advisor,
+      implementer-quick and researcher, plus claude fallbacks, on a ChatGPT
+      **Plus** plan. The tight quota was raised and accepted.
+    - Egress: `openai.com` and `chatgpt.com`, approved by the user.
+
+    Please review:
+    - whether CX-D4 overloads Plus;
+    - whether the fallback ordering keeps the tester off the implementers'
+      family (CX-R12);
+    - the generic engine change for a provider's second binary (CX-R3);
+    - whether putting yourself on Codex (CX-R10) loses anything.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
