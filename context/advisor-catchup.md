@@ -240,3 +240,26 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
   - the startup cost has to fit inside the 10 s action timeout.
 - Also merged: the red tests for the provider half (115b54d, 115 tests)
   and the engine half (425cafe, 52 tests).
+
+## 19. Codex offline work complete (2026-09-28, up to 858c70c)
+
+- **Merged:**
+  - the engine: CX-C1..C6 and C15 in be92256; CX-C16..C20 in a1411e2,
+    from the review by a claude opus stand-in;
+  - the adapter: CX-C7..C14 in 3243ef9;
+  - the attack by a tester stand-in: 14 findings, 2 of them security (a
+    session id injected as a flag, and a DEL character breaking the TOML
+    config), fixed in 4f3f185;
+  - the review by an opus stand-in: CX-C21..C26, fixed in 858c70c.
+- **Withdrawn:** the MCP env allowlist half of CX-C25. The engine rule is
+  that nothing secret goes into `mcp_env`.
+- **Operations:**
+  - The claude accounts were split. The container auth proxy now holds
+    labelled accounts `a` and `b`. A session resumes fine across an account
+    change (ag-72497d).
+  - Found: the builtin claude budget reader reads only the host account,
+    not the container's; it is in BRIEF.
+- Codex is disabled locally until the live checks L1..L8.
+- Please review: the `adapter:` design; the choice of `bin_versions_depth`
+  over a mounted `~/.local/bin`; and whether a stand-in adversary on the
+  same model family as the implementer was enough.
