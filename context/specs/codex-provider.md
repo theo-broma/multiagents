@@ -1009,3 +1009,33 @@ failures:
     works);
   - L7: consult on a codex advisor;
   - L8: measurement.
+
+### L8 / CX-R11: measurement (2026-09-28 ~22:00 UTC, one run per model, codex-probe)
+
+The task: read `scripts.py` and `budget.py`, list the 11 top-level functions
+of `scripts.py`, and explain the exit-64 path with `file:line` citations.
+The same task was given to every model.
+
+| model | correct | secs | input | cache read | output |
+|---|---|---|---|---|---|
+| gpt-5.6-terra | 11/11, yes | 25 | 19.5k | 53.5k | 755 |
+| gpt-5.6-luna | 11/11, yes | 29 | 20.5k | 68.6k | 986 |
+| gpt-6-sol | 11/11, yes | 30 | 27.4k | 52.1k | 1006 |
+| gpt-5.6-sol | 11/11, yes | 33 | 29.8k | 66.0k | 1188 |
+| gpt-6-astra | 11/11, yes | 42 | 27.5k | 88.1k | 812 |
+| gpt-5.5 | 11/11, yes | 42 | 41.7k | 77.3k | 1482 |
+| gpt-6-luna | **no** (invented 4 functions, read nothing) | 9 | 5.9k | 11.0k | 134 |
+
+- **The 5 h window reads in whole percent,** so no single run registers.
+  - The first five runs, plus the earlier probe, moved it from 0% to 4%.
+  - gpt-6-sol and gpt-6-astra together moved it from 4% to 9%, which
+    suggests the gpt-6 models cost more per token.
+  - The weekly window went from 15% to 16%.
+- **This task does not tell the models apart on quality,** except that
+  gpt-6-luna fails. Harder tasks would be needed to rank them.
+- **For CX-Q1, the user decides.** My recommendation:
+  - `gpt-5.6-terra` for cheap roles (implementer-quick, researcher) and as
+    the fallback model;
+  - a gpt-6 model (`gpt-6-sol` is cheaper than `astra` on this task) for
+    adversary, reviewer and advisor, where judgement matters;
+  - never `gpt-6-luna`.
