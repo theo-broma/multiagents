@@ -661,23 +661,87 @@ class DockerExecutor(Executor):
             return None
         return resolved.parent
 
+    # CX-C17: what a versions root may never be, nor contain. `/lib*` is
+    # matched by name below.
+    SYSTEM_PREFIXES = (Path("/usr"), Path("/bin"), Path("/sbin"), Path("/etc"),
+                       Path("/opt"), Path("/var"), Path("/nix"), Path("/snap"))
+
     @staticmethod
-    def _depth_root(provider: Any, resolved: Path) -> Path | None:
+    def _declares_depth(provider: Any) -> bool:
+        """Whether `provider` asks for a versions root that is to be honoured:
+        `bin_versions_depth` set on an enabled provider (CX-C3, CX-C20)."""
+        return ((getattr(provider, "bin_versions_depth", 0) or 0) >= 1
+                and getattr(provider, "enabled", True))
+
+    @classmethod
+    def _depth_error(cls, provider: Any, resolved: Path) -> str:
+        """Why the versions root `bin_versions_depth` computes for `resolved`
+        must not be mounted, or "" (CX-C17): deeper than the path allows, or a
+        root that would widen the mount to the home, `/` or a system prefix.
+        """
+        depth = provider.bin_versions_depth
+        key = f"{provider.name}'s bin_versions_depth: {depth}"
+        if len(resolved.parents) < depth:
+            return (f"{key} is deeper than {resolved}, which has only "
+                    f"{len(resolved.parents)} directories above it")
+        root = resolved.parents[depth - 1]
+        homes = {Path.home(), Path.home().resolve()}
+        if (root == Path("/") or root in homes
+                or any(root in home.parents for home in homes)):
+            reason = "the home directory or one above it"
+        elif (root in cls.SYSTEM_PREFIXES
+              or (len(root.parts) == 2 and root.parts[1].startswith("lib"))):
+            reason = "a system prefix"
+        else:
+            return ""
+        return (f"{key} makes {root} the versions root of {resolved}, and that "
+                f"is {reason}: mounting it would expose far more than the CLI. "
+                f"Lower the depth to the directory that holds every version")
+
+    @classmethod
+    def _depth_root(cls, provider: Any, resolved: Path) -> Path | None:
         """The versions root `bin_versions_depth` declares (CX-C3), or None.
 
         `resolved.parents[N-1]`: N = 1 is the target's own directory. None
-        when the key is unset, or the target is not that deep.
+        when the key is unset or not honoured (`_declares_depth`), and when
+        the root is refused (`_depth_error`): a refused root is never
+        mounted, and the run is refused in `ensure_running`.
         """
-        depth = getattr(provider, "bin_versions_depth", 0) or 0
-        if depth < 1 or not resolved.is_file() or len(resolved.parents) <= depth:
+        if not cls._declares_depth(provider) or not resolved.is_file():
             return None
-        return resolved.parents[depth - 1]
+        if cls._depth_error(provider, resolved):
+            return None
+        return resolved.parents[provider.bin_versions_depth - 1]
+
+    def _depth_errors(self) -> list[str]:
+        """Every refused versions root among the installed providers (CX-C17).
+        None with `mount_cli_from_host: false`, which mounts no root (CX-C18)."""
+        if not self.config.get("mount_cli_from_host", True):
+            return []
+        out = []
+        for provider in self.providers.values():
+            if not self._declares_depth(provider):
+                continue
+            binary = getattr(provider, "available", lambda: None)()
+            if not binary:
+                continue
+            resolved = self._resolve_launcher(binary)
+            if resolved.is_file():
+                error = self._depth_error(provider, resolved)
+                if error:
+                    out.append(error)
+        return out
 
     def _versions_roots(self) -> dict[Path, str]:
-        """{versions root: provider name} for every provider declaring
-        `bin_versions_depth`, as its launcher resolves right now."""
+        """{versions root: provider name} for every enabled provider declaring
+        `bin_versions_depth`, as its launcher resolves right now. Empty with
+        `mount_cli_from_host: false` (CX-C18)."""
         out: dict[Path, str] = {}
+        if not self.config.get("mount_cli_from_host", True):
+            return out
         for name, provider in self.providers.items():
+            if not self._declares_depth(provider):
+                continue
             binary = getattr(provider, "available", lambda: None)()
             if not binary:
                 continue
@@ -763,8 +827,13 @@ class DockerExecutor(Executor):
                     out.append((launcher_path, True))
                     resolved = launcher_path.resolve()
                     versions_dir = self._versions_dir(launcher_path, resolved)
-                    if self._depth_root(provider, resolved) is not None:
-                        pass    # its versions root is mounted last, below
+                    if (self._declares_depth(provider) and resolved.is_file()
+                            and (self._depth_root(provider, resolved) is not None
+                                 or self._depth_error(provider, resolved))):
+                        # Its versions root is mounted last, below; a refused
+                        # one is not mounted at all, nor anything under it
+                        # (CX-C17).
+                        pass
                     elif versions_dir is not None:
                         # A versioned launcher: mount the versions directory
                         # itself, not the resolved file, so the declared mount
@@ -814,16 +883,16 @@ class DockerExecutor(Executor):
         # update under it reaches the container without a recreate. Last,
         # because it may nest inside a private home mounted just above: the
         # deeper mount has to come after the one it sits in.
-        if self.config.get("mount_cli_from_host", True):
-            listed = {path for path, _ in mounts}
-            for root in self._versions_roots():
-                if root not in listed:
-                    mounts.append((root, True))
-                    listed.add(root)
+        listed = {path for path, _ in mounts}
+        for root in self._versions_roots():
+            if root not in listed:
+                mounts.append((root, True))
+                listed.add(root)
         return mounts
 
     def _adapter_paths(self) -> list[Path]:
-        """The host path of every provider's `adapter:` that is installed."""
+        """The host path of every enabled provider's `adapter:` that is
+        installed (CX-C20)."""
         from .. import scripts
         from ..paths import global_config_dir
 
@@ -831,6 +900,8 @@ class DockerExecutor(Executor):
         project_config = self.paths.config if self.paths is not None else None
         out = []
         for provider in self.providers.values():
+            if not getattr(provider, "enabled", True):
+                continue
             found = scripts.resolve_adapter(provider, config_dir, project_config)
             if found is not None and found not in out:
                 out.append(found)
@@ -1800,6 +1871,11 @@ class DockerExecutor(Executor):
             # the `_start_inside` branch first) — this guard is for any other
             # caller that assumes `ensure_running` is always safe to call.
             return {"ok": True, "container": self.container, "existed": True}
+        # CX-C17: a versions root that would widen the mount is a config
+        # error, refused before any container is created or used.
+        errors = self._depth_errors()
+        if errors:
+            return {"ok": False, "error": "; ".join(errors)}
         # Before anything is created or started: a container must never run
         # with a protected path missing, and a project it cannot protect is
         # refused outright (SG-R2).
@@ -1830,15 +1906,16 @@ class DockerExecutor(Executor):
         roots = {str(root): name for root, name in self._versions_roots().items()}
         moved = [roots[dest] for dest in stale if dest in roots]
         if moved:
-            # CX-C3: `bin` now resolves outside the versions root this
-            # container was created with — an update that moved the install,
-            # not one within it. Said by name, so the fix is findable.
+            # CX-C3/C19: `bin` resolves under a versions root this container
+            # was not created with — an update that moved the install, or the
+            # key added since. Said by name, so the fix is findable.
+            root = next(dest for dest in stale if dest in roots)
             provider = self.providers[moved[0]]
             return {"ok": False,
-                    "error": f"{moved[0]}'s `bin` now resolves outside the versions "
-                             f"root this container mounted (bin_versions_depth: "
-                             f"{provider.bin_versions_depth}), so the container "
-                             f"cannot reach it: run `multiagents docker rm && "
+                    "error": f"this container lacks the versions root {root} "
+                             f"({moved[0]}'s bin_versions_depth: "
+                             f"{provider.bin_versions_depth}), so it cannot run "
+                             f"{moved[0]}'s `bin`: run `multiagents docker rm && "
                              f"multiagents docker up`. That ends any agent still "
                              f"inside."}
         if stale:
@@ -2045,7 +2122,9 @@ class DockerExecutor(Executor):
         provider's bare command name are left alone (P0-R1.2). A launcher that
         is not versioned keeps today's bare-name argv.
         """
-        if not argv:
+        if not argv or not self.config.get("mount_cli_from_host", True):
+            # CX-C18: with no host CLI mounted, the bare name is the one the
+            # container's own PATH resolves.
             return argv
         for provider in self.providers.values():
             if provider.bin != argv[0]:
@@ -2070,7 +2149,12 @@ class DockerExecutor(Executor):
         From inside the container (a spawn at depth >= 2) the host launcher
         cannot be seen: this is the launcher as mounted, the version current
         when the container was created. It runs; it may be stale.
+
+        With `mount_cli_from_host: false` the host's CLI is not in the
+        container: the bare `bin`, for the container's PATH (CX-C18).
         """
+        if not self.config.get("mount_cli_from_host", True):
+            return provider.bin
         binary = super().native_bin(provider_name, provider, env)
         if not binary:
             return ""
@@ -2081,11 +2165,12 @@ class DockerExecutor(Executor):
             return str(resolved)
         return binary
 
-    def adapter_env(self, argv: list[str], env: dict[str, str]) -> dict[str, str]:
+    def adapter_env(self, argv: list[str], env: dict[str, str],
+                    provider: str = "") -> dict[str, str]:
         """The base variables, plus MULTIAGENTS_PRIVATE_HOME when this
         provider has a private home in the container, as actions get it."""
-        found = self.adapter_provider(argv)
-        env = super().adapter_env(argv, env)
+        found = self.adapter_provider(argv, provider)
+        env = super().adapter_env(argv, env, provider)
         if found is not None:
             private = self.private_state(found[0])
             if private:
@@ -2093,15 +2178,16 @@ class DockerExecutor(Executor):
         return env
 
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
-                    run_dir: Path | None = None, deadline: float = 0) -> Handle:
+                    run_dir: Path | None = None, deadline: float = 0,
+                    provider: str = "") -> Handle:
         if self.inside():
             return await self._start_inside(argv, cwd, env, run_dir=run_dir,
-                                            deadline=deadline)
+                                            deadline=deadline, provider=provider)
         state = self.ensure_running()
         if not state.get("ok"):
             raise RuntimeError(f"docker executor: {state.get('error')}")
         argv = self._versioned_argv(argv)
-        env = self.adapter_env(argv, env)
+        env = self.adapter_env(argv, env, provider)
         if "HOME" not in env:
             # What `container_home` promises. Locally the CLI falls back to the
             # passwd entry, which is this; in the image there is none.
@@ -2209,7 +2295,8 @@ class DockerExecutor(Executor):
         return pid_file
 
     async def _start_inside(self, argv: list[str], cwd: Path, env: dict[str, str], *,
-                            run_dir: Path | None = None, deadline: float = 0) -> Handle:
+                            run_dir: Path | None = None, deadline: float = 0,
+                            provider: str = "") -> Handle:
         """Start `argv` from within the container, as `docker exec` would.
 
         Already in the container, a start is a local one: `LocalExecutor`
@@ -2246,7 +2333,7 @@ class DockerExecutor(Executor):
             if value is not None:
                 env[key] = value
         argv = self._versioned_argv(argv)
-        env = self.adapter_env(argv, env)
+        env = self.adapter_env(argv, env, provider)
         if run_dir is not None:
             # The wrapper records the agent's pid where `kill_detached` reads it.
             return await LocalExecutor().start(argv, cwd, env, run_dir=run_dir,

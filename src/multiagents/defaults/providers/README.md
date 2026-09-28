@@ -84,6 +84,31 @@ read JSON.
                             live session to compact it. Any other value of the
                             variable is a real compaction.
 
+    <provider>.sh models    non-interactive; the provider's models, one per
+                            line or as its `models_parse` expects
+                            exit 64 = not implemented; nothing is listed
+
+`models` runs only for a provider with neither a static `models:` list nor a
+`models_cmd`. Before CX-C4 such a provider was skipped by `refresh-models`
+with "no models_cmd and no static models: list"; now its action script is
+asked. A script that answers `models` with exit 64 (claude's) therefore no
+longer produces that line: the provider is left out of models.yaml without a
+problem recorded. Deliberate, and the one place CX-C4 is not byte-for-byte.
+
+## Adapters
+
+A provider may name an `adapter:` (CX-C1), found where its action script
+would be. Agent runs exec the adapter, which drives `bin`; without a
+`script:`, the adapter is also the action script.
+
+In docker the adapter runs at its host path. When nothing already mounted
+covers it, it is bind-mounted **as a single file**, and docker binds a file
+by its inode: replacing the adapter atomically on the host (a rename, as
+editors and installers do) leaves the container running the OLD copy until
+the container is recreated (`multiagents docker rm && multiagents docker up`).
+Editing it in place is seen at once. Keep a project adapter in a directory
+that is mounted whole if you edit it often.
+
 ## Environment provided
 
     MULTIAGENTS_PROVIDER          provider name

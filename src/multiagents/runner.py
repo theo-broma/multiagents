@@ -1155,8 +1155,8 @@ class Runner:
             timeout=int(timeout or spec.timeout),
         )
         if provider.adapter:
-            # CX-C1: the adapter runs at its absolute path, which is also how
-            # the executor recognises an adapter run and tells it about `bin`.
+            # CX-C1: the adapter runs at its absolute path. The executor is
+            # told whose run it is by name (CX-C16), not by this path.
             adapter = scripts.resolve_adapter(provider, global_config_dir(),
                                               self.paths.config)
             if adapter is None:
@@ -1206,7 +1206,8 @@ class Runner:
         # when no server is left to.
         try:
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
-                                          deadline=launched + wall if wall else 0)
+                                          deadline=launched + wall if wall else 0,
+                                          provider=provider.name)
         except BaseException:
             # Nothing started, so nothing is followed: a lock kept here would
             # make the node unadoptable for this server's whole lifetime.
