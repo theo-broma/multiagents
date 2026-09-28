@@ -84,6 +84,13 @@ finished, and nothing new goes there.
 - **To fix next, after Codex:** give the builtin claude reader the
   executor's profile.
 
+**User rule, 2026-09-28 ~16:10 UTC:**
+- Run one agent at a time.
+- Stop at 95% of claude's 5 h window.
+- The user will later re-authenticate BOTH the orchestrator and the container
+  on a second claude account. The two will then share an account, which
+  sidesteps the budget-account mismatch above until it is fixed.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
