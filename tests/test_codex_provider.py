@@ -197,7 +197,8 @@ def test_cx_c10_docker_interim_mapping_is_danger_full_access(tmp_path, fake, per
     # after L3 if Codex's own sandbox initialises inside our container.
     fake.set(events=HAPPY)
     _, _, result = run_agent(tmp_path, fake, permission=permission,
-                             MULTIAGENTS_EXECUTOR="docker")
+                             MULTIAGENTS_EXECUTOR="docker",
+                             MULTIAGENTS_PRIVATE_HOME=str(tmp_path / "private-home" / ".codex"))
     assert result.returncode == 0, result.stderr
     assert h.sandbox_mode(the_exec(fake)["argv"]) == "danger-full-access"
 

@@ -5,7 +5,9 @@ and the fake native CLI records the CODEX_HOME it was handed. See
 `support/codex_harness.py`.
 
 Profile rule, as amended (CX-C8 revised, CX-C9 amended):
-- agent runs: docker → `$HOME/.codex` (the private backing, as mounted);
+- agent runs: docker → `$MULTIAGENTS_PRIVATE_HOME` (the private backing, as
+  mounted); refused with a `codex:` line when that is missing, never
+  `$HOME/.codex` (CX-C8 revised again, "Live results");
   otherwise `$MULTIAGENTS_CODEX_PROFILE`, else `~/.multiagents/profiles/codex`;
 - `check` and `login`: the private backing (`$MULTIAGENTS_PRIVATE_BACKING`)
   when the executor is docker and `MULTIAGENTS_PROFILE` is not `host`, the
@@ -111,13 +113,40 @@ def test_cx_c8_ambient_codex_home_is_ignored(tmp_path, fake, action):
     assert not ambient.exists()
 
 
-def test_cx_c8_docker_run_uses_the_backing_mounted_at_home_codex(tmp_path, fake):
+def test_cx_c8_docker_run_uses_the_private_home(tmp_path, fake):
+    # CX-C8 revised again: an agent's HOME is its own per-agent home, not the
+    # user's, so the backing is found at MULTIAGENTS_PRIVATE_HOME, never at
+    # $HOME/.codex. HOME, the private home and the backing are all distinct.
     fake.set(events=HAPPY)
+    private_home = tmp_path / "private-home" / ".codex"
+    private_home.mkdir(parents=True)
     env = h.base_env(tmp_path, fake, MULTIAGENTS_EXECUTOR="docker",
+                     MULTIAGENTS_PRIVATE_HOME=str(private_home),
+                     MULTIAGENTS_PRIVATE_BACKING=str(tmp_path / "backing"),
                      CODEX_HOME=str(tmp_path / "ambient"))
+    assert env["HOME"] != str(private_home.parent)
     _, result = run_agent(tmp_path, fake, env)
     assert result.returncode == 0, result.stderr
-    assert {c["codex_home"] for c in fake.calls()} == {str(tmp_path / "home" / ".codex")}
+    assert {c["codex_home"] for c in fake.calls()} == {str(private_home)}
+
+
+def test_cx_c8_docker_run_without_private_home_is_refused(tmp_path, fake):
+    # CX-C8 revised again: missing MULTIAGENTS_PRIVATE_HOME under docker is a
+    # refusal with a `codex:` line, and never a fallback to $HOME/.codex, even
+    # when that directory exists and looks logged in.
+    fake.set(events=HAPPY)
+    own = tmp_path / "home" / ".codex"
+    own.mkdir(parents=True)
+    (own / "auth.json").write_text('{"tokens": "' + h.SECRET + '"}')
+    env = h.base_env(tmp_path, fake, MULTIAGENTS_EXECUTOR="docker",
+                     MULTIAGENTS_PRIVATE_BACKING=str(tmp_path / "backing"))
+    assert "MULTIAGENTS_PRIVATE_HOME" not in env
+    _, result = run_agent(tmp_path, fake, env)
+    assert result.returncode != 0
+    assert any(line.startswith("codex:") for line in result.stderr.splitlines()), result.stderr
+    assert "Traceback" not in result.stderr
+    assert fake.exec_calls() == []
+    assert all(c["codex_home"] != str(own) for c in fake.calls())
 
 
 def test_cx_c8_local_actions_never_touch_the_users_own_codex_dir(tmp_path, fake):
