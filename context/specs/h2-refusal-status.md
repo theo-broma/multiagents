@@ -43,7 +43,13 @@ What each provider parses today:
   field and value, or the marker that matched, cut to 200 characters. An
   example: `claude stop_reason=refusal` or `agy response matched refusal
   marker "blocked by Gemini's filters"`.
-- `refused` is **not** a quota or authentication failure. It never cools
+- It is a member of `Tree.TERMINAL`. The `resume` CLI's listing of
+  unfinished branches includes it, and the monitor shows it in the error
+  colours.
+- `refused` is **not** a quota or authentication failure. It is excluded
+  from provider-health accounting, as `limited` and `truncated` already are
+  (`_provider_health_after`, `runner.py` ~2378–2417), so repeated content
+  filters never trip the provider's circuit breaker. It never cools
   down the provider, never counts toward exhaustion, and never triggers
   fallback routing.
 - A `refused` node can be resumed with `steer_agent`, exactly as a `failed`
@@ -57,21 +63,35 @@ What each provider parses today:
     and `collect_agent`;
   - a `refused` run leaves the provider's budget and cooldown state
     unchanged;
+  - N consecutive `refused` runs never mark the provider unhealthy, where
+    N is the breaker's threshold;
   - `steer_agent` on a `refused` node resumes it.
 
 **RF-R2: the refusal signals are declared by providers, not coded in the
 core.** No provider name appears in core code (the phase-5 invariant). A
 provider declares its refusal signals in `providers.yaml` by two routes:
 
-1. **Structured fields.** An event rule may map a native field or value to
-   the normalised final status `REFUSED`. That uses the same field-mapping
-   mechanism that already produces `status`. `_classify` turns a final
-   status of `REFUSED` into `refused`.
+1. **Structured fields.** An event rule may carry
+   `status_map: {<field path>: {<native value>: <NORMALISED>}}`. The
+   normalised values are `REFUSED` and `TRUNCATED`.
+   - It is evaluated on the matched event after `fields`. It sets the
+     event's status when a listed value is found.
+   - Today `parse_line()` only copies field values
+     (`providers.py` ~402–447), so this value mapping is new.
+   - A final status of `REFUSED` becomes `refused`, and one of `TRUNCATED`
+     becomes `truncated`.
+   - **Sticky:** once a run's status is `REFUSED` or `TRUNCATED`, a later
+     status-bearing event does not overwrite it. Today `runner.py`
+     ~1730–1732 overwrites the status on every event.
+   - **Structured signals win** over the markers in route 2.
 2. **`refusal_markers:`** is a provider-level list of case-insensitive
-   substrings, a sibling of the existing `truncation_markers`. They are
-   matched against:
-   - the run's **final assistant message**, not the whole transcript;
-   - the final status text.
+   regular expressions, a sibling of the existing `truncation_markers`.
+   Each entry must **full-match** the run's final assistant message,
+   stripped of surrounding whitespace.
+   - The final message is the last assistant text event, tracked on its own.
+     It is not the assembled `text_parts`.
+   - A marker anchored this way matches the provider's stock refusal message
+     as a whole. It never matches a phrase quoted inside longer prose.
 
    They are meant for fixed wording that the provider or its safety filter
    generates, never for a model's own prose refusals, which cannot be told
@@ -83,6 +103,11 @@ Precedence inside `_classify`:
 
 A run can therefore exit 0 with text and still be `refused`.
 
+Verified by: a **negative fixture**, in which a successful run's final
+message quotes the agy stock phrase inside longer prose. It stays `done`.
+Also: a stream with a `REFUSED` mapping followed by a later progress event
+with a status stays `refused`.
+
 Verified by: a test provider block declaring each route drives
 `_classify` to `refused`. Removing the declaration makes the same stream
 `done`, which shows that the core holds no provider-specific knowledge.
@@ -92,7 +117,8 @@ at minimum:
 - **claude:** a result carrying `stop_reason: "refusal"` maps to `REFUSED`.
   A result subtype `error_max_turns` maps to the existing `truncated`
   outcome, not to `failed`, because the work may be partial and resumable.
-- **agy:** `refusal_markers` includes the wording from `ag-da2c22`
+- **agy:** `refusal_markers` includes a full-message pattern for the stock
+  refusal wording from `ag-da2c22`
   (`blocked by Gemini's filters`). Take the exact text from that run's
   stream under `.multiagents/runs/ag-da2c22/` if it still exists, otherwise
   from `BRIEF.md` ~1586.
@@ -135,11 +161,25 @@ cannot catch presents itself.
 **RF-R6: `merge_agent` on a node that is not `done`.**
 - `merge_agent` still works on any node that has a branch. That does not
   change.
-- When the node's status is `refused`, `failed` or `truncated`, the result
-  carries `status_before_merge`. It also carries a one-line warning that
+- When the node's status is anything other than `done`, the result carries
+  `status_before_merge`. That covers every non-success status, including
+  `refused`, `failed`, `truncated` and `limited`. It also carries a one-line warning that
   the work was not reported complete.
 - Verified by: merging a `refused` node with a commit succeeds and returns
   the warning; merging a `done` node returns no warning.
+
+**RF-R8: a refused consult is not an answer.** When a `consult()` turn
+ends `refused`:
+- the result carries `status: "refused"` and the reason;
+- `reply` is empty or null, never the refusal prose presented as advice;
+- the result carries a one-line recovery instruction, such as rephrasing
+  or consulting again.
+- The conversation stays findable. `_find_conversation` (`runner.py`
+  ~3780–3815) accepts `refused`, so the next `consult` resumes the same
+  thread rather than starting a new one.
+- CX-C28's provider check still applies on that resume.
+- Verified by: a consult whose turn is refused returns that shape, and the
+  next consult to the same agent resumes the same node and session.
 
 **RF-R7: nothing else regresses.**
 - Quota and auth classification, truncation, and the "did work" rescue for
