@@ -653,3 +653,61 @@ The engine tests total 52: 29 red and 23 guards.
      `test_a_checking_pair_never_collapses_onto_one_model` does not cover a
      fourth family. The new test covers it through a fixture roster, and
      `test_core.py` is not changed.
+
+## CX-C11 revised: a live quota reading via the app-server (2026-09-28)
+
+**Source.** The binary was inspected at the user's request, and the
+app-server protocol generated offline with `codex app-server
+generate-json-schema`. `/status` reads the quota **live**:
+- Codex calls `GET https://chatgpt.com/backend-api/wham/usage` with the
+  profile's ChatGPT token. `chatgpt.com` is already approved.
+- It exposes the result through its app-server's JSON-RPC method
+  **`account/rateLimits/read`**. There is also an `account/rateLimits/updated`
+  notification.
+- The response, `GetAccountRateLimitsResponse`, carries:
+  - `rateLimits`, a single-bucket view;
+  - `rateLimitsByLimitId`, keyed by `limit_id` (for example `codex`; there
+    may be one bucket per model family).
+- Each bucket is a `RateLimitSnapshot`: `primary` and `secondary`, each a
+  `RateLimitWindow` with `usedPercent`, `windowDurationMins` and
+  `resetsAt` (Unix seconds). It also carries `credits`, `planType` and
+  `rateLimitReachedType`.
+- It costs no model call, and so no quota.
+
+**Why it replaces the rollout reading as the primary source:**
+- **It is live.** The rollout reading is only as recent as the last session.
+- **It is per account,** so the user's own Codex use is included
+  automatically. **CX-Q3 is thereby withdrawn**, and
+  `MULTIAGENTS_CODEX_QUOTA_HOMES` is kept only as an optional fallback
+  input.
+- **It uses Codex's own auth and refresh.** We never reimplement a private
+  HTTP call or handle the token ourselves.
+
+**The contract, which supersedes CX-C11's "where it reads":**
+- **Primary source.** `budget` starts `codex app-server` (stdio) under the
+  profile the executor implies (the CX-C9 rule), sends `initialize`, then
+  `account/rateLimits/read`, and shuts it down.
+  - The whole exchange is bounded to **7 s**, inside the engine's 10 s action
+    timeout. On timeout the process group is killed.
+  - Output: `source: "app-server"` and `stale_seconds: 0`.
+  - Windows are named by `windowDurationMins`: 300 → `5h`, 10080 →
+    `weekly`, anything else → `<n>m`.
+  - With several `rateLimitsByLimitId` buckets, each window is prefixed with
+    its `limitId` (`codex-5h`, …). Headroom is the worst across all of
+    them.
+  - `rateLimitReachedType` non-null means headroom 0.
+- **Fallback, only if the app-server fails.** On a non-zero exit, a timeout,
+  a JSON-RPC error, not being logged in, or an unparseable response, the
+  rollout reading applies as specified above, with its bounds, and its
+  `source: "rollout"`.
+  - The `note` says why the live read failed, in one line, with no
+    credentials and no response bodies.
+- **Nothing else from the response is emitted.** No `accountId`, no
+  `credits.balance`, no upsell text.
+- Tests use a fake `codex` that speaks the JSON-RPC exchange over stdio.
+  They cover success (single and multi-bucket), a hang (killed within the
+  bound), an error, garbage output, and the fallback to rollout.
+- **Live check L5 changes accordingly:** it confirms that
+  `account/rateLimits/read` works from the dedicated profile, on the host and
+  in the container through the proxy, and records the `limitId` buckets
+  observed. Those feed CX-Q1, since a model may have its own bucket.
