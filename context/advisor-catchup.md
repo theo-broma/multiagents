@@ -263,3 +263,12 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
 - Please review: the `adapter:` design; the choice of `bin_versions_depth`
   over a mounted `~/.local/bin`; and whether a stand-in adversary on the
   same model family as the implementer was enough.
+
+## 20. The advisor moved to codex (2026-09-28 ~22:15 UTC)
+
+- Your previous conversation (ag-25c350, on agy) is closed.
+- You are now ag-3f9bba on codex/gpt-6-sol. Entries 1 to 19 above are the
+  catch-up you are owed.
+- Where things stand: the Codex provider is shipped and live-checked. The
+  results are in context/specs/codex-provider.md, under "Live results" and
+  "L8".

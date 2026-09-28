@@ -1039,3 +1039,25 @@ The same task was given to every model.
   - a gpt-6 model (`gpt-6-sol` is cheaper than `astra` on this task) for
     adversary, reviewer and advisor, where judgement matters;
   - never `gpt-6-luna`.
+
+### Roster applied, and L7 (2026-09-28 ~22:15 UTC)
+
+- **The CX-D4 and CX-Q1 roster is live in `.multiagents/config/agents.yaml`.**
+  - advisor, adversary and reviewer run on codex/gpt-6-sol.
+  - implementer-quick and researcher run on codex/gpt-5.6-terra, with
+    effort low.
+  - Each keeps its previous primary as a fallback.
+  - implementer and implementer-deep gain a `codex: gpt-5.6-terra` fallback.
+  - tester is unchanged.
+- `codex-probe` has been removed from the roster.
+- **Finding: a conversational agent keeps the provider it was created on.**
+  - The first `consult("advisor")` after the roster change resumed the old
+    agy conversation, ag-25c350. It answered "Antigravity/Gemini", and it
+    spent one agy turn despite the user's no-agy rule.
+  - ag-25c350 was then discarded. Its context is rebuilt from
+    `context/advisor-catchup.md`.
+  - The engine should either refuse, or start a new conversation, when the
+    roster's provider for a conversational agent no longer matches the
+    node's.
+- **L7 passed.** The new advisor, ag-3f9bba on codex/gpt-6-sol, recalled a
+  token given in the previous consult. `resume` keeps the thread.
