@@ -161,6 +161,31 @@ finished, and nothing new goes there.
 - `refresh-models` dropped the `opencode-go/*` models from `models.yaml`,
   leaving only the free ones. Check this before opencode is used again.
 
+**Phase 5 (Codex): complete, 2026-09-28 ~22:40 UTC (main at 893365f).**
+- The contract, CX-C1..C28, is implemented and merged.
+- Live checks: L1, L3, L4a, L5, L6, L7 and L8 passed or were measured.
+  L2, L4b and L5-exec are deferred to their natural occurrence, as agreed
+  with the advisor.
+- The roster is live: advisor, adversary and reviewer on codex/gpt-6-sol;
+  implementer-quick and researcher on codex/gpt-5.6-terra; a codex fallback
+  for implementer and implementer-deep.
+- The advisor is now ag-3f9bba on codex. It received the 20-entry catch-up
+  (turn 3).
+- **Follow-ups found, not fixed (for the next phase):**
+  1. SG: `branch_pending_delete` can be forged from the container.
+     Serious: it can delete another agent's unmerged branch.
+  2. SG-R5: base hooks run merged agent code on the host.
+  3. Empty fallback model on the steer path (`_spec_of`) and on the start
+     path, when routing picks a family sibling (`runner.py` ~1581, ~2826).
+  4. Nested codex spawns get the launcher path, so `codex-code-mode-host`
+     is missing.
+  5. The claude budget reader reads only the host account under docker.
+  6. `refresh-models` fails before the first codex use, and it dropped the
+     `opencode-go/*` models.
+  7. Commits inside the container print a `packed-refs.lock` error (they
+     still land).
+  8. Prompts go to adapters in argv, which caps them at 128 KiB (E2BIG).
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
