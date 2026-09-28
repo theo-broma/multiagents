@@ -784,3 +784,24 @@ new ids.
     script exits 64. Accepted, and noted in the README.
   - **`load_providers` runs on every monitor snapshot.** A minor cost,
     deferred.
+
+### Decisions on the CX-C16..C20 tester's questions (ag-96b5b0, merged 364904d)
+
+- **CX-C17 and `container_state`.** No new return shape is required. A
+  refusal on the start path, whose message names `bin_versions_depth`, is
+  enough.
+- **CX-C17, which system prefixes.** A root is refused when it **is** one of
+  the listed prefixes, or an ancestor of one. A root strictly below a prefix
+  (`/usr/lib/node_modules/x`, `/opt/tool/releases`) is allowed.
+- **CX-C16, the ambiguous fallback.** Any refusal will do, or a start
+  without adapter variables. No specific exception type is required.
+- **CX-C18 and argv.** With the flag off, argv[0] of a provider without an
+  adapter also stays the bare `bin` name. The P0-R1 host-path rewrite does
+  not apply. With the flag off, the CX-C17 refusal does not run either,
+  since there is no versions root at all. Neither is tested yet; the
+  implementer adds no test, but implements both.
+- **test_core, merged a2acd54.** The checking-pair invariant now takes down
+  every family in the roster. An agent with **no** fallback is exempt when
+  its own provider is down. That follows the standing decision (fc01d27):
+  `implementer` and `implementer-deep` wait for claude rather than switch.
+  Accepted.
