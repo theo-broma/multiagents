@@ -731,3 +731,56 @@ generate-json-schema`. `/status` reads the quota **live**:
 - **7 s is the target.** The tests assert the observable bound, under
   9.5 s.
 - **How "not logged in" is signalled** is to be confirmed at L5.
+
+## Engine review of be92256 (ag-6f199c, a claude opus stand-in for the reviewer, 2026-09-28)
+
+Verdict: approve with fixes. The engine half is merged. The fixes below are
+new ids.
+
+- **CX-C16 — the provider is named, not guessed.** The executor must learn
+  which provider an agent run belongs to from the runner, by an explicit
+  parameter or an env entry, and never from the file name in argv[0].
+  - An `extends:` instance (`acme-2`, inheriting `adapter:`) gets its own
+    `MULTIAGENTS_BIN` and private home, not those of its parent.
+  - A provider without `adapter:` whose `bin` shares a file name with some
+    adapter gets no `MULTIAGENTS_*` adapter variables.
+  - The argv[0] match may stay only as a fallback. When two providers match,
+    it is an error.
+  - Verified by: executor unit tests with two instances sharing an adapter,
+    and with a colliding file name.
+- **CX-C17 — `bin_versions_depth` cannot widen the mount.** A computed root
+  is refused as a config error naming the key, reported through
+  `container_state`, and nothing is mounted, when it is:
+  - `/`;
+  - the user's home;
+  - an ancestor of either;
+  - a system prefix (`/usr`, `/bin`, `/lib*`, `/etc`, `/opt`, `/var`,
+    `/nix`, `/snap`).
+  - The same applies when the depth is larger than the path allows.
+  - Verified by: unit tests with depth 7 on the codex-like layout (which
+    reaches the home) and a `/usr/bin` layout.
+- **CX-C18 — `mount_cli_from_host: false` is honoured.** When the flag is
+  off:
+  - `MULTIAGENTS_BIN` is the bare `bin` name, resolved inside the container
+    by PATH;
+  - no versions root is mounted;
+  - no CX-C3 refusal runs.
+  - Verified by: unit tests with the flag off.
+- **CX-C19 — the stale-root refusal is worded neutrally.** It says "this
+  container lacks the versions root <X>" and gives the recreate command.
+  This covers both a moved target and a key added after the container was
+  created.
+  - Verified by: a unit test on the message.
+- **CX-C20 — disabled providers add no mounts.** `enabled: false` providers
+  contribute neither a versions root nor an adapter mount.
+  - Verified by: a unit test.
+- **Documented, not changed:**
+  - **An adapter mounted as a single file** stays pinned to the old copy
+    after an atomic replace on the host, until the container is recreated.
+    This goes in the providers README.
+  - **CX-C4 changes `refresh-models`** for a shipped provider with no
+    `models_cmd` but an action script (claude). The spec allows it, but it
+    is not byte-for-byte. The "no models_cmd" line disappears when the
+    script exits 64. Accepted, and noted in the README.
+  - **`load_providers` runs on every monitor snapshot.** A minor cost,
+    deferred.
