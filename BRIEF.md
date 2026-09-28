@@ -49,6 +49,28 @@ finished, and nothing new goes there.
   measurement (CX-R11), not before.
 - Full pipeline with an adversary.
 
+**Progress, 2026-09-28 ~08:25 UTC:**
+- **Done:**
+  - The contract, CX-C1 to C15 with amendments (`cc62eb1`..`980d66c`).
+  - The red tests, merged:
+    - provider: 115 tests (`115b54d`, `tests/test_codex_provider*.py`);
+    - engine: 52 tests, 29 of them red (`425cafe`, `tests/test_codex_engine_*.py`).
+- **Next:** two implementers in parallel, both from `main`.
+  - **Provider half** (CX-C7..C14, `implementer`). Files:
+    - `defaults/providers/codex.py`;
+    - the codex block and agy `billing: plan` in `defaults/providers.yaml`;
+    - egress in `defaults/project.yaml`.
+  - **Engine half** (CX-C1..C6, C15, `implementer-deep`). Files: the core
+    `.py` files, `executor/`, `models.py`, `budget.py`, `tui.py`.
+- **Paused:** claude's 5 h window is at 92% and resets at 10:39 UTC.
+  opencode fails at start (`ag-3ba37b` was discarded), and agy is excluded.
+- **Open for the user:** CX-Q3, whether to read `rate_limits` from their own
+  `~/.codex/sessions`. The default is no.
+- **Tooling:** commits made inside the container print
+  `packed-refs.lock: Read-only file system` (`ag-155ed5`, `ag-4aa932`),
+  although the commit lands. Investigate this before it bites; it is linked
+  to SG-R2's read-only `.git`.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
