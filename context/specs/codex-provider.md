@@ -805,3 +805,15 @@ new ids.
   its own provider is down. That follows the standing decision (fc01d27):
   `implementer` and `implementer-deep` wait for claude rather than switch.
   Accepted.
+
+### CX-C16..C20 implemented (ag-f0d8d7)
+
+- Result: 25 of the 29 review tests pass.
+- **The 4 that fail, `test_cx_c16_*[acme-2-*]`, are a test defect.** `acme`
+  and `acme-2` share a family, so routing (`choose_provider`, which breaks
+  ties by name) sends the agent to `acme`. The executor is then correctly
+  told `provider="acme"`.
+  - **Fix, for the tester:** make `acme-2` the instance the router picks,
+    for instance by making `acme` unavailable or loaded, or assert against
+    the node's recorded provider.
+- `/sbin` was added to the refused system prefixes. Accepted.
