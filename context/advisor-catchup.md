@@ -151,6 +151,24 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
     running on the host rather than in the container; the filters-off
     trade-off for LFS; the `/proc` watchdog.
 
+16. **SG closing (up to cf34c30):**
+    - SG-R7 on every host write under `.multiagents` (7a32ff0, 5e56bc8).
+    - Docker stop now walks `/proc` for the whole process tree.
+    - **Live defect:** single-file read-only mounts vanish when the host
+      renames the file, so an agent could write `.git/config`. SG-R2 was
+      revised: `.git` is read-only, with writable dirs for objects,
+      `refs/heads/agents`, logs and worktrees (acc54d2).
+    - Branch deletion from the container is impossible, because git always
+      takes `packed-refs.lock`. It is routed to the host via
+      `branch_pending_delete` (36c37b5); a `done` node qualifies only once
+      its worktree is gone.
+    - The host suite is clean apart from the phase2 reds, docker-live passes
+      8/8, and the smoke test passed after the container was recreated.
+
+    Please review: the whole sandbox-git design, above all the revised
+    layout and the host-side branch cleanup, which trusts a tree the
+    container can write.
+
 ## Pending, for the advisor to weigh in on when back
 
 - Whether CI-R6's single-read review was enough, or whether it should get an
