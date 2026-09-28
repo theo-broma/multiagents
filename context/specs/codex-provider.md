@@ -629,3 +629,27 @@ amendment conflicts with the text above, **the amendment wins**.
     it 18 times. `UPDATE_CHECK_OFF` stands as written.
   - The layout is `…/releases/0.158.0-x86_64-unknown-linux-musl/bin/codex`,
     so N = 3.
+
+## Decisions on the engine tester's questions (2026-09-28, ag-4aa932, merged 425cafe)
+
+The engine tests total 52: 29 red and 23 guards.
+
+- **A negative `stale_seconds`** may be ignored or clamped to 0. Either is
+  acceptable, and the tests accept both.
+- **"Skipped quietly"** means no line for the provider in the
+  `refresh-models` output, and no entry for it in `models.yaml`.
+- **An invalid `billing:` value** is treated as `metered`. It is not
+  tested.
+- **The CX-C5 totals wording** (`+ plan-billed runs`) is **withdrawn**. It
+  is not tested, and the per-row `plan` label is enough.
+- **An adapter run is recognised by an absolute adapter path in argv[0]**:
+  accepted.
+- **Real defects the tester found under CX-C6**, to be fixed by the engine
+  implementer:
+  1. **Routing:** a provider with `enabled: false` in the same family was
+     routed to and actually ran. `pick_instance` treats "no budget" as
+     "room", and `read_all` omits disabled providers.
+  2. **The roster test only simulates agy and opencode being down.**
+     `test_a_checking_pair_never_collapses_onto_one_model` does not cover a
+     fourth family. The new test covers it through a fixture roster, and
+     `test_core.py` is not changed.
