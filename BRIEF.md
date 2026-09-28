@@ -103,6 +103,24 @@ finished, and nothing new goes there.
   on a second claude account. The two will then share an account, which
   sidesteps the budget-account mismatch above until it is fixed.
 
+**Handoff, 2026-09-28 ~17:30 UTC: paused at 89% of claude's 5 h window (user rule: stop at 95%).**
+- **Merged on `main`:**
+  - the engine (be92256, a1411e2);
+  - the adapter (3243ef9);
+  - the attack tests and fixes (ce288fc, 4f3f185);
+  - the review tests for CX-C21..C26 (26a617d, 24 red).
+- Codex is disabled locally (`.multiagents/config/providers.yaml`) until the
+  live checks. The container was recreated after the `/mcp` reconnect.
+- **Next, after the 21:10 UTC reset, one agent at a time:**
+  1. `tester`: remove or rewrite the env-allowlist cases in
+     `tests/test_codex_provider_review.py`, per def4854.
+  2. `implementer`: CX-C21..C26 in `codex.py` (spec section "Adapter
+     review at 4f3f185" and its decisions).
+  3. My own Phase 6 read of the whole codex diff against the contract.
+  4. The live checks L1..L8. These need the user for
+     `multiagents auth login codex`, and codex re-enabled with a container
+     recreate.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
