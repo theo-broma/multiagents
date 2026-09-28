@@ -100,9 +100,12 @@ spawned itself.
   **never** from `tree.json`.
 - Where `tree.json` disagrees with the record for a host-created node, the
   host acts on the record, or refuses when the record does not permit the
-  action. It then emits one `host_authority_mismatch` event. The event
-  carries the node id, the action, and the names of the fields that
-  disagreed.
+  action. It then emits one `host_authority_mismatch` event.
+  - The event carries `node` (the node id), `action`, and `fields`: a list
+    of the names of the fields that disagreed, such as
+    `["branch", "parent"]`. It may also carry `reason`.
+  - HA-R5 and HA-R6 refusals use the same event and shape. For a path
+    refusal, `fields` is `["worktree"]`.
 - Verified by: tests that rewrite a host-created node's `branch`,
   `worktree` and `parent` in `tree.json` after spawn, then drive each
   operation above. The mutation either uses the recorded values or is
@@ -222,7 +225,12 @@ unverified.
   under a host-only lock. Its completion is marked atomically in the
   host-only directory.
 - An interrupted seed fails closed: nothing is reaped until a seed
-  completes, and a changed tree is not re-read.
+  completes. An interrupted seed leaves no completion marker. The next host
+  start discards any partial entries and re-attempts the seed from scratch,
+  and reaps only once it has completed.
+  - Testable seam: inject a fault into the seed, for example by making the
+    tree read raise part-way. The constructor must then not reap, and a
+    forged pending branch survives.
 - Seeding never repeats. A node that appears in `tree.json` later is not
   added unless the host spawns it.
 - Without seeding, the roughly 20 existing unmerged `agents/*` branches
