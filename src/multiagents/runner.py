@@ -3372,6 +3372,40 @@ class Runner:
                     best = node
         return best
 
+    def _conversation_route(self, spec: AgentSpec, node: Node) -> AgentSpec | None:
+        """The spec a standing conversation resumes as, or None if the roster
+        no longer allows the provider it lives on (CX-C28).
+
+        Observed at L7: the roster moved an advisor to another provider, and
+        the next consult resumed the old session on the old one — a turn spent
+        where the roster said not to, answered as the old model. A node's
+        provider is a route only while it is the roster's provider, a sibling
+        instance of that provider's family (which shares its model ids, so it
+        runs the roster's model), or a `models:` fallback that names a model.
+        An empty fallback model is not a route: it would run `--model ""`.
+        """
+        if node.provider == spec.provider:
+            return spec
+        here = self.providers.get(node.provider)
+        if here is None:
+            return None
+        family = here.family or node.provider
+        roster = self.providers.get(spec.provider)
+        if roster is not None and (roster.family or spec.provider) == family:
+            return spec
+        alternative, overrides = spec.fallback_for(node.provider)
+        if not alternative:
+            # A sibling of a listed fallback shares that fallback's model ids.
+            for name in (spec.models or {}):
+                other = self.providers.get(name)
+                if other is not None and (other.family or name) == family:
+                    alternative, overrides = spec.fallback_for(name)
+                    if alternative:
+                        break
+        if not alternative:
+            return None
+        return AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
+
     @contextlib.asynccontextmanager
     async def _conversation_turn(self, agent_name: str, wait: float):
         """Hold one conversation to one turn at a time (CF-R7).
@@ -3596,6 +3630,17 @@ class Runner:
         base = self._conversation_base()
         base_sha = gitops.resolve_commit(self.paths.root, base)
         placed = True       # the worktree was just cut from base this turn
+        replaced = None     # the conversation this turn replaces (CX-C28)
+
+        route = None
+        if node is not None:
+            route = self._conversation_route(spec, node)
+            if route is None:
+                # Not resumed anywhere: not on the provider the roster dropped,
+                # and its session means nothing to any other. A new
+                # conversation on the current roster takes its place.
+                replaced = node
+                node = None
 
         if node is None:
             provider = self.providers.get(spec.provider)
@@ -3621,6 +3666,15 @@ class Runner:
             self.tree.add(node)
             prompt = self.compose_prompt(spec, message, node, worktree_path)
             session_id = None
+            if replaced is not None:
+                reason = (f"replaced by {node_id}: the roster no longer runs "
+                          f"{agent_name} on {replaced.provider}")
+                if replaced.status == "idle":
+                    self.tree.set_status(replaced.id, "cancelled", reason)
+                self.tree.emit(node_id, "conversation_replaced",
+                               old_agent_id=replaced.id,
+                               old_provider=replaced.provider,
+                               provider=provider.name)
         else:
             node_id = node.id
             turn = node.turns + 1
@@ -3640,10 +3694,7 @@ class Runner:
             if run is not None:
                 spec, provider = run.spec, run.provider
             else:
-                if node.provider != spec.provider:
-                    alternative, overrides = spec.fallback_for(node.provider)
-                    spec = AgentSpec(**{**spec.__dict__, "model": alternative,
-                                        **overrides})
+                spec = route
                 provider = self.providers.get(node.provider)
             if provider is None or not provider.available():
                 raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
@@ -3728,6 +3779,13 @@ class Runner:
         run = self.runs.get(node_id) or run
         final = self.tree.get(node_id)
         reply = "\n".join(run.text_parts).strip()
+        # The caller believed it was continuing a conversation; the reply
+        # itself must say the memory it expected is not there (CX-C28).
+        # Prefixed after truncation, so a long reply cannot cut it off.
+        notice = "" if replaced is None else (
+            f"[system] {agent_name} was moved off {replaced.provider}, so this "
+            f"is a new conversation ({node_id}, replacing {replaced.id}); "
+            f"nothing said earlier was carried over.\n")
         if run.awaiting:
             # The advisor stopped to ask, not to answer. Returning its partial
             # text would read as a considered reply.
@@ -3737,7 +3795,7 @@ class Runner:
                 "asked": run.awaiting["question"],
                 "topic": run.awaiting["topic"],
                 "proposed_default": run.awaiting["proposed"],
-                "partial_reply": reply[-2000:],
+                "partial_reply": notice + reply[-2000:],
                 "note": "this agent asked a question instead of answering; "
                         "resolve it with answer_question before relying on this",
                 **view,
@@ -3747,7 +3805,7 @@ class Runner:
             "agent": agent_name,
             "turn": turn,
             "status": final.status if final else "unknown",
-            "reply": reply[-MAX_SUMMARY_CHARS:],
+            "reply": notice + reply[-MAX_SUMMARY_CHARS:],
             "usage": final.usage if final else {},
             "note": "advisory only — you decide whether to act on this",
             **view,
