@@ -71,6 +71,10 @@ executor:
       - antigravity.google
       - googleusercontent.com
       - gstatic.com
+      # Codex CLI: model API.
+      - openai.com
+      # Codex CLI: ChatGPT-plan auth and quota.
+      - chatgpt.com
 
       # 2. Package registries and docs. Without these an agent cannot install a
       # dependency or look anything up, and will thrash trying — an isolated

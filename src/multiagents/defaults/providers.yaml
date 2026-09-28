@@ -182,6 +182,8 @@ providers:
     truncation_markers:
       - "print timeout"
     usage_mode: cumulative
+    # Paid through the subscription, not per-token.
+    billing: plan
     # SL-R6 (bug-2cebea): `view_file`'s reported arguments do not identify the
     # call — the streamed tool_info.parameters carries only AbsolutePath, never
     # the StartLine/EndLine a re-read at a different range actually used, so
@@ -495,6 +497,93 @@ providers:
         - match: {type: "tool_progress"}
           as: step
           fields: {}
+
+  # Codex CLI. Unlike the other three, `bin` is never invoked directly: the
+  # runner execs `adapter` (CX-C1) in its place, told the real binary's
+  # resolved path through MULTIAGENTS_BIN (CX-C2). The adapter owns the whole
+  # native-CLI contract — profile selection, MCP config rendering, event
+  # normalisation, auth/quota reads — because Codex's `exec --json` stream and
+  # its `app-server` JSON-RPC protocol need more than declarative rules can
+  # express. See providers/codex.py and providers/README.md.
+  codex:
+    bin: codex
+    adapter: codex.py
+    family: codex
+    # codex-cli ships one binary per release under a versioned path; the
+    # container mounts that root rather than the single resolved file.
+    bin_versions_depth: 3
+    notes: >
+      Headless via `codex exec --json`, one JSON object per line. No
+      `models_cmd`: Codex has none, so the adapter's own `models` action reads
+      a locally-cached model list instead (CX-C12). No `transcript`: sessions
+      live under a profile the adapter picks per run (CX-C8), not a fixed,
+      guessable path. No `home_links`: linking the user's own ~/.codex would
+      hand every agent ChatGPT's own OAuth token and every prior conversation
+      (CX-D3) — the adapter instead resolves a private profile, created 0700,
+      per CX-C8/C9.
+    agent_guidance: >
+      Your shell tool runs one command per call and does not itself impose a
+      timeout on long-running commands (a test suite, a build). Wait for a
+      command to finish before ending your turn, and never report a result
+      you have not actually seen.
+    spawn:
+      args: ["run", "--prompt", "{prompt}", "--model", "{model}", "--workdir", "{workdir}"]
+      resume: ["--session", "{session_id}"]
+      permission:
+        full: ["--permission", "full"]
+        sandbox: ["--permission", "sandbox"]
+        readonly: ["--permission", "readonly"]
+      optional:
+        effort: ["--effort", "{effort}"]
+    # The multiagents server for an agent with spawn rights. Codex has no
+    # config-file flag of its own for MCP servers (they live in `-c
+    # mcp_servers=...`, which the adapter renders itself from this file after
+    # first enumerating and explicitly disabling every OTHER server codex
+    # already knows about); `file` only hands the adapter the one entry to add.
+    mcp:
+      file: mcp.json
+      config:
+        mcpServers:
+          multiagents:
+            command: "{mcp_command}"
+            args: "{mcp_args}"
+            env: "{mcp_env}"
+      args: ["--mcp-config", "{mcp_config}"]
+    # Codex reports per-turn deltas (turn.completed.usage), not a running
+    # total, so they must be summed rather than taken at their maximum.
+    usage_mode: delta
+    models_parse: tsv
+    # Paid through the ChatGPT subscription, not per-token.
+    billing: plan
+    # Under docker, do NOT mount the host's ~/.codex: its OAuth token does not
+    # survive containerisation any better than agy's, and a shared mount would
+    # let a compromised agent read or rotate the host's own credential. A
+    # private ~/.codex is mounted instead — see `multiagents docker login
+    # codex` and CX-C8's run_profile().
+    container_private_home:
+      - ".codex"
+    stream:
+      format: ndjson
+      session_id_paths: ["session_id"]
+      # The adapter (Normalizer.event, in codex.py) does all real translation
+      # from Codex's own event shapes; these rules are a pure passthrough of
+      # its already-normalised field names.
+      rules:
+        - match: {kind: "text"}
+          as: text
+          fields: {text: "text", turn: "turn"}
+        - match: {kind: "tool"}
+          as: tool
+          fields: {name: "name", args: "args", state: "state", turn: "turn"}
+        - match: {kind: "result"}
+          as: result
+          fields: {status: "status", text: "text", tokens: "tokens", turn: "turn"}
+        - match: {kind: "error"}
+          as: error
+          fields: {text: "text", turn: "turn"}
+        - match: {kind: "step"}
+          as: step
+          fields: {state: "state", turn: "turn"}
 
   # ---------------------------------------------------------------------
   # Template for a new integration. Uncomment, fill in, then verify with
