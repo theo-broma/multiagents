@@ -145,6 +145,22 @@ finished, and nothing new goes there.
   - a roster decision: a codex-pinned probe agent is needed to run agents on
     codex at all. The roles planned in CX-D4 wait for CX-R11.
 
+**Codex live status, 2026-09-28 ~22:05 UTC:**
+- **Passed:** L1, L3 (codex's bwrap cannot run in the container, so
+  `danger-full-access` stays), L4a, L5 (the app-server read works), L6.
+- **L8 measured** (spec, "L8 / CX-R11").
+- **Waiting on the user:**
+  - **CX-Q1:** the model per codex role. I recommend `gpt-5.6-terra` for
+    cheap roles and fallbacks, and `gpt-6-sol` for
+    adversary/reviewer/advisor.
+  - **The CX-D4 roster change.** Then L7 (consult on a codex advisor), L2
+    (a refresh and concurrent runs) and the L4 update simulation.
+- **Temporary:** `codex-probe` is in `.multiagents/config/agents.yaml` and
+  in the `implement` team roster in project.yaml. Remove it after the
+  roster change.
+- `refresh-models` dropped the `opencode-go/*` models from `models.yaml`,
+  leaving only the free ones. Check this before opencode is used again.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
