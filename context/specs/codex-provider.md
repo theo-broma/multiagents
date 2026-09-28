@@ -974,3 +974,38 @@ failures:
     line.
   - It never falls back to `$HOME/.codex`.
   - The tests that assert `$HOME/.codex` for docker change deliberately.
+- **2026-09-28 ~21:50 UTC, second probe (ag-1b4802, after 5e64f27): passed.**
+  - **L6 (sandbox-git):** the agent wrote `CODEX_PROBE.txt`, and multiagents
+    committed it. Writes to the project root, to `.git/config` and into
+    `.git/` all failed with "Read-only file system".
+  - **L1:** `CODEX_HOME=/home/theobroma/.codex` inside the container, which
+    is the backing. No new rollout appeared in the user's `~/.codex/sessions`;
+    one appeared in the backing.
+  - **L4 (first half):** `codex --version` inside the container reported
+    0.158.0, run through `MULTIAGENTS_BIN`. The simulated-update half is not
+    done yet.
+  - Cost: 109k tokens, of which 89k were cache reads, in 36 s.
+- **L3, Codex's own sandbox inside our container: it does NOT work.**
+  - Both `read-only` and `workspace-write` fail with `bwrap: No permissions
+    to create a new namespace` (no unprivileged user namespaces).
+  - **So the docker mapping stays everything → `danger-full-access`.** The
+    interim becomes final, and the container is the boundary, as it is for
+    claude.
+- **Finding: Codex needs its sibling `codex-code-mode-host`.** Run through
+  the launcher path (`~/.local/bin/codex`, a single-file mount), Codex looks
+  for `codex-code-mode-host` beside it and fails. Through the resolved path
+  in `releases/<v>/bin/`, it works.
+  - The adapter uses `MULTIAGENTS_BIN`, the resolved path, so first-level
+    runs are fine.
+  - **But the CX-C2 limitation matters here.** A codex agent spawned from
+    inside the container (depth ≥ 2) gets the launcher path, and its tool
+    calls would fail. Today every codex role has `can_spawn: false`.
+  - Record it before a codex agent is ever given `can_spawn`, or make
+    `_start_inside` resolve against the mounted versions root.
+- **Still to do:**
+  - L2: refresh through the proxy, and two concurrent runs;
+  - L4: a simulated update;
+  - L5: whether `exec --json` emits rate limits (the app-server path already
+    works);
+  - L7: consult on a codex advisor;
+  - L8: measurement.
