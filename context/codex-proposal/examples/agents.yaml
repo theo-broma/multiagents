@@ -1,0 +1,33 @@
+# À fusionner dans .multiagents/config/agents.yaml après choix du modèle.
+agents:
+  codex-reviewer:
+    provider: codex
+    model: REPLACE_WITH_AVAILABLE_MODEL_ID
+    instructions: library/reviewer.md
+    writes: false
+    permission: readonly
+    can_spawn: false
+    timeout: 600
+    silence_timeout: 180
+    effort: high
+
+  codex-implementer:
+    provider: codex
+    model: REPLACE_WITH_AVAILABLE_MODEL_ID
+    instructions: team/implementer.md
+    writes: true
+    permission: sandbox
+    can_spawn: false
+    timeout: 1200
+    silence_timeout: 180
+    effort: high
+
+# Pour remplacer un rôle existant : modifier son bloc, ne pas créer deux
+# entrées launch:true pour le même rôle. Exemple à décommenter :
+#  orchestrator:
+#    provider: codex
+#    model: REPLACE_WITH_AVAILABLE_MODEL_ID
+#    instructions: team/_orchestrator.md
+#    launch: true
+#    role: orchestrator
+#    can_spawn: true

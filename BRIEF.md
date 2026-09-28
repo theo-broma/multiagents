@@ -12,6 +12,58 @@ The review phase's brief is kept at
 
 ---
 
+## Current work (from 2026-09-28): Phase 5 — the Codex provider
+
+**What is complete:**
+- Phase 0, with contracts A and B.
+- QF, SV, SP, commit-identity and sandbox-git (smoke test passed on
+  2026-09-28).
+- All of it is **merged into `main`** (fast-forward from
+  `refactor/split-consume`, then `b3f3910`).
+- The dated progress logs further down are history. Do not redo what they
+  mark as merged.
+
+**Where new work branches from:** `main`. `refactor/split-consume` is
+finished, and nothing new goes there.
+
+**Next:** integrate Codex (OpenAI's CLI) as a shipped, fourth provider.
+- The requirements, the decisions already taken with the user, and the open
+  questions are in `context/specs/codex-provider.md` (ids `CX-D*`, `CX-R*`,
+  `CX-Q*`). The user's original proposal is in `context/codex-proposal/`.
+- In short:
+  - ship it under `src/multiagents/defaults/`, with no provider name in core
+    code;
+  - use a dedicated profile (`~/.multiagents/profiles/codex`) and never the
+    user's `~/.codex`;
+  - read the real quota from Codex's rollout files, because the plan is
+    ChatGPT **Plus** and its windows are tight;
+  - mount the native binary in the container, and settle Codex's own sandbox
+    inside Docker by a live test;
+  - no interactive orchestrator on Codex in this phase.
+- Egress: the user approved `openai.com` and `chatgpt.com`, and they are
+  already in the project's allowlist.
+- Roles planned for Codex once it works: adversary, reviewer,
+  implementer-quick, researcher and advisor, plus a claude fallback for
+  tester, implementer and implementer-deep. The proposal is in
+  `.multiagents/proposals/agents-codex.yaml`. Models are pinned after a
+  measurement (CX-R11), not before.
+- Full pipeline with an adversary.
+
+**Still queued behind Codex** (from "Progress", 2026-09-27; not started):
+- AGENTS.md should name `scripts/test-chunk.sh`.
+- A live compaction test.
+- A content-filter refusal reported as `done`.
+- The config-drift warning.
+- opencode startup failures, which the router still picks.
+- An explicit `model:` override does not pin the provider.
+- Idle nodes and about 20 unmerged `agents/*` branches.
+- The limit-hit notices idea (end of this file).
+- Phases 2 and 3, paused.
+- The advisor catch-up consult, once agy is back
+  (`context/advisor-catchup.md`).
+
+---
+
 ## What this project is
 
 `multiagents` is an orchestration tool: a root orchestrator delegates to
