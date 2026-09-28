@@ -78,9 +78,12 @@ def auth_profile():
 
 
 def run_profile():
-    """Profile for an agent `run` (CX-C8 revised): the private backing as mounted."""
+    """Profile for an agent `run` (CX-C8 revised again): the private home, never $HOME/.codex."""
     if _is_docker():
-        return Path(os.environ.get("HOME", str(Path.home()))) / ".codex"
+        home = os.environ.get("MULTIAGENTS_PRIVATE_HOME")
+        if not home:
+            raise ValueError("MULTIAGENTS_PRIVATE_HOME is not set for a docker run")
+        return Path(home)
     return _host_profile()
 
 
