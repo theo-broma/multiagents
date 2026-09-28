@@ -219,3 +219,24 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
   default).
 - The contract review ran on a claude opus stand-in (ag-5b326a), not on the
   advisor. Please re-read the contract for its silences.
+
+## 18. Codex quota: a live read through the app-server (2026-09-28, 9a66fcc, e25a048)
+
+- The user asked how `/status` reads the quota, and I inspected the binary.
+  - Codex calls `chatgpt.com/backend-api/wham/usage` with the profile's
+    token.
+  - It exposes this as app-server JSON-RPC `account/rateLimits/read`,
+    with `rateLimitsByLimitId` buckets holding `primary` and `secondary`
+    windows (`usedPercent`, `windowDurationMins`, `resetsAt`).
+- **Decision:**
+  - The `budget` action's primary source is now `codex app-server` with
+    that method, bounded to 7 s.
+  - The rollout files become the fallback.
+  - CX-Q3 (reading the user's `~/.codex`) is withdrawn: the live reading
+    is per account.
+- Risks to review:
+  - the app-server is marked `[experimental]`;
+  - the protocol may change between releases, and the fallback covers that;
+  - the startup cost has to fit inside the 10 s action timeout.
+- Also merged: the red tests for the provider half (115b54d, 115 tests)
+  and the engine half (425cafe, 52 tests).
