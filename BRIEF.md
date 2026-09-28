@@ -86,6 +86,13 @@ finished, and nothing new goes there.
 - 2026-09-28 16:30 UTC: the user's first `multiagents auth login claude` did
   NOT change the vault, which is still the old account (`vault/.claude.json`
   mtime 15:41). Container agents got 429 `rate_limit` (ag-72497d, ag-14a3e5).
+- **Resolved at 16:43 UTC.** The login had been run on another machine
+  (`theobroma-A8`). Redone on `cacao`, it put account b
+  (`claudeai.prologue091`) in `vault/accounts/b`, and ag-72497d resumed its
+  session on it. That confirms a session resumes across an account change.
+  - Note: once `accounts/` exists, `authproxy.Accounts.labels()` lists only
+    `accounts/*`, so the old top-level credential ("default") is no longer
+    used. That is fine here, but it is not "failover" to the old account.
 - **To fix next, after Codex:** give the builtin claude reader the
   executor's profile.
 
