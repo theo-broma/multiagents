@@ -711,3 +711,23 @@ generate-json-schema`. `/status` reads the quota **live**:
   `account/rateLimits/read` works from the dedicated profile, on the host and
   in the container through the proxy, and records the `limitId` buckets
   observed. Those feed CX-Q1, since a model may have its own bucket.
+
+### Decisions on the app-server tester's questions (ag-fc872d, 37 tests `test_cx_c11r_*`, merged fa91940)
+
+- **When `rateLimitsByLimitId` is present and non-empty,** every window is
+  prefixed with its `limitId`, even when there is a single bucket. The
+  unprefixed `rateLimits` view is then not also emitted. Only when
+  `rateLimitsByLimitId` is absent or empty does `rateLimits` give
+  unprefixed names.
+- **Null fields.**
+  - A window with a null `usedPercent` is skipped.
+  - A null `windowDurationMins` gives the name `window`, prefixed when the
+    bucket has one.
+  - A null `resetsAt` means that window has no `resets_at`.
+- **A valid response followed by a non-zero exit is used.** The exit status
+  of a process we shut down ourselves is noise.
+- **A live `usedPercent` out of 0..100, or not a number,** means that window
+  is skipped. This is the same rule as the rollout reading.
+- **7 s is the target.** The tests assert the observable bound, under
+  9.5 s.
+- **How "not logged in" is signalled** is to be confirmed at L5.
