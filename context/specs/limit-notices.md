@@ -42,8 +42,16 @@ The user's examples:
   defaults file and line, and says which user file would override it and
   under which key. The user's file may not contain the key at all yet.
 
-  The config loader has to keep the file and line for every limit it
-  resolves.
+  Keep provenance **only for the limits that notices cover**, not for every
+  key (advisor, turn 5).
+
+  Some limits have no config line. A `budget_tag` ceiling or an explicit
+  `timeout` can come from a tool call (`runner.py` ~1433–1487). For those,
+  the notice says so honestly, and names the config key to use instead
+  where there is one.
+
+  This depends on H14 (`phase6-hardening.md`), which settles which value
+  is actually in effect.
 
 - **LN-R3 — where it surfaces.** Proposed default:
   - an event in the tree's event log, which is the log entry;
@@ -67,9 +75,12 @@ The user's examples:
   lists the remaining limits in the config schema and says, for each one,
   whether it is covered or why not.
 
-- **LN-R6 — container `memory`.** An out-of-memory kill (exit 137 or the
-  cgroup's OOM counter) is reported as this limit, naming `executor.docker.memory`.
-  It must not be reported as a generic failure.
+- **LN-R6 — container `memory`.**
+  - A kill is attributed to `executor.docker.memory` **only when there is
+    evidence of OOM**: an increase in the cgroup's OOM-kill counter, or
+    something equivalent.
+  - Exit 137 alone only means SIGKILL. In that case the notice reports a
+    kill whose cause is uncertain, and does not claim a memory limit.
 
 ## Suggested pipeline
 
