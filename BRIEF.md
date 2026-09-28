@@ -132,6 +132,19 @@ finished, and nothing new goes there.
 - **Lesson:** never pass a commit to `git checkout` in the project root.
   Use `git show <rev>:<path>` or a worktree.
 
+**Codex offline work: done (2026-09-28 ~21:40 UTC, main at a3fd1a7).**
+- Everything is merged: CX-C1..C27 (CX-C25 half withdrawn), the tests
+  updated to four providers, and the SP-R5 drift fix.
+- Codex is re-enabled. The container is recreated with its mounts, all
+  verified with `docker inspect`:
+  - the backing at `~/.codex`, masking the user's own;
+  - the versions root, read-only;
+  - the adapter, read-only.
+- **Live checks L1..L8 are blocked on the user:**
+  - `multiagents auth login codex` on `cacao`;
+  - a roster decision: a codex-pinned probe agent is needed to run agents on
+    codex at all. The roles planned in CX-D4 wait for CX-R11.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
