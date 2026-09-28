@@ -64,8 +64,7 @@ finished, and nothing new goes there.
     `.py` files, `executor/`, `models.py`, `budget.py`, `tui.py`.
 - **Paused:** claude's 5 h window is at 92% and resets at 10:39 UTC.
   opencode fails at start (`ag-3ba37b` was discarded), and agy is excluded.
-- **Open for the user:** CX-Q3, whether to read `rate_limits` from their own
-  `~/.codex/sessions`. The default is no.
+- **CX-Q3 withdrawn** (9a66fcc): quota is read live via `codex app-server` `account/rateLimits/read`, per account.
 - **Tooling:** commits made inside the container print
   `packed-refs.lock: Read-only file system` (`ag-155ed5`, `ag-4aa932`),
   although the commit lands. Investigate this before it bites; it is linked
