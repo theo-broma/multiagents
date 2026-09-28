@@ -217,7 +217,13 @@ def _refusal(ex, adapter: Path, cwd: Path, monkeypatch, agent_id="ag-rv0009") ->
 
 def _two_instance_config(tmp_path: Path, host, *, parent_first: bool):
     """`acme` and `acme-2` (extends acme, own bin and private home), sharing
-    one adapter file in the project's providers dir."""
+    one adapter file in the project's providers dir.
+
+    `acme-2` is declared its own `family`. Without that, the two are one
+    family and the router chooses the instance (ties broken by name), so an
+    agent pinned to `acme-2` legitimately runs on `acme` and CX-C16 would be
+    asserted about an agent that never ran on `acme-2`. The shared adapter —
+    the thing an argv[0] guess would trip over — is unaffected."""
     record = tmp_path.parent / (tmp_path.name + "-adapter-record.jsonl")
     _executable(tmp_path / ".multiagents" / "config" / "providers" / ADAPTER,
                 _recorder_body(record))
@@ -225,7 +231,8 @@ def _two_instance_config(tmp_path: Path, host, *, parent_first: bool):
             NAME2: _executable(host.bin / NAME2, "#!/bin/sh\necho acme-2\n")}
     parent = {"bin": NAME, "adapter": ADAPTER, "spawn": SPAWN, "stream": STREAM,
               "container_private_home": [".acme"]}
-    child = {"extends": NAME, "bin": NAME2, "container_private_home": [".acme-2"]}
+    child = {"extends": NAME, "family": NAME2, "bin": NAME2,
+             "container_private_home": [".acme-2"]}
     blocks = [(NAME, parent), (NAME2, child)]
     providers = dict(blocks if parent_first else reversed(blocks))
     return providers, bins, record
