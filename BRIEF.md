@@ -50,6 +50,19 @@ default, so work can proceed):
 - **D1 surfaces** (LN-R3): default to an event, the tool result and the
   terminal plus the monitor.
 
+**Progress log (phase 6):**
+- 2026-09-28 23:10: claude weekly_all at 94% (resets Oct 02 11:59 UTC).
+  Advisor ag-3f9bba (turn 6) agreed on routing:
+  - Phase 6 goes to codex. `agents.yaml` gained `tester.models.codex:
+    gpt-6-sol`, and implementer-deep's codex fallback is now gpt-6-sol.
+  - The orchestrator stays on claude, because codex has no interactive
+    launch.
+  - H1's contract and implementation can proceed. Its security sign-off (the
+    adversary) waits for a checker from another family, meaning claude after
+    the reset, unless the remaining quota can safely cover one pass.
+  - H1 research started: ag-4da90f (deletion lifecycle), ag-d0cd7b
+    (container-writable vs host-only paths).
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
