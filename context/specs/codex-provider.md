@@ -899,3 +899,19 @@ review verdict is approve with fixes. The fixes become new ids:
   - signal handlers are installed before `Popen`, and a comment explains
     that agentwrap kills the process group (finding 9);
   - the argv rewrite in `main` is derived from the parser (finding 10).
+
+### Decisions on the CX-C21..C26 tester's questions (ag-cc6173, merged; 27 tests, 24 red)
+
+- **The env allowlist in CX-C25 is withdrawn.**
+  - The multiagents entry's `env` is built by the engine for its own MCP
+    server, and Codex only takes it through `-c`, which means argv.
+  - The standing rule, recorded here for the engine: nothing secret goes
+    into `mcp_env`.
+  - The URL half of CX-C25 stands: inherited server URLs never reach argv.
+  - So `tests/test_codex_provider_edges.py::test_cx_c10_hostile_mcp_env_values_inject_no_config_keys`
+    is correct. The env-allowlist cases in `tests/test_codex_provider_review.py`
+    must be removed or rewritten by `tester`.
+- **`window_minutes: null` on the rollout path** stays invalid (the event is
+  skipped). Only the live path names a window `window`.
+- **Not black-box testable,** and accepted: the `internal` class of CX-C24,
+  and the "one shared validator" half of CX-C21.
