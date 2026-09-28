@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -50,10 +51,19 @@ def _is_docker():
     return os.environ.get("MULTIAGENTS_EXECUTOR") == "docker"
 
 
+def _is_users_own_codex_home(path):
+    real_users_codex = os.path.realpath(Path.home() / ".codex")
+    return os.path.realpath(path) == real_users_codex
+
+
 def _host_profile():
     raw = os.environ.get("MULTIAGENTS_CODEX_PROFILE")
     if raw:
-        return Path(raw)
+        candidate = Path(raw)
+        if _is_users_own_codex_home(candidate):
+            raise ValueError(
+                "MULTIAGENTS_CODEX_PROFILE resolves to the user's own ~/.codex; refusing")
+        return candidate
     return Path.home() / ".multiagents" / "profiles" / "codex"
 
 
@@ -92,10 +102,28 @@ def codex_bin():
 
 # ---------------------------------------------------------------- run (CX-C10) --
 
+_TOML_SHORT_ESCAPES = {
+    "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t",
+    "\b": "\\b", "\f": "\\f",
+}
+
+
+def _toml_escape_string(value):
+    out = []
+    for ch in value:
+        if ch in _TOML_SHORT_ESCAPES:
+            out.append(_TOML_SHORT_ESCAPES[ch])
+        elif ch == "\x7f" or ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def toml(value):
     """Serialize the small JSON subset accepted by MCP configuration as TOML."""
     if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
+        return _toml_escape_string(value)
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, list):
@@ -119,10 +147,14 @@ def mcp_flags(filename, cwd, env):
         raise ValueError("unexpected Codex MCP listing")
     servers = {}
     for server in inherited:
+        if not isinstance(server, dict):
+            raise ValueError("unexpected Codex MCP listing")
         name = server.get("name")
         if not isinstance(name, str):
             raise ValueError("MCP server has no valid name")
         transport = server.get("transport") or {}
+        if not isinstance(transport, dict):
+            raise ValueError("unsupported inherited MCP transport")
         # Keep a minimal valid transport even when --ignore-user-config later
         # removes its original definition. Never copy auth headers or tokens.
         if transport.get("command"):
@@ -145,7 +177,13 @@ def mcp_flags(filename, cwd, env):
             "-c", "features.multi_agent=false"]
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
 def command(opts, env):
+    if opts.session and not _UUID_RE.match(opts.session):
+        raise ValueError(f"session id is not UUID-shaped: {opts.session!r}")
     if env.get("MULTIAGENTS_EXECUTOR") == "docker":
         # Interim (L3 pending): Codex's own sandbox is not yet verified to
         # initialise correctly inside our container, so every profile maps to
@@ -168,6 +206,27 @@ def command(opts, env):
         argv += ["--model", opts.model]
     # Prompt through stdin: leading dashes/braces/newlines remain literal.
     return [*argv, "-"]
+
+
+def _nonneg_int(value):
+    """Best-effort, never-raising coercion to a non-negative int."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):  # NaN or +/-inf
+            return 0
+        try:
+            return max(0, int(value))
+        except (OverflowError, ValueError):
+            return 0
+    if isinstance(value, str):
+        try:
+            return max(0, int(value))
+        except ValueError:
+            return 0
+    return 0
 
 
 class Normalizer:
@@ -196,12 +255,20 @@ class Normalizer:
             self.failed |= failed
             out.update(kind="result", status="failed" if failed else "success")
             if failed:
-                out["text"] = str((obj.get("error") or {}).get("message", "Codex turn failed"))
+                error = obj.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message")
+                    out["text"] = message if isinstance(message, str) and message else "Codex turn failed"
+                elif error:
+                    out["text"] = str(error)
+                else:
+                    out["text"] = "Codex turn failed"
             else:
-                usage = obj.get("usage") or {}
-                inp = max(0, int(usage.get("input_tokens", 0)))
-                cache = min(inp, max(0, int(usage.get("cached_input_tokens", 0))))
-                output = max(0, int(usage.get("output_tokens", 0)))
+                usage = obj.get("usage")
+                usage = usage if isinstance(usage, dict) else {}
+                inp = _nonneg_int(usage.get("input_tokens", 0))
+                cache = min(inp, _nonneg_int(usage.get("cached_input_tokens", 0)))
+                output = _nonneg_int(usage.get("output_tokens", 0))
                 out["tokens"] = {"input_tokens": inp - cache,
                                  "cache_read_input_tokens": cache,
                                  "output_tokens": output, "total_tokens": inp + output}
@@ -271,7 +338,7 @@ def run(opts, env):
                 text = event.get("text")
                 if kind == "result" and event.get("status") == "failed":
                     # Existing runner sniffs quota/auth errors from stderr.
-                    print(text or "Codex failed", file=sys.stderr, flush=True)
+                    print(f"codex: {text or 'Codex failed'}", file=sys.stderr, flush=True)
                 if (kind in ("result", "error") and isinstance(text, str) and not auth_printed
                         and any(marker in text.lower() for marker in _AUTH_REFRESH_MARKERS)):
                     print(AUTH_LINE, file=sys.stderr, flush=True)
@@ -348,17 +415,18 @@ def models_action():
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
-        print(f"Codex models: cannot read the model cache ({type(exc).__name__})",
+        print(f"codex: cannot read the model cache ({type(exc).__name__})",
               file=sys.stderr)
         return 1
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
-        print("Codex models: cache is not in the expected shape", file=sys.stderr)
+        print("codex: cache is not in the expected shape", file=sys.stderr)
         return 1
     for item in data["models"]:
         if not isinstance(item, dict):
             continue
         slug = item.get("slug")
-        if slug and item.get("visibility", "list") == "list":
+        if slug and item.get("visibility") == "list":
+            slug = str(slug).replace("\t", " ").replace("\n", " ")
             name = str(item.get("display_name", slug)).replace("\t", " ").replace("\n", " ")
             print(f"{slug}\t{name}")
     return 0
@@ -367,18 +435,29 @@ def models_action():
 # -------------------------------------------------------- budget: rollout (C11) --
 
 def _window_name(minutes):
+    if minutes is None or isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+        return "window"
+    if isinstance(minutes, float) and (minutes != minutes or minutes in (float("inf"), float("-inf"))):
+        return "window"
     if minutes == 300:
         return "5h"
     if minutes == 10080:
         return "weekly"
     try:
         return f"{int(minutes)}m"
-    except (TypeError, ValueError):
-        return f"{minutes}m"
+    except (TypeError, ValueError, OverflowError):
+        return "window"
 
 
 def _iso(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_iso(epoch):
+    try:
+        return _iso(epoch)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _parse_ts(value):
@@ -398,6 +477,11 @@ def _valid_window(raw):
         return None
     if "window_minutes" not in raw:
         return None
+    minutes = raw["window_minutes"]
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+        return None
+    if isinstance(minutes, float) and (minutes != minutes or minutes in (float("inf"), float("-inf"))):
+        return None
     used = raw.get("used_percent")
     resets = raw.get("resets_at")
     if not isinstance(used, (int, float)) or isinstance(used, bool):
@@ -406,7 +490,9 @@ def _valid_window(raw):
         return None
     if not isinstance(resets, (int, float)) or isinstance(resets, bool):
         return None
-    return {"used_percent": float(used), "window_minutes": raw["window_minutes"],
+    if _safe_iso(resets) is None:
+        return None
+    return {"used_percent": float(used), "window_minutes": minutes,
             "resets_at": float(resets)}
 
 
@@ -441,7 +527,7 @@ def _rollout_files(home):
     root = home / "sessions"
     if not root.is_dir():
         return []
-    files = [p for p in root.glob("**/*.jsonl") if p.is_file()]
+    files = [p for p in root.glob("**/rollout-*.jsonl") if p.is_file()]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return files[:MAX_FILES_PER_HOME]
 
@@ -495,8 +581,14 @@ def _extra_quota_homes():
 
 def _build_result(raw_windows, *, source, stale_seconds, note=None, force_zero=False):
     now = time.time()
-    kept = {name: w for name, w in raw_windows.items()
-            if w["resets_at"] >= now - EXPIRY_MARGIN}
+    kept = {}
+    for name, w in raw_windows.items():
+        iso = _safe_iso(w["resets_at"])
+        if iso is None:
+            continue
+        if w["resets_at"] < now - EXPIRY_MARGIN:
+            continue
+        kept[name] = {"percent": w["percent"], "resets_at": w["resets_at"], "iso": iso}
     if not kept:
         return {"known": False, "note": note or "Codex quota: no rate-limit reading available."}
     worst_name = max(kept, key=lambda n: kept[n]["percent"])
@@ -505,10 +597,10 @@ def _build_result(raw_windows, *, source, stale_seconds, note=None, force_zero=F
     result = {
         "known": True,
         "source": source,
-        "windows": {n: {"percent": w["percent"], "resets_at": _iso(w["resets_at"])}
+        "windows": {n: {"percent": w["percent"], "resets_at": w["iso"]}
                     for n, w in kept.items()},
         "headroom": headroom,
-        "resets_at": _iso(worst["resets_at"]),
+        "resets_at": worst["iso"],
         "stale_seconds": stale_seconds,
     }
     if note:
@@ -532,6 +624,8 @@ def _snapshot_windows(snapshot, prefix=None):
         minutes = w.get("windowDurationMins")
         resets = w.get("resetsAt")
         if not isinstance(used, (int, float)) or isinstance(used, bool):
+            continue
+        if not (0 <= used <= 100):
             continue
         if not isinstance(resets, (int, float)) or isinstance(resets, bool):
             continue
@@ -714,8 +808,11 @@ def budget_action():
             print(json.dumps(result, ensure_ascii=False))
             return 0
 
-    host = _host_profile()
-    homes = [host]
+    try:
+        host = _host_profile()
+    except ValueError:
+        host = None
+    homes = [host] if host is not None else []
     if profile is not None and profile != host:
         homes.append(profile)
     homes += _extra_quota_homes()
@@ -748,7 +845,7 @@ def action(name):
         return models_action()
     # `launch` is withdrawn for this phase (CX-C13); `compact`, `usage` and
     # `prepare` are not yet implemented. Zero side effects either way.
-    print(f"Codex adapter: {name!r} is not implemented.", file=sys.stderr)
+    print(f"codex: {name!r} is not implemented.", file=sys.stderr)
     return 64
 
 
@@ -788,5 +885,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-        print(f"Codex adapter: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"codex: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(20)
