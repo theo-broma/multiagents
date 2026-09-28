@@ -817,3 +817,43 @@ new ids.
     for instance by making `acme` unavailable or loaded, or assert against
     the node's recorded provider.
 - `/sbin` was added to the refused system prefixes. Accepted.
+
+## The attack on the adapter (ag-602b46, a tester standing in for the adversary; merged as tests/test_codex_provider_edges.py)
+
+The results were 14 findings, which are red tests, and 78 probes that held.
+Ranked:
+
+1. **security**: a resume session id that starts with `-` reaches the native
+   argv as a flag, for example `--dangerously-bypass-approvals-and-sandbox`.
+   A session id must be validated (UUID-shaped) or placed after `--`. Refuse
+   anything else.
+2. **security**: a DEL (`\x7f`) or another control character in MCP env
+   values, args or names, or in effort, produces invalid TOML. The whole
+   `-c` value then falls back to a string, which means our server is not
+   configured and inherited servers are not disabled. Every control
+   character must be TOML-escaped.
+3. **data**: malformed `turn.completed` usage (null, string, list, `1e999`)
+   and `turn.failed` with a string error drop the result event, lose the
+   tokens, or crash. Also `OverflowError` is not caught, and `_iso` is
+   unprotected.
+4. **data**: a live or rollout `resetsAt` in milliseconds or out of range,
+   or `window_minutes: 1e999`, crashes `budget`. The event must be skipped,
+   and the live read must fall back.
+5. **data**: a live `usedPercent` outside 0..100 is emitted. It must be
+   skipped, as already decided.
+6. **data**: `sessions/**/*.jsonl` matches non-rollout files. Only
+   `rollout-*.jsonl` counts.
+7. **data**: a models entry without `visibility` is listed, contrary to
+   decision 3. A slug containing a tab or newline forges a TSV row.
+8. **annoyance**: a malformed `mcp list` gives an AttributeError traceback,
+   and the stderr prefix is `Codex adapter:` instead of `codex:`.
+
+Decisions on its questions:
+- **A profile (`MULTIAGENTS_CODEX_PROFILE`) that resolves to the user's
+  `~/.codex`** is refused with a `codex:` line (CX-D3). No test exists for it
+  yet; the implementer adds one.
+- **A non-numeric `window_minutes` or `windowDurationMins`** is treated as
+  null, which gives the name `window` (see the CX-C11 decisions).
+- **Engine, out of scope here:** the prompt goes to the adapter in argv
+  (`--prompt`). The Linux limit of 128 KiB per argument (E2BIG) caps prompts
+  for every provider that takes argv. Logged for later.
