@@ -414,9 +414,11 @@ class Executor(ABC):
 
     @abstractmethod
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
-                    run_dir: Path | None = None, deadline: float = 0) -> Handle:
+                    run_dir: Path | None = None, deadline: float = 0,
+                    provider: str = "") -> Handle:
         """Start `argv`. Given `run_dir`, under the launch wrapper, returning
-        a `FollowHandle` (SV-R1); without one, on pipes, as before."""
+        a `FollowHandle` (SV-R1); without one, on pipes, as before.
+        `provider` names the provider the run belongs to (CX-C16)."""
         ...
 
     def preflight(self) -> list[str]:
@@ -443,21 +445,36 @@ class Executor(ABC):
 
     # ------------------------------------------------------------ adapter --
 
-    def adapter_provider(self, argv: list[str]) -> tuple[str, Any] | None:
-        """``(name, provider)`` whose adapter is `argv[0]`, or None (CX-C1).
+    def adapter_provider(self, argv: list[str], provider: str = "") -> tuple[str, Any] | None:
+        """``(name, provider)`` when this run is an adapter's, or None (CX-C1).
 
-        An adapter run is recognised by an absolute path in argv[0] whose
-        file name is a provider's `adapter:` — the runner resolves it to that
-        path. A bare command name is a native CLI, never an adapter.
+        The runner names the provider (CX-C16), and then that provider decides
+        alone: an `extends:` instance sharing its parent's adapter is itself,
+        and a provider without `adapter:` is never an adapter run, whatever
+        its `bin` is called.
+
+        Unnamed, argv[0] is matched as a fallback: an absolute path whose file
+        name is a provider's `adapter:`. A bare command name is a native CLI,
+        never an adapter. A name two providers share is refused, since
+        guessing would hand one of them the other's `bin` and home.
         """
+        providers = getattr(self, "providers", None) or {}
+        if provider:
+            entry = providers.get(provider)
+            if entry is None or not getattr(entry, "adapter", ""):
+                return None
+            return provider, entry
         if not argv or not os.path.isabs(argv[0]):
             return None
         name = Path(argv[0]).name
-        for provider_name, provider in (getattr(self, "providers", None) or {}).items():
-            adapter = getattr(provider, "adapter", "")
-            if adapter and Path(adapter).name == name:
-                return provider_name, provider
-        return None
+        matches = [(provider_name, entry) for provider_name, entry in providers.items()
+                   if getattr(entry, "adapter", "")
+                   and Path(entry.adapter).name == name]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"{name} is the adapter of {', '.join(n for n, _ in matches)}, and "
+                f"no provider was named for this run: refusing to guess which")
+        return matches[0] if matches else None
 
     def native_bin(self, provider_name: str, provider: Any, env: dict[str, str]) -> str:
         """The absolute path of `provider.bin` an adapter run should drive,
@@ -465,12 +482,13 @@ class Executor(ABC):
         found = shutil.which(provider.bin, path=env.get("PATH"))
         return os.path.abspath(found) if found else ""
 
-    def adapter_env(self, argv: list[str], env: dict[str, str]) -> dict[str, str]:
+    def adapter_env(self, argv: list[str], env: dict[str, str],
+                    provider: str = "") -> dict[str, str]:
         """`env` plus what an adapter run is told about its situation (CX-C2):
         the native binary and the executor, the same names action scripts get
         from `scripts.build_env`. Unchanged for a run that is not an adapter's.
         """
-        found = self.adapter_provider(argv)
+        found = self.adapter_provider(argv, provider)
         if found is None:
             return env
         provider_name, provider = found
