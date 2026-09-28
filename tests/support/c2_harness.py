@@ -144,7 +144,7 @@ def raw_shipped_providers() -> dict[str, Any]:
 def shipped_providers() -> dict[str, Provider]:
     """What the shipped `providers.yaml` parses into, right now.
 
-    `claude`, `opencode`, `agy` — the three real `Provider` objects, built the
+    `claude`, `opencode`, `agy`, `codex` — the four real `Provider` objects, built the
     same way `config.load()` builds them (`load_providers` over the raw dict),
     so a characterizer can assert on the real spawn args / stream rules /
     script names without re-typing the yaml.
