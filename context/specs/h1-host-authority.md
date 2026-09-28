@@ -44,8 +44,12 @@ The **container domain `D`** is:
 - every branch the host itself created;
 - every path outside the worktree root.
 
-A container agent must never be able to make the **host** process mutate
-anything outside `D`. It may make the host mutate things inside `D`. The
+**Container-written state alone never authorises a host mutation outside
+`D`.** An explicit host action may act outside `D`, because that is its job.
+Examples are the orchestrator's `merge_agent`, `discard_agent` and
+`push_branch`, or a user's CLI command. But it acts only with operands the
+host holds (HA-R1), never with ones read from container-writable state.
+Container-written state may make the host mutate things inside `D`. The
 container could damage those itself, so that grants it nothing new.
 
 "Host" means the multiagents MCP server or CLI running outside the executor
@@ -73,6 +77,9 @@ spawned itself.
   directory nor any parent of it; a test that editing `tree.json` does not
   change what the record returns; a test that a new `Runner` over the same
   project reads back a completed record.
+- Ordering: the host records a node's branch and worktree **before** any
+  container-visible state exists that could request their deletion, whether
+  in `tree.json` or in the worktree.
 
 **HA-R2: host mutations take their operands from the host record.**
 - Scope: every host-side mutation, meaning each of these:
@@ -83,7 +90,11 @@ spawned itself.
   - `_cleanup` (worktree removal and branch deletion);
   - `_drop_if_empty`;
   - `reap_pending_branches`;
-  - the reconciliation on `resume`.
+  - the reconciliation on `resume`;
+  - `push_branch` (its ref);
+  - `multiagents clean --branches` (`cli.py` ~1736–1761);
+  - every worktree move or reset done by steer and by conversation refresh
+    (`runner.py` ~3149–3241, ~3489–3580).
 - For host-created nodes, these operations take the branch name, the
   worktree path, the merge target and the parent link from the host record,
   **never** from `tree.json`.
@@ -154,10 +165,15 @@ Verified by:
 
 **HA-R5: worktree removal.** The host removes a worktree only at one of two
 paths:
-- the host-recorded path of a host-created node;
+- the host-recorded path of the exact host-created node whose
+  host-authorised completion is being cleaned;
 - for a nested node, a path that resolves (realpath) strictly inside
-  `~/.multiagents/worktrees/<slug>/` and is not the recorded worktree of any
-  host-created node that is still unfinished.
+  `~/.multiagents/worktrees/<slug>/` and is not the recorded worktree of
+  **any** host-recorded node, whatever its state.
+
+Containment must still hold at the moment the removal runs. A realpath
+check followed by a separate command that resolves the path again leaves a
+symlink-swap race, and is not compliant.
 
 Any other path is refused with `host_authority_mismatch`, and nothing is
 deleted. The case that matters most is a path under `paths.root`, `$HOME`,
@@ -188,19 +204,36 @@ node's run ends, `_merge_pending_children` merges only into that node's
 
 **HA-R7: migration.** On the first host start after this change, the host
 seeds its record once from `tree.json`. It takes every node with a `branch`
-or a `worktree`, and marks each entry with `seeded` provenance.
+or a `worktree`, and marks each entry with `seeded` provenance, meaning
+unverified.
+- A seeded entry **protects**:
+  - its branch is never reaped under HA-R4 case 2;
+  - its worktree is never removed under HA-R5's nested rule.
+- A seeded entry **authorises nothing automatic**:
+  - no auto-merge (HA-R3);
+  - no merge of pending children into it (HA-R6);
+  - no automatic cleanup.
+- Only an explicit host action may act on a seeded entry: `merge_agent`,
+  `discard_agent` or `clean`. That completion is then recorded normally.
+- A seeded worktree path outside the worktree root, or reached through a
+  symlink, is quarantined. It stays protected but is never used as an
+  operand.
+- Seeding runs before the constructor's reaper call (`runner.py` ~455),
+  under a host-only lock. Its completion is marked atomically in the
+  host-only directory.
+- An interrupted seed fails closed: nothing is reaped until a seed
+  completes, and a changed tree is not re-read.
 - Seeding never repeats. A node that appears in `tree.json` later is not
   added unless the host spawns it.
-- The trade: the seeding trusts `tree.json` as it stands at upgrade time.
-  That is accepted, and documented beside the code.
 - Without seeding, the roughly 20 existing unmerged `agents/*` branches
   would fall under HA-R4 case 2 and become deletable by a forgery.
 - Verified by:
-  - a tree with pre-existing nodes becomes a seeded record after one host
-    start;
-  - a node added to `tree.json` after that start is not host-recorded;
-  - a seeded branch is protected exactly as HA-R4 protects a host-created
-    one.
+  - pre-existing nodes become seeded entries after one host start;
+  - a node added after that start is not recorded;
+  - a seeded branch survives a forged pending deletion;
+  - a seeded node is not auto-merged;
+  - after a simulated interrupted seed, reaping stays disabled on the next
+    start until the seed completes.
 
 **HA-R8: nothing else regresses.** These keep their current behaviour:
 - nested merge, discard and pending deletion inside the container
@@ -217,9 +250,17 @@ or a `worktree`, and marks each entry with `seeded` provenance.
 - Inter-agent isolation inside the container: the threat-model section
   above. **Known limitation**; per-agent containers are future work. It is
   recorded in `sandbox-git.md` and in BRIEF.
-- Git executing configured programs during a host merge (hooks, filters,
-  drivers, fsmonitor) is **H3**, not H1. The merges that HA-R6 still
-  performs are in H3's audit.
+- Git executing configured programs on the host (hooks, filters, drivers,
+  fsmonitor) is **H3**, not H1. H3's audit covers two paths:
+  - the merges that HA-R6 still performs;
+  - the host CLI's `commit_all()` of an interrupted agent's worktree on
+    stop or resume (`cli.py` ~940–965, ~2528–2560).
+
+## Testing note
+
+In production, `DockerExecutor.inside()` decides host versus nested
+(`docker.py` ~590–611). It checks `/.dockerenv` and the container marker in
+`/proc/1/environ`. Unit tests may inject or monkeypatch its result.
 - `events.jsonl` is output, not authority. No host mutation may start
   reading it as authority.
 
