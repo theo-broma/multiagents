@@ -915,3 +915,33 @@ review verdict is approve with fixes. The fixes become new ids:
   skipped). Only the live path names a window `window`.
 - **Not black-box testable,** and accepted: the `internal` class of CX-C24,
   and the "one shared validator" half of CX-C21.
+
+## Full-suite regressions after the offline work (host run at 858c70c)
+
+Besides the 72 phase2 failures, which fail by design, the run has 5
+failures:
+
+- **3 characterization tests pin "three shipped providers":**
+  - `test_c2_auth_characterization::test_load_providers_builds_the_three_real_shipped_providers`
+  - `…::test_shipped_providers_yaml_folds_into_three_independent_families`
+  - `test_c2_provider_harness::test_shipped_providers_yaml_parses_into_the_three_real_providers`
+
+  CX-D1 makes codex the fourth. These are deliberate test updates, done by
+  `tester`.
+- **2 SP-R5 drift tests are pre-empted by the CX-C19 refusal:**
+  - `test_session_persistence::test_sp_r5_drift_refusal_with_agents_inside_says_stop_first`
+  - `test_session_persistence_adversary::test_sp_r5_drift_message_never_prescribes_refusing_command_when_stopped`
+
+  On a host where codex is installed, `docker up` returns the
+  versions-root refusal ("That ends any agent still inside") before the
+  SP-R5 drift path can name the agents inside.
+
+- **CX-C27 — a missing versions root is drift, and follows SP-R5.**
+  - A container that lacks a declared versions root is reported through the
+    same drift path as any other missing mount, with the same SP-R5
+    behaviour: name the agents inside and say stop first, and never
+    prescribe a command that would refuse.
+  - The CX-C19 wording ("this container lacks the versions root <X>") stays
+    as the description of that drift item.
+  - Verified by: the two SP-R5 tests above, green on a host with codex
+    installed, plus the existing CX-C19 tests.
