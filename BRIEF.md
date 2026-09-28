@@ -12,7 +12,51 @@ The review phase's brief is kept at
 
 ---
 
-## Current work (from 2026-09-28): Phase 5 — the Codex provider
+## Current work (from 2026-09-28, evening): Phase 6 — hardening, then two features
+
+**Complete:** everything up to and including Phase 5 (Codex), merged on `main`
+at `e12e605`. New work branches from `main`.
+
+**What this phase is.** Close the security holes and false completions found
+at the end of Phase 5, fix the routing and reliability defects, then build
+the two features the user asked for. The user approved this order on
+2026-09-28. They asked for the advisor to be consulted regularly and for the
+work to run as autonomously as possible. The advisor (ag-3f9bba, turn 4)
+reviewed the plan, and its corrections are already applied.
+
+**Requirements, in order:**
+- `context/specs/phase6-hardening.md` holds H1–H13 and D2.
+- `context/specs/limit-notices.md` holds D1.
+- Short order:
+  1. **H1**: a forged `branch_pending_delete` can destroy another agent's
+     branch. With an adversary.
+  2. **H2**: a refused or filtered run is reported as `done`.
+  3. **H3**: agent code runs on the host during merges. Base hooks default
+     off, plus an audit of Git's other command hooks. With an adversary.
+  4. **H4**: an empty fallback model on steer and start.
+  5. **D1**: limit-hit notices. The contract can be written early.
+  6. **H5–H7**: the claude budget under Docker, `refresh-models`, and
+     opencode routing together with explicit `model:` pins.
+  7. **H8**: the 128 KiB prompt transport.
+  8. **H9–H13**: the old queue and cosmetic items.
+  9. **D2**: tmux, step 1 (viewer only).
+
+**Open decisions for the user** (emit them as `NEED_DECISION`; each has a
+default, so work can proceed):
+- **`merge-hooks`** (H3): base hooks are off during host merges, with a
+  `project.yaml` opt-in. It touches the "hooks kept" decision of CI-R5,
+  which was about agent commits rather than host merges.
+- **D1 surfaces** (LN-R3): default to an event, the tool result and the
+  terminal plus the monitor.
+
+**Not in this phase:**
+- phases 2 and 3 of the review (the 72 by-design reds stay red);
+- tmux step 2;
+- nested codex spawns.
+
+---
+
+## Phase 5 — the Codex provider — **DONE 2026-09-28** (history below)
 
 **What is complete:**
 - Phase 0, with contracts A and B.

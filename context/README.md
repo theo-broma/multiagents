@@ -47,6 +47,11 @@ them. Review the tracked defaults; that is where a new provider starts from.
   It predates sandbox-git, and several of its choices are superseded by the
   spec (profile, quota, launch).
 
+## Phase 6 (from 2026-09-28)
+
+- `specs/phase6-hardening.md` — H1–H13 and D2, in the order to work them.
+- `specs/limit-notices.md` — D1, the limit-hit notices the user asked for.
+
 ## What is NOT here, and where it lives instead
 
 - **Requirements and specs.** This project does not specify before it builds.
