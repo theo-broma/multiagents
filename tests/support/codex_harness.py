@@ -357,3 +357,236 @@ if _log:
                     fh.write(path + "\n")
     sys.addaudithook(_hook)
 '''
+
+
+# ================================================== app-server (CX-C11 rev.) ==
+#
+# The revised CX-C11 reads the quota live: `codex app-server` over stdio,
+# `initialize` → `initialized` → `account/rateLimits/read`. The helpers below
+# are ADDITIONS; nothing above changes behaviour. `FakeCodexAppServer` is the
+# same fake as `FakeCodex` for every other subcommand (login status, exec, …)
+# and additionally speaks the app-server exchange when argv holds `app-server`.
+#
+# ---------------------------------------------------------------------------
+# THE WIRE ASSUMPTIONS, IN ONE PLACE. Taken from the 0.158.0 schema excerpts
+# (context/codex-proposal/app-server-schema/) and NOT yet confirmed live (L5).
+# If the live check disagrees, change the line here and nothing else:
+#   - framing: "ndjson" (one JSON object per line) or "content-length"
+#     (LSP-style `Content-Length: N\r\n\r\n<body>`), both implemented below;
+#   - whether the fake's replies carry `"jsonrpc": "2.0"` (the schema's
+#     JSONRPCResponse has only `id` and `result`/`error`);
+#   - the handshake the fake insists on before it answers the read.
+APP_SERVER_FRAMING = "ndjson"
+APP_SERVER_JSONRPC_FIELD = False
+APP_SERVER_HANDSHAKE = ("initialize", "initialized")   # request, then notification
+RATE_LIMITS_METHOD = "account/rateLimits/read"
+# ---------------------------------------------------------------------------
+
+# Values that must never leave the adapter (revised CX-C11: "no accountId, no
+# credits.balance, no upsell text").
+ACCOUNT_ID = "acct-LEAK-7f3e9a"
+CREDITS_BALANCE = "1234.56-LEAK"
+UPSELL_TEXT = "UPSELL-LEAK Upgrade to Pro for more"
+
+_APP_SERVER_BLOCK = r'''
+if "app-server" in argv:
+    import signal, subprocess
+    A = B.get("app_server") or {}
+    W = B.get("wire") or {}
+    mode = A.get("mode", "ok")
+    with open(HERE / "pids.txt", "a") as fh:
+        fh.write(f"{os.getpid()}\n")
+    if A.get("ignore_sigterm"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if mode.startswith("hang") or A.get("grandchild"):
+        # A grandchild in the same process group, holding the same stdio.
+        code = ("import signal, time\n"
+                + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if A.get("ignore_sigterm") else "")
+                + "time.sleep(600)\n")
+        child = subprocess.Popen([sys.executable, "-c", code])
+        with open(HERE / "pids.txt", "a") as fh:
+            fh.write(f"{child.pid}\n")
+    if mode == "exit":
+        print("fatal: app-server failed " + SECRET, file=sys.stderr, flush=True)
+        sys.exit(A.get("exit", 2))
+    if mode == "hang_silent":
+        time.sleep(600)
+
+    rin, rout = sys.stdin.buffer, sys.stdout.buffer
+    framing = W.get("framing", "ndjson")
+
+    def read_msg():
+        if framing == "ndjson":
+            while True:
+                line = rin.readline()
+                if not line:
+                    return None
+                if line.strip():
+                    return line
+        length = None
+        while True:
+            header = rin.readline()
+            if not header:
+                return None
+            header = header.strip()
+            if not header:
+                if length is None:
+                    continue
+                return rin.read(length)
+            name, _, value = header.decode("latin-1").partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value.strip())
+
+    def send_raw(body):
+        if framing == "ndjson":
+            rout.write(body + b"\n")
+        else:
+            rout.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        rout.flush()
+
+    def send(obj):
+        if W.get("jsonrpc_field"):
+            obj = {"jsonrpc": "2.0", **obj}
+        send_raw(json.dumps(obj).encode())
+
+    def error(mid, code, message, data=None):
+        err = {"code": code, "message": message}
+        if data is not None:
+            err["data"] = data
+        send({"id": mid, "error": err})
+
+    init_req, init_note = W.get("handshake", ["initialize", "initialized"])
+    method_read = W.get("rate_limits_method", "account/rateLimits/read")
+    init_done = initialized = False
+    while True:
+        raw = read_msg()
+        if raw is None:
+            if A.get("linger_after_eof"):
+                time.sleep(600)
+            sys.exit(A.get("eof_exit", 0))
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            msg = {"unparseable": raw.decode("utf-8", "replace")}
+        with open(HERE / "appserver.jsonl", "a") as fh:
+            fh.write(json.dumps(msg) + "\n")
+        if not isinstance(msg, dict):
+            continue
+        method, mid = msg.get("method"), msg.get("id")
+        if mode == "garbage":
+            if mid is not None:
+                rout.write(A.get("garbage", "not json at all " + SECRET).encode() + b"\n")
+                rout.flush()
+            continue
+        if mid is None:
+            if method == init_note and init_done:
+                initialized = True
+            continue
+        if method == init_req:
+            info = (msg.get("params") or {}).get("clientInfo")
+            if not (isinstance(info, dict) and isinstance(info.get("name"), str)
+                    and isinstance(info.get("version"), str)):
+                error(mid, -32602, "Invalid request: missing clientInfo")
+                continue
+            if mode == "init_error":
+                error(mid, -32603, "initialize failed", SECRET)
+                continue
+            init_done = True
+            send({"id": mid, "result": {"userAgent": "codex_cli_rs/0.158.0 (fake)"}})
+            continue
+        if method == method_read:
+            if not initialized:
+                error(mid, -32002, "Not initialized")
+                continue
+            if mode == "hang_after_initialize":
+                time.sleep(600)
+            if A.get("notify_first", True):
+                send({"method": "account/updated", "params": {"authMode": "chatgpt"}})
+            if mode == "rpc_error":
+                error(mid, -32603, "failed to fetch codex rate limits", SECRET)
+            elif mode == "not_logged_in":
+                error(mid, -32600,
+                      "codex account authentication required to read rate limits", SECRET)
+            else:
+                send({"id": mid, "result": A.get("result")})
+            continue
+        error(mid, -32601, "Method not found")
+'''
+
+_MARK = "\nwords = [a for a in argv"
+assert _MARK in FAKE_CODEX
+FAKE_CODEX_APP_SERVER = FAKE_CODEX.replace(_MARK, "\n" + _APP_SERVER_BLOCK + _MARK, 1)
+
+
+def rl_window(used: Any, minutes: Any, resets_at: Any) -> dict[str, Any]:
+    """A `RateLimitWindow` as the app-server sends it (camelCase, Unix seconds)."""
+    return {"usedPercent": used, "windowDurationMins": minutes, "resetsAt": resets_at}
+
+
+def rl_snapshot(primary: dict | None, secondary: dict | None, *, limit_id: str | None = None,
+                reached: str | None = None) -> dict[str, Any]:
+    """A `RateLimitSnapshot`, with a credits block whose balance must not leak."""
+    return {"limitId": limit_id, "limitName": None, "primary": primary,
+            "secondary": secondary, "planType": "plus", "rateLimitReachedType": reached,
+            "credits": {"hasCredits": True, "unlimited": False, "balance": CREDITS_BALANCE}}
+
+
+def rate_limits_response(rate_limits: dict, by_limit_id: dict | None = None) -> dict[str, Any]:
+    """A `GetAccountRateLimitsResponse`, carrying every field that must not leak."""
+    return {"accountId": ACCOUNT_ID, "rateLimits": rate_limits,
+            "rateLimitsByLimitId": by_limit_id,
+            "rateLimitUpsell": {"title": UPSELL_TEXT, "body_text": UPSELL_TEXT},
+            "ordinaryUsageAllowed": True,
+            "rateLimitResetCredits": {"availableCount": 0, "credits": None}}
+
+
+class FakeCodexAppServer(FakeCodex):
+    """`FakeCodex`, plus `codex app-server` speaking the JSON-RPC exchange.
+
+    Records, beside itself: `calls.jsonl` (argv and CODEX_HOME, as FakeCodex),
+    `appserver.jsonl` (every message the adapter sent it), and `pids.txt` (its
+    own pid, and a grandchild's in the hang modes).
+
+    Modes: ok, rpc_error, not_logged_in, init_error, garbage, exit,
+    hang_silent (never reads), hang_after_initialize. Options: `grandchild`
+    (spawn one in the same process group, as the hang modes always do),
+    `linger_after_eof` (keep running once stdin closes), `ignore_sigterm`.
+    """
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.path.write_text(FAKE_CODEX_APP_SERVER)
+        self.behaviour["wire"] = {"framing": APP_SERVER_FRAMING,
+                                  "jsonrpc_field": APP_SERVER_JSONRPC_FIELD,
+                                  "handshake": list(APP_SERVER_HANDSHAKE),
+                                  "rate_limits_method": RATE_LIMITS_METHOD}
+        self.behaviour["app_server"] = {"mode": "ok", "result": None}
+        self.save()
+
+    def app_server(self, **values: Any) -> None:
+        self.behaviour["app_server"].update(values)
+        self.save()
+
+    def app_server_calls(self) -> list[dict[str, Any]]:
+        return [c for c in self.calls() if "app-server" in c["argv"]]
+
+    def received(self) -> list[Any]:
+        log = self.dir / "appserver.jsonl"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines() if line]
+
+    def pids(self) -> list[int]:
+        log = self.dir / "pids.txt"
+        if not log.exists():
+            return []
+        return [int(line) for line in log.read_text().split()]
+
+
+def process_gone(pid: int) -> bool:
+    """True when `pid` no longer runs: absent, or a zombie awaiting its reaper."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError, IndexError):
+        return True
+    return state in ("Z", "X")
