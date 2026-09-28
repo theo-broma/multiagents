@@ -92,9 +92,10 @@ def test_read_provider_caches_until_invalidated(tmp_path):
 # Entry point 3 — providers.load_providers and the shipped providers.yaml
 # ---------------------------------------------------------------------------
 
-def test_shipped_providers_yaml_parses_into_the_three_real_providers():
+def test_shipped_providers_yaml_parses_into_the_four_real_providers():
+    # CX-D1: codex ships as the fourth default provider.
     providers = h.shipped_providers()
-    assert set(providers) == {"claude", "opencode", "agy"}
+    assert set(providers) == {"claude", "opencode", "agy", "codex"}
     assert providers["claude"].script_name == "claude.sh"
     assert providers["agy"].script_name == "agy.sh"
 
