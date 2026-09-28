@@ -78,6 +78,33 @@ default, so work can proceed):
   - Researcher ag-94c9f0 is mapping H2's refusal signals, in parallel and
     read-only.
   - H3's scope gained the host `commit_all` on stop and resume.
+- 2026-09-29, around 00:30: all three contracts are written and reviewed
+  by the advisor (turns 8–10):
+  - H1: `h1-host-authority.md`;
+  - H2: `h2-refusal-status.md`;
+  - H3: `h3-host-git-execution.md`.
+
+  Tests:
+  - H1 tests merged (a7544fb): 19 red, 6 green.
+  - H2 tests merged (d776bb0): 15 red, 6 green.
+  - H3 tester ag-d85ea7 is still adding coverage; merge it when done. It
+    changed 5 SG-R5 tests to the hooks-off default.
+
+  Implementation:
+  - H1 implementer-deep ag-ff8301 is running on codex gpt-6-sol.
+  - Next, in order:
+    1. H1 adversary. It needs a checker from a family other than codex:
+       claude after the reset, or decide.
+    2. H2 implementer, which can start once H1 merges because both edit
+       `runner.py`.
+    3. H3 implementer.
+
+  Other notes:
+  - dev-advisor is on agy, which is out of quota, so implementers are told
+    not to consult it and to raise NEED_INFO instead.
+  - Tooling: the doom-loop watchdog false-fires on codex `file_change`
+    events, because repeated edits to one file carry identical args (path
+    and kind only). File a bug-reporter ticket at a natural stop.
 
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
