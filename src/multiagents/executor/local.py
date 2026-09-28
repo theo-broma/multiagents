@@ -16,6 +16,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .. import procs
 from .base import Executor, FollowHandle, Handle, wrapper_argv
@@ -32,10 +33,15 @@ STREAM_LIMIT = 16 * 1024 * 1024
 class LocalExecutor(Executor):
     kind = "local"
 
+    def __init__(self, providers: dict[str, Any] | None = None):
+        # Only to recognise an adapter run (CX-C1); nothing else here needs them.
+        self.providers = providers or {}
+
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
                     run_dir: Path | None = None, deadline: float = 0,
                     pid_file: Path | None = None) -> Handle:
         cwd.mkdir(parents=True, exist_ok=True)
+        env = self.adapter_env(argv, env)
         if run_dir is not None:
             return await self._start_wrapped(argv, cwd, env, run_dir, deadline,
                                              pid_file or run_dir / "agent.pid")

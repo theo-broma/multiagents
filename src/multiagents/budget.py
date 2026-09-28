@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -823,7 +824,22 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
         source=str(data.get("source") or "script"),
         note=str(data.get("note") or ""),
         windows=data.get("windows") if isinstance(data.get("windows"), dict) else {},
+        stale_seconds=_script_stale_seconds(data.get("stale_seconds")),
     )
+
+
+def _script_stale_seconds(value: Any) -> float | None:
+    """CX-C15: a budget script's `stale_seconds`, the age of its reading.
+
+    A finite number, clamped at 0 as the built-in readers clamp it — a clock
+    a little ahead is not a reading from the future. Anything else is
+    ignored: a malformed age must not spoil the rest of the reading.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return max(0.0, float(value))
 
 
 def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,

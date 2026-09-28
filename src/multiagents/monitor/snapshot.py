@@ -152,6 +152,7 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
                              and data.get("usable"))
         out.append({
             "name": name,
+            "billing": getattr(provider, "billing", "metered"),
             "below_reserve": below_reserve,
             "reserve": reserve,
             "available": bool(getattr(provider, "available", lambda: None)()),
@@ -271,9 +272,12 @@ def spend_by_provider(tree: Tree) -> dict[str, dict[str, int]]:
     return out
 
 
-def totals(nodes: dict) -> dict:
+def totals(nodes: dict, plan: set[str] | frozenset[str] = frozenset()) -> dict:
     """Rolled up three ways, because "what did last night cost" is three
-    different questions depending on what you are about to change."""
+    different questions depending on what you are about to change.
+
+    A `by_model` row of a provider in `plan` carries `"billing": "plan"`
+    (CX-C5): its dollars are not a bill, and the row says so."""
     by_agent: dict[str, dict] = {}
     by_day: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
@@ -288,6 +292,8 @@ def totals(nodes: dict) -> dict:
                             (day, by_day),
                             (f"{node.get('provider')}/{node.get('model')}", by_model)):
             row = bucket.setdefault(key, {"tokens": 0, "cost_usd": 0.0, "runs": 0})
+            if bucket is by_model and node.get("provider") in plan:
+                row["billing"] = "plan"
             row["tokens"] += tokens
             row["cost_usd"] = round(row["cost_usd"] + cost, 4)
             row["runs"] += 1
@@ -462,7 +468,8 @@ def snapshot(paths: ProjectPaths, config: Config,
         "running": running,
         "conversations": parked,
         "history": roots,
-        "totals": totals(nodes),
+        "totals": totals(nodes, {name for name, p in load_providers(config.providers).items()
+                                 if p.billing == "plan"}),
         "tickets": data.get("tickets", []),
         "questions": data.get("questions", []),
         "deferred": data.get("deferred", []),

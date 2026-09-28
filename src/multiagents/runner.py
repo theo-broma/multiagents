@@ -46,6 +46,7 @@ from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_statu
                             running, stop_wrapped)
 from . import providers as providers_mod
 from . import procs
+from . import scripts
 from . import paths as paths_mod
 from .paths import ProjectPaths, global_config_dir, state_root
 from .providers import Event, Provider, load_providers
@@ -1153,6 +1154,17 @@ class Runner:
             permission=spec.permission, session_id=session_id, options=options,
             timeout=int(timeout or spec.timeout),
         )
+        if provider.adapter:
+            # CX-C1: the adapter runs at its absolute path, which is also how
+            # the executor recognises an adapter run and tells it about `bin`.
+            adapter = scripts.resolve_adapter(provider, global_config_dir(),
+                                              self.paths.config)
+            if adapter is None:
+                raise RuntimeError(
+                    f"provider {provider.name!r} names adapter "
+                    f"{provider.adapter!r}, which is in none of the provider "
+                    f"script directories (project, global, shipped)")
+            argv[0] = str(adapter)
 
         run_dir = self.paths.run_dir(node_id)
         dfd = _run_dir_fd(run_dir)
@@ -1504,6 +1516,10 @@ class Runner:
         family = providers_mod.families(self.providers).get(
             self.providers[spec.provider].family
             if spec.provider in self.providers else "", [])
+        # A disabled sibling is never a candidate (CX-C6): `read_all` omits it,
+        # and a provider with no budget would otherwise read as one with room.
+        family = [name for name in family
+                  if name == spec.provider or self.providers[name].enabled]
         load, last_used = self._instance_load()
         chosen, why = budget_mod.choose_provider(
             spec.provider, budgets,

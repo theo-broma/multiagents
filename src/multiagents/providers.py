@@ -210,6 +210,19 @@ class Provider:
     # the `mcp:` blocks in providers.yaml. Empty means the CLI cannot be given
     # one, and agents on it run without the server.
     mcp: dict[str, Any] = field(default_factory=dict)
+    # CX-C1: an executable exec'd as argv[0] of an agent run in place of
+    # `bin`, which keeps its meaning — the native CLI, what `available()` finds
+    # and the container mounts. The adapter drives it, told where it is by
+    # MULTIAGENTS_BIN. Resolved like the action script (project, global,
+    # shipped), and it IS the action script when `script:` is absent.
+    adapter: str = ""
+    # CX-C3: the resolved target of `bin` sits this many directories below the
+    # one holding every installed version, and the container mounts that root
+    # rather than the one file. 0 is unset: today's P0-R1 behaviour.
+    bin_versions_depth: int = 0
+    # CX-C5: `metered` (dollars per run) or `plan` (paid through a
+    # subscription, so a cost the stream never reports is not a zero).
+    billing: str = "metered"
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -245,6 +258,11 @@ class Provider:
             opaque_tools=list(data.get("opaque_tools", []) or []),
             opaque_tool_args=list(data.get("opaque_tool_args", []) or []),
             mcp=dict(data.get("mcp") or {}),
+            adapter=str(data.get("adapter") or ""),
+            bin_versions_depth=_versions_depth(data.get("bin_versions_depth")),
+            # Anything but `plan` is metered: a misspelling must not quietly
+            # hide a real dollar figure.
+            billing="plan" if data.get("billing") == "plan" else "metered",
         )
 
     # ------------------------------------------------------------- command --
@@ -259,8 +277,9 @@ class Provider:
 
     @property
     def script_name(self) -> str:
-        """The provider's script filename."""
-        return self.script or f"{self.name}.sh"
+        """The provider's script filename: `script:`, else the adapter (CX-C1),
+        else ``<name>.sh``."""
+        return self.script or self.adapter or f"{self.name}.sh"
 
     def usable(self) -> bool:
         """Enabled by the user AND actually present on this machine."""
@@ -305,7 +324,8 @@ class Provider:
                     out.append(token)
             return out
 
-        argv = [self.bin, *render(self.spawn.get("args", []))]
+        # CX-C1: the adapter by name; the runner resolves it to its path.
+        argv = [self.adapter or self.bin, *render(self.spawn.get("args", []))]
 
         if session_id and self.spawn.get("resume"):
             argv += render(self.spawn["resume"])
@@ -465,6 +485,13 @@ class Provider:
         return models
 
 
+def _versions_depth(value: Any) -> int:
+    """`bin_versions_depth` as a positive int, or 0 (unset) for anything else."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if value >= 1 else 0
+
+
 def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:
     """Fold `extends:` so an instance is a few lines, not a copied integration.
 
@@ -511,6 +538,16 @@ def _instance_conflicts(providers: dict[str, Provider]) -> list[str]:
                     f"entry pointing its CLI at it")
             claimed[relative] = name
     return problems
+
+
+def billed_rows(rows: list[dict[str, Any]],
+                providers: dict[str, Provider]) -> list[dict[str, Any]]:
+    """`usage_by_model` rows, a `plan` provider's marked `"billing": "plan"`
+    (CX-C5). `cost_usd` stays the number it was: it is what the tokens
+    would have cost, not what was billed, and the label says which."""
+    plan = {name for name, p in providers.items() if p.billing == "plan"}
+    return [{**row, "billing": "plan"} if row.get("provider") in plan else row
+            for row in rows]
 
 
 def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:

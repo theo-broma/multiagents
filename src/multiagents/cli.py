@@ -35,7 +35,7 @@ from .config import seed_global, seed_project, sync_layer
 from .models import refresh_models, validate_agent_models
 from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
-from .providers import load_providers
+from .providers import billed_rows, load_providers
 from .runner import Runner, reap_pending_branches
 from .tree import ACTIVE, Tree
 
@@ -845,8 +845,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     deferred = _offer_docker(paths)
 
-    providers = load_providers(load_config(paths).providers)
-    result = refresh_models(providers, paths.config / "models.yaml")
+    config = load_config(paths)
+    providers = load_providers(config.providers)
+    result = refresh_models(providers, paths.config / "models.yaml",
+                            config_dir=global_config_dir(), project_config=paths.config,
+                            executor_for=executor_for(paths, config, providers))
     for name, count in result["counts"].items():
         print(f"models       {name}: {count}")
     for name, problem in result["problems"].items():
@@ -1539,7 +1542,11 @@ def cmd_refresh_models(args: argparse.Namespace) -> int:
     paths = _resolve(args.path) if find_project_root() else None
     config = load_config(paths)
     target = (paths.config if paths else global_config_dir()) / "models.yaml"
-    result = refresh_models(load_providers(config.providers), target)
+    providers = load_providers(config.providers)
+    result = refresh_models(
+        providers, target, config_dir=global_config_dir(),
+        project_config=paths.config if paths else None,
+        executor_for=executor_for(paths, config, providers) if paths else None)
     print(f"written {result['written']}")
     for name, count in result["counts"].items():
         print(f"  {name:12} {count} models")
@@ -2145,7 +2152,8 @@ def cmd_usage(args: argparse.Namespace) -> int:
         return _report_checks(paths)
     if getattr(args, "mcp", False):
         return _report_mcp_overhead(args.hours)
-    rows = Tree(paths.tree_file, paths.events_file).usage_by_model()
+    rows = billed_rows(Tree(paths.tree_file, paths.events_file).usage_by_model(),
+                       load_providers(load_config(paths).providers))
     if not rows:
         print("No usage recorded yet.")
         return 0
@@ -2156,8 +2164,10 @@ def cmd_usage(args: argparse.Namespace) -> int:
     for r in rows:
         share = (100 * r["cost_usd"] / total_cost) if total_cost else 0
         bar = "#" * int(share / 4)
+        cost = (f"{'plan':>9}" if r.get("billing") == "plan"
+                else f"${r['cost_usd']:>8.4f}")
         print(f"{r['provider'] + '/' + r['model']:42} {r['runs']:>4} "
-              f"{r['tokens']:>12,} ${r['cost_usd']:>8.4f}  {share:4.0f}% {bar}")
+              f"{r['tokens']:>12,} {cost}  {share:4.0f}% {bar}")
         if args.agents:
             print(f"{'':42}      {', '.join(r['agents'])}")
     print(f"\n{'total':42} {sum(r['runs'] for r in rows):>4} "
@@ -2165,7 +2175,8 @@ def cmd_usage(args: argparse.Namespace) -> int:
 
     # A provider that bills per token and one that does not are not comparable,
     # so say which is which rather than letting a $0.00 row read as free.
-    free = [r["provider"] for r in rows if r["cost_usd"] == 0]
+    free = [r["provider"] for r in rows
+            if r["cost_usd"] == 0 and r.get("billing") != "plan"]
     if free:
         print(f"\n{', '.join(sorted(set(free)))} report no per-token cost "
               f"(subscription); their tokens are real but their dollars are not.")
