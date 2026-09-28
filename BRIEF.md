@@ -62,6 +62,22 @@ default, so work can proceed):
     the reset, unless the remaining quota can safely cover one pass.
   - H1 research started: ag-4da90f (deletion lifecycle), ag-d0cd7b
     (container-writable vs host-only paths).
+- 2026-09-28, 23:40: the H1 research changed the item's premise.
+  - Every agent in the container can write `refs/heads/agents`, `.git`
+    objects, logs and worktrees, and every agent's worktree and HOME. So
+    inter-agent isolation inside the container does not exist. Recorded as
+    a **known limitation**, for the user to decide later: accept it, or
+    move to per-agent containers.
+  - H1 is re-scoped to "container-written state never authorises a host
+    mutation outside the container domain". The contract is
+    `context/specs/h1-host-authority.md` (HA-R1..R8), reviewed by the
+    advisor at turns 7–8.
+  - The advisor found a worse hole: a forged `parent` makes the host
+    auto-merge into `main` (HA-R3).
+  - Tester ag-b5f92a is running on codex gpt-6-sol.
+  - Researcher ag-94c9f0 is mapping H2's refusal signals, in parallel and
+    read-only.
+  - H3's scope gained the host `commit_all` on stop and resume.
 
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
