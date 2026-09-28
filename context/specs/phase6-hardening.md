@@ -93,6 +93,10 @@ Deferred, and **not** part of this phase:
 
     Record what you find. Anything agent-controllable that executes on the
     host is closed or put behind the same opt-in.
+  - Also in scope (advisor, turn 8): the host CLI commits an interrupted
+    agent's worktree with `gitops.commit_all()` on stop and resume
+    (`cli.py` ~940–965, ~2528–2560). That can run agent-controlled hooks on
+    the host.
   - Running hooks inside the container is **later work**, not this phase:
     the base checkout is read-only there and it needs its own design.
   - Pipeline: full, **with an adversary**.
