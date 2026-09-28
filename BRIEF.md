@@ -1766,3 +1766,6 @@ Resume in this order:
   host incl. host-rewrite-by-rename check. Container recreated with .git ro (mountinfo verified). The MCP server
   still runs pre-acc54d2 code and refuses the container as drift (ag-609011) → needs another /mcp reconnect by the
   user, then smoke test (SMOKE.txt commit + write probes on root, .git/config, .git/).
+- 2026-09-28: after /mcp reconnect, smoke test ag-849cf5 PASSED: commit in the container works; writes to the root,
+  .git/config and .git/ all refused ("Read-only file system"). Discard deleted the branch on the host. A harmless
+  stderr line on commit: git tried packed-refs.lock (auto-maintenance), commit still succeeded. sandbox-git is closed.
