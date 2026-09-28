@@ -199,3 +199,23 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
   adversary pass.
 - The CI-R5 implementation, once built: the end-of-run relaunch path, which
   is its advice #3, the `_finalize` relaunch pattern.
+
+## 17. Phase 5, Codex: the interface contract (2026-09-28, cc62eb1)
+
+- Research: stand-ins on claude sonnet, ag-da174a and ag-fff50e.
+- Contract: `context/specs/codex-provider.md`, CX-C1..C14 plus live checks
+  L1..L8.
+- Engine decisions:
+  - a new generic `adapter:` field, where `bin` stays the native CLI;
+  - `MULTIAGENTS_BIN` and `MULTIAGENTS_EXECUTOR` passed to agent runs, not
+    only to actions;
+  - `bin_versions_depth: N`, which mounts the versions root read-only and
+    re-resolves the binary at each exec;
+  - `models_cmd` run under `build_env`;
+  - a run with tokens and no cost rendered as `plan`, not `$0`.
+- Docker permissions: `danger-full-access` until live check L3 settles
+  Codex's sandbox.
+- Egress: the shipped defaults get `openai.com` and `chatgpt.com` (CX-Q2
+  default).
+- The contract review ran on a claude opus stand-in (ag-5b326a), not on the
+  advisor. Please re-read the contract for its silences.
