@@ -44,8 +44,10 @@ from . import gitops
 from .config import CONFIG_FILES
 from .config import load as load_config
 from .config import limit_number, seed_project
+from .executor import executor_for
 from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
+from .providers import billed_rows
 from .redact import scrub
 from .runner import Runner
 from .tree import Tree, now
@@ -472,7 +474,9 @@ def refresh_model_list() -> dict:
     if denied:
         return _ok({"error": denied})
     run = runner()
-    result = refresh_models(run.providers, run.paths.config / "models.yaml")
+    result = refresh_models(run.providers, run.paths.config / "models.yaml",
+                            config_dir=global_config_dir(), project_config=run.paths.config,
+                            executor_for=executor_for(run.paths, run.config, run.providers))
     runner()                  # picks up models.yaml, keeping the tree and runs
     return _ok(result)
 
@@ -1328,7 +1332,7 @@ def budget_status() -> dict:
     return _ok({
         "providers": {k: v.to_dict() for k, v in budgets.items()},
         "tree_usage": run.tree.rollup_usage(),
-        "by_model": run.tree.usage_by_model(),
+        "by_model": billed_rows(run.tree.usage_by_model(), run.providers),
         "deferred_tasks": len(data.get("deferred", [])),
         "advice": advice or ["all providers have headroom"],
         # The calling session's own window. `known: false` is not room to spare.

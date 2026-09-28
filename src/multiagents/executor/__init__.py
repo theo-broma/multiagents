@@ -26,9 +26,10 @@ def get_executor(
     config_dir: Path | None = None,
 ) -> Executor:
     """Build an executor. The docker backend needs project context for its
-    bind mounts; the local one ignores everything but `kind`."""
+    bind mounts; the local one needs only the providers, to recognise an
+    adapter run (CX-C1)."""
     if kind == "local":
-        return LocalExecutor()
+        return LocalExecutor(providers)
     if kind == "docker":
         return DockerExecutor(config or {}, paths, providers, config_dir)
     raise ValueError(f"Unknown executor kind {kind!r} (expected 'local' or 'docker')")

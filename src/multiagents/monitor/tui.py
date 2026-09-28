@@ -239,8 +239,10 @@ class Screen:
             rows = sorted((totals.get(key) or {}).items(),
                           key=lambda kv: -kv[1]["cost_usd"])[:8]
             for name, row in rows:
+                cost = ("plan" if row.get("billing") == "plan"
+                        else f"${row['cost_usd']:.4f}")
                 self.put(y, 2, f"{name[:34]:<36} {row['runs']:>4} runs "
-                               f"{_num(row['tokens']):>9} tok  ${row['cost_usd']:.4f}")
+                               f"{_num(row['tokens']):>9} tok  {cost}")
                 y += 1
             y += 1
         self.rows = []

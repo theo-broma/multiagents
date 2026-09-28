@@ -441,6 +441,47 @@ class Executor(ABC):
         revert. On the host for an executor that runs agents there."""
         return gitops.HOST
 
+    # ------------------------------------------------------------ adapter --
+
+    def adapter_provider(self, argv: list[str]) -> tuple[str, Any] | None:
+        """``(name, provider)`` whose adapter is `argv[0]`, or None (CX-C1).
+
+        An adapter run is recognised by an absolute path in argv[0] whose
+        file name is a provider's `adapter:` — the runner resolves it to that
+        path. A bare command name is a native CLI, never an adapter.
+        """
+        if not argv or not os.path.isabs(argv[0]):
+            return None
+        name = Path(argv[0]).name
+        for provider_name, provider in (getattr(self, "providers", None) or {}).items():
+            adapter = getattr(provider, "adapter", "")
+            if adapter and Path(adapter).name == name:
+                return provider_name, provider
+        return None
+
+    def native_bin(self, provider_name: str, provider: Any, env: dict[str, str]) -> str:
+        """The absolute path of `provider.bin` an adapter run should drive,
+        resolved at this exec (CX-C2), or "" when it is not installed."""
+        found = shutil.which(provider.bin, path=env.get("PATH"))
+        return os.path.abspath(found) if found else ""
+
+    def adapter_env(self, argv: list[str], env: dict[str, str]) -> dict[str, str]:
+        """`env` plus what an adapter run is told about its situation (CX-C2):
+        the native binary and the executor, the same names action scripts get
+        from `scripts.build_env`. Unchanged for a run that is not an adapter's.
+        """
+        found = self.adapter_provider(argv)
+        if found is None:
+            return env
+        provider_name, provider = found
+        env = {**env, "MULTIAGENTS_EXECUTOR": self.kind}
+        binary = self.native_bin(provider_name, provider, env)
+        if binary:
+            env["MULTIAGENTS_BIN"] = binary
+        else:
+            env.pop("MULTIAGENTS_BIN", None)
+        return env
+
 
 # --------------------------------------------------------------------------
 # Environment preparation — shared, because the same decisions become `-e`

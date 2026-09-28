@@ -137,6 +137,17 @@ def resolve(provider_name: str, provider: Any, config_dir: Path,
     return find_script(name, config_dir, project_config)
 
 
+def resolve_adapter(provider: Any, config_dir: Path,
+                    project_config: Path | None = None) -> Path | None:
+    """The absolute path of a provider's `adapter:` (CX-C1), found where its
+    action script would be; None when it has none or it is not installed."""
+    name = getattr(provider, "adapter", "")
+    if not name:
+        return None
+    found = find_script(name, config_dir, project_config)
+    return found.absolute() if found is not None else None
+
+
 def script_argv(script: Path) -> list[str]:
     """The command that runs this script, minus the action.
 

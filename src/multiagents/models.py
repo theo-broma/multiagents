@@ -13,14 +13,29 @@ from __future__ import annotations
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
+from . import scripts
 from .providers import Provider
 
 
-def refresh_models(providers: dict[str, Provider], target: Path) -> dict[str, Any]:
+def refresh_models(providers: dict[str, Provider], target: Path, *,
+                   executor_for: Callable[[str], Any] | None = None,
+                   config_dir: Path | None = None,
+                   project_config: Path | None = None) -> dict[str, Any]:
+    """Ask every enabled provider for its models and write `target`.
+
+    In order: a static `models:` list, then `models_cmd`, then — for a
+    provider with neither — its `models` action (CX-C4), run through
+    `scripts.run_action` so it gets the provider's environment and is found
+    where its other actions are. `executor_for(name)` gives that action its
+    executor; local when not given.
+    """
+    from .executor.local import LocalExecutor
+    from .paths import global_config_dir
+
     models: dict[str, list[dict[str, str]]] = {}
     problems: dict[str, str] = {}
 
@@ -40,11 +55,24 @@ def refresh_models(providers: dict[str, Provider], target: Path) -> dict[str, An
             ]
             continue
 
-        if not provider.models_cmd:
+        config = config_dir or global_config_dir()
+        if not provider.models_cmd and scripts.resolve(
+                name, provider, config, project_config) is None:
             problems[name] = "no models_cmd and no static models: list"
             continue
         if not provider.available():
             problems[name] = f"{provider.bin} not on PATH"
+            continue
+        if not provider.models_cmd:
+            executor = executor_for(name) if executor_for else LocalExecutor()
+            code, out, err = scripts.run_action(name, provider, executor, "models",
+                                                config, project_config, timeout=120)
+            if code == scripts.UNIMPLEMENTED:
+                continue                  # says it has no `models`: nothing to say
+            if code != 0:
+                problems[name] = (err or out).strip()[:200] or f"`models` exited {code}"
+                continue
+            models[name] = provider.parse_models(out)
             continue
         try:
             proc = subprocess.run(
