@@ -857,3 +857,45 @@ Decisions on its questions:
 - **Engine, out of scope here:** the prompt goes to the adapter in argv
   (`--prompt`). The Linux limit of 128 KiB per argument (E2BIG) caps prompts
   for every provider that takes argv. Logged for later.
+
+## Adapter review at 4f3f185 (ag-fae464, a claude opus stand-in for the reviewer)
+
+The adapter's attack findings are fixed (4f3f185, 261 tests green). The
+review verdict is approve with fixes. The fixes become new ids:
+
+- **CX-C21 — window names never collide.**
+  - Two live windows that map to the same name, because their durations are
+    both null or equal, are kept apart, with suffixes `-primary` and
+    `-secondary`.
+  - Headroom is always the worst of all windows.
+  - The live and rollout paths validate windows in one shared function.
+  - Review findings 1 and 5.
+- **CX-C22 — `login` prints its instructions before exec**, flushed, so they
+  are visible when stdout is a pipe. Review finding 2.
+- **CX-C23 — `budget` always exits 0 with JSON.** This holds even if a rollout
+  file vanishes between the listing and the stat (race), or if any unexpected
+  error occurs on the rollout path. Review finding 3.
+- **CX-C24 — the live-read fallback says why.**
+  - `note` names the failure class (`timeout`, `exit`, `jsonrpc-error`,
+    `not-logged-in`, `unparseable`, `internal`). It is one line, with no
+    bodies and no paths.
+  - A programming error inside the live read is reported as `internal`, not
+    silently treated like an unavailable server.
+  - Review finding 4.
+- **CX-C25 — no credential reaches argv.**
+  - An inherited MCP server's `url` is never copied into the native argv.
+    A placeholder is enough to disable it.
+  - The only env values that may go on argv are an allowlist:
+    `MULTIAGENTS_*` without secrets, `PATH` and locale.
+  - Review finding 6.
+- **CX-C26 — the event stream is trusted less.**
+  - A non-string `thread_id` is ignored.
+  - Mapped events no longer carry the whole raw Codex object.
+  - An auth marker in a retryable `error` event does not fail the run. Only
+    the final result, or the exit status, decides it.
+  - Review finding 8.
+- **Cleanup, not tested:**
+  - `_shutdown` joins the reader thread before closing the pipe (finding 7);
+  - signal handlers are installed before `Popen`, and a comment explains
+    that agentwrap kills the process group (finding 9);
+  - the argv rewrite in `main` is derived from the parser (finding 10).
