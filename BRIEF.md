@@ -70,6 +70,20 @@ finished, and nothing new goes there.
   although the commit lands. Investigate this before it bites; it is linked
   to SG-R2's read-only `.git`.
 
+**Found on 2026-09-28: the claude quota reading follows the wrong account under docker.**
+- `budget.read_provider` calls `read_claude` with no `config_dir`
+  (`budget.py:872`), so it always reads the host's `~/.claude`. That is the
+  orchestrator's account.
+- Docker agents spend the container profile's account (the private backing).
+- The user is splitting the two accounts: the orchestrator gets a new
+  login, and the container keeps its own. From then on the router sees the
+  orchestrator's quota while the agents spend the container's.
+- No automatic failover from the container account to the orchestrator
+  account exists. That would need an `extends: claude` instance with its
+  own `container_private_home`.
+- **To fix next, after Codex:** give the builtin claude reader the
+  executor's profile.
+
 **Still queued behind Codex** (from "Progress", 2026-09-27; not started):
 - AGENTS.md should name `scripts/test-chunk.sh`.
 - A live compaction test.
