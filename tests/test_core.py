@@ -4169,8 +4169,20 @@ def test_a_checking_pair_never_collapses_onto_one_model():
         return next((m for p, m in (spec.get("models") or {}).items() if p != down),
                     None)
 
-    for down in ("agy", "opencode"):
+    def defers(spec, down):
+        # An agent with no fallback at all waits out its provider's outage
+        # (fc01d27) rather than running anything, so it cannot collapse.
+        return spec["provider"] == down and not spec.get("models")
+
+    # Every family the roster names, as a primary or as a fallback, taken down
+    # in turn — so a new provider is covered without editing this test.
+    families = sorted({p for spec in agents.values()
+                       for p in (spec.get("provider"), *(spec.get("models") or {}))
+                       if p})
+    for down in families:
         for left, right in pairs:
+            if defers(agents[left], down) or defers(agents[right], down):
+                continue
             a, b = resolve(agents[left], down), resolve(agents[right], down)
             assert a and b, f"{left}/{right} cannot run with {down} down"
             assert a != b, f"with {down} down, {left} and {right} both use {a}"

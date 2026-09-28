@@ -290,7 +290,11 @@ def test_cx_c1_c2_runner_execs_the_adapter_with_bin_and_executor_in_env(
     assert runs, (f"the adapter was never executed for the agent run; "
                   f"start() returned {result}")
     agent_run = runs[-1]
-    assert agent_run["argv"][-len(ARGS):] == ARGS, agent_run["argv"]
+    # The runner composes the prompt (preamble, then `## Task`), so the task
+    # text reaches the adapter inside the last argument rather than as all of it.
+    argv = agent_run["argv"]
+    assert argv[-len(ARGS):-1] == ARGS[:-1], argv
+    assert ARGS[-1] in argv[-1], argv
     env = agent_run["env"]
     assert env.get("MULTIAGENTS_BIN") and os.path.samefile(env["MULTIAGENTS_BIN"], native), (
         f"MULTIAGENTS_BIN must be the absolute path of the native `bin`: {env}")
