@@ -105,6 +105,19 @@ call.**
 - When a merge skips a hook that would otherwise have run, the host says so
   **once per process**, as an event plus one line in the `merge_agent`
   result. The line names the setting.
+- **Boundary for `commit_all`** (a tester question). Two kinds of commit
+  are distinguished:
+  - **Agent commits** keep CI-R5's hooks unchanged. These are commits the
+    runner makes on an agent's behalf **through that agent's executor**,
+    docker or local, meaning `commit_all` called with the agent's
+    executor.
+  - **Host bookkeeping** follows HG-R2, with hooks off. These are commits
+    the host CLI or server makes itself, outside any executor: the stop and
+    resume commit of an interrupted agent's worktree (`cli.py` ~939,
+    ~2547), where `commit_all` is called without an executor, which means
+    on the host.
+  - Under the local executor the agent already runs on the host, so its
+    agent commits are unaffected.
 - This supersedes SG-R5's default. CI-R5's "hooks kept" is untouched: it
   concerns agent commits *inside the container*, not host calls.
 - **User decision `merge-hooks`:** this default is proposed to the user,
