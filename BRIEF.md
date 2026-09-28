@@ -33,7 +33,8 @@ reviewed the plan, and its corrections are already applied.
   2. **H2**: a refused or filtered run is reported as `done`.
   3. **H3**: agent code runs on the host during merges. Base hooks default
      off, plus an audit of Git's other command hooks. With an adversary.
-  4. **H4**: an empty fallback model on steer and start.
+  4. **H4 + H14**: an empty fallback model on steer and start, and
+     built-in agent defaults that bypass `limits:`.
   5. **D1**: limit-hit notices. The contract can be written early.
   6. **H5–H7**: the claude budget under Docker, `refresh-models`, and
      opencode routing together with explicit `model:` pins.

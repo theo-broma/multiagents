@@ -17,7 +17,8 @@ written at any time. It is only *implemented* after H4.
 2. **H2** — a refused or filtered run reported as `done` (false completion).
 3. **H3** — host execution during a merge: base hooks and the wider audit
    (security).
-4. **H4** — an empty fallback model on the steer and start paths.
+4. **H4 + H14** — an empty fallback model on the steer and start paths,
+   and built-in agent defaults that bypass `limits:`.
 5. **D1 implementation**, from its contract.
 6. **H5–H7** — reliability of routing and first use.
 7. **H8** — prompt transport past 128 KiB.
@@ -41,6 +42,17 @@ Deferred, and **not** part of this phase:
   - The requirement: host-side deletion is authorised only by a completion
     record held on the host, somewhere the container cannot write. Nothing
     the container can write may authorise it.
+  - The record (advisor, turn 5):
+    - binds the node id, the exact branch, and the completed merge or
+      discard;
+    - survives a host restart;
+    - cannot be created by editing `tree.json`.
+  - **The contract must also define the legitimate path**: how a completion
+    that happens inside the container, such as a nested agent's merge or
+    discard, obtains host authority.
+  - Tests cover both directions:
+    - a forged terminal node never deletes another agent's branch;
+    - a genuine nested completion does eventually delete its own branch.
   - Pipeline: full, **with an adversary**. The adversary's job is to delete
     a branch it does not own from inside the container.
   - This is SG follow-up, decision #16 in `sandbox-git.md`.
@@ -68,11 +80,14 @@ Deferred, and **not** part of this phase:
     but that decision was about agent commits made in the container, not
     host merges. So it is raised as `NEED_DECISION(merge-hooks)` with this
     default.
-  - **Audit** everything else Git may run on the host during `gitops.merge()`
-    (`gitops.py` ~1083–1125):
+  - **Audit every Git call in the merge path**, not only `git merge`. That
+    includes preflight and rollback: `is_dirty`, `_base_hooks`, `commit`,
+    `merge --abort` and `reset --hard` all run on the host (`gitops.py`
+    ~1036–1125). For each call, list what it can execute:
     - filters and drivers from `.gitattributes` or config (`filter.*`,
-      `merge.*.driver`, `diff.*.textconv`);
+      `merge.*.driver`, `diff.*.textconv`, `diff.external`);
     - `core.fsmonitor` and `core.hooksPath`;
+    - signing programs (`gpg.program` and friends, when signing is on);
     - any other config key that names a command;
     - LFS.
 
@@ -81,6 +96,20 @@ Deferred, and **not** part of this phase:
   - Running hooks inside the container is **later work**, not this phase:
     the base checkout is read-only there and it needs its own design.
   - Pipeline: full, **with an adversary**.
+
+- **H14 — built-in agent defaults must not bypass project `limits:`.**
+  (advisor, turn 5)
+  - `AgentSpec` supplies `timeout=900` and `max_children=2`
+    (`config.py` ~348–352), and the runner uses those values (`runner.py`
+    ~792–809, ~1155).
+  - So an agent that omits the field may ignore `limits.default_timeout`
+    and `limits.max_children`.
+  - Confirm this with a test. If it is confirmed, define the precedence:
+    the explicit per-agent value, then the project's `limits:`, then the
+    built-in default.
+  - It comes before D1, because D1 has to report the effective value and
+    where it came from.
+  - Worked together with H4.
 
 - **H4 — an empty fallback model is never a valid route.**
   - CX-C28 refuses it on the consult path only.
