@@ -1061,3 +1061,38 @@ The same task was given to every model.
     node's.
 - **L7 passed.** The new advisor, ag-3f9bba on codex/gpt-6-sol, recalled a
   token given in the previous consult. `resume` keeps the thread.
+
+## Advisor catch-up and final review (ag-3f9bba, codex/gpt-6-sol, turn 3)
+
+- **CX-C28 — a conversation is never resumed on a provider the roster no
+  longer allows.**
+  - When `consult(<agent>)` finds an existing node whose provider (or its
+    family) is neither the roster's current provider for that agent nor
+    one of its `models:` fallbacks, it does not resume that session.
+  - Instead it starts a new conversation on the current roster. It records
+    an event, `conversation_replaced`, with the old node id, and the reply
+    carries a one-line note saying the previous conversation's context was
+    not carried over.
+  - An empty fallback model resolved for a provider (`config.py:392-408`)
+    is not a valid route. It is refused rather than run.
+  - Verified by: runner/server unit tests with a fake conversational node
+    created on provider A, and a roster since moved to provider B.
+- **Deferred, as the advisor agreed:**
+  - L2, observed at the next natural token expiry;
+  - L4, observed at the next real self-update;
+  - L5, whether `exec --json` carries rate limits, since the app-server
+    path works.
+- **Findings outside Codex, recorded for the next phase (not fixed here):**
+  1. **`branch_pending_delete` can be forged.** `.multiagents` is writable
+     from the container (`executor/docker.py:935-968`), and the host
+     force-deletes `agents/*` branches based on `tree.json` fields
+     (`runner.py:4190-4222`). An agent could forge a terminal node and a
+     deletion request, and so destroy another agent's unmerged branch.
+     Proposed fix: a host-held completion record before any host-side
+     deletion. This is SG-follow-up, decision #16.
+  2. **SG-R5 base hooks run on the host against merged content.** A base
+     hook that runs the tests executes the agent's merged code on the host.
+     This is outside the SG-R1 boundary. Document it, or require an
+     explicit opt-in (decision #12).
+  3. **Nested codex spawns (depth ≥ 2) get the launcher path** and fail on
+     `codex-code-mode-host`. Every codex role has `can_spawn: false` today.
