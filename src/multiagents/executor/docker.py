@@ -1903,30 +1903,30 @@ class DockerExecutor(Executor):
 
         state = self.container_state(self.container)
         stale = self.stale_mounts()
-        roots = {str(root): name for root, name in self._versions_roots().items()}
-        moved = [roots[dest] for dest in stale if dest in roots]
-        if moved:
-            # CX-C3/C19: `bin` resolves under a versions root this container
-            # was not created with — an update that moved the install, or the
-            # key added since. Said by name, so the fix is findable.
-            root = next(dest for dest in stale if dest in roots)
-            provider = self.providers[moved[0]]
-            return {"ok": False,
-                    "error": f"this container lacks the versions root {root} "
-                             f"({moved[0]}'s bin_versions_depth: "
-                             f"{provider.bin_versions_depth}), so it cannot run "
-                             f"{moved[0]}'s `bin`: run `multiagents docker rm && "
-                             f"multiagents docker up`. That ends any agent still "
-                             f"inside."}
         if stale:
             # A mount list is fixed when a container is CREATED. Starting an
             # old one back up gives you the mounts it was born with, so a
             # config change reads as "did nothing" — the toolchain is still
             # missing, the read-only path is still writable, and nothing says
             # why. Refusing is the only way that stops being silent.
+            roots = {str(root): name for root, name in self._versions_roots().items()}
+            root = next((dest for dest in stale if dest in roots), None)
+            if root is not None:
+                # CX-C3/C19/C27: `bin` resolves under a versions root this
+                # container was not created with — an update that moved the
+                # install, or the key added since. One more drift item, said
+                # by name so the fix is findable, and led with because it is
+                # the one that stops a provider running at all.
+                name = roots[root]
+                first = (f"this container lacks the versions root {root} "
+                         f"({name}'s bin_versions_depth: "
+                         f"{self.providers[name].bin_versions_depth}), so it "
+                         f"cannot run {name}'s `bin`")
+            else:
+                first = f"this container was created without {stale[0]}"
             warning = self.recreation_warning()
             return {"ok": False,
-                    "error": f"this container was created without {stale[0]}"
+                    "error": first
                              + (f" (and {len(stale) - 1} other change(s))"
                                 if len(stale) > 1 else "")
                              + ". A mount list is fixed at creation, so "
