@@ -199,3 +199,247 @@ the engine imposes, and most of that still holds.
   - the first adversary pass runs on agy after its reset, if the user lifts
     the exclusion, or on claude as a stand-in, as was done for sandbox-git;
   - log the choice in `context/advisor-catchup.md`.
+
+---
+
+# Interface contract (orchestrator, 2026-09-28)
+
+Ids `CX-C*`. They cite the requirements above. Never renumber: retire an id
+with `CX-Cn — withdrawn: <why>`. Research behind it: ag-da174a (mounts, bin,
+profiles, auth) and ag-fff50e (budget, cost, permissions, roster, consult).
+The proposal's 21 tests pass on `main` (ag-fff50e).
+
+**Two halves, one contract.** The engine half (CX-C1 to CX-C6) is generic and
+names no provider. The provider half (CX-C7 to CX-C14) lives entirely in
+`src/multiagents/defaults/providers/codex.py` and the `codex:` block of
+`src/multiagents/defaults/providers.yaml`. After this work, `rg -n codex
+src/multiagents/*.py src/multiagents/executor/` returns nothing.
+
+## Engine (generic)
+
+- **CX-C1 — `adapter:`, a provider field.** (CX-R1, CX-R3)
+  - Optional. It names an executable resolved like action scripts
+    (project → global → defaults, `scripts.find_script`).
+  - When set, an agent run execs the adapter as argv[0], with the arguments
+    `build_command` renders from `spawn:`. `bin` keeps its meaning, which is
+    the provider's native CLI. `available()` and the mounts use `bin`, and
+    the adapter drives it.
+  - When `adapter:` is set and `script:` is absent, the adapter is also the
+    action script.
+  - Absent `adapter:` means today's behaviour, byte for byte.
+  - In Docker, the adapter runs at the same path it has on the host. The
+    executor makes it visible read-only if it is not already.
+  - Verified by: unit tests on `Provider` parsing and `build_command`; a
+    runner test with a fake adapter and a fake native CLI; a docker-mount
+    test that the adapter path is in the mount list.
+
+- **CX-C2 — the adapter knows its native binary and executor.** (CX-R3, CX-R4)
+  - Every agent run of a provider with `adapter:` gets two variables, the
+    same ones action scripts already get from `scripts.build_env`:
+    - `MULTIAGENTS_BIN`: the absolute path of `bin`, resolved **at this
+      exec**, not at container creation;
+    - `MULTIAGENTS_EXECUTOR`: `local` or `docker`.
+  - In Docker, `MULTIAGENTS_BIN` is a path that exists inside the container.
+  - Verified by: a runner test (local), a docker argv/env unit test, and the
+    live check L4.
+
+- **CX-C3 — `bin_versions_depth:`, a versioned native binary.** (CX-R3)
+  - Optional integer N ≥ 1. It says the resolved target of `bin` sits N
+    directories below the directory that holds every installed version. For
+    codex, the target is
+    `…/releases/<version>-<triple>/bin/codex`, so N = 3 and the root is
+    `…/releases`.
+  - When set, the docker executor mounts that root read-only, instead of
+    only the resolved file. It mounts nothing else above it. For codex that
+    means the rest of the host's `~/.codex` is never mounted (CX-D3).
+  - At each exec, the launcher is re-resolved on the host. If the new target
+    lies under the mounted root, `MULTIAGENTS_BIN` names it, so a self-update
+    needs no container recreate. If it does not, the run fails with a
+    message that names the key and says `multiagents docker rm && multiagents
+    docker up`, the same refusal style as P0-R1.
+  - Absent key: today's P0-R1 behaviour, unchanged, and its tests stay green.
+  - Verified by: docker mount unit tests using a tmp tree that mimics the
+    layout (root mounted and nothing above it; a new version picked up; a
+    target outside the root refused); live check L4.
+
+- **CX-C4 — `models_cmd` runs with the provider's environment.** (CX-R7)
+  - `refresh_models()` runs `models_cmd` with the same environment
+    `scripts.build_env` gives actions, including `provider.env` with `~` and
+    `$VAR` expanded.
+  - A `models_cmd` whose first element is the provider's adapter or script
+    name resolves it the same way as CX-C1.
+  - Verified by: a unit test with a fake `models_cmd` that echoes an env var
+    set in `provider.env`.
+
+- **CX-C5 — a cost the provider does not report is not shown as `$0`.**
+  (CX-R8)
+  - A run with tokens > 0 and no reported cost (`cost_usd` absent or 0) is
+    rendered as `plan`, not `$0.00`, in `agent_tree`'s rendered text, the
+    monitor and `budget_status.by_model`.
+  - Totals say what they exclude: `…, $X (+ plan-billed runs)`.
+  - A run with zero tokens and no cost renders as today.
+  - This is generic, and fixes agy's `$0.0` too.
+  - Verified by: rendering unit tests on the tree and the monitor, and a
+    `budget_status` shape test.
+
+- **CX-C6 — the roster invariants hold with a fourth family.** (CX-R12)
+  - Adding `family: codex` and `models: codex:` fallbacks keeps these green:
+    `test_the_coding_tiers_get_their_own_advisor_on_another_family`,
+    `test_every_working_agent_names_a_cross_provider_fallback`,
+    `test_a_checking_pair_never_collapses_onto_one_model` and
+    `test_every_opencode_pin_is_on_the_sixty_dollar_tier`.
+  - The roster change itself waits for CX-R11 (the user pins the models).
+    This id only requires that the tests accept a codex family. If one of
+    them hardcodes the list of families, it is generalised.
+  - Verified by: those tests, run against a roster fixture that includes
+    codex fallbacks.
+
+## Provider (codex.py and its block)
+
+- **CX-C7 — layout.** (CX-D1)
+  - The adapter is `src/multiagents/defaults/providers/codex.py`: Python
+    3.11+, standard library only, executable, starting from the proposal's
+    `codex.py`.
+  - The block is in `defaults/providers.yaml`: `bin: codex`,
+    `adapter: codex.py`, `family: codex`, `bin_versions_depth: 3`,
+    `usage_mode: delta`, `models_parse: tsv`, `agent_guidance`, and a
+    `notes:` for humans.
+  - There is **no `home_links`**, and no `transcript:`.
+  - The proposal's tests move to `tests/test_codex_provider.py`, adapted to
+    the shipped paths. They stay offline, using a fake CLI.
+
+- **CX-C8 — a dedicated profile.** (CX-D3, CX-R6)
+  - On the host, every adapter invocation runs with
+    `CODEX_HOME=~/.multiagents/profiles/codex`, set through `env:` and
+    expanded by the engine. The adapter creates that directory (mode 0700)
+    if it is missing.
+  - In Docker, `CODEX_HOME` points at the private backing, via
+    `container_private_home` or an equivalent. The host profile directory is
+    **not visible** inside the container.
+  - Nothing reads or writes the user's `~/.codex`, apart from the read-only
+    versions root of CX-C3.
+  - Verified by:
+    - adapter unit tests (the env the native CLI gets, and the directory
+      created);
+    - a docker mount test (no mount of `~/.codex` or of the host profile);
+    - the live check L1.
+
+- **CX-C9 — auth actions.** (CX-R6)
+  - **`check`** runs `codex login status` under `CODEX_HOME`, with a 15 s
+    timeout. It exits 0 when logged in, 10 when not, and 20 on error. It
+    never prints the CLI's output or any credential.
+  - **`login`** runs device login into the profile the executor implies:
+    - the private backing when `MULTIAGENTS_EXECUTOR=docker` and
+      `MULTIAGENTS_PROFILE` is not `host`;
+    - the host profile otherwise.
+  - **A refresh failure is not "logged in".** When the stored token has
+    expired and cannot be refreshed, both of these report not authenticated:
+    `check` exits 10, and an agent run's result carries the engine's
+    unauthenticated status, not a generic failure.
+  - Verified by: unit tests with a fake CLI (status exit codes; an expired
+    token scenario in which the fake refresh fails); live check L2.
+
+- **CX-C10 — agent runs.** (CX-R1)
+  - Behaviour is as the proposal documents and its tests assert:
+    - `codex exec --json`, with the prompt on stdin and an explicit cwd;
+    - resume via `codex exec resume <thread_id>`, where the session id is the
+      `thread.started` id;
+    - token deltas per `turn.completed`, with cached input separated and not
+      double-counted;
+    - one tool event per call id;
+    - MCP injected with `-c mcp_servers.*`, inherited servers disabled, and
+      `features.multi_agent=false`;
+    - `--ignore-user-config`;
+    - quota and auth failure text echoed on stderr for the engine's
+      detectors.
+  - **Permissions.** Under `MULTIAGENTS_EXECUTOR=local`: `readonly` →
+    `read-only`, `sandbox` → `workspace-write`, `full` →
+    `danger-full-access`. Under `docker`, the mapping is whatever live check
+    L3 establishes, recorded in this file:
+    - if Codex's own sandbox initialises in our container, keep the local
+      mapping;
+    - otherwise, every profile maps to `danger-full-access`.
+    - Until L3 has run, docker maps to `danger-full-access`.
+  - Verified by: the moved proposal tests, plus a permission test for each
+    executor.
+
+- **CX-C11 — `budget` action.** (CX-R2)
+  - **Where it reads.** The newest `token_count` event carrying `rate_limits`
+    across the rollout files of every profile in use:
+    - `$CODEX_HOME/sessions/**/rollout-*.jsonl` on the host;
+    - the same under the docker private backing
+      (`$MULTIAGENTS_PRIVATE_BACKING`) when one exists.
+    - Only the newest files are examined, and each from its tail.
+  - **Output**, the shape `budget._from_script` parses:
+    - `known: true`, `source: "rollout"`;
+    - `windows: {"5h": {percent, resets_at}, "weekly": {percent,
+      resets_at}}`, mapped from `primary` (300 min) and `secondary`
+      (10080 min) by `window_minutes`, not by position;
+    - `headroom = 1 - max(percent)/100`;
+    - `resets_at` of the worst window, in ISO 8601 UTC;
+    - `stale_seconds`, the age of the event.
+  - **Freshness.** It follows `quota-freshness.md`. A window whose
+    `resets_at` + 120 s has passed counts as 0 % used (QF-R1). When no event
+    exists, it returns `known: false` with a note.
+  - **Bounds.** It finishes in under 5 s on a profile holding 1000 rollout
+    files of 5 MB each. It never loads a whole file into memory. It never
+    emits or logs any field other than `rate_limits`, timestamps and window
+    metadata: no message bodies, prompts or paths inside the user's home in
+    `note`.
+  - **Malformed input is not a crash.** Truncated lines, non-UTF-8 bytes,
+    missing keys, `used_percent` as a string or out of 0..100, or a
+    `resets_at` that is not a number: the event is skipped, and at worst the
+    result is `known: false`.
+  - **Optional, live-determined (L5).** If `codex exec --json` itself carries
+    rate limits, the adapter writes the latest reading to
+    `$CODEX_HOME/multiagents-rate-limits.json` (atomic replace, 0600), and
+    `budget` uses whichever reading is newer.
+  - Verified by: adapter unit tests on fixture rollout trees (fresh, stale,
+    expired window, no sessions, malformed lines, a size-bound test);
+    live check L5.
+
+- **CX-C12 — `models` action.** (CX-R7)
+  - It reads `$CODEX_HOME/models_cache.json`, keeps `visibility: list`
+    entries only, and prints TSV `id<TAB>label`.
+  - If the cache is missing or unreadable, it exits non-zero with a
+    one-line reason and no traceback.
+  - Verified by: unit tests with fixture caches.
+
+- **CX-C13 — `launch` and `compact` exit 64.** (CX-R9)
+  - Both say "not implemented for codex in this phase" on stderr. The
+    proposal's launch code is not shipped.
+  - Verified by: unit tests.
+
+- **CX-C14 — egress in the shipped defaults.** (CX-D2, CX-Q2)
+  - `openai.com` and `chatgpt.com` join group 1 (model endpoints) of
+    `src/multiagents/defaults/project.yaml`, each with a one-line comment.
+    Nothing else is added.
+  - Verified by: a config test that both are present and that no wildcard
+    or bare suffix was added.
+
+## Live checks (after the offline work merges; no agent running)
+
+These need the user once: `multiagents auth login codex`, a device login into
+the dedicated profile, and the same for docker if it differs. Record each
+outcome in this file under "Live results".
+
+- **L1** — The dedicated profile is used. After a run, `~/.codex/sessions`
+  has no new file and the profile does. In Docker, the backing has one.
+- **L2** — Refresh through the proxy (CX-R6). A docker run after the access
+  token's expiry either refreshes successfully, or reports unauthenticated.
+  It never reports "authenticated" and then fails.
+- **L3** — Codex's sandbox inside our container (CX-R4). Run `read-only` and
+  `workspace-write` on a trivial task; record whether each initialises, and
+  set CX-C10's docker mapping from the result.
+- **L4** — The native binary and its update (CX-R3). The container runs codex
+  via `MULTIAGENTS_BIN`. Simulate an update by adding a new release dir and
+  repointing the symlink: the next run uses it without a recreate.
+- **L5** — Quota. `budget_status` shows codex `known: true` after one run.
+  Record whether `exec --json` carries rate limits.
+- **L6** — sandbox-git (CX-R5). A codex agent edits a file, the commit lands,
+  and writes to the root, `.git/config` and `.git/` are refused.
+- **L7** — consult (CX-R10). Two consecutive `consult()` calls on a codex
+  advisor land in the same thread.
+- **L8** — CX-R11, the measurement: one fixed probe task per candidate model,
+  recording the 5 h window used. Then the user pins the models (CX-Q1), and
+  the roster change goes to the user (CX-D4).
