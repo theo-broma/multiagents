@@ -621,3 +621,11 @@ amendment conflicts with the text above, **the amendment wins**.
   `UPDATE_CHECK_OFF` in `tests/support/codex_harness.py`, currently
   `check_for_update_on_startup=false`. The implementer confirms the real key
   from the installed CLI. If it differs, `tester` changes that one line.
+- **Confirmed on the host, 2026-09-28:**
+  - The installed CLI is **0.158.0**. It updated itself from 0.157.1, which
+    shows CX-R3 matters.
+  - `codex login --device-auth` exists.
+  - `check_for_update_on_startup` is a real config key; the binary contains
+    it 18 times. `UPDATE_CHECK_OFF` stands as written.
+  - The layout is `…/releases/0.158.0-x86_64-unknown-linux-musl/bin/codex`,
+    so N = 3.
