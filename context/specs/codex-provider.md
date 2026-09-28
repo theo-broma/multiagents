@@ -591,3 +591,33 @@ amendment conflicts with the text above, **the amendment wins**.
   only the `rate_limits` block, on the host only, and never mount anything
   in agents. DEFAULT, pending the answer: unset, so it reads only the
   dedicated profile and the backing.
+
+## Decisions on the provider tester's questions (2026-09-28, ag-155ed5, merged 115b54d)
+
+1. **How a failed refresh is worded.** Unknown until the live check L2. The
+   fake uses Codex's "could not be refreshed … sign in again" text. If the
+   real wording differs, the adapter's matching changes to follow it, and
+   so does the fake. The contract does not change.
+2. **A successful `exec resume`** announces the same thread id again. A
+   thread that no longer exists produces `codex: resume failed:` in both
+   cases: when the CLI returns an error, and when it silently starts a new
+   thread (a different id).
+3. **A models-cache entry with no `visibility`** is **not** listed. Only
+   an explicit `visibility: list` counts.
+4. **`check` and `login` under docker** act on
+   `$MULTIAGENTS_PRIVATE_BACKING`, the host path of the backing, unless
+   `MULTIAGENTS_PROFILE=host`. Docker runs see that same directory as
+   `$HOME/.codex`. Consistent, as the tests assume.
+5. **`resets_at` in the output** is ISO 8601 UTC, converted from the
+   rollout's Unix timestamp.
+6. **A non-zero `login status` with output the adapter does not recognise**
+   exits 20 (unknown), never 10. Only a recognised "not logged in" or
+   "refresh failed" gives 10.
+7. **The device-login flag** is taken to be `--device-auth`, to confirm
+   from `codex login --help` during implementation.
+8. **A failed `mcp list`** still refuses the run, as in the proposal. Its
+   stderr line starts `codex:`.
+- **The update-check option** is asserted through one constant,
+  `UPDATE_CHECK_OFF` in `tests/support/codex_harness.py`, currently
+  `check_for_update_on_startup=false`. The implementer confirms the real key
+  from the installed CLI. If it differs, `tester` changes that one line.
