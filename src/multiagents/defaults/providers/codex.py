@@ -160,7 +160,9 @@ def mcp_flags(filename, cwd, env):
         if transport.get("command"):
             servers[name] = {"command": transport["command"], "enabled": False}
         elif transport.get("url"):
-            servers[name] = {"url": transport["url"], "enabled": False}
+            # The inherited URL may carry a token or userinfo, and argv is
+            # world-readable: a placeholder is enough to keep the entry valid.
+            servers[name] = {"url": "http://disabled.invalid/", "enabled": False}
         else:
             raise ValueError("unsupported inherited MCP transport")
     if filename:
@@ -240,9 +242,12 @@ class Normalizer:
 
     def event(self, obj):
         kind = obj.get("type")
-        out = {"kind": "raw", "codex": obj}
+        # Only the event type is carried, never the raw object (CX-C26).
+        out = {"kind": "raw", "type": kind if isinstance(kind, str) else ""}
         if kind == "thread.started":
-            self.session = obj.get("thread_id", "")
+            thread_id = obj.get("thread_id")
+            if isinstance(thread_id, str):
+                self.session = thread_id
             out["kind"] = "step"
         elif kind == "turn.started":
             self.turn += 1
@@ -311,18 +316,22 @@ def run(opts, env):
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as prompt:
         prompt.write(opts.prompt)
         prompt.seek(0)
-        child = subprocess.Popen(command(opts, env), cwd=opts.workdir, env=env, stdin=prompt,
-                                 stdout=subprocess.PIPE, text=True, encoding="utf-8",
-                                 errors="replace")  # stderr inherited; no buffering deadlock
+        child = None
         previous = {}
 
         def forward(signum, _frame):
-            if child.poll() is None:
+            if child is not None and child.poll() is None:
                 child.send_signal(signum)
 
+        # Installed before Popen so there is no window in which a signal kills
+        # only this wrapper. agentwrap kills the whole process group, so a
+        # signal arriving before the child exists needs no forwarding.
         for sig in (signal.SIGTERM, signal.SIGINT):
             previous[sig] = signal.signal(sig, forward)
         try:
+            child = subprocess.Popen(command(opts, env), cwd=opts.workdir, env=env, stdin=prompt,
+                                     stdout=subprocess.PIPE, text=True, encoding="utf-8",
+                                     errors="replace")  # stderr inherited; no buffering deadlock
             for line in child.stdout:
                 try:
                     value = json.loads(line)
@@ -339,17 +348,20 @@ def run(opts, env):
                 if kind == "result" and event.get("status") == "failed":
                     # Existing runner sniffs quota/auth errors from stderr.
                     print(f"codex: {text or 'Codex failed'}", file=sys.stderr, flush=True)
-                if (kind in ("result", "error") and isinstance(text, str) and not auth_printed
+                # A retryable `error` event never decides the run: only the
+                # final result (or the exit status) does.
+                if (kind == "result" and isinstance(text, str) and not auth_printed
                         and any(marker in text.lower() for marker in _AUTH_REFRESH_MARKERS)):
                     print(AUTH_LINE, file=sys.stderr, flush=True)
                     auth_printed = True
                     normalizer.failed = True
             code = child.wait()
         finally:
-            if child.poll() is None:
-                child.kill()
-                child.wait()
-            child.stdout.close()
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+                child.stdout.close()
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
     if code or not normalizer.terminal:
@@ -402,7 +414,8 @@ def login_action():
     _ensure_profile(profile)
     bin_path = codex_bin()
     env = {**os.environ, "CODEX_HOME": str(profile)}
-    print("Codex sign-in: follow the device link and code.")
+    # Flushed: exec replaces the process, and a piped stdout is block-buffered.
+    print("Codex sign-in: follow the device link and code.", flush=True)
     argv = [bin_path, "-c", "check_for_update_on_startup=false", "login", "--device-auth"]
     os.execvpe(argv[0], argv, env)
 
@@ -447,6 +460,19 @@ def _window_name(minutes):
         return f"{int(minutes)}m"
     except (TypeError, ValueError, OverflowError):
         return "window"
+
+
+def _named_windows(entries):
+    """Name windows from (side, minutes, percent, resets_at); shared by both paths.
+
+    Windows whose durations map to the same name (null, or equal) are kept
+    apart by a `-primary` / `-secondary` suffix instead of overwriting.
+    """
+    names = [_window_name(minutes) for _, minutes, _, _ in entries]
+    if len(set(names)) < len(names):
+        names = [f"{name}-{side}" for name, (side, _, _, _) in zip(names, entries)]
+    return {name: {"percent": percent, "resets_at": resets}
+            for name, (_, _, percent, resets) in zip(names, entries)}
 
 
 def _iso(epoch):
@@ -508,7 +534,7 @@ def _valid_event(obj):
     limits = payload.get("rate_limits")
     if not isinstance(limits, dict):
         return None
-    windows = {}
+    entries = []
     for side in ("primary", "secondary"):
         raw = limits.get(side)
         if raw is None:
@@ -516,10 +542,11 @@ def _valid_event(obj):
         valid = _valid_window(raw)
         if valid is None:
             return None
-        name = _window_name(valid["window_minutes"])
-        windows[name] = {"percent": valid["used_percent"], "resets_at": valid["resets_at"]}
-    if not windows:
+        entries.append((side, valid["window_minutes"], valid["used_percent"],
+                        valid["resets_at"]))
+    if not entries:
         return None
+    windows = _named_windows(entries)
     return {"timestamp": ts, "windows": windows}
 
 
@@ -527,9 +554,15 @@ def _rollout_files(home):
     root = home / "sessions"
     if not root.is_dir():
         return []
-    files = [p for p in root.glob("**/rollout-*.jsonl") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[:MAX_FILES_PER_HOME]
+    stamped = []
+    for p in root.glob("**/rollout-*.jsonl"):
+        try:
+            if p.is_file():
+                stamped.append((p.stat().st_mtime, p))
+        except OSError:
+            continue  # vanished between the listing and the stat
+    stamped.sort(key=lambda item: item[0], reverse=True)
+    return [p for _, p in stamped[:MAX_FILES_PER_HOME]]
 
 
 def _read_tail_lines(path):
@@ -611,11 +644,24 @@ def _build_result(raw_windows, *, source, stale_seconds, note=None, force_zero=F
 # --------------------------------------------------- budget: live app-server (C11 rev) --
 
 class _ExchangeFailed(Exception):
-    pass
+    """The live read failed; `kind` is one of the CX-C24 note classes."""
+
+    def __init__(self, kind):
+        super().__init__(kind)
+        self.kind = kind
+
+
+def _rpc_error_kind(msg):
+    error = msg.get("error")
+    text = str(error.get("message", "")) if isinstance(error, dict) else ""
+    text = text.lower()
+    if "authentication" in text or any(m in text for m in _AUTH_REFRESH_MARKERS):
+        return "not-logged-in"
+    return "jsonrpc-error"
 
 
 def _snapshot_windows(snapshot, prefix=None):
-    out = {}
+    entries = []
     for side in ("primary", "secondary"):
         w = snapshot.get(side)
         if not isinstance(w, dict):
@@ -629,11 +675,11 @@ def _snapshot_windows(snapshot, prefix=None):
             continue
         if not isinstance(resets, (int, float)) or isinstance(resets, bool):
             continue
-        name = _window_name(minutes)
-        if prefix:
-            name = f"{prefix}-{name}"
-        out[name] = {"percent": float(used), "resets_at": float(resets)}
-    return out
+        entries.append((side, minutes, float(used), float(resets)))
+    named = _named_windows(entries)
+    if prefix:
+        named = {f"{prefix}-{name}": w for name, w in named.items()}
+    return named
 
 
 def _rate_limits_windows(result):
@@ -681,25 +727,27 @@ def _shutdown(proc, thread):
         except subprocess.TimeoutExpired:
             pass
     finally:
+        # Join first: closing a pipe under a blocked reader is undefined; the
+        # process is dead (or abandoned) by now, so the reader sees EOF.
+        thread.join(timeout=1)
         for stream in (proc.stdin, proc.stdout):
             try:
                 stream.close()
             except (OSError, ValueError):
                 pass
-        thread.join(timeout=1)
 
 
 def _live_rate_limits(profile, timeout=EXCHANGE_BOUND):
     """`initialize` -> `initialized` -> `account/rateLimits/read`, over stdio.
 
-    Returns (windows, reached) on success, or None on any failure (bad JSON,
-    RPC error, timeout, broken pipe, non-zero exit before a reply): the
-    caller falls back to the rollout reading.
+    Returns (windows, reached) on success. Any expected failure (bad JSON, RPC
+    error, timeout, broken pipe, exit before a reply) raises _ExchangeFailed
+    with its class, and the caller falls back to the rollout reading.
     """
     try:
         bin_path = codex_bin()
     except ValueError:
-        return None
+        raise _ExchangeFailed("exit")
     env = {**os.environ, "CODEX_HOME": str(profile)}
     try:
         proc = subprocess.Popen(
@@ -707,7 +755,7 @@ def _live_rate_limits(profile, timeout=EXCHANGE_BOUND):
             cwd=str(profile), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:
-        return None
+        raise _ExchangeFailed("exit")
 
     deadline = time.monotonic() + timeout
     q: queue.Queue = queue.Queue()
@@ -728,53 +776,51 @@ def _live_rate_limits(profile, timeout=EXCHANGE_BOUND):
     def recv():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None
+            raise _ExchangeFailed("timeout")
         try:
             item = q.get(timeout=remaining)
         except queue.Empty:
-            return None
+            raise _ExchangeFailed("timeout")
         if item is eof:
-            return None
+            raise _ExchangeFailed("exit")
         try:
             return json.loads(item)
         except ValueError:
-            return None
+            raise _ExchangeFailed("unparseable")
 
     def send(obj):
         try:
             proc.stdin.write(json.dumps(obj).encode() + b"\n")
             proc.stdin.flush()
         except (OSError, ValueError):
-            raise _ExchangeFailed()
+            raise _ExchangeFailed("exit")
 
     try:
-        try:
-            send({"id": 1, "method": "initialize",
-                  "params": {"clientInfo": {"name": "multiagents", "version": "1"}}})
-            while True:
-                msg = recv()
-                if msg is None:
-                    return None
-                if not isinstance(msg, dict):
-                    continue
-                if msg.get("id") == 1:
-                    if "error" in msg or "result" not in msg:
-                        return None
-                    break
-            send({"method": "initialized", "params": {}})
-            send({"id": 2, "method": "account/rateLimits/read", "params": {}})
-            while True:
-                msg = recv()
-                if msg is None:
-                    return None
-                if not isinstance(msg, dict):
-                    continue
-                if msg.get("id") == 2:
-                    if "error" in msg:
-                        return None
-                    return _rate_limits_windows(msg.get("result"))
-        except _ExchangeFailed:
-            return None
+        send({"id": 1, "method": "initialize",
+              "params": {"clientInfo": {"name": "multiagents", "version": "1"}}})
+        while True:
+            msg = recv()
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("id") == 1:
+                if "error" in msg:
+                    raise _ExchangeFailed(_rpc_error_kind(msg))
+                if "result" not in msg:
+                    raise _ExchangeFailed("unparseable")
+                break
+        send({"method": "initialized", "params": {}})
+        send({"id": 2, "method": "account/rateLimits/read", "params": {}})
+        while True:
+            msg = recv()
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("id") == 2:
+                if "error" in msg:
+                    raise _ExchangeFailed(_rpc_error_kind(msg))
+                parsed = _rate_limits_windows(msg.get("result"))
+                if parsed is None:
+                    raise _ExchangeFailed("unparseable")
+                return parsed
     finally:
         _shutdown(proc, thread)
 
@@ -793,13 +839,16 @@ def budget_action():
             profile = None
 
     live = None
+    failure = None
     if profile is not None:
         try:
             live = _live_rate_limits(profile)
+        except _ExchangeFailed as exc:
+            failure = exc.kind
         except Exception:
-            # Any failure to read the quota live falls back to the rollout
-            # reading below; `budget` must always exit 0 with valid JSON.
-            live = None
+            # A programming error in the live read is not an unavailable
+            # server: say so. `budget` must still exit 0 with valid JSON.
+            failure = "internal"
 
     if live is not None:
         windows, reached = live
@@ -808,6 +857,17 @@ def budget_action():
             print(json.dumps(result, ensure_ascii=False))
             return 0
 
+    reason = f" ({failure})" if failure else ""
+    try:
+        return _budget_from_rollouts(profile, now, reason)
+    except Exception:
+        print(json.dumps({"known": False,
+                          "note": "Codex quota: no rate-limit reading available (internal)."},
+                         ensure_ascii=False))
+        return 0
+
+
+def _budget_from_rollouts(profile, now, reason):
     try:
         host = _host_profile()
     except ValueError:
@@ -824,7 +884,7 @@ def budget_action():
         return 0
     stale = max(0.0, now - best["timestamp"])
     note = ("Codex quota: read from local session history; "
-            "the live app-server reading was unavailable.")
+            f"the live app-server reading was unavailable{reason}.")
     result = _build_result(best["windows"], source="rollout", stale_seconds=stale, note=note)
     if not result.get("known"):
         result = {"known": False, "note": note}
@@ -866,8 +926,8 @@ def main():
     # The existing command builder passes whole tokens. argparse otherwise
     # treats a task starting with '--' as another option rather than its value.
     raw = sys.argv[1:]
-    valued = {"--prompt", "--model", "--workdir", "--session", "--permission",
-              "--effort", "--mcp-config"}
+    valued = {flag for act in parser._actions if act.nargs != 0
+              for flag in act.option_strings}
     fixed = []
     i = 0
     while i < len(raw):
