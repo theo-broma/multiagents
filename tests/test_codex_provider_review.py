@@ -9,6 +9,11 @@ Not covered here (see the tester's result): the `internal` note class of
 CX-C24, which needs a programming error inside the live read and has no
 black-box trigger; and the cleanup items of the review, which the spec marks
 "not tested".
+
+CX-C25 covers only its URL half. Its env allowlist was withdrawn (spec, last
+section, def4854): the multiagents entry's `env` reaches Codex through `-c`
+by design, and test_codex_provider_edges.py::test_cx_c10_hostile_mcp_env_values_inject_no_config_keys
+requires it verbatim there.
 """
 
 from __future__ import annotations
@@ -282,25 +287,6 @@ def test_cx_c25_an_inherited_server_url_never_reaches_the_native_argv(tmp_path, 
     servers = h.lookup(h.native_config(native), "mcp_servers")
     assert isinstance(servers, dict) and "remote" in servers, servers
     assert servers["remote"].get("enabled") is False, servers["remote"]
-
-
-ENV_SECRET = "ghp-ENVSECRET-5d7a"
-
-
-def test_cx_c25_a_non_allowlisted_env_value_never_reaches_the_native_argv(tmp_path, fake):
-    fake.set(events=HAPPY)
-    config = tmp_path / "mcp.json"
-    config.write_text(json.dumps({"mcpServers": {"multiagents": {
-        "command": "python3", "args": ["-m", "multiagents.mcp"],
-        "env": {"GITHUB_TOKEN": ENV_SECRET, "OPENAI_API_KEY": ENV_SECRET + "-2",
-                "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-                "MULTIAGENTS_AGENT_ID": "ag-000001"}}}}))
-    _, result = run_agent(tmp_path, fake, mcp_config=config, MULTIAGENTS_CAN_SPAWN="1")
-    assert result.returncode == 0, result.stderr
-    for call in fake.calls():
-        assert ENV_SECRET not in "\0".join(call["argv"]), call["argv"]
-    servers = h.lookup(h.native_config(the_exec(fake)["argv"]), "mcp_servers")
-    assert isinstance(servers, dict) and "multiagents" in servers, servers
 
 
 # ================================================================ CX-C26 ==
