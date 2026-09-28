@@ -78,9 +78,14 @@ finished, and nothing new goes there.
 - The user is splitting the two accounts: the orchestrator gets a new
   login, and the container keeps its own. From then on the router sees the
   orchestrator's quota while the agents spend the container's.
-- No automatic failover from the container account to the orchestrator
-  account exists. That would need an `extends: claude` instance with its
-  own `container_private_home`.
+- **Correction:** multi-account failover inside the container DOES exist,
+  through the auth proxy (`auth_proxy: true` in this project).
+  `multiagents auth login claude --account <label>` adds a labelled login in
+  `vault/accounts/<label>`, and work moves onto it when the first account
+  runs out of window. It has not been exercised live here yet.
+- 2026-09-28 16:30 UTC: the user's first `multiagents auth login claude` did
+  NOT change the vault, which is still the old account (`vault/.claude.json`
+  mtime 15:41). Container agents got 429 `rate_limit` (ag-72497d, ag-14a3e5).
 - **To fix next, after Codex:** give the builtin claude reader the
   executor's profile.
 
