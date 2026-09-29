@@ -266,6 +266,18 @@ applies only when plain git would find none.
 - Verified by:
   `tests/test_h3_adversary_config.py::test_host_checkpoint_keeps_identity_from_gitdir_conditional_include`.
 
+**Decision recorded 2026-09-29 (ag-c2d690).** To meet HG-R8 without a
+window between the check and the use, a host call scoped to a node runs with
+its temporary HEAD pinned to the commit the branch resolved to, detached. The
+branch is then advanced with a compare-and-swap `update-ref --no-deref`.
+
+Accepted side effect: for host calls on linked worktrees, config reached
+through `includeIf "onbranch:…"` does not apply, and neither does
+`branch.<name>.mergeOptions`. HG-R10 still holds, because the disable list and
+the call see the same config. HG-R11 still holds, because identity is resolved
+separately. Revisit only if a user relies on branch-conditional merge settings
+for parent-worktree merges.
+
 ## Adversary brief
 
 Work from inside the container, with write access to everything listed in
