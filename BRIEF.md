@@ -176,6 +176,26 @@ default, so work can proceed):
     Then use `model=gpt-6-astra` for implementer-deep runs.
   - Next after H3: an implementer fixes review ag-64181b's findings (tests
     in `tests/test_h1_h2_review2.py`, 3 red), then a re-review.
+  - **2026-09-29, around 09:50 UTC:**
+    - Merged:
+      - H1, plus both review-fix rounds (e1d2296);
+      - H2 (4b934c9);
+      - H3 (336f14f).
+    - Roster: advisor, adversary and implementer-deep's codex fallback are
+      now on gpt-6-astra.
+    - **agy is disabled** in `.multiagents/config/providers.yaml`, because
+      the router had sent two adversaries to it. Those were stopped and
+      discarded. One had come back "blocked by Gemini's filters", and was
+      still reported `done`: the running MCP server predates H2.
+    - **The MCP server must be reconnected (`/mcp`) while nothing runs**, so
+      that H1, H2 and H3 are live in the server process.
+    - Codex's 5 h window is at 88% and resets at 13:30 UTC; a wake-up is
+      armed for 13:35.
+    - Next steps:
+      1. H1 and H3 adversaries on codex astra. Their briefs are in the
+         contracts; restate them as properties.
+      2. H4 + H14 implementation.
+      3. D1.
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
