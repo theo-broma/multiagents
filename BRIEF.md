@@ -308,6 +308,8 @@ is harmless, but review it once.
   - tests/test_h1_swap_guard.py, keep or send to the tester;
   - D1 contract staleness against H4.
 
+**~14:15 UTC:** HA-R9 merged (b68474c). On main, H1 + H4 + subagent_mcp are 151/151. The conversation refresh recreate path was a real instance of the bug, and is fixed. Open point from ag-a4bb6e: `cmd_stop` commits into the worktree path read from the tree entry without checking it against the host record (cli.py ~2640, H3/HA-R2 territory). Check it after ag-c2d690 merges and give it to the H3 re-review. ag-a4bb6e ran `pkill -f "pytest.*no:cacheprovider"`, which may have killed other agents' pytest runs; results from that window are suspect. Bug-reporter started for the container claude 401 + codex 401 + the secondary tickets.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
