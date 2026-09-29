@@ -138,6 +138,21 @@ Deferred, and **not** part of this phase:
   - An explicit `model:` override that names a provider must pin that
     provider. It is not a hint the router may ignore.
 
+  - **Binary resolution** (user, 2026-09-29): `multiagents auth login
+    opencode` failed with `exec: opencode: not found` because
+    `~/.opencode/bin` was not on the calling shell's PATH. The binary
+    existed.
+    - Requirement: multiagents resolves each provider's binary once on the
+      host, from `bin`, then PATH, then an optional per-provider
+      `bin_search:` list of extra directories (e.g. `~/.opencode/bin`).
+    - It uses that one result everywhere: agent launch, container mount,
+      and the auth `login`/`check` scripts.
+    - The scripts receive it as `MULTIAGENTS_BIN`, which exists already
+      for adapters, and never search PATH themselves.
+    - Not found: the error names every place searched and how to set it.
+    - Check whether the MCP server's own PATH explains part of the opencode
+      startup failures.
+
 - **H8 — prompt transport.**
   - Adapters receive the prompt as one argv element (`providers.py`
     ~291–320). Above the kernel's per-argument limit (128 KiB) the process
