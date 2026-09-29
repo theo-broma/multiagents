@@ -58,8 +58,12 @@ limit emits none.
 Paths are absolute. Lines are 1-based and point at the key's own line.
 
 Provenance is kept **only for the covered keys**, not for every key.
-- `effective_limits` from LM-R2 gains the same `source` detail for its
-  three keys.
+- `effective_limits` from LM-R2 gains the same detail for its three keys.
+  *Amended 2026-09-29 (ag-179b69 NEED_INFO):* LM-R2's `source` stays the
+  layer string: `call`, `agent`, `project` or `builtin`. The detail goes
+  beside it as `source_detail: {layer, file, line}`, so each entry is
+  `{value, source, source_detail}`. This keeps the H4 surface stable for
+  existing readers.
 
 Verified by:
 - a temporary project whose `project.yaml` sets `limits.max_concurrent` on
