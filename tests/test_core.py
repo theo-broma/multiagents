@@ -1433,7 +1433,7 @@ def test_a_steer_says_whether_anything_answered(tmp_path):
 
     r = _runner(tmp_path, {"b": AgentSpec("b", "p", "m")}, {"p": {"bin": "sh"}})
     r.tree.add(Node(id="ag-1", agent="b", provider="p", model="m",
-                    parent=None, depth=1, session_id="s-1", worktree=str(tmp_path)))
+                    parent=None, depth=1, session_id="s-1", worktree=str(_node_worktree(r, "ag-1"))))
     r.tree.set_status("ag-1", "running")
 
     async def _noop(*a, **kw):
@@ -2228,6 +2228,13 @@ def _runner(tmp_path, agents=None, providers_yaml=None, git=True, project=None):
         agents=agents or {}, models={}, instruction_dirs=[],
     )
     return Runner(paths, config)
+
+
+def _node_worktree(r, node_id):
+    """Give a directly registered node a checkout in this project's worktree root."""
+    worktree = r.paths.worktree(node_id)
+    worktree.mkdir(parents=True, exist_ok=True)
+    return worktree
 
 
 def test_the_orchestrator_cannot_be_spawned_or_consulted(tmp_path):
@@ -3507,7 +3514,7 @@ def test_a_conversation_whose_worktree_vanished_is_told_so(tmp_path):
     from multiagents.tree import Node
     r.tree.add(Node(id="ag-old", agent="advisor", provider="p", model="m",
                     parent=None, depth=1, status="idle", conversation=True,
-                    session_id="s-1", worktree=str(tmp_path / "gone"),
+                    session_id="s-1", worktree=str(r.paths.worktree("ag-old")),
                     branch="agents/advisor/old"))
 
     import asyncio
@@ -6839,7 +6846,7 @@ def test_steer_does_not_report_running_against_a_dead_run(tmp_path):
                                               "resume": ["-c", "exit 1"]}}})
     r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
                     parent=None, depth=1, status="running", session_id="s-1",
-                    worktree=str(tmp_path)))
+                    worktree=str(_node_worktree(r, "ag-1"))))
 
     result = asyncio.run(r.steer("ag-1", "change course"))
     assert result["steered"] is False, result
@@ -6885,7 +6892,7 @@ def test_steer_confirms_on_the_first_event_not_a_fixed_sleep(tmp_path):
                                               "resume": ["-c", "sleep 30"]}}})
     r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
                     parent=None, depth=1, status="running", session_id="s-1",
-                    worktree=str(tmp_path)))
+                    worktree=str(_node_worktree(r, "ag-1"))))
 
     async def scenario():
         started = asyncio.get_running_loop().time()
@@ -6993,7 +7000,7 @@ def test_r7_a_steered_fallback_run_keeps_the_model_it_is_actually_running(tmp_pa
     # the spec `start()` builds at spawn time for this `models:` entry.
     r.tree.add(Node(id="ag-1", agent="worker", provider="agy",
                     model="gemini-3.8-flash-high", parent=None, depth=1,
-                    status="running", session_id="s-1", worktree=str(tmp_path),
+                    status="running", session_id="s-1", worktree=str(_node_worktree(r, "ag-1")),
                     routed_from="opencode",
                     routed_why="opencode is constrained; falling back to agy"))
 
@@ -7025,7 +7032,7 @@ def test_r7_an_unrouted_run_resumes_exactly_as_it_does_today(tmp_path):
                 {"opencode": _recording_provider("opencode", probe)})
     r.tree.add(Node(id="ag-1", agent="worker", provider="opencode",
                     model="opencode-go/qwen3.7-plus", parent=None, depth=1,
-                    status="running", session_id="s-1", worktree=str(tmp_path)))
+                    status="running", session_id="s-1", worktree=str(_node_worktree(r, "ag-1"))))
 
     result = asyncio.run(_steer_recording(r, "ag-1", "change course", probe))
 
@@ -7063,7 +7070,7 @@ def test_r7_a_consulted_advisor_keeps_the_model_it_is_actually_running(tmp_path)
     # The standing conversation, as routing left it: on agy, with agy's model.
     r.tree.add(Node(id="ag-1", agent="advisor", provider="agy",
                     model="gemini-3.8-flash-high", parent=None, depth=1,
-                    status="idle", session_id="s-1", worktree=str(tmp_path),
+                    status="idle", session_id="s-1", worktree=str(_node_worktree(r, "ag-1")),
                     conversation=True, turns=1,
                     routed_from="opencode",
                     routed_why="opencode is constrained; falling back to agy"))
@@ -7106,7 +7113,7 @@ def test_r9_a_reader_never_sees_a_steered_run_as_terminally_ended(tmp_path):
                 {"p": _recording_provider("p", probe)})
     r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
                     parent=None, depth=1, status="running", session_id="s-1",
-                    worktree=str(tmp_path)))
+                    worktree=str(_node_worktree(r, "ag-1"))))
 
     async def scenario():
         seen = []
@@ -10340,10 +10347,9 @@ def _branch_with(r, tmp_path, changes, node_id="ag-1"):
     for args in (["add", "-A"], ["commit", "-m", "seed"]):
         subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, env=env)
 
-    # Outside the project: a worktree inside it is an untracked directory, and
-    # `gitops.merge` refuses to merge into a dirty tree — which is exactly what
-    # the real layout avoids by putting worktrees under ~/.multiagents.
-    worktree = tmp_path.parent / f"{tmp_path.name}-wt" / node_id
+    # Keep the checkout in this project's worktree root, as a host-created
+    # agent's checkout would be.
+    worktree = r.paths.worktree(node_id)
     branch = gitops.create_worktree(tmp_path, worktree, f"agents/dev/{node_id}")
     for rel, body in changes.items():
         target = worktree / rel
