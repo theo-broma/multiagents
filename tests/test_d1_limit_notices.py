@@ -230,21 +230,36 @@ def test_ln_c3_run_terminal_prints_notice_while_provider_active(tmp_path, monkey
     import yaml
 
     r, _, agent_file = _project(tmp_path, monkeypatch, project_lines=["max_concurrent: 1"])
+    # The shipped `orchestrator` entry is disabled so `captain`, on the fake
+    # provider, is the only launchable orchestrator.
     agent_file.write_text(agent_file.read_text() +
+                          "  orchestrator:\n    disabled: true\n"
                           "  captain:\n    provider: fake\n    model: m1\n    launch: true\n    role: orchestrator\n")
+    launched = tmp_path / "fake-provider-launched"
     provider_script = r.paths.config / "providers" / "fake.py"
     provider_script.parent.mkdir()
     provider_script.write_text(
-        f"#!{sys.executable}\nimport sys, time\n"
+        f"#!{sys.executable}\nimport pathlib, sys, time\n"
         "if sys.argv[1] == 'check': sys.exit(0)\n"
-        "if sys.argv[1] == 'launch': print('FAKE_PROVIDER_ACTIVE', flush=True); time.sleep(4); sys.exit(0)\n"
+        f"if sys.argv[1] == 'launch': pathlib.Path({str(launched)!r}).touch(); "
+        "print('FAKE_PROVIDER_ACTIVE', flush=True); time.sleep(4); sys.exit(0)\n"
         "sys.exit(64)\n")
     provider_script.chmod(0o755)
     providers = yaml.safe_load((r.paths.config / "providers.yaml").read_text())
     providers["providers"]["fake"]["script"] = "fake.py"
     (r.paths.config / "providers.yaml").write_text(yaml.safe_dump(providers))
     r = Runner(r.paths, load(r.paths, seed=False))
-    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"), PYTHONUNBUFFERED="1")
+    # Shadow every shipped provider CLI so a misrouted launch cannot reach a
+    # real one on this machine; a shim records that it was invoked.
+    shims = tmp_path / "provider-shims"
+    shims.mkdir()
+    real_cli_hit = tmp_path / "real-provider-cli-invoked"
+    for name in ("claude", "codex", "agy", "opencode"):
+        shim = shims / name
+        shim.write_text(f"#!/bin/sh\necho \"$0 $*\" >> {str(real_cli_hit)!r}\nexit 97\n")
+        shim.chmod(0o755)
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"), PYTHONUNBUFFERED="1",
+               PATH=f"{shims}{os.pathsep}{os.environ.get('PATH', '')}")
     process = subprocess.Popen([sys.executable, "-m", "multiagents.cli", "--path", str(r.paths.root),
                                 "run", "--no-supervise"], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, env=env)
@@ -262,6 +277,8 @@ def test_ln_c3_run_terminal_prints_notice_while_provider_active(tmp_path, monkey
         if process.poll() is None:
             process.terminate()
             process.communicate(timeout=5)
+    assert not real_cli_hit.exists(), real_cli_hit.read_text()
+    assert launched.exists(), "the fake provider was never launched as the orchestrator"
 
 
 def test_ln_c2_effective_limits_carry_precise_provenance(tmp_path, monkeypatch):
@@ -270,12 +287,13 @@ def test_ln_c2_effective_limits_carry_precise_provenance(tmp_path, monkeypatch):
         agent_lines=["silence_timeout: 6"])
     result = _try_start(r)
     assert isinstance(result, dict) and result.get("agent_id"), result
+    # Amended LN-C2: `source` stays LM-R2's layer string; the detail is beside it.
     assert result.get("effective_limits") == {
-        "timeout": {"value": 4, "source": {"layer": "project",
+        "timeout": {"value": 4, "source": "project", "source_detail": {"layer": "project",
             "file": str(project_file.resolve()), "line": 3}},
-        "max_children": {"value": 1, "source": {"layer": "project",
+        "max_children": {"value": 1, "source": "project", "source_detail": {"layer": "project",
             "file": str(project_file.resolve()), "line": 4}},
-        "silence_timeout": {"value": 6, "source": {"layer": "agent",
+        "silence_timeout": {"value": 6, "source": "agent", "source_detail": {"layer": "agent",
             "file": str(agent_file.resolve()), "line": 5}},
     }
 
