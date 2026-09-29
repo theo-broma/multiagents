@@ -208,6 +208,24 @@ default, so work can proceed):
       420), so codex is used to the end of its windows.
     - No per-window percentage reserve exists for non-orchestrator
       providers. That would be a feature to add.
+  - The MCP server was reconnected by the user around 10:10 UTC: H1, H2
+    and H3 are live.
+  - **Queued (user request, 2026-09-29):** reword the agent instruction
+    files away from attack vocabulary, towards verification vocabulary.
+    - Targets:
+      - `defaults/agents/team/adversary.md`, the main target;
+      - `library/spec-adversary.md`;
+      - `library/README.md`;
+      - both `pipeline.md` files;
+      - `library/security-advisor.md`;
+      - the single mentions elsewhere.
+    - Leave `pentester.md` alone.
+    - Keep the agent name.
+    - Add to adversary's "Calling this agent" section that OpenAI's cyber
+      filter also trips on TOCTOU, forge and sandbox wording, so state them
+      as invariants and inputs.
+    - Delegate the rewrite after 13:30 UTC; the orchestrator reviews the
+      diff.
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
