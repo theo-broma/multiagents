@@ -938,6 +938,27 @@ INTERRUPTED_COMMIT = (
 )
 
 
+CHECKPOINT_FAILED = "checkpoint failed"
+
+
+def _checkpoint_failed(tree: Tree, node_id: str, action: str, detail: str) -> None:
+    """HG-R9: record a node's refused or failed host checkpoint.
+
+    The worktree is left as it is, and the node's reason says why, which is
+    what keeps `clean --branches` from deleting it without `--force`.
+    """
+    detail = detail.strip()[:400]
+    if "host_authority_mismatch" in detail:
+        tree.emit(node_id, "host_authority_mismatch", node=node_id, action=action,
+                  fields=["branch"], reason=detail)
+    tree.emit(node_id, "checkpoint_failed", action=action, detail=detail)
+    node = tree.get(node_id)
+    if node is not None:
+        note = f"{CHECKPOINT_FAILED}: {detail}"
+        tree.update(node_id, reason=f"{node.reason}; {note}" if node.reason else note)
+    print(f"  {node_id}: {CHECKPOINT_FAILED}, worktree kept: {detail}", file=sys.stderr)
+
+
 def _save_interrupted(node, root: Path | None = None,
                       authority: HostAuthority | None = None,
                       tree: Tree | None = None) -> bool:
@@ -978,6 +999,8 @@ def _save_interrupted(node, root: Path | None = None,
                 if tree:
                     tree.emit(node.id, "host_git_refused", detail=result.err)
                 print(result.err)
+            if not result.ok and tree:
+                _checkpoint_failed(tree, node.id, "resume", result.err or result.out)
             return bool(result.ok)
     except (OSError, ValueError):
         if tree:
@@ -985,7 +1008,9 @@ def _save_interrupted(node, root: Path | None = None,
                       action="resume", fields=["worktree"],
                       reason="worktree could not be pinned")
         return False
-    except gitops.GitError:
+    except gitops.GitError as exc:
+        if tree:
+            _checkpoint_failed(tree, node.id, "resume", str(exc))
         return False
 
 
@@ -1823,6 +1848,9 @@ def cmd_clean(args: argparse.Namespace) -> int:
                 tree.emit(node_id, "host_authority_mismatch", node=node_id,
                           action="clean", fields=["branch"])
                 continue
+            if CHECKPOINT_FAILED in (node.get("reason") or "") and not args.force:
+                print(f"keep   {branch} (its checkpoint failed; --force to delete)")
+                continue
             commits = gitops.commits_on(paths.root, branch, base, root=paths.root)
             if commits and not args.force:
                 print(f"keep   {branch} ({commits} unmerged commit(s); --force to delete)")
@@ -2642,6 +2670,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     # A killed agent never reaches the commit its own run would have made, so
     # its edits sit uncommitted in a worktree nobody will look at again. The
     # branch is what makes the work resumable, so the work has to be on it.
+    # HG-R9: each node on its own; one refused checkpoint stops no other.
     saved = 0
     for node in stopped_agents:
         if tree.id_mismatch(node.id):         # HA-R9: no host git on it
@@ -2654,16 +2683,18 @@ def cmd_stop(args: argparse.Namespace) -> int:
         try:
             if not gitops.is_dirty(worktree, root=paths.root):   # SG-R4
                 continue
-        except gitops.GitError:
-            continue
-        result = gitops.commit_all(worktree, f"{node.agent}: work in progress "
-                                             f"when stopped ({node.id})", root=paths.root,
-                                   branch=node.branch)
+            result = gitops.commit_all(worktree, f"{node.agent}: work in progress "
+                                                 f"when stopped ({node.id})", root=paths.root,
+                                       branch=node.branch)
+        except (OSError, gitops.GitError) as exc:
+            result = gitops.GitResult(False, "", str(exc), 1)
         if result.ok:
             saved += 1
-        elif "filtered paths" in result.err:
+            continue
+        if "filtered paths" in result.err:
             tree.emit(node.id, "host_git_refused", detail=result.err)
             print(result.err)
+        _checkpoint_failed(tree, node.id, "stop", result.err or result.out)
 
     # --- the container, last: the agents were inside it --------------------
     container = ""

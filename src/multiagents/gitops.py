@@ -37,18 +37,97 @@ _host_context: contextvars.ContextVar[tuple[list[str], dict[str, str]] | None] =
     "host_git_context", default=None)
 
 
-def _content_disable_args(root: Path) -> list[str]:
-    config_env = dict(os.environ)
-    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
-        config_env.pop(key, None)
+def _host_env(env: dict[str, str] | None) -> dict[str, str]:
+    """The environment a host-scoped git call runs with: the caller's, minus
+    any git location it inherited, plus `env`."""
+    actual = dict(os.environ)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                "GIT_EXTERNAL_DIFF"):
+        actual.pop(key, None)
+    actual.update(env or {})
+    return actual
+
+
+def _content_disable_args(checkout: Path, args: list[str],
+                          env: dict[str, str]) -> list[str]:
+    """HG-R4's `-c` overrides emptying every content program.
+
+    HG-R10: listed with exactly the git dir, work tree, HEAD, arguments and
+    environment of the call it protects, so a conditional include
+    (`onbranch:`, `gitdir:`) cannot show that call a program this list missed.
+    """
     keys = subprocess.run(
-        ["git", "-C", str(root), "config", "--name-only", "--get-regexp",
+        ["git", "-C", str(checkout), *args, "config", "--name-only", "--get-regexp",
          r"^(filter\..*\.(clean|smudge|process|required)|merge\..*\.driver|diff\..*\.textconv|diff\.external)$"],
-        capture_output=True, text=True, env=config_env,
+        capture_output=True, text=True, env=_host_env(env),
     )
     return [item for key in keys.stdout.splitlines()
             for item in ("-c", f"{key}={'false' if key.endswith('.required') else ''}")] + [
         "-c", "diff.external="]
+
+
+IDENTITY_KEYS = r"^(user|author|committer)\.(name|email)$"
+
+
+def _identity_args(gitdir: Path, common: Path, checkout: Path,
+                   env: dict[str, str]) -> list[str]:
+    """HG-R11: the identity plain git resolves in a linked worktree, as `-c`.
+
+    The private git dir a host call runs with is not the worktree's, so an
+    `includeIf "gitdir:..."` naming the worktree's git dir no longer matches
+    it. The identity keys are read here with the real git dir, file scope by
+    file scope, skipping `config.worktree` (agent-written, HG-R1). A key
+    the environment sets (`GIT_CONFIG_COUNT`, `-c`) is left to it, as it
+    outranks files for plain git too; a key found nowhere is left missing, so
+    CI-R1's fallback still applies.
+    """
+    base = _host_env({"GIT_DIR": str(gitdir), "GIT_COMMON_DIR": str(common),
+                      "GIT_WORK_TREE": str(checkout)})
+    scopes = ["--global", "--local"]
+    if base.get("GIT_CONFIG_NOSYSTEM", "").lower() not in ("1", "true", "yes", "on"):
+        scopes.insert(0, "--system")
+    found: dict[str, str] = {}
+    for scope in scopes:
+        result = subprocess.run(
+            ["git", "-C", str(checkout), "config", scope, "--includes",
+             "--get-regexp", IDENTITY_KEYS],
+            capture_output=True, text=True, env=base,
+        )
+        for line in result.stdout.splitlines():
+            key, _, value = line.partition(" ")
+            found[key] = value
+    command = subprocess.run(
+        ["git", "-C", str(checkout), "config", "--show-scope", "--get-regexp",
+         IDENTITY_KEYS],
+        capture_output=True, text=True, env=_host_env(env),
+    )
+    for line in command.stdout.splitlines():
+        scope, _, rest = line.partition("\t")
+        if scope == "command":
+            found.pop(rest.partition(" ")[0], None)
+    return [item for key, value in found.items() for item in ("-c", f"{key}={value}")]
+
+
+def _plain_branch_tip(common: Path, ref: str) -> str:
+    """HG-R8: the commit `ref` names, provided `ref` is a regular branch ref.
+
+    A branch ref lives in the common dir, which a container can write; turned
+    into a symbolic ref it would carry a host commit onto whatever it names.
+    """
+    env = {"GIT_DIR": str(common), "GIT_COMMON_DIR": str(common)}
+    if not ref.startswith("refs/heads/"):
+        raise GitError(f"host_authority_mismatch: branch {ref} is not a local branch")
+    symbolic = subprocess.run(["git", "symbolic-ref", "-q", ref], capture_output=True,
+                              text=True, env=_host_env(env))
+    if symbolic.returncode != 1:
+        raise GitError(f"host_authority_mismatch: branch {ref} is a symbolic ref"
+                       if symbolic.returncode == 0 else
+                       f"could not read branch {ref}: {symbolic.stderr.strip()}")
+    tip = subprocess.run(["git", "rev-parse", "--verify", "-q", f"{ref}^{{commit}}"],
+                         capture_output=True, text=True, env=_host_env(env))
+    if tip.returncode != 0 or not tip.stdout.strip():
+        raise GitError(f"host_authority_mismatch: branch {ref} does not name a commit")
+    return tip.stdout.strip()
 
 
 @contextlib.contextmanager
@@ -60,6 +139,11 @@ def _host_scope(repo: Path, *, root: Path | None = None,
     A linked checkout's .git, commondir and config.worktree are all writable
     by its agent. A private gitdir retains the real HEAD and index while
     obtaining config and refs solely from the base repository.
+
+    HG-R8: the branch ref is writable too. So the private HEAD is detached at
+    the branch's tip, checked to be a regular ref, and whatever the call
+    commits is put on that ref afterwards with `--no-deref`, only if the ref
+    still holds the tip it started from. No symbolic ref is ever followed.
     """
     root = Path(root or repo).resolve()
     checkout = Path(repo)
@@ -73,20 +157,24 @@ def _host_scope(repo: Path, *, root: Path | None = None,
             empty_hooks = Path(tmp) / "hooks"
             empty_hooks.mkdir()
             args += ["-c", f"core.hooksPath={empty_hooks}"]
-        if not content:
-            args += _content_disable_args(root)
         env: dict[str, str] = {"GIT_DIR": str(common), "GIT_WORK_TREE": str(root),
                                "GIT_COMMON_DIR": str(common)}
+        ref, tip, private = "", "", None
         if repo != root:
             actual = common / "worktrees" / repo.name
             head = _read_regular(actual / "HEAD", 4096)
             if head is None or not actual.is_dir() or actual.is_symlink():
                 raise GitError(f"no trusted worktree metadata for {repo}")
-            if branch and head.decode(errors="replace").strip() != f"ref: refs/heads/{branch}":
+            held = head.decode(errors="replace").strip()
+            if branch and held != f"ref: refs/heads/{branch}":
                 raise GitError("host_authority_mismatch: worktree HEAD differs from host record")
             registered = _registration_branch(root, repo, branch)
             if registered is not None and branch and registered != branch:
                 raise GitError("host_authority_mismatch: worktree registration differs from host record")
+            if held.startswith("ref:"):
+                ref = held.removeprefix("ref:").strip()
+                tip = _plain_branch_tip(common, ref)
+                head = f"{tip}\n".encode()
             private = Path(tmp) / "gitdir"
             private.mkdir()
             (private / "HEAD").write_bytes(head)
@@ -97,11 +185,34 @@ def _host_scope(repo: Path, *, root: Path | None = None,
             env = {"GIT_DIR": str(private), "GIT_WORK_TREE": str(checkout),
                    "GIT_COMMON_DIR": str(common), "GIT_INDEX_FILE": str(index),
                    "GIT_OPTIONAL_LOCKS": "0"}
+            args += _identity_args(actual, common, checkout, env)
+        if not content:
+            args += _content_disable_args(checkout, args, env)
         token = _host_context.set((args, env))
         try:
             yield
         finally:
             _host_context.reset(token)
+        if ref:
+            _advance_branch(common, ref, tip, private)
+
+
+def _advance_branch(common: Path, ref: str, tip: str, private: Path) -> None:
+    """HG-R8: move `ref` to what the host call left at its detached HEAD."""
+    env = _host_env({"GIT_DIR": str(common), "GIT_COMMON_DIR": str(common)})
+    now = _read_regular(private / "HEAD", 4096)
+    head = (now or b"").decode(errors="replace").strip()
+    if head == tip:
+        return
+    if len(head) not in (40, 64) or any(c not in "0123456789abcdef" for c in head):
+        raise GitError("host_authority_mismatch: host call left HEAD off its branch")
+    moved = subprocess.run(
+        ["git", "update-ref", "--no-deref", "-m", "multiagents: host commit", ref, head, tip],
+        capture_output=True, text=True, env=env,
+    )
+    if moved.returncode != 0:
+        raise GitError(f"host_authority_mismatch: branch {ref} moved during the host "
+                       f"call: {moved.stderr.strip()}")
 
 
 @dataclass
@@ -121,12 +232,7 @@ def run(repo: Path, *args: str, check: bool = False, timeout: int = 120,
     if host:
         prefix, host_env = host
         args = (*prefix, *args)
-        actual_env = dict(os.environ)
-        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                    "GIT_EXTERNAL_DIFF"):
-            actual_env.pop(key, None)
-        actual_env.update(host_env)
-        actual_env.update(env or {})
+        actual_env = _host_env({**host_env, **(env or {})})
     else:
         actual_env = {**os.environ, **env} if env else None
     proc = subprocess.run(
@@ -446,7 +552,7 @@ def _pinned(repo: Path, root: Path | None):
                "GIT_INDEX_FILE": str(private / "index"),
                "GIT_OPTIONAL_LOCKS": "0"}
         args = ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={hooks}"]
-        args += _content_disable_args(root)
+        args += _content_disable_args(tree, args, env)
         yield args, env
 
 
