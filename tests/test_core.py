@@ -5541,14 +5541,15 @@ def test_stop_commits_what_a_killed_agent_left_behind(tmp_path, quiet_git,
     cli.cmd_init(_init_args(tmp_path))
 
     paths = cli._resolve(str(tmp_path))
-    worktree = tmp_path / ".." / "wt-stop"
-    gitops.create_worktree(tmp_path, worktree.resolve(), "agents/napper/1")
-    (worktree.resolve() / "half-finished.txt").write_text("in progress\n")
+    # HA-R10: the checkpoint only runs in a worktree inside the domain.
+    worktree = paths.worktree("ag-1")
+    gitops.create_worktree(tmp_path, worktree, "agents/napper/1")
+    (worktree / "half-finished.txt").write_text("in progress\n")
 
     tree = Tree(paths.tree_file, paths.events_file)
     tree.add(Node(id="ag-1", agent="napper", provider="p", model="m",
                   parent=None, depth=1, status="running", pid=0,
-                  branch="agents/napper/1", worktree=str(worktree.resolve())))
+                  branch="agents/napper/1", worktree=str(worktree)))
 
     monkeypatch.setattr(cli.Runner, "stop", _noop_stop)
     cli.cmd_stop(argparse.Namespace(path=str(tmp_path), keep_containers=True))
