@@ -288,6 +288,36 @@ unverified.
 - Verified by: the existing suite stays green, apart from the 72 known
   phase2 reds.
 
+**HA-R9: node identity comes from the key, never from the entry**
+(adversary ag-387314, 2026-09-29). A node's identity is the key it is stored
+under in tree.json. The `id` field inside an entry is container-written data.
+- Every host action on a node resolves its record, and everything derived
+  from it, from the key the host addressed. That covers:
+  - the authority record;
+  - branch;
+  - worktree;
+  - completion;
+  - merge target;
+  - pending deletion;
+  - `clean`'s liveness check.
+
+  The inner `id` never picks a different record.
+- An entry whose inner `id` differs from its key is a mismatch:
+  - the host emits `host_authority_mismatch` with `fields` containing `"id"`;
+  - it performs no host mutation on that node, or on any node the inner id
+    names;
+  - read-only reporting (tree, status) may still show the entry.
+- `clean --branches` decides liveness per key. Another entry's inner `id`
+  can neither mark a node done nor unprotect it.
+- Verified by: `tests/test_h1_adversary_id_alias.py`, all 5 tests:
+  - drop-if-empty aliasing a live node;
+  - forged branch merged;
+  - forged branch pushed;
+  - clean deleting a live node;
+  - auto-merge into an unrelated worktree.
+
+  Plus a mismatch-event assertion added by the tester.
+
 ## Out of scope, and recorded
 
 - Inter-agent isolation inside the container: the threat-model section
