@@ -545,6 +545,13 @@ def build_env(
             env[key] = value
 
     if home is not None:
+        # The agent's HOME is private, but host-scoped state (the codex login
+        # profile) belongs to the real user: say where that is, and forward an
+        # explicit profile override, so `run` resolves what `auth login` wrote.
+        env["MULTIAGENTS_USER_HOME"] = str(Path.home())
+        override = os.environ.get("MULTIAGENTS_CODEX_PROFILE")
+        if override and "MULTIAGENTS_CODEX_PROFILE" not in blocked:
+            env["MULTIAGENTS_CODEX_PROFILE"] = override
         env["HOME"] = str(home)
         env["XDG_CONFIG_HOME"] = str(home / ".config")
         env["XDG_DATA_HOME"] = str(home / ".local" / "share")

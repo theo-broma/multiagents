@@ -51,9 +51,15 @@ def _is_docker():
     return os.environ.get("MULTIAGENTS_EXECUTOR") == "docker"
 
 
+def _user_home():
+    """The real user's home: under the local executor an agent's $HOME is private."""
+    return Path(os.environ.get("MULTIAGENTS_USER_HOME") or Path.home())
+
+
 def _is_users_own_codex_home(path):
-    real_users_codex = os.path.realpath(Path.home() / ".codex")
-    return os.path.realpath(path) == real_users_codex
+    real = os.path.realpath(path)
+    return real in {os.path.realpath(_user_home() / ".codex"),
+                    os.path.realpath(Path.home() / ".codex")}
 
 
 def _host_profile():
@@ -64,7 +70,7 @@ def _host_profile():
             raise ValueError(
                 "MULTIAGENTS_CODEX_PROFILE resolves to the user's own ~/.codex; refusing")
         return candidate
-    return Path.home() / ".multiagents" / "profiles" / "codex"
+    return _user_home() / ".multiagents" / "profiles" / "codex"
 
 
 def auth_profile():
@@ -84,7 +90,14 @@ def run_profile():
         if not home:
             raise ValueError("MULTIAGENTS_PRIVATE_HOME is not set for a docker run")
         return Path(home)
-    return _host_profile()
+    profile = _host_profile()
+    # Only for an agent the engine launched (it names the real home): there an
+    # empty profile is never a first run, it is a run that would call the API
+    # unauthenticated. A hand-run adapter keeps creating its profile (CX-C8).
+    if os.environ.get("MULTIAGENTS_USER_HOME") and not (profile / "auth.json").is_file():
+        raise ValueError(f"no codex login at {profile} (auth.json missing); "
+                         "run: multiagents auth login codex")
+    return profile
 
 
 def _ensure_profile(path):
