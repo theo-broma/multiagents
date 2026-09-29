@@ -84,7 +84,6 @@ class Project:
         c3.as_root(monkeypatch)
         monkeypatch.setattr(cli, "_confirm", lambda *a, **k: True)
         monkeypatch.setattr(cli, "_executor_problems", lambda *a: [])
-        self.tmp = tmp_path
         self.root = tmp_path / "proj"
         self.root.mkdir()
         git(self.root, "init", "-q", "-b", "main")
@@ -109,7 +108,7 @@ class Project:
               depth: int = 1, **extra) -> Node:
         """A node on its own branch, with a worktree and one commit on it."""
         branch = branch or f"agents/worker/{node_id[3:]}"
-        path = self.tmp / "wt" / node_id
+        path = self.paths.worktree(node_id)
         actual = gitops.create_worktree(self.root, path, branch, unique=False)
         assert actual == branch
         if commit:
