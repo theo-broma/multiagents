@@ -540,6 +540,11 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - everything else stays as now, on codex. That includes the advisor, dev-advisor, researcher, reviewer and adversary.
 - Before editing, check how agents.yaml expresses a variant (spawn.optional.variant → `--variant`) and what fallbacks each implementer keeps (codex, as today). The advisor is consulted on the edit, not on the decision, which is the user's.
 
+**2026-09-29 23:22 UTC:** claude has reset.
+- Started zai tester ag-c3d029 (claude sonnet) on ZA-R1..R5.
+- Started implementer ag-a2d0d6 (claude sonnet) on HA-R12 `clean` (18 red tests).
+- The codex wake (23:48) resumes H7 ag-2abbbc via steer.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
