@@ -959,9 +959,68 @@ def _checkpoint_failed(tree: Tree, node_id: str, action: str, detail: str) -> No
     print(f"  {node_id}: {CHECKPOINT_FAILED}, worktree kept: {detail}", file=sys.stderr)
 
 
+def _checkpoint_operands(node, authority: HostAuthority, tree: Tree,
+                         action: str) -> tuple[object | None, str]:
+    """HA-R10: the node with the operands a stop or resume checkpoint may use.
+
+    Taken the way other host actions take them: from the host record when
+    the node is recorded, and under HA-R2a when it is not. The worktree has
+    to be a checkout inside the worktree root and the branch an `agents/*`
+    ref no other record holds, whatever tree.json says, so a checkpoint
+    never commits the project root or onto the base branch or another
+    node's branch. HA-R12: an operand of the wrong type is refused too.
+
+    Returns `(node, "")` to checkpoint, `(None, "")` when there is nothing to
+    checkpoint, and `(None, detail)` when the operands were refused.
+    """
+    record = authority.get(node.id)
+    if record:
+        fields = [key for key in ("branch", "worktree", "parent")
+                  if getattr(node, key) != record.get(key)]
+        if fields:
+            tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                      action=action, fields=fields)
+        node = dataclasses.replace(node, **{key: record.get(key)
+                                            for key in ("branch", "worktree", "parent")})
+
+    def refused(fields: list[str], reason: str) -> tuple[None, str]:
+        tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                  action=action, fields=fields, reason=reason)
+        return None, f"operands refused ({', '.join(fields)}): {reason}"
+
+    worktree, branch = node.worktree, node.branch
+    bad = [key for key, value in (("worktree", worktree), ("branch", branch))
+           if value is not None and not isinstance(value, str)]
+    if bad:
+        return refused(bad, "not a string")
+    if not worktree:
+        return None, ""
+    try:
+        path = Path(worktree)
+        inside = (authority.safe_seeded_path(path) if record
+                  else authority.safe_nested_path(path))
+        if not inside:
+            return refused(["worktree"], "worktree is outside the container domain")
+        if not path.is_dir():
+            return None, ""
+    except (OSError, ValueError, RuntimeError):
+        return refused(["worktree"], "worktree could not be resolved")
+    if record:
+        others = {r.get("branch") for key, r in authority.read().items() if key != node.id}
+        ok = (bool(branch) and branch.startswith("agents/")
+              and bool(branch.removeprefix("agents/")) and branch not in others
+              and gitops.run(authority.paths.root, "check-ref-format",
+                             f"refs/heads/{branch}").ok)
+    else:
+        ok = bool(branch) and authority.safe_unrecorded_branch(branch)
+    if not ok:
+        return refused(["branch"], "branch is not this node's agents/* branch")
+    return node, ""
+
+
 def _save_interrupted(node, root: Path | None = None,
                       authority: HostAuthority | None = None,
-                      tree: Tree | None = None) -> bool:
+                      tree: Tree | None = None, action: str = "resume") -> bool:
     """Commit an interrupted agent's worktree, marked as what it is.
 
     A cancelled node is TERMINAL, and `clean --branches` removes worktrees for
@@ -974,6 +1033,8 @@ def _save_interrupted(node, root: Path | None = None,
 
     `root`, the project root, pins the dirtiness check to the repository's
     trusted paths (SG-R4); a worktree it cannot resolve is left alone.
+    `action` is the pass it runs in, `resume` or `stop`, for its message
+    and its events.
     """
     worktree = Path(node.worktree) if node.worktree else None
     if not worktree or not worktree.is_dir():
@@ -982,7 +1043,7 @@ def _save_interrupted(node, root: Path | None = None,
             and not authority.safe_unrecorded_branch(node.branch)):
         if tree:
             tree.emit(node.id, "host_authority_mismatch", node=node.id,
-                      action="resume", fields=["branch"],
+                      action=action, fields=["branch"],
                       reason="unrecorded branch is outside the container domain")
         return False
     try:
@@ -993,24 +1054,26 @@ def _save_interrupted(node, root: Path | None = None,
                 return False
             if not gitops.is_dirty(checkout, root=root):   # SG-R4
                 return False
-            result = gitops.commit_all(checkout, INTERRUPTED_COMMIT.format(
-                agent=node.agent, agent_id=node.id), root=root, branch=node.branch)
+            message = (f"{node.agent}: work in progress when stopped ({node.id})"
+                       if action == "stop" else
+                       INTERRUPTED_COMMIT.format(agent=node.agent, agent_id=node.id))
+            result = gitops.commit_all(checkout, message, root=root, branch=node.branch)
             if not result.ok and "filtered paths" in result.err:
                 if tree:
                     tree.emit(node.id, "host_git_refused", detail=result.err)
                 print(result.err)
             if not result.ok and tree:
-                _checkpoint_failed(tree, node.id, "resume", result.err or result.out)
+                _checkpoint_failed(tree, node.id, action, result.err or result.out)
             return bool(result.ok)
     except (OSError, ValueError):
         if tree:
             tree.emit(node.id, "host_authority_mismatch", node=node.id,
-                      action="resume", fields=["worktree"],
+                      action=action, fields=["worktree"],
                       reason="worktree could not be pinned")
         return False
     except gitops.GitError as exc:
         if tree:
-            _checkpoint_failed(tree, node.id, "resume", str(exc))
+            _checkpoint_failed(tree, node.id, action, str(exc))
         return False
 
 
@@ -1037,26 +1100,14 @@ def cmd_resume(args: argparse.Namespace) -> int:
     left_running: list[str] = []      # SV-R6/R10: the next server adopts these
     ended_alone: list[str] = []       # finished with nobody watching; ditto
     for node in tree.active():
-        record = authority.get(node.id)
-        safe_unrecorded_worktree = True
         if tree.id_mismatch(node.id):
             # HA-R9: reconciled like any other, but no host git on it.
             tree.emit(node.id, "host_authority_mismatch", node=node.id,
                       action="resume", fields=["id"])
-            safe_unrecorded_worktree = False
-        if record:
-            fields = [key for key in ("branch", "worktree", "parent")
-                      if getattr(node, key) != record.get(key)]
-            if fields:
-                tree.emit(node.id, "host_authority_mismatch", node=node.id,
-                          action="resume", fields=fields)
-            node = dataclasses.replace(node, **{key: record.get(key)
-                           for key in ("branch", "worktree", "parent")})
-        elif node.worktree and not authority.safe_nested_path(Path(node.worktree)):
-            tree.emit(node.id, "host_authority_mismatch", node=node.id,
-                      action="resume", fields=["worktree"],
-                      reason="unrecorded worktree is outside the container domain")
-            safe_unrecorded_worktree = False
+            target, refused = None, ""
+        else:
+            # HA-R10: operands from the record, or under HA-R2a.
+            target, refused = _checkpoint_operands(node, authority, tree, "resume")
         # `procs.alive`, not `os.kill(pid, 0)`. This loop runs after a restart,
         # and after a REBOOT every pid here was issued by a kernel that is gone
         # while the low numbers have already been handed out again — so the
@@ -1103,7 +1154,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # Committed HERE rather than in the cancellation handler: this runs with
         # time, a live loop and full information, where a teardown has none of
         # those and a git call in it can hang for its whole timeout.
-        if safe_unrecorded_worktree and _save_interrupted(node, paths.root, authority, tree):
+        if refused:
+            _checkpoint_failed(tree, node.id, "resume", refused)
+        elif target and _save_interrupted(target, paths.root, authority, tree):
             saved += 1
 
     # SG-R2: branches a container could not delete, now that the host can.
@@ -2608,6 +2661,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     config = load_config(paths)
     tree = Tree(paths.tree_file, paths.events_file)
+    authority = HostAuthority(paths, tree)
     # SV-R10: `stop <id>` ends that one agent — wherever it runs, whether or
     # not a session is attached — and leaves the sessions and the rest alone.
     only = getattr(args, "agent_id", "") or ""
@@ -2673,24 +2727,13 @@ def cmd_stop(args: argparse.Namespace) -> int:
             tree.emit(node.id, "host_authority_mismatch", node=node.id,
                       action="stop", fields=["id"])
             continue
-        worktree = Path(node.worktree) if node.worktree else None
-        if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree, root=paths.root):
-            continue
-        try:
-            if not gitops.is_dirty(worktree, root=paths.root):   # SG-R4
-                continue
-            result = gitops.commit_all(worktree, f"{node.agent}: work in progress "
-                                                 f"when stopped ({node.id})", root=paths.root,
-                                       branch=node.branch)
-        except (OSError, gitops.GitError) as exc:
-            result = gitops.GitResult(False, "", str(exc), 1)
-        if result.ok:
+        # HA-R10: operands from the record, or under HA-R2a, never tree.json.
+        target, refused = _checkpoint_operands(node, authority, tree, "stop")
+        if refused:
+            _checkpoint_failed(tree, node.id, "stop", refused)
+        elif target and _save_interrupted(target, paths.root, authority, tree,
+                                          action="stop"):
             saved += 1
-            continue
-        if "filtered paths" in result.err:
-            tree.emit(node.id, "host_git_refused", detail=result.err)
-            print(result.err)
-        _checkpoint_failed(tree, node.id, "stop", result.err or result.out)
 
     # --- the container, last: the agents were inside it --------------------
     container = ""
