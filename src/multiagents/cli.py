@@ -1635,6 +1635,7 @@ def cmd_tree(args: argparse.Namespace) -> int:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     """Tail the global event log — the out-of-band view of a running tree."""
+    from . import notices
     paths = _resolve(args.path)
     path = paths.events_file
     print(f"watching {path}  (ctrl-c to stop)")
@@ -1652,12 +1653,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                stamp = time.strftime("%H:%M:%S", time.localtime(event.get("t", 0)))
-                extra = " ".join(
-                    f"{k}={v}" for k, v in event.items()
-                    if k not in {"t", "agent", "kind"} and v not in (None, "", [])
-                )
-                print(f"{stamp} {event.get('agent','-'):10} {event.get('kind',''):10} {extra}")
+                print(notices.event_line(event))
         except KeyboardInterrupt:
             return 0
 

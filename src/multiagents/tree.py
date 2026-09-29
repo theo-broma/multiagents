@@ -660,7 +660,11 @@ class Tree:
     def budget_for_tag(self, tag: str) -> int:
         return int((self.read().get("budgets") or {}).get(tag, {}).get("tokens", 0) or 0)
 
-    def set_budget(self, tag: str, tokens: int) -> dict[str, Any]:
+    def budget_record(self, tag: str) -> dict[str, Any]:
+        """A tag's ceiling as recorded: tokens, when, and who set it."""
+        return dict((self.read().get("budgets") or {}).get(tag) or {})
+
+    def set_budget(self, tag: str, tokens: int, set_by: str = "") -> dict[str, Any]:
         """Record a tag's ceiling. The FIRST value wins.
 
         Deliberately not raisable. A ceiling the spender may lift on its own is
@@ -678,7 +682,8 @@ class Tree:
                           "created": False,
                           "note": "already set; a budget cannot be raised from here"}
             else:
-                budgets[tag] = {"tokens": int(tokens), "set_at": now()}
+                budgets[tag] = {"tokens": int(tokens), "set_at": now(),
+                                **({"set_by": set_by} if set_by else {})}
                 result = {"tag": tag, "tokens": int(tokens), "created": True}
         return result
 

@@ -22,6 +22,7 @@ from ..budget import read_all, reset_label, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
 from ..providers import load_providers
+from .. import notices as limit_notices
 from .. import procs
 from ..tree import ACTIVE, PAUSED, Tree, cost_of, token_count
 
@@ -405,6 +406,14 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
                                 f"{node['status']} but its process is gone",
                         "detail": "`multiagents resume` reconciles this"})
 
+    # LN-C3: a limit that is constraining work right now, until it clears.
+    for notice in limit_notices.active(data):
+        count = int(notice.get("count", 1))
+        out.append({"level": "warn", "kind": "limit",
+                    "text": notice.get("message", ""),
+                    "detail": f"{count} time(s) since "
+                              f"{time.strftime('%H:%M:%S', time.localtime(notice.get('first_hit') or 0))}"})
+
     rank = {"error": 0, "warn": 1, "info": 2}
     out.sort(key=lambda a: rank.get(a["level"], 3))
     return out
@@ -474,6 +483,9 @@ def snapshot(paths: ProjectPaths, config: Config,
         "questions": data.get("questions", []),
         "deferred": data.get("deferred", []),
         "pause": tree.pause_state(),
+        # LN-C3: active notices, and the last ones that cleared.
+        "limit_notices": {"active": limit_notices.active(data),
+                          "cleared": limit_notices.recently_cleared(data)},
         "counts": {
             "nodes": len(nodes),
             "running": len(running),
