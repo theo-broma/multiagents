@@ -327,6 +327,17 @@ Bug-reporter ag-a0be27 finished from source only (it had no shell). It wrote 8 t
 
 ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have been resumed.
 
+**~19:30 UTC:**
+- **H3 coverage merged** (de0bee6): all 62 H3 tests are green on main.
+- **Round-2 adversary ag-ab23f4, VERDICT rejected (4).**
+  - `stop` commits the main checkout onto the base branch through a forged `worktree`.
+  - `merge_agent(into=unrecorded)` follows a forged HEAD onto main.
+  - `remove_worktree` runs an unscoped prune.
+  - One malformed entry aborts stop, resume, reap and active.
+
+  Its tests were merged in c6c18ff, and the contract was extended with HA-R10..R12 and the HG-R1 clarification (2f5d821). The fix is running as implementer-deep ag-6?? (see tree).
+- **Researcher for the D3 inventory failed on codex.** Rerun it after the codex profile fix, ag-3d7d8b, merges.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
