@@ -65,7 +65,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def agent_branch(root: Path, tmp_path: Path, *, file: str = "agent.txt") -> Path:
-    wt = tmp_path / "worktrees" / "agent"
+    wt = ProjectPaths(root).worktree("ag-one")
     gitops.create_worktree(root, wt, "agents/worker/one", base="main", unique=False)
     (wt / file).write_text("agent\n")
     git(wt, "add", "-A")
@@ -179,7 +179,7 @@ def test_hg_r2_merge_agent_skip_notice_once_per_process(tmp_path):
     result = r.merge_agent(n.id)
     assert result["result"] == "merged", result
     assert not sentinel.exists()
-    second_wt = tmp_path / "worktrees" / "second"
+    second_wt = r.paths.worktree("ag-two")
     gitops.create_worktree(root, second_wt, "agents/worker/two", base="main", unique=False)
     (second_wt / "second.txt").write_text("second\n")
     git(second_wt, "add", "-A")
@@ -212,9 +212,9 @@ def test_hg_r2_host_hooks_opt_in_runs_only_for_base_merge(tmp_path):
 
     # A parent worktree is an agent checkout. The opt-in must not reach it.
     sentinel.unlink()
-    parent = tmp_path / "worktrees" / "parent"
+    parent = r.paths.worktree("ag-parent")
     gitops.create_worktree(root, parent, "agents/parent/one", base="main", unique=False)
-    child = tmp_path / "worktrees" / "child"
+    child = r.paths.worktree("ag-child")
     gitops.create_worktree(root, child, "agents/worker/child", base="main", unique=False)
     (child / "child.txt").write_text("child\n")
     git(child, "add", "-A")
@@ -303,7 +303,7 @@ def driver_project(tmp_path: Path) -> tuple[Path, Path, Path]:
     (root / "shared.txt").write_text("common\n")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "shared")
-    wt = tmp_path / "worktrees" / "agent"
+    wt = ProjectPaths(root).worktree("ag-one")
     gitops.create_worktree(root, wt, "agents/worker/one", base="main", unique=False)
     (wt / "shared.txt").write_text("agent change\n")
     git(wt, "add", "-A")
@@ -338,7 +338,7 @@ def test_hg_r4_content_program_opt_in_reaches_base_merge_only(tmp_path):
     other = tmp_path / "parent-case"
     other.mkdir()
     root2, child_wt, sentinel2 = driver_project(other)
-    parent_wt = other / "worktrees" / "parent"
+    parent_wt = ProjectPaths(root2).worktree("ag-parent")
     gitops.create_worktree(root2, parent_wt, "agents/parent/one", base="main", unique=False)
     r2 = runner(root2, content=True, style="no-ff")
     result2 = r2.merge_agent(node(r2, child_wt).id, into=str(parent_wt))
