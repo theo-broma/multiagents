@@ -282,6 +282,8 @@ locally:
 Also: `test_h1_swap_guard.py` was written by an implementer and merged. It
 is harmless, but review it once.
 
+**~10:40 UTC, after compaction:** codex adversaries ag-25c242/ag-afe388 discarded. In flight, all on claude (local executor): adversary ag-387314 (H1, opus), adversary ag-e98308 (H3, opus), implementer ag-736dd1 (instruction rewording, sonnet), implementer-deep ag-2a0da5 (H4+H14). Next: route adversary findings back with tests; review the rewording diff; D1 after H4 merges; then the bug-reporter batch.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
