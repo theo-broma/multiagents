@@ -12,6 +12,7 @@ from __future__ import annotations
 import signal
 import asyncio
 import argparse
+import contextlib
 import dataclasses
 import json
 import os
@@ -37,6 +38,7 @@ from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
 from .providers import billed_rows, load_providers
 from .runner import Runner, reap_pending_branches
+from .authority import HostAuthority
 from .tree import ACTIVE, Tree
 
 GITIGNORE_LINE = ".multiagents/"
@@ -936,7 +938,9 @@ INTERRUPTED_COMMIT = (
 )
 
 
-def _save_interrupted(node, root: Path | None = None) -> bool:
+def _save_interrupted(node, root: Path | None = None,
+                      authority: HostAuthority | None = None,
+                      tree: Tree | None = None) -> bool:
     """Commit an interrupted agent's worktree, marked as what it is.
 
     A cancelled node is TERMINAL, and `clean --branches` removes worktrees for
@@ -951,16 +955,27 @@ def _save_interrupted(node, root: Path | None = None) -> bool:
     trusted paths (SG-R4); a worktree it cannot resolve is left alone.
     """
     worktree = Path(node.worktree) if node.worktree else None
-    if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree):
+    if not worktree or not worktree.is_dir():
         return False
     try:
-        if not gitops.is_dirty(worktree, root=root):   # SG-R4
-            return False
+        pinned = (authority.pinned_worktree(worktree) if authority and node.branch
+                  else contextlib.nullcontext(worktree))
+        with pinned as checkout:
+            if not gitops.is_repo(checkout):
+                return False
+            if not gitops.is_dirty(checkout, root=root):   # SG-R4
+                return False
+            result = gitops.commit_all(checkout, INTERRUPTED_COMMIT.format(
+                agent=node.agent, agent_id=node.id))
+            return bool(result.ok)
+    except (OSError, ValueError):
+        if tree:
+            tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                      action="resume", fields=["worktree"],
+                      reason="worktree could not be pinned")
+        return False
     except gitops.GitError:
         return False
-    result = gitops.commit_all(worktree, INTERRUPTED_COMMIT.format(
-        agent=node.agent, agent_id=node.id))
-    return bool(result.ok)
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
@@ -969,6 +984,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
     paths = _resolve(args.path)
     tree = Tree(paths.tree_file, paths.events_file)
+    authority = HostAuthority(paths, tree)
 
     # Agents are started with start_new_session=True, so that stopping one also
     # stops the shells and test runners beneath it — which means they are in
@@ -985,6 +1001,21 @@ def cmd_resume(args: argparse.Namespace) -> int:
     left_running: list[str] = []      # SV-R6/R10: the next server adopts these
     ended_alone: list[str] = []       # finished with nobody watching; ditto
     for node in tree.active():
+        record = authority.get(node.id)
+        safe_unrecorded_worktree = True
+        if record:
+            fields = [key for key in ("branch", "worktree", "parent")
+                      if getattr(node, key) != record.get(key)]
+            if fields:
+                tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                          action="resume", fields=fields)
+            node = dataclasses.replace(node, **{key: record.get(key)
+                           for key in ("branch", "worktree", "parent")})
+        elif node.worktree and not authority.safe_nested_path(Path(node.worktree)):
+            tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                      action="resume", fields=["worktree"],
+                      reason="unrecorded worktree is outside the container domain")
+            safe_unrecorded_worktree = False
         # `procs.alive`, not `os.kill(pid, 0)`. This loop runs after a restart,
         # and after a REBOOT every pid here was issued by a kernel that is gone
         # while the low numbers have already been handed out again — so the
@@ -1031,11 +1062,11 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # Committed HERE rather than in the cancellation handler: this runs with
         # time, a live loop and full information, where a teardown has none of
         # those and a git call in it can hang for its whole timeout.
-        if _save_interrupted(node, paths.root):
+        if safe_unrecorded_worktree and _save_interrupted(node, paths.root, authority, tree):
             saved += 1
 
     # SG-R2: branches a container could not delete, now that the host can.
-    reap_pending_branches(paths.root, tree)
+    reap_pending_branches(paths.root, tree, authority)
 
     # Reclaiming a node is itself proof of an ending nobody recorded: a clean
     # teardown marks its agents cancelled, so a node still claiming to run
@@ -1736,6 +1767,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 def cmd_clean(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     tree = Tree(paths.tree_file, paths.events_file)
+    authority = HostAuthority(paths, tree)
     data = tree.read()
     removed = 0
 
@@ -1744,16 +1776,41 @@ def cmd_clean(args: argparse.Namespace) -> int:
     if args.branches:
         base = gitops.current_branch(paths.root)
         for node in data["nodes"].values():
-            branch = node.get("branch")
+            record = authority.get(node["id"])
+            if record:
+                fields = [key for key in ("branch", "worktree", "parent")
+                          if node.get(key) != record.get(key)]
+                if fields:
+                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                              action="clean", fields=fields)
+            branch = record["branch"] if record else node.get("branch")
             if not branch or node.get("status") in {"running", "pending"}:
+                continue
+            if not branch.startswith("agents/") or (not record and authority.owns_branch(branch)):
+                tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                          action="clean", fields=["branch"])
                 continue
             commits = gitops.commits_on(paths.root, branch, base, root=paths.root)
             if commits and not args.force:
                 print(f"keep   {branch} ({commits} unmerged commit(s); --force to delete)")
                 continue
-            worktree = node.get("worktree")
-            if worktree and Path(worktree).is_dir():
-                gitops.remove_worktree(paths.root, Path(worktree), force=True)
+            worktree = record["worktree"] if record else node.get("worktree")
+            if worktree and record and record["seeded"] and not authority.safe_seeded_path(Path(worktree)):
+                tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                          action="clean", fields=["worktree"])
+                continue
+            if worktree and not record and not authority.safe_nested_path(Path(worktree)):
+                tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                          action="clean", fields=["worktree"])
+                continue
+            if worktree and (Path(worktree).exists() or Path(worktree).is_symlink()):
+                if not authority.remove_worktree(Path(worktree), recorded=bool(record)):
+                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                              action="clean", fields=["worktree"],
+                              reason="worktree could not be removed within its authorised path")
+                    continue
+            if record:
+                authority.complete(node["id"], "discarded")
             gitops.delete_branch(paths.root, branch, force=True)
             print(f"delete {branch}")
             removed += 1
