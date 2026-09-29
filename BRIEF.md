@@ -132,6 +132,21 @@ default, so work can proceed):
   - Contracts and tests merged since: H4+H14 (`h4-h14-routing-limits.md`,
     tests 784fe09), D1 (`d1-limit-notices-contract.md`, tests 08efd68),
     and the RT-R1 example correction.
+  - 2026-09-29, around 07:10 UTC:
+    - `.multiagents/config/project.yaml` `budget.reserve_headroom` is set
+      **temporarily** to 0.02. The claude reader sees only one account
+      (97%, H5), while the user says vault account `a` has quota.
+      **Restore to 0.05** after H5, or when the week resets on Oct 02.
+    - The user re-logged `a` and `b` from two browsers, and the auth
+      sidecar was restarted. Claude is still not verified: the tree keeps
+      re-pausing because deferred tasks restart on opencode, which fails
+      and cools down again.
+    - Tooling bugs to file:
+      1. the authproxy does not fail over from a 401 to the next account
+         (`authproxy.py` ~301);
+      2. `docker rm` does not restart the auth sidecar;
+      3. deferred tasks restart on a provider that just failed
+         (opencode), which re-pauses the tree.
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
