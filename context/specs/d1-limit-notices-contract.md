@@ -15,7 +15,9 @@ requirements in `limit-notices.md` (LN-R1..R6).
 execution, the runner emits a `limit_hit` tree event. Constraining means
 that something is refused, queued or deferred, tripped to stuck, killed,
 or cut short (LN-R1). The event carries:
-- `key`: the dotted config key, e.g. `limits.max_concurrent`,
+- `key`: the dotted config key, e.g. `limits.max_concurrent`. A budget-tag
+  ceiling uses `budget_tag.<tag>`, e.g. `budget_tag.phase6`. Other
+  examples:
   `executor.docker.memory`, or `agents.<name>.timeout`;
 - `value`: the effective value;
 - `effect`: one of `refused`, `deferred`, `stuck`, `killed`,
@@ -142,6 +144,12 @@ Verified by:
     - When the counter did increase, it may say that the container hit
       its memory limit at the time and name `executor.docker.memory` as a
       possible cause, but it never attributes the kill to it.
+- **Test seam** (a tester question): the docker executor exposes one
+  method, `oom_kill_count() -> int | None`, which reads the container
+  cgroup's `oom_kill` counter. `None` means unreadable. Every OOM decision
+  goes through it, so tests monkeypatch it. Whether the run was the sole
+  occupant is decided from the runner's own record of which runs it had
+  alive in that container.
 - `docker inspect … State.OOMKilled` is not evidence, because it describes
   the container, not the exec'd process.
 - Verified by, with a stubbed counter reader:
