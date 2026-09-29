@@ -497,6 +497,10 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   - It was told tests/ is read-only by instruction.
   - **Note:** implementer-deep has `readonly_paths: []` in agents.yaml, so the readonly revert does not protect the tests. Check the diff for any tests/ change before merging.
 
+**2026-09-29 22:06 UTC:** ag-2abbbc failed after 42 s with `quota exhausted`: codex's 5 h window is at 86% and resets at 23:45 UTC. Claude's session is at 89%. The user prefers codex.
+- A background wake is armed for 23:48 UTC.
+- **On waking:** `steer_agent(ag-2abbbc, "the codex window has reset, carry on with the task")`.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
