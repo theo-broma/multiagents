@@ -507,6 +507,16 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - A live `opencode run -m zai-coding-plan/glm-5.3-flash` works: `text` and `step_finish` with tokens, and a reported cost of 0.
 - The user was asked to run `usage.py --provider zai` live to confirm the quota endpoint.
 
+**2026-09-29 ~22:35 UTC: the z.ai quota endpoint was CONFIRMED live by the user** (`usage.py --provider zai`).
+- `level: lite`.
+- Both windows are `CREDIT_LIMIT`:
+  - 5 h: unit 3, number 5, `usage` 2000 (capacity), `currentValue` 1, `remaining` 1998, `percentage` 1;
+  - weekly: unit 6, number 1, `usage` 10000.
+- `nextResetTime` is in ms.
+- The single test call cost 1 credit.
+- Note: `usage` = capacity and `currentValue` = used (not what the field names suggest).
+- The opencode-zai budget action can be written from this: headroom = the worst of the two `percentage` values.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
