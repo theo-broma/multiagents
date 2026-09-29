@@ -2035,7 +2035,8 @@ class Runner:
         # silence trip in the window before exit would otherwise leave the node
         # `stuck` with the question invisible.
         status = "awaiting_user" if run.awaiting else self._classify(run, code, text, stderr)
-        if not run.awaiting and (timed_out or (unrecorded and not run.final_result)):
+        if (not run.awaiting and status not in {"refused", "truncated"}
+                and (timed_out or (unrecorded and not run.final_result))):
             status = "failed"
         # SV-R10: `cancelled` here was written by someone else — this run's own
         # stop never reaches `_finalize` — so the exit being judged is that
@@ -3427,8 +3428,15 @@ class Runner:
                                          f"{branch!r} and could not be moved "
                                          f"aside: {exc}"}
                 try:
-                    gitops.attach_worktree(self.paths.root, workdir, branch)
-                except gitops.GitError as exc:
+                    # Reopen without following symlinks after move_aside, then
+                    # hold that parent through checkout creation as well.
+                    pinned = (self.authority.pinned_parent(workdir) if self.authority
+                              else contextlib.nullcontext(workdir))
+                    with pinned as checkout:
+                        gitops.attach_worktree(self.paths.root, checkout, branch)
+                        if not checkout.samefile(workdir):
+                            raise OSError("worktree path changed during checkout creation")
+                except (gitops.GitError, OSError, ValueError) as exc:
                     moved = (f" What was at that path is now at {aside}."
                              if aside is not None else "")
                     return {"agent_id": agent_id, "steered": False,
