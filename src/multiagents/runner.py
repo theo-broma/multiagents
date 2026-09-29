@@ -835,12 +835,22 @@ class Runner:
                 f"Wait for one to finish or stop it."
             )
 
+        # LM-R1a: the cap is the SPAWNING parent's, as recorded when it
+        # started; the requested child's own `max_children` governs its
+        # children, not its siblings. The root orchestrator is not capped
+        # here: max_concurrent bounds it, and `limits.max_children` would
+        # halve the tree's parallelism (LM-R3).
         parent = self.self_id()
         if parent:
             siblings = [c for c in self.tree.children_of(parent) if _occupies_slot(c)]
-            cap = spec.max_children or int(limits.get("max_children", 2))
-            if len(siblings) >= cap:
-                raise RuntimeError(f"This agent already has {len(siblings)} active children (max {cap}).")
+            cap = self._child_cap(parent)
+            if len(siblings) >= cap["value"]:
+                where = {"agent": "its agent config",
+                         "project": "the project's limits.max_children",
+                         "builtin": "the built-in default"}.get(cap["source"], cap["source"])
+                raise RuntimeError(
+                    f"This agent already has {len(siblings)} active children "
+                    f"(max {cap['value']}, source: {cap['source']} — {where}).")
 
         ceiling = int(limits.get("budget_tokens", 0) or 0)
         if ceiling:
@@ -891,13 +901,30 @@ class Runner:
                 f"bare binary with no stdin and hang or fail obscurely."
             )
 
+    def _node_cap(self, node: Node, spec: AgentSpec) -> Any:
+        recorded = (node.limits or {}).get("max_children") or {}
+        if "value" in recorded:
+            return recorded["value"]
+        return self.config.effective_limits(spec)["max_children"]["value"]
+
+    def _child_cap(self, parent: str) -> dict[str, Any]:
+        """LM-R1a: `{value, source}` of how many children `parent` may run at
+        once. Recorded on its node at start; a node from before that was
+        recorded is resolved from its agent's current config."""
+        node = self.tree.get(parent)
+        recorded = ((node.limits if node else None) or {}).get("max_children")
+        if isinstance(recorded, dict) and "value" in recorded:
+            return recorded
+        spec = self.config.agents.get(node.agent) if node else None
+        return self.config.effective_limits(spec)["max_children"]
+
     # ---------------------------------------------------------------- prompt --
 
     def compose_prompt(self, spec: AgentSpec, task: str, node: Node, workdir: Path) -> str:
         limits = self.config.limits
         branch_line = f"- Branch: {node.branch} (yours alone; commit freely)\n" if node.branch else ""
         spawn_line = (
-            f"- You may spawn subagents (up to {spec.max_children}).\n"
+            f"- You may spawn subagents (up to {self._node_cap(node, spec)}).\n"
             if spec.can_spawn else "- You may not spawn subagents.\n"
         )
         # Naming the protected paths HERE, rather than leaving it to the brief,
@@ -1101,11 +1128,26 @@ class Runner:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
+    def _limits_for(self, node_id: str, spec: AgentSpec,
+                    timeout: float | None = None) -> dict[str, dict[str, Any]]:
+        """LM-R1b: the limits a (re)launch of this node runs under. A timeout
+        the caller gave when the run started (source `call`) survives a retry
+        or a steer; everything else is resolved again from the current config."""
+        if not timeout:
+            node = self.tree.get(node_id)
+            recorded = ((node.limits if node else None) or {}).get("timeout") or {}
+            if recorded.get("source") == "call":
+                timeout = recorded.get("value")
+        return self.config.effective_limits(spec, timeout)
+
     def _supervisor(self, spec: AgentSpec, provider: Provider,
-                    wall_timeout: float) -> Supervisor:
+                    wall_timeout: float, silence_timeout: float | None = None
+                    ) -> Supervisor:
         loop_repeats = int(self.config.limits.get("doom_loop_repeats", 5))
+        if silence_timeout is None:
+            silence_timeout = self.config.effective_limits(spec)["silence_timeout"]["value"]
         return Supervisor(
-            silence_timeout=spec.silence_timeout,
+            silence_timeout=silence_timeout,
             wall_timeout=wall_timeout,
             max_steps=spec.max_steps or int(
                 self.config.limits.get("max_steps", 250)),
@@ -1181,12 +1223,14 @@ class Runner:
         env.update(identity)
         executor = self.executor(spec)
 
+        limits = self._limits_for(node_id, spec, timeout)
+        wall = limits["timeout"]["value"]
         options = {"effort": spec.effort,
                    **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
         argv = provider.build_command(
             prompt=prompt, model=spec.model, workdir=str(workdir),
             permission=spec.permission, session_id=session_id, options=options,
-            timeout=int(timeout or spec.timeout),
+            timeout=int(wall),
         )
         if provider.adapter:
             # CX-C1: the adapter runs at its absolute path. The executor is
@@ -1215,7 +1259,6 @@ class Runner:
             self._withdraw_server(provider, home)
         turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
         _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
-        wall = timeout or spec.timeout
         launched = now()
         # Environment KEYS only — values may be secret and this file is on disk.
         # `launched_at` and `timeout` are what a server adopting this run
@@ -1249,7 +1292,8 @@ class Runner:
             raise
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
-            supervisor=self._supervisor(spec, provider, wall),
+            supervisor=self._supervisor(spec, provider, wall,
+                                        limits["silence_timeout"]["value"]),
             turn_start=getattr(handle, "offset", 0),
             **({"done": done} if done is not None else {}),
         )
@@ -1501,8 +1545,7 @@ class Runner:
                 # meaningless in the old one's namespace, which is the whole
                 # reason this check exists.
                 alternative, overrides = spec.fallback_for(elsewhere)
-                spec = AgentSpec(**{**spec.__dict__, "provider": elsewhere,
-                                    "model": alternative, **overrides})
+                spec = spec.replace(provider=elsewhere, model=alternative, **overrides)
             elif known and model not in known:
                 offers = ", ".join(
                     f"{name}:{spec.fallback_for(name)[0]}" for name in (spec.models or {})
@@ -1514,7 +1557,7 @@ class Runner:
                     f"those models here runs it on that provider."
                 )
             else:
-                spec = AgentSpec(**{**spec.__dict__, "model": model})
+                spec = spec.replace(model=model)
         if budget_tag and budget_tokens:
             # First value wins, so a re-declaration cannot lift a spent ceiling.
             self.tree.set_budget(budget_tag, budget_tokens)
@@ -1555,10 +1598,18 @@ class Runner:
         # and a provider with no budget would otherwise read as one with room.
         family = [name for name in family
                   if name == spec.provider or self.providers[name].enabled]
+        # RT-R1: a candidate is a provider this agent has a model on — its
+        # own, a `models:` entry naming one, or a sibling of either. A key
+        # with an empty model is not one: routing there ran `--model ""`.
+        chain = list(budget_cfg.get("fallback_chain", []))
+        usable = {name for name in self.providers
+                  if self._usable_spec(spec, name) is not None}
+        unmodelled = [name for name in dict.fromkeys([*chain, *family])
+                      if name in self.providers and name not in usable
+                      and self.providers[name].enabled]
         load, last_used = self._instance_load()
         chosen, why = budget_mod.choose_provider(
-            spec.provider, budgets,
-            list(budget_cfg.get("fallback_chain", [])),
+            spec.provider, budgets, chain,
             float(budget_cfg.get("reserve_headroom", 0.15)),
             reserved=budget_mod.reserved_providers(
                 self.config.project, self.providers, self._orchestrator_provider()),
@@ -1566,13 +1617,19 @@ class Runner:
             # it cannot use is not a candidate, and discovering that afterwards
             # is how a run ended up back on the provider just ruled out.
             allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
-                     *family},
+                     *family, *chain} & usable,
             family=family,
             load=load, last_used=last_used,
             wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
         )
         if chosen is not None and len(family) > 1:
             self.tree.claim_instance(chosen)
+        if chosen != spec.provider:
+            # Only when routing looked past the agent's own provider: that is
+            # when a provider it has no model on was passed over.
+            for name in unmodelled:
+                self.tree.emit(node_id, "route_skipped", provider=name,
+                               reason=f"no model configured for this agent on {name}")
         if chosen is None:
             # Prefer a real reset time over the blind cooldown: a provider that
             # told us when it comes back should not be waited on for longer.
@@ -1612,12 +1669,18 @@ class Runner:
             # reverting to the provider it had just ruled out. Measured cost of
             # that: an agent whose configured fallback sat one place further
             # down the chain ran five times into a revoked token instead.
-            alternative, overrides = spec.fallback_for(chosen)
+            _, overrides = spec.fallback_for(chosen)
+            routed = self._usable_spec(spec, chosen)
+            if routed is None:          # choose_provider offers only `allowed`
+                raise RuntimeError(f"routing chose {chosen!r}, where agent "
+                                   f"{agent_name!r} has no model")
             provider = self.providers[chosen]
             routed_from, routed_why = spec.provider, why
             if overrides:
                 routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
-            spec = AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
+            spec = routed
+        # LM-R1/R2: resolved once, recorded on the node, reported to the caller.
+        limits = self.config.effective_limits(spec, timeout)
 
         # --- git isolation ---------------------------------------------------
         # EVERY agent gets a worktree, including read-only ones. `writes: false`
@@ -1644,7 +1707,7 @@ class Runner:
             verifies=verifies if verifies in self.tree.read()["nodes"] else "",
             budget_tag=budget_tag,
             routed_from=routed_from, routed_why=routed_why,
-            session=self.session(),
+            limits=limits, session=self.session(),
         )
         if self.authority:
             self.authority.add(node)
@@ -1679,6 +1742,7 @@ class Runner:
             "workdir": str(worktree_path),
             "status": "running",
             "routing": why,
+            "effective_limits": limits,
             "log": str(self.paths.run_dir(node_id)),
             "pid": run.handle.pid if run.handle else None,
         }
@@ -3026,10 +3090,13 @@ class Runner:
         the same way `start()` built them: a run routed to a fallback carries
         the fallback's model and options, not the configured ones."""
         spec = self.config.agent(node.agent)
-        if node.provider != spec.provider:
+        routed = self._usable_spec(spec, node.provider)
+        if routed is None:
+            # Followed as it was launched; only a relaunch needs a model, and
+            # steer refuses that first (RT-R2).
             alternative, overrides = spec.fallback_for(node.provider)
-            spec = AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
-        return spec, self.providers[node.provider]
+            routed = spec.replace(model=alternative, **overrides)
+        return routed, self.providers[node.provider]
 
     # ------------------------------------------------------------- survival --
 
@@ -3145,7 +3212,8 @@ class Runner:
         with contextlib.suppress(OSError, ValueError):
             command = json.loads(_run_read(run_dir, "command.json"))
         launched = float(command.get("launched_at") or node.started_at or now())
-        wall = float(command.get("timeout") or spec.timeout)
+        wall = float(command.get("timeout")
+                     or self._limits_for(node.id, spec)["timeout"]["value"])
         follow = node.follow or {}
         turn = int(follow.get("turn", 0))
         # SV-R7: what the last server logged past the point it recorded, it
@@ -3347,6 +3415,19 @@ class Runner:
         if run is not None:
             spec, provider = run.spec, run.provider
         else:
+            # RT-R2: the session lives on the recorded provider, so without a
+            # model there the steer is refused, not moved: another provider
+            # cannot resume it, and `--model ""` is not a model.
+            configured = self.config.agent(node.agent)
+            if self._usable_spec(configured, node.provider) is None:
+                return {
+                    "agent_id": agent_id, "steered": False,
+                    "error": f"agent {node.agent!r} has no model for provider "
+                             f"{node.provider!r}, where this run's session "
+                             f"lives: `models.{node.provider}` is missing or "
+                             f"names no model in agents.yaml. Add it to steer "
+                             f"this run, or start a fresh one.",
+                }
             spec, provider = self._spec_of(node)
 
         # A truncated `writes: false` agent may have had its worktree reclaimed
@@ -3603,33 +3684,42 @@ class Runner:
 
         Observed at L7: the roster moved an advisor to another provider, and
         the next consult resumed the old session on the old one — a turn spent
-        where the roster said not to, answered as the old model. A node's
-        provider is a route only while it is the roster's provider, a sibling
-        instance of that provider's family (which shares its model ids, so it
-        runs the roster's model), or a `models:` fallback that names a model.
-        An empty fallback model is not a route: it would run `--model ""`.
+        where the roster said not to, answered as the old model. Whether the
+        node's provider is still a route is `_usable_spec`'s answer, the same
+        one start and steer get (RT-R3).
         """
-        if node.provider == spec.provider:
+        return self._usable_spec(spec, node.provider)
+
+    def _usable_spec(self, spec: AgentSpec, provider: str) -> AgentSpec | None:
+        """What `spec` runs as on `provider`, or None when it has no model
+        there (RT-R1..R3). Start, steer and consult all ask this, so what
+        counts as a usable model cannot drift between them.
+
+        A route is exact — the agent's own provider, or a `models:` entry that
+        names a model — or same-family: a sibling instance of a provider with
+        an exact route shares its model ids, so it runs that route's model. An
+        empty fallback model is not a route: it would run `--model ""`.
+        """
+        if provider == spec.provider:
             return spec
-        here = self.providers.get(node.provider)
+        alternative, overrides = spec.fallback_for(provider)
+        if alternative:
+            return spec.replace(model=alternative, **overrides)
+        here = self.providers.get(provider)
         if here is None:
             return None
-        family = here.family or node.provider
+        family = here.family or provider
         roster = self.providers.get(spec.provider)
         if roster is not None and (roster.family or spec.provider) == family:
             return spec
-        alternative, overrides = spec.fallback_for(node.provider)
-        if not alternative:
-            # A sibling of a listed fallback shares that fallback's model ids.
-            for name in (spec.models or {}):
-                other = self.providers.get(name)
-                if other is not None and (other.family or name) == family:
-                    alternative, overrides = spec.fallback_for(name)
-                    if alternative:
-                        break
-        if not alternative:
-            return None
-        return AgentSpec(**{**spec.__dict__, "model": alternative, **overrides})
+        # A sibling of a listed fallback shares that fallback's model ids.
+        for name in (spec.models or {}):
+            other = self.providers.get(name)
+            if other is not None and (other.family or name) == family:
+                alternative, overrides = spec.fallback_for(name)
+                if alternative:
+                    return spec.replace(model=alternative, **overrides)
+        return None
 
     @contextlib.asynccontextmanager
     async def _conversation_turn(self, agent_name: str, wait: float):
@@ -3831,7 +3921,7 @@ class Runner:
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
         # Waiting for the other turn is bounded by how long that turn may run.
-        wait = (timeout or spec.timeout) + 60
+        wait = self.config.effective_limits(spec, timeout)["timeout"]["value"] + 60
         try:
             async with self._conversation_turn(agent_name, wait) as ours:
                 if ours:
@@ -3883,7 +3973,9 @@ class Runner:
                 id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
                 parent=parent, depth=depth, task=message[:500], branch=branch,
                 worktree=str(worktree_path), status="pending", conversation=True,
-                session=self.session(),
+                # A consult's timeout is per turn, so none is recorded as the
+                # run's own (LM-R1b): the next turn must not inherit it.
+                limits=self.config.effective_limits(spec), session=self.session(),
             )
             if self.authority:
                 self.authority.add(node)
@@ -4014,7 +4106,7 @@ class Runner:
             return self._consult_result(agent_name, node_id, turn, view,
                                         error=str(exc))
 
-        limit = timeout or spec.timeout
+        limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
         try:
             await asyncio.wait_for(run.done.wait(), timeout=limit + 30)
         except (asyncio.TimeoutError, TimeoutError):

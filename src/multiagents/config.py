@@ -20,7 +20,7 @@ import math
 import re
 import shutil
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -388,6 +388,32 @@ class AgentSpec:
     # `init-agent`. Both are launch: true; the role says which door they use.
     role: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+    # LM-R1c: the fields the agent's config actually SETS, read off the merged
+    # yaml before it becomes a dataclass. Without it `timeout: 900` written by
+    # hand and the 900 default are the same value, and a project's `limits:`
+    # could never tell which one to override. `None` (a spec built in code)
+    # counts every field that differs from its default as set.
+    set_fields: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.set_fields is None:
+            defaults = {f.name: f.default for f in fields(self)
+                        if f.default is not MISSING}
+            self.set_fields = frozenset(
+                name for name, default in defaults.items()
+                if name != "set_fields" and getattr(self, name) != default)
+        else:
+            self.set_fields = frozenset(self.set_fields)
+
+    def sets(self, name: str) -> bool:
+        """Whether the agent's config sets `name` rather than inheriting it."""
+        return name in (self.set_fields or ())
+
+    def replace(self, **changes: Any) -> AgentSpec:
+        """A copy with `changes` applied, which then count as set: a fallback's
+        `{model: ..., timeout: 600}` is the agent's own value on that route."""
+        return AgentSpec(**{**self.__dict__, **changes,
+                            "set_fields": frozenset(self.set_fields or ()) | set(changes)})
 
     def fallback_for(self, provider: str) -> tuple[str, dict[str, Any]]:
         """What this agent becomes on another provider: `(model, overrides)`.
@@ -404,16 +430,40 @@ class AgentSpec:
             model = str(entry.get("model") or entry.get("id") or "")
             fields = set(AgentSpec.__dataclass_fields__)
             overrides = {k: v for k, v in entry.items()
-                         if k in fields and k not in ("name", "model", "models")}
+                         if k in fields and k not in ("name", "model", "models", "set_fields")}
             return model, overrides
         return str(entry or ""), {}
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> AgentSpec:
-        known = {f for f in cls.__dataclass_fields__ if f != "extra"}
+        known = {f for f in cls.__dataclass_fields__ if f not in ("extra", "set_fields")}
         kwargs = {k: v for k, v in data.items() if k in known}
         extra = {k: v for k, v in data.items() if k not in known}
-        return cls(name=name, extra=extra, **{k: v for k, v in kwargs.items() if k != "name"})
+        return cls(name=name, extra=extra, set_fields=frozenset(kwargs) - {"name"},
+                   **{k: v for k, v in kwargs.items() if k != "name"})
+
+
+# LM-R1: the run limits an agent may set for itself, the `limits:` key each
+# falls back to, and the built-in value when neither is set.
+LIMIT_FIELDS: dict[str, tuple[str, int]] = {
+    "timeout": ("default_timeout", 900),
+    "max_children": ("max_children", 2),
+    "silence_timeout": ("silence_timeout", 180),
+}
+
+
+def _positive(value: Any) -> int | float | None:
+    """A usable limit, or None: person-typed, so `5m`, a boolean, NaN or a
+    non-positive number is not a value and the next source applies."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return int(number) if number == int(number) else number
 
 
 @dataclass
@@ -517,6 +567,34 @@ class Config:
             return [str(p) for p in spec.readonly_paths]
         default = self.limits.get("readonly_paths") or []
         return [str(p) for p in default]
+
+    def effective_limits(self, spec: AgentSpec | None,
+                         timeout: float | None = None) -> dict[str, dict[str, Any]]:
+        """LM-R1/R2: each run limit as `{value, source}`, the first of an
+        explicit per-call value (`timeout` only), the agent's own setting, the
+        project's `limits:` and the built-in default.
+
+        `limits:` here is the merged project, global and shipped layers. A
+        nested runner in the container sees the same mounted project config and
+        so resolves the same values; a `limits:` override made only in the
+        host's global config directory is not mounted and applies on the host
+        only (LM-R1c). `spec=None` resolves from `limits:` alone, for a parent
+        whose agent is no longer configured.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for name, (key, builtin) in LIMIT_FIELDS.items():
+            call = _positive(timeout) if name == "timeout" else None
+            own = _positive(getattr(spec, name)) if spec and spec.sets(name) else None
+            project = _positive(self.limits.get(key))
+            if call is not None:
+                out[name] = {"value": call, "source": "call"}
+            elif own is not None:
+                out[name] = {"value": own, "source": "agent"}
+            elif project is not None:
+                out[name] = {"value": project, "source": "project"}
+            else:
+                out[name] = {"value": builtin, "source": "builtin"}
+        return out
 
     def instruction_parts(self, spec: AgentSpec) -> list[str]:
         """The brief files this agent names, as a list even when there is one."""
