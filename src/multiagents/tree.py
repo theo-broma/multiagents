@@ -240,9 +240,17 @@ class Node:
 _NODE_FIELDS = {f.name for f in fields(Node)}
 
 
-def node_from_raw(raw: dict[str, Any]) -> Node:
-    """Build a Node ignoring unknown keys for forward compatibility."""
-    return Node(**{k: v for k, v in raw.items() if k in _NODE_FIELDS})
+def node_from_raw(raw: dict[str, Any], key: str | None = None) -> Node:
+    """Build a Node ignoring unknown keys for forward compatibility.
+
+    HA-R9: `key`, the key the entry is stored under, is the node's identity.
+    The entry's own `id` is container-written data and never overrides it;
+    `Tree.id_mismatch` is how a host action finds out that they disagree.
+    """
+    kept = {k: v for k, v in raw.items() if k in _NODE_FIELDS}
+    if key is not None:
+        kept["id"] = key
+    return Node(**kept)
 
 
 _node_from_raw = node_from_raw
@@ -459,7 +467,12 @@ class Tree:
 
     def get(self, agent_id: str) -> Node | None:
         raw = self.read()["nodes"].get(agent_id)
-        return _node_from_raw(raw) if raw else None
+        return _node_from_raw(raw, agent_id) if raw else None
+
+    def id_mismatch(self, agent_id: str) -> bool:
+        """HA-R9: whether the entry stored under `agent_id` names another id."""
+        raw = self.read()["nodes"].get(agent_id)
+        return isinstance(raw, dict) and raw.get("id") != agent_id
 
     def update(self, agent_id: str, **fields: Any) -> None:
         with self.transaction() as data:
@@ -528,7 +541,7 @@ class Tree:
         started it, not to the orchestrator. With `session`, only that
         session's agents, and those recorded before sessions were.
         """
-        return [_node_from_raw(n) for n in self.read()["nodes"].values()
+        return [_node_from_raw(n, k) for k, n in self.read()["nodes"].items()
                 if n.get("unseen") and not n.get("parent")
                 and n.get("role", "") not in DRIVER_ROLES
                 and (not session or n.get("session", "") in {"", session})]
@@ -575,7 +588,7 @@ class Tree:
     def children_of(self, agent_id: str) -> list[Node]:
         data = self.read()
         node = data["nodes"].get(agent_id, {})
-        return [_node_from_raw(data["nodes"][c]) for c in node.get("children", []) if c in data["nodes"]]
+        return [_node_from_raw(data["nodes"][c], c) for c in node.get("children", []) if c in data["nodes"]]
 
     def active(self) -> list[Node]:
         """Active AGENTS. Drivers are excluded — see `DRIVER_ROLES`.
@@ -585,12 +598,12 @@ class Tree:
         waited on forever by `wait_for_any` because nothing in this process
         will ever finish it.
         """
-        return [_node_from_raw(n) for n in self.read()["nodes"].values()
+        return [_node_from_raw(n, k) for k, n in self.read()["nodes"].items()
                 if n.get("status") in ACTIVE and n.get("role", "") not in DRIVER_ROLES]
 
     def drivers(self) -> list[Node]:
         """The launched sessions — what `active()` deliberately leaves out."""
-        return [_node_from_raw(n) for n in self.read()["nodes"].values()
+        return [_node_from_raw(n, k) for k, n in self.read()["nodes"].items()
                 if n.get("role", "") in DRIVER_ROLES]
 
     def ancestry(self, agent_id: str) -> list[str]:

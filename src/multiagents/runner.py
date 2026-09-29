@@ -462,9 +462,15 @@ class Runner:
         reap_pending_branches(paths.root, self.tree, self.authority)
 
     def authoritative(self, node: Node, action: str) -> Node | None:
-        """Use recorded operands, reporting container-written disagreements once."""
+        """Use recorded operands, reporting container-written disagreements once.
+
+        None when the entry's inner id is not its key (HA-R9): the host then
+        performs no mutation on the node at all.
+        """
         if self.authority is None:
             return node
+        if not self.identity_ok(node.id, action):
+            return None
         record = self.authority.get(node.id)
         if record is None:
             return node
@@ -476,6 +482,14 @@ class Runner:
         return replace(node, **{key: record.get(key) or "" if key != "parent"
                                 else record.get(key)
                                 for key in ("branch", "worktree", "parent")})
+
+    def identity_ok(self, node_id: str, action: str) -> bool:
+        """HA-R9: a node is the key it is stored under. An entry whose inner
+        `id` names anything else is reported and left alone by the host."""
+        if self.authority is None or not self.tree.id_mismatch(node_id):
+            return True
+        self.mismatch(node_id, action, ["id"], "entry id differs from its key")
+        return False
 
     def mismatch(self, node_id: str, action: str, fields: list[str], reason: str = "") -> None:
         self.tree.emit(node_id, "host_authority_mismatch", action=action,
@@ -2572,6 +2586,8 @@ class Runner:
             if record and record["seeded"]:
                 return
             node = self.authoritative(node, "drop_if_empty")
+            if node is None:
+                return
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         root = self.paths.root
         try:
@@ -2768,6 +2784,8 @@ class Runner:
             record = self.authority.get(node_id)
             if not record or record["seeded"]:
                 return
+            if not self.identity_ok(node_id, "merge_pending_children"):
+                return
         for child in self.tree.children_of(node_id):
             if child.status == "done" and child.branch:
                 await self._maybe_merge_into_parent(child.id, pending=True,
@@ -2793,6 +2811,8 @@ class Runner:
             self.mismatch(node.id, action, ["parent"], "child is not linked to ending parent")
             return
         if self.authority:
+            if not self.identity_ok(node.id, action):
+                return
             record = self.authority.get(node.id)
             if record:
                 if record["seeded"] or record.get("parent") != node.parent:
@@ -2806,6 +2826,8 @@ class Runner:
             parent_record = self.authority.get(node.parent)
             if not parent_record or parent_record["seeded"]:
                 self.mismatch(node.id, action, ["parent"], "parent is not host-recorded")
+                return
+            if not self.identity_ok(node.parent, action):
                 return
         parent = self.tree.get(node.parent)
         if self.authority and parent:
@@ -2868,6 +2890,8 @@ class Runner:
         True when the branch is left for the host to delete (SG-R2).
         """
         if self.authority:
+            if not self.identity_ok(node.id, "cleanup"):
+                return None
             record = self.authority.get(node.id)
             if record:
                 node = replace(node, branch=record["branch"], worktree=record["worktree"])
@@ -3384,6 +3408,9 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         node = self.authoritative(node, "steer")
+        if node is None:
+            return {"agent_id": agent_id, "steered": False,
+                    "error": "entry id differs from its key"}
         if not self.unrecorded_branch_ok(node, "steer"):
             return {"agent_id": agent_id, "steered": False,
                     "error": "branch is outside the container domain"}
@@ -3669,11 +3696,11 @@ class Runner:
         conversation survives a server restart and is visible to nested agents.
         """
         best: Node | None = None
-        for raw in self.tree.read()["nodes"].values():
+        for key, raw in self.tree.read()["nodes"].items():
             if raw.get("agent") != agent_name or not raw.get("conversation"):
                 continue
             if raw.get("status") in {"idle", "running", "stuck", "refused"} and raw.get("session_id"):
-                node = node_from_raw(raw)
+                node = node_from_raw(raw, key)
                 if best is None or node.created_at > best.created_at:
                     best = node
         return best
@@ -3998,6 +4025,9 @@ class Runner:
         else:
             node_id = node.id
             node = self.authoritative(node, "conversation_refresh")
+            if node is None:
+                return self._consult_result(agent_name, node_id, None,
+                                            error="entry id differs from its key")
             if not self.unrecorded_branch_ok(node, "conversation_refresh"):
                 return self._consult_result(agent_name, node_id, None,
                                             error="branch is outside the container domain")
@@ -4454,6 +4484,9 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         node = self.authoritative(node, "merge_agent")
+        if node is None:
+            return {"agent_id": agent_id, "result": "blocked",
+                    "detail": "entry id differs from its key"}
         if not self.unrecorded_branch_ok(node, "merge_agent"):
             return {"agent_id": agent_id, "result": "blocked", "detail": "branch is outside the container domain"}
         if self.authority and not self.authority.get(agent_id) and node.worktree:
@@ -4582,6 +4615,9 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         node = self.authoritative(node, "discard_agent")
+        if node is None:
+            return {"agent_id": agent_id, "discarded": False,
+                    "error": "entry id differs from its key"}
         if not self.unrecorded_branch_ok(node, "discard_agent"):
             return {"agent_id": agent_id, "discarded": False, "error": "branch is outside the container domain"}
         if self.authority and not self.authority.get(agent_id) and node.worktree:
@@ -4629,6 +4665,8 @@ class Runner:
             if node is None or not node.branch:
                 return {"pushed": False, "error": f"no branch for {agent_id!r}"}
             node = self.authoritative(node, "push_branch")
+            if node is None:
+                return {"pushed": False, "error": "entry id differs from its key"}
             if not self.unrecorded_branch_ok(node, "push_branch"):
                 return {"pushed": False, "error": "branch is outside the container domain"}
             if not self.config.push_agent_branches:
