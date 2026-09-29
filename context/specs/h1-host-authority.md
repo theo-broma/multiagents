@@ -345,6 +345,19 @@ resolve itself** (ag-ab23f4, finding 2).
 - The base branch moves only through the explicit merge into base.
 - Verified by: `tests/test_h1h3_round2_merge_into.py`.
 
+*HA-R11 resolution order, decided 2026-09-29 (ag-691e46, confirmed by the
+orchestrator):* the host determines the target branch in this order:
+1. The record whose worktree resolves to `into`.
+2. For an unrecorded checkout inside the domain, the branch of its single
+   unrecorded tree node.
+3. Failing that, the single worktree registration the host finds by scanning
+   `.git/worktrees/*/gitdir`, not through the checkout's own `.git`.
+
+Options 2 and 3 must pass `safe_unrecorded_branch`, meaning an `agents/*`
+branch that no other record holds. A target outside the domain, or on a
+non-`agents/*` branch, is refused. Test fixtures that merged into arbitrary
+checkouts are updated to use recorded or in-domain targets.
+
 **HA-R12: malformed entries never abort host-wide passes** (ag-ab23f4,
 findings 4 and 5). A tree entry can have a wrong type in any field (a
 non-string `worktree` or `branch`, a list, a missing required field), or can
