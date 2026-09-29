@@ -311,9 +311,9 @@ def test_sg_r3_restore_paths_commit_hook_runs_inside_the_container(live):
             f"container ({r['msg']!r}, hostname {r['host']!r}, marker {r['box']!r})")
 
     on_base = [r for r in records if r["toplevel"] == str(lv.root.resolve())]
-    assert on_base and all(r["where"] == "host" for r in on_base), (
-        f"control: the host-side squash commit should have run the user's hooks on "
-        f"the host, and been recognised as such; records={records}")
+    assert not on_base, (
+        f"HG-R2: the host-side squash commit must skip hooks by default; "
+        f"records={records}")
 
 
 def test_sg_r1_an_agent_rewritten_in_tree_hook_never_runs_on_the_host(live):
