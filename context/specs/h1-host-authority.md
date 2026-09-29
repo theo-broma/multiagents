@@ -111,6 +111,41 @@ spawned itself.
   operation above. The mutation either uses the recorded values or is
   refused, and the event is emitted.
 
+**HA-R2a: operands of unrecorded nodes** (reviewer ag-84303b, 2026-09-29).
+An unrecorded node, meaning one the host did not spawn and did not seed,
+may supply a host operand only inside `D`.
+- **Branch.** Its `branch` must be under `agents/`, pass
+  `check-ref-format`, and not be the recorded branch of any host-recorded
+  node. Otherwise `merge_agent`, `push_branch`, `discard_agent` and every
+  other host action refuse, with `host_authority_mismatch` and
+  `fields: ["branch"]`.
+- **Worktree.** Its worktree must satisfy HA-R5's nested rule **at the
+  moment of every use**, not only at a first check. That applies to steer's
+  `move_aside`, to conversation refresh's reset, to resume's commit, and to
+  removal.
+  - A check followed by a later use of the same pathname is not compliant.
+  - The use must go through a pinned or descriptor-based path, or must fail
+    closed when the path changes.
+- **Resolution.** Containment compares **resolved** paths on both sides:
+  the root and the candidate. So a `~/.multiagents` that is a symlink to
+  another disk does not refuse legitimate recorded paths.
+- **Host-cleared operands stay cleared.** When the host itself legitimately
+  clears a recorded node's branch or worktree, as `_drop_if_empty` does for
+  a completed read-only node, the record is updated. Later host actions
+  such as steer must not resurrect the deleted operand from the record.
+- Verified by:
+  - a forged unrecorded node with `branch: "main"`: `push_branch` and
+    `merge_agent` refuse, and `main` is neither pushed nor merged;
+  - the same node naming another host-recorded node's branch: refused;
+  - a nested worktree swapped for a symlink to an outside directory
+    between the check and the use: steer and refresh leave the outside
+    directory untouched;
+  - a root reached through a symlinked `~/.multiagents`: a recorded
+    worktree is merged, committed and removed normally;
+  - a completed read-only node cleared by `_drop_if_empty`, then steered:
+    the steer takes the branchless-checkout recovery path, and no branch is
+    restored.
+
 **HA-R3: no auto-merge outside the domain.** On the host, the auto-merge
 into a parent (`inside_tree: auto`) happens only when both the child and
 the target parent are host-recorded, and the child's recorded parent is that
