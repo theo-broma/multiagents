@@ -585,6 +585,26 @@ class Tree:
             # the id also reached the append-only log.
             self.emit(agent_id, "session", session_id=learned)
 
+    def _nodes(self, keep, entries: Iterable[tuple[str, Any]], pass_: str) -> list[Node]:
+        """HA-R12: the entries `keep` selects, as Nodes, skipping malformed ones.
+
+        `tree.json` is container-writable, so an entry may not be a mapping,
+        may lack a field Node requires, or may hold a value of a type the
+        filter cannot compare. Such an entry is left out with an event, never
+        raised out of a pass that iterates the whole tree.
+        """
+        out = []
+        for key, raw in entries:
+            try:
+                if not isinstance(raw, dict):
+                    raise TypeError(f"entry is {type(raw).__name__}, not a mapping")
+                if keep(raw):
+                    out.append(_node_from_raw(raw, key))
+            except (TypeError, ValueError) as exc:
+                self.emit(key, "malformed_entry", node=key, action=pass_,
+                          reason=f"{type(exc).__name__}: {exc}"[:300])
+        return out
+
     def children_of(self, agent_id: str) -> list[Node]:
         data = self.read()
         node = data["nodes"].get(agent_id, {})
@@ -598,13 +618,14 @@ class Tree:
         waited on forever by `wait_for_any` because nothing in this process
         will ever finish it.
         """
-        return [_node_from_raw(n, k) for k, n in self.read()["nodes"].items()
-                if n.get("status") in ACTIVE and n.get("role", "") not in DRIVER_ROLES]
+        return self._nodes(lambda n: n.get("status") in ACTIVE
+                           and n.get("role", "") not in DRIVER_ROLES,
+                           self.read()["nodes"].items(), "active")
 
     def drivers(self) -> list[Node]:
         """The launched sessions — what `active()` deliberately leaves out."""
-        return [_node_from_raw(n, k) for k, n in self.read()["nodes"].items()
-                if n.get("role", "") in DRIVER_ROLES]
+        return self._nodes(lambda n: n.get("role", "") in DRIVER_ROLES,
+                           self.read()["nodes"].items(), "drivers")
 
     def ancestry(self, agent_id: str) -> list[str]:
         """Root-first chain of ids down to `agent_id`, for cycle and depth checks."""

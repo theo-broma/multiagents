@@ -193,8 +193,8 @@ class HostAuthority:
 
         Every walk and unlink is relative to an open directory descriptor. A
         symlink in the path is refused; symlinks *inside* the checkout are
-        unlinked as entries, never followed. Git's stale registration is pruned
-        only after the anchored removal succeeds.
+        unlinked as entries, never followed. This checkout's own stale
+        registration is pruned only after the anchored removal succeeds.
         """
         root = self.paths.worktrees.resolve()
         try:
@@ -236,8 +236,10 @@ class HostAuthority:
         finally:
             os.close(root_fd)
 
+        # HG-R1: only this checkout's own registration, never a global prune.
         from . import gitops
-        gitops.run(self.paths.root, "worktree", "prune", "--expire", "now")
+        with contextlib.suppress(gitops.GitError, OSError):
+            gitops.prune_worktree(self.paths.root, path, "")
         return True
 
     @classmethod

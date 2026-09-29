@@ -4764,6 +4764,21 @@ class Runner:
         if not node.branch:
             return {"agent_id": agent_id, "merged": False, "error": "agent has no branch (writes: false)"}
         target = Path(into).expanduser() if into else self.paths.root
+        base_merge = target.resolve() == self.paths.root.resolve()
+        target_branch = ""
+        if self.authority and not base_merge:
+            # HA-R11: the branch a merge into a checkout advances is the
+            # host's to name, never whatever that checkout's HEAD says.
+            target_branch = self._merge_target_branch(target)
+            if not target_branch:
+                reason = "merge target has no host-determined branch"
+                self.mismatch(agent_id, "merge_agent", ["into"], reason)
+                self.tree.emit(agent_id, "merge", result="blocked", detail=reason,
+                               into=str(target))
+                return {"agent_id": agent_id, "result": "blocked", "branch": node.branch,
+                        "detail": f"{reason}: {target} is not the worktree of a "
+                                  f"recorded node, nor of an unrecorded one with a "
+                                  f"valid agents/* branch. Nothing was merged."}
         policy = self.config.project.get("git", {}).get("merge", {})
 
         # Revert-and-report, before the merge. The agent's own work still
@@ -4816,15 +4831,8 @@ class Runner:
             self.tree.emit(agent_id, "readonly_revert", paths=reverted[:50],
                            count=len(reverted), base=base)
 
-        base_merge = target.resolve() == self.paths.root.resolve()
         host_hooks = base_merge and bool(policy.get("host_hooks", False))
         host_content = base_merge and bool(policy.get("host_content_programs", False))
-        target_branch = ""
-        if self.authority and not base_merge:
-            for held in self.authority.read().values():
-                if held.get("worktree") == str(target):
-                    target_branch = held.get("branch", "")
-                    break
         status, detail = gitops.merge(
             target, node.branch, f"{node.agent}: {node.task[:72]}",
             policy.get("style", "squash"), root=self.paths.root,
@@ -4871,6 +4879,47 @@ class Runner:
                 f"to resolve."
             )
         return payload
+
+    def _merge_target_branch(self, target: Path) -> str:
+        """HA-R11: the branch a merge into `target` may advance, or "".
+
+        The recorded branch of the recorded node whose worktree `target`
+        resolves to. Failing that, for a checkout inside the container domain,
+        the branch of the one unrecorded node there, or else of the one
+        registration the host finds by its `gitdir` (never through the
+        checkout's own `.git`); either way it must pass HA-R2a. Paths compare
+        resolved, so a symlinked spelling of a recorded checkout still finds
+        its record.
+        """
+        try:
+            want = target.resolve()
+            records = self.authority.read()
+            held = [r for r in records.values() if isinstance(r.get("worktree"), str)
+                    and r["worktree"] and Path(r["worktree"]).resolve() == want]
+            if held:
+                branch = held[0].get("branch")
+                return (branch if len(held) == 1 and isinstance(branch, str)
+                        and branch.startswith("agents/") else "")
+            if not self.authority.safe_nested_path(want):
+                return ""
+            found = [(key, raw) for key, raw in self.tree.read()["nodes"].items()
+                     if key not in records and isinstance(raw, dict)
+                     and isinstance(raw.get("worktree"), str) and raw["worktree"]
+                     and Path(raw["worktree"]).resolve() == want]
+        except (OSError, ValueError, RuntimeError):
+            return ""
+        if len(found) > 1 or (found and self.tree.id_mismatch(found[0][0])):
+            return ""
+        if found:
+            branch = found[0][1].get("branch")
+        else:
+            try:
+                branch = gitops._registration_branch(self.paths.root, want)
+            except gitops.GitError:
+                return ""
+        if not isinstance(branch, str) or not self.authority.safe_unrecorded_branch(branch):
+            return ""
+        return branch
 
     def discard_agent(self, agent_id: str, force: bool = False) -> dict[str, Any]:
         node = self.tree.get(agent_id)
@@ -4951,7 +5000,7 @@ def _branch_released(node: dict) -> bool:
     is terminal, and a `done` node's worktree is gone too. A `done` node that
     still has one is waiting on its parent to merge or discard it."""
     status = node.get("status")
-    if status not in TERMINAL:
+    if not isinstance(status, str) or status not in TERMINAL:
         return False
     if status == "done":
         worktree = node.get("worktree")
@@ -4981,11 +5030,18 @@ def reap_pending_branches(root: Path, tree: Tree,
               if isinstance(n, dict) and n.get("branch_pending_delete")]
     if not marked:
         return 0
+    # HA-R12: an entry whose branch is not a string holds no branch, and
+    # carries out no mark; it is skipped with an event, never raised on.
     held = {n.get("branch") for n in nodes.values()
-            if isinstance(n, dict) and not _branch_released(n)}
+            if isinstance(n, dict) and isinstance(n.get("branch"), str)
+            and not _branch_released(n)}
     cleared = 0
     for node_id, node in marked:
         branch = node.get("branch_pending_delete")
+        if not isinstance(branch, str) or not isinstance(node.get("branch", ""), str):
+            tree.emit(node_id, "malformed_entry", node=node_id, action="reap",
+                      fields=["branch"])
+            continue
         record = authority.get(node_id) if authority else None
         completed = bool(record and record.get("completion") and
                          record.get("branch") == branch)
