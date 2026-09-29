@@ -23,7 +23,7 @@ context reading code.
 | `advisor.md` | `advisor` | Second opinion for the drivers. Reads the code, analyses proposals and prompts, offers alternatives. Decides nothing, changes nothing. |
 | `tester.md` | `tester` | Writes the black-box behavioural test suite from the orchestrator's contract, before any implementation exists. Defines what done means. |
 | `implementer.md` | `implementer-quick`, `implementer`, `implementer-deep` | Writes the code that makes the suite green. Three tiers on one brief, routed by how much judgement the task needs. The tests are read-only to them, enforced at the merge gate by `limits.readonly_paths`. |
-| `adversary.md` | `adversary` | Attacks the green code — mutation, fuzzing, untested inputs, interleaving, the attacker's position. Breaks it; fixes nothing. Everything that already exists is read-only to it. |
+| `adversary.md` | `adversary` | Stress-tests the green code — mutation, fuzzing, untested inputs, interleaving, the outside-input boundary. Finds failures; fixes nothing. Everything that already exists is read-only to it. |
 | `reviewer.md` | `reviewer` | Ordinary code review, which nothing else here does: is this *good* code? Ranked findings and a verdict, no writes. Carries a threshold — not every merge. |
 | `researcher.md` | `researcher` | Answers one question about the codebase, burning its own context instead of the orchestrator's. Cheap, read-only, blocks nothing. |
 

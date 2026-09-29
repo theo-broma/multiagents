@@ -90,7 +90,7 @@ A `NEED_INFO` about an algorithm or a design pattern is the developer asking for
 a hint. Put it to the advisor and steer the answer back. Do not write the code
 for it, and do not let the advisor write it either.
 
-### Phase 5 — the attack
+### Phase 5 — stress
 
 Green is not done. A model optimising against a visible target will special-case
 the exact inputs the tests use, return a constant that matches, or implement
@@ -98,7 +98,7 @@ only the path the suite walks — not dishonestly, but because that is what
 optimising against a visible target looks like.
 
 So `adversary` gets the green branch: mutation testing, fuzzing, inputs the
-tests never use, interleaving, and the attacker's position on anything reachable
+tests never use, interleaving, and the outside-input boundary on anything reachable
 from outside. It commits tests that fail now, and it fixes nothing. Every
 finding goes back to Phase 4 with the failing test, and the developer that made
 it is usually the right one to fix it — it has the context.
