@@ -1,161 +1,247 @@
 # H7: provider startup failures, binary resolution, model pins — the contract
 
-**Status:** contract, written by the orchestrator on 2026-09-29.
-- **Source:** phase6-hardening.md, item H7, including the user's
-  binary-resolution note of 2026-09-29.
+**Status:** contract, written by the orchestrator on 2026-09-29, and
+revised the same day after the advisor's review (ag-8e7d87, turn 3).
+- **Source:** phase6-hardening.md, item H7, including the user's note on
+  binary resolution.
 - **Research:** ag-aedab3.
   - 25 failed opencode runs were found. 16 of them failed at startup with
     `Unexpected server error`, exit 1 and zero steps.
   - None of them failed because the binary was missing.
-  - The code has no resolver that works out the binary once.
-  - The circuit breaker is reset by any success and re-admits the
-    provider when the cooldown expires.
+  - Binaries are looked up again in each place that needs one, not
+    resolved once.
+  - The circuit breaker is reset by any success, and it re-admits a
+    provider when its cooldown expires.
   - A model override is not a pin.
 - **Ids:** `PS-R*`. They are never renumbered. A behaviour is retired by
   marking it withdrawn.
 
 ## Behaviours
 
-**PS-R1: resolve the binary once, from a fixed order.**
-- A new provider field, `bin_search`, is an optional list of extra
-  directories. `~` is expanded.
-- `Provider.resolve_bin() -> ResolvedBin{path, via, searched}` is the only
-  place that looks a binary up.
-  - `path` is absolute, or `None` when the binary was not found.
-  - `via` is one of `bin`, `PATH` and `bin_search`.
-  - `searched` is the ordered list of places looked at.
-- **The order:**
-  1. `bin` itself, when it contains a `/`;
-  2. the server process's `PATH`;
-  3. each `bin_search` directory in turn.
+**PS-R1: resolving the binary.**
 
-  An entry counts only when it is an executable regular file, or a
-  symlink to one.
-- **The shipped `opencode` provider** gets `bin_search: ["~/.opencode/bin"]`.
-- Verified by:
-  - a fake binary found through each of the three routes;
-  - an empty `PATH` with the binary only under `bin_search`, which is
-    found with `via: "bin_search"`;
-  - a non-executable file at the right name, which is skipped.
+A new provider field, `bin_search`, is an optional list of extra
+directories. `~` is expanded in it, and relative entries are refused at
+config load.
 
-**PS-R2: every consumer uses that one result.**
+`Provider.resolve_bin(env=None) -> ResolvedBin{path, launcher, via,
+searched}` is the one host-side lookup:
+- `path` is absolute and has its symlinks resolved. It is `None` when
+  nothing was found.
+- `launcher` is the path as found, before symlinks are resolved. The
+  docker version-root mount needs this path.
+- `via` is one of `bin`, `PATH` and `bin_search`.
+- `searched` is the ordered list of places looked at.
 
-Each of the following takes the binary from `resolve_bin()`. None of them
-calls `shutil.which` on the provider's `bin` independently:
+The lookup runs in this order:
+1. **`bin` itself, when it contains a `/`.** After `~` expansion it must
+   be absolute. When it is missing or not executable, resolution fails
+   there. It does not fall through to the next steps.
+2. **`PATH` from `env`,** or from the server process when `env` is
+   omitted. An empty or unset `PATH` is skipped.
+3. **Each `bin_search` directory**, in order.
+
+An entry counts only when it is an executable regular file, or a symlink
+to one.
+- **Lifetime.** Resolution runs per operation, against the config
+  snapshot that operation uses. It is never cached for the life of the
+  process.
+- **Shipped config.** The shipped `opencode` provider gets
+  `bin_search: ["~/.opencode/bin"]`.
+
+Verified by:
+- a fake binary found through each of the three routes;
+- an empty `PATH` with the binary only under `bin_search`, found with
+  `via: "bin_search"`;
+- a non-executable file at the right name, which is skipped;
+- an explicit missing `bin: /x/y`, which fails without searching `PATH`;
+- a symlinked launcher, which reports `launcher` and `path` distinctly.
+
+**PS-R2: every host-side consumer uses that result.**
+
+These consumers take the binary from `resolve_bin()`:
 - native launch;
-- the docker mount and container binary derivation, including
-  `bin_versions_depth`;
+- the docker host-mount derivation when `mount_cli_from_host` is true,
+  which uses `launcher` for the `bin_versions_depth` root;
 - the auth `check` and `login` scripts;
 - the budget and usage scripts;
 - `doctor`;
 - `refresh-models`.
 
-The details that follow:
-- **Scripts.** `MULTIAGENTS_BIN` is always the absolute resolved path.
-  - When the binary is not found, the script is **not run**. The action
-    reports a `missing` state carrying the PS-R3 message.
-  - The shipped scripts use `MULTIAGENTS_BIN` and never search `PATH`
-    themselves. The `:-opencode` style fallbacks are removed.
+None of them calls `shutil.which` on the provider's `bin` independently.
+
+The details:
+- **When the CLI lives in the container.** With `mount_cli_from_host:
+  false`, the container binary is resolved in the container, as it is
+  today. The binary's absence on the host neither blocks nor warns for
+  container launches.
+- **Scripts, when the binary was found.** `MULTIAGENTS_BIN` is the
+  absolute resolved path.
+- **Scripts, when it was not found.** The script still runs, because
+  file-based actions such as reading a budget from `auth.json` do not
+  need the binary. `MULTIAGENTS_BIN` is empty, and
+  `MULTIAGENTS_BIN_ERROR` carries the PS-R3 message.
+  - A shipped script action that needs the binary prints that message
+    and exits 20 (unknown).
+  - The shipped scripts never search `PATH` themselves: the
+    `${MULTIAGENTS_BIN:-opencode}`-style fallbacks are removed.
 - **`models_cmd`.** Its first element is replaced by the resolved path
-  when it equals the provider's `bin` or that name's basename. So
-  `["opencode", "models"]` runs the resolved binary.
-- Verified by: with `PATH` lacking the binary and `bin_search` pointing at
-  a fake, each of the following finds and runs that fake:
-  - native launch;
-  - `auth check`;
-  - `budget`;
-  - `doctor`;
-  - `refresh-models`.
+  when it equals the provider's `bin` or that name's basename.
+
+Verified by: with `PATH` lacking the binary and `bin_search` pointing at
+a fake, each of these finds and runs the fake:
+- native launch;
+- `auth check`;
+- `refresh-models`;
+- `doctor`.
+
+A budget action that is file-based still runs when the binary is
+missing.
 
 **PS-R3: a not-found error says where it looked and how to fix it.**
-- **The message** names the provider and every place in `searched`, in
+- **The message** names the provider and every entry of `searched`, in
   order. It then says how to fix it: set `bin:` to an absolute path, or
   add the directory to `bin_search:` in `providers.yaml`.
-- **Where it appears:** it is the error from `start_agent`, from
-  `multiagents auth login <provider>`, and from `doctor`.
-- **`doctor`** also shows, for a found binary, its path and its `via`.
-- Verified by message tests on each of those three surfaces.
+- **Where it appears:**
+  - in the `start_agent` error;
+  - in `multiagents auth login <provider>`;
+  - in `doctor`.
+- **`doctor` for a found binary** shows the path and its `via`.
 
-**PS-R4: a startup failure is a category of its own.**
-- **Definition.** A run *failed at startup* when it ended in failure,
-  meaning a non-zero exit or a failed status, and the provider's stream
-  produced **no** step, tool, text or usage event. Two kinds of end are
-  excluded:
-  - a run multiagents itself refused or stopped;
-  - a quota or limit end, which is already classified.
-- **What is recorded.** The provider's consecutive startup failures are
-  counted separately from the existing general health counter.
-- **What resets the count.** A run on that provider that produced at
-  least one such event. A success on a *different* provider never
-  resets it.
-- **The threshold.** At `limits.startup_failure_threshold` consecutive
-  startup failures (default 2), the provider is marked
-  `startup_down`:
-  - it gets an event naming the provider, the count and the last run's
-    first error line;
-  - routing excludes it exactly as it excludes `provider_down`.
-- Verified by:
-  - a fake CLI that exits 1 with no events twice marks the provider;
-  - a fake CLI that emits one event and then fails does not count;
-  - an intervening success on another provider does not reset the
-    count.
+Verified by: message tests on those three surfaces.
 
-**PS-R5: recovery is demonstrated, not timed.**
-- **After the cooldown expires**
-  (`limits.provider_down_cooldown_seconds`), a `startup_down` provider is
-  *half-open*.
-  - Routing may send it at most **one** run at a time: the probe.
-  - All other runs keep being routed as if it were down.
-- **The outcome of the probe:**
-  - **If the probe produces a PS-R4 event**, the mark is cleared and a
-    `provider_recovered` event is emitted.
-  - **If it fails at startup**, the provider is marked down again for
-    another cooldown.
-- **Nothing else clears the mark:**
-  - not cooldown expiry alone;
-  - not a success elsewhere;
-  - not an auth check;
-  - not a restart of the server.
+**PS-R4: a startup failure is its own category, and "progress" is
+defined per provider.**
 
-  The mark lives in the durable state where the cooldowns already live.
-- Verified by:
-  - with the cooldown expired, two concurrent starts give one probe on
-    the provider, and the other start goes elsewhere or defers;
-  - a successful probe clears the mark;
-  - a failed probe re-marks it;
-  - a restarted Runner still sees the mark.
+- **Startup progress.** Evidence that the model actually ran, meaning at
+  least one of:
+  - non-empty assistant text;
+  - a tool call;
+  - usage with output tokens greater than zero.
+
+  These do **not** count:
+  - initialization or session events, such as claude `system` init,
+    codex `thread.started` or `turn.started`, and opencode session ids;
+  - echoed input;
+  - error events.
+
+  Each provider declares its startup-progress signal in its stream rules
+  or adapter. It is distinct from the generic `step` used by the
+  watchdogs, and the watchdogs are unchanged.
+- **Failed at startup.** A run *failed at startup* when both hold:
+  - it ended in failure, through a non-zero exit or a failed status;
+  - it produced no startup progress.
+
+  Excluded, because they are already classified: a run multiagents
+  refused or stopped, and a quota or limit end.
+- **The count and its threshold.**
+  - Consecutive startup failures are counted per provider, separately
+    from the general health counter.
+  - The count resets only on startup progress from a run launched on
+    that provider.
+  - At `limits.startup_failure_threshold` (default 2) the provider is
+    marked `startup_down`, with an event naming the provider, the count
+    and the last run's first error line.
+  - Routing excludes a `startup_down` provider, as it excludes
+    `provider_down`.
+
+Verified by:
+- for claude and codex fake streams, init events followed by a failure
+  count as a startup failure;
+- init plus one assistant text followed by a failure does not count;
+- two startup failures mark the provider;
+- a success on another provider does not reset the count.
+
+**PS-R5: recovery is demonstrated, and its state is host-owned.**
+
+- **Where the state lives.** The `startup_down` mark, the startup
+  failure count and the probe claim live in the protected per-project
+  host-state directory (`authority.py` ~20), under an atomic lock.
+  - They are not in `tree.json`, which agents can write. `tree.json` may
+    mirror them for display only, and nothing reads the mirror back for
+    a decision.
+  - A runner that cannot reach the host-state directory treats a
+    `startup_down` provider as down. It fails closed.
+- **Half-open.** After `limits.provider_down_cooldown_seconds`, the
+  provider is *half-open*: routing may give it **one** probe run at a
+  time.
+  - The claim is taken atomically, before launch, and records the run id
+    and a generation token.
+  - All other routing treats the provider as down.
+- **What happens to the probe:**
+
+  | Probe outcome | Mark | Claim |
+  |---|---|---|
+  | Startup progress | Cleared at once, with a `provider_recovered` event | Released |
+  | Startup failure | Re-marked for another cooldown | Released |
+  | Exits without progress and without failure | Stays; a new probe may follow | Released |
+  | Refused or stopped by multiagents, launch failure, or cancellation | Stays | Released |
+  | Quota or limit end | Stays | Released |
+  | Hangs | Stays | Held until the run ends. The existing watchdogs apply. |
+
+- **After a restart.** A claim whose run is no longer alive is released
+  at reconciliation. A completion carrying a stale generation token is
+  ignored.
+- **Independence from the other health state.** The general health path
+  never clears `startup_down`. That includes a success removing a
+  provider's cooldown (`tree.py` ~903). Clearing `startup_down` never
+  lifts an independent auth or quota restriction.
+- **Runs already in flight.** A run launched before the mark, or any run
+  other than the probe, does not clear it.
+
+Verified by:
+- with the cooldown expired, two concurrent starts give exactly one
+  probe;
+- the probe succeeds and the mark clears;
+- the probe fails and the provider is re-marked;
+- a probe with no outcome leaves the mark and releases the claim;
+- a restarted Runner still sees the mark and releases a dead claim;
+- a forged `startup_down` entry, or its absence, in `tree.json` changes
+  nothing.
 
 **PS-R6: an explicit `start_agent(model=…)` pins its provider.**
-- **Which provider.** A call-level model override is resolved to a
-  provider as it is today: the configured primary or fallback whose
-  model equals it, or else the primary.
+- **Which provider.** The call-level model is resolved to a provider
+  exactly as it is today, with unchanged match precedence, including the
+  catalog lookup (`runner.py` ~1690).
 - **What the pin forbids.** The run is pinned to that provider:
   - no family sibling;
   - no fallback;
   - no other account.
-- **When the pinned provider is unavailable** (down, `startup_down`,
-  out of quota, or not authenticated), `start_agent` **refuses**:
-  - It does not defer, and it does not pause the tree.
-  - The message names the provider, why it is unavailable, and that
-    omitting `model` lets the router choose.
-- **Unchanged.** A model that only comes from `agents.yaml` is not a
-  pin. Family failover for it is kept.
-- Verified by:
-  - with the pinned provider healthy and a healthy sibling available,
-    the run goes to the pinned provider;
-  - with the pinned provider down, the call refuses and no run starts
-    on the sibling;
-  - without `model`, the same agent still fails over.
+
+  The pin carries over to steer and resume of that run.
+- **When the pinned provider cannot take the run**, `start_agent`
+  **refuses**. That covers a provider that is:
+  - disabled or has a missing binary;
+  - down or `startup_down` and not claimable as a probe;
+  - out of quota, or held by the reserve or wind-down;
+  - known to be unauthenticated.
+
+  The refusal is structured:
+  - `reason`, and `retry_after` when known;
+  - a message saying that omitting `model` lets the router choose.
+  - It never enqueues, defers or pauses the tree.
+- **Unknown auth** does not block the pin.
+- **A pinned call may take an available half-open probe claim.**
+  Otherwise a pinned-only workload could never recover.
+- **Unchanged:** a model that only comes from `agents.yaml` is not a
+  pin, and family failover for it stays.
+
+Verified by:
+- pinned healthy with a healthy sibling: the run goes to the pinned
+  provider;
+- pinned down: refused, and no run starts on the sibling;
+- pinned half-open: the call becomes the probe;
+- without `model`, the same agent fails over.
 
 **PS-R7: nothing else regresses.**
 - The existing `provider_down`, auth cooldown, deferral and pause
-  behaviour is unchanged for everything PS-R4 to PS-R6 do not cover.
+  behaviours are unchanged outside what PS-R4 to PS-R6 cover.
+- No existing health state is migrated.
 - The existing suite stays green, apart from the known reds.
 
 ## Out of scope
 
-- **The cause of opencode's `Unexpected server error`.** It is upstream
-  (the provider's server). H7 makes it contained, not fixed.
-- **The model-namespace parsing idea**, reading `opencode-go/` as naming a
-  provider. It is rejected: those prefixes are opencode's namespaces, not
-  multiagents providers.
+- **The root cause of opencode's `Unexpected server error`.** H7 contains
+  the failure; it does not diagnose it.
+- **Reading an opencode model namespace (`opencode-go/…`) as a
+  multiagents provider.** Rejected.
