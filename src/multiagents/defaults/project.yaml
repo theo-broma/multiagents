@@ -116,8 +116,8 @@ executor:
     credential_scope: shared
 
     # Never enabled. Docker here is rootful and the user is in the `docker`
-    # group, so the socket is host root — an agent holding it escapes the
-    # container in one command. Setting this true is refused, not honoured.
+    # group, so the socket is host root — an agent holding it can act on the
+    # host from inside the container in one command. Setting this true is refused, not honoured.
     mount_docker_socket: false
 
 # --------------------------------------------------------------------------
@@ -204,7 +204,7 @@ team: implement
 teams:
   implement:
     description: >-
-      Builds new work from BRIEF.md: contract, tests, implementation, attack,
+      Builds new work from BRIEF.md: contract, tests, implementation, stress,
       review, delivery.
     # The orchestrator's brief, composed in order. The first file is the
     # team-independent half — branches, budget, parked questions, delegation,
@@ -230,7 +230,7 @@ teams:
   review:
     description: >-
       Audits an existing codebase one bounded context at a time: map, gate,
-      harness, characterize, attack, report. Builds no features.
+      harness, characterize, stress, report. Builds no features.
     # A team's list REPLACES the roster entry's, so a skill the
     # orchestrator should always have belongs here too.
     orchestrator: [team/_orchestrator.md, teams/review/pipeline.md,

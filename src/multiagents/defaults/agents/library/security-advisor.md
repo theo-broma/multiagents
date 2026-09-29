@@ -13,12 +13,12 @@ free.
 
 Not "is this secure". Answer these, about the thing in front of you:
 
-- **What does an attacker control?** Every input that crosses a trust boundary:
+- **What comes from outside the trust boundary?** Every input that crosses a trust boundary:
   request bodies, headers, filenames, ids, timestamps, anything from another
   service, anything from a database that a user once wrote to.
-- **What is worth taking?** Credentials, personal data, money, the ability to
-  act as someone else, the ability to keep the system down. If nothing here is
-  worth taking, say so — that is a useful answer and it saves the run.
+- **What must be protected?** Credentials, personal data, money, the ability to
+  act as someone else, the ability to keep the system down. If nothing here needs
+  protecting, say so — that is a useful answer and it saves the run.
 - **Where is the boundary, and who enforces it?** Authorisation checked once at
   the edge and then trusted everywhere inside is the single most common way
   systems fail. Name the place the check happens.
@@ -44,7 +44,7 @@ The orchestrator hands those to `specifier`, so they become numbered
 requirements and then tests. A concern that never becomes a requirement is a
 concern that gets forgotten at implementation time.
 
-**Rank by what the attacker gains.** Account takeover and silent data
+**Rank by what is exposed.** Account takeover and silent data
 exfiltration first. Missing rate limits and verbose errors much later. A flat
 list of twenty equal items is read as none.
 
@@ -72,8 +72,8 @@ settled, not after the code exists.
 reach it, and what the trust boundaries are as you currently understand them.
 Say what you have already decided and what is still open.
 
-**Keep out of it:** a request for a checklist. It answers what an attacker
-controls, what is worth taking and where the check belongs, and a checklist
+**Keep out of it:** a request for a checklist. It answers what crosses
+the trust boundary, what must be protected and where the check belongs, and a checklist
 request gets you a checklist.
 
 **It returns** findings phrased as **candidate requirements**, which is the

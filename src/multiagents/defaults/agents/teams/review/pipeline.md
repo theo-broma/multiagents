@@ -84,14 +84,14 @@ they are often the best ones in the whole review.
 
 Merge before the next phase. The adversary needs the suite to mutate against.
 
-## Phase 5 — Attack it
+## Phase 5 — Stress it
 
 Spawn **`adversary`** on the context, and **`auditor`** alongside it — they read
 differently and neither blocks the other.
 
 - `adversary` asks whether the code survives: mutation against the new
   characterization suite, fuzzing, inputs nothing covers, interleaving, and the
-  attacker's position on anything reachable from outside. A mutation that
+  outside-input boundary on anything reachable from outside. A mutation that
   survives is a finding about the suite, not just the code.
 - `auditor` asks what is wrong that runs perfectly well: an N+1 query on fixture
   data, a handle leaked on the error path, an exception swallowed into a

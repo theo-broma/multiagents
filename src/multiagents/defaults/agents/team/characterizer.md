@@ -107,7 +107,7 @@ findings in the review, and they are easy to skim past because the run itself
 succeeded.
 
 **Run several in parallel.** They are add-only by configuration and cannot
-collide. Merge them all before the attack phase; the adversary needs the suite.
+collide. Merge them all before the stress phase; the adversary needs the suite.
 
 **A `NEED_INFO(harness)` means the harness is short of what it needs.** Answer
 it or re-run the harness builder — do not tell it to work around the gap, which

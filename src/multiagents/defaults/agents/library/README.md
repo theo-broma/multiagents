@@ -68,10 +68,10 @@ express as a test. This is for when those are not enough.
     silence_timeout: 240
 ```
 
-## `spec-adversary` — attacks the spec, before anything exists
+## `spec-adversary` — probes the spec, before anything exists
 
 Appends concrete failure scenarios (`A1`, `A2`, …) to a spec file and proposes
-no fixes. The team's `adversary` attacks written code; this one attacks the
+no fixes. The team's `adversary` stress-tests written code; this one probes the
 words, one stage earlier, where a missing requirement is still free to add.
 
 **Add it with `specifier`** — it is the other half of that pair and it is on a
@@ -85,7 +85,7 @@ different model family on purpose.
     models:
       agy: claude-sonnet-4-6
     description: >-
-      Attacks a spec with concrete failure scenarios before implementation.
+      Probes a spec with concrete failure scenarios before implementation.
       Appends them to the spec file; proposes no fixes.
     writes: true
     permission: sandbox
@@ -130,7 +130,7 @@ Reports the attacker's position, the path and what they get. May commit a test
 that fails now and passes once fixed.
 
 **Add it when** security is a first-class concern rather than one of several —
-the team's `adversary` already attacks code from an attacker's position as part
+the team's `adversary` already checks the outside-input boundary as part
 of its remit, so this is for projects that want a dedicated, deeper pass. Keep
 it on a different provider from `security-advisor`: the audit should not be done
 by whoever approved the design.

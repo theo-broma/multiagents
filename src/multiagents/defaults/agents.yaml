@@ -302,14 +302,14 @@ agents:
     silence_timeout: 180
 
   # ---------------------------------------------------------------- phase 5 --
-  # Attacks code that already passes its tests: mutation testing, fuzzing,
-  # inputs the suite never uses, interleaving, and the attacker's position on
+  # Stress-tests code that already passes its tests: mutation testing, fuzzing,
+  # inputs the suite never uses, interleaving, and the outside-input boundary on
   # anything reachable from outside. It commits tests that fail now and fixes
   # nothing.
   #
   # It checks BOTH the implementer's code and — through mutation — the
-  # coverage of the tester's suite, so it is pinned away from both of them. An
-  # attacker that shares the author's blind spots agrees with them, which is
+  # coverage of the tester's suite, so it is pinned away from both of them. A
+  # checker that shares the author's blind spots agrees with them, which is
   # the one thing it must not do.
   #
   # A strong-reasoning pick, and yours to change; the family difference is the
@@ -322,7 +322,7 @@ agents:
     models:
       agy: gemini-3.8-flash-high
     description: >-
-      Attacks green code with mutation, fuzzing and untested inputs. Commits
+      Stress-tests green code with mutation, fuzzing and untested inputs. Commits
       failing tests that prove findings; proposes no fixes.
     writes: true
     permission: sandbox
@@ -344,13 +344,13 @@ agents:
     # reverted at the gate.
     #
     # It also means it cannot weaken an existing test, which its brief already
-    # forbids, so its tests go in NEW files named for what they attack.
+    # forbids, so its tests go in NEW files named for what they check.
     readonly_paths: ["**"]
 
   # ---------------------------------------------------------------- phase 6 --
   # Ordinary code review, which nothing else here does. The tester asks whether
   # the code matches the contract; the adversary asks whether it survives
-  # attack. Neither asks whether it is GOOD code — an N+1 query, a leaked
+  # stress. Neither asks whether it is GOOD code — an N+1 query, a leaked
   # handle, a swallowed exception, a retry with no backoff. All of those pass a
   # green suite and survive fuzzing.
   #
