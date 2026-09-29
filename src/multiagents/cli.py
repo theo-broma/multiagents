@@ -1097,7 +1097,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     data = tree.read()
     stale = [
         n for n in data["nodes"].values()
-        if n.get("branch") and n.get("status") in {"orphaned", "stuck", "done", "failed"}
+        if n.get("branch") and n.get("status") in {"orphaned", "stuck", "done", "failed", "refused"}
     ]
     if stale:
         print(f"\n{len(stale)} branch(es) still held by unfinished agents:")
