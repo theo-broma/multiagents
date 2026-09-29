@@ -1786,7 +1786,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
             branch = record["branch"] if record else node.get("branch")
             if not branch or node.get("status") in {"running", "pending"}:
                 continue
-            if not branch.startswith("agents/") or (not record and authority.owns_branch(branch)):
+            if (not record and not authority.safe_unrecorded_branch(branch)) or (record and not branch.startswith("agents/")):
                 tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
                           action="clean", fields=["branch"])
                 continue

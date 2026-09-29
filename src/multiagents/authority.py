@@ -98,12 +98,33 @@ class HostAuthority:
                     record[key].append(value)
             self._write(records)
 
+    def clear(self, node_id: str, *, branch: bool = False,
+              worktree: bool = False) -> None:
+        """Keep host-authorised deletion reflected in the current operands."""
+        with (self.directory / "lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            records = self.read()
+            if node_id in records:
+                if branch:
+                    records[node_id]["branch"] = ""
+                if worktree:
+                    records[node_id]["worktree"] = ""
+                self._write(records)
+
     def get(self, node_id: str) -> dict | None:
         return self.read().get(node_id)
 
     def owns_branch(self, branch: str) -> bool:
         return any(branch in r.get("branches", [r.get("branch")])
                    for r in self.read().values())
+
+    def safe_unrecorded_branch(self, branch: str) -> bool:
+        from . import gitops
+        return (branch.startswith("agents/") and
+                bool(branch.removeprefix("agents/")) and
+                gitops.run(self.paths.root, "check-ref-format",
+                           f"refs/heads/{branch}").ok and
+                not self.owns_branch(branch))
 
     def owns_worktree(self, path: Path) -> bool:
         return any(str(path) in r.get("worktrees", [r.get("worktree")])
@@ -131,7 +152,7 @@ class HostAuthority:
     def pinned_worktree(self, path: Path):
         """Keep the exact recorded checkout open across a host git operation."""
         root = self.paths.worktrees.resolve()
-        parts = path.absolute().relative_to(root).parts
+        parts = path.absolute().relative_to(self.paths.worktrees.absolute()).parts
         if not parts or any(part in {"", ".", ".."} for part in parts):
             raise OSError("worktree is outside the project worktree root")
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -147,6 +168,26 @@ class HostAuthority:
             for fd in reversed(opened):
                 os.close(fd)
 
+    @contextlib.contextmanager
+    def pinned_parent(self, path: Path):
+        """Give a pathname whose parent cannot be swapped during a move."""
+        root = self.paths.worktrees.resolve()
+        parts = path.absolute().relative_to(self.paths.worktrees.absolute()).parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise OSError("worktree is outside the project worktree root")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        opened = []
+        try:
+            fd = os.open(root, flags)
+            opened.append(fd)
+            for part in parts[:-1]:
+                fd = os.open(part, flags, dir_fd=fd)
+                opened.append(fd)
+            yield Path(f"/proc/{os.getpid()}/fd/{fd}") / parts[-1]
+        finally:
+            for fd in reversed(opened):
+                os.close(fd)
+
     def remove_worktree(self, path: Path, *, recorded: bool = False) -> bool:
         """Remove an authorised checkout without resolving an attacker-swapped link.
 
@@ -157,7 +198,7 @@ class HostAuthority:
         """
         root = self.paths.worktrees.resolve()
         try:
-            parts = path.absolute().relative_to(root).parts
+            parts = path.absolute().relative_to(self.paths.worktrees.absolute()).parts
         except ValueError:
             return False
         if not parts or any(part in {"", ".", ".."} for part in parts):

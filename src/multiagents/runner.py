@@ -480,6 +480,13 @@ class Runner:
         self.tree.emit(node_id, "host_authority_mismatch", action=action,
                        node=node_id, fields=fields, reason=reason)
 
+    def unrecorded_branch_ok(self, node: Node, action: str) -> bool:
+        if (self.authority and not self.authority.get(node.id) and node.branch
+                and not self.authority.safe_unrecorded_branch(node.branch)):
+            self.mismatch(node.id, action, ["branch"], "branch is outside the container domain")
+            return False
+        return True
+
     def reload(self, config: Config) -> None:
         """Swap in a freshly loaded config and everything derived from it.
 
@@ -2514,6 +2521,8 @@ class Runner:
             # the host has deleted it (SG-R2), which then clears it.
             self.tree.update(node_id, worktree="",
                              **({} if pending else {"branch": ""}))
+            if self.authority:
+                self.authority.clear(node_id, worktree=True, branch=not pending)
         else:
             self.tree.emit(
                 node_id, "unexpected_commits",
@@ -2798,8 +2807,7 @@ class Runner:
                 if node.worktree and not self.authority.safe_nested_path(Path(node.worktree)):
                     self.mismatch(node.id, "cleanup", ["worktree"], "outside worktree domain")
                     return None
-                if node.branch and (not node.branch.startswith("agents/") or
-                                    self.authority.owns_branch(node.branch)):
+                if node.branch and not self.authority.safe_unrecorded_branch(node.branch):
                     self.mismatch(node.id, "cleanup", ["branch"], "protected branch")
                     return None
         if node.branch and (not node.branch.startswith("agents/") or
@@ -3288,6 +3296,9 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         node = self.authoritative(node, "steer")
+        if not self.unrecorded_branch_ok(node, "steer"):
+            return {"agent_id": agent_id, "steered": False,
+                    "error": "branch is outside the container domain"}
         if self.authority and not self.authority.get(agent_id):
             operand = Path(node.worktree) if node.worktree else self.paths.worktree(agent_id)
             if not self.authority.safe_nested_path(operand):
@@ -3386,8 +3397,12 @@ class Runner:
                     # Kept, never deleted: it may hold the only copy of
                     # something.
                     try:
-                        aside = gitops.move_aside(self.paths.root, workdir)
-                    except gitops.GitError as exc:
+                        if self.authority:
+                            with self.authority.pinned_parent(workdir) as pinned:
+                                aside = gitops.move_aside(self.paths.root, pinned).resolve()
+                        else:
+                            aside = gitops.move_aside(self.paths.root, workdir)
+                    except (gitops.GitError, OSError, ValueError) as exc:
                         return {"agent_id": agent_id, "steered": False,
                                 "error": f"{workdir} is not a checkout of "
                                          f"{branch!r} and could not be moved "
@@ -3417,9 +3432,12 @@ class Runner:
                 base = self.config.base_branch or gitops.current_branch(self.paths.root)
                 try:
                     if self.authority and self.authority.get(agent_id):
-                        self.authority.rebind(agent_id, own, workdir)
-                    branch = gitops.create_worktree(self.paths.root, workdir, own,
-                                                    base, unique=False)
+                        self.authority.rebind(agent_id, "", workdir)
+                    result = gitops.run(self.paths.root, "worktree", "add", "--detach",
+                                        str(workdir), base)
+                    if not result.ok:
+                        raise gitops.GitError(result.err or result.out)
+                    branch = ""
                 except gitops.GitError as exc:
                     return {"agent_id": agent_id, "steered": False,
                             "error": f"could not cut {own!r} again at "
@@ -3861,6 +3879,9 @@ class Runner:
         else:
             node_id = node.id
             node = self.authoritative(node, "conversation_refresh")
+            if not self.unrecorded_branch_ok(node, "conversation_refresh"):
+                return self._consult_result(agent_name, node_id, None,
+                                            error="branch is outside the container domain")
             if self.authority and not self.authority.get(node_id):
                 operand = (Path(node.worktree) if node.worktree
                            else self.paths.worktree(node_id))
@@ -3930,8 +3951,17 @@ class Runner:
             if not recreated:
                 placed = False
                 if worktree_path.is_dir():
-                    notice, head, behind = self._refresh_conversation(
-                        node, worktree_path, base, base_sha)
+                    if self.authority and not self.authority.get(node_id):
+                        try:
+                            with self.authority.pinned_worktree(worktree_path) as pinned:
+                                notice, head, behind = self._refresh_conversation(
+                                    node, pinned, base, base_sha)
+                        except (OSError, ValueError) as exc:
+                            self.mismatch(node_id, "conversation_refresh", ["worktree"], str(exc))
+                            notice, head, behind = "", "", None
+                    else:
+                        notice, head, behind = self._refresh_conversation(
+                            node, worktree_path, base, base_sha)
                     prompt = notice + prompt
                 else:
                     head, behind = "", None
@@ -4305,6 +4335,8 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         node = self.authoritative(node, "merge_agent")
+        if not self.unrecorded_branch_ok(node, "merge_agent"):
+            return {"agent_id": agent_id, "result": "blocked", "detail": "branch is outside the container domain"}
         if self.authority and not self.authority.get(agent_id) and node.worktree:
             if not self.authority.safe_nested_path(Path(node.worktree)):
                 self.mismatch(agent_id, "merge_agent", ["worktree"],
@@ -4399,6 +4431,8 @@ class Runner:
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
         node = self.authoritative(node, "discard_agent")
+        if not self.unrecorded_branch_ok(node, "discard_agent"):
+            return {"agent_id": agent_id, "discarded": False, "error": "branch is outside the container domain"}
         if self.authority and not self.authority.get(agent_id) and node.worktree:
             if not self.authority.safe_nested_path(Path(node.worktree)):
                 self.mismatch(agent_id, "discard_agent", ["worktree"],
@@ -4444,6 +4478,8 @@ class Runner:
             if node is None or not node.branch:
                 return {"pushed": False, "error": f"no branch for {agent_id!r}"}
             node = self.authoritative(node, "push_branch")
+            if not self.unrecorded_branch_ok(node, "push_branch"):
+                return {"pushed": False, "error": "branch is outside the container domain"}
             if not self.config.push_agent_branches:
                 return {
                     "pushed": False,
