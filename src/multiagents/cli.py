@@ -957,6 +957,13 @@ def _save_interrupted(node, root: Path | None = None,
     worktree = Path(node.worktree) if node.worktree else None
     if not worktree or not worktree.is_dir():
         return False
+    if (authority and not authority.get(node.id)
+            and not authority.safe_unrecorded_branch(node.branch)):
+        if tree:
+            tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                      action="resume", fields=["branch"],
+                      reason="unrecorded branch is outside the container domain")
+        return False
     try:
         pinned = (authority.pinned_worktree(worktree) if authority and node.branch
                   else contextlib.nullcontext(worktree))
