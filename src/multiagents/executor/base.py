@@ -558,6 +558,10 @@ def build_env(
         env["XDG_CACHE_HOME"] = str(home / ".cache")
 
     _add_git_config_override(env, "commit.gpgsign", "false")
+    # H13: agent-run `git commit` must not trigger auto gc/maintenance, which
+    # prints a `packed-refs.lock` error although the commit landed.
+    _add_git_config_override(env, "gc.auto", "0")
+    _add_git_config_override(env, "maintenance.auto", "false")
     env.update(identity)
     return env
 

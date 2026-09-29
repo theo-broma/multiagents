@@ -1252,7 +1252,10 @@ def _commit_all(worktree: Path, message: str, *, role: str | None,
         f"{agent_id or 'agent'}@multiagents.invalid",
         git,
     )
-    args = ("-c", "commit.gpgsign=false", *extra, "commit", "-m", message)
+    # H13: no auto gc/maintenance after the commit — it tries `packed-refs.lock`
+    # and prints an error although the commit landed.
+    args = ("-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+            "-c", "maintenance.auto=false", *extra, "commit", "-m", message)
     hooks = [] if host_bookkeeping else _active_commit_hooks(worktree, git)
     if not hooks:
         return git.run(worktree, *args)
