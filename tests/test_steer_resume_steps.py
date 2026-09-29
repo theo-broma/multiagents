@@ -146,9 +146,11 @@ def test_bug_1b2612_steer_reports_success_for_a_live_stuck_run(tmp_path):
     spec = AgentSpec("worker", "p", "m")
     r = _runner(tmp_path, {"worker": spec},
                {"p": _recording_provider("p", probe)})
+    worktree = r.paths.worktree("ag-1")
+    worktree.mkdir(parents=True)
     r.tree.add(Node(id="ag-1", agent="worker", provider="p", model="m",
                     parent=None, depth=1, status="running", session_id="s-1",
-                    worktree=str(tmp_path)))
+                    worktree=str(worktree)))
 
     result = asyncio.run(_steer_flagging_stuck(r, "ag-1", "carry on", probe))
 

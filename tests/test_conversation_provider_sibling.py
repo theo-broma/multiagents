@@ -23,8 +23,8 @@ def test_cx_c28_a_sibling_instance_is_resumed_with_the_rosters_model(tmp_path, m
     runner = h.make_runner(tmp_path / "proj", monkeypatch,
                            agents={"advisor": spec},
                            providers={"acme": acme, "acme2": acme2})
-    worktree = tmp_path / "old-worktree"
-    worktree.mkdir()
+    worktree = runner.paths.worktree(OLD_NODE)
+    worktree.mkdir(parents=True)
     runner.tree.add(Node(
         id=OLD_NODE, agent="advisor", provider="acme2", model="acme-large",
         parent=None, depth=1, status="idle", session_id=OLD_SESSION,
