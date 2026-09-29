@@ -347,6 +347,16 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 
 **~20:00 UTC:** codex local-profile fix merged (4e25b09, 383 codex tests green). The auth.json fail-fast applies only to engine-launched agents (MULTIAGENTS_USER_HOME set); accepted. **Not live yet:** the running MCP server still uses the old `build_env` (advisor run ag-3c7a4c had no MULTIAGENTS_USER_HOME, so it 401'd again). It needs `/mcp` reconnect by the user, ideally when no agents are running. Then retry the advisor consult (the three asks above) and the D3 researcher.
 
+**~20:15 UTC:** **D1 merged** (db187f7). D1, H4 and subagent_mcp are 104/104 on main. The D1 tests were fixed by tester ag-3464b3; the H4 assertions were relaxed to value+source by ag-24e107.
+- The D1 reviewer was deferred: it routes to codex, which is still broken until the MCP reconnect. Its task names branch agents/implementer-deep/179b69, which is now merged; when it runs, steer it to review `db187f7^..db187f7`.
+- The tree was paused by that deferral.
+- Still running: ag-691e46 (H1/H3 round-2 fix).
+- **Next:**
+  1. The user reconnects MCP when the tree is idle.
+  2. Advisor consult (three asks).
+  3. D3 researcher, then the D3 contract.
+  4. Adversary re-check of the round-2 fix, if it is large.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
