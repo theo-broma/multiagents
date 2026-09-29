@@ -335,7 +335,7 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   - `remove_worktree` runs an unscoped prune.
   - One malformed entry aborts stop, resume, reap and active.
 
-  Its tests were merged in c6c18ff, and the contract was extended with HA-R10..R12 and the HG-R1 clarification (2f5d821). The fix is running as implementer-deep ag-6?? (see tree).
+  Its tests were merged in c6c18ff, and the contract was extended with HA-R10..R12 and the HG-R1 clarification (2f5d821). The fix is running as implementer-deep ag-691e46.
 - **Researcher for the D3 inventory failed on codex.** Rerun it after the codex profile fix, ag-3d7d8b, merges.
 
 **Not in this phase:**
