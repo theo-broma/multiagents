@@ -167,3 +167,14 @@ Verified by: a fake-server test.
 - **The off-peak ticket protocol.** It is a future idea; see BRIEF.
 - **Roster changes, meaning which agents use GLM.** These are the
   orchestrator's, after merge, with the advisor.
+
+## Decisions recorded after the tests (tester ag-c3d029, 2026-09-29)
+
+- **ZA-R4:** `usage` calls the endpoint itself. It does not render from
+  `MULTIAGENTS_BUDGET`, because the budget windows carry no credits.
+  Reset times are printed as ISO UTC.
+- **An unknown or empty `MULTIAGENTS_OPENCODE_PLAN`** is treated as
+  unset, so the script behaves as it does today.
+- **A limit with no `percentage`** is not a window: it is skipped.
+- **A window with no `nextResetTime`** is listed with a null
+  `resets_at`.
