@@ -554,6 +554,13 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - **zai implementer ag-325a81** (claude sonnet) is running in parallel with H7. It was told to stay away from the opencode.sh `BIN=` line and the opencode block.
 - **Codex wake at 23:48:** steer H7 ag-2abbbc.
 
+**2026-09-30 ~00:00 UTC:**
+- **H7 ag-2abbbc (codex)** ran out of codex quota again after about 6 min. Codex says it is back at 04:48 UTC. Its work was committed: 8bef215, 8352cda, 23416b1 and the WIP 3773bfc. All 30 H7 tests pass, but the suite shows regressions.
+- That work was merged (squashed) into claude opus implementer-deep **ag-d06a0b**'s worktree as 5faab46, via `merge_agent(into=<worktree path>)`. A node id is refused; a path works.
+- ag-d06a0b fixes the regressions and removes the stray `.h7-chunk*.log`.
+- **Then:** the adversary on H7, on codex after 04:48 or on claude.
+- **zai implementer ag-325a81** is still running.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
