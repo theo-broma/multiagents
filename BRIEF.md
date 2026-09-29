@@ -489,6 +489,14 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   - the HA-R12 `clean` implementation (18 red tests);
   - H5, H6, H8, H10–H13, D2.
 
+**2026-09-30 ~00:10 UTC: H7.**
+- **Tester ag-e5d2c3 merged (acaae5c):** tests/test_h7_provider_startup.py, 30 cases, 27 red for the right reasons and 3 green. Verified by the orchestrator outside the sandbox, in 8 s.
+  - **Tooling observation, for a ticket:** codex with `permission: sandbox` cannot commit in a linked worktree (the index.lock under `.git/worktrees/<id>` is read-only). The runner's leftover commit saved the work. Fake-CLI Runner tests also stall inside the codex sandbox.
+- **PS-R5 stale-generation clause:** there is no public test seam. The implementer must say where it lives, and the adversary targets it.
+- **Implementer-deep ag-2abbbc** (codex gpt-6-astra, timeout 5400) is on PS-R1..R7.
+  - It was told tests/ is read-only by instruction.
+  - **Note:** implementer-deep has `readonly_paths: []` in agents.yaml, so the readonly revert does not protect the tests. Check the diff for any tests/ change before merging.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
