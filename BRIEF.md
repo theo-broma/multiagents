@@ -545,6 +545,15 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - Started implementer ag-a2d0d6 (claude sonnet) on HA-R12 `clean` (18 red tests).
 - The codex wake (23:48) resumes H7 ag-2abbbc via steer.
 
+**2026-09-29 ~23:40 UTC:**
+- **Merged:**
+  - HA-R12 clean (a919b35);
+  - zai tests (523074e: 81 cases, 72 red);
+  - H13 (6cfa1cf: gc.auto=0 and maintenance.auto=false on multiagents commits and in the agent env).
+- **D3 contract revision 2:** 24c62d8. Implement it after H7, since it reuses `resolve_bin`.
+- **zai implementer ag-325a81** (claude sonnet) is running in parallel with H7. It was told to stay away from the opencode.sh `BIN=` line and the opencode block.
+- **Codex wake at 23:48:** steer H7 ag-2abbbc.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
