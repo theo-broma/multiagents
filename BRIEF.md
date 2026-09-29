@@ -473,6 +473,22 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   - **Off-peak: FUTURE idea, not now.** It is a ticket system with a separate inference endpoint that needs the ZCode OAuth JWT and impersonates the ZCode client, so it is a likely ToS risk. A model-side skill or MCP cannot work: the ticket must wrap the whole session. The right form would be runner-level: take the ticket, defer, launch with an OPENCODE_CONFIG overlay, settle.
 - **User 23:05:** launch H7, preferring codex models (claude at 86%), THEN PAUSE: nothing else starts after H7. H7 researcher: ag-aedab3.
 
+**2026-09-29 ~23:40 UTC: H7 in progress (user: codex first, then PAUSE; nothing else starts).**
+- Contract `context/specs/h7-provider-startup.md` (dbf5248), PS-R1..R7, revised after advisor turn 3.
+- Tester ag-e5d2c3 (codex gpt-6-sol, timeout 2700).
+- **Next:**
+  1. Merge the tester.
+  2. Run implementer-deep with `model=gpt-6-astra` (codex) on PS-R1..R7.
+  3. Run the adversary, since this code decides routing.
+  4. Merge, advance wt-main, and ask the user for `/mcp`.
+  5. Then PAUSE, and wait for the user (z.ai login).
+- **Queued after the pause:**
+  - opencode-zai with its quota;
+  - the D3 contract revision;
+  - the D1 fixes (8 findings);
+  - the HA-R12 `clean` implementation (18 red tests);
+  - H5, H6, H8, H10–H13, D2.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
