@@ -447,6 +447,32 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   6. CUT `extends` and the newer/older ordering; `lint()` reads shipped files only; separate the shipped refs from the installed-package case.
 - **User 22:45:** pause, start no new agents while we discuss z.ai/GLM via opencode. Still running: ag-304283 (tester, H1 fixtures), ag-de331d (D1 review), ag-c75a01 (H9).
 
+**2026-09-29 ~23:10 UTC:**
+- **Merged:**
+  - ag-304283 (2542bd1). The H1 fixtures are fixed, and the full suite shows only the 72 known reds plus one flake (`test_p0_r8f_9[inf_string]`, which passes on its own).
+  - The new `tests/test_h1h3_round2_clean.py` is RED in 18 cases: HA-R12 is not implemented in `cmd_clean`.
+    - A str or list entry crashes it.
+    - Under `--branches`, it falls back to the host record and deletes the malformed node's real branch.
+    - `--tree --homes` emit no event.
+  - **Decision:** keep the strict reading (an event in every pass). This needs an implementer, see TODO.
+  - ag-c75a01: H9 done (abe4059, AGENTS.md created).
+- **D1 review, ag-de331d:** VERDICT rejected, 8 findings, still to fix (to go to implementer-deep, `verifies=ag-179b69`):
+  1. P1, runner.py:1462: OOM attribution sees only this Runner's peers, so a cross-process sibling is misattributed. It must report kill_uncertain.
+  2. P1, runner.py:2345: adopted docker runs have no oom_reader, so an exit 137 after a restart is silent.
+  3. P1, notices.py:229: dedup state in the agent-writable tree.json lets a forged active entry suppress a real limit_hit.
+  4. P2, runner.py:2675: `commit_fix_attempts: 0` suppresses the exhaustion notice.
+  5. P2, runner.py:1809: deferred notices are not cleared when a pause clears.
+  6. P2, notices.py:309: on a caller's first wait, a hit and clear that happened before it are lost.
+  7. P2, notices.py:301: `since()` reads the whole event backlog under the exclusive lock, and cursors are never retired.
+  8. P2, runner.py:2260: provenance is looked up from the current YAML instead of being captured at launch.
+- **z.ai / GLM (user):**
+  - The user is subscribing to the GLM Coding Plan and will log in via opencode.
+  - Analysis in ~/zcode-analysis/ (README.md, USAGE.md, usage.py). Quota = `GET https://api.z.ai/api/monitor/usage/quota/limit` with `Authorization: <Coding Plan key>` (raw key); `data.limits` holds a 5 h window (`unit` 3, `number` 5) and a weekly one (`unit` 6); `percentage` is the % used; `nextResetTime` is in ms.
+  - **Plan:** after H7, add an `opencode-zai` provider (extends opencode, its own XDG_DATA_HOME, `models_include` for the zai models) plus its budget action.
+  - Before that: the user runs `usage.py` live once, and we check the provider key name in auth.json (keys only, never values). Egress to api.z.ai is needed only under docker, and must be ASKED for.
+  - **Off-peak: FUTURE idea, not now.** It is a ticket system with a separate inference endpoint that needs the ZCode OAuth JWT and impersonates the ZCode client, so it is a likely ToS risk. A model-side skill or MCP cannot work: the ticket must wrap the whole session. The right form would be runner-level: take the ticket, defer, launch with an OPENCODE_CONFIG overlay, settle.
+- **User 23:05:** launch H7, preferring codex models (claude at 86%), THEN PAUSE: nothing else starts after H7. H7 researcher: ag-aedab3.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
