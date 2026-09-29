@@ -221,6 +221,51 @@ behaviour closes it. It is updated when a new host git call is added.
   tester**, deliberately, to the new default, and listed in its result.
 - Verified by: the existing suite.
 
+**HG-R8: the branch a host call acts on is resolved, not read**
+(adversary ag-e98308, finding 1). A host git call scoped to a node checks two
+things before it runs:
+- the ref it will commit to or merge into is a regular (non-symbolic) ref;
+- that ref's full name equals the node's recorded branch.
+
+A symbolic ref anywhere on that path is a mismatch. That covers a
+`refs/heads/agents/...` ref, or a ref reached through the worktree's HEAD, that
+points at `main`, a sibling's branch or any other ref. On a mismatch the host:
+- emits `host_authority_mismatch` with `fields` containing `"branch"`;
+- raises the same error as other HG mismatches;
+- moves no ref.
+
+This applies to `commit_all` (stop and resume checkpoints) and to merges into
+a parent worktree.
+- Verified by: `tests/test_h3_adversary_refs.py`, 3 tests.
+
+**HG-R9: one node's mismatch does not abort the others.** `multiagents stop`
+and the resume path checkpoint each node independently. When one node's
+checkpoint is refused or fails:
+- the failure is recorded as an event and in the node's reason;
+- the node's worktree is kept;
+- the remaining nodes are still checkpointed;
+- stop still stops the container.
+
+`clean --branches` must not delete the worktree of a node whose checkpoint
+failed without `--force`.
+- Verified by: `tests/test_h3_adversary_stop.py`.
+
+**HG-R10: the disable list is computed where the call runs.** HG-R4's list of
+content programs to disable is derived with exactly the git dir, work tree,
+branch and environment the protected call will use. So a conditional include
+such as `onbranch:` or `gitdir:` cannot make a program visible to the call but
+invisible to the list.
+- Verified by:
+  `tests/test_h3_adversary_config.py::test_onbranch_included_merge_driver_not_run_for_parent_merge`.
+
+**HG-R11: host commits keep the user's identity.** The author and committer
+of a host checkpoint or parent-worktree squash merge are the same identity
+plain `git` resolves in that worktree. That includes an identity set through
+`includeIf "gitdir:…"` in the user's global config. The fallback identity
+applies only when plain git would find none.
+- Verified by:
+  `tests/test_h3_adversary_config.py::test_host_checkpoint_keeps_identity_from_gitdir_conditional_include`.
+
 ## Adversary brief
 
 Work from inside the container, with write access to everything listed in
