@@ -312,6 +312,21 @@ is harmless, but review it once.
 
 **~14:30 UTC:** HG-R8..R11 merged (f435d8d). On main, H1+H3+H4+sandbox_git_merge are 169/169. The pinned-HEAD decision is recorded in the H3 spec. Next for H1/H3: once tester ag-a43782 merges, run one re-review adversary over both (fresh opus). Its scope: the fixes, plus `cmd_stop` committing into the tree-entry worktree path without checking the host record (ag-a4bb6e note). Also: `timeout 590` around test-chunk.sh does not reach pytest (minor tooling note).
 
+**~18:30 UTC (after a second restart and a classifier outage):**
+
+Bug-reporter ag-a0be27 finished from source only (it had no shell). It wrote 8 tickets; the full text is in `.multiagents/runs/ag-a0be27/result.json`, but only bug-c106a9 (docker rm leaves the sidecar) reached the queue.
+
+- **Codex 401 root cause:** the per-agent HOME makes `run_profile()` resolve an empty `<agent HOME>/.multiagents/profiles/codex`. Fix in flight: implementer ag-3d7d8b. It restores the advisor.
+- **Claude container 401:** the per-account vault tokens are never renewed (`refresh_private_credentials` reads the top-level vault file); `check` is blind to `accounts/*`; there is no failover on 401; the proxy logs no forwarded requests. None of this explains the 401 right after re-login, which needs a `docker exec` probe. Needs a contract before fixing. Schedule it after D1 and D3, or earlier if the user wants docker back.
+- **Minor, not yet filed:**
+  - consult bypasses/is gated inconsistently by max_concurrent (a bug);
+  - doom-loop false positive on codex `file_change`;
+  - deferred tasks restart on the just-failed provider;
+  - `args.path` is ignored by the `find_project_root()` guards in cli.py (`doctor_clear` tests);
+  - `auth login codex` does not say which store it writes.
+
+ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have been resumed.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
