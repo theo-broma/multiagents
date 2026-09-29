@@ -357,6 +357,8 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   3. D3 researcher, then the D3 contract.
   4. Adversary re-check of the round-2 fix, if it is large.
 
+**~20:50 UTC:** H1/H3 round-2 fix merged (b782387); the 154 H1/H3/round2 tests are green. Six older fixtures contradict HA-R10/R11: test_core stop-into-out-of-domain, and test_h2 rf_r6 x5, which merges into an arbitrary checkout. Tester ag-304283 is fixing them, plus adding an HA-R12 `clean` test. HA-R11 resolution order is recorded in the spec. Still open: the D1 review, the advisor consult and the D3 researcher, which all need codex, so they wait for the MCP reconnect.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
