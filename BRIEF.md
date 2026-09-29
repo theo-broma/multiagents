@@ -286,6 +286,8 @@ is harmless, but review it once.
 
 **~11:00 UTC:** H1 adversary ag-387314 VERDICT rejected: the host resolves the authority record from tree.json's inner `id` rather than the key (5 red tests, merged 934db09). Contract HA-R9 added (7943284). Fix: implementer-deep ag-a4bb6e. Queued for the next free slot: tester for the 11 mutation survivors on authority.py listed in ag-387314's result (seeded flag, complete(), check-ref-format, branches history, safe_nested_path, pinned `..`, remove_worktree owns-checks, st_dev, safe_seeded_path, rebind completion, add overwrite) plus an HA-R9 mismatch-event assertion.
 
+**Queued (user, 2026-09-29 ~11:10):** once ALL agents currently in flight have finished (ag-e98308, ag-736dd1, ag-2a0da5, ag-a4bb6e), start a `bug-reporter` to diagnose the container claude 401 (step 1): run a claude call inside the workspace container and establish where the request actually goes (auth sidecar, which logs only `listening`, vs direct api.anthropic.com through the egress proxy — check proxy logs), which credential file the CLI finds in its container HOME (without reading the vault's secret contents), and whether a CLI version change (2.1.274 → 2.1.280) stopped honouring ANTHROPIC_BASE_URL. No `docker rm`, no config edits. Then file the ticket together with the other tooling bugs in the handoff list.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
