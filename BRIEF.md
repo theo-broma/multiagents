@@ -196,6 +196,18 @@ default, so work can proceed):
          contracts; restate them as properties.
       2. H4 + H14 implementation.
       3. D1.
+  - **2026-09-29, around 10:00 UTC:** both adversaries died on codex quota.
+    **Resume them with steer_agent after 13:30 UTC, do not restart them.**
+    - ag-25c242 (H1): codex's cyber filter refused the first phrasing. It
+      was restated as an edge-case and property test job for
+      `tests/test_h1_edge_*.py`, then hit the quota.
+    - ag-afe388 (H3): hit the quota mid-run.
+
+    Config changed at the user's request:
+    - `limits.wind_down_seconds` 120 and `wrap_up_seconds` 60 (were 600 and
+      420), so codex is used to the end of its windows.
+    - No per-window percentage reserve exists for non-orchestrator
+      providers. That would be a feature to add.
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
