@@ -115,8 +115,8 @@ def test_rt_r2_steer_refuses_unmodelled_recorded_provider_without_mutation(
                                            "models": {"zeta": entry}})
     r = _runner(tmp_path, monkeypatch, agent=agent,
                 providers={"acme": primary, "zeta": old})
-    worktree = tmp_path / "standing-worktree"
-    worktree.mkdir()
+    worktree = r.paths.worktree("ag-steer")
+    worktree.mkdir(parents=True)
     marker = worktree / "keep.txt"
     marker.write_text("unchanged")
     node = Node(id="ag-steer", agent="worker", provider="zeta", model="z1",
@@ -141,8 +141,8 @@ def test_rt_r2_steer_uses_family_model_on_recorded_sibling(tmp_path, monkeypatch
     sibling["family"] = "acme"
     r = _runner(tmp_path, monkeypatch,
                 providers={"acme": primary, "acme2": sibling})
-    worktree = tmp_path / "standing-worktree"
-    worktree.mkdir()
+    worktree = r.paths.worktree("ag-sibling")
+    worktree.mkdir(parents=True)
     r.tree.add(Node(id="ag-sibling", agent="worker", provider="acme2", model="m1",
                     parent=None, depth=1, status="idle", session_id="sess-old",
                     worktree=str(worktree)))
