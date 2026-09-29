@@ -530,6 +530,16 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
      - the D3 contract revision, then its pipeline;
      - H5, H6, H8, H10–H13, D2.
 
+**2026-09-29 ~22:55 UTC: USER ROSTER DECISION (applies once opencode-zai is merged and enabled):**
+- orchestrator: claude opus (unchanged);
+- tester: claude **sonnet**;
+- the implementers run on GLM through opencode-zai, on `zai-coding-plan/glm-5.3`, one reasoning level per tier. The opencode variants verified for glm-5.3 are `low`, `high` and `max`:
+  - implementer-quick: `variant: low`;
+  - implementer: `variant: high`;
+  - implementer-deep: `variant: max`;
+- everything else stays as now, on codex. That includes the advisor, dev-advisor, researcher, reviewer and adversary.
+- Before editing, check how agents.yaml expresses a variant (spawn.optional.variant → `--variant`) and what fallbacks each implementer keeps (codex, as today). The advisor is consulted on the edit, not on the decision, which is the user's.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
