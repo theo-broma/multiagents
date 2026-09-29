@@ -59,6 +59,7 @@ from .tree import TERMINAL, Node, Tree, new_id, node_from_raw, now
 from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
+_HOST_HOOK_NOTIFIED: set[Path] = set()
 
 # How often stream progress is flushed to the shared tree. The watchdogs read
 # the in-process Supervisor, not the tree, so this bounds disk writes without
@@ -2767,10 +2768,11 @@ class Runner:
                 with self.authority.pinned_worktree(target) as pinned:
                     status, detail = gitops.merge(
                         pinned, node.branch, f"{node.agent}: {node.task[:72]}",
-                        policy.get("style", "squash"),
+                        policy.get("style", "squash"), root=self.paths.root,
+                        target_branch=parent.branch if parent else "",
                     )
                     if status == "merged":
-                        merged_sha = gitops.head_sha(pinned)
+                        merged_sha = gitops.head_sha(pinned, root=self.paths.root)
             except (OSError, ValueError):
                 self.mismatch(node.id, action, ["worktree"],
                               "parent worktree could not be pinned")
@@ -2778,11 +2780,14 @@ class Runner:
         else:
             status, detail = gitops.merge(
                 target, node.branch, f"{node.agent}: {node.task[:72]}",
-                policy.get("style", "squash"),
+                policy.get("style", "squash"), root=self.paths.root,
+                target_branch=parent.branch if parent else "",
             )
             if status == "merged":
-                merged_sha = gitops.head_sha(target)
+                merged_sha = gitops.head_sha(target, root=self.paths.root)
         self.tree.emit(node_id, "merge", result=status, detail=detail[:400], into=str(target))
+        if "host_authority_mismatch" in detail:
+            self.mismatch(node_id, action, ["worktree", "branch"], detail[:400])
         if status == "merged":
             self.tree.set_status(node_id, "merged")
             self._cleanup(node, completion="merged", commit=merged_sha)
@@ -2819,6 +2824,18 @@ class Runner:
             return None
         if node.worktree:
             worktree = Path(node.worktree)
+            try:
+                registered = gitops._registration_branch(self.paths.root, worktree,
+                                                        node.branch)
+            except gitops.GitError as exc:
+                if self.authority:
+                    self.mismatch(node.id, "cleanup", ["worktree", "branch"], str(exc))
+                return None
+            if registered and registered != node.branch:
+                if self.authority:
+                    self.mismatch(node.id, "cleanup", ["worktree", "branch"],
+                                  "host_authority_mismatch: worktree registration differs")
+                return None
             if self.authority and (worktree.exists() or worktree.is_symlink()):
                 if not self.authority.remove_worktree(worktree, recorded=bool(record)):
                     self.mismatch(node.id, "cleanup", ["worktree"],
@@ -2826,6 +2843,8 @@ class Runner:
                     return None
             elif worktree.is_dir():
                 gitops.remove_worktree(self.paths.root, worktree, force=True)
+            if not worktree.exists() and registered:
+                gitops.prune_worktree(self.paths.root, worktree, node.branch)
         if self.authority and record and completion:
             self.authority.complete(node.id, completion, commit)
         if node.branch:
@@ -3363,7 +3382,7 @@ class Runner:
         if workdir is None or not workdir.is_dir():
             missing = True
         elif branch and root_is_repo:
-            missing = gitops.worktree_branch(workdir) != branch
+            missing = gitops.worktree_branch(workdir, root=self.paths.root) != branch
         else:
             missing = False
         if missing:
@@ -4402,13 +4421,45 @@ class Runner:
             self.tree.emit(agent_id, "readonly_revert", paths=reverted[:50],
                            count=len(reverted), base=base)
 
+        base_merge = target.resolve() == self.paths.root.resolve()
+        host_hooks = base_merge and bool(policy.get("host_hooks", False))
+        host_content = base_merge and bool(policy.get("host_content_programs", False))
+        target_branch = ""
+        if self.authority and not base_merge:
+            for held in self.authority.read().values():
+                if held.get("worktree") == str(target):
+                    target_branch = held.get("branch", "")
+                    break
         status, detail = gitops.merge(
-            target, node.branch, f"{node.agent}: {node.task[:72]}", policy.get("style", "squash")
+            target, node.branch, f"{node.agent}: {node.task[:72]}",
+            policy.get("style", "squash"), root=self.paths.root,
+            host_hooks=host_hooks, host_content_programs=host_content,
+            target_branch=target_branch,
         )
-        self.tree.emit(agent_id, "merge", result=status, detail=detail[:400], into=str(target))
+        git_detail = detail
+        if base_merge and not host_hooks and self.paths.root.resolve() not in _HOST_HOOK_NOTIFIED:
+            configured = gitops.run(self.paths.root, "config", "--path", "--get",
+                                    "core.hooksPath")
+            hooks = (Path(configured.out) if configured.ok and configured.out
+                     else self.paths.root / ".git" / "hooks")
+            if not hooks.is_absolute():
+                hooks = self.paths.root / hooks
+            if hooks and hooks.is_dir() and any(p.is_file() and os.access(p, os.X_OK)
+                                               for p in hooks.iterdir()):
+                notice = "host merge hooks skipped (git.merge.host_hooks: false)"
+                detail = f"{detail}\n{notice}" if detail else notice
+                self.tree.emit(agent_id, "host_git_notice", detail=notice)
+                _HOST_HOOK_NOTIFIED.add(self.paths.root.resolve())
+        if not host_content:
+            detail = f"{detail}\nHost content programs disabled (git.merge.host_content_programs: false)"
+        self.tree.emit(agent_id, "merge", result=status, detail=git_detail[:400], into=str(target))
+        if "host_authority_mismatch" in git_detail:
+            self.mismatch(agent_id, "merge_agent", ["worktree", "branch"],
+                          git_detail[:400])
         if status == "merged":
             self.tree.set_status(agent_id, "merged")
-            self._cleanup(node, completion="merged", commit=gitops.head_sha(target))
+            self._cleanup(node, completion="merged",
+                          commit=gitops.head_sha(target, root=self.paths.root))
         reap_pending_branches(self.paths.root, self.tree, self.authority)
         payload = {"agent_id": agent_id, "result": status, "detail": detail[:1000],
                    "branch": node.branch}

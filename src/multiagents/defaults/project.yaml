@@ -141,6 +141,14 @@ git:
     # Landing on your base branch is always an explicit merge_agent() call.
     into_base: explicit
     style: squash        # squash | no-ff
+    # Host merges skip hooks by default: a base hook that runs tests would
+    # execute the agent's newly merged code on the host. This opt-in affects
+    # only merges into the base branch, never agent commits or stop checkpoints.
+    host_hooks: false
+    # Host merges also skip configured filters, merge drivers and textconv.
+    # With this enabled, an agent-written .lfsconfig (lfs.url) can direct
+    # where Git LFS makes network requests during a base merge.
+    host_content_programs: false
 
 # --------------------------------------------------------------------------
 # What a child process is allowed to see.
