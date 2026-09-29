@@ -102,6 +102,36 @@ default, so work can proceed):
   Other notes:
   - dev-advisor is on agy, which is out of quota, so implementers are told
     not to consult it and to raise NEED_INFO instead.
+  - **2026-09-29, around 04:35 UTC: paused.**
+    - Codex's 5 h window is at 89% and resets at 08:25 UTC.
+    - The container's claude token has expired (401). The user was asked
+      to run `multiagents auth login claude --account <label>`.
+    - opencode and agy are unusable.
+  - **H1** is on branch `agents/implementer-deep/ff8301` (ag-ff8301),
+    **not merged yet**.
+    - Green: H1 25/25 and the 3 unrecorded-node regressions.
+    - Host run on 2026-09-29: chunk 1 fully green. Chunks 2–3 show only the
+      known reds (72 phase2 and H2) **plus 3 old tests whose fixtures put
+      worktrees outside the worktree root**, the same class as the 15
+      fixed by ag-ccf9cd:
+      - `test_conversation_provider_change::test_cx_c28_a_conversation_on_a_listed_fallback_is_still_resumed`;
+      - `test_conversation_provider_sibling::test_cx_c28_a_sibling_instance_is_resumed_with_the_rosters_model`;
+      - `test_steer_resume_steps::test_bug_1b2612_steer_reports_success_for_a_live_stuck_run`.
+    - Next:
+      1. a tester moves those fixtures under `Paths.worktree(...)`;
+      2. merge the tester, then the H1 branch. Its
+         `tests/test_h1_swap_guard.py` gets reverted at merge, which is
+         fine, because the case is covered by `test_h1_unrecorded_nodes.py`;
+      3. the H1 adversary runs on claude opus
+         (`adversary.models.claude: opus`) once the container is
+         re-authenticated;
+      4. a reviewer on the H1 diff (ag-7b7132 fell to opencode and died);
+      5. then the H2 implementer.
+    - The advisor's turn-12 finding (unrecorded nodes in resume and steer)
+      is fixed in `2c59ac7`.
+  - Contracts and tests merged since: H4+H14 (`h4-h14-routing-limits.md`,
+    tests 784fe09), D1 (`d1-limit-notices-contract.md`, tests 08efd68),
+    and the RT-R1 example correction.
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
