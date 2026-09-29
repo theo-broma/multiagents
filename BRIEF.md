@@ -230,6 +230,58 @@ default, so work can proceed):
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
 
+**HANDOFF, 2026-09-29, around 10:30 UTC (orchestrator context wind-down):**
+
+State:
+- **Merged on main:**
+  - H1: host authority, HA-R1..R8 plus HA-R2a, with two review-fix rounds.
+    Last fix e1d2296.
+  - H2: refusal status (4b934c9) and its RF-R2 finalize fix.
+  - H3: host git execution (336f14f).
+- **Tests merged, red, implementation pending:**
+  - H4+H14: `tests/test_h4_h14_routing_limits.py`, contract
+    `h4-h14-routing-limits.md`.
+  - D1: `tests/test_d1_limit_notices.py`, contract
+    `d1-limit-notices-contract.md`.
+- **Executor is now `local`.** The user edited it on 2026-09-29, "route 2",
+  because container claude returns 401. A claude ping works locally.
+  - Revert to `docker` once the container auth is fixed.
+  - Under local, H1/H3 protect nothing, which is accepted by the user.
+- **Codex:** the 5 h window was exhausted and resets at 13:30 UTC. agy is
+  disabled in `providers.yaml`. opencode is dead (H7).
+- **Temporary config to restore later:**
+  - `limits.provider_down_cooldown_seconds: 10`: delete that line.
+  - `wind_down_seconds` 120 and `wrap_up_seconds` 60 were the user's
+    choice; keep them unless the user says otherwise.
+- **Roster:** advisor, adversary and implementer-deep's codex fallback are
+  on gpt-6-astra. The tester has a codex fallback of gpt-6-sol.
+  `adversary.models.claude: opus` exists.
+
+Next, in order:
+1. H1 and H3 adversaries on **claude opus** (`model=opus`), which is the
+   cross-family check. Codex runs ag-25c242 and ag-afe388 died on quota
+   under the docker executor: discard them and start fresh.
+   - Phrase the tasks as invariants and inputs to test. The first H1
+     phrasing tripped OpenAI's cyber filter.
+   - Findings go back to an implementer, with tests first.
+2. Reword the attack vocabulary in the instruction files (queued above).
+   Delegate, then review the diff.
+3. H4+H14 implementation (implementer-deep), then D1 implementation.
+4. Then H5–H13 and D2, per `phase6-hardening.md`. H7 gained binary
+   resolution.
+
+Open tooling bugs to file with a bug-reporter, which now runs on claude
+locally:
+- container claude 401 while the auth sidecar logs no request;
+- the authproxy does not fail over from a 401;
+- `docker rm` leaves the auth sidecar running;
+- deferred tasks restart on a provider that just failed;
+- the doom-loop false positive on codex `file_change`;
+- `test_core` `doctor_clear` tests fail when run outside the project dir.
+
+Also: `test_h1_swap_guard.py` was written by an implementer and merged. It
+is harmless, but review it once.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
