@@ -359,6 +359,11 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 
 **~20:50 UTC:** H1/H3 round-2 fix merged (b782387); the 154 H1/H3/round2 tests are green. Six older fixtures contradict HA-R10/R11: test_core stop-into-out-of-domain, and test_h2 rf_r6 x5, which merges into an arbitrary checkout. Tester ag-304283 is fixing them, plus adding an HA-R12 `clean` test. HA-R11 resolution order is recorded in the spec. Still open: the D1 review, the advisor consult and the D3 researcher, which all need codex, so they wait for the MCP reconnect.
 
+**~21:15 UTC — important:** the MCP server does not run from the project checkout. It runs from the orchestrator's scratchpad worktree `.../scratchpad/wt-main`, configured in `~/.config/multiagents/mcp.json`.
+- That worktree was still at ba32688 (H1's first commit), so the server was running none of the later fixes: H2/H3 server-side paths, HA-R9..R12, H4, D1, and the codex `build_env` fix. Merges and tests were unaffected, because they ran from the repo.
+- It is now advanced to main (72d4ab2). **The user must `/mcp` reconnect again** to load it.
+- To keep this from recurring: after every merge that touches `src/`, run `git -C <wt-main> checkout --detach main`, then reconnect. The adapter copy in `~/.config/multiagents/providers/codex.py` is already identical to the repo's.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
