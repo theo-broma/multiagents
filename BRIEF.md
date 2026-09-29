@@ -293,6 +293,8 @@ is harmless, but review it once.
 
 **~12:20 UTC:** rewording merged (8135e0c). Two phrases kept because test_core pins them ("You attack code that already works", "not a weapon"); tester ag-e45e53 relaxes those pins and writes H1 coverage tests (tests/test_h1_coverage.py). After it merges: an implementer-quick rewords those two phrases in team/adversary.md. The rewording agent saw 125 failures in chunk 2 and did not compare them to base; re-check chunk 2 on main at the next full-suite run.
 
+**~13:30 UTC (after session restart):** all 4 agents had stopped on the claude window; resumed via steer: ag-a4bb6e (HA-R9, commit 70ba3bb), ag-c2d690 (HG-R8..R11, commit 5d00422), ag-e45e53 (tester, WIP), ag-2a0da5 (H4: 25/28 green; decisions sent). Decisions recorded in the spec (b3b8888): SV-R4 stays, so the timeout tests observe `stuck` rather than a kill; the root orchestrator is exempt from max_children. **Queued tester (next free slot):** rewrite the 3 LM-R1 timeout tests; add a root-exemption test; fix test_sm_r3 to use the spawner's cap. The full task text is in the orchestrator's log; restate it from this line if lost. Codex reports "not authenticated", which is for the user: `multiagents auth login codex`. The advisor is on codex, so it is unavailable until then.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
