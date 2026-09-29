@@ -414,7 +414,7 @@ def list_agents() -> dict:
             "writes": spec.writes,
             "can_spawn": spec.can_spawn,
             "permission": spec.permission,
-            "timeout": spec.timeout,
+            "timeout": run.config.effective_limits(spec)["timeout"]["value"],
             "available": bool(provider and provider.available()),
         })
     payload = {

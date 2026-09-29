@@ -188,6 +188,11 @@ class Node:
     # to ask someone to read the code.
     routed_from: str = ""
     routed_why: str = ""
+    # LM-R1/R2: this run's timeout, max_children and silence_timeout as
+    # `{value, source}`, resolved when it started. The cap its own children
+    # are counted against is read from here, so a roster edit after launch
+    # does not rewrite it (LM-R1a); a steer keeps a `call` timeout (LM-R1b).
+    limits: dict[str, Any] = field(default_factory=dict)
     # A named slice of work this run is spent against — a review team's bounded
     # context, a feature, whatever the parent is budgeting. Spend is summed per
     # tag and a tag can be given a ceiling, which is what makes a phase
