@@ -43,10 +43,13 @@ has a **non-empty** model. That is its primary model, or a non-empty
   `route_skipped` event is emitted per `start`, carrying `provider` and
   `reason: "no model configured for this agent on <provider>"`.
 - Verified by:
-  - an agent whose primary provider is exhausted, and whose only same-family
-    sibling has no `models:` entry, is never launched with an empty
-    `--model` or equivalent. It is deferred or refused as today, and the
-    event is emitted.
+  - an agent whose primary provider is exhausted, and for which the only
+    other candidate provider has no usable model (neither an exact route
+    nor a same-family route), is never launched with an empty `--model` or
+    equivalent. It is deferred or refused as today, and the event is
+    emitted.
+  - This example was corrected on 2026-09-29, after the tester's
+    NEED_INFO(RT-R1): the shared definition governs.
   - with a non-empty sibling entry, it routes to that sibling as today;
   - a same-family sibling with no `models:` entry of its own routes, using
     the family's model, and does not emit the event.
