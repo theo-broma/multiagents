@@ -437,6 +437,16 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   - researcher ag-a609b9 (codex), re-running the D3 inventory;
   - implementer-quick ag-c75a01, doing H9 (AGENTS.md → scripts/test-chunk.sh).
 
+**2026-09-29 ~22:45 UTC:**
+- **D3 contract** written (3588055). The advisor (ag-8e7d87, turn 2) says revise it BEFORE the tester. Accepted, to do:
+  1. DM-R4: allow file-level and case-arm refs, because the shell actions are top-level `case` arms; define exact literal plus fragment matching; handle quotes, heredocs and `${#}` when stripping comments; drop the claim that it cannot be gamed.
+  2. DM-R5: use JSON-Pointer selectors on the real keys (`spawn.args`, `spawn.resume`, `spawn.permission.*`, `spawn.optional.*`, `models_cmd`, `mcp.args`, `stream.session_id_paths`, `stream.rules[*].match/.fields`, `status_map`, `refusal_markers`, `truncation_markers`, `transcript.limit_markers[*].match`, `home_links`, `bin_versions_depth`); count mapping KEYS too; leaf-level only; exclude codex's internal YAML.
+  3. `verified` must also match platform, executor and scope; define state precedence and stdout vs stderr; a binary missing only in the container is not counted by the host section.
+  4. Container probe: add a new "exec in an already-running container" seam (`ensure_running` may create a container); kill on the container side; overall deadline; enumerate the contexts from all agent executor overrides.
+  5. Digest: framed records, taken after provider inheritance; byte-identical overrides keep the digest; document that shared code (docker.py) is out of it; editing a dependency voids `verified`.
+  6. CUT `extends` and the newer/older ordering; `lint()` reads shipped files only; separate the shipped refs from the installed-package case.
+- **User 22:45:** pause, start no new agents while we discuss z.ai/GLM via opencode. Still running: ag-304283 (tester, H1 fixtures), ag-de331d (D1 review), ag-c75a01 (H9).
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
