@@ -1,11 +1,7 @@
-"""SG-R5: a host-side merge runs the base's hooks, never the branch's.
+"""SG-R5 as superseded by HG-R2: host merges skip hooks by default.
 
-context/specs/sandbox-git.md, SG-R5 plus its Decisions entry "SG-R5, hook
-directory as a whole". When `core.hooksPath` points inside the working tree,
-`gitops.merge` still runs the user's commit hooks on the merge commit, but
-from the whole hooks directory as it is at the base's HEAD before the merge:
-helpers a hook calls next to itself come from the base too, and a hook that
-exists only on the branch being merged is not run.
+HG-R2 supersedes SG-R5's default. The merge keeps the branch's hook files in
+the resulting tree, but runs no hook while making the host merge commit.
 
 Black box: every hook appends its own distinct line to a log file outside the
 repository, and the log is the oracle. Nothing here depends on how the base's
@@ -15,8 +11,8 @@ Which hooks git fires depends on the merge style. A squash merge ends with a
 `git commit` (pre-commit, commit-msg). A `--no-ff` merge is a `git merge`
 commit, which fires pre-merge-commit and commit-msg but never pre-commit. So
 the base carries a `pre-merge-commit` that execs the `pre-commit` next to it,
-as git's own sample does. The base's pre-commit entry is therefore expected
-under both styles, and a branch-modified pre-commit would show under both.
+as git's own sample does. This makes both styles useful probes for the new
+default.
 
 The `control_*` tests run plain git on the same fixture, and show that the
 branch's hooks do fire when nothing intervenes. Without them the SG-R5
@@ -159,13 +155,13 @@ def test_sg_r5_control_plain_no_ff_merge_runs_the_branch_hooks(tmp_path):
 
 @pytest.mark.parametrize("absolute", [False, True], ids=["relative-hookspath", "absolute-hookspath"])
 @pytest.mark.parametrize("style", STYLES)
-def test_sg_r5_merge_runs_the_base_pre_commit_and_its_base_helper(tmp_path, style, absolute):
+def test_hg_r7_merge_skips_the_base_pre_commit_and_its_base_helper(tmp_path, style, absolute):
     fx = build(tmp_path, absolute=absolute)
     status, detail = gitops.merge(fx["repo"], "agent", "merge agent", style=style)
     assert status == "merged", detail
     lines = log_lines(fx["log"])
-    assert BASE_PRE_COMMIT in lines, f"the base's pre-commit must run; log={lines}"
-    assert BASE_HELPER in lines, f"the helper next to the base hook must be the base's; log={lines}"
+    assert BASE_PRE_COMMIT not in lines, f"host merge ran the base hook; log={lines}"
+    assert BASE_HELPER not in lines, f"host merge ran the base helper; log={lines}"
 
 
 @pytest.mark.parametrize("absolute", [False, True], ids=["relative-hookspath", "absolute-hookspath"])
@@ -198,27 +194,26 @@ def test_sg_r5_merge_still_merges_the_branch_hook_files_into_the_tree(tmp_path, 
 
 @pytest.mark.parametrize("absolute", [False, True], ids=["relative-hookspath", "absolute-hookspath"])
 @pytest.mark.parametrize("style", STYLES)
-def test_sg_r5_a_refusing_base_hook_still_fails_the_merge(tmp_path, style, absolute):
-    """The base's pre-commit exits 1; the branch's version exits 0. Running
-    the branch's hook would let the merge through; skipping hooks would too."""
+def test_hg_r7_refusing_base_hook_is_skipped_by_default(tmp_path, style, absolute):
+    """The old refusing base hook is skipped by the new default."""
     fx = build(tmp_path, absolute=absolute, base_exit=1)
     status, detail = gitops.merge(fx["repo"], "agent", "merge agent", style=style)
-    assert status != "merged", f"a refusing base hook must stop the merge: {detail}"
-    assert git(fx["repo"], "rev-parse", "HEAD").stdout.strip() == fx["base_head"]
+    assert status == "merged", detail
+    assert git(fx["repo"], "rev-parse", "HEAD").stdout.strip() != fx["base_head"]
     lines = log_lines(fx["log"])
-    assert BASE_PRE_COMMIT in lines, f"the refusal must come from the base hook; log={lines}"
+    assert BASE_PRE_COMMIT not in lines, f"the base hook ran; log={lines}"
     for entry in BRANCH_ENTRIES:
         assert entry not in lines
 
 
 @pytest.mark.parametrize("style", STYLES)
-def test_sg_r5_a_hook_the_branch_deletes_still_runs_from_the_base(tmp_path, style):
-    """Deleting a hook on the branch must not switch it off for the merge."""
+def test_hg_r7_deleted_branch_hook_does_not_enable_base_hook(tmp_path, style):
+    """Neither the base hook nor its deletion on the branch changes the default."""
     fx = build(tmp_path, base_exit=1, branch_deletes_pre_commit=True)
     status, detail = gitops.merge(fx["repo"], "agent", "merge agent", style=style)
-    assert status != "merged", f"the base's refusing pre-commit was skipped: {detail}"
-    assert git(fx["repo"], "rev-parse", "HEAD").stdout.strip() == fx["base_head"]
-    assert BASE_PRE_COMMIT in log_lines(fx["log"])
+    assert status == "merged", detail
+    assert git(fx["repo"], "rev-parse", "HEAD").stdout.strip() != fx["base_head"]
+    assert BASE_PRE_COMMIT not in log_lines(fx["log"])
 
 
 @pytest.mark.parametrize("style", STYLES)
@@ -258,22 +253,32 @@ BRANCH_HOOKS = [pytest.param(False, id="branch-keeps-hooks"),
                 pytest.param(True, id="branch-rewrites-hooks")]
 
 
+def make_conflict(fx):
+    """Give the base a conflicting change, independent of hook refusal."""
+    repo = fx["repo"]
+    (repo / "app.txt").write_text("base changed\n")
+    git(repo, "add", "app.txt")
+    git(repo, "commit", "-q", "--no-verify", "-m", "base changed")
+    fx["base_head"] = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
 @pytest.mark.parametrize("rewrites", BRANCH_HOOKS)
 @pytest.mark.parametrize("absolute", [False, True], ids=["relative-hookspath", "absolute-hookspath"])
 @pytest.mark.parametrize("style", STYLES)
-def test_sg_r5_a_merge_refused_by_a_base_hook_leaves_the_base_checkout_as_it_was(
+def test_hg_r7_conflicted_merge_leaves_the_base_checkout_as_it_was(
         tmp_path, style, absolute, rewrites):
     """`branch-keeps-hooks` refuses under plain git too, so it isolates the
     cleanup from SG-R5's choice of hooks; `branch-rewrites-hooks` is the
     same refusal reached only because the base's hooks are the ones run."""
     fx = build(tmp_path, absolute=absolute, base_exit=1, branch_rewrites_hooks=rewrites)
+    make_conflict(fx)
     repo = fx["repo"]
     before = _tree_snapshot(repo)
 
     status, detail = gitops.merge(repo, "agent", "merge agent", style=style)
 
-    assert status != "merged", f"a refusing base hook must stop the merge: {detail}"
-    assert BASE_PRE_COMMIT in log_lines(fx["log"]), "control: the base hook must have refused"
+    assert status == "conflict", detail
+    assert BASE_PRE_COMMIT not in log_lines(fx["log"]), "a hook ran during conflict handling"
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == fx["base_head"], "HEAD moved"
     assert git(repo, "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/main", \
         "the base checkout no longer has main checked out"
@@ -282,18 +287,19 @@ def test_sg_r5_a_merge_refused_by_a_base_hook_leaves_the_base_checkout_as_it_was
     status_out = git(repo, "status", "--porcelain", "--untracked-files=all").stdout
     assert not status_out.strip(), f"the base checkout is not clean after a refusal:\n{status_out}"
     assert _tree_snapshot(repo) == before, "the working tree was not restored"
-    assert (repo / "app.txt").read_text() == "base\n"
+    assert (repo / "app.txt").read_text() == "base changed\n"
     assert git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode != 0, \
         "a merge is left in progress on the base"
 
 
 @pytest.mark.parametrize("rewrites", BRANCH_HOOKS)
 @pytest.mark.parametrize("style", STYLES)
-def test_sg_r5_after_a_refused_merge_the_base_can_commit_normally(tmp_path, style, rewrites):
+def test_hg_r7_after_a_conflicted_merge_the_base_can_commit_normally(tmp_path, style, rewrites):
     """The refusal must not leave a half-merge the user's next commit picks
     up: a commit made on the base afterwards carries only what the user
     staged, not the branch's changes."""
     fx = build(tmp_path, base_exit=1, branch_rewrites_hooks=rewrites)
+    make_conflict(fx)
     repo = fx["repo"]
     status, detail = gitops.merge(repo, "agent", "merge agent", style=style)
     assert status != "merged", detail
