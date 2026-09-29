@@ -33,7 +33,7 @@ import tempfile
 import textwrap
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,8 @@ from .paths import ProjectPaths, global_config_dir, state_root
 from .providers import Event, Provider, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
+from .authority import HostAuthority
+from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
 from .tree import TERMINAL, Node, Tree, new_id, node_from_raw, now
 from .transcripts import session_transcript
@@ -452,7 +454,29 @@ class Runner:
         self.providers = load_providers(config.providers)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.runs: dict[str, Run] = {}
-        reap_pending_branches(paths.root, self.tree)
+        self.authority = (None if DockerExecutor({}, paths, {}, state_root()).inside()
+                          else HostAuthority(paths, self.tree))
+        reap_pending_branches(paths.root, self.tree, self.authority)
+
+    def authoritative(self, node: Node, action: str) -> Node | None:
+        """Use recorded operands, reporting container-written disagreements once."""
+        if self.authority is None:
+            return node
+        record = self.authority.get(node.id)
+        if record is None:
+            return node
+        fields = [key for key in ("branch", "worktree", "parent")
+                  if getattr(node, key) != record.get(key)]
+        if fields:
+            self.tree.emit(node.id, "host_authority_mismatch", action=action,
+                           node=node.id, fields=fields)
+        return replace(node, **{key: record.get(key) or "" if key != "parent"
+                                else record.get(key)
+                                for key in ("branch", "worktree", "parent")})
+
+    def mismatch(self, node_id: str, action: str, fields: list[str], reason: str = "") -> None:
+        self.tree.emit(node_id, "host_authority_mismatch", action=action,
+                       node=node_id, fields=fields, reason=reason)
 
     def reload(self, config: Config) -> None:
         """Swap in a freshly loaded config and everything derived from it.
@@ -1601,7 +1625,7 @@ class Runner:
             base = self.config.base_branch or gitops.current_branch(repo)
             desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
             worktree_path = self.paths.worktree(node_id)
-            branch = gitops.create_worktree(repo, worktree_path, desired, base)
+            branch = gitops.unique_branch(repo, desired)
 
         node = Node(
             id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
@@ -1612,6 +1636,10 @@ class Runner:
             routed_from=routed_from, routed_why=routed_why,
             session=self.session(),
         )
+        if self.authority:
+            self.authority.add(node)
+        if not workdir:
+            gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
         self.tree.add(node)
         if routed_from:
             # Loud enough to find later. This decision changes which model does
@@ -2450,6 +2478,11 @@ class Runner:
         node = self.tree.get(node_id)
         if node is None or not node.branch or spec.writes or spec.conversational:
             return                            # a live conversation keeps its worktree
+        if self.authority:
+            record = self.authority.get(node_id)
+            if record and record["seeded"]:
+                return
+            node = self.authoritative(node, "drop_if_empty")
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         root = self.paths.root
         try:
@@ -2458,7 +2491,9 @@ class Runner:
             self.git_unreadable(node_id, root, exc)
             return                            # unread is not empty: kept
         if commits == 0:
-            pending = self._cleanup(node)
+            pending = self._cleanup(node, completion="discarded")
+            if pending is None:
+                return
             # A branch the container could not delete stays on the node until
             # the host has deleted it (SG-R2), which then clears it.
             self.tree.update(node_id, worktree="",
@@ -2628,18 +2663,56 @@ class Runner:
         Called once this agent's own run has ended and its worktree has been
         committed, so nothing lands under it mid-task.
         """
+        parent = self.tree.get(node_id)
+        if self.authority and parent:
+            record = self.authority.get(node_id)
+            if not record or record["seeded"]:
+                return
         for child in self.tree.children_of(node_id):
             if child.status == "done" and child.branch:
-                await self._maybe_merge_into_parent(child.id)
+                await self._maybe_merge_into_parent(child.id, pending=True,
+                                                    ending_parent=node_id)
 
-    async def _maybe_merge_into_parent(self, node_id: str) -> None:
+    async def _maybe_merge_into_parent(self, node_id: str, pending: bool = False,
+                                       ending_parent: str | None = None) -> None:
         node = self.tree.get(node_id)
         if not node or not node.branch or not node.parent:
             return                            # depth-1 lands via explicit merge
         policy = self.config.project.get("git", {}).get("merge", {})
         if policy.get("inside_tree", "auto") != "auto":
             return
+        # Deferral performs no mutation. Keep it available for pre-upgrade and
+        # nested nodes even when their eventual merge needs host validation.
+        pending_parent = self.tree.get(node.parent)
+        if pending_parent is not None and pending_parent.status in {"pending", "running"}:
+            self.tree.emit(node_id, "merge_deferred", parent=pending_parent.id,
+                           reason="parent is still working in that worktree")
+            return
+        action = "merge_pending_children" if pending else "auto_merge"
+        if ending_parent is not None and node.parent != ending_parent:
+            self.mismatch(node.id, action, ["parent"], "child is not linked to ending parent")
+            return
+        if self.authority:
+            record = self.authority.get(node.id)
+            if record:
+                if record["seeded"] or record.get("parent") != node.parent:
+                    self.mismatch(node.id, action, ["parent"], "untrusted parent")
+                    return
+                node = self.authoritative(node, action)
+            elif (not node.branch.startswith("agents/") or
+                  self.authority.owns_branch(node.branch)):
+                self.mismatch(node.id, action, ["branch"], "untrusted child branch")
+                return
+            parent_record = self.authority.get(node.parent)
+            if not parent_record or parent_record["seeded"]:
+                self.mismatch(node.id, action, ["parent"], "parent is not host-recorded")
+                return
         parent = self.tree.get(node.parent)
+        if self.authority and parent:
+            parent_record = self.authority.get(parent.id)
+            parent = replace(parent, branch=parent_record["branch"],
+                             worktree=parent_record["worktree"],
+                             parent=parent_record["parent"])
 
         # Never merge into a worktree an agent is actively using. Even with the
         # dirty-tree guard in gitops.merge — which only refuses when there are
@@ -2654,26 +2727,74 @@ class Runner:
         target = Path(parent.worktree) if parent and parent.worktree else self.paths.root
         if not target.is_dir():
             return
-        status, detail = gitops.merge(
-            target, node.branch, f"{node.agent}: {node.task[:72]}",
-            policy.get("style", "squash"),
-        )
+        merged_sha = ""
+        if self.authority:
+            try:
+                with self.authority.pinned_worktree(target) as pinned:
+                    status, detail = gitops.merge(
+                        pinned, node.branch, f"{node.agent}: {node.task[:72]}",
+                        policy.get("style", "squash"),
+                    )
+                    if status == "merged":
+                        merged_sha = gitops.head_sha(pinned)
+            except (OSError, ValueError):
+                self.mismatch(node.id, action, ["worktree"],
+                              "parent worktree could not be pinned")
+                return
+        else:
+            status, detail = gitops.merge(
+                target, node.branch, f"{node.agent}: {node.task[:72]}",
+                policy.get("style", "squash"),
+            )
+            if status == "merged":
+                merged_sha = gitops.head_sha(target)
         self.tree.emit(node_id, "merge", result=status, detail=detail[:400], into=str(target))
         if status == "merged":
             self.tree.set_status(node_id, "merged")
-            self._cleanup(node)
+            self._cleanup(node, completion="merged", commit=merged_sha)
         elif status == "conflict":
             self.tree.set_status(node_id, "done", "merge conflict; branch kept for parent")
 
-    def _cleanup(self, node: Node) -> bool:
+    def _cleanup(self, node: Node, *, completion: str = "",
+                 commit: str = "") -> bool | None:
         """Remove a finished agent's worktree and branch.
 
         Only ever called after a successful merge or an explicit discard, so
         force-deleting the branch is safe: its commits are already elsewhere.
         True when the branch is left for the host to delete (SG-R2).
         """
-        if node.worktree and Path(node.worktree).is_dir():
-            gitops.remove_worktree(self.paths.root, Path(node.worktree), force=True)
+        if self.authority:
+            record = self.authority.get(node.id)
+            if record:
+                node = replace(node, branch=record["branch"], worktree=record["worktree"])
+                if not (record["completion"] or completion):
+                    return None
+            else:
+                if node.worktree and not self.authority.safe_nested_path(Path(node.worktree)):
+                    self.mismatch(node.id, "cleanup", ["worktree"], "outside worktree domain")
+                    return None
+                if node.branch and (not node.branch.startswith("agents/") or
+                                    self.authority.owns_branch(node.branch)):
+                    self.mismatch(node.id, "cleanup", ["branch"], "protected branch")
+                    return None
+        if node.branch and (not node.branch.startswith("agents/") or
+                            not gitops.run(self.paths.root, "check-ref-format",
+                                           f"refs/heads/{node.branch}").ok):
+            if self.authority:
+                self.mismatch(node.id, "cleanup", ["branch"],
+                              "branch is outside agents namespace")
+            return None
+        if node.worktree:
+            worktree = Path(node.worktree)
+            if self.authority and (worktree.exists() or worktree.is_symlink()):
+                if not self.authority.remove_worktree(worktree, recorded=bool(record)):
+                    self.mismatch(node.id, "cleanup", ["worktree"],
+                                  "worktree could not be removed within its authorised path")
+                    return None
+            elif worktree.is_dir():
+                gitops.remove_worktree(self.paths.root, worktree, force=True)
+        if self.authority and record and completion:
+            self.authority.complete(node.id, completion, commit)
         if node.branch:
             result = gitops.delete_branch(self.paths.root, node.branch, force=True)
             if gitops.refused_by_packed_refs_lock(result):
@@ -3117,6 +3238,14 @@ class Runner:
         node = self.tree.get(agent_id)
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
+        node = self.authoritative(node, "steer")
+        if self.authority and not self.authority.get(agent_id):
+            operand = Path(node.worktree) if node.worktree else self.paths.worktree(agent_id)
+            if not self.authority.safe_nested_path(operand):
+                self.mismatch(agent_id, "steer", ["worktree"],
+                              "unrecorded worktree is outside the container domain")
+                return {"agent_id": agent_id, "steered": False,
+                        "error": "unrecorded worktree is outside the container domain"}
         if not node.session_id:
             return {
                 "agent_id": agent_id, "steered": False,
@@ -3238,6 +3367,8 @@ class Runner:
                 # exactly that name and never a suffixed one.
                 base = self.config.base_branch or gitops.current_branch(self.paths.root)
                 try:
+                    if self.authority and self.authority.get(agent_id):
+                        self.authority.rebind(agent_id, own, workdir)
                     branch = gitops.create_worktree(self.paths.root, workdir, own,
                                                     base, unique=False)
                 except gitops.GitError as exc:
@@ -3651,18 +3782,21 @@ class Runner:
             depth = self.self_depth() + 1
             node_id = new_id()
             worktree_path = self.paths.worktree(node_id)
-            branch = gitops.create_worktree(
-                self.paths.root, worktree_path,
-                f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}",
-                base,
-            )
-            head = gitops.head_sha(worktree_path)
+            branch = gitops.unique_branch(
+                self.paths.root,
+                f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}")
             node = Node(
                 id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
                 parent=parent, depth=depth, task=message[:500], branch=branch,
                 worktree=str(worktree_path), status="pending", conversation=True,
-                session=self.session(), placed_on=head,
+                session=self.session(),
             )
+            if self.authority:
+                self.authority.add(node)
+            gitops.create_worktree(self.paths.root, worktree_path, branch, base,
+                                   unique=False)
+            head = gitops.head_sha(worktree_path)
+            node = replace(node, placed_on=head)
             self.tree.add(node)
             prompt = self.compose_prompt(spec, message, node, worktree_path)
             session_id = None
@@ -3677,6 +3811,15 @@ class Runner:
                                provider=provider.name)
         else:
             node_id = node.id
+            node = self.authoritative(node, "conversation_refresh")
+            if self.authority and not self.authority.get(node_id):
+                operand = (Path(node.worktree) if node.worktree
+                           else self.paths.worktree(node_id))
+                if not self.authority.safe_nested_path(operand):
+                    self.mismatch(node_id, "conversation_refresh", ["worktree"],
+                                  "unrecorded worktree is outside the container domain")
+                    return self._consult_result(agent_name, node_id, None,
+                                                error="unrecorded worktree is outside the container domain")
             turn = node.turns + 1
             worktree_path = Path(node.worktree)
             prompt = message
@@ -3709,10 +3852,14 @@ class Runner:
             if not worktree_path.is_dir() and gitops.is_repo(self.paths.root):
                 recreated = True
                 worktree_path = self.paths.worktree(node_id)
+                desired = (f"{self.config.branch_prefix}/{agent_name}/"
+                           f"{node_id.removeprefix('ag-')}")
+                branch = gitops.unique_branch(self.paths.root, desired)
+                if self.authority and self.authority.get(node_id):
+                    self.authority.rebind(node_id, branch, worktree_path)
                 branch = gitops.create_worktree(
                     self.paths.root, worktree_path,
-                    f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}",
-                    base,
+                    branch, base, unique=False,
                 )
                 head = gitops.head_sha(worktree_path)
                 self.tree.update(node_id, worktree=str(worktree_path), branch=branch,
@@ -4101,6 +4248,17 @@ class Runner:
         node = self.tree.get(agent_id)
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
+        node = self.authoritative(node, "merge_agent")
+        if self.authority and not self.authority.get(agent_id) and node.worktree:
+            if not self.authority.safe_nested_path(Path(node.worktree)):
+                self.mismatch(agent_id, "merge_agent", ["worktree"],
+                              "unrecorded worktree is outside the container domain")
+                return {"agent_id": agent_id, "result": "blocked",
+                        "detail": "unrecorded worktree is outside the container domain"}
+        if self.authority:
+            record = self.authority.get(agent_id)
+            if record and record["seeded"] and record.get("worktree") and not self.authority.safe_seeded_path(Path(record["worktree"])):
+                return {"agent_id": agent_id, "result": "blocked", "detail": "seeded worktree is quarantined"}
         if not node.branch:
             return {"agent_id": agent_id, "merged": False, "error": "agent has no branch (writes: false)"}
         target = Path(into).expanduser() if into else self.paths.root
@@ -4162,8 +4320,8 @@ class Runner:
         self.tree.emit(agent_id, "merge", result=status, detail=detail[:400], into=str(target))
         if status == "merged":
             self.tree.set_status(agent_id, "merged")
-            self._cleanup(node)
-        reap_pending_branches(self.paths.root, self.tree)
+            self._cleanup(node, completion="merged", commit=gitops.head_sha(target))
+        reap_pending_branches(self.paths.root, self.tree, self.authority)
         payload = {"agent_id": agent_id, "result": status, "detail": detail[:1000],
                    "branch": node.branch}
         if reverted:
@@ -4181,6 +4339,18 @@ class Runner:
         node = self.tree.get(agent_id)
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
+        node = self.authoritative(node, "discard_agent")
+        if self.authority and not self.authority.get(agent_id) and node.worktree:
+            if not self.authority.safe_nested_path(Path(node.worktree)):
+                self.mismatch(agent_id, "discard_agent", ["worktree"],
+                              "unrecorded worktree is outside the container domain")
+                return {"agent_id": agent_id, "discarded": False,
+                        "error": "unrecorded worktree is outside the container domain"}
+        if self.authority:
+            record = self.authority.get(agent_id)
+            if record and record["seeded"] and record.get("worktree") and not self.authority.safe_seeded_path(Path(record["worktree"])):
+                self.mismatch(agent_id, "discard_agent", ["worktree"], "seeded worktree is quarantined")
+                return {"agent_id": agent_id, "discarded": False, "error": "seeded worktree is quarantined"}
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         try:
             unmerged = (gitops.commits_on(self.paths.root, node.branch, base,
@@ -4199,9 +4369,11 @@ class Runner:
                 "error": f"branch has {unmerged} unmerged commit(s). Pass force=true to "
                          f"delete this work permanently.",
             }
-        self._cleanup(node)
+        if self._cleanup(node, completion="discarded") is None:
+            return {"agent_id": agent_id, "discarded": False,
+                    "error": "worktree or branch could not be cleaned safely"}
         self.tree.set_status(agent_id, "discarded", "discarded by parent")
-        reap_pending_branches(self.paths.root, self.tree)
+        reap_pending_branches(self.paths.root, self.tree, self.authority)
         return {"agent_id": agent_id, "discarded": True, "branch": node.branch}
 
     def push_branch(self, agent_id: str | None, remote: str | None = None) -> dict[str, Any]:
@@ -4212,6 +4384,7 @@ class Runner:
             node = self.tree.get(agent_id)
             if node is None or not node.branch:
                 return {"pushed": False, "error": f"no branch for {agent_id!r}"}
+            node = self.authoritative(node, "push_branch")
             if not self.config.push_agent_branches:
                 return {
                     "pushed": False,
@@ -4240,7 +4413,8 @@ def _branch_released(node: dict) -> bool:
     return True
 
 
-def reap_pending_branches(root: Path, tree: Tree) -> int:
+def reap_pending_branches(root: Path, tree: Tree,
+                          authority: HostAuthority | None = None) -> int:
     """Delete the branches a container could not (SG-R2), and clear the marks.
 
     `tree.json` is written by the container too, so a mark is only a request.
@@ -4251,6 +4425,8 @@ def reap_pending_branches(root: Path, tree: Tree) -> int:
     branch is gone, the mark and the node's `branch` are both cleared. Never
     raises: it runs on every Runner start. Returns how many were cleared.
     """
+    if authority is None and not DockerExecutor({}, ProjectPaths(root), {}, state_root()).inside():
+        authority = HostAuthority(ProjectPaths(root), tree)
     try:
         nodes = tree.read().get("nodes", {})
     except Exception:
@@ -4264,9 +4440,15 @@ def reap_pending_branches(root: Path, tree: Tree) -> int:
     cleared = 0
     for node_id, node in marked:
         branch = node.get("branch_pending_delete")
-        if (not isinstance(branch, str) or branch != node.get("branch")
-                or not _branch_released(node) or branch in held
+        record = authority.get(node_id) if authority else None
+        completed = bool(record and record.get("completion") and
+                         record.get("branch") == branch)
+        if (not isinstance(branch, str) or
+                (not completed and branch != node.get("branch"))
+                or not _branch_released(node) or (branch in held and not completed)
                 or not branch.startswith("agents/")):
+            continue
+        if authority and authority.owns_branch(branch) and not completed:
             continue
         try:
             if not gitops.run(root, "check-ref-format", f"refs/heads/{branch}").ok:

@@ -888,6 +888,13 @@ class DockerExecutor(Executor):
             if root not in listed:
                 mounts.append((root, True))
                 listed.add(root)
+        from ..authority import HostAuthority
+        authority = HostAuthority.directory_for(self.paths).resolve()
+        for source, _ in mounts:
+            mounted = source.resolve()
+            if (mounted == authority or mounted in authority.parents
+                    or authority in mounted.parents):
+                raise ValueError(f"mount {source} would expose host authority records")
         return mounts
 
     def _adapter_paths(self) -> list[Path]:
