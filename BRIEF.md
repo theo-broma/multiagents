@@ -147,6 +147,29 @@ default, so work can proceed):
       2. `docker rm` does not restart the auth sidecar;
       3. deferred tasks restart on a provider that just failed
          (opencode), which re-pauses the tree.
+  - 2026-09-29, around 07:50 UTC: **claude in the container is still 401**
+    ("OAuth access token has expired") after all of the following:
+    - `a` and `b` re-logged from two browsers, confirmed on REDACTED;
+    - a workspace recreate;
+    - an auth sidecar recreate;
+    - the user clearing the claude cooldown and pause in `tree.json`.
+
+    What is known:
+    - The sidecar logs only `listening`. It is unknown whether it logs each
+      request.
+    - The workspace env has `ANTHROPIC_BASE_URL`, and `docker exec
+      --env-file` inherits it.
+    - Researcher ag-f9a508 blamed a missing `ANTHROPIC_BASE_URL`. That is
+      **not confirmed**: the container env has it.
+
+    Open, for a bug-reporter on a working provider:
+    - does the sidecar get the request at all;
+    - which vault (`shared` or project scope) did the login write to;
+    - can a read-only vault mount block the token refresh.
+
+    Temporary config:
+    - `limits.provider_down_cooldown_seconds: 10` is set at the user's
+      request, for testing. **Remove it afterwards.**
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
