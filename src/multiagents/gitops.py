@@ -18,6 +18,7 @@ The parent performs every operation here. Subagents only commit.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import shutil
@@ -30,6 +31,77 @@ from pathlib import Path
 
 class GitError(RuntimeError):
     pass
+
+
+_host_context: contextvars.ContextVar[tuple[list[str], dict[str, str]] | None] = contextvars.ContextVar(
+    "host_git_context", default=None)
+
+
+def _content_disable_args(root: Path) -> list[str]:
+    config_env = dict(os.environ)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        config_env.pop(key, None)
+    keys = subprocess.run(
+        ["git", "-C", str(root), "config", "--name-only", "--get-regexp",
+         r"^(filter\..*\.(clean|smudge|process|required)|merge\..*\.driver|diff\..*\.textconv|diff\.external)$"],
+        capture_output=True, text=True, env=config_env,
+    )
+    return [item for key in keys.stdout.splitlines()
+            for item in ("-c", f"{key}={'false' if key.endswith('.required') else ''}")] + [
+        "-c", "diff.external="]
+
+
+@contextlib.contextmanager
+def _host_scope(repo: Path, *, root: Path | None = None,
+                hooks: bool = False, content: bool = False,
+                branch: str = ""):
+    """Use trusted repository metadata for a host Git transaction.
+
+    A linked checkout's .git, commondir and config.worktree are all writable
+    by its agent. A private gitdir retains the real HEAD and index while
+    obtaining config and refs solely from the base repository.
+    """
+    root = Path(root or repo).resolve()
+    checkout = Path(repo)
+    repo = checkout.resolve()
+    common = root / ".git"
+    if not common.is_dir():
+        raise GitError(f"no trusted git directory at {common}")
+    with tempfile.TemporaryDirectory(prefix="multiagents-host-git-") as tmp:
+        args = ["-c", "core.fsmonitor=false"]
+        if not hooks:
+            empty_hooks = Path(tmp) / "hooks"
+            empty_hooks.mkdir()
+            args += ["-c", f"core.hooksPath={empty_hooks}"]
+        if not content:
+            args += _content_disable_args(root)
+        env: dict[str, str] = {"GIT_DIR": str(common), "GIT_WORK_TREE": str(root),
+                               "GIT_COMMON_DIR": str(common)}
+        if repo != root:
+            actual = common / "worktrees" / repo.name
+            head = _read_regular(actual / "HEAD", 4096)
+            if head is None or not actual.is_dir() or actual.is_symlink():
+                raise GitError(f"no trusted worktree metadata for {repo}")
+            if branch and head.decode(errors="replace").strip() != f"ref: refs/heads/{branch}":
+                raise GitError("host_authority_mismatch: worktree HEAD differs from host record")
+            registered = _registration_branch(root, repo, branch)
+            if registered is not None and branch and registered != branch:
+                raise GitError("host_authority_mismatch: worktree registration differs from host record")
+            private = Path(tmp) / "gitdir"
+            private.mkdir()
+            (private / "HEAD").write_bytes(head)
+            (private / "commondir").write_text(f"{common}\n")
+            index = actual / "index"
+            if index.is_symlink() or (index.exists() and not index.is_file()):
+                raise GitError(f"unreadable index for {repo}")
+            env = {"GIT_DIR": str(private), "GIT_WORK_TREE": str(checkout),
+                   "GIT_COMMON_DIR": str(common), "GIT_INDEX_FILE": str(index),
+                   "GIT_OPTIONAL_LOCKS": "0"}
+        token = _host_context.set((args, env))
+        try:
+            yield
+        finally:
+            _host_context.reset(token)
 
 
 @dataclass
@@ -45,10 +117,22 @@ class GitResult:
 
 def run(repo: Path, *args: str, check: bool = False, timeout: int = 120,
         env: dict[str, str] | None = None, strip: bool = True) -> GitResult:
+    host = _host_context.get()
+    if host:
+        prefix, host_env = host
+        args = (*prefix, *args)
+        actual_env = dict(os.environ)
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                    "GIT_EXTERNAL_DIFF"):
+            actual_env.pop(key, None)
+        actual_env.update(host_env)
+        actual_env.update(env or {})
+    else:
+        actual_env = {**os.environ, **env} if env else None
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True, text=True, timeout=timeout,
-        env={**os.environ, **env} if env else None,
+        env=actual_env,
     )
     out = proc.stdout.strip() if strip else proc.stdout
     result = GitResult(proc.returncode == 0, out, proc.stderr.strip(), proc.returncode)
@@ -86,8 +170,11 @@ class Git:
 HOST = Git()
 
 
-def is_repo(path: Path) -> bool:
-    return run(path, "rev-parse", "--git-dir").ok
+def is_repo(path: Path, *, root: Path | None = None) -> bool:
+    try:
+        return _read(path, root, "rev-parse", "--git-dir").ok
+    except GitError:
+        return False
 
 
 def init_repo(path: Path) -> GitResult:
@@ -359,6 +446,7 @@ def _pinned(repo: Path, root: Path | None):
                "GIT_INDEX_FILE": str(private / "index"),
                "GIT_OPTIONAL_LOCKS": "0"}
         args = ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={hooks}"]
+        args += _content_disable_args(root)
         yield args, env
 
 
@@ -473,7 +561,8 @@ def create_worktree(repo: Path, path: Path, branch: str, base: str = "",
     args = ["worktree", "add", str(path), "-b", branch]
     if base:
         args.append(base)
-    run(repo, *args, check=True, timeout=300)
+    with _host_scope(repo):
+        run(repo, *args, check=True, timeout=300)
     return branch
 
 
@@ -489,19 +578,29 @@ def attach_worktree(repo: Path, path: Path, branch: str) -> None:
     ensure_repo(repo)
     if not branch_exists(repo, branch):
         raise GitError(f"branch {branch!r} no longer exists")
-    run(repo, "worktree", "prune")
+    # Git's global prune can act on another agent's registration. Only the
+    # branch's own stale entry may be removed during recovery.
+    _prune_path(repo, path, branch)
     path.parent.mkdir(parents=True, exist_ok=True)
-    run(repo, "worktree", "add", str(path), branch, check=True, timeout=300)
+    with _host_scope(repo):
+        run(repo, "worktree", "add", str(path), branch, check=True, timeout=300)
+    with _host_scope(path, root=repo):
+        filtered = _filtered_paths(path, HOST, all_paths=True)
+    if filtered:
+        print("Host checkout left filtered paths unconverted: " + ", ".join(filtered[:50]))
 
 
-def worktree_branch(path: Path) -> str | None:
+def worktree_branch(path: Path, *, root: Path | None = None) -> str | None:
     """The branch checked out in the worktree whose top level is `path`.
 
     None when `path` is not the top of a git checkout at all — missing, a
     plain directory, or a subdirectory of some other repository, which git
     would happily answer for. "" for a detached HEAD.
     """
-    top = run(path, "rev-parse", "--show-toplevel")
+    try:
+        top = _read(path, root, "rev-parse", "--show-toplevel")
+    except GitError:
+        return None
     if not top.ok or not top.out:
         return None
     try:
@@ -509,7 +608,10 @@ def worktree_branch(path: Path) -> str | None:
             return None
     except OSError:
         return None
-    head = run(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    try:
+        head = _read(path, root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    except GitError:
+        return None
     return head.out if head.ok else ""
 
 
@@ -539,7 +641,11 @@ def move_aside(repo: Path, path: Path) -> Path:
     target = holder / path.name
     try:
         if not path.is_symlink() and _registered_worktree(repo, path):
-            moved = run(repo, "worktree", "move", str(path), str(target), timeout=300)
+            branch = _registration_branch(repo, path)
+            if not branch:
+                raise GitError("host_authority_mismatch: worktree registration is ambiguous")
+            with _host_scope(repo):
+                moved = run(repo, "worktree", "move", str(path), str(target), timeout=300)
             if not moved.ok:
                 raise GitError(f"git worktree move {path} failed: "
                                f"{moved.err or moved.out}")
@@ -576,14 +682,72 @@ def _registered_worktree(repo: Path, path: Path) -> bool:
     return False
 
 
+def _prune_path(repo: Path, path: Path, branch: str = "") -> None:
+    """Remove only a stale registration for this path and branch."""
+    if branch:
+        _registration_branch(repo, path, branch)
+    if path.exists():
+        return
+    registrations = Path(repo) / ".git" / "worktrees"
+    if not registrations.is_dir():
+        return
+    matches: list[Path] = []
+    for entry in registrations.iterdir():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        marker = _read_regular(entry / "gitdir", 4096)
+        head = _read_regular(entry / "HEAD", 4096)
+        if marker is None or head is None:
+            continue
+        if Path(marker.decode(errors="replace").strip()).resolve() != (path / ".git").resolve():
+            continue
+        held = head.decode(errors="replace").strip()
+        if branch and held != f"ref: refs/heads/{branch}":
+            raise GitError("host_authority_mismatch: worktree registration branch differs")
+        matches.append(entry)
+    if len(matches) > 1:
+        raise GitError("host_authority_mismatch: duplicate worktree registration")
+    for entry in matches:
+        shutil.rmtree(entry)
+
+
+def _registration_branch(repo: Path, path: Path, expected_branch: str = "") -> str | None:
+    registrations = Path(repo) / ".git" / "worktrees"
+    matches: list[str] = []
+    if not registrations.is_dir():
+        return None
+    for entry in registrations.iterdir():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        marker = _read_regular(entry / "gitdir", 4096)
+        head = _read_regular(entry / "HEAD", 4096)
+        if marker is None or head is None:
+            continue
+        value = head.decode(errors="replace").strip()
+        marker_path = Path(marker.decode(errors="replace").strip()).resolve()
+        expected_path = (path / ".git").resolve()
+        if (expected_branch and value == f"ref: refs/heads/{expected_branch}"
+                and marker_path != expected_path):
+            raise GitError("host_authority_mismatch: recorded branch points at another worktree")
+        if marker_path == expected_path:
+            if not value.startswith("ref: refs/heads/"):
+                raise GitError("host_authority_mismatch: detached worktree registration")
+            matches.append(value.removeprefix("ref: refs/heads/"))
+    if len(matches) > 1:
+        raise GitError("host_authority_mismatch: duplicate worktree registration")
+    return matches[0] if matches else None
+
+
 def remove_worktree(repo: Path, path: Path, force: bool = False) -> GitResult:
+    _registration_branch(repo, path)
     args = ["worktree", "remove", str(path)]
     if force:
         args.insert(2, "--force")
-    result = run(repo, *args, timeout=180)
+    with _host_scope(repo):
+        result = run(repo, *args, timeout=180)
     if not result.ok:
         # A directory deleted by hand leaves a stale registration behind.
-        run(repo, "worktree", "prune")
+        _prune_path(repo, path)
     return result
 
 
@@ -609,11 +773,19 @@ def owning_repo(worktree: Path) -> Path | None:
 
 
 def prune_worktrees(repo: Path) -> GitResult:
-    return run(repo, "worktree", "prune")
+    # No unscoped prune: the registry is agent writable, and a forged gitdir
+    # in a sibling entry could cause Git to act outside the requested node.
+    return GitResult(True, "", "", 0)
+
+
+def prune_worktree(repo: Path, path: Path, branch: str) -> GitResult:
+    _prune_path(repo, path, branch)
+    return GitResult(True, "", "", 0)
 
 
 def delete_branch(repo: Path, branch: str, force: bool = False) -> GitResult:
-    return run(repo, "branch", "-D" if force else "-d", branch)
+    with _host_scope(repo):
+        return run(repo, "branch", "-D" if force else "-d", branch)
 
 
 def refused_by_packed_refs_lock(result: GitResult) -> bool:
@@ -901,7 +1073,8 @@ def _identity_fallback_args(worktree: Path, name: str, email: str,
 
 def commit_all(worktree: Path, message: str, *,
                role: str | None = None, agent_id: str | None = None,
-               git: Git = HOST) -> GitResult:
+               git: Git = HOST, root: Path | None = None,
+               branch: str = "") -> GitResult:
     """Commit whatever an agent left uncommitted, so no work is stranded.
 
     CI-R1: falls back to an identity naming the agent when none is
@@ -917,6 +1090,48 @@ def commit_all(worktree: Path, message: str, *,
     the agent's hooks, so an executor with a sandbox passes its own `Git` and
     they run in there; the hook trace is written where both sides reach it.
     """
+    if git is HOST and root is not None:
+        with _host_scope(worktree, root=root, branch=branch):
+            return _commit_all(worktree, message, role=role, agent_id=agent_id,
+                               git=git, host_bookkeeping=True)
+    return _commit_all(worktree, message, role=role, agent_id=agent_id, git=git)
+
+
+def _filtered_paths(worktree: Path, git: Git, *, all_paths: bool = False) -> list[str]:
+    commands = (["ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+                if all_paths else None)
+    if commands is not None:
+        results = [git.run(worktree, *commands, strip=False)]
+    else:
+        results = [git.run(worktree, "diff", "--name-only", "-z", strip=False),
+                   git.run(worktree, "diff", "--cached", "--name-only", "-z", strip=False),
+                   git.run(worktree, "ls-files", "--others", "--exclude-standard", "-z",
+                           strip=False)]
+    if any(not result.ok for result in results):
+        raise GitError("could not inspect paths before host commit")
+    paths = sorted({name for result in results for name in result.out.split("\0") if name})
+    found: list[str] = []
+    for path in paths:
+        if not (worktree / path).is_file():
+            continue
+        result = git.run(worktree, "check-attr", "-z", "filter", "--", path,
+                         strip=False)
+        if not result.ok:
+            raise GitError(f"could not inspect filter attribute for {path}")
+        parts = result.out.split("\0")
+        if len(parts) >= 3 and parts[2] not in ("unspecified", "unset", ""):
+            found.append(path)
+    return found
+
+
+def _commit_all(worktree: Path, message: str, *, role: str | None,
+                agent_id: str | None, git: Git,
+                host_bookkeeping: bool = False) -> GitResult:
+    if host_bookkeeping:
+        filtered = _filtered_paths(worktree, git)
+        if filtered:
+            names = ", ".join(filtered[:50])
+            return GitResult(False, "", f"refused host commit for filtered paths: {names}", 1)
     # CI-R2: a failed `git add` is a failed commit. Ignored, it left the work
     # unstaged and the staged diff empty, which then read as a clean tree.
     added = git.run(worktree, "add", "-A")
@@ -932,7 +1147,7 @@ def commit_all(worktree: Path, message: str, *,
         git,
     )
     args = ("-c", "commit.gpgsign=false", *extra, "commit", "-m", message)
-    hooks = _active_commit_hooks(worktree, git)
+    hooks = [] if host_bookkeeping else _active_commit_hooks(worktree, git)
     if not hooks:
         return git.run(worktree, *args)
     # CI-R5: whether a hook is what refused it. Git prints nothing of its own
@@ -1080,7 +1295,10 @@ def _undo_merge(repo: Path, hooks: list[str]) -> None:
         Path(squash_msg.out).unlink(missing_ok=True)
 
 
-def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple[str, str]:
+def merge(repo: Path, branch: str, message: str, style: str = "squash", *,
+          root: Path | None = None, host_hooks: bool = False,
+          host_content_programs: bool = False,
+          target_branch: str = "") -> tuple[str, str]:
     """Merge `branch` into whatever `repo` currently has checked out.
 
     Returns ``(status, detail)`` where status is ``merged``, ``empty``,
@@ -1091,12 +1309,16 @@ def merge(repo: Path, branch: str, message: str, style: str = "squash") -> tuple
     :func:`_base_hooks`). A merge a hook refuses leaves the base checkout as
     it was: HEAD unchanged, nothing staged, the working tree restored.
     """
-    if is_dirty(repo):
-        return "failed", "target worktree has uncommitted changes; commit or stash first"
     try:
-        with _base_hooks(repo) as hooks:
-            return _merge(repo, branch, message, style, hooks)
-    except OSError as exc:
+        with _host_scope(repo, root=root, hooks=host_hooks,
+                         content=host_content_programs, branch=target_branch):
+            if is_dirty(repo):
+                return "failed", "target worktree has uncommitted changes; commit or stash first"
+            if host_hooks:
+                with _base_hooks(repo) as hooks:
+                    return _merge(repo, branch, message, style, hooks)
+            return _merge(repo, branch, message, style, [])
+    except (OSError, GitError) as exc:
         return "failed", f"could not set the base's hooks aside: {exc}"
 
 
@@ -1131,4 +1353,5 @@ def push(repo: Path, remote: str, branch: str) -> GitResult:
     finishing a run, because publishing is not reversible."""
     if not remote:
         return GitResult(False, "", "no remote configured (git.remote is empty)", 1)
-    return run(repo, "push", "-u", remote, branch, timeout=600)
+    with _host_scope(repo, content=True):
+        return run(repo, "push", "-u", remote, branch, timeout=600)

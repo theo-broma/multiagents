@@ -961,12 +961,16 @@ def _save_interrupted(node, root: Path | None = None,
         pinned = (authority.pinned_worktree(worktree) if authority and node.branch
                   else contextlib.nullcontext(worktree))
         with pinned as checkout:
-            if not gitops.is_repo(checkout):
+            if not gitops.is_repo(checkout, root=root):
                 return False
             if not gitops.is_dirty(checkout, root=root):   # SG-R4
                 return False
             result = gitops.commit_all(checkout, INTERRUPTED_COMMIT.format(
-                agent=node.agent, agent_id=node.id))
+                agent=node.agent, agent_id=node.id), root=root, branch=node.branch)
+            if not result.ok and "filtered paths" in result.err:
+                if tree:
+                    tree.emit(node.id, "host_git_refused", detail=result.err)
+                print(result.err)
             return bool(result.ok)
     except (OSError, ValueError):
         if tree:
@@ -1724,6 +1728,18 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     """
     targets = [p for p in _machine_state() if p.exists()]
     dirty, repos = _worktree_survey()
+    # Retain exact registrations before removing machine state. A global Git
+    # prune could act on an unrelated forged entry in the same repository.
+    orphaned: dict[Path, list[tuple[Path, str]]] = {}
+    worktrees_root = state_root() / "worktrees"
+    for repo in repos:
+        held = []
+        if worktrees_root.is_dir():
+            for path in worktrees_root.glob("*/*"):
+                branch = gitops._registration_branch(repo, path)
+                if branch:
+                    held.append((path, branch))
+        orphaned[repo] = held
 
     for path in targets:
         print(f"would remove  {path}")
@@ -1757,7 +1773,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     pruned = 0
     for repo in sorted(repos):
         if gitops.is_repo(repo):
-            gitops.prune_worktrees(repo)
+            for path, branch in orphaned[repo]:
+                gitops.prune_worktree(repo, path, branch)
             pruned += 1
     print(f"pruned   stale worktree registrations in {pruned} repository(ies)")
     print("\nPer-project .multiagents/ directories are untouched.")
@@ -1770,8 +1787,6 @@ def cmd_clean(args: argparse.Namespace) -> int:
     authority = HostAuthority(paths, tree)
     data = tree.read()
     removed = 0
-
-    gitops.prune_worktrees(paths.root)
 
     if args.branches:
         base = gitops.current_branch(paths.root)
@@ -1803,12 +1818,26 @@ def cmd_clean(args: argparse.Namespace) -> int:
                 tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
                           action="clean", fields=["worktree"])
                 continue
+            if worktree:
+                try:
+                    registered = gitops._registration_branch(paths.root, Path(worktree),
+                                                             branch)
+                except gitops.GitError:
+                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                              action="clean", fields=["worktree", "branch"])
+                    continue
+                if registered and registered != branch:
+                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                              action="clean", fields=["worktree", "branch"])
+                    continue
             if worktree and (Path(worktree).exists() or Path(worktree).is_symlink()):
                 if not authority.remove_worktree(Path(worktree), recorded=bool(record)):
                     tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
                               action="clean", fields=["worktree"],
                               reason="worktree could not be removed within its authorised path")
                     continue
+            if worktree and registered and not Path(worktree).exists():
+                gitops.prune_worktree(paths.root, Path(worktree), branch)
             if record:
                 authority.complete(node["id"], "discarded")
             gitops.delete_branch(paths.root, branch, force=True)
@@ -2598,7 +2627,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     saved = 0
     for node in stopped_agents:
         worktree = Path(node.worktree) if node.worktree else None
-        if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree):
+        if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree, root=paths.root):
             continue
         try:
             if not gitops.is_dirty(worktree, root=paths.root):   # SG-R4
@@ -2606,9 +2635,13 @@ def cmd_stop(args: argparse.Namespace) -> int:
         except gitops.GitError:
             continue
         result = gitops.commit_all(worktree, f"{node.agent}: work in progress "
-                                             f"when stopped ({node.id})")
+                                             f"when stopped ({node.id})", root=paths.root,
+                                   branch=node.branch)
         if result.ok:
             saved += 1
+        elif "filtered paths" in result.err:
+            tree.emit(node.id, "host_git_refused", detail=result.err)
+            print(result.err)
 
     # --- the container, last: the agents were inside it --------------------
     container = ""

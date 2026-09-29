@@ -49,6 +49,16 @@ drivers, `core.sshCommand`, includes, or anything else.
 The base repository's `.git/config` and `.git/hooks` are read-only to the
 container. They and the user's global and system config are **trusted**.
 
+| Host Git call family | Possible program or redirect | H3 boundary |
+| --- | --- | --- |
+| Trusted base `git config` lookup for content-program names | global and base config includes | Reads only the base checkout's trusted config before per-call overrides are built (HG-R1, HG-R4) |
+| `merge` status, squash, no-ff, commit, abort, reset | hooks, fsmonitor, clean/smudge/process filters, merge drivers, diff programs, linked-worktree config | HG-R1, HG-R2, HG-R3, HG-R4 |
+| Host `commit_all` on stop or resume | hooks, fsmonitor, clean filters, linked-worktree config | HG-R1, HG-R2, HG-R3; HG-R4 refuses filtered paths |
+| `worktree add` and recovery attach | post-checkout, smudge/process filters, fsmonitor | HG-R2, HG-R3; HG-R4 reports unconverted paths |
+| `worktree move`, remove and scoped prune | writable registry `gitdir`, linked-worktree config | HG-R1 registration validation; HG-R2 and HG-R3 |
+| `branch -D` and push | hooks/config, credential or transport helpers, `core.sshCommand` | HG-R1, HG-R2, HG-R3, HG-R5 |
+| Pinned refresh reads and `reset --keep` | fsmonitor, filters | HG-R1, HG-R2, HG-R3, HG-R4 via the existing pinned path |
+
 ## Behaviours
 
 **HG-R1: no agent-written git dir or config is ever honoured by a host
