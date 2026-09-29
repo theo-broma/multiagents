@@ -80,7 +80,8 @@ class Screen:
         return {
             "running": curses.color_pair(1), "idle": curses.color_pair(3),
             "done": curses.color_pair(0), "merged": curses.color_pair(0),
-            "failed": curses.color_pair(2), "orphaned": curses.color_pair(2),
+            "failed": curses.color_pair(2), "refused": curses.color_pair(2),
+            "orphaned": curses.color_pair(2),
             "cancelled": curses.color_pair(2), "discarded": curses.color_pair(2),
         }.get(status, 0)
 

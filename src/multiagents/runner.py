@@ -49,7 +49,7 @@ from . import procs
 from . import scripts
 from . import paths as paths_mod
 from .paths import ProjectPaths, global_config_dir, state_root
-from .providers import Event, Provider, load_providers
+from .providers import Event, Provider, get_path, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
 from .authority import HostAuthority
@@ -365,6 +365,8 @@ class Run:
     task: asyncio.Task | None = None
     events: list[dict] = field(default_factory=list)
     text_parts: list[str] = field(default_factory=list)
+    final_assistant_message: str = ""
+    refusal_signal: str = ""
     final_status: str = ""
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     internal_stop: bool = False       # steer() ending this turn to respawn it, not a real cancel
@@ -1744,6 +1746,8 @@ class Runner:
 
                 if event.text:
                     run.text_parts.append(event.text)
+                    if event.kind == "text" or (event.kind == "result" and not run.final_assistant_message):
+                        run.final_assistant_message = event.text
                 if event.tokens:
                     usage = _merge_usage(usage, event.tokens, provider.usage_mode)
                 if event.cost:
@@ -1756,7 +1760,17 @@ class Runner:
                 if captured_session:
                     session_id = event.session_id
                 if event.status:
-                    run.final_status = event.status
+                    if run.final_status.upper() not in {"REFUSED", "TRUNCATED"}:
+                        run.final_status = event.status
+                        if event.status.upper() in {"REFUSED", "TRUNCATED"}:
+                            signal = next((f"{path}={get_path(event.raw, path)}"
+                                           for rule in provider.stream.get("rules", [])
+                                           if rule.get("as") == event.kind
+                                           for path, mapping in (rule.get("status_map") or {}).items()
+                                           if str(get_path(event.raw, path)) in mapping
+                                           and mapping[str(get_path(event.raw, path))] == event.status),
+                                          f"status={event.status}")
+                            run.refusal_signal = signal
                 if replayed:
                     run.supervisor.observe(event)
                     continue
@@ -2223,6 +2237,8 @@ class Runner:
                     f"session on its branch. Reissuing the task instead pays "
                     f"for the whole conversation again — measured at 7.2M "
                     f"cached tokens on a run that had cost 173k.")
+            elif status == "refused":
+                reason = f"{run.provider.name} {run.refusal_signal or 'reported refusal'}"[:200]
             elif status == "truncated":
                 reason = (
                     f"{run.provider.name} stopped its own turn at the time limit "
@@ -2403,7 +2419,7 @@ class Runner:
         # failed is broken whatever the reason, and that is knowable without
         # reading a word of what the agent said — which is the part this
         # project has already got wrong once.
-        if status not in ("awaiting_user", "limited", "truncated"):
+        if status not in ("awaiting_user", "limited", "truncated", "refused"):
             trip = self.tree.note_run_outcome(
                 run.provider.name, ok=status in ("done", "merged"),
                 threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
@@ -2621,6 +2637,15 @@ class Runner:
                        if m.lower() in (stderr or "").lower()), None)
         if marker:
             return "truncated"
+        if run.final_status.upper() == "TRUNCATED":
+            return "truncated"
+        if run.final_status.upper() == "REFUSED":
+            return "refused"
+        message = getattr(run, "final_assistant_message", "").strip()
+        for pattern in getattr(run.provider, "refusal_markers", []):
+            if re.fullmatch(pattern, message, re.IGNORECASE):
+                run.refusal_signal = f'response matched refusal marker "{message[:150]}"'
+                return "refused"
         succeeded = code == 0 and (
             not run.final_status
             or run.final_status.upper() in {"SUCCESS", "OK", "COMPLETED"}
@@ -2829,6 +2854,7 @@ class Runner:
             "branch": node.branch or None,
             "events": [_compact(e) for e in window],
         }
+        result.update(self._no_commits_note(node))
         if run and run.supervisor and node.status in {"running", "pending"}:
             # Only meaningful for a live process. A parked agent's Run survives
             # in self.runs, so this would grow forever and read as silence.
@@ -2904,6 +2930,7 @@ class Runner:
             "log_dir": str(run_dir),
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
+        payload.update(self._no_commits_note(node, text))
         if mode == "full":
             payload["text"] = text
             payload["stderr_tail"] = data.get("stderr_tail", "")
@@ -2941,6 +2968,28 @@ class Runner:
                     f"call, not its."
                 )
         return payload
+
+    def _no_commits_note(self, node: Node, text: str | None = None) -> dict[str, Any]:
+        spec = self.config.agents.get(node.agent)
+        if (node.status != "done" or not node.branch or spec is None
+                or not spec.writes or not gitops.is_repo(self.paths.root)):
+            return {}
+        if text is None:
+            try:
+                text = json.loads(_run_read(self.paths.run_dir(node.id), "result.json")).get("text", "")
+            except (OSError, json.JSONDecodeError):
+                text = node.summary
+        text = text or ""
+        if "NEED_INFO(" in text or "NEED_DECISION(" in text:
+            return {}
+        base = self.config.base_branch or gitops.current_branch(self.paths.root)
+        try:
+            if gitops.commits_on(self.paths.root, node.branch, base, root=self.paths.root):
+                return {}
+        except gitops.GitError:
+            return {}
+        return {"no_commits": True,
+                "no_commits_note": "Writing agent finished without a commit; review its result before merging."}
 
     # ---------------------------------------------------------------- control --
 
@@ -3413,7 +3462,7 @@ class Runner:
                     break
                 await asyncio.sleep(0.05)
         node = self.tree.get(agent_id)
-        if heard and node is not None and node.status in ("done", "idle"):
+        if heard and node is not None and node.status in ("done", "idle", "refused"):
             # Not a run that died: one that heard the message, answered it and
             # finished inside the window. Read from a file (SV-R1), a short
             # turn arrives in a single poll, so this is the common case for a
@@ -3497,7 +3546,7 @@ class Runner:
         for raw in self.tree.read()["nodes"].values():
             if raw.get("agent") != agent_name or not raw.get("conversation"):
                 continue
-            if raw.get("status") in {"idle", "running", "stuck"} and raw.get("session_id"):
+            if raw.get("status") in {"idle", "running", "stuck", "refused"} and raw.get("session_id"):
                 node = node_from_raw(raw)
                 if best is None or node.created_at > best.created_at:
                     best = node
@@ -3947,6 +3996,10 @@ class Runner:
                         "resolve it with answer_question before relying on this",
                 **view,
             }
+        if final and final.status == "refused":
+            return self._consult_result(agent_name, node_id, turn, view,
+                                        status="refused", reason=final.reason,
+                                        reply="", note="Rephrase the request or consult again.")
         return {
             "agent_id": node_id,
             "agent": agent_name,
@@ -4156,6 +4209,7 @@ class Runner:
                 already.append({
                     "agent_id": agent_id, "agent": node.agent,
                     "status": node.status, "reason": node.reason,
+                    **self._no_commits_note(node),
                 })
 
         if not pending:
@@ -4208,11 +4262,13 @@ class Runner:
                         changed_.append({
                             "agent_id": agent_id, "agent": node.agent,
                             "status": node.status, "reason": node.reason,
+                            **self._no_commits_note(node),
                         })
                 else:
                     changed_.append({
                         "agent_id": agent_id, "agent": node.agent,
                         "status": node.status, "reason": node.reason,
+                        **self._no_commits_note(node),
                     })
             return changed_, running_, still_stuck_
 
@@ -4324,6 +4380,9 @@ class Runner:
         reap_pending_branches(self.paths.root, self.tree, self.authority)
         payload = {"agent_id": agent_id, "result": status, "detail": detail[:1000],
                    "branch": node.branch}
+        if node.status != "done":
+            payload["status_before_merge"] = node.status
+            payload["warning"] = f"Agent was not reported complete ({node.status}) before merge."
         if reverted:
             payload["readonly_reverted"] = reverted[:50]
             payload["readonly_note"] = (

@@ -93,6 +93,11 @@ providers:
             state: "part.state.status"
         - match: {type: "step_finish"}
           as: step
+          # OpenCode stores the model's finishReason in part.reason.
+          status_map:
+            part.reason:
+              content-filter: REFUSED
+              length: TRUNCATED
           fields:
             tokens: "part.tokens"
             cost: "part.cost"
@@ -181,6 +186,8 @@ providers:
     # not: the provider did exactly what it was asked, the budget ran out.
     truncation_markers:
       - "print timeout"
+    refusal_markers:
+      - "This request was blocked by Gemini's filters.*"
     usage_mode: cumulative
     # Paid through the subscription, not per-token.
     billing: plan
@@ -461,6 +468,11 @@ providers:
             turn: "message.id"
         - match: {type: "result"}
           as: result
+          status_map:
+            stop_reason:
+              refusal: REFUSED
+            subtype:
+              error_max_turns: TRUNCATED
           fields:
             status: "subtype"
             tokens: "usage"

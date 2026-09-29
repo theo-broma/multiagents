@@ -38,7 +38,7 @@ from .redact import depersonalise, scrub
 # branch is real but unfinished. It must never be merged as done, and it says
 # nothing about the provider's health.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned",
-            "limited", "truncated"}
+            "limited", "truncated", "refused"}
 # "detached": still running, left by a root server that exited (SV-R3), and
 # waiting for the next one to adopt it (SV-R6). Work in flight, so ACTIVE.
 ACTIVE = {"pending", "running", "stuck", "detached"}

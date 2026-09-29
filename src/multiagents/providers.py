@@ -148,6 +148,7 @@ class Provider:
     usage_mode: str = "cumulative"       # cumulative | delta
     # Text a CLI prints when it stopped a turn early of its own accord.
     truncation_markers: list[str] = field(default_factory=list)
+    refusal_markers: list[str] = field(default_factory=list)
     models_include: list[str] = field(default_factory=list)
     models_exclude: list[str] = field(default_factory=list)
     models_static: list[dict[str, str]] = field(default_factory=list)
@@ -233,6 +234,7 @@ class Provider:
             stream=data.get("stream", {}) or {},
             models_cmd=list(data.get("models_cmd", []) or []),
             truncation_markers=data.get("truncation_markers", []) or [],
+            refusal_markers=data.get("refusal_markers", []) or [],
             models_parse=data.get("models_parse", "lines"),
             usage_mode=data.get("usage_mode", "cumulative"),
             models_include=list(data.get("models_include", []) or []),
@@ -427,6 +429,12 @@ class Provider:
             if all(get_path(payload, key) == value for key, value in match.items()):
                 fields = rule.get("fields", {}) or {}
                 extracted = {k: get_path(payload, p) for k, p in fields.items()}
+                signal = ""
+                for path, mapping in (rule.get("status_map") or {}).items():
+                    value = get_path(payload, path)
+                    if value is not None and str(value) in mapping:
+                        signal = str(mapping[str(value)])
+                        break
                 tokens = extracted.get("tokens")
                 args = extracted.get("args")
                 step = extracted.get("step")
@@ -438,7 +446,7 @@ class Provider:
                     args=args if isinstance(args, dict) else ({} if args is None else {"_": args}),
                     text=str(extracted.get("text") or ""),
                     state=str(extracted.get("state") or ""),
-                    status=str(extracted.get("status") or ""),
+                    status=signal or str(extracted.get("status") or ""),
                     tokens=tokens if isinstance(tokens, dict) else {},
                     cost=cost,
                     step=step if isinstance(step, int) else None,
