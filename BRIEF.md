@@ -338,6 +338,13 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   Its tests were merged in c6c18ff, and the contract was extended with HA-R10..R12 and the HG-R1 clarification (2f5d821). The fix is running as implementer-deep ag-691e46.
 - **Researcher for the D3 inventory failed on codex.** Rerun it after the codex profile fix, ag-3d7d8b, merges.
 
+**~19:45 UTC: D1 implementation ag-179b69 finished**, with 2 NEED_INFOs, both decided.
+- `effective_limits` keeps the `source` string and adds `source_detail` (contract 10fcd9f). ag-179b69 was steered to implement it.
+- The ln_c3 test launched the real claude CLI. Tester ag-3464b3 is fixing both D1 tests.
+- **Merge order:** ag-3464b3 (tests), then ag-179b69 (code). After that, start a reviewer on D1 (the diff is about 800 lines, with a new `notices.py`).
+- D1 also changed silence detection: a worktree reading is taken at launch.
+- Tooling note: `scripts/test-chunk.sh` fails in agent worktrees whose `.venv` lacks pytest.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
