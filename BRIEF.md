@@ -345,6 +345,8 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - D1 also changed silence detection: a worktree reading is taken at launch.
 - Tooling note: `scripts/test-chunk.sh` fails in agent worktrees whose `.venv` lacks pytest.
 
+**~20:00 UTC:** codex local-profile fix merged (4e25b09, 383 codex tests green). The auth.json fail-fast applies only to engine-launched agents (MULTIAGENTS_USER_HOME set); accepted. **Not live yet:** the running MCP server still uses the old `build_env` (advisor run ag-3c7a4c had no MULTIAGENTS_USER_HOME, so it 401'd again). It needs `/mcp` reconnect by the user, ideally when no agents are running. Then retry the advisor consult (the three asks above) and the D3 researcher.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
