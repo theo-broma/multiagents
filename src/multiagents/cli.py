@@ -1867,6 +1867,20 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _clean_malformed(node) -> str | None:
+    """HA-R12: why `clean` cannot read this tree entry, or None if it can.
+
+    `tree.json` is container-writable; an entry that is not a mapping, or
+    whose branch or worktree is not a string, names nothing `clean` may act on.
+    """
+    if not isinstance(node, dict):
+        return f"entry is {type(node).__name__}, not a mapping"
+    for key in ("branch", "worktree"):
+        if node.get(key) is not None and not isinstance(node[key], str):
+            return f"{key} is {type(node[key]).__name__}, not a string"
+    return None
+
+
 def cmd_clean(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     tree = Tree(paths.tree_file, paths.events_file)
@@ -1879,6 +1893,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
         # HA-R9: liveness, record and everything derived are the key's. An
         # entry naming another id can neither complete nor unprotect that node.
         for node_id, node in data["nodes"].items():
+            reason = _clean_malformed(node)
+            if reason:
+                tree.emit(node_id, "malformed_entry", node=node_id,
+                          action="clean", reason=reason)
+                continue
             if node.get("id") != node_id:
                 tree.emit(node_id, "host_authority_mismatch", node=node_id,
                           action="clean", fields=["id"])
@@ -1941,22 +1960,33 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
     if args.tree:
         from multiagents.tree import TERMINAL
+        skipped = {}
         with tree.transaction() as state:
+            skipped = {nid: reason for nid, n in state["nodes"].items()
+                       if (reason := _clean_malformed(n))}
             drop = [
                 nid for nid, n in state["nodes"].items()
-                if n.get("status") in TERMINAL and not n.get("branch")
+                if nid not in skipped and n.get("status") in TERMINAL and not n.get("branch")
                 and not n.get("conversation")
             ]
             for nid in drop:
                 state["nodes"].pop(nid, None)
-            for n in state["nodes"].values():
-                n["children"] = [c for c in n.get("children", []) if c not in drop]
+            for nid, n in state["nodes"].items():
+                if nid not in skipped:
+                    n["children"] = [c for c in n.get("children", []) if c not in drop]
+        for nid, reason in skipped.items():
+            tree.emit(nid, "malformed_entry", node=nid, action="clean", reason=reason)
         print(f"pruned {len(drop)} finished node(s) holding no branch")
         removed += len(drop)
 
     if args.homes:
         for home in paths.homes.glob("ag-*"):
             node = data["nodes"].get(home.name)
+            reason = _clean_malformed(node) if home.name in data["nodes"] else None
+            if reason:
+                tree.emit(home.name, "malformed_entry", node=home.name,
+                          action="clean", reason=reason)
+                continue
             if node and node.get("status") in {"running", "pending"}:
                 continue
             shutil.rmtree(home, ignore_errors=True)
