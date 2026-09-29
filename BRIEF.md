@@ -310,6 +310,8 @@ is harmless, but review it once.
 
 **~14:15 UTC:** HA-R9 merged (b68474c). On main, H1 + H4 + subagent_mcp are 151/151. The conversation refresh recreate path was a real instance of the bug, and is fixed. Open point from ag-a4bb6e: `cmd_stop` commits into the worktree path read from the tree entry without checking it against the host record (cli.py ~2640, H3/HA-R2 territory). Check it after ag-c2d690 merges and give it to the H3 re-review. ag-a4bb6e ran `pkill -f "pytest.*no:cacheprovider"`, which may have killed other agents' pytest runs; results from that window are suspect. Bug-reporter started for the container claude 401 + codex 401 + the secondary tickets.
 
+**~14:30 UTC:** HG-R8..R11 merged (f435d8d). On main, H1+H3+H4+sandbox_git_merge are 169/169. The pinned-HEAD decision is recorded in the H3 spec. Next for H1/H3: once tester ag-a43782 merges, run one re-review adversary over both (fresh opus). Its scope: the fixes, plus `cmd_stop` committing into the tree-entry worktree path without checking the host record (ag-a4bb6e note). Also: `timeout 590` around test-chunk.sh does not reach pytest (minor tooling note).
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
