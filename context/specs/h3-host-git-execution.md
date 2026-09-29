@@ -278,6 +278,12 @@ the call see the same config. HG-R11 still holds, because identity is resolved
 separately. Revisit only if a user relies on branch-conditional merge settings
 for parent-worktree merges.
 
+**HG-R1 clarification (ag-ab23f4, finding 3).** "No unscoped prune" covers
+`HostAuthority.remove_worktree` too. Removing one node's worktree may drop
+only that node's own registration. Other registrations stay, even ones whose
+`gitdir` points at a missing path.
+- Verified by: `tests/test_h1h3_round2_prune.py`.
+
 ## Adversary brief
 
 Work from inside the container, with write access to everything listed in
