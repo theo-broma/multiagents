@@ -170,6 +170,12 @@ default, so work can proceed):
     Temporary config:
     - `limits.provider_down_cooldown_seconds: 10` is set at the user's
       request, for testing. **Remove it afterwards.**
+  - **Pending user request (2026-09-29):** once H3's implementer
+    (ag-99daa6) finishes, switch `advisor` to `codex/gpt-6-astra` and set
+    `implementer-deep.models.codex` to `gpt-6-astra` in `agents.yaml`.
+    Then use `model=gpt-6-astra` for implementer-deep runs.
+  - Next after H3: an implementer fixes review ag-64181b's findings (tests
+    in `tests/test_h1_h2_review2.py`, 3 red), then a re-review.
   - Tooling: the doom-loop watchdog false-fires on codex `file_change`
     events, because repeated edits to one file carry identical args (path
     and kind only). File a bug-reporter ticket at a natural stop.
