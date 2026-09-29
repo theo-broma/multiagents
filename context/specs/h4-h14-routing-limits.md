@@ -110,16 +110,26 @@ Verified by, for each of the three keys:
 - neither set gives the built-in value;
 - for `timeout`, an explicit `start_agent(timeout=…)` beats all three.
 
-The observables are the wall-clock timeout the supervisor enforces, the
-child-count refusal, and the silence watchdog. Short values keep the tests
-fast.
+The observables are the wall-clock watchdog, the child-count refusal, and the
+silence watchdog. Short values keep the tests fast.
+
+*Amended 2026-09-29 (ag-2a0da5 NEED_INFO).* SV-R4 in
+`context/specs/agent-survival.md` holds: a watchdog never kills a run. The
+wall-clock observable for `timeout` is therefore that the run is reported
+`stuck` with a `timeout` reason once the effective value has passed. It is
+also the recorded effective value. It is not a kill. The watchdog's polling
+granularity (about 5 s) is tolerated.
 
 **LM-R1a: `max_children` is the parent's cap.** Today `_preflight`
 counts the spawning parent's children but applies the *requested child's*
 `spec.max_children` (`runner.py` ~804–809). That is wrong.
 - The cap enforced is the **parent's** effective `max_children`, resolved
-  by LM-R1 and recorded when the parent starts. The root orchestrator's
-  cap comes from the project `limits:`, then the built-in default.
+  by LM-R1 and recorded when the parent starts.
+- *Amended 2026-09-29 (ag-2a0da5).* The **root orchestrator is not capped
+  by `max_children`**. Its top-level agents are bounded by `max_concurrent`
+  only, as before. Capping it at `limits.max_children`, which is 2 in this
+  project, would halve the tree's parallelism, and LM-R3 forbids that
+  regression.
 - A refusal for too many children carries the cap's value and source.
 - Verified by: a parent whose effective cap is 1 is refused a second
   child, whatever the requested child's own `max_children`, and the
