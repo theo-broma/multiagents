@@ -364,6 +364,72 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - It is now advanced to main (72d4ab2). **The user must `/mcp` reconnect again** to load it.
 - To keep this from recurring: after every merge that touches `src/`, run `git -C <wt-main> checkout --detach main`, then reconnect. The adapter copy in `~/.config/multiagents/providers/codex.py` is already identical to the repo's.
 
+**HANDOFF, 2026-09-29 ~21:30 UTC (orchestrator context wind-down #2)**
+
+**State.**
+- **MCP server:** runs from scratchpad `wt-main`, now at main. The user reconnected, and the advisor (codex, gpt-6-astra) works again (ag-8e7d87 replied).
+- **Codex under local:** fixed.
+- **Merged since the last handoff:**
+  - H1: HA-R9, HA-R10..R12 and HG-R1 prune (b782387).
+  - H3: HG-R8..R11 (f435d8d).
+  - H3 coverage (de0bee6).
+  - H1 coverage (5763750).
+  - H4+H14 (5c6307c).
+  - D1 (db187f7).
+  - Codex local profile (4e25b09).
+  - Rewording (8135e0c, e69dccc).
+- **In flight:** tester ag-304283 is fixing 6 old fixtures (test_core stop out-of-domain; test_h2 rf_r6 ×5) and adding an HA-R12 `clean` test. Merge it when done, then check that the full suite has only the 72 known phase2 reds.
+
+**Advisor answers (ag-8e7d87), accepted:**
+1. **HA-R11 option 3 stays, as "host-validated selection".** Queue a tester for three cases:
+   - registration-only success;
+   - a duplicate registration is refused;
+   - a branch held by a record is refused.
+
+   Known limitation: `_host_scope` derives the registration location from the checkout basename, so discovery can accept a registration that execution then refuses. It fails closed; note it and leave it.
+2. **tests/test_h1_swap_guard.py goes to the tester.**
+   - Its first test only proves symlink refusal before removal, which overlaps test_h1_unrecorded_nodes.py:83. Consolidate it.
+   - Keep the second test (explicit extra-mount rejection).
+3. **The D3 contract must settle:**
+   - **Location and layering:**
+     - `<provider>.dependencies.yaml` beside the adapter;
+     - precedence project → global → shipped (as in scripts.py:66);
+     - whole-document replacement;
+     - `extends`;
+     - behaviour when a custom provider has no manifest.
+   - **Overrides:** an override of the adapter or of `providers.yaml` voids "verified" status. Show the provenance of both the manifest and the implementation.
+   - **Scope:** scripts, adapters AND YAML. Separate native CLI dependencies from the adapter interface and from the internal `MULTIAGENTS_*` protocol.
+   - **"Verified":** an exact CLI version exercised against identified integration code, recorded with date, platform/executor, evidence and scope.
+     - `--version` alone is discovery, not verification.
+     - Fake-CLI tests prove adapter behaviour, not upstream compatibility.
+   - **Doctor:**
+     - probe the real binary in each execution context (today it checks host PATH only, cli.py:1545);
+     - probes are bounded and non-interactive;
+     - states: missing, malformed, timeout, disabled, overridden;
+     - a CLI newer or older than verified gives an "unverified" warning, never a refusal;
+     - define how warnings and errors affect the exit status.
+   - **Lint:** an explicitly authorised static consistency lint:
+     - stable dependency ids, resolvable to executable code or config (not comments or substrings);
+     - reverse coverage where it can be extracted mechanically;
+     - paired with doctor tests and parser fixtures;
+     - it claims neither completeness nor compatibility.
+
+**Next, in order:**
+1. Merge ag-304283.
+2. **D1 review.** The reviewer runs on codex now; review `db187f7^..db187f7`. The earlier task text is in this BRIEF (~19:45 entry).
+3. **D3 researcher**, which needs codex. The task text was given to ag-147507; re-issue it.
+4. Write `context/specs/d3-cli-dependency-manifest.md` using the advisor's points, consult the advisor on the contract, then tester, then implementer-deep.
+5. **Tester** for HA-R11 option 3 and swap_guard consolidation.
+6. **Then** H5–H13 and D2 per phase6-hardening.md; H7 includes binary resolution.
+7. **Claude container 401:** needs a contract (per-account renewal, `check` reading accounts/*, 401 failover, proxy request log, a docker exec probe). Schedule it when the user wants docker back.
+8. **Tickets:** only bug-c106a9 is in the queue. The other 7 are in `.multiagents/runs/ag-a0be27/result.json` and need filing via a bug-reporter, or recording.
+
+**Temporary config still in place:**
+- `limits.provider_down_cooldown_seconds: 10`;
+- `executor.kind: local`.
+
+**Procedure:** after merging any change to `src/`, run `git -C <scratchpad>/wt-main checkout --detach main` and ask the user to `/mcp` reconnect.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
