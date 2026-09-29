@@ -501,6 +501,12 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - A background wake is armed for 23:48 UTC.
 - **On waking:** `steer_agent(ag-2abbbc, "the codex window has reset, carry on with the task")`.
 
+**2026-09-29 ~22:20 UTC: z.ai connected by the user in opencode.**
+- The auth.json provider key is `zai-coding-plan`, with fields `key` and `type: api`. Only the names were read.
+- `opencode models` lists `zai-coding-plan/{glm-4.7, glm-5-turbo, glm-5.2, glm-5.2-highspeed, glm-5.3, glm-5.3-flash, glm-5.3-highspeed}`.
+- A live `opencode run -m zai-coding-plan/glm-5.3-flash` works: `text` and `step_finish` with tokens, and a reported cost of 0.
+- The user was asked to run `usage.py --provider zai` live to confirm the quota endpoint.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
