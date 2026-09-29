@@ -172,7 +172,7 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
 # agents
 
 
-def _node_view(node: dict, now: float) -> dict:
+def _node_view(node: dict, now: float, key: str | None = None) -> dict:
     usage = node.get("usage") or {}
     started = node.get("started_at") or node.get("created_at") or 0
     ended = node.get("ended_at")
@@ -190,7 +190,7 @@ def _node_view(node: dict, now: float) -> dict:
     else:
         until = ended or (spoke if not alive else None) or now
     return {
-        "id": node.get("id"),
+        "id": key if key is not None else node.get("id"),   # HA-R9: the key
         "agent": node.get("agent"),
         "status": node.get("status"),
         "provider": node.get("provider"),
@@ -236,7 +236,7 @@ def agent_tree(nodes: dict, now: float) -> list[dict]:
     interrupted write that left one of them half-updated still produces a tree
     with every node in it exactly once.
     """
-    views = {nid: _node_view(node, now) for nid, node in nodes.items()}
+    views = {nid: _node_view(node, now, nid) for nid, node in nodes.items()}
     for view in views.values():
         view["kids"] = []
     roots = []
@@ -425,12 +425,12 @@ def snapshot(paths: ProjectPaths, config: Config,
 
     provider_rows = providers_view(paths, config, tree, with_scripts=with_scripts)
     roots = agent_tree(nodes, now)
-    running = [_node_view(n, now) for n in nodes.values()
+    running = [_node_view(n, now, k) for k, n in nodes.items()
                if n.get("status") in ACTIVE]
     running.sort(key=lambda v: v["started_at"] or 0)
     # Shown apart, and shown at all: it is state the orchestrator will act on,
     # and invisible state is how the last several surprises happened.
-    parked = [_node_view(n, now) for n in nodes.values()
+    parked = [_node_view(n, now, k) for k, n in nodes.items()
               if n.get("status") in PAUSED and n.get("session_id")]
     parked.sort(key=lambda v: -(v["last_spoke"] or 0))
 
@@ -509,14 +509,14 @@ def branches(paths: ProjectPaths, config: Config) -> list[dict]:
                         "--format=%(refname:short)")
     merged_set = {line.strip() for line in (merged.out or "").splitlines()}
 
-    by_branch = {n.get("branch"): n for n in tree.read().get("nodes", {}).values()
+    by_branch = {n.get("branch"): (k, n) for k, n in tree.read().get("nodes", {}).items()
                  if n.get("branch")}
     out = []
     for name in sorted(names):
-        node = by_branch.get(name) or {}
+        agent_id, node = by_branch.get(name) or (None, {})
         out.append({
             "branch": name,
-            "agent_id": node.get("id"),
+            "agent_id": agent_id,
             "agent": node.get("agent"),
             "status": node.get("status"),
             "merged": name in merged_set,

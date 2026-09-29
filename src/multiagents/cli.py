@@ -1014,6 +1014,11 @@ def cmd_resume(args: argparse.Namespace) -> int:
     for node in tree.active():
         record = authority.get(node.id)
         safe_unrecorded_worktree = True
+        if tree.id_mismatch(node.id):
+            # HA-R9: reconciled like any other, but no host git on it.
+            tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                      action="resume", fields=["id"])
+            safe_unrecorded_worktree = False
         if record:
             fields = [key for key in ("branch", "worktree", "parent")
                       if getattr(node, key) != record.get(key)]
@@ -1797,19 +1802,25 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
     if args.branches:
         base = gitops.current_branch(paths.root)
-        for node in data["nodes"].values():
-            record = authority.get(node["id"])
+        # HA-R9: liveness, record and everything derived are the key's. An
+        # entry naming another id can neither complete nor unprotect that node.
+        for node_id, node in data["nodes"].items():
+            if node.get("id") != node_id:
+                tree.emit(node_id, "host_authority_mismatch", node=node_id,
+                          action="clean", fields=["id"])
+                continue
+            record = authority.get(node_id)
             if record:
                 fields = [key for key in ("branch", "worktree", "parent")
                           if node.get(key) != record.get(key)]
                 if fields:
-                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                    tree.emit(node_id, "host_authority_mismatch", node=node_id,
                               action="clean", fields=fields)
             branch = record["branch"] if record else node.get("branch")
             if not branch or node.get("status") in {"running", "pending"}:
                 continue
             if (not record and not authority.safe_unrecorded_branch(branch)) or (record and not branch.startswith("agents/")):
-                tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                tree.emit(node_id, "host_authority_mismatch", node=node_id,
                           action="clean", fields=["branch"])
                 continue
             commits = gitops.commits_on(paths.root, branch, base, root=paths.root)
@@ -1818,11 +1829,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
                 continue
             worktree = record["worktree"] if record else node.get("worktree")
             if worktree and record and record["seeded"] and not authority.safe_seeded_path(Path(worktree)):
-                tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                tree.emit(node_id, "host_authority_mismatch", node=node_id,
                           action="clean", fields=["worktree"])
                 continue
             if worktree and not record and not authority.safe_nested_path(Path(worktree)):
-                tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                tree.emit(node_id, "host_authority_mismatch", node=node_id,
                           action="clean", fields=["worktree"])
                 continue
             if worktree:
@@ -1830,23 +1841,23 @@ def cmd_clean(args: argparse.Namespace) -> int:
                     registered = gitops._registration_branch(paths.root, Path(worktree),
                                                              branch)
                 except gitops.GitError:
-                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                    tree.emit(node_id, "host_authority_mismatch", node=node_id,
                               action="clean", fields=["worktree", "branch"])
                     continue
                 if registered and registered != branch:
-                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                    tree.emit(node_id, "host_authority_mismatch", node=node_id,
                               action="clean", fields=["worktree", "branch"])
                     continue
             if worktree and (Path(worktree).exists() or Path(worktree).is_symlink()):
                 if not authority.remove_worktree(Path(worktree), recorded=bool(record)):
-                    tree.emit(node["id"], "host_authority_mismatch", node=node["id"],
+                    tree.emit(node_id, "host_authority_mismatch", node=node_id,
                               action="clean", fields=["worktree"],
                               reason="worktree could not be removed within its authorised path")
                     continue
             if worktree and registered and not Path(worktree).exists():
                 gitops.prune_worktree(paths.root, Path(worktree), branch)
             if record:
-                authority.complete(node["id"], "discarded")
+                authority.complete(node_id, "discarded")
             gitops.delete_branch(paths.root, branch, force=True)
             print(f"delete {branch}")
             removed += 1
@@ -2633,6 +2644,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
     # branch is what makes the work resumable, so the work has to be on it.
     saved = 0
     for node in stopped_agents:
+        if tree.id_mismatch(node.id):         # HA-R9: no host git on it
+            tree.emit(node.id, "host_authority_mismatch", node=node.id,
+                      action="stop", fields=["id"])
+            continue
         worktree = Path(node.worktree) if node.worktree else None
         if not worktree or not worktree.is_dir() or not gitops.is_repo(worktree, root=paths.root):
             continue
