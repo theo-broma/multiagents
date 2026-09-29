@@ -430,6 +430,13 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 
 **Procedure:** after merging any change to `src/`, run `git -C <scratchpad>/wt-main checkout --detach main` and ask the user to `/mcp` reconnect.
 
+**2026-09-29 ~22:20 UTC (after handoff #2):**
+- ag-304283 tripped its 1500 s timeout while still running its suite. It was left running (SV-R4).
+- Started three runs:
+  - reviewer ag-de331d (codex), reviewing D1 db187f7, `verifies=ag-179b69`;
+  - researcher ag-a609b9 (codex), re-running the D3 inventory;
+  - implementer-quick ag-c75a01, doing H9 (AGENTS.md → scripts/test-chunk.sh).
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
