@@ -635,10 +635,14 @@ def test_sm_r3_max_depth_holds_for_a_child(tmp_path, monkeypatch):
 
 
 def test_sm_r3_max_children_holds_for_a_child(tmp_path, monkeypatch):
-    t = Tree3(tmp_path, monkeypatch)
+    """LM-R1a: the cap is the spawning parent's, not the requested child's.
+    The spawner's effective cap is 1 by its agent config and by the project
+    alike, while the requested leaf allows 9, so the second child is refused."""
+    t = Tree3(tmp_path, monkeypatch, limits={"max_children": 1})
     cfg = t.project.root / ".multiagents" / "config"
     agents = yaml.safe_load((cfg / "agents.yaml").read_text())
-    agents["agents"]["leaf"]["max_children"] = 1
+    agents["agents"]["spawner"]["max_children"] = 1
+    agents["agents"]["leaf"]["max_children"] = 9
     (cfg / "agents.yaml").write_text(yaml.safe_dump(agents))
     t.tree.add(h.Node(id="ag-grandchild", agent="leaf", provider="claude", model="m",
                       parent="ag-child", depth=2, status="running"))
