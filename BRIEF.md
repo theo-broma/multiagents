@@ -282,7 +282,7 @@ locally:
 Also: `test_h1_swap_guard.py` was written by an implementer and merged. It
 is harmless, but review it once.
 
-**~10:40 UTC, after compaction:** codex adversaries ag-25c242/ag-afe388 discarded. In flight, all on claude (local executor): adversary ag-387314 (H1, opus), adversary ag-e98308 (H3, opus), implementer ag-736dd1 (instruction rewording, sonnet), implementer-deep ag-2a0da5 (H4+H14). Next: route adversary findings back with tests; review the rewording diff; D1 after H4 merges; then the bug-reporter batch.
+**~10:40 UTC, after compaction:** codex adversaries ag-25c242/ag-afe388 discarded. In flight, all on claude (local executor): adversary ag-387314 (H1, opus), adversary ag-e98308 (H3, opus), implementer ag-736dd1 (instruction rewording, sonnet), implementer-deep ag-2a0da5 (H4+H14). Advisor ag-3f9bba consult failed (codex: `resume failed: requested '01a0ea08…', observed ''`, turn 15) — retry after 13:30; add to the bug-reporter batch if it persists. Pending advisor asks: review tests/test_h1_swap_guard.py; D1 sequential after H4. Next: route adversary findings back with tests; review the rewording diff; D1 after H4 merges; then the bug-reporter batch.
 
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
