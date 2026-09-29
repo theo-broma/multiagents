@@ -3903,9 +3903,12 @@ def test_the_adversary_attacks_code_rather_than_the_specification():
     """It runs after the suite is green, on the premise that green proves only
     that the code satisfies the tests that were written."""
     flat = " ".join((_briefs_dir() / "team" / "adversary.md").read_text().split())
-    assert "You attack code that already works" in flat
-    for attack in ("Mutation", "Hardcoding", "Fuzzing", "Interference"):
-        assert attack in flat, attack
+    # Its target is working code behind a green suite, not the specification;
+    # pinned by meaning so a rewording of the verb does not break it.
+    assert "code that already works" in flat
+    assert "The test suite is green" in flat
+    for check in ("Mutation", "Hardcoding", "Fuzzing", "Interference"):
+        assert check in flat, check
     # It must not weaken the contract someone else wrote. That used to be a
     # request; it is now the read-only rule, stated in the brief as such.
     assert "never edit one" in flat
@@ -3922,7 +3925,9 @@ def test_the_adversary_brief_bounds_it_to_this_repository():
     text = " ".join(raw.split())
     assert "no live systems" in text
     assert "never print its value" in text
-    assert "not a weapon" in text
+    # Its output is a test that reproduces a finding, nothing usable beyond it.
+    assert "a reproducing test" in text
+    assert "demonstrate a finding with a test" in text
 
 
 def test_the_orchestrator_is_told_when_the_adversary_is_not_needed():
