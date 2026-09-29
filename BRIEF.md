@@ -295,6 +295,19 @@ is harmless, but review it once.
 
 **~13:30 UTC (after session restart):** all 4 agents had stopped on the claude window; resumed via steer: ag-a4bb6e (HA-R9, commit 70ba3bb), ag-c2d690 (HG-R8..R11, commit 5d00422), ag-e45e53 (tester, WIP), ag-2a0da5 (H4: 25/28 green; decisions sent). Decisions recorded in the spec (b3b8888): SV-R4 stays, so the timeout tests observe `stuck` rather than a kill; the root orchestrator is exempt from max_children. H1 coverage tests and the wording-pin fix are merged (5763750). The pinned phrases in adversary.md still need rewording, which is queued for implementer-quick. Tester ag-5e4d2a has started on the queued work, plus aligning the HA-R9 assertion in test_h1_adversary_id_alias with the refusal semantics. Previously queued: rewrite the 3 LM-R1 timeout tests; add a root-exemption test; fix test_sm_r3 to use the spawner's cap. The full task text is in the orchestrator's log; restate it from this line if lost. (Tooling bug for the batch: `multiagents auth login codex` refreshed the container store, not the host `~/.codex/auth.json` that the local executor uses, so the advisor kept getting 401s until the user ran a plain `codex login` on the host at ~14:10.) Codex reports "not authenticated", which is for the user: `multiagents auth login codex`. The advisor is on codex, so it is unavailable until then.
 
+**~14:05 UTC:**
+- **Merged:**
+  - H4+H14 (5c6307c): its files pass 77/77 on main.
+  - adversary.md final rewording (e69dccc).
+- **D1 started:** implementer-deep ag-179b69.
+- **Advisor still unusable, codex 401.** The error is "Missing bearer" against `api.openai.com/v1/responses`. The adapter's profile `~/.multiagents/profiles/codex` (auth.json refreshed 15:33 CEST; `codex login status` says "Logged in using ChatGPT") is logged in, yet requests go to the API endpoint without a token.
+  - Correction: the earlier note blaming host `~/.codex` was wrong.
+  - Add this to the bug-reporter diagnosis, together with the container claude 401. That diagnosis starts when ag-a4bb6e and ag-c2d690 finish.
+- **Pending advisor asks, not yet answered:**
+  - HA-R9 refusal semantics;
+  - tests/test_h1_swap_guard.py, keep or send to the tester;
+  - D1 contract staleness against H4.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
