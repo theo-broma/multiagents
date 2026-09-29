@@ -318,6 +318,48 @@ under in tree.json. The `id` field inside an entry is container-written data.
 
   Plus a mismatch-event assertion added by the tester.
 
+**HA-R10: stop and resume checkpoints take their operands from the host
+record** (adversary ag-ab23f4, 2026-09-29, findings 1 and 4).
+- `multiagents stop` and the resume path resolve each node's worktree and
+  branch the same way other host actions do: from the host record when the
+  node is recorded, and under HA-R2a when it is not. The worktree must be
+  inside the domain and the branch must be an `agents/*` ref.
+- A checkpoint never runs in the project root, the user's main checkout, and
+  never commits onto the base branch or onto another node's branch. This
+  holds whatever tree.json says, including an empty or missing branch.
+- A node whose operands fail these checks is skipped under HG-R9:
+  - an event is emitted;
+  - the node's reason is updated;
+  - the other nodes are still processed.
+- Verified by: `tests/test_h1h3_round2_stop.py`.
+
+**HA-R11: `merge_agent(into=…)` never follows a registration HEAD it did not
+resolve itself** (ag-ab23f4, finding 2).
+- The merge target branch is determined by the host:
+  - the recorded branch of the recorded node whose worktree `into` resolves
+    to, compared after resolving the path (symlinks, spelling);
+  - or, for an unrecorded target, an `agents/*` branch validated under
+    HA-R2a.
+- A merge with no host-determined target branch is refused. It never
+  advances whatever ref the target's HEAD names.
+- The base branch moves only through the explicit merge into base.
+- Verified by: `tests/test_h1h3_round2_merge_into.py`.
+
+**HA-R12: malformed entries never abort host-wide passes** (ag-ab23f4,
+findings 4 and 5). A tree entry can have a wrong type in any field (a
+non-string `worktree` or `branch`, a list, a missing required field), or can
+fail to build a Node. Such an entry is skipped with an event, and the node is
+treated as mismatched (no host mutation) by every pass that iterates the
+tree:
+- stop and resume checkpoints;
+- `reap_pending_branches`;
+- `Tree.active()` and its callers;
+- `clean`.
+
+It never raises out of them.
+- Verified by: the type cases in `tests/test_h1h3_round2_stop.py`, plus a
+  reap and active-tree case added by the tester.
+
 ## Out of scope, and recorded
 
 - Inter-agent isolation inside the container: the threat-model section
