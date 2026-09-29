@@ -291,6 +291,8 @@ is harmless, but review it once.
 **~11:45 UTC:** H3 adversary ag-e98308 VERDICT rejected (3 blocking/serious + identity): symref branch lets host commit onto main; one forged HEAD aborts `stop` for all; disable list misses includeIf-scoped drivers; includeIf gitdir identity lost. Tests merged 1b8cc8c (6 red, 11 coverage green). Contract HG-R8..R11 (f2f9888). Fix: implementer-deep ag-c2d690. Queued tester: H3 mutation survivors (process/textconv dropped from disable list, `.required=false`, push/delete_branch/worktree remove/move without host scope, move_aside ambiguity refusal, merge_agent target_branch lookup) + HG-R9's `clean --branches` clause (untested). Also still queued: H1 mutation-gap tester (above).
 **D3 — in this phase, scheduled right after D1 (user decision 2026-09-29):** a machine-readable per-provider CLI dependency manifest next to src/multiagents/defaults/providers/<p>.* (flags, env vars honoured, paths, stream event fields, parsed messages, exit codes, endpoints, last verified CLI version), a `doctor` check against the installed CLI, and a test tying each declared dependency to code.
 
+**~12:20 UTC:** rewording merged (8135e0c). Two phrases kept because test_core pins them ("You attack code that already works", "not a weapon"); tester ag-e45e53 relaxes those pins and writes H1 coverage tests (tests/test_h1_coverage.py). After it merges: an implementer-quick rewords those two phrases in team/adversary.md. The rewording agent saw 125 failures in chunk 2 and did not compare them to base; re-check chunk 2 on main at the next full-suite run.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
