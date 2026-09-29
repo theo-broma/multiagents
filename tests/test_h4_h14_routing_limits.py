@@ -42,6 +42,13 @@ def _events(runner, kind):
             if (entry := json.loads(line)).get("kind") == kind] if path.exists() else []
 
 
+def _limit(result, field):
+    # Only value and source are H4's contract; D1 adds sibling keys such as
+    # source_detail, which its own tests cover.
+    entry = result.get("effective_limits", {}).get(field)
+    return {k: entry.get(k) for k in ("value", "source")} if isinstance(entry, dict) else entry
+
+
 def _runner(tmp_path, monkeypatch, *, agent=None, project=None, providers=None):
     if providers is None:
         provider, _ = _fake_cli(tmp_path, "acme")
@@ -174,7 +181,7 @@ def test_lm_r1_and_r2_report_project_agent_and_builtin_precedence(
     r = _runner(tmp_path, monkeypatch, agent=agent, providers={"acme": provider},
                 project={"limits": limits})
     result = _start(r)
-    assert result.get("effective_limits", {}).get(field) == {
+    assert _limit(result, field) == {
         "value": expected, "source": source}, (field, configuration, result)
 
 
@@ -185,7 +192,7 @@ def test_lm_r1_and_r2_explicit_call_timeout_wins(tmp_path, monkeypatch):
     r = _runner(tmp_path, monkeypatch, agent=agent,
                 project={"limits": {"default_timeout": 4}})
     result = _start(r, timeout=2)
-    assert result.get("effective_limits", {}).get("timeout") == {
+    assert _limit(result, "timeout") == {
         "value": 2, "source": "call"}, result
 
 
@@ -222,7 +229,7 @@ def test_lm_r1_project_timeout_is_enforced_on_start(tmp_path, monkeypatch):
                 providers={"acme": _slow_provider(tmp_path, seconds=OUTLIVES_TIMEOUT)},
                 project={"limits": {"default_timeout": 1}})
     result = _start(r)
-    assert result.get("effective_limits", {}).get("timeout") == {
+    assert _limit(result, "timeout") == {
         "value": 1, "source": "project"}, result
     assert _timed_out(r, result["agent_id"]), _events(r, "stuck")
     # Reported, not killed: the run still finishes with its own answer.
@@ -408,7 +415,7 @@ def test_lm_r1c_loaded_project_field_presence_survives_config_layers(tmp_path, m
     result = _start(r)
     for field, value in {"timeout": 4, "max_children": 1,
                          "silence_timeout": 4}.items():
-        assert result.get("effective_limits", {}).get(field) == {
+        assert _limit(result, field) == {
             "value": value, "source": "project"}, result
 
     # A second Runner using only the mounted project layers represents the
