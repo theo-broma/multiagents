@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -205,14 +204,30 @@ def _slow_provider(tmp_path, seconds=3):
                                   "fields": {"text": "text"}}]}}
 
 
+# LM-R1 as amended 2026-09-29 (SV-R4: a watchdog never kills): the wall-clock
+# observable is a `stuck` report with reason `timeout` once the effective value
+# has passed, not a kill. The runs below outlive the effective timeout plus the
+# watchdog's ~5 s polling, and are far shorter than any other candidate value.
+OUTLIVES_TIMEOUT = 9
+
+
+def _timed_out(runner, agent_id):
+    return [event for event in _events(runner, "stuck")
+            if event.get("agent") == agent_id and event.get("reason") == "timeout"]
+
+
 def test_lm_r1_project_timeout_is_enforced_on_start(tmp_path, monkeypatch):
     _budgets(monkeypatch, acme=1.0)
     r = _runner(tmp_path, monkeypatch,
-                providers={"acme": _slow_provider(tmp_path)},
+                providers={"acme": _slow_provider(tmp_path, seconds=OUTLIVES_TIMEOUT)},
                 project={"limits": {"default_timeout": 1}})
     result = _start(r)
+    assert result.get("effective_limits", {}).get("timeout") == {
+        "value": 1, "source": "project"}, result
+    assert _timed_out(r, result["agent_id"]), _events(r, "stuck")
+    # Reported, not killed: the run still finishes with its own answer.
     node = r.tree.get(result["agent_id"])
-    assert node.status in {"failed", "stuck"} and "timeout" in node.reason.lower(), node
+    assert node.status == "done", node
 
 
 def test_lm_r1_project_silence_timeout_is_enforced_on_start(tmp_path, monkeypatch):
@@ -249,15 +264,32 @@ def test_lm_r1a_parent_cap_refuses_second_child_with_source(tmp_path, monkeypatc
     assert "1" in str(exc.value) and "agent" in str(exc.value).lower()
 
 
-def test_lm_r1a_root_cap_comes_from_project(tmp_path, monkeypatch):
+def test_lm_r1a_root_is_not_capped_by_max_children(tmp_path, monkeypatch):
+    """LM-R1a as amended 2026-09-29: the root orchestrator's top-level agents
+    are bounded by max_concurrent only. Replaces the former root-cap test,
+    which asserted the refusal this amendment removes."""
     _budgets(monkeypatch, acme=1.0)
     r = _runner(tmp_path, monkeypatch,
+                providers={"acme": _slow_provider(tmp_path, seconds=OUTLIVES_TIMEOUT)},
                 project={"limits": {"max_children": 1, "max_concurrent": 3}})
-    r.tree.add(Node(id="ag-first", agent="worker", provider="acme", model="m1",
-                    parent=None, depth=1, status="running"))
-    with pytest.raises((PermissionError, RuntimeError)) as exc:
-        asyncio.run(r.start("worker", "second"))
-    assert "1" in str(exc.value) and "project" in str(exc.value).lower()
+    h.as_root(monkeypatch)
+
+    async def scenario():
+        started = []
+        try:
+            for n in range(3):
+                result = await r.start("worker", f"task {n}")
+                started.append(result.get("agent_id"))
+                assert result.get("agent_id") and not result.get("error"), result
+            running = [r.tree.get(agent_id) for agent_id in started]
+            assert all(node.parent is None and node.status in {"pending", "running"}
+                       for node in running), running
+        finally:
+            for agent_id in started:
+                if agent_id:
+                    await r.stop(agent_id)
+
+    asyncio.run(scenario())
 
 
 def test_lm_r1a_parent_cap_is_recorded_at_parent_start(tmp_path, monkeypatch):
@@ -295,13 +327,16 @@ def test_lm_r1a_parent_cap_is_recorded_at_parent_start(tmp_path, monkeypatch):
 
 
 def test_lm_r1b_consult_uses_project_timeout(tmp_path, monkeypatch):
-    provider = _slow_provider(tmp_path, seconds=2)
+    provider = _slow_provider(tmp_path, seconds=OUTLIVES_TIMEOUT)
     agent = AgentSpec.from_dict("worker", {"provider": "acme", "model": "m1",
                                            "conversational": True})
     r = _runner(tmp_path, monkeypatch, agent=agent, providers={"acme": provider},
                 project={"limits": {"default_timeout": 1}})
-    result = asyncio.run(asyncio.wait_for(r.consult("worker", "hello"), 4))
-    assert result.get("error") or result.get("status") in {"timeout", "failed", "stuck"}, result
+    result = asyncio.run(asyncio.wait_for(r.consult("worker", "hello"), 30))
+    assert result.get("agent_id"), result
+    # The consult's run is watched against the project value (1 s), not the
+    # built-in 900 s: it is reported stuck on timeout while it is still running.
+    assert _timed_out(r, result["agent_id"]), (result, _events(r, "stuck"))
 
 
 def test_lm_r1b_steer_keeps_original_call_timeout(tmp_path, monkeypatch):
@@ -314,7 +349,7 @@ def test_lm_r1b_steer_keeps_original_call_timeout(tmp_path, monkeypatch):
         f"p = pathlib.Path({str(count)!r})\n"
         "n = int(p.read_text()) + 1 if p.exists() else 1\n"
         "p.write_text(str(n))\n"
-        "if n > 1: time.sleep(3)\n"
+        f"if n > 1: time.sleep({OUTLIVES_TIMEOUT})\n"
         "print(json.dumps({'type': 'text', 'text': 'answer', 'session': 's1'}), flush=True)\n")
     script.chmod(0o755)
     provider = {"bin": str(script),
@@ -329,12 +364,23 @@ def test_lm_r1b_steer_keeps_original_call_timeout(tmp_path, monkeypatch):
     assert count.read_text() == "1", first
     assert r.tree.get(first["agent_id"]).session_id == "s1"
 
-    began = time.monotonic()
-    asyncio.run(asyncio.wait_for(r.steer(first["agent_id"], "continue"), 5))
-    elapsed = time.monotonic() - began
+    agent_id = first["agent_id"]
+    assert not _timed_out(r, agent_id), "the first turn finished well inside 1s"
 
+    async def steer_and_wait():
+        steered = await r.steer(agent_id, "continue")
+        run = r.runs.get(agent_id)
+        if run:
+            await asyncio.wait_for(run.done.wait(), 20)
+        return steered
+
+    steered = asyncio.run(steer_and_wait())
+
+    assert steered.get("steered") is True, steered
     assert count.read_text() == "2"
-    assert elapsed < 2.5, f"steer ran for {elapsed:.1f}s past its original 1s cap"
+    # The steered turn is watched against the original call value (1 s), not
+    # the project's 10 s: it is reported stuck on timeout before it ends.
+    assert _timed_out(r, agent_id), _events(r, "stuck")
 
 
 def test_lm_r1c_loaded_project_field_presence_survives_config_layers(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import subprocess
 import json
 from pathlib import Path
@@ -25,9 +26,12 @@ def events(r, kind: str) -> list[dict]:
 
 
 def test_recorded_node_with_rewritten_inner_id_merges_forged_branch(project):
-    """HA-R2: merge_agent on a host-created node must use the recorded branch."""
+    """HA-R2/HA-R9: an entry whose inner id differs from its key is a
+    mismatch, so merge_agent on it is refused outright. Neither the forged
+    branch nor the recorded one lands on main, and the node is not completed."""
     victim = asyncio.run(start(project))
     commit(victim, "genuine.txt")
+    base = git(project.paths.root, "rev-parse", "main")
 
     # Container side: an agents/* branch it made, plus a rewrite of the
     # victim's entry so its inner id no longer names a recorded node.
@@ -45,12 +49,19 @@ def test_recorded_node_with_rewritten_inner_id_merges_forged_branch(project):
         entry["branch"] = evil
         entry["worktree"] = ""
 
-    result = project.merge_agent(victim.id)
+    result = None
+    with contextlib.suppress(Exception):
+        result = project.merge_agent(victim.id)
 
     assert not (project.paths.root / "evil.txt").exists(), result
-    assert result.get("branch") == victim.branch, result
-    assert any(row.get("node") == victim.id for row in
-               events(project, "host_authority_mismatch")), result
+    assert git(project.paths.root, "rev-parse", "main") == base, result
+    assert not (project.paths.root / "genuine.txt").exists(), result
+    assert not (result or {}).get("merged"), result
+    assert (result or {}).get("result") != "merged", result
+    assert project.authority.get(victim.id)["completion"] is None, result
+    assert exists(project.paths.root, victim.branch), result
+    assert any(row.get("node") == victim.id and "id" in row.get("fields", [])
+               for row in events(project, "host_authority_mismatch")), result
 
 
 def test_recorded_node_with_rewritten_inner_id_pushes_forged_branch(project, tmp_path):
