@@ -49,6 +49,9 @@ limit emits none.
 - `{layer: "call", tool, argument}`: the value came from a tool call, such
   as `start_agent(timeout=…)` or a `budget_tag` ceiling.
   - `override_key` names the config key to use instead, when one exists.
+  - For a budget tag, the **first** ceiling set wins (`tree.py` ~645–665).
+    So `source` identifies that original call, meaning the node that set
+    it, not the later call that was refused.
 
 Paths are absolute. Lines are 1-based and point at the key's own line.
 
@@ -92,8 +95,11 @@ Verified by:
 - `wait_for_agents` returns a new notice once, and not again on the next
   call;
 - the monitor snapshot contains the active notice;
-- the `run` terminal printer outputs the line when fed the event. This can
-  be tested at the printer, without a live session.
+- **integration:** a live `multiagents run` session, driven by a fake
+  provider CLI, prints the `limit_hit` line to its terminal while the
+  provider is still active. A printer test fed a synthetic event is not
+  sufficient, because `run` does not tail events today (`cli.py`
+  ~1564–1588).
 
 **LN-C4: deduplication (LN-R4).** The dedup key is `(key, scope)`.
 - The first constraint emits `limit_hit`.
@@ -103,10 +109,18 @@ Verified by:
 - When the constraint stops, `limit_cleared` is emitted with `key`,
   `scope` and `count`. The constraint stops when the next attempt
   succeeds, or when the node ends or the pause clears.
-- Dedup state is in memory. After a restart, the first hit is announced
-  again. That is acceptable.
-- Verified by: ten refused starts under `max_concurrent` give one
-  `limit_hit`. A successful start then gives one `limit_cleared` with
+- **Shared state** (advisor, turn 13). Each agent's runner is its own
+  process, and the monitor reads a separate snapshot. So the active-notice
+  state (key, scope, count, first-hit time) lives in project state that
+  every runner and the monitor read and write consistently, under
+  `.multiagents/`, not in one process's memory. It survives a restart, so
+  a hit that is still active is not announced again.
+- `events.jsonl` stays the history.
+- `wait_for_agents`'s `limit_notices` uses a per-caller cursor, one per
+  calling node, over that history. Two callers each see a notice once.
+- Verified by: ten refused starts under `max_concurrent`, spread across two
+  Runner instances over the same project, give one `limit_hit`. The monitor
+  snapshot shows it as active. A successful start then gives one `limit_cleared` with
   `count: 10`.
 
 **LN-C5: container memory (LN-R6).**
@@ -114,17 +128,29 @@ Verified by:
   137), the host compares the container cgroup's `memory.events` `oom_kill`
   counter with the value it read when that run started. The counter is
   resolved per cgroup layout; systemd with cgroup v2 is the minimum.
-  - If the counter **increased**, the notice is `effect: killed` on
+  - The counter is **container-wide**. An increase is attributed to this
+    run only when there is run-specific evidence: this was the only
+    process in the container that the runner started which was alive
+    during the interval, and it died with SIGKILL while the counter
+    increased. Only then is the notice `effect: killed` on
     `executor.docker.memory`, with its provenance.
-  - Otherwise, or when the counter cannot be read, the notice is
-    `effect: kill_uncertain`. It reports a SIGKILL of unknown cause and
-    does **not** claim the memory limit, although it may mention it as one
-    possible cause.
+  - In every other case the notice is `effect: kill_uncertain`, on the
+    neutral key `process.sigkill` with `source: null`. That covers a
+    counter that did not increase, an unreadable counter, and an increase
+    during a run that had concurrent siblings.
+    - It reports a SIGKILL of unknown cause.
+    - When the counter did increase, it may say that the container hit
+      its memory limit at the time and name `executor.docker.memory` as a
+      possible cause, but it never attributes the kill to it.
 - `docker inspect … State.OOMKilled` is not evidence, because it describes
   the container, not the exec'd process.
-- Verified by: with a stubbed counter reader, an increase gives `killed`
-  on `executor.docker.memory`, no increase gives `kill_uncertain`, and an
-  unreadable counter gives `kill_uncertain`.
+- Verified by, with a stubbed counter reader:
+  - a sole run with an increase gives `killed` on
+    `executor.docker.memory`;
+  - an increase while a sibling ran concurrently gives `kill_uncertain` on
+    `process.sigkill`;
+  - no increase gives `kill_uncertain`;
+  - an unreadable counter gives `kill_uncertain`.
 
 **LN-C6: coverage (LN-R5).** Covered:
 
@@ -141,6 +167,8 @@ Verified by:
 | `max_steps`: agent or limits | stuck | supervisor ~163 |
 | `limits.doom_loop_repeats` | stuck | supervisor ~145 |
 | `limits.commit_fix_attempts` | stopped, on exhaustion only | ~2254–2286 |
+| `limits.commit_fix_timeout` | stopped, when it cuts a fix attempt short | ~2254–2286 |
+| `limits.wind_down_seconds` | deferred, when it is what makes a provider unavailable and work is deferred | ~560–586 |
 | `executor.docker.memory` | killed or kill_uncertain | LN-C5 |
 
 Not covered, and why:
@@ -151,6 +179,8 @@ Not covered, and why:
   work.
 - `compact_at_tokens` and `context_wind_down_tokens`: they already have
   their own dedicated notices (`compacted`, `context_wind_down`).
+- `doom_loop_rearm`: a parameter of the doom-loop trip, which is covered
+  under `limits.doom_loop_repeats`. It constrains nothing by itself.
 - `readonly_paths`: a protection, not a limit, and already reported as
   `readonly_violations`.
 - Driver retry and turn settings (`restart_attempts`, `supervised_turns`,
