@@ -473,6 +473,10 @@ class Config:
     agents: dict[str, AgentSpec]
     models: dict[str, Any]
     instruction_dirs: list[Path]
+    # LN-C2: the directories the layers above were read from, lowest first,
+    # so a limit notice can name the file and line a value came from. Empty
+    # for a Config built in code, which has no file to point at.
+    layers: list[Path] = field(default_factory=list)
 
     # --- convenience accessors, all with defaults so a sparse config works ---
 
@@ -708,4 +712,5 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         agents=agents,
         models=merged["models.yaml"].get("models", {}) or {},
         instruction_dirs=[layer / "agents" for layer in reversed(layers)],
+        layers=layers,
     )

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import fcntl
 import signal
 import hashlib
@@ -45,6 +46,7 @@ from .executor import build_env, get_executor, prepare_home, private_file
 from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_status,
                             running, stop_wrapped)
 from . import providers as providers_mod
+from . import notices
 from . import procs
 from . import scripts
 from . import paths as paths_mod
@@ -400,6 +402,15 @@ class Run:
     fix_turn: bool = False
     fix_verdict: dict | None = None
     fix_timed_out: bool = False       # CI-R5: ended at `commit_fix_timeout`
+    # LN-C1: the `{value, source}` limits this turn was launched under, so a
+    # trip names the value in force rather than one resolved again later.
+    limits: dict = field(default_factory=dict)
+    # LN-C5: the container's `oom_kill` count at launch (None: unreadable),
+    # and whether another run of ours shared the container meanwhile.
+    oom_baseline: int | None = None
+    oom_reader: Any = None
+    oom_container: str = ""
+    oom_crowded: bool = False
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -457,6 +468,9 @@ class Runner:
         self.providers = load_providers(config.providers)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.runs: dict[str, Run] = {}
+        # LN-C5: the runs this server has alive in each container, which is
+        # the only evidence that a container-wide OOM kill was a given run's.
+        self._container_runs: dict[str, dict[str, Run]] = {}
         self.authority = (None if DockerExecutor({}, paths, {}, state_root()).inside()
                           else HostAuthority(paths, self.tree))
         reap_pending_branches(paths.root, self.tree, self.authority)
@@ -633,6 +647,26 @@ class Runner:
                 budget.cooldown_until = now() + max(60.0, left)
                 budget.note = (f"winding down: about {left / 60:.0f} min of this "
                                f"window left at the current rate")
+
+    def _deferral_notices(self, agent_name: str, choose, budgets: dict,
+                          before_wind_down: dict, reserve: float) -> None:
+        """LN-C1/C6: name the limit that deferred this start, only when it is
+        what did — the same choice without it would have found a provider."""
+        wind_down = float(self.config.limits.get("wind_down_seconds", 300))
+        if reserve > 0 and choose(budgets, 0.0)[0] is not None:
+            key = "budget.reserve_headroom"
+            source = notices.provenance(self.config, key, reserve)
+            self._notice(key, reserve, "deferred", "tree", source,
+                         f"start of {agent_name!r} deferred to keep the headroom reserve",
+                         "lower it there to spend closer to the wall")
+        if choose(before_wind_down, reserve)[0] is not None:
+            key = "limits.wind_down_seconds"
+            value = int(wind_down) if wind_down == int(wind_down) else wind_down
+            source = notices.provenance(self.config, key, value)
+            self._notice(key, value, "deferred", "tree", source,
+                         f"start of {agent_name!r} deferred: its provider is winding "
+                         f"down before its window ends",
+                         "lower it there to keep starting work closer to the wall")
 
     def _half_open(self, budgets: dict, cooldowns: dict) -> None:
         """When a tripped provider's cooldown lapses, allow exactly one trial.
@@ -836,18 +870,27 @@ class Runner:
                 f"yourself. Changing the roster is the user's call."
             )
 
+        # LN-C1/C6: each refusal below is also a limit notice, and its text
+        # carries the notice's line (LN-C3).
+        caller = self.self_id() or "tree"
         depth = self.self_depth() + 1
         max_depth = int(limits.get("max_depth", 3))
         if depth > max_depth:
-            raise PermissionError(f"Depth limit reached: {depth} > max_depth={max_depth}")
+            raise PermissionError(self._refused(
+                f"Depth limit reached: {depth} > max_depth={max_depth}",
+                spec, "limits.max_depth", max_depth, caller,
+                notices.provenance(self.config, "limits.max_depth", max_depth),
+                "it would be deeper than the tree allows"))
 
         active = [n for n in self.tree.active() if _occupies_slot(n)]
         max_concurrent = int(limits.get("max_concurrent", 4))
         if len(active) >= max_concurrent:
-            raise RuntimeError(
+            raise RuntimeError(self._refused(
                 f"{len(active)} agents already running (max_concurrent={max_concurrent}). "
-                f"Wait for one to finish or stop it."
-            )
+                f"Wait for one to finish or stop it.",
+                spec, "limits.max_concurrent", max_concurrent, "tree",
+                notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
+                f"{len(active)} already running"))
 
         # LM-R1a: the cap is the SPAWNING parent's, as recorded when it
         # started; the requested child's own `max_children` governs its
@@ -862,28 +905,45 @@ class Runner:
                 where = {"agent": "its agent config",
                          "project": "the project's limits.max_children",
                          "builtin": "the built-in default"}.get(cap["source"], cap["source"])
-                raise RuntimeError(
+                owner = self.tree.get(parent)
+                key = (f"agents.{owner.agent}.max_children"
+                       if cap["source"] == "agent" and owner else "limits.max_children")
+                raise RuntimeError(self._refused(
                     f"This agent already has {len(siblings)} active children "
-                    f"(max {cap['value']}, source: {cap['source']} — {where}).")
+                    f"(max {cap['value']}, source: {cap['source']} — {where}).",
+                    spec, key, cap["value"], parent,
+                    notices.provenance(self.config, key, cap["value"], cap["source"]),
+                    f"{parent} already has {len(siblings)} active children"))
 
         ceiling = int(limits.get("budget_tokens", 0) or 0)
         if ceiling:
             used = self.tree.rollup_usage().get("total", 0)
             if used >= ceiling:
-                raise RuntimeError(f"Tree token budget exhausted: {used:,} >= {ceiling:,}")
+                raise RuntimeError(self._refused(
+                    f"Tree token budget exhausted: {used:,} >= {ceiling:,}",
+                    spec, "limits.budget_tokens", ceiling, "tree",
+                    notices.provenance(self.config, "limits.budget_tokens", ceiling),
+                    f"the tree has spent {used:,} tokens"))
 
         if budget_tag:
             cap = self.tree.budget_for_tag(budget_tag)
             if cap:
                 spent = int(self.tree.usage_for_tag(budget_tag).get("total", 0) or 0)
                 if spent >= cap:
-                    raise RuntimeError(
+                    # LN-C2: the FIRST ceiling set wins, so the source is the
+                    # call that set it, not this one.
+                    record = self.tree.budget_record(budget_tag)
+                    raise RuntimeError(self._refused(
                         f"Budget for {budget_tag!r} is spent: {spent:,} of {cap:,} "
                         f"tokens. This is the limit doing its job, not an "
                         f"obstacle — decide what this slice of work does NOT get, "
                         f"report what you covered and what you did not, and move "
-                        f"on. Raising it is the user's call, not yours."
-                    )
+                        f"on. Raising it is the user's call, not yours.",
+                        spec, f"budget_tag.{budget_tag}", cap, budget_tag,
+                        notices.call_source("budget_tokens", budget_tag=budget_tag,
+                                            node=record.get("set_by"),
+                                            set_at=record.get("set_at")),
+                        f"{budget_tag!r} has spent {spent:,} tokens"))
 
         provider = self.providers.get(spec.provider)
         if provider is None:
@@ -914,6 +974,43 @@ class Runner:
                 f"delegates (agent {spec.name!r}). Without this check it would exec the "
                 f"bare binary with no stdin and hang or fail obscurely."
             )
+
+    def _refused(self, text: str, spec: AgentSpec, key: str, value: Any,
+                 scope: str, source: dict[str, Any] | None, why: str) -> str:
+        """LN-C1/C3: record a refusal as a limit notice and return the error
+        text carrying its line. A repeat while the notice is active only counts
+        (LN-C4), and says how many times."""
+        notice = self._notice(key, value, "refused", scope, source,
+                              f"start of {spec.name!r} refused ({why})",
+                              "raise it there to allow more")
+        count = int(notice.get("count", 1))
+        again = f" (refused {count} times while this limit holds)" if count > 1 else ""
+        return f"{text}\n{notice['message']}{again}"
+
+    def _notice(self, key: str, value: Any, effect: str, scope: str,
+                source: dict[str, Any] | None, what: str, advice: str = "",
+                node: str | None = None) -> dict[str, Any]:
+        """LN-C1: one `limit_hit`, deduplicated across processes (LN-C4)."""
+        return notices.hit(self.tree, key=key, value=value, effect=effect,
+                           scope=scope, source=source, node=node,
+                           message=notices.message(key, value, source, what, advice))
+
+    def _limits_detail(self, agent_name: str,
+                       limits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """LN-C2: `effective_limits` as reported, each entry `{value, source,
+        source_detail}`. `source` stays LM-R2's layer name; `source_detail`
+        says which file and line (or which call argument) it came from."""
+        out: dict[str, dict[str, Any]] = {}
+        for name, entry in limits.items():
+            limit_key = "limits." + config_mod.LIMIT_FIELDS[name][0]
+            layer = entry.get("source")
+            if layer == "call":
+                detail = notices.call_source(name, limit_key)
+            else:
+                key = f"agents.{agent_name}.{name}" if layer == "agent" else limit_key
+                detail = notices.provenance(self.config, key, entry.get("value"), layer)
+            out[name] = {**entry, "source_detail": detail}
+        return out
 
     def _node_cap(self, node: Node, spec: AgentSpec) -> Any:
         recorded = (node.limits or {}).get("max_children") or {}
@@ -1308,10 +1405,11 @@ class Runner:
             node_id=node_id, provider=provider, spec=spec, handle=handle,
             supervisor=self._supervisor(spec, provider, wall,
                                         limits["silence_timeout"]["value"]),
-            turn_start=getattr(handle, "offset", 0),
+            turn_start=getattr(handle, "offset", 0), limits=limits,
             **({"done": done} if done is not None else {}),
         )
         self.runs[node_id] = run
+        await self._track_container_run(run, executor)
         self.tree.update(node_id, pid=handle.pid,
                          pid_start=getattr(handle, "pid_start", "")
                          or procs.start_time(handle.pid),
@@ -1326,6 +1424,62 @@ class Runner:
         asyncio.create_task(self._wrap_up_watch(node_id))
         self._start_credential_watch()
         return run
+
+    async def _track_container_run(self, run: Run, executor) -> None:
+        """LN-C5: note the container's `oom_kill` count as this run starts,
+        and whether any other run of ours shares the container with it."""
+        reader = getattr(executor, "oom_kill_count", None)
+        if not callable(reader):
+            return                                  # not a container
+        run.oom_reader = reader
+        run.oom_container = str(getattr(executor, "container", "") or "")
+        with contextlib.suppress(Exception):
+            run.oom_baseline = await asyncio.to_thread(reader)
+        peers = self._container_runs.setdefault(run.oom_container, {})
+        for other_id, other in list(peers.items()):
+            if other_id == run.node_id or other.done.is_set() \
+                    or (other.task is not None and other.task.done()):
+                peers.pop(other_id, None)
+        if peers:
+            run.oom_crowded = True
+            for other in peers.values():
+                other.oom_crowded = True
+        peers[run.node_id] = run
+
+    async def _sigkill_notice(self, run: Run, code: int) -> None:
+        """LN-C5: a run in the container died by SIGKILL. Attributed to
+        `executor.docker.memory` only when the container's `oom_kill` count
+        rose during it AND it was the only run of ours in there; every other
+        case is a SIGKILL of unknown cause. `docker inspect … OOMKilled`
+        describes the container, not the exec'd process, and is not used."""
+        node_id = run.node_id
+        after = None
+        with contextlib.suppress(Exception):
+            after = await asyncio.to_thread(run.oom_reader)
+        rose = (run.oom_baseline is not None and after is not None
+                and after > run.oom_baseline)
+        memory = (self.config.project.get("executor", {}).get("docker", {}) or {}).get("memory")
+        if rose and not run.oom_crowded and memory:
+            key = "executor.docker.memory"
+            self._notice(key, memory, "killed", node_id,
+                         notices.provenance(self.config, key, memory),
+                         f"{node_id} ({run.spec.name}) was SIGKILLed when the "
+                         f"container ran out of memory",
+                         "raise it there if the work needs more", node=node_id)
+            return
+        if rose:
+            why = (f"the container hit its memory limit at the time "
+                   f"(executor.docker.memory = {memory}), a possible cause, but "
+                   f"another run shared the container" if memory else
+                   "the container's OOM killer fired at the time, but another "
+                   "run shared the container")
+        elif after is None or run.oom_baseline is None:
+            why = "the container's OOM counter could not be read"
+        else:
+            why = "the container's OOM counter did not change"
+        self._notice("process.sigkill", code, "kill_uncertain", node_id, None,
+                     f"{node_id} ({run.spec.name}) ended by SIGKILL of unknown "
+                     f"cause; {why}", node=node_id)
 
     def _hand_server(self, node_id: str, provider: Provider, env: dict[str, str],
                      home: Path | None, run_dir: Path) -> tuple[list[str], dict[str, str]]:
@@ -1574,8 +1728,14 @@ class Runner:
                 spec = spec.replace(model=model)
         if budget_tag and budget_tokens:
             # First value wins, so a re-declaration cannot lift a spent ceiling.
-            self.tree.set_budget(budget_tag, budget_tokens)
+            self.tree.set_budget(budget_tag, budget_tokens,
+                                 set_by=self.self_id() or self.session() or "root")
         self._preflight(spec, workdir, budget_tag)
+        # LN-C4: every refusal limit this start was checked against let it
+        # through, so the notices for them in its scopes have stopped.
+        passed = {"tree", self.self_id() or "tree", *([budget_tag] if budget_tag else [])}
+        notices.clear(self.tree, lambda e: e.get("effect") == "refused"
+                      and e.get("scope") in passed)
         provider = self.providers[spec.provider]
 
         parent = self.self_id()
@@ -1600,6 +1760,7 @@ class Runner:
         spend_now = self.tree.rollup_usage().get("cost_usd", 0)
         for name, entry in budgets.items():
             self.tree.note_headroom(name, entry.headroom, spend_now)
+        before_wind_down = copy.deepcopy(budgets)
         self._wind_down(budgets)
         routed_from, routed_why = "", ""
         budget_cfg = self.config.project.get("budget", {})
@@ -1622,20 +1783,31 @@ class Runner:
                       if name in self.providers and name not in usable
                       and self.providers[name].enabled]
         load, last_used = self._instance_load()
-        chosen, why = budget_mod.choose_provider(
-            spec.provider, budgets, chain,
-            float(budget_cfg.get("reserve_headroom", 0.15)),
-            reserved=budget_mod.reserved_providers(
-                self.config.project, self.providers, self._orchestrator_provider()),
-            # Only the providers this agent has a model to run on. A candidate
-            # it cannot use is not a candidate, and discovering that afterwards
-            # is how a run ended up back on the provider just ruled out.
-            allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
-                     *family, *chain} & usable,
-            family=family,
-            load=load, last_used=last_used,
-            wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
-        )
+        reserve = float(budget_cfg.get("reserve_headroom", 0.15))
+
+        def choose(budgets: dict, reserve: float) -> tuple[str | None, str]:
+            return budget_mod.choose_provider(
+                spec.provider, budgets, chain, reserve,
+                reserved=budget_mod.reserved_providers(
+                    self.config.project, self.providers, self._orchestrator_provider()),
+                # Only the providers this agent has a model to run on. A
+                # candidate it cannot use is not a candidate, and discovering
+                # that afterwards is how a run ended up back on the provider
+                # just ruled out.
+                allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
+                         *family, *chain} & usable,
+                family=family,
+                load=dict(load), last_used=dict(last_used),
+                wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
+            )
+
+        chosen, why = choose(budgets, reserve)
+        if chosen is None:
+            self._deferral_notices(agent_name, choose, budgets, before_wind_down, reserve)
+        else:
+            # LN-C4: work routed, so a deferral limit is no longer deferring it.
+            notices.clear(self.tree, lambda e: e.get("effect") == "deferred"
+                          and e.get("scope") == "tree")
         if chosen is not None and len(family) > 1:
             self.tree.claim_instance(chosen)
         if chosen != spec.provider:
@@ -1756,7 +1928,7 @@ class Runner:
             "workdir": str(worktree_path),
             "status": "running",
             "routing": why,
-            "effective_limits": limits,
+            "effective_limits": self._limits_detail(agent_name, limits),
             "log": str(self.paths.run_dir(node_id)),
             "pid": run.handle.pid if run.handle else None,
         }
@@ -1914,6 +2086,7 @@ class Runner:
                 if trip:
                     self.tree.set_status(node_id, "stuck", f"{trip.reason}: {trip.detail}")
                     self.tree.emit(node_id, "stuck", reason=trip.reason, detail=trip.detail)
+                    self._trip_notice(run, trip)
                     run.trip_kind = trip.reason
                     run.trip_signature = run.supervisor.last_digest
                     run.trip_progress = run.supervisor.current_progress
@@ -1964,6 +2137,8 @@ class Runner:
                 # result.
                 self.tree.set_status(node_id, "cancelled", reason)
                 self._release(node_id)
+                with contextlib.suppress(Exception):
+                    notices.clear_node(self.tree, node_id)        # LN-C4
             raise
         except Exception as exc:
             self.tree.set_status(node_id, "failed", f"{type(exc).__name__}: {exc}")
@@ -2011,6 +2186,9 @@ class Runner:
         finally:
             if not relaunched:
                 self._release(node_id)
+                # LN-C4: the node ended, so its own notices have stopped.
+                with contextlib.suppress(Exception):
+                    notices.clear_node(self.tree, node_id)
                 run.done.set()
 
     def _maybe_clear_stuck(self, run: Run, node_id: str) -> None:
@@ -2051,10 +2229,52 @@ class Runner:
         )
         if cleared:
             self.tree.set_status(node_id, "running")
+            notices.clear_node(self.tree, node_id, "stuck")      # LN-C4
             run.trip_kind = ""
             run.trip_signature = ""
             run.trip_progress = ""
             run.trip_opaque_calls = 0
+
+    def _trip_notice(self, run: Run, trip) -> None:
+        """LN-C1/C6: a watchdog or supervisor trip is a limit notice, keyed by
+        where the value in force came from. Reported, never enforced (SV-R4).
+
+        A commit-fix turn's wall clock is `limits.commit_fix_timeout`, which
+        its loop reports itself."""
+        if run.fix_turn or run.supervisor is None:
+            return
+        node_id = run.node_id
+        agent = run.spec.name
+        limits = run.limits or self._limits_for(node_id, run.spec)
+        if trip.reason in ("timeout", "silence"):
+            name = "timeout" if trip.reason == "timeout" else "silence_timeout"
+            limit_key = "limits." + ("default_timeout" if name == "timeout"
+                                     else "silence_timeout")
+            entry = limits.get(name) or {}
+            value = entry.get("value")
+            layer = entry.get("source")
+            if layer == "call":
+                key, source = limit_key, notices.call_source(name, limit_key)
+            elif layer == "agent":
+                key = f"agents.{agent}.{name}"
+                source = notices.provenance(self.config, key, value, "agent")
+            else:
+                key = limit_key
+                source = notices.provenance(self.config, key, value, layer)
+        elif trip.reason == "runaway_steps":
+            value = run.supervisor.max_steps
+            key = (f"agents.{agent}.max_steps" if run.spec.max_steps
+                   else "limits.max_steps")
+            source = notices.provenance(self.config, key, value)
+        elif trip.reason == "doom_loop":
+            value = run.supervisor.loop_repeats
+            key = "limits.doom_loop_repeats"
+            source = notices.provenance(self.config, key, value)
+        else:
+            return
+        self._notice(key, value, "stuck", node_id, source,
+                     f"{node_id} ({agent}) reported stuck: {trip.detail}",
+                     "raise it there if runs like this need more", node=node_id)
 
     @staticmethod
     def _with_trip(prior_stuck: str, reason: str) -> str:
@@ -2122,6 +2342,11 @@ class Runner:
         stopped_elsewhere = bool(stuck_before and stuck_before.status == "cancelled")
         if stopped_elsewhere:
             status = "cancelled"
+        if run.oom_reader is not None:
+            self._container_runs.get(run.oom_container, {}).pop(node_id, None)
+            if code in (137, -9) and not stopped_elsewhere and not timed_out:
+                with contextlib.suppress(Exception):
+                    await self._sigkill_notice(run, code)
 
         if not stopped_elsewhere:
             status, limited = await self._provider_health_after(run, status, text, stderr)
@@ -2416,6 +2641,11 @@ class Runner:
                 fix.fix_timed_out = True
                 await fix.handle.stop()
                 await asyncio.wait({fix.task})
+                key = "limits.commit_fix_timeout"
+                self._notice(key, wall, "stopped", node_id,
+                             notices.provenance(self.config, key, wall),
+                             f"fix attempt {attempt} of {node_id} cut short",
+                             "raise it there if a fix needs longer", node=node_id)
             if fix.detaching:
                 return result, attempt, "detached", usage, None
             if fix.stop_requested:
@@ -2442,6 +2672,15 @@ class Runner:
                 gitops.commit_all,
                 Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
                 role=node.agent, agent_id=node_id, git=self.agent_git(node))
+        if not result.ok and result.hook and allowed and attempt >= allowed:
+            # LN-C6: on exhaustion only — every attempt was used and the hook
+            # still refuses.
+            key = "limits.commit_fix_attempts"
+            self._notice(key, allowed, "stopped", node_id,
+                         notices.provenance(self.config, key, allowed),
+                         f"{node_id} used all {allowed} fix attempt(s) and the "
+                         f"{result.hook} hook still refuses its commit",
+                         "raise it there to allow more", node=node_id)
         return result, attempt, "", usage, None
 
     async def _finalize_fix_turn(self, run: Run, code: int | None,
@@ -2626,6 +2865,15 @@ class Runner:
         node = self.tree.get(run.node_id)
         progress_dir = (Path(node.worktree) if node and node.worktree
                         and gitops.is_repo(Path(node.worktree)) else None)
+        # The working tree at launch is the first reading silence compares
+        # against, so a run that has said nothing and changed nothing since it
+        # started trips at the first quiet poll rather than the second. Any
+        # stream event drops it (`Supervisor.observe`), so a long tool call
+        # later in the run still gets its first look.
+        if progress_dir is not None:
+            with contextlib.suppress(Exception):
+                run.supervisor.progress_when_last_quiet = await asyncio.to_thread(
+                    _worktree_state, progress_dir, self.paths.root)
         while True:
             await asyncio.sleep(5)
             try:
@@ -2645,6 +2893,7 @@ class Runner:
                 if trip:
                     self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
                     self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
+                    self._trip_notice(run, trip)
                     run.trip_kind = trip.reason
                     run.trip_signature = run.supervisor.last_digest
                     run.trip_progress = run.supervisor.current_progress
@@ -4322,6 +4571,19 @@ class Runner:
         return result
 
     async def wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
+        """Block until any of the given agents leaves the running state.
+
+        LN-C3: the result carries `limit_notices`, the limit hits and clears
+        this caller has not been shown yet — read when the result is built,
+        through one cursor per calling node (LN-C4).
+        """
+        result = await self._wait_for_any(agent_ids, timeout)
+        shown = notices.since(self.tree, self.self_id() or self.session() or "root")
+        if shown:
+            result["limit_notices"] = shown
+        return result
+
+    async def _wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
         """Block until any of the given agents leaves the running state.
 
         Polls the shared tree rather than only in-process events, so an

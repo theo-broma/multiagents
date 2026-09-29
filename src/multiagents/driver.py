@@ -450,6 +450,11 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # Without it `stop` can end the agents and leave the thing that starts more
     # of them running.
     _write_pid(paths, role, os.getpid())
+    # LN-C3: limit notices reach this terminal while the CLI holds it, as the
+    # line `multiagents watch` prints. Started before either path, since the
+    # exec below leaves nothing of ours in this process to print with.
+    from . import notices
+    notices.start_tailer(paths.events_file, os.getpid())
     try:
         if unattended:
             return _supervise(paths, config, role, spec, provider, executor,

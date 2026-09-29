@@ -1623,6 +1623,45 @@ class DockerExecutor(Executor):
         except ValueError:
             return None
 
+    def oom_kill_count(self) -> int | None:
+        """LN-C5: the container cgroup's `oom_kill` counter, or None when it
+        cannot be read. Container-wide: every OOM decision goes through here,
+        and attributing a rise to one run is the caller's job.
+
+        Inside the container the cgroup namespace root is its own cgroup.
+        From the host it is found by the container's full id under the
+        layouts docker uses: systemd with cgroup v2 (the minimum supported),
+        cgroupfs v2, and both under cgroup v1.
+        """
+        if self.inside():
+            candidates = [Path("/sys/fs/cgroup/memory.events"),
+                          Path("/sys/fs/cgroup/memory/memory.oom_control")]
+        else:
+            try:
+                result = _run(["docker", "inspect", "-f", "{{.Id}}", self.container],
+                              timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            cid = result.stdout.strip()
+            if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{64}", cid):
+                return None
+            root = Path("/sys/fs/cgroup")
+            candidates = [root / "system.slice" / f"docker-{cid}.scope" / "memory.events",
+                          root / "docker" / cid / "memory.events",
+                          root / "memory" / "system.slice" / f"docker-{cid}.scope"
+                          / "memory.oom_control",
+                          root / "memory" / "docker" / cid / "memory.oom_control"]
+        for path in candidates:
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                name, _, value = line.partition(" ")
+                if name == "oom_kill" and value.strip().isdigit():
+                    return int(value.strip())
+        return None
+
     def container_state(self, name: str) -> str:
         result = _run(["docker", "inspect", "-f", "{{.State.Status}}", name])
         return result.stdout.strip() if result.returncode == 0 else "absent"
