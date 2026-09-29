@@ -18,6 +18,18 @@ What happens today:
   - **start:** budget or family routing picks a same-family sibling
     provider and does the same (`runner.py` ~1515, ~1581).
 
+**Usable model, the definition shared by RT-R1 to RT-R3** (advisor, turn
+11). An agent has a usable model on provider P when either of these holds:
+- **exact route:** P is its primary provider, or `models:` has a non-empty
+  entry for P;
+- **same-family route:** P is a sibling in the same family as a provider
+  with an exact route, and siblings share model ids, as the runner already
+  assumes (`runner.py` ~1515) and consult already does (~3375–3407). That
+  exact route's model is then used on P.
+
+"No model" means neither route supplies a non-empty model. Only then is P
+excluded or refused.
+
 **RT-R1: start never routes to a provider without a model.** Budget and
 family routing in `start()` considers only providers for which the agent
 has a **non-empty** model. That is its primary model, or a non-empty
@@ -35,7 +47,9 @@ has a **non-empty** model. That is its primary model, or a non-empty
     sibling has no `models:` entry, is never launched with an empty
     `--model` or equivalent. It is deferred or refused as today, and the
     event is emitted.
-  - with a non-empty sibling entry, it routes to that sibling as today.
+  - with a non-empty sibling entry, it routes to that sibling as today;
+  - a same-family sibling with no `models:` entry of its own routes, using
+    the family's model, and does not emit the event.
 
 **RT-R2: steer never resumes on a provider without a model.** When
 `steer_agent` rebuilds a run on the node's recorded provider and the agent
@@ -96,6 +110,42 @@ Verified by, for each of the three keys:
 The observables are the wall-clock timeout the supervisor enforces, the
 child-count refusal, and the silence watchdog. Short values keep the tests
 fast.
+
+**LM-R1a: `max_children` is the parent's cap.** Today `_preflight`
+counts the spawning parent's children but applies the *requested child's*
+`spec.max_children` (`runner.py` ~804–809). That is wrong.
+- The cap enforced is the **parent's** effective `max_children`, resolved
+  by LM-R1 and recorded when the parent starts. The root orchestrator's
+  cap comes from the project `limits:`, then the built-in default.
+- A refusal for too many children carries the cap's value and source.
+- Verified by: a parent whose effective cap is 1 is refused a second
+  child, whatever the requested child's own `max_children`, and the
+  refusal names the value and source.
+
+**LM-R1b: consult and resumed runs.**
+- LM-R1 also covers the conversational path: consult's lock wait, launch,
+  reply wait and silence watchdog use the resolved values. Today they use
+  `timeout or spec.timeout` (`runner.py` ~3609, ~3754–3766).
+- A retry or `steer_agent` keeps the run's original effective `timeout`
+  when that came from an explicit per-call value (source `call`).
+  Otherwise the values are resolved again from the current config.
+- Verified by: a consult with the agent field omitted, under a short
+  project `limits.default_timeout`, times out at the project value; a
+  steered run started with an explicit timeout keeps it.
+
+**LM-R1c: field presence and nested runners.**
+- Whether the agent config **sets** a field is determined before config
+  layers are merged into `AgentSpec`. Otherwise "agent explicit" cannot be
+  told apart from a default.
+- The project's `limits:`, together with the project and default config
+  layers, is authoritative for resolution. A nested runner in the container
+  sees the same mounted project config and resolves the same values. A
+  `limits:` override set only in the host's global config directory, which
+  is not mounted into the container, applies on the host only. This is
+  documented beside the setting.
+- Verified by: a runner constructed as nested, with `inside()`
+  monkeypatched and no global config, resolves the same effective values
+  as the host for the same project config.
 
 **LM-R2: the effective value and its source are reportable.** For every
 started agent, the runner can report each of the three effective values
