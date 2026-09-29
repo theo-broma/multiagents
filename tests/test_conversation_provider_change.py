@@ -105,7 +105,8 @@ class Moved:
     roster that now names `zeta` — with whatever `models:` fallbacks the test
     gives it."""
 
-    def __init__(self, tmp_path, monkeypatch, *, models=None):
+    def __init__(self, tmp_path, monkeypatch, *, models=None,
+                 worktree_in_domain=False):
         acme, self.acme_probe = _fake_cli(tmp_path, "acme")
         zeta, self.zeta_probe = _fake_cli(tmp_path, "zeta")
         self.acme_bin = acme["bin"]
@@ -115,8 +116,9 @@ class Moved:
         self.runner = h.make_runner(self.root, monkeypatch,
                                     agents={"advisor": spec},
                                     providers={"acme": acme, "zeta": zeta})
-        worktree = tmp_path / "old-worktree"
-        worktree.mkdir()
+        worktree = (self.runner.paths.worktree(OLD_NODE) if worktree_in_domain
+                    else tmp_path / "old-worktree")
+        worktree.mkdir(parents=True)
         # The conversation as the earlier roster left it: on acme, idle, one
         # turn in, with acme's session.
         self.runner.tree.add(Node(
@@ -234,7 +236,8 @@ def test_cx_c28_the_next_consult_continues_the_replacement(tmp_path, monkeypatch
 def test_cx_c28_a_conversation_on_a_listed_fallback_is_still_resumed(tmp_path, monkeypatch):
     """The other half, and the one an over-eager fix breaks: a node routed to
     a fallback the roster still lists keeps its conversation."""
-    m = Moved(tmp_path, monkeypatch, models={"acme": "acme-large"})
+    m = Moved(tmp_path, monkeypatch, models={"acme": "acme-large"},
+              worktree_in_domain=True)
 
     result = m.consult()
 
