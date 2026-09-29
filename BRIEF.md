@@ -517,6 +517,19 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - Note: `usage` = capacity and `currentValue` = used (not what the field names suggest).
 - The opencode-zai budget action can be written from this: headroom = the worst of the two `percentage` values.
 
+**2026-09-29 ~22:45 UTC: USER MANDATE (autonomous overnight).** Quote: "implement all this with claude and codex; when I come back tomorrow everything will be ready to use GLM in our dev team. When you are done with that, continue with the original plan; I will tell you when I am back." Both claude and codex may be used.
+- **Order:**
+  1. H7 (implementer ag-2abbbc, resuming after the codex reset at 23:45 UTC), then the adversary, then merge.
+  2. opencode-zai, contract `context/specs/zai-provider.md` (ZA-R1..R5): tester, then implementer AFTER H7 merges (both touch opencode.sh and providers.yaml), then merge.
+  3. Enable opencode-zai in `.multiagents/config/providers.yaml`, then refresh-models.
+  4. Roster: add `opencode-zai: zai-coding-plan/glm-5.3*` to agents' `models:`. Consult the advisor first; the user explicitly authorised making GLM usable by the team.
+  5. Advance wt-main. The user must run `/mcp` on return: note it in the final report.
+  6. The original plan:
+     - D1 fixes (8 findings);
+     - HA-R12 clean;
+     - the D3 contract revision, then its pipeline;
+     - H5, H6, H8, H10–H13, D2.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
