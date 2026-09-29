@@ -287,9 +287,10 @@ def test_rf_r6_merge_reports_prior_non_done_status(tmp_path, monkeypatch, status
                    check=True, capture_output=True)
     if status != "done":
         r.tree.set_status(agent_id, status, "fixture outcome")
-    target = tmp_path / "merge-target"
-    h.gitops.create_worktree(r.paths.root, target, "target")
-    result = r.merge_agent(agent_id, into=str(target))
+    # HA-R11: the target must be a recorded worktree, so merge into a second
+    # agent's rather than an arbitrary checkout.
+    target = r.tree.get(_run(r)).worktree
+    result = r.merge_agent(agent_id, into=target)
     assert result["result"] == "merged", result
     if status == "done":
         assert "status_before_merge" not in result
