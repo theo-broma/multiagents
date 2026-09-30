@@ -2054,7 +2054,8 @@ class Runner:
                     self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
                 )
                 self.tree.defer({"agent": agent_name, "task": task, "timeout": timeout,
-                                 "model": model, "workdir": workdir}, retry_at, why)
+                                 "model": model, "workdir": workdir}, retry_at, why,
+                                deferred_by=self.self_id())
                 # Nothing can run, so nothing should keep being started. Pausing is
                 # the difference between a system that stops and one that carries on
                 # writing code while the agents that check it are unreachable.
@@ -2065,7 +2066,8 @@ class Runner:
                 # problem into everybody's.
                 unavailable = sorted(name for name in options
                                      if name in budgets and not budgets[name].usable)
-                self.tree.pause(retry_at, why, providers=unavailable or sorted(options))
+                self.tree.pause(retry_at, why, providers=unavailable or sorted(options),
+                                deferral=True)
                 return {"deferred": True, "reason": why, "retry_after": retry_at,
                         "paused": True,
                         "note": "the tree is paused until this clears; deferred tasks "
@@ -4913,44 +4915,68 @@ class Runner:
             return {"paused": False, "restarted": []}
 
         budget_mod.invalidate_cache()             # the window moved; re-read it
-        restarted, still_waiting, orphaned = [], 0, []
+        restarted, refused, dropped, stopped = [], [], [], ""
         for entry in due:
             task_spec = entry.get("spec") or {}
             agent = task_spec.get("agent")
             if not agent or agent not in self.config.agents:
                 # The roster changed while this waited. Reported rather than
                 # dropped silently: the orchestrator believes it is still queued.
-                orphaned.append({"agent": agent, "task": task_spec.get("task", "")[:120]})
-                self.tree.drop_deferred(entry["id"])
+                reason = "agent is no longer in agents.yaml"
+                dropped.append({"agent": agent, "task": task_spec.get("task", "")[:120],
+                                "reason": reason})
+                self.tree.exit_deferred(entry["id"], "dropped", reason=reason)
                 continue
+            known = {d["id"] for d in self.tree.read()["deferred"]}
             try:
                 result = await self.start(
                     agent, task_spec.get("task", ""),
                     workdir=task_spec.get("workdir"), timeout=task_spec.get("timeout"),
                     model=task_spec.get("model"),
                 )
+            except (ValueError, PermissionError) as exc:
+                # DQ-R3b: the request itself cannot be honoured, and waiting
+                # will not change that. Kept, marked, never retried.
+                result = {"error": f"{agent}: {exc}"}
             except Exception as exc:
                 # Leave this entry queued — it has not been dealt with — and
                 # stop. One failure here is almost always systemic (the window
                 # closed again mid-drain), and grinding through the rest turns
                 # one problem into a batch of them.
-                still_waiting = len(due) - len(restarted) - len(orphaned)
-                return {"paused": False, "restarted": restarted,
-                        "still_deferred": still_waiting,
-                        "stopped_on": f"{type(exc).__name__}: {exc}"[:300]}
-            # Dealt with either way: a re-deferral from start() is a NEW entry,
-            # so dropping the old one here is what stops the queue growing.
-            self.tree.drop_deferred(entry["id"])
+                stopped = f"{type(exc).__name__}: {exc}"[:300]
+                break
+            if result.get("error") and not result.get("deferred"):
+                reason = str(result.get("reason") or result["error"])
+                if agent not in reason:
+                    reason = f"{agent}: {reason}"
+                if task_spec.get("model") and task_spec["model"] not in reason:
+                    reason += f" (pinned model {task_spec['model']!r})"
+                refused.append({"agent": agent, "deferred_id": entry["id"],
+                                "reason": reason})
+                self.tree.exit_deferred(entry["id"], "refused", reason=reason)
+                continue
             if result.get("deferred"):
-                still_waiting += 1
+                # A re-deferral from start() is a NEW entry, so ending the old
+                # one here is what stops the queue growing.
+                fresh = [d["id"] for d in self.tree.read()["deferred"]
+                         if d["id"] not in known]
+                self.tree.exit_deferred(entry["id"], "re_deferred",
+                                        new_deferred_id=fresh[0] if fresh else None)
                 break                             # the window closed again
+            self.tree.exit_deferred(entry["id"], "restarted",
+                                    agent_id=result.get("agent_id"))
             restarted.append({"agent": agent, "agent_id": result.get("agent_id")})
-        result = {"paused": False, "restarted": restarted,
-                  "still_deferred": still_waiting}
-        if orphaned:
-            result["dropped"] = orphaned
+        still = sum(1 for d in self.tree.read()["deferred"]
+                    if d.get("status", "waiting") == "waiting")
+        result = {"paused": False, "restarted": restarted, "still_deferred": still}
+        if refused:
+            result["refused"] = refused
+        if dropped:
+            result["dropped"] = dropped
             result["note"] = ("these were deferred for an agent that is no longer "
                               "in agents.yaml; re-issue them if they still matter")
+        if stopped:
+            result["stopped_on"] = stopped
         return result
 
     async def wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
@@ -4960,22 +4986,31 @@ class Runner:
         this caller has not been shown yet — read when the result is built,
         through one cursor per calling node (LN-C4).
         """
-        result = await self._wait_for_any(agent_ids, timeout)
+        # Drain the deferred queue first. A task waiting on a quota reset is
+        # invisible to active(), so without this an orchestrator polling for
+        # work is told there is none while tasks sit ready to restart.
+        revived = await self.resume_deferred()
+        result = await self._wait_for_any(agent_ids, timeout, revived)
+        # DQ-R2: the drain's outcome rides on every result that followed one —
+        # the "no active agents" and timeout returns included, which is where
+        # a refused or dropped entry used to go unreported.
+        if "still_deferred" in revived:
+            result["deferred"] = {"restarted": revived["restarted"],
+                                  "refused": revived.get("refused", []),
+                                  "dropped": revived.get("dropped", []),
+                                  "still_deferred": revived["still_deferred"]}
         shown = notices.since(self.tree, self.self_id() or self.session() or "root")
         if shown:
             result["limit_notices"] = shown
         return result
 
-    async def _wait_for_any(self, agent_ids: list[str] | None, timeout: float) -> dict[str, Any]:
+    async def _wait_for_any(self, agent_ids: list[str] | None, timeout: float,
+                            revived: dict[str, Any]) -> dict[str, Any]:
         """Block until any of the given agents leaves the running state.
 
         Polls the shared tree rather than only in-process events, so an
         orchestrator can also wait on agents started by a nested server.
         """
-        # Drain the deferred queue first. A task waiting on a quota reset is
-        # invisible to active(), so without this an orchestrator polling for
-        # work is told there is none while tasks sit ready to restart.
-        revived = await self.resume_deferred()
         # A pause stops new work, not the wait: agents already running are
         # waited on as usual, and every result says whether a pause is in
         # force. Read when the result is built, not now — a pause can expire

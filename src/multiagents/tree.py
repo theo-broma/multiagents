@@ -437,7 +437,7 @@ class Tree:
 
     # --------------------------------------------------------------- events --
 
-    def emit(self, agent_id: str, kind: str, **fields: Any) -> None:
+    def emit(self, agent_id: str, kind: str, /, **fields: Any) -> None:
         """Append one line to the global event log. Never raises."""
         entry = scrub({"t": now(), "agent": agent_id, "kind": kind, **fields})
         try:
@@ -982,7 +982,7 @@ class Tree:
     # pause.
 
     def pause(self, until: float, reason: str, providers: list[str] | None = None,
-             cause: str | None = None) -> dict:
+             cause: str | None = None, deferral: bool = False) -> dict:
         """Record that there is nothing to run `providers` work on until `until`.
 
         Keeps the EARLIEST reset of any active pause, not the latest. Waking
@@ -994,9 +994,14 @@ class Tree:
         `"spend_limit"`, or omitted. A pause with no cause, or written before
         this parameter existed, is never treated as a quota pause — see
         `context/specs/quota-freshness.md`.
+
+        `deferral` marks a pause set by deferring a task (DQ-R6): only that
+        kind is lifted when the last waiting deferred entry leaves.
         """
         record = {"until": until, "reason": reason, "since": now(),
                   "providers": sorted(providers or [])}
+        if deferral:
+            record["deferral"] = True
         if cause is not None:
             record["cause"] = cause
         with self.transaction() as data:
@@ -1026,26 +1031,59 @@ class Tree:
 
     # ------------------------------------------------------------- deferred --
 
-    def defer(self, spec: dict, retry_after: float, reason: str) -> dict:
+    def defer(self, spec: dict, retry_after: float, reason: str,
+              deferred_by: str | None = None) -> dict:
         record = {"id": "df-" + uuid.uuid4().hex[:6], "spec": spec,
-                  "retry_after": retry_after, "reason": reason, "queued_at": now()}
+                  "retry_after": retry_after, "reason": reason, "queued_at": now(),
+                  "status": "waiting", "deferred_by": deferred_by}
         with self.transaction() as data:
             data["deferred"].append(record)
         self.emit(spec.get("agent", "?"), "deferred", reason=reason, retry_after=retry_after)
         return record
 
     def due_deferred(self) -> list[dict]:
-        """Entries whose window has passed. **Does not remove them.**
+        """Waiting entries whose window has passed. **Does not remove them.**
 
         It used to pop, which made any exception between the pop and the
-        restart delete the whole remaining batch permanently. The caller drops
-        each entry with drop_deferred once it has actually dealt with it, so a
-        crash leaves work queued rather than losing it.
+        restart delete the whole remaining batch permanently. The caller ends
+        each entry with exit_deferred once it has actually dealt with it, so a
+        crash leaves work queued rather than losing it. A refused entry is never
+        due: it leaves only through cancel_deferred (DQ-R3).
         """
         current = now()
-        return [d for d in self.read()["deferred"] if d["retry_after"] <= current]
+        return [d for d in self.read()["deferred"]
+                if d.get("status", "waiting") == "waiting" and d["retry_after"] <= current]
+
+    def exit_deferred(self, deferred_id: str, outcome: str, **fields: Any) -> bool:
+        """End one entry's stay in the queue, and say so (DQ-R1).
+
+        The only way an entry leaves, so no exit goes unrecorded. `refused`
+        keeps the entry, marked, and every other outcome removes it. When no
+        waiting entry is left the pause a deferral set is lifted in the same
+        step (DQ-R6); a pause of another origin is left alone (DQ-R6a).
+        """
+        lifted = False
+        with self.transaction() as data:
+            entry = next((d for d in data["deferred"] if d.get("id") == deferred_id), None)
+            if entry is None:
+                return False
+            if outcome == "refused":
+                entry["status"] = "refused"
+                entry["reason"] = fields.get("reason", "")
+            else:
+                data["deferred"] = [d for d in data["deferred"] if d is not entry]
+            waiting = any(d.get("status", "waiting") == "waiting" for d in data["deferred"])
+            if not waiting and (data.get("pause") or {}).get("deferral"):
+                data["pause"] = {}
+                lifted = True
+        self.emit("system", "deferred_exit", deferred_id=deferred_id,
+                  agent=(entry.get("spec") or {}).get("agent"), outcome=outcome, **fields)
+        if lifted:
+            self.emit("system", "resumed", reason="no deferred task is waiting")
+        return True
 
     def drop_deferred(self, deferred_id: str) -> bool:
+        """Remove an entry with no event. Prefer exit_deferred (DQ-R1)."""
         with self.transaction() as data:
             before = len(data["deferred"])
             data["deferred"] = [d for d in data["deferred"]
