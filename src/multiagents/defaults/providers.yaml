@@ -593,6 +593,22 @@ providers:
     models_parse: tsv
     # Paid through the ChatGPT subscription, not per-token.
     billing: plan
+    # Q5 (doom-loop false positive on codex file_change): codex reports each
+    # file edit as a `file_change` item, normalised to a tool event whose args
+    # carry only the changed paths and kinds — never the content. Successive
+    # edits to one file therefore normalise to identical name-and-args
+    # signatures, and doom_loop used to trip on a working agent mid-edit. The
+    # one field that would tell two edits apart (the item id) is dropped by
+    # design (CX-C26: only the event shape is carried, never the raw object),
+    # and the remaining args cannot distinguish one edit from another, so the
+    # tool is declared opaque whole — the same reasoning as agy's view_file
+    # (SL-R6) rather than agy's arg-scoped manage_task rule (bug-8615db):
+    # there is no argument value that separates a legitimate call from a
+    # repeated one. `command_execution` and `web_search` are deliberately NOT
+    # declared: their args carry the command and the query, so a genuinely
+    # repeated call still trips.
+    opaque_tools:
+      - file_change
     # Under docker, do NOT mount the host's ~/.codex: its OAuth token does not
     # survive containerisation any better than agy's, and a shared mount would
     # let a compromised agent read or rotate the host's own credential. A
