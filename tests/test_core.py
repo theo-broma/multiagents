@@ -4358,7 +4358,7 @@ def test_draining_stops_when_the_window_closes_mid_batch(tmp_path):
     result = asyncio.run(r.resume_deferred())
 
     assert result["restarted"] == []
-    assert result["still_deferred"] == 1, "it stopped after the first"
+    assert result["still_deferred"] == 3, "DQ-R2: counts entries left waiting"
     # Two untouched originals plus the one start() re-queued.
     assert len(r.tree.read()["deferred"]) == 3
 
