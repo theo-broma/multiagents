@@ -2992,3 +2992,7 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - **Side effect:** 18 tests in `test_t1_deferred_queue.py` went red. Their fixture defers through the `worker` agent, whose `models:` zeta fallback now routes first under RM-R2. Tester ag-978728 is fixing the fixture.
   - **The T1 fix run ag-c604fe** is based on pre-M main. At merge time, check its T1 adversary and amendment tests against M: the same `worker` fixture issue may apply.
   - **Not yet done:** an adversary run on M, since routing decides where credentials are spent. It should be run on claude opus, because codex refuses adversary work.
+- **~13:50 UTC: the T1 adversary fixes are merged (4c44d71),** carrying the amendments and `tests/test_t1_adversary.py`. With M on main, 215 T1, M and phase0 tests are green.
+  - **Regression:** `test_core::test_a_failed_restart_leaves_the_rest_of_the_queue_intact`. A `RuntimeError` from `start()` now propagates, although DQ-R3b says to stop and return `stopped_on`. The fix is ag-? (implementer-quick glm).
+  - **Discard later:** ag-3a07cc and ag-5917f6, which are carried.
+  - **Adversary on M:** ag-9dffc6 (opus), running.
