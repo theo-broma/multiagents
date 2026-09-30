@@ -2946,3 +2946,9 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     - the phase 0 invariant fix (ag-4240d0, glm). Two phase0 guards have been red since the D3 and H7-fix merges, because comments name claude and opencode in manifest.py:224 and providers.py:644.
     - T1 (ag-38d415, claude, finishing).
   - **gpt-6.1-sol.** The user says it works in their terminal. Here, codex 0.158.0 `exec` gets a 400 "not supported when using Codex with a ChatGPT account", both via ~/.codex and via the agents' profile. ~/.codex/sessions has no successful gpt-6.1-sol session today, so the user's terminal may use another CODEX_HOME or machine. I have asked the user.
+- 2026-09-30 ~11:40 UTC.
+  - **Merged:**
+    - Q6 (a22a0b1), `reset_display`, the countdown plus local time in the monitor;
+    - the phase 0 invariant fixes (5e1eb4b, and the follow-up for the Q6 docstring).
+  - **codex.** The user upgraded the CLI to 0.159.2, and gpt-6.1-sol now works through the agents' profile. The model list is refreshed, and every roster use of gpt-6-sol has become gpt-6.1-sol: advisor, dev-advisor, adversary, the tester's fallback, the implementer's codex fallback, and the reviewer.
+  - **The advisor conversation ag-322b14 (gpt-6-sol) is stopped,** so that the next consult starts fresh on 6.1. This is the same-provider model-change bug.
