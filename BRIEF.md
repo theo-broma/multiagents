@@ -3203,3 +3203,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - `in_launch` is set too early, leaving a node `pending` (P2).
 
   These were steered to ag-074735. **Next:** a reviewer again, then cherry-pick f8c2b26, then merge.
+- **Update, 20:35 UTC.** PS ag-dc8946 exited because the z.ai 5-hour quota was hit ("reset at 2026-10-01 05:01:26", z.ai time = 21:01 UTC). Its work is committed (e469bbd, f86439e, 9e7d9bd WIP). A wake-up is armed for 21:05 UTC: then steer ag-dc8946 with "quota reset, carry on", and steer ag-074735 too if it died the same way. **Correction:** the handoff timestamps above ("~23:45") were wrong; the real UTC time is about 20:30.
