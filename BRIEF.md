@@ -2931,3 +2931,6 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - **Tooling defect, observed 2026-09-30 by the user.** A roster model change on the SAME provider does not take effect in a standing conversation. `_find_conversation` resumed advisor ag-8e7d87, which was created on codex gpt-6-astra, after the roster had changed to gpt-6-sol. `_conversation_route` checks only the provider (CX-C28).
   - **Workaround used:** stop the old conversation node, so that the next consult creates a fresh one.
   - **Ticket to fix:** a conversation whose model differs from the roster should be retired and recreated, or at least reported.
+- **User order, 2026-09-30 ~10:55 UTC: launch no more implementers on claude; wait for glm.**
+  - The running claude implementers (T1 ag-38d415, T2 ag-9008e5) finish their current scope.
+  - The work on the T1/T2 amendments (tests are in 3ce818e) goes to glm-5.3-flash implementers. So does batch Q (Q1, Q4, Q5, Q6) and then batch M.
