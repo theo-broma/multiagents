@@ -561,6 +561,20 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - **Then:** the adversary on H7, on codex after 04:48 or on claude.
 - **zai implementer ag-325a81** is still running.
 
+**2026-09-30 ~01:00 UTC:**
+- **opencode-zai merged (88ddd80).** The orchestrator reviewed the key handling: urllib, no redirects, fixed-text notes, key never printed. 80/81 zai tests pass.
+- **Tester ag-3d714b (sonnet)** is fixing three test problems:
+  - the ambiguous test ZA-R4 `_line("1%")`;
+  - the three c2 tests that pin "four providers";
+  - `test_h2` RF-R5/RF-R6: a raw `git commit` in the fixture depends on the host's global identity. It fails in the orchestrator shell with "Author identity unknown" and passes in agent envs. This is not a product regression.
+- **Plan after the H7 merge:**
+  1. Advance wt-main.
+  2. Enable `opencode-zai` in `.multiagents/config/providers.yaml`.
+  3. Run refresh-models.
+  4. Make the roster edit.
+
+  This is not done before, because the running server reads the shipped yaml from wt-main.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
