@@ -575,6 +575,19 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 
   This is not done before, because the running server reads the shipped yaml from wt-main.
 
+**2026-09-30 ~02:00 UTC: THE GLM TEAM IS LIVE.**
+- **Code:** wt-main was advanced to 49c9b4e. That brings the zai provider, HA-R12, H13 and the test fixes. H7 is NOT in it yet.
+- **Config** (`.multiagents/config/` is gitignored, so these changes are recorded here):
+  - `providers.yaml`: `opencode-zai: enabled: true`.
+  - `agents.yaml`:
+    - implementer-quick, implementer and implementer-deep use provider opencode-zai, model `zai-coding-plan/glm-5.3`, variants low, high and max. Their fallbacks are codex (quick/default gpt-5.6-terra, deep gpt-6-astra) and then opencode Go, each with `variant: ""`. Claude was removed from the implementer chains.
+    - tester uses claude sonnet.
+    - dev-advisor gets `codex: gpt-6-sol` as its first fallback (agy disabled, Go at 99%).
+  - `refresh-models` now records opencode-zai with 7 models.
+- **doctor:** opencode-zai is authenticated, with its budget at 1% (5 h window).
+- **Smoke test ag-be5784:** implementer-quick on opencode-zai, argv `--variant low`, done in 7 s, reply correct. Discarded afterwards.
+- **Note:** implementer-deep has `readonly_paths: []` (tests unprotected) from an older decision. It was left as is, but this agent is told in each task that tests/ is read-only.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
