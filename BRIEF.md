@@ -2980,3 +2980,11 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - 1a, the container claude 401 (docker only);
   - 4, the agy pools (decision above);
   - e8565d#4, transcripts keys.
+- **~13:00 UTC: adversary ag-5917f6 on T1.** 7 findings, 5 of them high:
+  - a crash after `start()` gives a double start;
+  - a cancelled drain strands the claim;
+  - a cancel mid-restart;
+  - a re-deferral takes the wrong owner, and so does an orchestrator entry drained by a subagent.
+  - The rest: malformed entries crash things, and a refused entry can be retried by a recovery race.
+- **Spec amended** with DQ-R9..R12.
+- **Fix run** ag-c604fe (implementer-deep glm), with the worktree squashed from agents/adversary/5917f6 (amendments plus tests) as e1347f6. When green, merge it; that one merge carries the amendments and the fixes. Afterwards discard ag-3a07cc and ag-5917f6, since both are carried.
