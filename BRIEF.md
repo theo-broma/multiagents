@@ -2711,3 +2711,26 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - id validation, and symlinks and FIFOs refused;
   - truncation is handled.
   ag-743603 is the D2 tester (sonnet).
+
+### 2026-09-30 ~09:40 UTC — roster switch (user) and PAUSE
+- **The user's instructions.** z.ai's 5 h window is exhausted and agy's
+  quota is back. Implementers go to codex: quick is gpt-6-luna, default is
+  gpt-6-sol, deep is gpt-6-astra. GLM stays as their fallback, with
+  variants low, high and max. The advisor, adversary and dev-advisor go to
+  agy gemini-3.1-pro-high, with codex as the fallback. agy is re-enabled in
+  the project providers.yaml. models.yaml has been refreshed (agy: 14
+  models), and every provider is authenticated.
+- **PAUSE, at the user's request, while they get agy working again.** Start
+  nothing new.
+- **Runs that died at the z.ai limit (exit 1).** Their worktrees and
+  commits are kept, so resume from them rather than restart:
+  - **ag-709ee5 (D3):** WIP commit 667b9b8.
+  - **ag-42b581 (D1 fixes):** a93e53c. Findings 1, 2, 3 and 8 are done.
+    Still to do: F4 to F7 in notices.py, the followup tests, and the
+    adopted-run deadline from the host record.
+  - **ag-303ef7 (H7 fixes):** 21c3035 and 2dcd789. These may be complete;
+    verify tests/test_h7_adversary.py before merging.
+  - **To resume on codex:** start a new run on the new tier, pass
+    `merge_agent(<old>, into=<new worktree>)`, and point it at
+    .multiagents/runs/<old>/.
+- ag-743603 (the D2 tester, on sonnet) is still running.
