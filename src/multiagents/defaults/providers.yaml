@@ -469,6 +469,15 @@ providers:
     stream:
       format: ndjson
       session_id_paths: ["session_id"]
+      # PS-R4a: an API error is not startup progress. Claude Code prints one
+      # as an assistant message from the model "<synthetic>" (the shape
+      # transcripts.py already knows), inside a result whose `is_error` is
+      # true. A run that only reports an API error never ran the model, so it
+      # counts as a startup failure and a probe that only reports one does
+      # not recover the provider.
+      no_progress:
+        - {type: "assistant", "message.model": "<synthetic>"}
+        - {type: "result", "is_error": true}
       rules:
         # Ordered: an assistant event carrying a tool_use block is a tool call
         # even when a thinking block precedes it in the same content list.

@@ -1856,129 +1856,150 @@ class Runner:
         self._wind_down(budgets)
         routed_from, routed_why = "", ""
         budget_cfg = self.config.project.get("budget", {})
-        # Other accounts on the same CLI. Interchangeable without a `models:`
-        # entry, because a model id means the same thing on both.
-        family = providers_mod.families(self.providers).get(
-            self.providers[spec.provider].family
-            if spec.provider in self.providers else "", [])
-        # A disabled sibling is never a candidate (CX-C6): `read_all` omits it,
-        # and a provider with no budget would otherwise read as one with room.
-        family = [name for name in family
-                  if name == spec.provider or self.providers[name].enabled]
-        # RT-R1: a candidate is a provider this agent has a model on — its
-        # own, a `models:` entry naming one, or a sibling of either. A key
-        # with an empty model is not one: routing there ran `--model ""`.
-        chain = list(budget_cfg.get("fallback_chain", []))
-        if model:
-            family, chain = [], []
-        elif self.startup.availability(spec.provider):
-            chain = list(dict.fromkeys([*chain, *(spec.models or {})]))
-        startup_blocked = {}
-        for name, candidate in self.providers.items():
-            problem = self.startup.availability(name)
-            if problem:
-                startup_blocked[name] = problem
-                entry = budgets.setdefault(name, budget_mod.Budget(name, known=False))
-                entry.cooldown_until = max(now() + 1, problem.get("retry_after") or 0)
-                entry.note = problem["reason"]
-        usable = {name for name in self.providers
-                  if self._usable_spec(spec, name) is not None}
-        unmodelled = [name for name in dict.fromkeys([*chain, *family])
-                      if name in self.providers and name not in usable
-                      and self.providers[name].enabled]
-        load, last_used = self._instance_load()
-        reserve = float(budget_cfg.get("reserve_headroom", 0.15))
+        # PS-R5b: routing and the startup claim are two steps, and another
+        # server can take a half-open provider's only probe between them.
+        # Losing that race is not a refusal — the call never asked for this
+        # provider by name — so routing runs again with the provider that
+        # could not be claimed excluded, exactly as `provider_down` is
+        # handled: siblings and fallbacks are tried, and deferral applies
+        # when none is left. A pinned start still gets the PS-R6 refusal.
+        unclaimable: set[str] = set()
+        configured_spec = spec
+        while True:
+            spec = configured_spec
+            provider = self.providers[spec.provider]
+            routed_from, routed_why = "", ""
+            # Other accounts on the same CLI. Interchangeable without a
+            # `models:` entry, because a model id means the same thing on both.
+            family = providers_mod.families(self.providers).get(
+                self.providers[spec.provider].family
+                if spec.provider in self.providers else "", [])
+            # A disabled sibling is never a candidate (CX-C6): `read_all` omits
+            # it, and a provider with no budget would otherwise read as one
+            # with room.
+            family = [name for name in family
+                      if name == spec.provider or self.providers[name].enabled]
+            # RT-R1: a candidate is a provider this agent has a model on — its
+            # own, a `models:` entry naming one, or a sibling of either. A key
+            # with an empty model is not one: routing there ran `--model ""`.
+            chain = list(budget_cfg.get("fallback_chain", []))
+            if model:
+                family, chain = [], []
+            elif self.startup.availability(spec.provider):
+                chain = list(dict.fromkeys([*chain, *(spec.models or {})]))
+            startup_blocked = {}
+            for name, candidate in self.providers.items():
+                problem = self.startup.availability(name)
+                if problem or name in unclaimable:
+                    if problem:
+                        startup_blocked[name] = problem
+                    entry = budgets.setdefault(name, budget_mod.Budget(name, known=False))
+                    entry.cooldown_until = max(
+                        entry.cooldown_until or 0, now() + 1,
+                        (problem or {}).get("retry_after") or 0)
+                    entry.note = problem["reason"] if problem else "startup_down"
+            usable = {name for name in self.providers
+                      if self._usable_spec(spec, name) is not None}
+            unmodelled = [name for name in dict.fromkeys([*chain, *family])
+                          if name in self.providers and name not in usable
+                          and self.providers[name].enabled]
+            load, last_used = self._instance_load()
+            reserve = float(budget_cfg.get("reserve_headroom", 0.15))
 
-        def choose(budgets: dict, reserve: float) -> tuple[str | None, str]:
-            return budget_mod.choose_provider(
-                spec.provider, budgets, chain, reserve,
-                reserved=budget_mod.reserved_providers(
-                    self.config.project, self.providers, self._orchestrator_provider()),
-                # Only the providers this agent has a model to run on. A
-                # candidate it cannot use is not a candidate, and discovering
-                # that afterwards is how a run ended up back on the provider
-                # just ruled out.
-                allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
-                         *family, *chain} & usable,
-                family=family,
-                load=dict(load), last_used=dict(last_used),
-                wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
-            )
+            def choose(budgets: dict, reserve: float) -> tuple[str | None, str]:
+                return budget_mod.choose_provider(
+                    spec.provider, budgets, chain, reserve,
+                    reserved=budget_mod.reserved_providers(
+                        self.config.project, self.providers, self._orchestrator_provider()),
+                    # Only the providers this agent has a model to run on. A
+                    # candidate it cannot use is not a candidate, and discovering
+                    # that afterwards is how a run ended up back on the provider
+                    # just ruled out.
+                    allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
+                             *family, *chain} & usable,
+                    family=family,
+                    load=dict(load), last_used=dict(last_used),
+                    wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
+                )
 
-        chosen, why = choose(budgets, reserve)
-        if chosen is None and model:
-            entry = budgets.get(spec.provider)
-            problem = startup_blocked.get(spec.provider) or {}
-            return self._pin_refusal(spec.provider, problem.get("reason") or why,
-                                     problem.get("retry_after") or
-                                     (entry.cooldown_until if entry else None))
-        if chosen is None:
-            self._deferral_notices(agent_name, choose, budgets, before_wind_down, reserve)
-        else:
-            # LN-C4: work routed, so a deferral limit is no longer deferring it.
-            notices.clear(self.tree, lambda e: e.get("effect") == "deferred"
-                          and e.get("scope") == "tree")
-        if chosen is not None and len(family) > 1:
-            self.tree.claim_instance(chosen)
-        if chosen != spec.provider:
-            # Only when routing looked past the agent's own provider: that is
-            # when a provider it has no model on was passed over.
-            for name in unmodelled:
-                self.tree.emit(node_id, "route_skipped", provider=name,
-                               reason=f"no model configured for this agent on {name}")
-        if chosen is None:
-            # Prefer a real reset time over the blind cooldown: a provider that
-            # told us when it comes back should not be waited on for longer.
-            # Only from providers THIS agent could use — waking for one it
-            # cannot run on finds nothing changed and defers again, forever.
-            options = {spec.provider, *(spec.models or spec.extra.get("models") or {})}
-            resets = [b.cooldown_until for name, b in budgets.items()
-                      if b.cooldown_until and name in options]
-            retry_at = min(resets) if resets else now() + float(
-                self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
-            )
-            self.tree.defer({"agent": agent_name, "task": task, "timeout": timeout,
-                             "model": model, "workdir": workdir}, retry_at, why)
-            # Nothing can run, so nothing should keep being started. Pausing is
-            # the difference between a system that stops and one that carries on
-            # writing code while the agents that check it are unreachable.
-            #
-            # Named by what is actually UNAVAILABLE, not by everything this
-            # agent could have used: a pause listing a healthy provider would
-            # refuse other agents that only need that one, turning one agent's
-            # problem into everybody's.
-            unavailable = sorted(name for name in options
-                                 if name in budgets and not budgets[name].usable)
-            self.tree.pause(retry_at, why, providers=unavailable or sorted(options))
-            return {"deferred": True, "reason": why, "retry_after": retry_at,
-                    "paused": True,
-                    "note": "the tree is paused until this clears; deferred tasks "
-                            "restart by themselves when it does"}
-        if chosen != spec.provider:
-            # The model id belongs to the original provider's namespace, so it
-            # is meaningless to the new one — failing over without remapping
-            # would run `agy --model opencode-go/glm-5.3-flash`. choose_provider
-            # is told which providers this agent named a model for and offers no
-            # other, so there is always one to use here.
-            #
-            # It used to discover the missing model at this point and respond by
-            # reverting to the provider it had just ruled out. Measured cost of
-            # that: an agent whose configured fallback sat one place further
-            # down the chain ran five times into a revoked token instead.
-            _, overrides = spec.fallback_for(chosen)
-            routed = self._usable_spec(spec, chosen)
-            if routed is None:          # choose_provider offers only `allowed`
-                raise RuntimeError(f"routing chose {chosen!r}, where agent "
-                                   f"{agent_name!r} has no model")
-            provider = self.providers[chosen]
-            routed_from, routed_why = spec.provider, why
-            if overrides:
-                routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
-            spec = routed
-        try:
-            startup_token = self.startup.claim(provider.name, node_id)
-        except StartupUnavailable as exc:
-            return self._pin_refusal(provider.name, exc.reason, exc.retry_after)
+            chosen, why = choose(budgets, reserve)
+            if chosen is None and model:
+                entry = budgets.get(spec.provider)
+                problem = startup_blocked.get(spec.provider) or {}
+                return self._pin_refusal(spec.provider, problem.get("reason") or why,
+                                         problem.get("retry_after") or
+                                         (entry.cooldown_until if entry else None))
+            if chosen is None:
+                self._deferral_notices(agent_name, choose, budgets, before_wind_down, reserve)
+            else:
+                # LN-C4: work routed, so a deferral limit is no longer deferring it.
+                notices.clear(self.tree, lambda e: e.get("effect") == "deferred"
+                              and e.get("scope") == "tree")
+            if chosen is not None and len(family) > 1:
+                self.tree.claim_instance(chosen)
+            if chosen != spec.provider:
+                # Only when routing looked past the agent's own provider: that is
+                # when a provider it has no model on was passed over.
+                for name in unmodelled:
+                    self.tree.emit(node_id, "route_skipped", provider=name,
+                                   reason=f"no model configured for this agent on {name}")
+            if chosen is None:
+                # Prefer a real reset time over the blind cooldown: a provider that
+                # told us when it comes back should not be waited on for longer.
+                # Only from providers THIS agent could use — waking for one it
+                # cannot run on finds nothing changed and defers again, forever.
+                options = {spec.provider, *(spec.models or spec.extra.get("models") or {})}
+                resets = [b.cooldown_until for name, b in budgets.items()
+                          if b.cooldown_until and name in options]
+                retry_at = min(resets) if resets else now() + float(
+                    self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
+                )
+                self.tree.defer({"agent": agent_name, "task": task, "timeout": timeout,
+                                 "model": model, "workdir": workdir}, retry_at, why)
+                # Nothing can run, so nothing should keep being started. Pausing is
+                # the difference between a system that stops and one that carries on
+                # writing code while the agents that check it are unreachable.
+                #
+                # Named by what is actually UNAVAILABLE, not by everything this
+                # agent could have used: a pause listing a healthy provider would
+                # refuse other agents that only need that one, turning one agent's
+                # problem into everybody's.
+                unavailable = sorted(name for name in options
+                                     if name in budgets and not budgets[name].usable)
+                self.tree.pause(retry_at, why, providers=unavailable or sorted(options))
+                return {"deferred": True, "reason": why, "retry_after": retry_at,
+                        "paused": True,
+                        "note": "the tree is paused until this clears; deferred tasks "
+                                "restart by themselves when it does"}
+            if chosen != spec.provider:
+                # The model id belongs to the original provider's namespace, so it
+                # is meaningless to the new one — failing over without remapping
+                # would run `agy --model opencode-go/glm-5.3-flash`. choose_provider
+                # is told which providers this agent named a model for and offers no
+                # other, so there is always one to use here.
+                #
+                # It used to discover the missing model at this point and respond by
+                # reverting to the provider it had just ruled out. Measured cost of
+                # that: an agent whose configured fallback sat one place further
+                # down the chain ran five times into a revoked token instead.
+                _, overrides = spec.fallback_for(chosen)
+                routed = self._usable_spec(spec, chosen)
+                if routed is None:          # choose_provider offers only `allowed`
+                    raise RuntimeError(f"routing chose {chosen!r}, where agent "
+                                       f"{agent_name!r} has no model")
+                provider = self.providers[chosen]
+                routed_from, routed_why = spec.provider, why
+                if overrides:
+                    routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
+                spec = routed
+            try:
+                startup_token = self.startup.claim(provider.name, node_id)
+            except StartupUnavailable as exc:
+                if model:
+                    return self._pin_refusal(provider.name, exc.reason, exc.retry_after)
+                unclaimable.add(provider.name)
+                continue
+            break
         launched = False
         try:
             # LM-R1/R2: resolved once, recorded on the node, reported to the
@@ -4003,15 +4024,43 @@ class Runner:
                                      f"{workdir}: {exc}"}
                 self.tree.update(agent_id, worktree=str(workdir), branch=branch)
 
+        # PS-R5a: the provider's ability to take the RELAUNCH is checked —
+        # and its startup claim taken — BEFORE the live process is stopped.
+        # Steering stops the run and respawns it; a respawn whose claim
+        # cannot be had (the provider is startup_down and not claimable as a
+        # probe) would kill a healthy, progressing run for nothing, which is
+        # how the wrap-up steer once ended nodes as `failed: Provider 'x' is
+        # startup_down`. Refused here, the live run is left untouched,
+        # pinned or not. The claim is handed to `_launch` so the window
+        # between this check and the respawn cannot close.
+        try:
+            startup_token = self.startup.claim(provider.name, agent_id)
+        except StartupUnavailable as exc:
+            refusal = {
+                "agent_id": agent_id, "steered": False, "reason": exc.reason,
+                "error": f"provider {provider.name!r} is {exc.reason}, so the "
+                         f"live run cannot be relaunched after a steer; it was "
+                         f"left untouched. Retry once the provider recovers, or "
+                         f"stop it and start a fresh run elsewhere.",
+            }
+            if exc.retry_after:
+                refusal["retry_after"] = exc.retry_after
+            return refusal
         # `internal=True`: this ends the turn to respawn the very same run, not
         # a cancellation, and must not report the run as `cancelled` while
         # that is in flight (bug-8195f2) — see `run.internal_stop`.
-        await self.stop(agent_id, internal=True)
+        try:
+            await self.stop(agent_id, internal=True)
+        except BaseException:
+            # Nothing was relaunched, so nothing will release the claim above.
+            self._startup_finish(provider.name, agent_id, startup_token)
+            raise
         try:
             await self._launch(
                 node_id=agent_id, spec=spec, provider=provider, prompt=message,
                 workdir=workdir, branch=branch,
                 parent=node.parent, depth=node.depth, session_id=node.session_id,
+                startup_token=startup_token,
             )
         except RuntimeError as exc:
             self.tree.set_status(agent_id, "failed", str(exc))
