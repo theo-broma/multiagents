@@ -3024,3 +3024,15 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     - start implementer-deep (glm), then squash `agents/adversary/9dffc6` into its worktree;
     - verify, merge, and discard ag-9dffc6.
 - **Nothing is running now.**
+
+### 2026-09-30 ~14:40 UTC — after compaction #6
+
+**User decisions:**
+- (a) The adversary gets a reworded brief and name: the new roster agent `robustness-tester` (codex gpt-6.1-sol, medium; brief `.multiagents/config/agents/team/robustness-tester.md`). `adversary` goes back to claude/opus as its primary.
+- (b) agy's Claude/GPT pool becomes its own provider. The user generalised this into feature **PS**: providers share tooling (CLI, auth, quota source) while keeping their models and quota separate. The contract is `context/specs/ps-provider-sharing.md` (d5a6885), reviewed twice by the advisor ag-d20e1e.
+
+**In flight:**
+- M fix: `ag-f25929`, implementer-deep on glm, verifying ag-9dffc6. The adversary tests were squashed in (873c535), and the M spec was amended with RM-R7..R2b (6e09333).
+- **NEXT for M:** verify, then the `robustness-tester` (codex) as a first real test of the renamed role, then merge, then discard ag-9dffc6.
+- PS tester: deferred (claude session reset 14:51 UTC). It auto-restarts at the next wait.
+- **NEXT for PS:** tester → implementer-deep (glm) → robustness-tester → reviewer → merge, then move the agy claude/gpt routes in agents.yaml to `agy-partner`.
