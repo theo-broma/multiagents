@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
 import sys
 import tempfile
@@ -222,13 +223,37 @@ def _clean(state: Any) -> dict:
     a record nobody vouches for is exactly the hole finding 3 closed."""
     if not isinstance(state, dict):
         state = {}
-    if not isinstance(state.get("active"), dict):
-        state["active"] = {}
-    if not isinstance(state.get("cleared"), list):
-        state["cleared"] = []
-    if not isinstance(state.get("cursors"), dict):
-        state["cursors"] = {}
+    active = state.get("active")
+    state["active"] = {
+        _ident(entry["key"], entry["scope"]): entry
+        for raw in (active.values() if isinstance(active, dict) else ())
+        if (entry := _clean_entry(raw)) is not None
+    }
+    cleared = state.get("cleared")
+    state["cleared"] = [entry for raw in (cleared if isinstance(cleared, list) else ())
+                        if (entry := _clean_entry(raw)) is not None]
+    cursors = state.get("cursors")
+    state["cursors"] = {caller: offset for caller, offset in
+                        (cursors.items() if isinstance(cursors, dict) else ())
+                        if isinstance(caller, str) and isinstance(offset, int)
+                        and not isinstance(offset, bool) and offset >= 0}
     return state
+
+
+def _clean_entry(raw: Any) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    if not isinstance(raw.get("key"), str) or not isinstance(raw.get("scope"), str):
+        return None
+    entry = dict(raw)
+    try:
+        entry["count"] = max(1, int(entry.get("count", 1)))
+    except (TypeError, ValueError, OverflowError):
+        entry["count"] = 1
+    stamp = entry.get("first_hit")
+    entry["first_hit"] = (stamp if isinstance(stamp, (int, float))
+                          and not isinstance(stamp, bool) and math.isfinite(stamp) else 0)
+    return entry
 
 
 class NoticeState:
@@ -356,7 +381,7 @@ def hit(tree: Tree, *, key: str, value: Any, effect: str, scope: str,
             tree.emit(node or "-", "limit_hit", **fields)
             result = dict(entry)
         state.commit(data)
-    _mirror(tree, data)
+        _mirror(tree, data)
     return result
 
 
@@ -381,7 +406,7 @@ def clear(tree: Tree, match) -> list[dict[str, Any]]:
         if not ended:
             return []                     # the common case: nothing to end
         state.commit(data)
-    _mirror(tree, data)
+        _mirror(tree, data)
     return ended
 
 
@@ -393,12 +418,14 @@ def clear_node(tree: Tree, node_id: str, effect: str | None = None) -> None:
 
 def active(data: dict) -> list[dict[str, Any]]:
     """Active notices from an already-read tree, oldest first."""
-    entries = ((data.get(STATE_KEY) or {}).get("active") or {}).values()
+    block = data.get(STATE_KEY) if isinstance(data, dict) else None
+    entries = _clean(block)["active"].values()
     return sorted(entries, key=lambda e: e.get("first_hit") or 0)
 
 
 def recently_cleared(data: dict) -> list[dict[str, Any]]:
-    return list((data.get(STATE_KEY) or {}).get("cleared") or [])
+    block = data.get(STATE_KEY) if isinstance(data, dict) else None
+    return _clean(block)["cleared"]
 
 
 def _brief(event: dict[str, Any]) -> dict[str, Any]:
@@ -465,8 +492,7 @@ def since(tree: Tree, caller: str) -> list[dict[str, Any]]:
         for gone in prune:
             data["cursors"].pop(gone, None)
         if moved:
-            data["cursors"][caller] = max(cursor_out,
-                                          data["cursors"].get(caller, 0))
+            data["cursors"][caller] = cursor_out
         state.commit(data)
         _mirror(tree, data)
     return out
