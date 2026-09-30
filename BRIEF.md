@@ -3036,3 +3036,19 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - **NEXT for M:** verify, then the `robustness-tester` (codex) as a first real test of the renamed role, then merge, then discard ag-9dffc6.
 - PS tester: deferred (claude session reset 14:51 UTC). It auto-restarts at the next wait.
 - **NEXT for PS:** tester → implementer-deep (glm) → robustness-tester → reviewer → merge, then move the agy claude/gpt routes in agents.yaml to `agy-partner`.
+
+### 2026-09-30 ~16:00 UTC
+
+**Merged:**
+- the M fix, ag-f25929, as 6e023e0: test_m_adversary 24/24, and M+T1 179 passed on main;
+- the PS tests, ag-adf1bc, as d20093b. They are red by design. The spec amendments R10, R4b and R7b were committed as 7941330.
+
+**Roster:** `robustness-tester` was added to the implement and review team rosters in project.yaml. implementer-deep's timeouts were raised to 5400/900, because glm is silent while suites run.
+
+**In flight:**
+- robustness-tester ag-6e70df (codex gpt-6.1-sol), checking M after the fix; this is the first run of the renamed role;
+- PS implementer-deep ag-dc8946 (glm).
+
+**NEXT:**
+- M: read the result. Findings go to an implementer-deep on glm. If the codex filter still refuses the run, report that to the user.
+- PS: verify, then the robustness-tester, then the reviewer, then merge, then move the agy claude/gpt routes in agents.yaml to agy-partner.
