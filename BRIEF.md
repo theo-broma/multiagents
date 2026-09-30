@@ -2918,3 +2918,9 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - **Batch L:**
   - 1a: container claude 401. Deferred, since the docker executor is not in use.
   - 4: agy pools, which needs a design decision (pool-aware routing, or two providers). That goes to the advisor when agy is back.
+- 2026-09-30 ~10:35 UTC:
+  - Q3 merged (a0afac7), which fixes bug-c106a9.
+  - Q2 merged (a7d3302), `_resolve_if_project`.
+  - The T1 and T2 tests are merged (d646f77, e8d19ca), with spec amendments c01a85d and b942382.
+  - In flight on claude sonnet: T1 impl ag-38d415 and T2 impl ag-9008e5.
+  - Next, on glm-5.3-flash after 10:57: Q1, Q4, Q5, Q6, then batch M one at a time (1g, 3, 6).
