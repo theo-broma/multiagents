@@ -158,3 +158,29 @@ They must stay green.
   - release the supervision lock;
   - `occupancy.forget()` any registered container occupancy.
 - **The order.** The slot or claim is released only after that cleanup has run.
+
+## Amendments of 2026-09-30, after the round-4 re-review (ag-467011). The design is binding, from the advisor (ag-d20e1e, turn 5).
+
+**RM-R1c: failed-launch cleanup, the exact design.** It supersedes the retry and detach approach of RM-R1b's implementation.
+- **One cleanup task.** Create exactly **one cleanup task**. It:
+  1. stops the launched process;
+  2. **confirms** that the actual local or container run has ended. `handle.wait()` on its own is not proof, since it may return on an exit-status file, and `stop()` has only bounded settling (executor/base.py ~355–405);
+  3. then releases the supervision lock, the container occupancy, the startup claim and the reserved concurrency slot;
+  4. only after that, removes tracking and signals `run.done` if it exists.
+
+  Never release any of these merely because stop returned, raised or timed out.
+- **The caller.**
+  - The caller keeps awaiting `asyncio.shield(the_same_task)` through any further cancellation of its own. There is no retry limit, and no replacement stop task is ever created.
+  - When the task completes, the caller retrieves its result and propagates the original launch failure or cancellation.
+  - Caller cancellation is distinguished from the cleanup task itself being cancelled: the caller never loops on a cancelled task.
+- **If termination fails.** Ownership and occupancy are kept until death is confirmed, and the cleanup failure is reported.
+- **What is forbidden:**
+  - an outer exception or `finally` handler that frees the slot early;
+  - a detached cleanup;
+  - an unobserved task exception.
+
+**RM-R4f: the cache hit, the exact design.** It clarifies RM-R4e's "next access".
+- **First, under `_cache_lock`.** Verify that the entry is still current **and that its config-dir identity matches**. If either fails, take the ordinary miss path, without returning or ageing that entry.
+- **A backward step.** For a matching entry, `now < last_seen` means: invalidate the entry and take the ordinary fetch path **in this same call**, whatever the age metadata says. The invalidated budget is never returned. A failed fetch gives the normal unknown result.
+- **Otherwise,** the ordinary TTL and age handling applies.
+- **Publishing.** The replacement budget and its source identity are published together, under the lock. Provider I/O happens outside the lock.
