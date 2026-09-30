@@ -2756,3 +2756,11 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - Worth a ticket: the router accepted a model/effort pair the CLI rejects.
   - ag-463a38, a researcher on agy pro-low, is analysing what GLM delivered for 100% of its 5 h window and 35% of its weekly, at the user's request.
 - **agy loop pattern.** agy moves long commands to the background, and Gemini then polls their task log; the doom-loop watchdog fires on this. I steered ag-725897 and ag-149e0a to run tests in the foreground or to sleep between checks.
+- **GLM analysis (ag-463a38), reported to the user.**
+  - One 5 h window: ~2.8 M tokens and 20 weekly points (from 15% to 35%).
+  - Output: H6 and H8 complete, H7 fixes complete, D1 about 60%, and D3 WIP. That is ~560 src lines and ~470 test lines.
+  - Five parallel runs emptied the window in ~45 minutes.
+  - Quality is good at high and low. max is long, and three of its runs were cut off.
+- **D3 on agy (ag-149e0a) is DONE.** I verified the D3 suite myself: 286 passed. The stray files were removed (16b34e6).
+  - My concern: the cleanup one-liner in exec_in_running was shaped to match the fake-docker log matcher. The in-container kill is real.
+  - The reviewer ag-bf6004 (agy gemini pro, fallback from codex) is reviewing it before the merge.
