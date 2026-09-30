@@ -51,10 +51,12 @@ class Proj:
 
     def __init__(self, tmp_path, monkeypatch):
         self.monkeypatch = monkeypatch
-        self.headroom = {"acme": 1.0, "zeta": 1.0, "slowp": 1.0}
+        # `zeta` is `worker`'s own fallback (RM-R2): it shares acme's window here,
+        # so closing acme leaves a deferral with no usable route, as the tests mean.
+        self.headroom = {"acme": 1.0, "slowp": 1.0}
         monkeypatch.setattr(budget_mod, "read_all", lambda *a, **kw: {
             n: budget_mod.Budget(n, known=True, headroom=v)
-            for n, v in self.headroom.items()})
+            for n, v in {**self.headroom, "zeta": self.headroom["acme"]}.items()})
         providers = {
             "acme": h.fake_cli(tmp_path, "acme", events=TEXT),
             "zeta": h.fake_cli(tmp_path, "zeta", events=TEXT),
@@ -438,8 +440,10 @@ def test_dq_r4_deferred_by_is_orchestrator_for_the_root_and_the_caller_for_a_sub
     p.tree.add(Node(id="ag-child", agent="worker", provider="acme", model="m1",
                     parent=None, depth=1, status="running"))
     p.as_child("ag-child")
-    p.headroom["acme"] = 0.0
-    result = p.call(server.start_agent, "worker", "from child")
+    # The root's deferral holds a pause on acme and zeta, which refuses another
+    # `worker` start outright; the child defers on a provider that is still open.
+    p.headroom["slowp"] = 0.0
+    result = p.call(server.start_agent, "slow", "from child")
     assert result.get("deferred") is True, result
     by_task = {e["task"]: e for e in p.listed()}
     assert by_task["from root"]["deferred_by"] == "orchestrator"
