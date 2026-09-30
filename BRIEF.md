@@ -2898,3 +2898,23 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - reviewer/e8565d: #1-3 and #7 are fixed. #4 (transcripts.py:388, keys hardcoded to Claude's) waits until a second transcript reader exists. #5 and #6 are skipped.
   - reviewer/bf6004: #5 is declined, as documented.
   - **Branch cleanup:** the reviewer branches 98e037, e4919f, e8565d and bf6004 and tester/b689bf (superseded) can be discarded. The implementer leftovers are the quarantined worktrees and the discards the classifier denied, so they need the user.
+- **Ticket triage (researcher ag-72e868, 2026-09-30).** The full table is in the run result.
+- **Fixed already:**
+  - 1b, the codex empty profile;
+  - 5, the agy manage_task polling (bug-8615db).
+- **The quarantined worktrees.** discard refused "seeded worktree is quarantined" on reviewer 98e037, e4919f and e8565d and on tester b689bf. That is left to the user; bf6004 is discarded.
+- **Batch Q, S-size, known cause, straight to implementer-quick on glm-5.3-flash, in parallel because the files do not overlap:**
+  - Q1: runner.py:2706 `suppress(Exception)` around the retry launch (98e037 #4). The fix logs an event.
+  - Q2: cli.py, `_resolve(args.path) if find_project_root()` at 8 sites (1f).
+  - Q3: executor/docker.py `stop()` omits `auth_container` (1h, bug-c106a9).
+  - Q4: codex.py `login_action` does not name the profile path (1c).
+  - Q5: providers.yaml codex block, `file_change` doom-loop false positive (1e). The minimal fix is `opaque_tools`.
+  - Q6: monitor reset time shown as local time plus a countdown (unfiled ticket 1). This is presentation only; the UTC data stays.
+- **Batch M, which needs contracts, and runner.py is shared, so these run one after another:**
+  - T1 (deferred queue): in progress, and it includes 1d.
+  - 1g: `consult` skips `max_concurrent` on resume.
+  - 3: the project `fallback_chain` overrides the agent's own fallbacks (bug-ac396a).
+  - 6: a model/effort conflict is not validated before launch.
+- **Batch L:**
+  - 1a: container claude 401. Deferred, since the docker executor is not in use.
+  - 4: agy pools, which needs a design decision (pool-aware routing, or two providers). That goes to the advisor when agy is back.
