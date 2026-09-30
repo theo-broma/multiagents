@@ -2996,3 +2996,23 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - **Regression:** `test_core::test_a_failed_restart_leaves_the_rest_of_the_queue_intact`. A `RuntimeError` from `start()` now propagates, although DQ-R3b says to stop and return `stopped_on`. The fix is ag-? (implementer-quick glm).
   - **Discard later:** ag-3a07cc and ag-5917f6, which are carried.
   - **Adversary on M:** ag-9dffc6 (opus), running.
+
+### HANDOFF #6, 2026-09-30 ~13:55 UTC (orchestrator context wind-down)
+- **Main is at the latest BRIEF commit.** Merged today: Q1-Q6, the phase0 invariant fixes, T2, T1 (base 180e483, then amendments and adversary fixes 4c44d71), M (28eb8a6), and the test fixture fixes (8b14a6a, d95865a). ag-3a07cc and ag-5917f6 are discarded.
+- **In flight (verify, then merge):**
+  1. **ag-45fc5c (implementer-quick glm):** the regression `test_core::test_a_failed_restart_leaves_the_rest_of_the_queue_intact`. A `RuntimeError` must stop the drain and return `stopped_on` (DQ-R3b); only a `BaseException` re-raises (DQ-R10). After it merges, run test_core in full plus the 3 T1 files, the M file and the phase0 files.
+  2. **ag-9dffc6 (adversary, claude opus, verifies ag-3d566d):** the robustness review of M. Its failing tests go in `tests/test_m_adversary.py`. Next step: amend m-routing-fixes.md with any contract gaps, then run an implementer-deep on glm, carrying the adversary branch with a manual `git merge --squash` into the new worktree.
+- **Roster, all in gitignored agents.yaml; backups in the scratchpad:**
+  - every implementer tier is on opencode-zai glm-5.3-flash;
+  - advisor, dev-advisor and adversary are on codex gpt-6.1-sol, effort medium;
+  - the adversary cannot run on codex (the OpenAI cyber filter), so pass `model: opus`;
+  - implementer-quick `max_steps` is 80.
+- **User decisions pending:**
+  - (a) adversary on codex: request Daybreak access, rephrase the brief, or keep it on opus;
+  - (b) split the agy Claude/GPT pool into its own provider.
+- **Open tooling items to fix later:**
+  - a standing conversation keeps its old model after a same-provider roster change;
+  - the agy start was refused while `budget_status` showed agy usable (check `tree.json` cooldowns.agy);
+  - the MCP `wait_for_agents` with timeout 1800 is killed by the client idle timeout, so use 1500 or less;
+  - 1a, the container claude 401;
+  - e8565d#4, the transcripts keys.
