@@ -656,6 +656,11 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - **Still in flight:** ag-7fbf31 (H11) and ag-d61f60 (D1 fixes).
 - **Next** is unchanged from handoff #3.
 
+**2026-09-30 ~03:30 UTC:**
+- **Merged ag-7fbf31, H11 (925a68e).** Run on GLM high, 806 s. Changes: drift.py, a doctor `config drift` section, and a server drift_summary. 40/40 H11 tests pass, and 809 pass in the regression sweep. models.yaml is deliberately not compared.
+- **Still in flight:** ag-d61f60 (D1 fixes).
+- **Next** is unchanged from handoff #3.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
