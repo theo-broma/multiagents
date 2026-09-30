@@ -312,3 +312,38 @@ Verified by fixture tests for each reference form, covering:
 - The shipped `used_by` references are repo-relative. In an installed
   package they are resolved relative to the package root. The lint is a
   repository test and is not run against an installed package.
+
+## Amendments of 2026-09-30, after the test suite (ag-e9d658)
+
+The tester's assumptions are accepted as contract, so the implementer is
+held to them:
+1. **Module.** `multiagents.manifest` exposes `lint`, `probe`,
+   `integration_digest`, `LintFinding` and `ProbeResult`.
+2. **Where refs are resolved.** `lint(root=None)` takes an optional
+   keyword; the default is the repo root. Refs are relative to that root,
+   for example `src/multiagents/defaults/providers/x.sh::case:check`.
+3. **YAML pointers.** They start at the `providers:` mapping, so
+   `providers.yaml#/opencode/spawn/args/5`. Selectors are relative to the
+   provider entry.
+4. **The seam and the probe result.**
+   - `exec_in_running` is synchronous.
+   - "Not running" is signalled by a `NotRunning` value or exception.
+   - `ProbeResult.digests` is a dict with the keys `integration_digest`
+     and `dependencies_digest`.
+5. **Strings.**
+   - The platform is `platform.system().lower()-platform.machine()`.
+   - The not-running state is `container not running`.
+   - A partial state starts with `verified (partial`.
+6. **Doctor rows.** Each row carries the provider name and its context
+   word. Provenance shows the manifest path, and both digests appear in
+   full.
+7. **Signature.** `integration_digest(provider_name, ProjectPaths)`.
+
+Recorded as untested (the tester's list, ag-e9d658):
+- a file listed twice is framed once;
+- the adapter role in the digest;
+- missing in a container versus on the host;
+- the doctor row format beyond the substrings above.
+
+A reference syntax error may be reported as `unresolved_ref` or
+`malformed`.
