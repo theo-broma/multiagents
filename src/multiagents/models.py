@@ -21,10 +21,32 @@ from . import scripts
 from .providers import Provider
 
 
+def _previous_entries(target: Path) -> dict[str, list]:
+    """The per-provider model lists already recorded in `target` (H6).
+
+    The refresh rewrites the file from an empty `models:` mapping, so a
+    provider whose listing failed would take its old entries with it — one
+    flaky CLI, or one that has nothing to list yet (codex keeps no model
+    cache until its first run), and the generated list silently loses models
+    that are still offered. Read before anything runs; entries are handed
+    back only for a provider that then fails, never one that lists.
+    """
+    try:
+        existing = yaml.safe_load(target.read_text())
+    except (OSError, yaml.YAMLError):
+        return {}                      # absent or unreadable: nothing to keep
+    raw = existing.get("models") if isinstance(existing, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {str(name): entries for name, entries in raw.items()
+            if isinstance(entries, list)}
+
+
 def refresh_models(providers: dict[str, Provider], target: Path, *,
                    executor_for: Callable[[str], Any] | None = None,
                    config_dir: Path | None = None,
-                   project_config: Path | None = None) -> dict[str, Any]:
+                   project_config: Path | None = None,
+                   timeout: int = 120) -> dict[str, Any]:
     """Ask every enabled provider for its models and write `target`.
 
     In order: a static `models:` list, then `models_cmd`, then — for a
@@ -32,12 +54,26 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
     `scripts.run_action` so it gets the provider's environment and is found
     where its other actions are. `executor_for(name)` gives that action its
     executor; local when not given.
+
+    H6: a provider whose listing fails — non-zero exit, timeout, a missing
+    binary, output that parses to no models — keeps the entries it already
+    has in `target` and is reported in `problems` with the reason, instead of
+    being erased by the wholesale rewrite. A provider that lists replaces
+    its own entries wholesale: a model the CLI no longer offers disappears.
     """
     from .executor.local import LocalExecutor
     from .paths import global_config_dir
 
+    previous = _previous_entries(target)
     models: dict[str, list[dict[str, str]]] = {}
     problems: dict[str, str] = {}
+
+    def failed(name: str, reason: str) -> None:
+        problems[name] = reason
+        old = previous.get(name)
+        if old:
+            models[name] = old
+            problems[name] = f"{reason}; kept {len(old)} models from the previous list"
 
     for name, provider in providers.items():
         if not provider.enabled:
@@ -63,17 +99,21 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
         if not provider.models_cmd:
             executor = executor_for(name) if executor_for else LocalExecutor()
             code, out, err = scripts.run_action(name, provider, executor, "models",
-                                                config, project_config, timeout=120)
+                                                config, project_config, timeout=timeout)
             if code == scripts.UNIMPLEMENTED:
                 continue                  # says it has no `models`: nothing to say
             if code != 0:
-                problems[name] = (err or out).strip()[:200] or f"`models` exited {code}"
+                failed(name, (err or out).strip()[:200] or f"`models` exited {code}")
                 continue
-            models[name] = provider.parse_models(out)
+            parsed = provider.parse_models(out)
+            if not parsed:
+                failed(name, "`models` action output parsed to no models")
+                continue
+            models[name] = parsed
             continue
         resolved = provider.resolve_bin()
         if resolved.launcher is None:
-            problems[name] = provider.bin_error(resolved)
+            failed(name, provider.bin_error(resolved))
             continue
         command = list(provider.models_cmd)
         if command[0] in {provider.bin, Path(provider.bin).name}:
@@ -81,15 +121,20 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
             command[0] = str(resolved.launcher)
         try:
             proc = subprocess.run(
-                command, capture_output=True, text=True, timeout=120,
+                command, capture_output=True, text=True, timeout=timeout,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            problems[name] = f"{type(exc).__name__}: {exc}"
+            failed(name, f"{type(exc).__name__}: {exc}")
             continue
         if proc.returncode != 0:
-            problems[name] = (proc.stderr or proc.stdout).strip()[:200]
+            failed(name, (proc.stderr or proc.stdout).strip()[:200]
+                   or f"models_cmd exited {proc.returncode}")
             continue
-        models[name] = provider.parse_models(proc.stdout)
+        parsed = provider.parse_models(proc.stdout)
+        if not parsed:
+            failed(name, "models_cmd output parsed to no models")
+            continue
+        models[name] = parsed
 
     target.parent.mkdir(parents=True, exist_ok=True)
     header = (
