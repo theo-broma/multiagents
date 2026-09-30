@@ -42,3 +42,15 @@
 **MT-R5: nothing else changes.**
 - A single-marker message behaves exactly as today.
 - The existing ticket tests stay green.
+
+## Amendments of 2026-09-30, after the test suite (ag-b46fa7)
+
+- **MT-R3a: a lone marker still files a ticket.** MT-R5 wins over MT-R3 in one case: when a message has exactly one real marker, it files a ticket even when its body is empty, as it does today. The empty-section drop in MT-R3 applies only when a message has two or more real markers.
+- **MT-R1a: the headed form of `PROPOSED_FIX`.**
+  - A line consisting of `PROPOSED_FIX`, optionally preceded by Markdown heading hashes (`## PROPOSED_FIX`) and optionally followed by a `:`, splits a section's fix from its body. The existing `PROPOSED_FIX:` form still works.
+  - This applies per section.
+  - The real message in `tests/fixtures/bug_reporter_three_tickets.txt` uses `## PROPOSED_FIX`.
+- **Other assumptions.** The tester's other assumptions are accepted:
+  - the `tree.read()["tickets"]` seam;
+  - `tickets` as a list of ids or of dicts with an `id`, under the same name in `collect`;
+  - a fix-only section is still a ticket.
