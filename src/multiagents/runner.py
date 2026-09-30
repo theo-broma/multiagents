@@ -56,6 +56,7 @@ from .redact import scrub
 from .auth import looks_like_auth_failure
 from .startup import StartupHealth, StartupUnavailable
 from .authority import HostAuthority
+from .launch_limits import LaunchLimits
 from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
@@ -412,10 +413,13 @@ class Run:
     limits: dict = field(default_factory=dict)
     # LN-C5: the container's `oom_kill` count at launch (None: unreadable,
     # or the run began under another server that never told us). Occupancy
-    # is judged from the shared host-side record, not kept here.
+    # is judged from the shared host-side record, not kept here; `oom_since`
+    # is when this run entered it, so "was any sibling alive during this
+    # run" can be answered over the run's whole life (adversary finding 1).
     oom_baseline: int | None = None
     oom_reader: Any = None
     oom_container: str = ""
+    oom_since: float | None = None
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -479,6 +483,10 @@ class Runner:
         # this process's own runs, or a sibling started by a second Runner
         # would not stop a `killed` attribution (review finding 1).
         self.occupancy = ContainerOccupancy(paths)
+        # LN-C2, adversary findings 3/8: the launch-time limits of each run,
+        # kept where the container cannot write them, because `tree.json`'s
+        # node records can be forged by the very run they describe.
+        self.launch_limits = LaunchLimits(paths)
         self.authority = (None if DockerExecutor({}, paths, {}, state_root()).inside()
                           else HostAuthority(paths, self.tree))
         reap_pending_branches(paths.root, self.tree, self.authority)
@@ -1251,12 +1259,17 @@ class Runner:
                     timeout: float | None = None) -> dict[str, dict[str, Any]]:
         """LM-R1b: the limits a (re)launch of this node runs under. A timeout
         the caller gave when the run started (source `call`) survives a retry
-        or a steer; everything else is resolved again from the current config."""
+        or a steer; everything else is resolved again from the current config.
+        The recorded value comes from the host-owned launch record, never from
+        the node's `limits` in `tree.json` — that block is container-writable,
+        and a run relaunching under its own forged wall clock is not a limit
+        at all (adversary finding 8)."""
         if not timeout:
-            node = self.tree.get(node_id)
-            recorded = ((node.limits if node else None) or {}).get("timeout") or {}
-            if recorded.get("source") == "call":
-                timeout = recorded.get("value")
+            recorded = self.launch_limits.lookup(node_id).get("timeout")
+            if isinstance(recorded, dict):
+                src = recorded.get("source")
+                if src == "call" or (isinstance(src, dict) and src.get("layer") == "call"):
+                    timeout = recorded.get("value")
         return self.config.effective_limits(spec, timeout)
 
     def _supervisor(self, spec: AgentSpec, provider: Provider,
@@ -1348,6 +1361,11 @@ class Runner:
         # a trip fires.
         limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
                                                                  timeout))
+        # LN-C2, adversary findings 3/8: written where the container cannot
+        # reach, so a later adoption or relaunch reads what THIS launch ran
+        # under, not what the node's forgeable record in `tree.json` claims.
+        launched = now()
+        self.launch_limits.record(node_id, limits, launched)
         wall = limits["timeout"]["value"]
         options = {"effort": spec.effort,
                    **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
@@ -1454,7 +1472,10 @@ class Runner:
         """LN-C5: note the container's `oom_kill` count as this run starts,
         and register it in the occupancy record every Runner of this project
         shares — a sibling started by another server is as much a sibling as
-        one of ours (finding 1)."""
+        one of ours (finding 1). Nothing here may fail a launch that already
+        started a process (adversary finding 2): the run must always get its
+        consumer, so a record that cannot be written costs the OOM
+        attribution its evidence, not the run its supervision."""
         reader = getattr(executor, "oom_kill_count", None)
         if not callable(reader):
             return                                  # not a container
@@ -1463,24 +1484,34 @@ class Runner:
         with contextlib.suppress(Exception):
             run.oom_baseline = await asyncio.to_thread(reader)
         handle_pid = getattr(run.handle, "pid", 0) or 0
-        self.occupancy.register(run.oom_container, run.node_id, handle_pid,
-                                getattr(run.handle, "pid_start", "") or "")
+        try:
+            entry = self.occupancy.register(
+                run.oom_container, run.node_id, handle_pid,
+                getattr(run.handle, "pid_start", "") or "")
+            run.oom_since = entry.get("since")
+        except Exception:
+            # Unwritable record: `others` fails closed without it, which is
+            # `kill_uncertain` — the answer LN-C5 prefers to a wrong `killed`.
+            pass
 
     async def _sigkill_notice(self, run: Run, code: int) -> None:
         """LN-C5: a run in the container died by SIGKILL. Attributed to
         `executor.docker.memory` only when the container's `oom_kill` count
-        rose during it AND it was the only run in there, judged across every
-        Runner of this project; every other case is a SIGKILL of unknown
-        cause — including a run whose baseline is unknown because it began
-        under another server (finding 2). `docker inspect … OOMKilled`
-        describes the container, not the exec'd process, and is not used."""
+        rose during it AND no other run was alive in there at any point of
+        its life, judged across every Runner of this project; every other
+        case is a SIGKILL of unknown cause — including a run whose baseline
+        is unknown because it began under another server (finding 2), and a
+        sibling that ended before the kill but overlapped the run (adversary
+        finding 1). `docker inspect … OOMKilled` describes the container,
+        not the exec'd process, and is not used."""
         node_id = run.node_id
         after = None
         with contextlib.suppress(Exception):
             after = await asyncio.to_thread(run.oom_reader)
         rose = (run.oom_baseline is not None and after is not None
                 and after > run.oom_baseline)
-        crowded = self.occupancy.others(run.oom_container, node_id)
+        crowded = self.occupancy.others(run.oom_container, node_id,
+                                        run.oom_since)
         memory = (self.config.project.get("executor", {}).get("docker", {}) or {}).get("memory")
         if rose and not crowded and memory:
             key = "executor.docker.memory"
@@ -2400,12 +2431,19 @@ class Runner:
         agent = run.spec.name
         # LN-C2, finding 8: prefer the limits (and their provenance) captured
         # at the launch still in flight — `run.limits` for a run this server
-        # launched, the node's recorded launch limits for one it adopted.
+        # launched (adoption fills it from the same record), the host-owned
+        # launch record for one it did not. The node's own `limits` block in
+        # `tree.json` is container-writable and never consulted (adversary
+        # finding 3); with no record at all the limits are resolved from the
+        # config as it is NOW, and the provenance reported is that
+        # resolution's — an honest "where it comes from today", not a
+        # fabricated launch-time claim.
         limits = run.limits
         if not limits:
-            recorded = self.tree.get(node_id)
-            limits = ((recorded.limits if recorded else None)
-                      or self._limits_for(node_id, run.spec))
+            limits = self.launch_limits.lookup(node_id)
+        if not limits:
+            limits = self._limits_detail(run.spec.name,
+                                         self._limits_for(node_id, run.spec))
         if trip.reason in ("timeout", "silence"):
             name = "timeout" if trip.reason == "timeout" else "silence_timeout"
             limit_key = "limits." + ("default_timeout" if name == "timeout"
@@ -2504,10 +2542,15 @@ class Runner:
         if stopped_elsewhere:
             status = "cancelled"
         if run.oom_reader is not None:
-            self.occupancy.forget(run.oom_container, node_id)
             if code in (137, -9) and not stopped_elsewhere and not timed_out:
+                # Before `forget`: the notice asks whether any sibling was
+                # alive during this run's life, and this run's own entry is
+                # what keeps ended siblings in the record (adversary
+                # finding 1). Forgetting first would empty the container and
+                # answer "alone" for a run that shared it.
                 with contextlib.suppress(Exception):
                     await self._sigkill_notice(run, code)
+            self.occupancy.forget(run.oom_container, node_id)
 
         if not stopped_elsewhere:
             status, limited = await self._provider_health_after(run, status, text, stderr)
@@ -3643,7 +3686,7 @@ class Runner:
         # wrapper ends it within a second (SV-R4), and the next pass finalises
         # it as the timeout it is; owned, the wrapper would leave it to a
         # watchdog that only reports.
-        if live and self._past_deadline(run_dir):
+        if live and self._past_deadline(run_dir, node.id):
             return False
         agent_id = node.id
         if not self._claim(agent_id):
@@ -3663,9 +3706,15 @@ class Runner:
         command: dict[str, Any] = {}
         with contextlib.suppress(OSError, ValueError):
             command = json.loads(_run_read(run_dir, "command.json"))
-        launched = float(command.get("launched_at") or node.started_at or now())
-        wall = float(command.get("timeout")
-                     or self._limits_for(node.id, spec)["timeout"]["value"])
+        
+        limits = self.launch_limits.lookup(node.id)
+        launched = self.launch_limits.launch_time(node.id)
+        wall = float(limits.get("timeout", {}).get("value") or 0)
+        
+        if not launched:
+            launched = float(command.get("launched_at") or node.started_at or now())
+        if not wall:
+            wall = float(command.get("timeout") or self._limits_for(node.id, spec)["timeout"]["value"])
         follow = node.follow or {}
         turn = int(follow.get("turn", 0))
         # SV-R7: what the last server logged past the point it recorded, it
@@ -3683,10 +3732,16 @@ class Runner:
         # SV-R8: the wall clock runs from the launch, whoever watched it; the
         # silence clock runs from now, because nobody was listening before.
         supervisor.started = time.monotonic() - max(0.0, now() - launched)
+        # LN-C2, adversary finding 3: the limits an adopted run trips
+        # against come from the host-owned launch record the launching
+        # server wrote, never from the node's record in `tree.json`, which
+        # the running agent can forge between the two servers.
+        limits = self.launch_limits.lookup(node.id)
         run = Run(node_id=node.id, provider=provider, spec=spec, handle=handle,
                   supervisor=supervisor, turn_start=turn,
                   replay_to=int(follow.get("offset", turn)), adopted=True,
-                  startup_token=self.startup.token_for(provider.name, node.id))
+                  startup_token=self.startup.token_for(provider.name, node.id),
+                  limits=limits if isinstance(limits, dict) else {})
         reader = getattr(executor, "oom_kill_count", None)
         if callable(reader):
             # LN-C5, finding 2: a docker run taken over mid-flight gets the
@@ -3696,8 +3751,12 @@ class Runner:
             # is `kill_uncertain`, never silently absent.
             run.oom_reader = reader
             run.oom_container = str(getattr(executor, "container", "") or "")
-            self.occupancy.rebind(run.oom_container, node.id, handle.pid,
-                                  handle.pid_start)
+            try:
+                entry = self.occupancy.rebind(run.oom_container, node.id,
+                                              handle.pid, handle.pid_start)
+                run.oom_since = entry.get("since")
+            except Exception:
+                pass               # as at launch: supervision is never the cost
         self.runs[node.id] = run
         if live:
             self.tree.update(node.id, adopted_at=now())
@@ -3709,13 +3768,18 @@ class Runner:
             self._start_credential_watch()
         return True
 
-    @staticmethod
-    def _past_deadline(run_dir: Path) -> bool:
-        with contextlib.suppress(OSError, ValueError, TypeError):
-            command = json.loads(_run_read(run_dir, "command.json"))
-            wall = float(command.get("timeout") or 0)
-            return bool(wall) and now() >= float(command["launched_at"]) + wall
-        return False
+    def _past_deadline(self, run_dir: Path, node_id: str) -> bool:
+        launched = self.launch_limits.launch_time(node_id)
+        limits = self.launch_limits.lookup(node_id)
+        wall = float(limits.get("timeout", {}).get("value") or 0)
+        
+        if not launched or not wall:
+            with contextlib.suppress(OSError, ValueError, TypeError):
+                command = json.loads(_run_read(run_dir, "command.json"))
+                wall = wall or float(command.get("timeout") or 0)
+                launched = launched or float(command.get("launched_at") or 0)
+                
+        return bool(wall) and bool(launched) and now() >= launched + wall
 
     async def shutdown(self, *, detach: bool) -> None:
         """This server is going. SV-R3: a root server leaves its agents
