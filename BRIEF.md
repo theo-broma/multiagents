@@ -2872,3 +2872,4 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - tickets;
   - moving wt-main to main, followed by a /mcp.
 - The deferred duplicate df-e34d37 is gone: after the MCP reconnect, the deferred queue is empty and no run was started (checked 2026-09-30). Nothing left to stop.
+- 2026-09-30 ~10:00 UTC. The bug-reporter (ag-3afd5a) wrote 3 tickets, but the queue filed only the last one (bug-ac396a: routing to an exhausted agy). The other two are saved verbatim in context/tickets/2026-09-30-unfiled.md: the monitor showing reset times in UTC ISO, and the deferred task vanishing without a trace (the df-e34d37 case). One more tooling defect: a run with several TICKET() markers files only the last one.
