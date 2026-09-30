@@ -1381,6 +1381,10 @@ class Runner:
             env.update(server_env)
         else:
             self._withdraw_server(provider, home)
+        # H8: refused before anything starts — the kernel's per-argument
+        # limit (checked over the fully assembled argv, adapter and server
+        # arguments included).
+        providers_mod.check_argv_limit(provider.name, argv)
         turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
         _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
         launched = now()
