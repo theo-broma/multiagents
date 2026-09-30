@@ -603,6 +603,54 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   - Advance wt-main after the H7 adversary and PS-R2a.
   - Then D3.
 
+**HANDOFF #3, 2026-09-30 ~03:00 UTC (orchestrator context wind-down).** The user's overnight mandate is in the ~22:45 entry, and the roster decision in the ~22:55 entry. The user will say when they are back.
+
+**Done tonight (all on main):**
+- **H7:** 85524b9, spec amendments 4e7b97c, test updates da355ae.
+- **opencode-zai:** 88ddd80 (ZA-R1..R5), tests 523074e and 49c9b4e.
+- **HA-R12 clean:** a919b35.
+- **H9:** abe4059.
+- **H13:** 6cfa1cf.
+- **H11 tests:** 1a80ea2.
+- **D1 finding tests:** 9d91043 (11 red).
+- **D3 contract rev 2:** 24c62d8. Not started.
+- **GLM TEAM LIVE**, config is in the ~02:00 entry. wt-main is at 49c9b4e. That is BEFORE H7, and it must be advanced.
+
+**In flight** (all GLM on opencode-zai, except where noted):
+- **ag-7fbf31** (implementer, glm high): H11 (drift.py, doctor section, server drift_summary). Tests: tests/test_h11_config_drift.py.
+- **ag-e67fb5** (implementer-quick, glm low): H7 PS-R2a/PS-R2b (launcher for invocation, provider `env:` wins). 3 red tests.
+- **ag-d61f60** (implementer-deep, glm max, `verifies=ag-179b69`): the 8 D1 findings. Tests: tests/test_d1_review_findings.py.
+
+**Next, in order:**
+1. Collect and merge the three runs above. Before merging, check each diff for tests/ edits, because implementer-deep has `readonly_paths: []`.
+2. Run the H7 adversary, `verifies=ag-d06a0b`, when codex is back (it said 06:48 local, which is 04:48 UTC).
+   - Targets: PS-R5 probe/generation (`startup.py` `StartupHealth._current`, `_reconcile`), PS-R6 pin refusal, PS-R4 progress marking in `Provider.parse_line`, and binary resolution.
+   - Every finding goes back through the tester, then GLM.
+3. After the H7 adversary and the PS-R2a merge, advance wt-main: `git -C <scratchpad>/wt-main checkout --detach main`.
+   - Tell the user to run `/mcp` when they are back.
+   - Run `doctor` to check that opencode-zai is still authenticated.
+4. **D3:** tester from context/specs/d3-cli-dependency-manifest.md (rev 2), then implementer-deep (GLM).
+5. **Then:**
+   - H5: claude budget under docker (only relevant under docker).
+   - H6: refresh-models must not erase another provider's entries.
+   - H8: prompt over 128 KiB.
+   - H10: live compaction check.
+   - H12: branch cleanup.
+   - D2: tmux step 1.
+6. **Final report to the user:**
+   - the GLM team is live;
+   - `/mcp` is needed;
+   - egress to api.z.ai is needed only when docker returns, and must be asked for;
+   - the off-peak idea is parked;
+   - the global `~/.config/multiagents/providers.yaml` is a full stale copy, which H11 will flag;
+   - tickets still unfiled: 7, plus the codex-sandbox commit issue (from the ~00:10 entry).
+
+**Routing notes:**
+- Testers use claude sonnet (the new default).
+- Implementers use GLM, with codex as fallback.
+- Researcher, reviewer and adversary use codex. If codex is down, wait for it; claude is reserved by the user for the orchestrator and tester.
+- `merge_agent(into=<worktree PATH>)` works for handing one run's work to another run; a node id is refused.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
