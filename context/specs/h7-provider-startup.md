@@ -282,3 +282,44 @@ startup claim.
 **PS-R5 stale-generation check.** It lives in `src/multiagents/startup.py`,
 in `StartupHealth._current`, around line 144. `_reconcile`, around
 line 84, releases dead claims.
+
+## Amendments of 2026-09-30, after the adversary (ag-bd9c41)
+
+**PS-R4a: an API-error turn is not startup progress.**
+- These are not startup progress:
+  - an assistant message whose model is `<synthetic>`;
+  - an assistant message that belongs to a result with `is_error: true`.
+- This is Claude Code's shape for an API failure.
+- As a result, a run that only reports an API error counts as a startup
+  failure, and a probe that only reports one does not recover the
+  provider.
+
+**PS-R5a: steering a live run never kills it because of startup health.**
+- The provider's availability is checked **before** the live process is
+  stopped. That covers `startup_down` and not claimable, for pinned and
+  unpinned runs alike.
+- If the provider cannot take the relaunch, the steer is refused with a
+  structured reason. The live run is left untouched, and `steered` is
+  false.
+- The runner's own wrap-up steer follows the same rule. The watchdogs
+  still apply.
+
+**PS-R5b: losing the probe race is not a pin refusal.**
+- **Unpinned start.** When the claim fails after routing chose a provider,
+  routing runs again with that provider excluded, as for `provider_down`:
+  siblings and fallbacks are tried, and deferral applies when none is
+  left.
+- **Pinned start.** It still gets the PS-R6 refusal.
+
+**PS-R1a: tightening, from the adversary's untested list.**
+- **What counts as a binary.** A directory, including an executable one,
+  is not a binary.
+- **A relative explicit `bin`** is refused at config load, as PS-R1
+  already says. It is never a `ValueError` raised later from
+  `resolve_bin`.
+- **The docker host-mount derivation** resolves with the same env as
+  native launch: the provider's merged env, not the server's `PATH`.
+
+Recorded but not changed:
+- A silent retry counts once per node.
+- A probe that ends with neither outcome restarts the full cooldown.
