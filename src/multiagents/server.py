@@ -22,6 +22,7 @@ import stat
 import sys
 import threading
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -846,6 +847,55 @@ async def stop_agent(agent_id: str) -> dict:
     if denied:
         return _ok({"error": denied})
     return _ok(await run.stop(agent_id))
+
+
+@_tool()
+def list_deferred() -> dict:
+    """List every task in the deferred queue, waiting or refused.
+
+    `waiting` entries restart by themselves once `retry_after` passes and a
+    `wait_for_agents` runs. `refused` entries could not be restarted (see
+    `reason`), are never retried, and stay until `cancel_deferred` removes them.
+    Read-only.
+    """
+    entries = []
+    for d in runner().tree.read()["deferred"]:
+        spec = d.get("spec") or {}
+        entries.append({
+            "id": d.get("id"), "agent": spec.get("agent"),
+            "task": (spec.get("task") or "")[:200],
+            "model": spec.get("model") or "",
+            "retry_after": datetime.fromtimestamp(
+                d.get("retry_after") or 0, timezone.utc).isoformat(),
+            "status": d.get("status", "waiting"),
+            "reason": d.get("reason", ""),
+            "deferred_by": d.get("deferred_by") or "orchestrator",
+        })
+    return _ok({"deferred": entries})
+
+
+@_tool()
+def cancel_deferred(deferred_id: str) -> dict:
+    """Remove a task from the deferred queue (waiting or refused).
+
+    Only the agent that deferred it, one of its ancestors, or the orchestrator
+    may cancel. The exit is recorded as a `deferred_exit` event, and the pause a
+    deferral set is lifted if no waiting entry remains.
+    """
+    run = runner()
+    entry = next((d for d in run.tree.read()["deferred"]
+                  if d.get("id") == deferred_id), None)
+    if entry is None:
+        return _ok({"error": f"no deferred entry {deferred_id!r}; list_deferred shows the queue"})
+    caller = run.self_id()
+    owner = entry.get("deferred_by")
+    if caller is not None and not (owner and caller in run.tree.ancestry(owner)):
+        return _ok({"error": f"{caller} may only cancel entries it deferred, or its "
+                             f"descendants' ({deferred_id} was deferred by "
+                             f"{owner or 'the orchestrator'})."})
+    if not run.tree.exit_deferred(deferred_id, "cancelled"):
+        return _ok({"error": f"no deferred entry {deferred_id!r}"})
+    return _ok({"cancelled": deferred_id})
 
 
 # --------------------------------------------------------------------------
