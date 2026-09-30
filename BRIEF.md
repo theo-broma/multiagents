@@ -3087,3 +3087,9 @@ Findings 2 and 3 go to implementer ag-ce8fce, together with the leftover in snap
 **Workaround applied.** agy's lapsed breaker was cleared through `Tree.note_run_outcome`. The bug is ticketed (ddcdf7f).
 
 **Codex sandbox.** Under the reviewer's agy sandbox, `run_command git` failed. Diffs were exported into `_review/` in its worktree.
+
+### 2026-09-30 ~17:10 UTC: user rules
+
+- **The reviewer runs systematically after every implementer, before merge.** This overrides the pipeline threshold.
+- **glm variants.** They were never passed. The `models:` route variant (low/high/max) is ignored for the agent's preferred provider: argv had no `--variant` in any run. Worked around by a top-level `variant:` on each implementer tier (quick low, implementer high, deep max). New runs only.
+- **Candidate in-house ticket:** a `models:` route entry for the preferred provider is ignored.
