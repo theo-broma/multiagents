@@ -432,6 +432,9 @@ def login_action():
     bin_path = codex_bin()
     env = {**os.environ, "CODEX_HOME": str(profile)}
     # Flushed: exec replaces the process, and a piped stdout is block-buffered.
+    executor = os.environ.get("MULTIAGENTS_EXECUTOR") or "local"
+    print(f"Codex sign-in writes the credential store at {profile} "
+          f"(chosen by the {executor} executor).", flush=True)
     print("Codex sign-in: follow the device link and code.", flush=True)
     argv = [bin_path, "-c", "check_for_update_on_startup=false", "login", "--device-auth"]
     os.execvpe(argv[0], argv, env)
