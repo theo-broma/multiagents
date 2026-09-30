@@ -102,3 +102,8 @@ The tester's assumptions 1, 2 and 4 are accepted:
 **DQ-R2a: refused entries stay visible.** The `wait_for_agents` result carries `deferred.refused_total`, the count of refused entries still queued, whenever it is non-zero, even when that drain did nothing else. Refused entries never expire by themselves.
 
 **DQ-R3c: an error returned by start() leaves nothing behind.** When `start()` returns an error dict, it must have created no node and no worktree. If it did, the node is recorded in the refused entry's `node_id`, so that it can be found.
+
+**DQ-R8a: the shape of the claim, fixed after the tests (ag-7cfc05).**
+- **Where it lives.** The claim is stored in the entry as `claim: {"pid": <int>, "at": <epoch float>}`.
+- **The pause.** A `restarting` entry holds the pause, as a `waiting` one does.
+- **A re-deferral.** A re-deferred entry keeps its original `deferred_by`.
