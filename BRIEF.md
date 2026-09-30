@@ -3113,3 +3113,14 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **Also queued:**
 - the ticket for the pinned-start half-open self-deadlock (ddcdf7f), after ag-074735 merges;
 - the `models:` route of the preferred provider being ignored (variant).
+
+### 2026-09-30 ~20:00 UTC: user decision on test-suite speed
+
+**Measuring.** Researcher ag-613241 is measuring the full-suite time: durations, causes, whether xdist is feasible.
+
+**The user's decision, if the findings confirm it.** The test rework is done by **claude opus as the implementer**, instructed to work with **gemini pro as its advisor**: dev-advisor on agy gemini-3.1-pro-high.
+
+**Caveats to solve before launching:**
+- The implementer tiers have the tests in `readonly_paths`, so `merge_agent` would revert their test edits. Options: a per-run exception, a dedicated agent entry, or the tester on opus. The user asked for an implementer that can consult an advisor.
+- Only the implementer tiers can consult dev-advisor.
+- On agy, `run_command` failed for the readonly reviewer, so a Gemini dev-advisor may be unable to run git or pytest.
