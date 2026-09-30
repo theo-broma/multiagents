@@ -3124,3 +3124,17 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - The implementer tiers have the tests in `readonly_paths`, so `merge_agent` would revert their test edits. Options: a per-run exception, a dedicated agent entry, or the tester on opus. The user asked for an implementer that can consult an advisor.
 - Only the implementer tiers can consult dev-advisor.
 - On agy, `run_command` failed for the readonly reviewer, so a Gemini dev-advisor may be unable to run git or pytest.
+
+### 2026-09-30 ~20:40 UTC
+
+**PS implementer ag-dc8946 is done.** 132/132 of the PS tests pass.
+
+**Two NEED_INFO test conflicts** (c2_provider_harness counts 5 providers; the subagent_mcp fixtures use `model: "m"`) went to tester ag-e77949. Reviewer ag-4cdd7b is on PS, and was asked to map the collisions with the 074735 cache rewrite.
+
+**M round 3, ag-074735.** Its 5 findings are fixed, and it is being re-reviewed by ag-53986b.
+
+**Merge order.** Merge M first (ag-074735); PS will then need a rebase or reconciliation on budget.py's cache.
+
+**Test-speed measurement.** Researcher ag-613241 on codex could not run pytest: its readonly sandbox has a read-only HOME, /tmp and workspace. The orchestrator is measuring the chunks with `--durations` in its own shell. Output: scratchpad/durations.
+
+**Codex sandbox note.** Codex `readonly` and `sandbox` runs cannot run the test suite, and cannot always run git commit.
