@@ -2679,3 +2679,10 @@ Resume in this order:
       processes inside the container;
     - which providers have to be excluded;
     - the fallback when tmux is not installed.
+
+### 2026-09-30 ~07:00 UTC — user chose claude opus as adversary; 4 runs in flight
+- ag-bd9c41 adversary (opus) on H7, verifies ag-d06a0b.
+- ag-03602e adversary (opus) on D1 fixes (942df35), verifies ag-d61f60.
+- ag-e9d658 tester (sonnet) for D3 from d3-cli-dependency-manifest.md rev 2.
+- ag-0cbda0 implementer (GLM glm-5.3 high) on H6, fast path (known-cause bug, own regression tests).
+Next: adversary findings go back to a GLM implementer with the failing tests; D3 implementer-deep (GLM max) after the tester merges.
