@@ -94,3 +94,49 @@
   - an explicit conflicting route effort is refused.
 
 **RM-R6a.** Nothing changes except what RM-R1..R5b describe.
+
+## Amendments of 2026-09-30, after the adversary (ag-9dffc6, `tests/test_m_adversary.py`). They supersede the text above where they differ.
+
+**RM-R7: an effort refusal has no side effect.**
+- **Before anything else.** The RM-R5a refusal happens before the startup claim or half-open probe is taken, and before any `startup.json` record, node, worktree or process exists.
+- **On every exit path.** More generally, any refusal or exception in `start()` that happens after the startup claim was taken releases that claim.
+- Verified by: `test_explicit_effort_refusal_does_not_hold_the_half_open_probe` and `test_explicit_effort_refusal_leaves_no_startup_run_record`.
+
+**RM-R1a: the admission of a resumed consult is atomic.**
+- **The rule.** A resumed consult that passes admission counts toward `max_concurrent` from that moment, not only once its process has started. The check and the reservation happen together, as they do for `start()`.
+- **Two consults for one slot.** When two resumed consults compete for the last slot, exactly one is admitted and the other gets the RM-R1 refusal.
+- **On failure.** A reservation whose launch fails is released.
+- Verified by: `test_two_concurrent_resumed_consults_cannot_both_take_the_last_slot`.
+
+**RM-R5b: explicitness belongs to the route, not to the provider's name.**
+- **The rule.** When routing lands on a family sibling of the route the effort was written on, the effort is still explicit for RM-R5a. A conflict is refused there, exactly as it would be on the route's own provider.
+- Verified by: `test_explicit_route_effort_is_refused_on_the_routes_sibling_too`.
+
+**RM-R5c: what a value in `effort_suffixes` must be.**
+- **Valid values.** Each value in `effort_suffixes` must be a non-empty string.
+- **Invalid values.** A null or any other non-string value is a config error at load, like a non-mapping `effort_suffixes`. It is never turned into an effort string.
+- **What reaches the CLI.** `--effort None`, or any effort that did not come from a valid configured value, never reaches argv.
+- Verified by: `test_null_effort_in_effort_suffixes_never_reaches_the_cli`.
+
+**RM-R4c: a stale reading feeds no prediction.**
+- **What is excluded.** A reading that routes as unknown under RM-R4b is not added to the burn samples and never triggers `_wind_down` or a cooldown.
+- Verified by: `test_a_stale_reading_does_not_wind_its_provider_down`.
+
+**RM-R4d: time going backwards never makes a reading fresher.**
+- **In the cache.** A negative elapsed time, from a wall-clock step backwards, expires the cache entry.
+- **For a reading's age.** A reading's age never decreases and never freezes across such a step. The contract does not fix the mechanism; a monotonic clock is acceptable.
+- **A future `read_at`.** A `read_at` more than 300 s in the future, which covers a value sent in milliseconds, makes the reading route as unknown. Clamping such a reading's age to 0 is not acceptable.
+- Verified by: `test_cached_reading_age_is_not_frozen_by_a_backwards_clock_step`. The future `read_at` rule has no test yet; the reviewer checks it.
+
+**RM-R3b: known before unknown inside Tier A, answering the adversary's NEED_INFO.**
+- **The decision.** The current behaviour is kept. Inside Tier A's pool, a known usable reading is preferred to an unknown one before load and last use are compared.
+- **Why.** An unknown sibling may itself be exhausted.
+- **The docstring.** `pick_instance`'s docstring must say this. It must not say "with load and last-use equal".
+
+**RM-R2b: disabled siblings never join Tier B.** A family sibling with `enabled: false` is never added to the agent's own routes.
+
+**Test guards.** The guards in `tests/test_m_adversary.py` also cover:
+- the persistence of the normalised effort across a consult resume in a new process, and on steer;
+- a malformed `max_reading_age_seconds`, which falls back to 3600.
+
+They must stay green.
