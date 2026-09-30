@@ -1145,7 +1145,8 @@ class Tree:
             entry.pop("claim", None)
             return True
 
-    def exit_deferred(self, deferred_id: str, outcome: str, **fields: Any) -> bool:
+    def exit_deferred(self, deferred_id: str, outcome: str,
+                      **fields: Any) -> bool | str:
         """End one entry's stay in the queue, and say so (DQ-R1).
 
         The only way an entry leaves, so no exit goes unrecorded. `refused`
@@ -1153,12 +1154,30 @@ class Tree:
         waiting entry is left the pause a deferral set is lifted in the same
         step (DQ-R6); a pause of another origin is left alone (DQ-R6a). A
         `restarting` entry holds the pause as a `waiting` one does (DQ-R8a).
+
+        Returns True when the exit happened, False when there is no such
+        entry, and why it was refused when it was — today only a `cancelled`
+        exit of a `restarting` entry (DQ-R12), which returns "restarting".
+        The reason is decided inside the transaction, so the caller answers
+        for the state at the removal, never for a later read. Only
+        `cancelled` can be refused, so callers passing any other outcome
+        still read this as the plain bool it always was.
         """
         lifted = False
         with self.transaction() as data:
             entry = find_deferred(data["deferred"], deferred_id)
             if entry is None:
                 return False
+            if (outcome == "cancelled" and entry.get("status") == "restarting"
+                    and not deferred_malformed(entry)):
+                # DQ-R12: a drain claimed this entry between the caller's
+                # snapshot read and this transaction. Removing it here would
+                # record `cancelled` while the claimed run starts anyway.
+                # The claim wins; stop_agent reaches the run once it exists.
+                # A malformed entry is never claimed (the drain skips it,
+                # DQ-R9), so its cancel cannot race, and DQ-R9 leaves its
+                # removal to the orchestrator alone.
+                return "restarting"
             if outcome == "refused":
                 entry["status"] = "refused"
                 entry["reason"] = fields.get("reason", "")
