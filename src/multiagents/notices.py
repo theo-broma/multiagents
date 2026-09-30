@@ -11,10 +11,14 @@ Three things live here:
   came from. Found by composing the yaml rather than loading it, because only
   the node tree keeps line numbers.
 * **Shared notice state** (LN-C4): which notices are active, how often each
-  was hit, and each `wait_for_agents` caller's cursor into the event log. In
-  `tree.json`, under the tree's own lock — every agent's server is its own
-  process and the monitor another, so a notice deduplicated in one process's
-  memory would be announced once per process.
+  was hit, and each `wait_for_agents` caller's cursor into the event log.
+  Every agent's server is its own process and the monitor another, so a
+  notice deduplicated in one process's memory would be announced once per
+  process. The state is host-owned, in the protected directory H7's startup
+  health already uses: `tree.json` is container-writable, and an `active`
+  entry forged there must not be able to suppress a real hit (review
+  finding 3). `tree.json` carries a mirror for the monitor's display, and no
+  decision ever reads the mirror back.
 * **The terminal line** (LN-C3): the one `multiagents watch` prints, and a
   small tailer that `multiagents run` leaves beside the CLI it hands the
   terminal to.
@@ -22,18 +26,22 @@ Three things live here:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import sys
+import tempfile
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
-from .paths import global_config_dir, shipped_defaults_dir
-from .tree import Tree, now
+from .paths import (global_config_dir, project_slug, shipped_defaults_dir,
+                    state_root)
+from .tree import TERMINAL, Tree, now
 
 # The effects of LN-C1.
 EFFECTS = ("refused", "deferred", "stuck", "killed", "kill_uncertain", "stopped")
@@ -201,19 +209,122 @@ def message(key: str, value: Any, source: dict[str, Any] | None,
 
 
 # --------------------------------------------------------------------------
-# shared state (LN-C4)
+# shared state (LN-C4) — host-owned, mirrored into tree.json
 
 
 def _ident(key: str, scope: str) -> str:
     return f"{key}|{scope}"
 
 
-def _state(data: dict) -> dict:
-    state = data.setdefault(STATE_KEY, {})
-    state.setdefault("active", {})
-    state.setdefault("cleared", [])
-    state.setdefault("cursors", {})
+def _clean(state: Any) -> dict:
+    """The state's own shape, or a fresh one. Anything unreadable resets the
+    dedup — a notice announced twice is the safe direction; one suppressed by
+    a record nobody vouches for is exactly the hole finding 3 closed."""
+    if not isinstance(state, dict):
+        state = {}
+    if not isinstance(state.get("active"), dict):
+        state["active"] = {}
+    if not isinstance(state.get("cleared"), list):
+        state["cleared"] = []
+    if not isinstance(state.get("cursors"), dict):
+        state["cursors"] = {}
     return state
+
+
+class NoticeState:
+    """The dedup authority for limit notices, beside H7's startup health.
+
+    `tree.json` sits under the project root, where every agent in the
+    container can write it; a state kept there would let a forged `active`
+    entry silence the next real hit of the same key. So the state lives in
+    the host's own protected directory, under this lock, and `tree.json`
+    only holds a copy for the monitor — written, never read back.
+
+    When the directory cannot be used at all, the state degrades to this
+    process's memory: dedup then holds within one server, which is still
+    more than nothing, and still never consults the forgeable copy.
+    """
+
+    def __init__(self, tree: Tree):
+        root = tree.path.resolve().parent.parent
+        self.directory = state_root() / "host-authority" / project_slug(root)
+        self.file = self.directory / "limit-notices.json"
+        self.lock_path = self.directory / "limit-notices.lock"
+        self.memory: dict | None = None
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.directory.chmod(0o700)
+        except OSError:
+            self.memory = _clean({})
+
+    @contextlib.contextmanager
+    def locked(self) -> Iterator[dict]:
+        """The state dict under its lock. Mutate it and `commit` it inside
+        the `with`; a degraded state is committed by the mutation itself."""
+        if self.memory is None:
+            try:
+                with self.lock_path.open("a+b") as lock:
+                    os.fchmod(lock.fileno(), 0o600)
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    try:
+                        yield self.read()
+                    finally:
+                        with contextlib.suppress(OSError):
+                            fcntl.flock(lock, fcntl.LOCK_UN)
+                return
+            except OSError:
+                self.memory = _clean({})
+        yield self.memory
+
+    def read(self) -> dict:
+        if self.memory is not None:
+            return self.memory
+        try:
+            state = json.loads(self.file.read_text())
+        except (OSError, ValueError):
+            return _clean({})
+        return _clean(state)
+
+    def commit(self, state: dict) -> None:
+        """Persist the state, durably, through a file nobody reads in place."""
+        if self.memory is not None:
+            return
+        try:
+            fd, name = tempfile.mkstemp(dir=self.directory, prefix=".notices-")
+            try:
+                with os.fdopen(fd, "w") as out:
+                    json.dump(state, out)
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(name, self.file)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(name)
+        except OSError:
+            self.memory = state            # keep going without the file
+
+
+_states: dict[str, NoticeState] = {}
+
+
+def _state(tree: Tree) -> NoticeState:
+    known = _states.get(str(tree.path))
+    if known is None:
+        known = _states[str(tree.path)] = NoticeState(tree)
+    return known
+
+
+def _mirror(tree: Tree, state: dict) -> None:
+    """Copy the state into `tree.json` — display only (LN-C3: the monitor's
+    alerts and event view). The copy a container agent can forge is never
+    read back; the next decision overwrites it with the host's truth."""
+    view = _clean(state)
+    snapshot = {"active": view["active"],
+                "cleared": view["cleared"][-KEEP_CLEARED:],
+                "cursors": view["cursors"]}
+    with contextlib.suppress(OSError):
+        with tree.transaction() as data:
+            data[STATE_KEY] = snapshot
 
 
 def hit(tree: Tree, *, key: str, value: Any, effect: str, scope: str,
@@ -222,48 +333,55 @@ def hit(tree: Tree, *, key: str, value: Any, effect: str, scope: str,
     """Record one constraint. The first under `(key, scope)` emits
     `limit_hit`; later ones while it is active only count. Returns the active
     notice, with its count."""
-    with tree.transaction() as data:
-        active = _state(data)["active"]
+    state = _state(tree)
+    with state.locked() as data:
+        active = data["active"]
         ident = _ident(key, scope)
         entry = active.get(ident)
         if entry is not None:
             entry["count"] = int(entry.get("count", 1)) + 1
             entry["last_hit"] = now()
-            return dict(entry)
-        entry = {"key": key, "value": value, "effect": effect, "scope": scope,
-                 "node": node, "source": source, "message": message,
-                 "count": 1, "first_hit": now(), "last_hit": now()}
-        active[ident] = entry
-        # Under the lock, so two processes hitting it at once agree on which
-        # of them announced it.
-        fields = {"key": key, "value": value, "effect": effect, "scope": scope,
-                  "source": source, "message": message}
-        if node:
-            fields["node"] = node
-        tree.emit(node or "-", "limit_hit", **fields)
-        return dict(entry)
+            result = dict(entry)
+        else:
+            entry = {"key": key, "value": value, "effect": effect, "scope": scope,
+                     "node": node, "source": source, "message": message,
+                     "count": 1, "first_hit": now(), "last_hit": now()}
+            active[ident] = entry
+            # Under the lock, so two processes hitting it at once agree on
+            # which of them announced it.
+            fields = {"key": key, "value": value, "effect": effect,
+                      "scope": scope, "source": source, "message": message}
+            if node:
+                fields["node"] = node
+            tree.emit(node or "-", "limit_hit", **fields)
+            result = dict(entry)
+        state.commit(data)
+    _mirror(tree, data)
+    return result
 
 
 def clear(tree: Tree, match) -> list[dict[str, Any]]:
     """End every active notice `match(entry)` accepts, each with one
     `limit_cleared` carrying its count."""
-    if not (tree.read().get(STATE_KEY) or {}).get("active"):
-        return []                     # the common case: one read, no write
-    ended: list[dict[str, Any]] = []
-    with tree.transaction() as data:
-        state = _state(data)
-        for ident, entry in list(state["active"].items()):
+    state = _state(tree)
+    with state.locked() as data:
+        ended: list[dict[str, Any]] = []
+        for ident, entry in list(data["active"].items()):
             if not match(entry):
                 continue
-            del state["active"][ident]
+            del data["active"][ident]
             entry = {**entry, "cleared_at": now()}
             ended.append(entry)
-            state["cleared"] = [*state["cleared"], entry][-KEEP_CLEARED:]
+            data["cleared"] = [*data["cleared"], entry][-KEEP_CLEARED:]
             tree.emit(entry.get("node") or "-", "limit_cleared",
                       key=entry["key"], scope=entry["scope"],
                       count=entry.get("count", 1),
                       message=f"limit cleared: {entry['key']} "
                               f"({entry['scope']}) after {entry.get('count', 1)} hit(s)")
+        if not ended:
+            return []                     # the common case: nothing to end
+        state.commit(data)
+    _mirror(tree, data)
     return ended
 
 
@@ -293,37 +411,137 @@ def since(tree: Tree, caller: str) -> list[dict[str, Any]]:
     """LN-C3/C4: the notices a `wait_for_agents` caller has not been shown.
 
     One cursor per caller over `events.jsonl`, so two callers each see a
-    notice once. A caller's first call has no cursor and gets the notices that
-    are active now instead of the log's whole history.
+    notice once. The cursor starts at the caller's CREATION (finding 6): a
+    first wait reports every hit and clear since the caller began, plus
+    whatever is still active now, whatever its birthday. The event bytes and
+    the state are read outside every lock (finding 7), and a cursor only
+    ever advances past whole lines, so a torn final line is picked up on the
+    next call. Cursors of callers whose node has ended are pruned.
     """
+    state = _state(tree)
+    # Node facts for this one call: the caller's creation, and which callers
+    # have ended and so lose their cursors (finding 7).
+    nodes = tree.read().get("nodes") or {}
+    mine = nodes.get(caller)
+    created = mine.get("created_at") if isinstance(mine, dict) else None
+    ended = {key for key, raw in nodes.items()
+             if isinstance(raw, dict) and raw.get("status") in TERMINAL}
     path = tree.events_path
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+
+    # What to show, read without a lock: an unlocked state read decides which
+    # of the two paths this is, and the bytes move after it. Anything that
+    # lands in between is an event too, and the next call shows it.
+    snapshot = state.read()
+    cursor = snapshot["cursors"].get(caller)
     out: list[dict[str, Any]] = []
-    with tree.transaction() as data:
-        state = _state(data)
-        cursor = state["cursors"].get(caller)
+    if caller in ended:
+        pass                          # an ended caller is shown nothing new
+    elif cursor is None or cursor > size:
+        # First call (or a log that shrank underneath us). Root, which is no
+        # node, keeps the old contract: what is active now.
+        if created is None:
+            out = [{"kind": "limit_hit", **_brief(entry)}
+                   for entry in sorted(snapshot["active"].values(),
+                                       key=lambda e: e.get("first_hit") or 0)]
+        else:
+            out, _ = _notices_between(path, _offset_at_or_after(path,
+                                                                float(created)),
+                                      size)
+            out = _with_active(out, snapshot["active"])
+        cursor_out = size
+    else:
+        out, cursor_out = _notices_between(path, cursor, size)
+
+    with state.locked() as data:
+        prune = [c for c in data["cursors"] if c in ended]
+        moved = (caller not in ended
+                 and data["cursors"].get(caller) != cursor_out)
+        if not prune and not moved:
+            return out                # the common poll: nothing moved
+        for gone in prune:
+            data["cursors"].pop(gone, None)
+        if moved:
+            data["cursors"][caller] = max(cursor_out,
+                                          data["cursors"].get(caller, 0))
+        state.commit(data)
+        _mirror(tree, data)
+    return out
+
+
+def _stamp(line: bytes) -> float:
+    """One event's time, or -1 for anything that is not a timestamped event."""
+    try:
+        value = json.loads(line).get("t")
+    except ValueError:
+        return -1.0
+    return value if isinstance(value, (int, float)) else -1.0
+
+
+def _offset_at_or_after(path: Path, created: float) -> int:
+    """Byte offset of the first whole event stamped at/after `created`; the
+    end of the last whole event when every event predates it. Events are
+    appended in time order, so the scan stops at the first hit."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    start = 0                          # the next unparsed line's own offset
+    tail = b""
+    try:
+        with path.open("rb") as handle:
+            while start < size:
+                chunk = handle.read(1 << 16)
+                if not chunk:
+                    break
+                *lines, tail = (tail + chunk).split(b"\n")
+                for line in lines:
+                    if _stamp(line) >= created:
+                        return start
+                    start += len(line) + 1
+    except OSError:
+        return 0
+    return start                        # past the last whole line
+
+
+def _notices_between(path: Path, start: int,
+                     end: int) -> tuple[list[dict[str, Any]], int]:
+    """The limit notices among the whole lines in `[start, end)`, and the
+    offset just past the last of those lines."""
+    if end <= start:
+        return [], start
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            chunk = handle.read(end - start)
+    except OSError:
+        return [], start
+    cut = chunk.rfind(b"\n") + 1
+    out: list[dict[str, Any]] = []
+    for line in chunk[:cut].splitlines():
         try:
-            size = path.stat().st_size
-        except OSError:
-            size = 0
-        if cursor is None or cursor > size:
-            out = [{"kind": "limit_hit", **_brief(entry)} for entry in active(data)]
-            state["cursors"][caller] = size
-            return out
-        try:
-            with path.open("rb") as handle:
-                handle.seek(cursor)
-                chunk = handle.read(size - cursor)
-        except OSError:
-            return []
-        end = chunk.rfind(b"\n") + 1
-        for line in chunk[:end].splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("kind") in ("limit_hit", "limit_cleared"):
-                out.append(_brief(event))
-        state["cursors"][caller] = cursor + end
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("kind") in ("limit_hit", "limit_cleared"):
+            out.append(_brief(event))
+    return out, start + cut
+
+
+def _with_active(out: list[dict[str, Any]],
+                 active_map: dict) -> list[dict[str, Any]]:
+    """Add what is constraining right now but began before this caller did:
+    a notice still active is news to a caller that has never been shown one,
+    whatever its birthday."""
+    seen = {(e.get("key"), e.get("scope")) for e in out
+            if e.get("kind") == "limit_hit"}
+    for entry in sorted(active_map.values(),
+                        key=lambda e: e.get("first_hit") or 0):
+        if (entry.get("key"), entry.get("scope")) not in seen:
+            out.append({"kind": "limit_hit", **_brief(entry)})
     return out
 
 
