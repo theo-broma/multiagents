@@ -390,13 +390,25 @@ def test_build_env_private_state_typeerror_falls_back_to_no_arg_call(tmp_path):
 # build_env — provider.env, precedence, and expansion
 # ---------------------------------------------------------------------------
 
-def test_build_env_with_no_env_block_adds_nothing_beyond_ambient_and_base_keys(tmp_path):
-    provider = h.make_provider("p")
-    env = h.build_env("p", provider, h.FakeExecutor())
+def _extra_keys(env):
     base_keys = {"MULTIAGENTS_PROVIDER", "MULTIAGENTS_BIN", "MULTIAGENTS_EXECUTOR",
                  "MULTIAGENTS_UID", "MULTIAGENTS_GID"}
-    extra = set(env) - set(os.environ) - base_keys
-    assert extra == set()
+    return set(env) - set(os.environ) - base_keys
+
+
+def test_build_env_with_no_env_block_and_a_found_binary_adds_nothing_beyond_ambient_and_base_keys(tmp_path):
+    provider = h.make_provider("p", bin="sh")
+    env = h.build_env("p", provider, h.FakeExecutor())
+    # BIN_ERROR may be absent or empty when found; nothing else may appear.
+    assert _extra_keys(env) - {"MULTIAGENTS_BIN_ERROR"} == set()
+    assert env.get("MULTIAGENTS_BIN_ERROR", "") == ""
+
+
+def test_build_env_with_no_env_block_and_a_missing_binary_adds_only_bin_error(tmp_path):
+    """H7 PS-R2: a missing binary is reported via MULTIAGENTS_BIN_ERROR."""
+    provider = h.make_provider("p", bin="definitely-not-a-real-binary-c2-seam-test")
+    env = h.build_env("p", provider, h.FakeExecutor())
+    assert _extra_keys(env) == {"MULTIAGENTS_BIN_ERROR"}
 
 
 def test_build_env_providers_env_block_is_applied_and_can_override_protocol_keys(tmp_path):
@@ -470,22 +482,24 @@ def test_build_env_copies_the_full_ambient_process_environment(tmp_path, monkeyp
 # build_env — MULTIAGENTS_BIN via provider.available() / shutil.which
 # ---------------------------------------------------------------------------
 
-def test_build_env_bin_resolves_to_an_absolute_path_when_the_binary_is_on_path(tmp_path):
-    """`build_env` calls `provider.available()`, which does a live
-    `shutil.which(provider.bin)` lookup against the REAL process PATH every
-    time — not a stored/configured value. `sh` is guaranteed present, so this
-    resolves to an absolute path rather than the literal string "sh"."""
+def test_build_env_bin_is_the_absolute_launcher_path_when_the_binary_is_on_path(tmp_path):
+    """H7 PS-R2/PS-R2a: `build_env` resolves the binary live against the real
+    PATH and hands the scripts the launcher path: absolute, symlinks not
+    resolved (`sh` stays `.../sh` even where it links to dash)."""
     provider = h.make_provider("p", bin="sh")
     env = h.build_env("p", provider, h.FakeExecutor())
     assert env["MULTIAGENTS_BIN"] != "sh"
     assert os.path.isabs(env["MULTIAGENTS_BIN"])
     assert env["MULTIAGENTS_BIN"].endswith("/sh")
+    assert env.get("MULTIAGENTS_BIN_ERROR", "") == ""
 
 
-def test_build_env_bin_falls_back_to_the_configured_name_when_not_on_path(tmp_path):
+def test_build_env_bin_is_empty_with_an_error_when_the_binary_is_not_found(tmp_path):
+    """H7 PS-R2: no fallback to the configured name any more."""
     provider = h.make_provider("p", bin="definitely-not-a-real-binary-c2-seam-test")
     env = h.build_env("p", provider, h.FakeExecutor())
-    assert env["MULTIAGENTS_BIN"] == "definitely-not-a-real-binary-c2-seam-test"
+    assert env["MULTIAGENTS_BIN"] == ""
+    assert env["MULTIAGENTS_BIN_ERROR"]
 
 
 # ---------------------------------------------------------------------------

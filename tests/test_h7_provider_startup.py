@@ -325,7 +325,39 @@ def test_ps_r2_auth_check_receives_resolved_binary_from_bin_search(tmp_path, mon
     p = _provider("p", bin="testcli", bin_search=[str(directory)], script="p.sh")
     code, out, err = scripts.run_action("p", p, LocalExecutor(), "check", tmp_path)
     assert code == 0, err
-    assert out == str(binary.resolve())
+    assert out == str(binary)
+
+
+def test_ps_r2a_bin_is_the_symlink_launcher_while_identity_is_the_target(tmp_path, monkeypatch):
+    from multiagents import scripts
+    from multiagents.executor.local import LocalExecutor
+    target = _exe(tmp_path / "versions" / "v1" / "testcli")
+    directory = tmp_path / "extra"
+    launcher = directory / "testcli"
+    directory.mkdir()
+    launcher.symlink_to(target)
+    _exe(tmp_path / "providers" / "p.sh", 'test "$1" = check || exit 21\nprintf "%s" "$MULTIAGENTS_BIN"')
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    p = _provider("p", bin="testcli", bin_search=[str(directory)], script="p.sh")
+    assert p.resolve_bin().path == target.resolve()
+    code, out, err = scripts.run_action("p", p, LocalExecutor(), "check", tmp_path)
+    assert code == 0, err
+    assert out == str(launcher)
+    assert out != str(target.resolve())
+
+
+def test_ps_r2b_provider_env_overrides_resolved_bin(tmp_path, monkeypatch):
+    from multiagents import scripts
+    from multiagents.executor.local import LocalExecutor
+    directory = tmp_path / "extra"
+    _exe(directory / "testcli")
+    _exe(tmp_path / "providers" / "p.sh", 'test "$1" = check || exit 21\nprintf "%s" "$MULTIAGENTS_BIN"')
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    p = _provider("p", bin="testcli", bin_search=[str(directory)], script="p.sh",
+                  env={"MULTIAGENTS_BIN": "/custom/x"})
+    code, out, err = scripts.run_action("p", p, LocalExecutor(), "check", tmp_path)
+    assert code == 0, err
+    assert out == "/custom/x"
 
 
 def test_ps_r2_refresh_models_rewrites_command_to_resolved_binary(tmp_path, monkeypatch):
