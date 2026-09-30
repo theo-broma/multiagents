@@ -2962,3 +2962,21 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - **One old test contradicts DQ-R2.** In `test_core.py::test_draining_stops_when_the_window_closes_mid_batch`, `still_deferred` should be 3 (what is left waiting). Tester ag-0ce81a is updating it.
   - **The T1 amendments** (DQ-R8/R8a, R4a, R2a, R3c; 13 red) are on glm, ag-3a07cc.
   - **M** is on glm, ag-3d566d, with 4 commits so far and its suite running.
+
+### HANDOFF #5, 2026-09-30 ~12:40 UTC. The orchestrator context is near wind-down.
+- **Merged today, after handoff #4:**
+  - Q1-Q6;
+  - the phase 0 invariant fixes;
+  - T2 (multi-ticket, all green);
+  - the T1 base (180e483) and the test_core DQ-R2 fix (8b14a6a).
+- **In flight:**
+  - **T1 amendments,** ag-3a07cc (glm), done: 29 plus 46 green, commit 4e53896, NOT merged yet. Adversary ag-5917f6 (claude opus, verifies ag-3a07cc) is checking it. Its top lead is the crash window between `start()` returning and `deferred_id` being written, which can cause a duplicate restart. After it: fix its findings on a glm implementer, carrying 4e53896, then merge.
+  - **M routing fixes,** ag-3d566d (implementer-deep glm): 4 commits (ff55a7c, 9e129d6, f186c1c, d5243ad), running the full suite. After it: verify `tests/test_m_routing_fixes.py` and the phase0 invariants, and consider running the adversary on it (routing decides where credentials are spent).
+- **Adversary on codex gpt-6.1-sol fails at once.** codex returns "This content was flagged for possible cybersecurity risk … apply for Daybreak access" (ag-18bf9a). The adversary brief's wording trips OpenAI's cyber filter. Use claude opus (or agy) for the adversary until the user decides. **Tell the user.**
+- **agy start refused** with "agy and all fallbacks are exhausted or cooling down" although `budget_status` shows agy usable at 0.83 headroom. Probably a stale agy cooldown in tree.json. Check `tree.json` cooldowns.agy before relying on agy.
+- **Open decision for the user:** split agy's Claude/GPT pool into its own provider (the advisor recommends it only if the user wants to route work there).
+- **Tickets still to fix later:**
+  - a standing conversation keeps its old model after a same-provider roster change;
+  - 1a, the container claude 401 (docker only);
+  - 4, the agy pools (decision above);
+  - e8565d#4, transcripts keys.
