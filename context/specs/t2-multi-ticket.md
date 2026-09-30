@@ -54,3 +54,11 @@
   - the `tree.read()["tickets"]` seam;
   - `tickets` as a list of ids or of dicts with an `id`, under the same name in `collect`;
   - a fix-only section is still a ticket.
+
+## Amendments of 2026-09-30, after the advisor (ag-322b14)
+
+**MT-R2a: fences, exactly.**
+- **What opens a fence.** A line starting with three or more backticks, or three or more tildes.
+- **What closes it.** A later line of the same character, at least as long.
+- **An unclosed fence** runs to the end of the message, and markers after it are ignored.
+- **A known limit.** An unfenced, unprefixed `TICKET(...)` line quoted in a monologue is indistinguishable from a real marker. MT-R3's empty-section drop is the remaining defence against it, and that limit is accepted.

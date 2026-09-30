@@ -83,3 +83,22 @@ The tester's assumptions 1, 2 and 4 are accepted:
 - **Transient:** any other exception, for example `RuntimeError`, `OSError` or `TimeoutError`. The entry stays `waiting`, and the drain stops, as it does today.
 
 **DQ-R6a: pauses of other origins.** DQ-R6 concerns only the pause set by a deferral. A pause set another way (auth, provider_down, …) is unchanged by this contract.
+
+## Amendments of 2026-09-30, after the advisor (ag-322b14)
+
+**DQ-R8: claim before restart, so two drains never restart the same entry.**
+- **The claim.** In one tree transaction, the drain moves a due entry from `waiting` to `status: "restarting"` and records a claim with the drain's pid and time. A concurrent drain skips any entry that is not `waiting`.
+- **After the attempt.** The entry leaves the queue only in a later transaction, once its outcome is known. The started node records `deferred_id`.
+- **Where the truth lives.** `tree.json` is authoritative; the event is appended after the tree commit.
+- **Recovery.** A `restarting` entry whose claimer pid is dead is resolved at the next drain:
+  - when a node carrying its `deferred_id` exists, it counts as `restarted` and the missing event is written then;
+  - when there is no such node, the entry returns to `waiting`.
+- Verified by:
+  - two drains run concurrently on one due entry start exactly one run;
+  - an entry left `restarting` by a dead pid is resolved as described.
+
+**DQ-R4a: `deferred_by` comes from the trusted caller.** `deferred_by` is recorded when the entry is created, from the caller's identity, never inferred later from `spec.agent`. Entries created before this change have no `deferred_by`, and only the orchestrator may cancel them.
+
+**DQ-R2a: refused entries stay visible.** The `wait_for_agents` result carries `deferred.refused_total`, the count of refused entries still queued, whenever it is non-zero, even when that drain did nothing else. Refused entries never expire by themselves.
+
+**DQ-R3c: an error returned by start() leaves nothing behind.** When `start()` returns an error dict, it must have created no node and no worktree. If it did, the node is recorded in the refused entry's `node_id`, so that it can be found.
