@@ -205,3 +205,37 @@ The tester's assumptions are accepted as contract. Its full list is in
 - a symlinked `tmux` dir;
 - `close` on a missing window;
 - `kill` with no server.
+
+## Amendments of 2026-09-30, after the adversary (ag-b8b511)
+
+**TM-R1a: what the formatter also escapes.**
+- These are escaped visibly, as control bytes are:
+  - the Unicode bidi controls U+202A–U+202E, U+2066–U+2069, U+200E, U+200F and U+061C;
+  - lone surrogates (U+D800–U+DFFF).
+- Nothing reaching stdout may raise an encoding error.
+
+**TM-R1b: truncation followed by growth is detected.**
+- The follower detects that the file was replaced or rewritten, even when
+  the size did not shrink. That covers a new inode, and also truncation
+  followed by growth past the old offset.
+- The mechanism is the developer's choice. One example is to compare a
+  fingerprint of the bytes already consumed; another is to check that the
+  previous offset still sits on a line boundary with the same prefix.
+- On detection, the follower prints the restart marker and re-reads from
+  the start.
+
+**TM-R2a: unknown agents and errors.**
+- **Unknown agents.** `tmux open` and the `tmux_open` monitor action
+  refuse an id that is well-formed but unknown, meaning it has no tree
+  node and no run directory. The CLI exits 2, and the action returns
+  `ok: false`.
+- **No exit from library code.** Library code never calls `sys.exit`.
+  Errors are raised as an exception, which the CLI maps to its exit code
+  and the monitor action maps to `ok: false`. No input may take the
+  monitor process down.
+- **Concurrent `open`.** Two simultaneous `open` calls for the same
+  project must both succeed. A "duplicate session" answer from tmux means
+  the session already exists, and is not an error.
+- **The socket directory.** A broken symlink, or any non-directory, at
+  the socket-directory path is refused like a wrong-mode directory. It
+  never crashes the command.
