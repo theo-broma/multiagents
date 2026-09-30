@@ -675,6 +675,26 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
   3. D3 tester (sonnet), then GLM implementer-deep.
   4. H5, H6, H8, H10, H12, D2.
 
+**2026-09-30 04:50 UTC: STOPPED, waiting for the user.**
+- **Budget:**
+  - codex's 5 h window is free, but its WEEKLY is at 93% until 2026-10-04 10:49 UTC;
+  - claude weekly at 40%;
+  - opencode-zai weekly at 15%;
+  - opencode Go at 99% monthly.
+- **Why no H7/D1 adversary ran on codex:** it could exhaust codex for 4 days, and codex is the only provider for the advisor, researcher and reviewer. That is a user budget decision.
+- **Options for the user:**
+  - (a) the adversary on claude opus, which is independent of the GLM implementers;
+  - (b) the adversary on GLM, which is cheap but not independent of the implementers;
+  - (c) wait for codex's weekly reset.
+- **The orchestrator's context is past wind-down (325k)** and needs a /compact before any new work.
+- **Ready to run next, no codex needed:**
+  1. D3 tester (claude sonnet), then GLM implementer-deep.
+  2. Then H6, H8, H10, H12, D2.
+  3. H5 only matters under docker.
+- **The user must also:**
+  - run `/mcp` after wt-main is advanced; it is still at 49c9b4e, before H7, H11 and the D1 fixes;
+  - decide on the adversary provider.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
