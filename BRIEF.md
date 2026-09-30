@@ -3148,3 +3148,15 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **Tester ag-e77949.** It updated the c2 harness count to 6 and the subagent_mcp fixture (`models_include: ["*"]`). **Merge it together with PS**: one of its tests is red on main until PS lands.
 
 **The reviewer's timeout** was raised to 1800.
+
+### 2026-09-30 ~22:30 UTC
+
+**TS, test speed.**
+- **Measured:** 46 min sequential (chunks of 685, 537, 841 and 712 s). 240 slow tests make up 65 % of the time, and five tests take about 60 s each.
+- **Contract:** context/specs/ts-test-speed.md, with the advisor's amendments (131d8ef). The work is split into Run A (xdist and parity), then Run B (timing), then optionally Run C (fixtures).
+- **Run A** is ag-2caa66: implementer-deep pinned to **opus**, consulting the new agent `gemini-advisor` (agy gemini-3.1-pro-high; added to agents.yaml and the rosters). implementer-deep got the route `claude: opus`.
+- **NEXT:** review Run A's manifests, then Run B.
+
+**M.** Round 4 was rejected again (ag-467011, 4 defects). Binding designs RM-R1c and RM-R4f (7fd909d), from advisor turn 5, were steered back to ag-074735.
+
+**PS.** ag-dc8946 is fixing 11 findings.
