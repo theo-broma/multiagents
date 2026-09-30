@@ -3207,3 +3207,15 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **Update, 21:12 UTC.** ag-dc8946 and ag-074735 were both resumed after the z.ai reset (the first steer of 074735 hit startup_down until dc8946's trial succeeded).
 - **Update.** TS Run A fixes are done (h7 made deterministic, sg_r7 fixture, manifest.py). Re-review ag-pending is started. A new product-race ticket was added to context/tickets/2026-09-30-unfiled.md: a stop during launch leaves setsid children running.
 - **Update.** Re-review ag-83ad32 of TS Run A: P1, the sg_r7 wait hides the launch-window race. Steered: add a deterministic strict-xfail launch-window test tied to the ticket. **Next:** a reviewer again, then merge.
+
+### 2026-10-01 ~00:10 UTC
+
+**MERGED: TS Run A** (ag-2caa66, opus + gemini-advisor), as 6a06f9c, after reviewer ag-cb7fbc APPROVED it.
+- On main, `pytest -n auto --basetemp=/var/tmp/<id>` runs the full suite in **265 s** (it took 46 min serially).
+- The results are 171 failed, all known reds (72 phase2, 97 PS, 2 c2 PS), plus 4180 passed, 15 skipped and 7 xfailed. Against the base's 4181 passed and 14 skipped, one test moved from passed to skipped. That is probably environment-dependent; check it in Run B.
+
+**NEXT for TS: Run B** (TS-R2, R3, R3a, R2a and R2b), on implementer-deep `model=opus` consulting gemini-advisor, followed by a reviewer and a robustness-tester. Discard ag-2caa66's leftovers if any.
+
+**In flight:**
+- reviewer ag-b859f1 on M round 6 (fdb4fcb). If approved: cherry-pick f8c2b26 (tester ag-35d54e) into the ag-074735 worktree, merge, verify, and discard ag-35d54e.
+- PS ag-dc8946, fixing the 11 findings.
