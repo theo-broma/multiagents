@@ -2741,3 +2741,13 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     - D3: ag-92a8d7, implementer-deep on gpt-6-astra, carrying 02701e3 from ag-709ee5.
   - ag-743603, the D2 tester, is still running.
 - ~10:15 UTC: D2 tests merged (c40e4e2): 197 tests, which the tester validated against a throwaway reference implementation. Its interface assumptions are accepted into the contract (4f568d1). ag-cac49a, the implementer on codex gpt-6-sol, is implementing D2. In flight: ag-e6c241 (D1 fixes) and ag-92a8d7 (D3).
+- ~07:10 UTC (real clock) — **codex's weekly is EXHAUSTED until Oct 4 12:49 CEST.** All three codex runs died on quota:
+  - ag-92a8d7 (D3) left WIP e69cf83;
+  - ag-e6c241 (D1) left WIP f4e9c29;
+  - ag-cac49a (D2) had no commits and was discarded.
+- **User decision: every implementer tier goes on agy Gemini** (quick gemini-3.8-flash-high, default and deep gemini-3.1-pro-high). The GLM variants, then codex, are the fallbacks. The advisor, adversary and dev-advisor are already on agy gemini pro.
+- **Relaunched on agy:**
+  - **D1:** ag-725897. It carries 0c94f3d, the squash of both earlier D1 runs.
+  - **D3:** ag-149e0a. It carries 84afefa, with stray .d3-* files it was told to remove.
+  - **D2:** ag-51c6dc, a fresh start.
+- **For later.** Once the codex weekly resets, the reviewer and researcher lose their provider. Once the z.ai 5 h window resets (~10:57 UTC), GLM is available again as a fallback.
