@@ -588,6 +588,21 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - **Smoke test ag-be5784:** implementer-quick on opencode-zai, argv `--variant low`, done in 7 s, reply correct. Discarded afterwards.
 - **Note:** implementer-deep has `readonly_paths: []` (tests unprotected) from an older decision. It was left as is, but this agent is told in each task that tests/ is read-only.
 
+**2026-09-30 ~02:30 UTC:**
+- **H7 merged (85524b9)** via ag-d06a0b. The 30 H7 tests pass.
+- **Amendments** (4e7b97c):
+  - PS-R2a: invocation uses the launcher, not the realpath;
+  - PS-R2b: a provider's `env:` wins over MULTIAGENTS_BIN;
+  - 3 superseded c2 tests.
+- **In flight:**
+  - tester ag-946e1f, on the tests for those amendments. Next, a GLM implementer implements PS-R2a/b.
+  - tester ag-56fe25, turning the 8 D1 findings into tests. Next, GLM implementer-deep.
+  - tester ag-70b0c0, on H11. Next, GLM implementer.
+- **Still to do:**
+  - The H7 adversary, when codex returns at 04:48 UTC.
+  - Advance wt-main after the H7 adversary and PS-R2a.
+  - Then D3.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
