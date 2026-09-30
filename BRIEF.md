@@ -3052,3 +3052,18 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 **NEXT:**
 - M: read the result. Findings go to an implementer-deep on glm. If the codex filter still refuses the run, report that to the user.
 - PS: verify, then the robustness-tester, then the reviewer, then merge, then move the agy claude/gpt routes in agents.yaml to agy-partner.
+
+### 2026-09-30 ~16:30 UTC
+
+**robustness-tester ag-6e70df (codex gpt-6.1-sol).** No content-filter refusal, so the rename works. VERDICT(rejected, 3), with tests in `tests/test_m_robustness.py`. The findings:
+- start() overbooks against a consult;
+- consult reservations leak on pre-launch exceptions;
+- a backward clock step makes a cached reading younger.
+
+The fix is running in implementer-deep ag-074735 (glm), and the tests were squashed into its worktree as 118141b.
+
+**Tooling note, minor** (the harness auto-committed anyway). Under the codex `sandbox` permission:
+- git cannot create an index lock, because the common git dir is read-only;
+- `asyncio.to_thread` hangs in its sandbox.
+
+This is a candidate ticket, to fix in-house later.
