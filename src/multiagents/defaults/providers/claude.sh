@@ -1,7 +1,16 @@
 #!/bin/sh
 # Claude Code. Has a first-class auth surface, so this is thin.
 set -u
-BIN="${MULTIAGENTS_BIN:-claude}"
+BIN="${MULTIAGENTS_BIN:-}"
+require_bin() {
+    if [ -z "$BIN" ]; then
+        printf '%s\n' "${MULTIAGENTS_BIN_ERROR:-MULTIAGENTS_BIN is not set}" >&2
+        exit 20
+    fi
+}
+case "${1:-check}" in
+    login|launch|compact|refresh) require_bin ;;
+esac
 
 # The container's own claude profile, when there is one: a DIRECTORY, because a
 # bind-mounted credential FILE is frozen at its inode on the host side and
@@ -223,6 +232,7 @@ for block in d.values():
         echo "the container profile has no credentials yet — run \`multiagents auth login claude\`"
         exit 10
     fi
+    require_bin
     out=$("$BIN" auth status --json 2>/dev/null) || {
         echo "could not run '$BIN auth status'"; exit 20; }
     case "$out" in

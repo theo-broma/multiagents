@@ -132,6 +132,7 @@ class Node:
     branch: str = ""
     worktree: str = ""
     session_id: str = ""
+    model_pinned: bool = False
     pid: int | None = None
     # What makes `pid` an identity rather than a number: see
     # :mod:`multiagents.procs`. Recorded beside it so a recovery after a reboot

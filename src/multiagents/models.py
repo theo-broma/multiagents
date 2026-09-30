@@ -60,9 +60,6 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
                 name, provider, config, project_config) is None:
             problems[name] = "no models_cmd and no static models: list"
             continue
-        if not provider.available():
-            problems[name] = f"{provider.bin} not on PATH"
-            continue
         if not provider.models_cmd:
             executor = executor_for(name) if executor_for else LocalExecutor()
             code, out, err = scripts.run_action(name, provider, executor, "models",
@@ -74,9 +71,16 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
                 continue
             models[name] = provider.parse_models(out)
             continue
+        resolved = provider.resolve_bin()
+        if resolved.path is None:
+            problems[name] = provider.bin_error(resolved)
+            continue
+        command = list(provider.models_cmd)
+        if command[0] in {provider.bin, Path(provider.bin).name}:
+            command[0] = str(resolved.path)
         try:
             proc = subprocess.run(
-                provider.models_cmd, capture_output=True, text=True, timeout=120,
+                command, capture_output=True, text=True, timeout=120,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             problems[name] = f"{type(exc).__name__}: {exc}"

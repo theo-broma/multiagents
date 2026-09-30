@@ -54,6 +54,7 @@ from .paths import ProjectPaths, global_config_dir, state_root
 from .providers import Event, Provider, get_path, load_providers
 from .redact import scrub
 from .auth import looks_like_auth_failure
+from .startup import StartupHealth, StartupUnavailable
 from .authority import HostAuthority
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
@@ -371,6 +372,8 @@ class Run:
     final_assistant_message: str = ""
     refusal_signal: str = ""
     final_status: str = ""
+    startup_token: str = ""
+    startup_progress: bool = False
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     internal_stop: bool = False       # steer() ending this turn to respawn it, not a real cancel
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
@@ -467,6 +470,7 @@ class Runner:
         self.config = config
         self.providers = load_providers(config.providers)
         self.tree = Tree(paths.tree_file, paths.events_file)
+        self.startup = StartupHealth(paths)
         self.runs: dict[str, Run] = {}
         # LN-C5: the runs this server has alive in each container, which is
         # the only evidence that a container-wide OOM kill was a given run's.
@@ -803,7 +807,7 @@ class Runner:
     # ------------------------------------------------------------- guardrails --
 
     def _preflight(self, spec: AgentSpec, workdir: str | None = None,
-                   budget_tag: str = "") -> None:
+                   budget_tag: str = "", *, pinned: bool = False) -> None:
         limits = self.config.limits
         if spec.launch:
             raise PermissionError(
@@ -819,7 +823,7 @@ class Runner:
         # only honest answer; an explicit workdir override is the caller saying
         # they meant it.
         paused = self.tree.pause_state()
-        if paused:
+        if paused and not pinned:
             # A pause names the providers that were exhausted. Refusing an agent
             # that still has a usable provider would be over-applying it: the
             # protection against unreviewed work is the orchestrator's own rule
@@ -953,8 +957,8 @@ class Runner:
                 f"Provider {provider.name!r} is disabled in providers.yaml "
                 f"(needed by agent {spec.name!r}). Set `enabled: true` to use it."
             )
-        if not provider.available():
-            raise FileNotFoundError(f"{provider.bin!r} is not on PATH (needed by agent {spec.name!r})")
+        if self._host_binary_needed(spec) and not provider.available():
+            raise FileNotFoundError(provider.bin_error())
         # An agent whose purpose failed to load should not run and guess at it.
         # The file is resolved across three config layers, so this is a typo or
         # a deleted brief, and the symptom without it — a capable agent doing
@@ -1283,6 +1287,7 @@ class Runner:
         session_id: str | None = None,
         timeout: int | None = None,
         done: asyncio.Event | None = None,
+        startup_token: str = "",
     ) -> Run:
         """Build the environment and command for one turn and start the process.
 
@@ -1392,20 +1397,28 @@ class Runner:
         # SV-R1/R4: under the launch wrapper, which writes the output and the
         # exit status to the run dir and ends the run at its wall clock even
         # when no server is left to.
+        handle = None
         try:
+            startup_token = startup_token or self.startup.claim(provider.name, node_id)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
                                           deadline=launched + wall if wall else 0,
                                           provider=provider.name)
+            self.startup.bind(provider.name, node_id, startup_token, handle.pid,
+                              getattr(handle, "pid_start", "") or "")
         except BaseException:
             # Nothing started, so nothing is followed: a lock kept here would
             # make the node unadoptable for this server's whole lifetime.
+            if handle is not None:
+                await handle.stop()
             self._release(node_id)
+            self._startup_finish(provider.name, node_id, startup_token)
             raise
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
             supervisor=self._supervisor(spec, provider, wall,
                                         limits["silence_timeout"]["value"]),
             turn_start=getattr(handle, "offset", 0), limits=limits,
+            startup_token=startup_token,
             **({"done": done} if done is not None else {}),
         )
         self.runs[node_id] = run
@@ -1674,6 +1687,68 @@ class Runner:
                 self.tree.emit(node_id, "wrap_up_failed", detail=str(exc)[:200])
             return
 
+    def _host_binary_needed(self, spec: AgentSpec) -> bool:
+        executor = self.executor(spec)
+        return not (getattr(executor, "kind", "local") == "docker"
+                    and not executor.config.get("mount_cli_from_host", True))
+
+    @staticmethod
+    def _pin_refusal(provider: str, reason: str, retry_after=None) -> dict:
+        message = (f"{provider}: {reason}. Omitting model lets the router choose "
+                   "another provider.")
+        result = {"reason": reason, "error": message, "message": message}
+        if retry_after:
+            result["retry_after"] = retry_after
+        return result
+
+    def _pin_problem(self, spec: AgentSpec) -> dict | None:
+        provider = self.providers.get(spec.provider)
+        if provider is None or not provider.enabled:
+            return self._pin_refusal(spec.provider, "provider is disabled or unavailable")
+        if self._host_binary_needed(spec) and not provider.available():
+            return self._pin_refusal(spec.provider, provider.bin_error())
+        problem = self.startup.availability(spec.provider)
+        if problem:
+            return self._pin_refusal(spec.provider, problem["reason"],
+                                     problem.get("retry_after"))
+        return None
+
+    async def _pin_health(self, spec: AgentSpec) -> dict | None:
+        problem = self._pin_problem(spec)
+        if problem:
+            return problem
+        if await asyncio.to_thread(self._auth_ok, spec.provider) is False:
+            return self._pin_refusal(spec.provider, "provider is not authenticated")
+        cooldowns = self.tree.read().get("cooldowns", {})
+        budgets = await asyncio.to_thread(
+            budget_mod.read_all, self.providers, lambda _name: self.executor(spec),
+            global_config_dir(), self.paths.config, None, cooldowns,
+            limits=self.config.limits)
+        self._half_open(budgets, cooldowns)
+        self._wind_down(budgets)
+        cfg = self.config.project.get("budget", {})
+        chosen, why = budget_mod.choose_provider(
+            spec.provider, budgets, [], float(cfg.get("reserve_headroom", 0.15)),
+            reserved=budget_mod.reserved_providers(
+                self.config.project, self.providers, self._orchestrator_provider()),
+            allowed={spec.provider})
+        if chosen is None:
+            entry = budgets.get(spec.provider)
+            return self._pin_refusal(spec.provider, why,
+                                     entry.cooldown_until if entry else None)
+        return None
+
+    def _startup_finish(self, provider: str, node_id: str, token: str,
+                        failed: bool = False, error: str = "") -> None:
+        if not token:
+            return
+        event = self.startup.finish(
+            provider, node_id, token, failed=failed, error=error,
+            threshold=int(self.config.limits.get("startup_failure_threshold", 2)),
+            cooldown=float(self.config.limits.get("provider_down_cooldown_seconds", 1800)))
+        if event:
+            self.tree.emit(node_id, "startup_down", **event)
+
     # ----------------------------------------------------------------- start --
 
     async def start(
@@ -1730,7 +1805,11 @@ class Runner:
             # First value wins, so a re-declaration cannot lift a spent ceiling.
             self.tree.set_budget(budget_tag, budget_tokens,
                                  set_by=self.self_id() or self.session() or "root")
-        self._preflight(spec, workdir, budget_tag)
+        if model:
+            problem = await self._pin_health(spec)
+            if problem:
+                return problem
+        self._preflight(spec, workdir, budget_tag, pinned=bool(model))
         # LN-C4: every refusal limit this start was checked against let it
         # through, so the notices for them in its scopes have stopped.
         passed = {"tree", self.self_id() or "tree", *([budget_tag] if budget_tag else [])}
@@ -1777,6 +1856,18 @@ class Runner:
         # own, a `models:` entry naming one, or a sibling of either. A key
         # with an empty model is not one: routing there ran `--model ""`.
         chain = list(budget_cfg.get("fallback_chain", []))
+        if model:
+            family, chain = [], []
+        elif self.startup.availability(spec.provider):
+            chain = list(dict.fromkeys([*chain, *(spec.models or {})]))
+        startup_blocked = {}
+        for name, candidate in self.providers.items():
+            problem = self.startup.availability(name)
+            if problem:
+                startup_blocked[name] = problem
+                entry = budgets.setdefault(name, budget_mod.Budget(name, known=False))
+                entry.cooldown_until = max(now() + 1, problem.get("retry_after") or 0)
+                entry.note = problem["reason"]
         usable = {name for name in self.providers
                   if self._usable_spec(spec, name) is not None}
         unmodelled = [name for name in dict.fromkeys([*chain, *family])
@@ -1802,6 +1893,12 @@ class Runner:
             )
 
         chosen, why = choose(budgets, reserve)
+        if chosen is None and model:
+            entry = budgets.get(spec.provider)
+            problem = startup_blocked.get(spec.provider) or {}
+            return self._pin_refusal(spec.provider, problem.get("reason") or why,
+                                     problem.get("retry_after") or
+                                     (entry.cooldown_until if entry else None))
         if chosen is None:
             self._deferral_notices(agent_name, choose, budgets, before_wind_down, reserve)
         else:
@@ -1865,73 +1962,83 @@ class Runner:
             if overrides:
                 routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
             spec = routed
-        # LM-R1/R2: resolved once, recorded on the node, reported to the caller.
-        limits = self.config.effective_limits(spec, timeout)
-
-        # --- git isolation ---------------------------------------------------
-        # EVERY agent gets a worktree, including read-only ones. `writes: false`
-        # is a statement of intent, not an enforced permission — nothing stops a
-        # model from calling an edit tool. Giving a "read-only" agent the real
-        # project directory would mean trusting that intent with your working
-        # tree. A worktree costs almost nothing and makes the flag irrelevant to
-        # your safety: a non-writing agent that writes anyway is quarantined,
-        # and its branch is dropped afterwards if it turns out to be empty.
-        repo = self.paths.root
-        branch = ""
-        worktree_path = Path(workdir).expanduser() if workdir else self.paths.root
-        if not workdir:
-            # _preflight has already established that this is a repository.
-            base = self.config.base_branch or gitops.current_branch(repo)
-            desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
-            worktree_path = self.paths.worktree(node_id)
-            branch = gitops.unique_branch(repo, desired)
-
-        node = Node(
-            id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
-            parent=parent, depth=depth, task=task[:500], branch=branch,
-            worktree=str(worktree_path), status="pending",
-            verifies=verifies if verifies in self.tree.read()["nodes"] else "",
-            budget_tag=budget_tag,
-            routed_from=routed_from, routed_why=routed_why,
-            limits=limits, session=self.session(),
-        )
-        if self.authority:
-            self.authority.add(node)
-        if not workdir:
-            gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
-        self.tree.add(node)
-        if routed_from:
-            # Loud enough to find later. This decision changes which model does
-            # the work, and until now it left no trace anywhere.
-            self.tree.emit(node_id, "routed", **{"from": routed_from,
-                                                 "to": provider.name,
-                                                 "model": spec.model,
-                                                 "reason": routed_why})
-
-        prompt = self.compose_prompt(spec, task, node, worktree_path)
         try:
-            run = await self._launch(
-                node_id=node_id, spec=spec, provider=provider, prompt=prompt,
-                workdir=worktree_path, branch=branch, parent=parent, depth=depth,
-                timeout=timeout,
-            )
-        except RuntimeError as exc:
-            self.tree.set_status(node_id, "failed", str(exc))
-            return {"agent_id": node_id, "status": "failed", "error": str(exc)}
+            startup_token = self.startup.claim(provider.name, node_id)
+        except StartupUnavailable as exc:
+            return self._pin_refusal(provider.name, exc.reason, exc.retry_after)
+        launched = False
+        try:
+            # LM-R1/R2: resolved once, recorded on the node, reported to the caller.
+            limits = self.config.effective_limits(spec, timeout)
 
-        return {
-            "agent_id": node_id,
-            "agent": agent_name,
-            "provider": provider.name,
-            "model": spec.model,
-            "branch": branch or None,
-            "workdir": str(worktree_path),
-            "status": "running",
-            "routing": why,
-            "effective_limits": self._limits_detail(agent_name, limits),
-            "log": str(self.paths.run_dir(node_id)),
-            "pid": run.handle.pid if run.handle else None,
-        }
+            # --- git isolation ---------------------------------------------------
+            # EVERY agent gets a worktree, including read-only ones. `writes: false`
+            # is a statement of intent, not an enforced permission — nothing stops a
+            # model from calling an edit tool. Giving a "read-only" agent the real
+            # project directory would mean trusting that intent with your working
+            # tree. A worktree costs almost nothing and makes the flag irrelevant to
+            # your safety: a non-writing agent that writes anyway is quarantined,
+            # and its branch is dropped afterwards if it turns out to be empty.
+            repo = self.paths.root
+            branch = ""
+            worktree_path = Path(workdir).expanduser() if workdir else self.paths.root
+            if not workdir:
+                # _preflight has already established that this is a repository.
+                base = self.config.base_branch or gitops.current_branch(repo)
+                desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
+                worktree_path = self.paths.worktree(node_id)
+                branch = gitops.unique_branch(repo, desired)
+
+            node = Node(
+                id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
+                parent=parent, depth=depth, task=task[:500], branch=branch,
+                worktree=str(worktree_path), status="pending",
+                verifies=verifies if verifies in self.tree.read()["nodes"] else "",
+                budget_tag=budget_tag,
+                routed_from=routed_from, routed_why=routed_why,
+                limits=limits, session=self.session(), model_pinned=bool(model),
+            )
+            if self.authority:
+                self.authority.add(node)
+            if not workdir:
+                gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
+            self.tree.add(node)
+            if routed_from:
+                # Loud enough to find later. This decision changes which model does
+                # the work, and until now it left no trace anywhere.
+                self.tree.emit(node_id, "routed", **{"from": routed_from,
+                                                     "to": provider.name,
+                                                     "model": spec.model,
+                                                     "reason": routed_why})
+
+            prompt = self.compose_prompt(spec, task, node, worktree_path)
+            try:
+                run = await self._launch(
+                    node_id=node_id, spec=spec, provider=provider, prompt=prompt,
+                    workdir=worktree_path, branch=branch, parent=parent, depth=depth,
+                    timeout=timeout, startup_token=startup_token,
+                )
+            except RuntimeError as exc:
+                self.tree.set_status(node_id, "failed", str(exc))
+                return {"agent_id": node_id, "status": "failed", "error": str(exc)}
+
+            launched = True
+            return {
+                "agent_id": node_id,
+                "agent": agent_name,
+                "provider": provider.name,
+                "model": spec.model,
+                "branch": branch or None,
+                "workdir": str(worktree_path),
+                "status": "running",
+                "routing": why,
+                "effective_limits": self._limits_detail(agent_name, limits),
+                "log": str(self.paths.run_dir(node_id)),
+                "pid": run.handle.pid if run.handle else None,
+            }
+        finally:
+            if not launched:
+                self._startup_finish(provider.name, node_id, startup_token)
 
     # --------------------------------------------------------------- consume --
 
@@ -1974,6 +2081,10 @@ class Runner:
                 # logged, counted, or acted on again.
                 replayed = (run.replay_to >= 0
                             and getattr(handle, "offset", 0) <= run.replay_to)
+                if event.startup_progress and not run.startup_progress:
+                    run.startup_progress = True
+                    if self.startup.progress(provider.name, node_id, run.startup_token):
+                        self.tree.emit(node_id, "provider_recovered", provider=provider.name)
                 if event.kind == "result":
                     run.final_result = True
 
@@ -2147,6 +2258,9 @@ class Runner:
             watchdog.cancel()
             stderr_task.cancel()
             stream_log.close()
+            if not run.detaching and (run.stop_requested
+                    or asyncio.current_task().cancelling()):
+                self._startup_finish(provider.name, node_id, run.startup_token)
 
         # Everything after the stream is guarded, because nothing else releases
         # this run. `consult` waits on `run.done` for the agent's whole timeout
@@ -2184,6 +2298,7 @@ class Runner:
                     node_id, "failed",
                     f"the post-mortem crashed: {type(exc).__name__}: {exc}")
         finally:
+            self._startup_finish(provider.name, node_id, run.startup_token)
             if not relaunched:
                 self._release(node_id)
                 # LN-C4: the node ended, so its own notices have stopped.
@@ -2519,6 +2634,7 @@ class Runner:
                         session_id=session_id or None,
                         done=run.done,
                     )
+                    retried.startup_progress = retried.startup_progress or run.startup_progress
                     self.tree.set_status(node_id, "running", "retried once after "
                                          "an unexplained early exit")
                     return True
@@ -2574,6 +2690,11 @@ class Runner:
                 else:
                     reason = "produced no output"
             self.tree.set_status(node_id, status, self._with_trip(prior_stuck, reason))
+
+        self._startup_finish(run.provider.name, node_id, run.startup_token,
+                             failed=status == "failed" and not run.startup_progress
+                             and not run.stop_requested and not timed_out,
+                             error=(stderr or text).splitlines()[0] if (stderr or text) else status)
 
         # Auto-merge this agent's own children upward: their work is still
         # quarantined on this agent's branch, so nothing real has changed yet.
@@ -2708,6 +2829,11 @@ class Runner:
         else:
             status = self._classify(run, -1 if code is None else code, text, stderr)
             status, limited = await self._provider_health_after(run, status, text, stderr)
+        self._startup_finish(run.provider.name, run.node_id, run.startup_token,
+                             failed=status == "failed" and not run.startup_progress
+                             and not run.stop_requested and not timed_out,
+                             error=(stderr or text).splitlines()[0] if (stderr or text) else status)
+
         run.fix_verdict = {"status": status, "limited": limited, "usage": usage}
         return True
 
@@ -3363,6 +3489,8 @@ class Runner:
         the same way `start()` built them: a run routed to a fallback carries
         the fallback's model and options, not the configured ones."""
         spec = self.config.agent(node.agent)
+        if node.model_pinned:
+            return spec.replace(provider=node.provider, model=node.model), self.providers[node.provider]
         routed = self._usable_spec(spec, node.provider)
         if routed is None:
             # Followed as it was launched; only a relaunch needs a model, and
@@ -3506,7 +3634,8 @@ class Runner:
         supervisor.started = time.monotonic() - max(0.0, now() - launched)
         run = Run(node_id=node.id, provider=provider, spec=spec, handle=handle,
                   supervisor=supervisor, turn_start=turn,
-                  replay_to=int(follow.get("offset", turn)), adopted=True)
+                  replay_to=int(follow.get("offset", turn)), adopted=True,
+                  startup_token=self.startup.token_for(provider.name, node.id))
         self.runs[node.id] = run
         if live:
             self.tree.update(node.id, adopted_at=now())
@@ -3695,7 +3824,7 @@ class Runner:
             # model there the steer is refused, not moved: another provider
             # cannot resume it, and `--model ""` is not a model.
             configured = self.config.agent(node.agent)
-            if self._usable_spec(configured, node.provider) is None:
+            if not node.model_pinned and self._usable_spec(configured, node.provider) is None:
                 return {
                     "agent_id": agent_id, "steered": False,
                     "error": f"agent {node.agent!r} has no model for provider "
@@ -3705,6 +3834,11 @@ class Runner:
                              f"this run, or start a fresh one.",
                 }
             spec, provider = self._spec_of(node)
+
+        if node.model_pinned:
+            refusal = await self._pin_health(spec.replace(provider=provider.name))
+            if refusal:
+                return {**refusal, "steered": False}
 
         # A truncated `writes: false` agent may have had its worktree reclaimed
         # by `_drop_if_empty` once its empty branch made it look worth nothing

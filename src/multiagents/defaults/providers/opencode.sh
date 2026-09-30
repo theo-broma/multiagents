@@ -2,7 +2,16 @@
 # opencode. Credentials live on the HOST even when agents run in a container,
 # because the container mounts opencode's data directory rather than masking it.
 set -u
-BIN="${MULTIAGENTS_BIN:-opencode}"
+BIN="${MULTIAGENTS_BIN:-}"
+require_bin() {
+    if [ -z "$BIN" ]; then
+        printf '%s\n' "${MULTIAGENTS_BIN_ERROR:-MULTIAGENTS_BIN is not set}" >&2
+        exit 20
+    fi
+}
+case "${1:-check}" in
+    check|login|launch) require_bin ;;
+esac
 
 # MULTIAGENTS_OPENCODE_PLAN=zai-coding-plan selects the Z.AI Coding Plan (the
 # `opencode-zai` instance). Unset, empty or any other value is the Go behaviour

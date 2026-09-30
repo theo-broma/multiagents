@@ -479,8 +479,8 @@ class Executor(ABC):
     def native_bin(self, provider_name: str, provider: Any, env: dict[str, str]) -> str:
         """The absolute path of `provider.bin` an adapter run should drive,
         resolved at this exec (CX-C2), or "" when it is not installed."""
-        found = shutil.which(provider.bin, path=env.get("PATH"))
-        return os.path.abspath(found) if found else ""
+        found = provider.resolve_bin(env={**os.environ, **env})
+        return str(found.path) if found.path is not None else ""
 
     def adapter_env(self, argv: list[str], env: dict[str, str],
                     provider: str = "") -> dict[str, str]:
@@ -497,7 +497,8 @@ class Executor(ABC):
         if binary:
             env["MULTIAGENTS_BIN"] = binary
         else:
-            env.pop("MULTIAGENTS_BIN", None)
+            env["MULTIAGENTS_BIN"] = ""
+            env["MULTIAGENTS_BIN_ERROR"] = provider.bin_error()
         return env
 
 

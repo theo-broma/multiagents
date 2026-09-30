@@ -1543,16 +1543,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print("providers")
     for name, provider in sorted(providers.items()):
-        path = provider.available()
+        resolved = provider.resolve_bin()
+        path = resolved.path
         state = "" if provider.enabled else "  [disabled in providers.yaml]"
         if path:
-            print(f"  {name:12} {path}{state}")
+            print(f"  {name:12} {path} (via {resolved.via}){state}")
         elif not provider.enabled:
             # Disabled and absent is not a problem worth flagging — the user
             # said they do not want it.
             print(f"  {name:12} not installed{state}")
         else:
-            print(f"  {name:12} NOT FOUND ({provider.bin} is not on PATH)")
+            print(f"  {name:12} NOT FOUND ({provider.bin_error(resolved)})")
             problems += 1
 
     print("\nagents")
@@ -1740,13 +1741,16 @@ def cmd_probe(args: argparse.Namespace) -> int:
     if provider is None:
         print(f"unknown provider {args.provider!r}; known: {sorted(providers)}", file=sys.stderr)
         return 2
-    if not provider.available():
-        print(f"{provider.bin} is not on PATH", file=sys.stderr)
+    resolved = provider.resolve_bin()
+    if resolved.path is None:
+        print(provider.bin_error(resolved), file=sys.stderr)
         return 2
 
     argv = provider.build_command(
         prompt=args.prompt, model=args.model, workdir=str(Path.cwd()), permission="readonly",
     )
+    if not provider.adapter:
+        argv[0] = str(resolved.path)
     print(f"$ {' '.join(argv[:6])} …\n")
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=args.timeout)
 
@@ -2873,7 +2877,14 @@ def cmd_docker(args: argparse.Namespace) -> int:
         # bind-mounted at their host paths, which are not on the container
         # image's PATH. Forward the host PATH too, so anything the CLI shells
         # out to during login resolves as it would on the host.
-        binary = provider.available() or provider.bin
+        if ex.config.get("mount_cli_from_host", True):
+            resolved = provider.resolve_bin()
+            if resolved.path is None:
+                print(provider.bin_error(resolved), file=sys.stderr)
+                return 2
+            binary = ex.native_bin(provider_name, provider, dict(os.environ))
+        else:
+            binary = provider.bin
         os.execvp("docker", [
             "docker", "exec", "-it",
             "--user", f"{os.getuid()}:{os.getgid()}",
