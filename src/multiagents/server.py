@@ -52,7 +52,7 @@ from .paths import ProjectPaths, find_project_root, global_config_dir
 from .providers import billed_rows
 from .redact import scrub
 from .runner import Runner
-from .tree import Tree, now
+from .tree import Tree, deferred_malformed, find_deferred, now
 from .transcripts import session_context
 
 mcp = _Server("multiagents", version=__version__)
@@ -856,10 +856,31 @@ def list_deferred() -> dict:
     `waiting` entries restart by themselves once `retry_after` passes and a
     `wait_for_agents` runs. `refused` entries could not be restarted (see
     `reason`), are never retried, and stay until `cancel_deferred` removes them.
+    A status of `restarting` is a drain's transient claim (DQ-R8): the entry is
+    being restarted right now, and the next drain settles it if the claiming
+    process died. A status of `malformed` (DQ-R9) is an entry too broken to
+    act on: it is skipped by the drain and only the orchestrator can remove it.
     Read-only.
     """
     entries = []
     for d in runner().tree.read()["deferred"]:
+        if not isinstance(d, dict) or deferred_malformed(d):
+            # DQ-R9: shown, with status `malformed`, never a crash. Only the
+            # orchestrator can remove it, which is why `deferred_by` reads so.
+            spec = d.get("spec") if isinstance(d, dict) else None
+            if not isinstance(spec, dict):
+                spec = {}
+            entries.append({
+                "id": (d.get("id") or "") if isinstance(d, dict) else "",
+                "agent": spec.get("agent"),
+                "task": (spec.get("task") or "")[:200],
+                "model": spec.get("model") or "",
+                "retry_after": "",
+                "status": "malformed",
+                "reason": "queue entry is malformed; the drain skips it (DQ-R9)",
+                "deferred_by": "orchestrator",
+            })
+            continue
         spec = d.get("spec") or {}
         entries.append({
             "id": d.get("id"), "agent": spec.get("agent"),
@@ -879,20 +900,37 @@ def cancel_deferred(deferred_id: str) -> dict:
     """Remove a task from the deferred queue (waiting or refused).
 
     Only the agent that deferred it, one of its ancestors, or the orchestrator
-    may cancel. The exit is recorded as a `deferred_exit` event, and the pause a
-    deferral set is lifted if no waiting entry remains.
+    may cancel — an entry recorded with no `deferred_by` predates that field
+    and only the orchestrator may cancel it (DQ-R4a). A malformed entry
+    (DQ-R9) is likewise the orchestrator's alone. An entry whose restart is
+    in progress is refused (DQ-R12): `stop_agent` the run once it exists. The
+    exit is recorded as a `deferred_exit` event, and the pause a deferral set
+    is lifted if no waiting entry remains.
     """
     run = runner()
-    entry = next((d for d in run.tree.read()["deferred"]
-                  if d.get("id") == deferred_id), None)
+    entry = find_deferred(run.tree.read()["deferred"], deferred_id)
     if entry is None:
         return _ok({"error": f"no deferred entry {deferred_id!r}; list_deferred shows the queue"})
     caller = run.self_id()
-    owner = entry.get("deferred_by")
-    if caller is not None and not (owner and caller in run.tree.ancestry(owner)):
-        return _ok({"error": f"{caller} may only cancel entries it deferred, or its "
-                             f"descendants' ({deferred_id} was deferred by "
-                             f"{owner or 'the orchestrator'})."})
+    if deferred_malformed(entry):
+        # A broken entry has no owner that can be trusted; whoever defers or
+        # drains cannot be recovered from it, so removal is not theirs to do.
+        if caller is not None:
+            return _ok({"error": f"only the orchestrator may cancel the malformed "
+                                 f"entry {deferred_id} (DQ-R9)."})
+    elif entry.get("status") == "restarting":
+        # DQ-R12: the restart and the cancel would each believe they own the
+        # outcome — the record could say cancelled while the run started
+        # anyway. Refuse here; stop_agent reaches the run once it exists.
+        return _ok({"error": f"{deferred_id} is restarting; cancel is refused while a "
+                             f"restart is in progress (DQ-R12). stop_agent the run "
+                             f"once it exists."})
+    else:
+        owner = entry.get("deferred_by")
+        if caller is not None and not (owner and caller in run.tree.ancestry(owner)):
+            return _ok({"error": f"{caller} may only cancel entries it deferred, or its "
+                                 f"descendants' ({deferred_id} was deferred by "
+                                 f"{owner or 'the orchestrator'})."})
     if not run.tree.exit_deferred(deferred_id, "cancelled"):
         return _ok({"error": f"no deferred entry {deferred_id!r}"})
     return _ok({"cancelled": deferred_id})
