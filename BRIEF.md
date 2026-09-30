@@ -3093,3 +3093,23 @@ Findings 2 and 3 go to implementer ag-ce8fce, together with the leftover in snap
 - **The reviewer runs systematically after every implementer, before merge.** This overrides the pipeline threshold.
 - **glm variants.** They were never passed, but glm-5.3-flash defaults to max. Per the user, keep max for all tiers: the top-level override was removed and the models: routes were set to max. The `models:` route variant (low/high/max) is ignored for the agent's preferred provider: argv had no `--variant` in any run. Worked around by a top-level `variant:` on each implementer tier (quick low, implementer high, deep max). New runs only.
 - **Candidate in-house ticket:** a `models:` route entry for the preferred provider is ignored.
+
+### 2026-09-30 ~18:30 UTC
+
+**Merged:** T1 review fixes, ag-ce8fce, as 55befed. T1 and M are 188 passed on main.
+
+**M round 3, ag-074735.** Reviewer ag-f21a0c rejected it with 5 defects:
+- P1: a cancel after `executor.start` releases a live slot;
+- the `read_at` age is counted twice;
+- the age floor is overwritten by a stale hit;
+- the age floor freezes ageing after a clock step;
+- the post-claim settle sits outside the `finally`.
+These were steered back to ag-074735, with a monotonic clock suggested.
+
+**Q2b, queued and low priority.** The Q2 spec was silent (researcher ag-69700c).
+- **Decision:** an explicit `--path` that does not exist, or is not a project, must fail loudly in the `_resolve_if_project` commands, not fall back to global.
+- **Needs:** the tester to change tests/test_q2_cli_path.py:18, then an implementer-quick, then the reviewer.
+
+**Also queued:**
+- the ticket for the pinned-start half-open self-deadlock (ddcdf7f), after ag-074735 merges;
+- the `models:` route of the preferred provider being ignored (variant).
