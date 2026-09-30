@@ -184,3 +184,9 @@ They must stay green.
 - **A backward step.** For a matching entry, `now < last_seen` means: invalidate the entry and take the ordinary fetch path **in this same call**, whatever the age metadata says. The invalidated budget is never returned. A failed fetch gives the normal unknown result.
 - **Otherwise,** the ordinary TTL and age handling applies.
 - **Publishing.** The replacement budget and its source identity are published together, under the lock. Provider I/O happens outside the lock.
+
+**RM-R1d: the cleanup hold is durable. Binding; added after ag-7c0716.**
+- **Record the new process first.** Immediately after `executor.start()` succeeds, and before any other step that can fail, the node's record in `tree.json` is updated to the **new** process identity (pid/container) in one transaction. The retry's dead predecessor is never what admission sees.
+- **Keep the hold in `tree.json`.** The cleanup hold is a durable node field in `tree.json`, for example `cleanup_hold: {"since": ..., "owner_pid": ...}`. It is not only in memory. It is set in the same transaction as the step that starts the cleanup, and cleared only once death is confirmed.
+- **Admission honours it.** In **every** Runner, `_occupies_slot()` counts a node that carries `cleanup_hold` as occupying, whatever its pid liveness.
+- **Anything that can fail comes before the flock.** Supervisor and limits construction happen **before** `_claim()` takes the supervision flock. If it cannot be moved there, a failure after `_claim()` calls `_release()`.
