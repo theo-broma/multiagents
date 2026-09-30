@@ -2773,18 +2773,18 @@ class Runner:
                 # so a flag kept there resets on every retry and one free retry
                 # becomes an unbounded loop. Found by running it.
                 self.tree.update(node_id, retries=fresh.retries + 1)
-                with contextlib.suppress(Exception):
-                    # Continuity for whoever is waiting on the attempt that
-                    # just died: `_launch` starts every relaunch with a fresh
-                    # `Run`, but a caller that captured this run (consult(),
-                    # or a test driving the agent directly) before the retry
-                    # must still be woken when the SECOND attempt finishes,
-                    # not left waiting on an event nothing will ever set. Handed
-                    # in at construction, not assigned after the fact: `_launch`
-                    # publishes the new Run to `self.runs[node_id]` before it
-                    # returns, and a post-hoc `retried.done = run.done` would
-                    # leave a window where a concurrent reader gets a Run whose
-                    # `done` nobody but this line will ever fix up.
+                # Continuity for whoever is waiting on the attempt that
+                # just died: `_launch` starts every relaunch with a fresh
+                # `Run`, but a caller that captured this run (consult(),
+                # or a test driving the agent directly) before the retry
+                # must still be woken when the SECOND attempt finishes,
+                # not left waiting on an event nothing will ever set. Handed
+                # in at construction, not assigned after the fact: `_launch`
+                # publishes the new Run to `self.runs[node_id]` before it
+                # returns, and a post-hoc `retried.done = run.done` would
+                # leave a window where a concurrent reader gets a Run whose
+                # `done` nobody but this line will ever fix up.
+                try:
                     retried = await self._launch(
                         node_id=node_id, spec=run.spec, provider=run.provider,
                         prompt=_run_read(run_dir, "prompt.md"),
@@ -2793,10 +2793,24 @@ class Runner:
                         session_id=session_id or None,
                         done=run.done,
                     )
-                    retried.startup_progress = retried.startup_progress or run.startup_progress
-                    self.tree.set_status(node_id, "running", "retried once after "
-                                         "an unexplained early exit")
-                    return True
+                except Exception as exc:
+                    # A retry that cannot even start must not propagate out of
+                    # `_finalize` — `_consume` would read that as the
+                    # post-mortem itself crashing — but neither may it be
+                    # silent: the `retrying` event above already promised a
+                    # relaunch, and a swallowed failure here used to leave the
+                    # node ending with the FIRST death's reason (`exited 1`)
+                    # as if no retry had ever been attempted. Recorded like a
+                    # failed launch anywhere else: `failed`, with the cause.
+                    detail = f"{type(exc).__name__}: {exc}"[:300]
+                    self.tree.emit(node_id, "retry_failed", detail=detail)
+                    self.tree.set_status(node_id, "failed",
+                                         f"retry launch failed: {detail}")
+                    return False
+                retried.startup_progress = retried.startup_progress or run.startup_progress
+                self.tree.set_status(node_id, "running", "retried once after "
+                                     "an unexplained early exit")
+                return True
 
             # Say why, when the provider told us. Three real failures ended with
             # agy emitting {"kind": "result", "status": "ERROR"} — a structured
