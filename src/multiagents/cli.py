@@ -64,6 +64,17 @@ def _resolve(explicit: str | None = None) -> ProjectPaths:
 
 
 
+def _resolve_if_project(explicit: str | None = None) -> ProjectPaths | None:
+    """`_resolve`, or None when there is no project to resolve.
+
+    The existence check looks where the command was pointed: `--path` when
+    given, the cwd otherwise. Checking the cwd alone made `--path P` from
+    outside a project behave as if P did not exist.
+    """
+    start = Path(explicit).expanduser().resolve() if explicit else None
+    return _resolve(explicit) if find_project_root(start) else None
+
+
 # --------------------------------------------------------------------------
 
 
@@ -1490,7 +1501,7 @@ def cmd_prompt(args) -> int:
     from .runner import Runner
     from .tree import Node
 
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
     if args.team:
         config = replace(config, project={**config.project, "team": args.team})
@@ -1534,7 +1545,7 @@ def cmd_prompt(args) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
     providers = load_providers(config.providers)
     if getattr(args, "clear", None):
@@ -1687,7 +1698,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_refresh_models(args: argparse.Namespace) -> int:
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
     target = (paths.config if paths else global_config_dir()) / "models.yaml"
     providers = load_providers(config.providers)
@@ -1756,7 +1767,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
     The tool for adding an integration: it shows which rules matched and, more
     usefully, which lines fell through to `raw` and still need a rule.
     """
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
     providers = load_providers(config.providers)
     provider = providers.get(args.provider)
@@ -2024,7 +2035,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
     if args.update:
         result = catalog_mod.apply(global_config_dir(), args.provider)
@@ -2099,7 +2110,7 @@ def cmd_skills(args: argparse.Namespace) -> int:
     that ships in the package is one nobody knows to attach, and the roster is
     the wrong place to go looking because the roster is about who exists.
     """
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
 
     seen: dict[str, Path] = {}
@@ -2139,7 +2150,7 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     Edited files are left alone and reported.
     """
     from .paths import shipped_defaults_dir
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     verb = "would " if args.dry_run else ""
 
     targets = [("global", shipped_defaults_dir(), global_config_dir(), "global")]
@@ -2172,7 +2183,7 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
 
 
 def cmd_auth(args: argparse.Namespace) -> int:
-    paths = _resolve(args.path) if find_project_root() else None
+    paths = _resolve_if_project(args.path)
     config = load_config(paths)
     providers = load_providers(config.providers)
     project_config = paths.config if paths else None
