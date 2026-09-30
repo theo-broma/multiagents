@@ -80,3 +80,35 @@
 - The 72 in `tests/test_phase2_*`, by design.
 - `test_h1_h2_review2.py::test_rf_r3_r1_adopted_opencode_filter_without_exit_status_is_refused`, which already failed before.
 - PS's reds on main until PS merges. **Base the work on main after M merges.**
+
+## Amendments of 2026-09-30, after the advisor (ag-d20e1e, turn 4)
+
+**TS-R0: the work is split into runs.**
+- **Run A: xdist, isolation and parity (TS-R1).**
+  - It ends with outcome manifests: per node id, the outcome for the untouched base, for a serial run and for a parallel run, plus a second parallel run.
+  - The orchestrator reviews them before Run B starts.
+- **Run B: timing (TS-R2 and TS-R3).**
+- **Run C: fixture reuse (TS-R4),** only if setup is still a measured bottleneck after B.
+
+**TS-R1a: parity is measured against the base.**
+- **What is compared.** The collected node ids and the per-id outcomes are compared with the **untouched base** commit, not only serial against parallel on the modified commit.
+- **The known reds.** The list is captured as exact ids after M merges. It replaces the "72" estimate.
+
+**TS-R3a: mutation coverage.**
+- **Every changed guarantee.** Each changed test that guards a race, a timeout or a deadline gets a demonstrated kill. It must fail on its intended assertion, not on an unrelated exception.
+- **Deadline behaviour.** Before-deadline, at-deadline and after-deadline behaviour is preserved, and so is real ordering under concurrency. A fake sleep must yield control, and shortening an interval must not replace testing the production default where the default is the behaviour under test.
+
+**TS-R2a: representative real integration tests stay.**
+- **What stays.** Some subprocess and concurrency tests keep their real-time integration form.
+- **Not every 60 s test is a hang.** For example, `test_d2_view.py` ~356 waits out TM-R3's ~60 s grace period on purpose. Such a test is either kept or given a configurable grace period with the production default unchanged.
+
+**TS-R4a: shared fixtures.**
+- **Preferred.** Immutable seed data copied into per-test repositories, rather than shared writable repositories.
+- **Required.** Teardown and background-process writes count as mutations.
+
+**TS-R2b: how durations are measured.**
+- **Comparable conditions:** the same machine load, the same worker count, and the same cache state.
+- **Setup and teardown are included.**
+- **The 5 s check covers every test,** so `--durations=0` is filtered, not only the top 30.
+
+**Note.** `scripts/test-chunk.sh` already forwards extra pytest arguments, so `-n` needs no new interface.
