@@ -3225,3 +3225,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **PS ag-dc8946** has its 11 fixes done; re-review ag-2f0d3e has started.
   - **Merge order:** M, then PS (plus tester ag-e77949), reconciling the cache per the reviewer.
 - **Update.** PS re-review ag-2f0d3e REJECTED it with 10 defects: allowlist checks against stale or reconstructed specs, cooldown read-modify-write outside a transaction, projection skipped on a cache hit. Steered to ag-dc8946. M round 7 is done; reviewer ag-cef33c is running on it. The user has still not answered whether M and PS should move from glm to opus.
+- **Update.** M round 7 REJECTED by ag-cef33c with 4 defects: supervisor construction outside cleanup; a cleanup hold not holding the slot; steer's claim leaked on a prologue failure; stale_seconds bypassing the future read_at guard. Steered to ag-074735 as round 8.
