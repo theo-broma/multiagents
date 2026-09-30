@@ -2840,3 +2840,4 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - tester: claude sonnet.
 - researcher: codex terra, then agy gemini-3.1-pro-low.
 - agy re-enabled.
+- 08:20 UTC: **D1 fixes MERGED (9fd5660).** ag-725897 died on the agy quota after its final commit. I verified 215 passed myself: d1_adversary, d1_adversary_followup, d1_review_findings, d1_limit_notices, h4_h14, h7, h7_adversary and h11. Item 2 of handoff #4 is DONE. D2 is the only item still pending (deferred).
