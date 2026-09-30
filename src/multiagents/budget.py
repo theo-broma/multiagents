@@ -107,7 +107,7 @@ def reset_display(stamp: Any, now: float | None = None) -> str:
     """A reset time as it fits a usage line: countdown first, then local clock.
 
     Provider scripts print their own usage lines and several stamp them with
-    the raw UTC ISO string the API sent (opencode.sh's ``ms_iso``). Q6: a
+    the raw UTC ISO string the API sent (a provider script's ``ms_iso``). Q6: a
     viewer at UTC+2 read "10:57" as local time and concluded a quota that was
     still an hour away had already failed to come back. :func:`reset_label`
     already renders the generic path, but a script's line passes the monitor
