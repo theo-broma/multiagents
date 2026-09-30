@@ -2846,3 +2846,4 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - I added `claude: {model: sonnet}` to the implementer's models in agents.yaml.
   - I carried ag-51c6dc into it by hand, in commit 5824254: a squash, with BRIEF.md kept from main.
   - **Watch:** the earlier DEFERRED agy task (implementer, claude-sonnet-4-6) will auto-restart after the agy cooldown (~08:35 UTC). It is a DUPLICATE: stop and discard it.
+- Deferred duplicate df-e34d37 (agy implementer claude-sonnet-4-6, D2). No MCP tool can cancel a deferred task (`tree.drop_deferred` exists, but nothing exposes it). That is a ticket. When it restarts, stop_agent and discard it; D2 is ag-d86348.
