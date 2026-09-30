@@ -3196,3 +3196,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - snapshot.py still names providers in 2 comments.
 
 **Pending user-facing items:** none blocking.
+- **Update, after handoff #7.** Reviewer ag-90626e rejected TS Run A with 2 findings: the h7 and sg_r7 flakes under the /var/tmp basetemp break parity (P1), and manifest.py asserts on duplicate testcase ids (P2). Both were steered back to ag-2caa66 (opus). **Next:** a reviewer again, then merge.
