@@ -2928,3 +2928,6 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - **Verified.** One live `codex exec` through the multiagents profile brought its reading to 5h 0% and weekly 0% (the weekly window now resets 2026-10-07). The rollout reading had been about 3.6h stale, still saying weekly 100%.
   - **Config change, per the user.** advisor, dev-advisor and adversary moved to provider codex, gpt-6-sol, effort medium, with agy gemini-3.1-pro-high as their fallback. The user said "GPT-6.1-sol"; only gpt-6-sol exists in the catalog.
   - **The advisor catch-up consult is running on codex.**
+- **Tooling defect, observed 2026-09-30 by the user.** A roster model change on the SAME provider does not take effect in a standing conversation. `_find_conversation` resumed advisor ag-8e7d87, which was created on codex gpt-6-astra, after the roster had changed to gpt-6-sol. `_conversation_route` checks only the provider (CX-C28).
+  - **Workaround used:** stop the old conversation node, so that the next consult creates a fresh one.
+  - **Ticket to fix:** a conversation whose model differs from the roster should be retired and recreated, or at least reported.
