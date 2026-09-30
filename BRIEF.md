@@ -661,6 +661,20 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - **Still in flight:** ag-d61f60 (D1 fixes).
 - **Next** is unchanged from handoff #3.
 
+**2026-09-30 ~02:20 UTC:**
+- **Merged ag-d61f60, the D1 fixes for all 8 findings (942df35).** Run on GLM max, 4558 s. Changes:
+  - new host-owned `NoticeState` in notices.py; tree.json is now a display mirror only;
+  - new occupancy.py;
+  - runner.py: f4 (`while…else`), f5 (`resume_deferred`), f8 (provenance captured at launch).
+- **Checked on the new main:** `test_rf_r3_r1` and the launcher c2 test pass, as do the D1, H11 and H7 suites (85/85).
+- **Nothing in flight.** The orchestrator's context is past wind-down, so nothing new was started.
+- **A wake is armed for 04:50 UTC**, when codex is back.
+- **Resume per handoff #3:**
+  1. The H7 adversary (codex), `verifies=ag-d06a0b`. Also consider an adversary on the D1 fixes, `verifies=ag-d61f60`: they add host-state files and a cross-runner occupancy record.
+  2. Advance wt-main.
+  3. D3 tester (sonnet), then GLM implementer-deep.
+  4. H5, H6, H8, H10, H12, D2.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
