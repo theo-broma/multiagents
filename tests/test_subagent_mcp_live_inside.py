@@ -258,7 +258,7 @@ def test_tool_failed_never_raises_even_if_tree_emit_does(tmp_path, monkeypatch):
         lambda self, *a, **k: (_ for _ in ()).throw(OSError("disk full (simulated)")))
 
     import multiagents.server as server_mod
-    server_mod._runner = None
+    monkeypatch.setattr(server_mod, "_runner", None)
 
     result = server_mod._tool_failed("consult", RuntimeError("sm-r1-probe"))
 

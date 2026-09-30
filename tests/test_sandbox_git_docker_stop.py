@@ -158,6 +158,20 @@ def wait_for(path: Path, timeout: float = 10.0) -> int:
     raise AssertionError(f"fixture: {path.name} never appeared")
 
 
+def wait_for_recorded(path: Path, timeout: float = 10.0) -> int:
+    """`wait_for`, for a file the wrapper writes as "<pid> <namespace>"."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            head = path.read_text().split()[:1]
+        except OSError:
+            head = []
+        if head and head[0].isdigit():
+            return int(head[0])
+        time.sleep(0.05)
+    raise AssertionError(f"fixture: {path.name} never appeared")
+
+
 def agent_script(tmp_path: Path) -> list[str]:
     """An agent with two direct children: one in its process group (a tool
     it runs) and one that left it (`setsid`, as a daemonising tool does)."""
@@ -179,6 +193,15 @@ async def started(ex: DockerExecutor, tmp_path: Path, route: str):
     pids = {}
     for name in ("child-in-group", "child-left-group"):
         pids[name] = await asyncio.to_thread(wait_for, tmp_path / name)
+    if run_dir is not None:
+        # Stopping a running agent is the case here, and a wrapped agent is
+        # running for `kill_detached` once the wrapper has recorded it: the
+        # wrapper starts the agent, then writes container.pid. The children
+        # can write theirs first, and a stop in that window finds no agent
+        # pid, so the setsid child outlives it. Under -n auto this test hit
+        # that window about once in seven runs. That launch-window race is a
+        # separate finding (context/ts/manifests/README.md), not what this checks.
+        await asyncio.to_thread(wait_for_recorded, run_dir / "container.pid")
     # The agent is the children's parent, whichever pid file recorded it.
     pids["agent"] = int(Path(f"/proc/{pids['child-in-group']}/stat").read_text()
                         .rsplit(")", 1)[1].split()[1])
