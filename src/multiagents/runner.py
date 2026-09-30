@@ -5151,12 +5151,24 @@ class Runner:
                 # DQ-R3b: the request itself cannot be honoured, and waiting
                 # will not change that. Kept, marked, never retried.
                 result = {"error": f"{agent}: {exc}"}
+            except Exception as exc:
+                # DQ-R3b: a transient failure (anything that is not a
+                # ValueError or PermissionError) leaves the entry queued and
+                # stops the drain — one failure is almost always systemic
+                # (the window closed again mid-drain), and grinding through
+                # the rest turns one problem into a batch of them. The claim
+                # goes back first (see _settle_interrupted for which way),
+                # then `stopped_on` reports where the drain gave up.
+                self._settle_interrupted(entry, claim)
+                stopped = f"{type(exc).__name__}: {exc}"[:300]
+                break
             except BaseException:
-                # DQ-R10: `except Exception` never saw a CancelledError — an
-                # MCP client giving up on the wait — so a cancelled drain
-                # used to strand the entry `restarting` behind this server's
-                # own live pid, unrecoverable for the process's whole life.
-                # Whatever the interruption, the claim goes back first (see
+                # DQ-R10: only cancellation reaches here — `except Exception`
+                # never saw a CancelledError — an MCP client giving up on the
+                # wait — so a cancelled drain used to strand the entry
+                # `restarting` behind this server's own live pid,
+                # unrecoverable for the process's whole life. Whatever the
+                # interruption, the claim goes back first (see
                 # _settle_interrupted for which way it goes), then the
                 # interruption propagates.
                 self._settle_interrupted(entry, claim)
