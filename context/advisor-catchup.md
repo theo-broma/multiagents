@@ -272,3 +272,13 @@ first written. Its turn 19 reply produced the decisions in 9e27280.
 - Where things stand: the Codex provider is shipped and live-checked. The
   results are in context/specs/codex-provider.md, under "Live results" and
   "L8".
+
+## 21. 2026-09-29/30 work done without you (agy down), to review in one consult
+- **Merged, with the contracts in context/specs:**
+  - H6, H8, and the H7 fixes (h7-provider-startup.md PS-R1a..R5b);
+  - D1 fixes, D3 (d3-cli-dependency-manifest.md) and D2 (d2-tmux-viewer.md TM-R1..R6, R1a/b, R2a).
+  - Details are in the BRIEF entries of 2026-09-29/30.
+- **New contracts not yet reviewed:**
+  - context/specs/t1-deferred-queue.md, where the questions are: whether a refused entry should stay in the queue, and whether cancel authorisation should mirror stop_agent;
+  - context/specs/t2-multi-ticket.md, where the question is whether to drop the "last marker wins" rule in favour of quote-aware parsing.
+- **Question:** what do these contracts leave unsaid?

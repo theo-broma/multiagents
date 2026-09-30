@@ -2873,3 +2873,21 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - moving wt-main to main, followed by a /mcp.
 - The deferred duplicate df-e34d37 is gone: after the MCP reconnect, the deferred queue is empty and no run was started (checked 2026-09-30). Nothing left to stop.
 - 2026-09-30 ~10:00 UTC. The bug-reporter (ag-3afd5a) wrote 3 tickets, but the queue filed only the last one (bug-ac396a: routing to an exhausted agy). The other two are saved verbatim in context/tickets/2026-09-30-unfiled.md: the monitor showing reset times in UTC ISO, and the deferred task vanishing without a trace (the df-e34d37 case). One more tooling defect: a run with several TICKET() markers files only the last one.
+
+## 2026-09-30 ~10:15 UTC: the user's routing plan and the ticket backlog
+- **User orders, verbatim in substance:**
+  - continue all pending tasks with **claude only**;
+  - when z.ai returns (5h reset at 10:57 UTC), move **all implementer tiers to zai-coding-plan/glm-5.3-flash**, which also tests it;
+  - when agy returns (~11:54 UTC), run the **overdue advisor tasks**: the context/advisor-catchup.md catch-up, plus a review of the T1/T2 contracts;
+  - **tickets are never submitted** (no gh): we fix them ourselves.
+- **New work.**
+  - The contracts are context/specs/t1-deferred-queue.md (DQ-R1..R7) and context/specs/t2-multi-ticket.md (MT-R1..R4).
+  - The advisor has not reviewed them yet, because agy is down; they are logged in advisor-catchup.
+- **Ticket backlog to triage against main:**
+  - bug-c106a9 and bug-ac396a;
+  - the 8 in the ag-a0be27 result;
+  - the unfiled monitor reset-time ticket;
+  - the agy Claude-pool routing issue;
+  - the doom_loop trip on agy background polls;
+  - the researcher's model/effort conflict.
+  - A researcher does the triage.
