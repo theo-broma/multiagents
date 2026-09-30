@@ -159,3 +159,49 @@ project's tmux session.**
 - tmux as the process supervisor (step 2).
 - Windows for command tools.
 - Writable or interactive panes.
+
+## Amendments of 2026-09-30, after the test suite (ag-743603)
+
+The tester's assumptions are accepted as contract. Its full list is in
+.multiagents/runs/ag-743603/result.json.
+
+**The CLI.**
+- `multiagents [--path P] view <id> [--follow|--no-follow]`.
+- `multiagents [--path P] tmux open|attach-cmd|close <id>`, and `tmux kill`.
+- `open`, `attach-cmd` and `close` validate the id and exit 2 without
+  calling tmux.
+- A bad socket directory, a symlink, a FIFO or a directory exits non-zero
+  (not 3) with a message on stderr.
+
+**The monitor action.**
+- It is `tmux_open` in `monitor.actions.ACTIONS`, with the payload
+  `{"agent_id": …}`.
+- It returns `{"ok", "message", …}` with the attach command in it.
+- Run rows in `snapshot()["running"]` list it under `actions`.
+
+**Runs.**
+- An unknown agent is one with no tree node and no run directory.
+- A run is active when its status is in `ACTIVE`, and terminal when it is
+  in `TERMINAL`.
+- `view` prints the final status by name.
+- `view` exits within 90 s after its run turns terminal. This replaces
+  "about 60 s" as the testable bound.
+
+**Windows and the session.**
+- Windows are named exactly after the agent id, in the session
+  `ma-<slug>`.
+- The window command ends with `… view <id> --follow`, and starts with an
+  absolute interpreter path.
+- `remain-on-exit`, if it is set, is `off`.
+- `kill` leaves no socket file.
+- `close` and `attach-cmd` create nothing when there is no server.
+
+**Output.** Newline and tab survive as raw bytes.
+
+**Not tested:**
+- a socket directory owned by another user;
+- the page markup;
+- the auto-close timing;
+- a symlinked `tmux` dir;
+- `close` on a missing window;
+- `kill` with no server.
