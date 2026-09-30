@@ -2841,3 +2841,8 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - researcher: codex terra, then agy gemini-3.1-pro-low.
 - agy re-enabled.
 - 08:20 UTC: **D1 fixes MERGED (9fd5660).** ag-725897 died on the agy quota after its final commit. I verified 215 passed myself: d1_adversary, d1_adversary_followup, d1_review_findings, d1_limit_notices, h4_h14, h7, h7_adversary and h11. Item 2 of handoff #4 is DONE. D2 is the only item still pending (deferred).
+- 08:25 UTC: **D2 was relaunched on claude sonnet at the user's request.**
+  - The run is ag-d86348, verifies=ag-b8b511.
+  - I added `claude: {model: sonnet}` to the implementer's models in agents.yaml.
+  - I carried ag-51c6dc into it by hand, in commit 5824254: a squash, with BRIEF.md kept from main.
+  - **Watch:** the earlier DEFERRED agy task (implementer, claude-sonnet-4-6) will auto-restart after the agy cooldown (~08:35 UTC). It is a DUPLICATE: stop and discard it.
