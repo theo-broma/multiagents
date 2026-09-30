@@ -613,10 +613,12 @@ def test_opencode_sh_check_missing_binary_reports_could_not_run(tmp_path):
 # Config folding — load_providers / resolve_inheritance / families
 # ---------------------------------------------------------------------------
 
-def test_load_providers_builds_the_four_real_shipped_providers():
-    # CX-D1: codex ships as the fourth default provider.
+def test_load_providers_builds_the_five_real_shipped_providers():
+    # CX-D1: codex ships as a default provider; ZA-R1: so does opencode-zai
+    # (disabled by default).
     providers = h.shipped_providers()
-    assert set(providers) == {"claude", "opencode", "agy", "codex"}
+    assert set(providers) == {"claude", "opencode", "agy", "codex", "opencode-zai"}
+    assert providers["opencode-zai"].enabled is False
     assert providers["claude"].script_name == "claude.sh"
     assert providers["claude"].bin == "claude"
     assert providers["claude"].container_private_home == [".claude"]
@@ -748,9 +750,11 @@ def test_families_sorts_provider_names_within_each_group():
     assert h.families(providers)["fam"] == ["a-instance", "z-instance"]
 
 
-def test_shipped_providers_yaml_folds_into_four_independent_families():
-    # CX-D1: codex ships as the fourth default provider, in its own family.
+def test_shipped_providers_yaml_folds_into_five_independent_families():
+    # CX-D1: codex ships in its own family; ZA-R1: so does opencode-zai, which
+    # extends opencode but is NOT folded into opencode's family.
     providers = h.shipped_providers()
     families = h.families(providers)
     assert families == {"claude": ["claude"], "agy": ["agy"],
-                        "opencode": ["opencode"], "codex": ["codex"]}
+                        "opencode": ["opencode"], "codex": ["codex"],
+                        "opencode-zai": ["opencode-zai"]}

@@ -763,7 +763,10 @@ def test_za_r4_usage_follows_the_opencode_bar_format(env, zai):
     cp = usage(env, zai((200, HIGH, {})))
     assert "########.." in _line(cp, "80%")
     cp = usage(env, zai())      # the live sample: 1% -> empty bar
-    assert ".........." in _line(cp, "1%") or ".........." in cp.stdout.splitlines()[0]
+    # both windows are at 1%, so key each line on its reset date, not the percent
+    for reset in ("2026-09-30", "2026-10-06"):
+        line = _line(cp, reset)
+        assert ".........." in line and "1%" in line, cp.stdout
 
 
 def test_za_r4_usage_without_credit_fields_still_shows_the_window(env, zai):

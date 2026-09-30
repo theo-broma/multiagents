@@ -261,7 +261,8 @@ def test_rf_r5_no_commits_flag_only_for_empty_writing_run(
         worktree = Path(node.worktree)
         (worktree / "change.txt").write_text("change")
         subprocess.run(["git", "-C", str(worktree), "add", "change.txt"], check=True)
-        subprocess.run(["git", "-C", str(worktree), "commit", "-m", "change"],
+        subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-m", "change"],
                        check=True, capture_output=True)
     assert r.tree.get(agent_id).status == "done"
     results = [r.check(agent_id), r.collect(agent_id),
@@ -283,7 +284,8 @@ def test_rf_r6_merge_reports_prior_non_done_status(tmp_path, monkeypatch, status
     worktree = Path(node.worktree)
     (worktree / "change.txt").write_text("change")
     subprocess.run(["git", "-C", str(worktree), "add", "change.txt"], check=True)
-    subprocess.run(["git", "-C", str(worktree), "commit", "-m", "change"],
+    subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Fixture", "-c",
+                    "user.email=fixture@example.invalid", "commit", "-m", "change"],
                    check=True, capture_output=True)
     if status != "done":
         r.tree.set_status(agent_id, status, "fixture outcome")
