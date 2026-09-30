@@ -140,3 +140,43 @@ A provider that declares none of these keys behaves exactly as today.
 ## Roster changes (the orchestrator's, after merge)
 
 Move every agy route with a claude/gpt model in `.multiagents/config/agents.yaml` to `agy-partner`.
+
+## Amendments of 2026-09-30, after the advisor (ag-d20e1e, turn 3). They supersede the text above where they differ.
+
+**PS-R8a: the real window keys.**
+- **What `agy.sh` emits:** `gemini-weekly`, `gemini-5h`, `3p-weekly` and `3p-5h`. See `tests/test_core.py` ~4805.
+- **The selectors:**
+  - agy: `budget_windows: ["gemini*"]`;
+  - agy-partner: `budget_windows: ["3p-*"]`.
+- **The partner reading** gets a generic quota note and display. The inherited agy note, which assumes gemini is the counted pool, must not be shown for agy-partner.
+- **Allowlists:**
+  - agy allows `gemini-*`;
+  - agy-partner allows `claude-*` and `gpt-*`.
+
+**PS-R1a: inherited env versus explicit env.**
+- **The conflict rule** in PS-R1 applies only to keys the dependent sets **explicitly** in its own declaration.
+- **Inherited values.** A value inherited through `extends` from the same owner is not a conflict. An explicit value equal to the owner's is not a conflict either.
+- **Rejected:** only an explicit value that differs from the owner's.
+
+**PS-R4a: auth recovery is scoped.**
+- **What recovery clears.** Recovery clears only blocks caused by authentication. Quota, startup and provider_down blocks on any member stay as they are.
+- **The group is per execution context.** A host check or login never clears a container auth failure, and a container check never clears a host one.
+
+**PS-R5a: validity of the payload.**
+- **A known dependent reading.** A provider whose selected windows are present and valid yields a known reading, even when the owner's aggregate is `known: false`, for example when the gemini buckets are absent.
+- **Defaults.** A window with no `counted` field counts as `counted: true`. An empty `budget_windows` list matches nothing, so the reading is unknown.
+
+**PS-R7a: deferred entries record their destination.**
+- **New entries.** A deferred entry created from now on records the provider it was routed to, alongside `agent` and `model`.
+- **At restart.**
+  - If that provider no longer allows the pinned model, the entry is refused under PS-R7.
+  - If it still allows the model, the entry restarts there, or on its normal routing.
+- **Entries without a recorded provider:**
+  - a legacy entry with no recorded provider and no model pin routes normally;
+  - a legacy entry with a model pin routes normally only when the pinned model is allowed on the provider routing picks, **and** that provider has the same family as the agent's configured provider for that model. Otherwise it is refused with the repair hint.
+- **Never.** A roster change never silently moves a pinned deferred entry to a different provider family.
+
+**PS-R8b: where the migration stops.**
+- **What changes.** PS-R8 changes the packaged defaults only. Existing global (`~/.config/multiagents`) or project provider overrides are not rewritten.
+- **An existing global `agy` override** that lacks the new keys keeps today's behaviour. The provider-level keys deep-merge, so the new defaults apply unless the override replaces them.
+- **Documentation.** The providers.yaml comment says how to adopt the split.
