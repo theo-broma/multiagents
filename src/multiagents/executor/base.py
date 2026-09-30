@@ -480,7 +480,8 @@ class Executor(ABC):
         """The absolute path of `provider.bin` an adapter run should drive,
         resolved at this exec (CX-C2), or "" when it is not installed."""
         found = provider.resolve_bin(env={**os.environ, **env})
-        return str(found.path) if found.path is not None else ""
+        # H7 PS-R2a: invocation uses the launcher, not the realpath.
+        return str(found.launcher) if found.launcher is not None else ""
 
     def adapter_env(self, argv: list[str], env: dict[str, str],
                     provider: str = "") -> dict[str, str]:

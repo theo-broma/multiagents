@@ -1742,7 +1742,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
         print(f"unknown provider {args.provider!r}; known: {sorted(providers)}", file=sys.stderr)
         return 2
     resolved = provider.resolve_bin()
-    if resolved.path is None:
+    if resolved.launcher is None:
         print(provider.bin_error(resolved), file=sys.stderr)
         return 2
 
@@ -1750,7 +1750,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
         prompt=args.prompt, model=args.model, workdir=str(Path.cwd()), permission="readonly",
     )
     if not provider.adapter:
-        argv[0] = str(resolved.path)
+        # H7 PS-R2a: invoke through the launcher, not the realpath.
+        argv[0] = str(resolved.launcher)
     print(f"$ {' '.join(argv[:6])} …\n")
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=args.timeout)
 
