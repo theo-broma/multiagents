@@ -245,3 +245,40 @@ Verified by:
   the failure; it does not diagnose it.
 - **Reading an opencode model namespace (`opencode-go/…`) as a
   multiagents provider.** Rejected.
+
+## Amendments of 2026-09-30, after implementation (ag-d06a0b)
+
+**PS-R2a: invocation uses `launcher`, not the realpath.**
+- **Invocation.** `MULTIAGENTS_BIN`, native launch argv[0] and `models_cmd`
+  use `ResolvedBin.launcher`: the absolute path where the binary was found,
+  with symlinks **not** resolved.
+- **Identity and mounts.** `path`, the realpath, serves only for identity
+  and for the docker version-root mount.
+- **Why.** Some tools depend on the name they were invoked by, such as
+  multi-call binaries or launchers that are symlinks. For example
+  `/bin/sh` must not become `/usr/bin/dash`.
+- **Affected tests.** The PS-R2 tests that compare against
+  `binary.resolve()` compare against the launcher path instead.
+
+**PS-R2b: a provider's `env:` still wins.**
+- **Order.** `MULTIAGENTS_BIN` and `MULTIAGENTS_BIN_ERROR` are set
+  **before** the provider's own `env:` block. A provider that sets
+  `MULTIAGENTS_BIN` in `env:` therefore overrides the resolved value, as
+  F112 established.
+
+**Characterization tests superseded by PS-R2** (`tests/test_c2_seam_characterization.py`):
+- `test_build_env_with_no_env_block_adds_nothing_beyond_ambient_and_base_keys`:
+  `MULTIAGENTS_BIN_ERROR` is now expected when the binary is missing.
+- `test_build_env_bin_resolves_to_an_absolute_path_when_the_binary_is_on_path`:
+  now expects the launcher path (see PS-R2a).
+- `test_build_env_bin_falls_back_to_the_configured_name_when_not_on_path`:
+  `MULTIAGENTS_BIN` is now empty when the binary is missing.
+
+**Accepted behaviour.** Commit-fix turns and resume turns take their own
+startup claim.
+- A fix turn that fails with no progress counts as a startup failure.
+- On a `startup_down` provider, a fix turn ends `commit_fix_failed`.
+
+**PS-R5 stale-generation check.** It lives in `src/multiagents/startup.py`,
+in `StartupHealth._current`, around line 144. `_reconcile`, around
+line 84, releases dead claims.
