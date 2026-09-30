@@ -2751,3 +2751,8 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - **D3:** ag-149e0a. It carries 84afefa, with stray .d3-* files it was told to remove.
   - **D2:** ag-51c6dc, a fresh start.
 - **For later.** Once the codex weekly resets, the reviewer and researcher lose their provider. Once the z.ai 5 h window resets (~10:57 UTC), GLM is available again as a fallback.
+- **Researcher and agy.**
+  - The roster gave the researcher `agy: gemini-3.8-flash-medium`, which agy refuses combined with `effort: low` ("conflicts with --effort=low"). It is now `gemini-3.1-pro-low` in agents.yaml.
+  - Worth a ticket: the router accepted a model/effort pair the CLI rejects.
+  - ag-463a38, a researcher on agy pro-low, is analysing what GLM delivered for 100% of its 5 h window and 35% of its weekly, at the user's request.
+- **agy loop pattern.** agy moves long commands to the background, and Gemini then polls their task log; the doom-loop watchdog fires on this. I steered ag-725897 and ag-149e0a to run tests in the foreground or to sleep between checks.
