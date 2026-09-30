@@ -3016,3 +3016,11 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - the MCP `wait_for_agents` with timeout 1800 is killed by the client idle timeout, so use 1500 or less;
   - 1a, the container claude 401;
   - e8565d#4, the transcripts keys.
+- **~14:05 UTC: regression fix merged (6598c07).** On main, test_core, the 3 T1 files, M and phase0 give **773 passed, 2 skipped**. T1 and T2 are DONE.
+- **M adversary ag-9dffc6 (opus): VERDICT(rejected, 5).**
+  - The failing tests are committed on `agents/adversary/9dffc6` (2b40a3a): probe leak, sibling effort, null suffix, consult race, stale wind-down, clock step. The full report is in `.multiagents/runs/ag-9dffc6/result.json`.
+  - **NEXT (the post-compact orchestrator does this):**
+    - read the report and amend m-routing-fixes.md;
+    - start implementer-deep (glm), then squash `agents/adversary/9dffc6` into its worktree;
+    - verify, merge, and discard ag-9dffc6.
+- **Nothing is running now.**
