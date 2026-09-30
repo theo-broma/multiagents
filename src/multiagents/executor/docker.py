@@ -2177,7 +2177,7 @@ sys.exit(rc)
 
     def stop(self, remove: bool = False) -> dict:
         out = {}
-        for name in (self.container, self.proxy_container):
+        for name in (self.container, self.proxy_container, self.auth_container):
             if self.container_state(name) == "absent":
                 continue
             out[name] = _run(["docker", "rm", "-f", name] if remove
