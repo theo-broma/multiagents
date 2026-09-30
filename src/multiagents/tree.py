@@ -118,6 +118,41 @@ def now() -> float:
     return time.time()
 
 
+def deferred_malformed(entry: Any) -> bool:
+    """Whether a deferred queue entry is too broken to act on (DQ-R9).
+
+    Malformed means any of: not a dict, missing `id`, a missing or non-numeric
+    `retry_after`, or a `claim` that is not a dict with an int `pid`. The queue
+    sits in a file every agent process can write, so the drain reads it the way
+    it reads everything else it did not write itself. A malformed entry is
+    skipped by the drain, shown by `list_deferred` as `malformed`, and removed
+    only by `cancel_deferred` — it never makes anything raise.
+    """
+    if not isinstance(entry, dict):
+        return True
+    if not entry.get("id"):
+        return True
+    retry = entry.get("retry_after")
+    if isinstance(retry, bool) or not isinstance(retry, (int, float)):
+        return True
+    claim = entry.get("claim")
+    if claim is not None and (not isinstance(claim, dict)
+                              or isinstance(claim.get("pid"), bool)
+                              or not isinstance(claim.get("pid"), int)):
+        return True
+    return False
+
+
+def find_deferred(entries: Iterable[Any], deferred_id: str) -> dict | None:
+    """The entry named `deferred_id`, tolerating malformed neighbours (DQ-R9).
+
+    A scan over the queue is a scan over a file other processes write, so it
+    skips what it cannot read rather than raising on it.
+    """
+    return next((d for d in entries
+                 if isinstance(d, dict) and d.get("id") == deferred_id), None)
+
+
 @dataclass
 class Node:
     id: str
@@ -206,6 +241,11 @@ class Node:
     # here" will skip the utility folder, and one merely asked to watch its
     # budget will not.
     budget_tag: str = ""
+    # The deferred entry this run restarts, when it is a drain's restart
+    # (DQ-R8). Written in the SAME transaction as the node itself (DQ-R11): a
+    # drain that dies after start() returns leaves a node that recovery can
+    # find, so the task is never started a second time.
+    deferred_id: str = ""
     turns: int = 0
     # The base commit a conversation's worktree was last placed on: where it
     # was cut on turn 1, then every refresh that moved it. Own work is what
@@ -1053,11 +1093,57 @@ class Tree:
         restart delete the whole remaining batch permanently. The caller ends
         each entry with exit_deferred once it has actually dealt with it, so a
         crash leaves work queued rather than losing it. A refused entry is never
-        due: it leaves only through cancel_deferred (DQ-R3).
+        due: it leaves only through cancel_deferred (DQ-R3). A malformed entry
+        is never due either — the drain skips it (DQ-R9).
         """
         current = now()
         return [d for d in self.read()["deferred"]
-                if d.get("status", "waiting") == "waiting" and d["retry_after"] <= current]
+                if isinstance(d, dict) and not deferred_malformed(d)
+                and d.get("status", "waiting") == "waiting"
+                and d["retry_after"] <= current]
+
+    def claim_deferred(self, deferred_id: str) -> dict | None:
+        """Claim a due entry for this drain, in one transaction (DQ-R8).
+
+        The entry moves from `waiting` to `restarting` and records who claimed
+        it, so a concurrent drain — which selects only `waiting` entries, and
+        re-checks inside this transaction — skips it. Returns the claim written
+        (the caller needs it to release the same claim later), or None when
+        another drain won the race or the entry is gone.
+        """
+        with self.transaction() as data:
+            entry = find_deferred(data["deferred"], deferred_id)
+            if entry is None or entry.get("status", "waiting") != "waiting":
+                return None
+            claim = {"pid": os.getpid(), "at": now()}
+            entry["status"] = "restarting"
+            entry["claim"] = claim
+            return claim
+
+    def requeue_deferred(self, deferred_id: str,
+                         claim: dict | None = None) -> bool:
+        """Return a claimed entry to `waiting`, with no event.
+
+        The claim is released rather than the entry ended: a transient failure
+        (DQ-R3) or an unresolved recovery (DQ-R8) means nothing was dealt with,
+        and the next drain must find the entry due again.
+
+        `claim` is the claim the caller believes it holds (DQ-R12): the
+        re-check happens inside this one transaction, so a drain that read the
+        entry before another resolved it cannot put a `refused` — or re-claimed
+        — entry back into rotation. When `claim` is not given, only the entry's
+        existence is checked.
+        """
+        with self.transaction() as data:
+            entry = find_deferred(data["deferred"], deferred_id)
+            if entry is None:
+                return False
+            if claim is not None and (entry.get("status") != "restarting"
+                                      or entry.get("claim") != claim):
+                return False
+            entry["status"] = "waiting"
+            entry.pop("claim", None)
+            return True
 
     def exit_deferred(self, deferred_id: str, outcome: str, **fields: Any) -> bool:
         """End one entry's stay in the queue, and say so (DQ-R1).
@@ -1065,20 +1151,27 @@ class Tree:
         The only way an entry leaves, so no exit goes unrecorded. `refused`
         keeps the entry, marked, and every other outcome removes it. When no
         waiting entry is left the pause a deferral set is lifted in the same
-        step (DQ-R6); a pause of another origin is left alone (DQ-R6a).
+        step (DQ-R6); a pause of another origin is left alone (DQ-R6a). A
+        `restarting` entry holds the pause as a `waiting` one does (DQ-R8a).
         """
         lifted = False
         with self.transaction() as data:
-            entry = next((d for d in data["deferred"] if d.get("id") == deferred_id), None)
+            entry = find_deferred(data["deferred"], deferred_id)
             if entry is None:
                 return False
             if outcome == "refused":
                 entry["status"] = "refused"
                 entry["reason"] = fields.get("reason", "")
+                if fields.get("node_id"):
+                    # DQ-R3c: a refusal should have left no node behind; if one
+                    # exists anyway, the entry is where it is found from.
+                    entry["node_id"] = fields["node_id"]
             else:
                 data["deferred"] = [d for d in data["deferred"] if d is not entry]
-            waiting = any(d.get("status", "waiting") == "waiting" for d in data["deferred"])
-            if not waiting and (data.get("pause") or {}).get("deferral"):
+            holding = any(isinstance(d, dict) and not deferred_malformed(d)
+                          and d.get("status", "waiting") in ("waiting", "restarting")
+                          for d in data["deferred"])
+            if not holding and (data.get("pause") or {}).get("deferral"):
                 data["pause"] = {}
                 lifted = True
         self.emit("system", "deferred_exit", deferred_id=deferred_id,
@@ -1092,7 +1185,8 @@ class Tree:
         with self.transaction() as data:
             before = len(data["deferred"])
             data["deferred"] = [d for d in data["deferred"]
-                                if d.get("id") != deferred_id]
+                                if not (isinstance(d, dict)
+                                        and d.get("id") == deferred_id)]
             return len(data["deferred"]) < before
 
     def set_cooldown(self, provider: str, until: float, reason: str,

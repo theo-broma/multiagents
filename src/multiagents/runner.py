@@ -60,7 +60,7 @@ from .launch_limits import LaunchLimits
 from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
-from .tree import TERMINAL, Node, Tree, new_id, node_from_raw, now
+from .tree import TERMINAL, Node, Tree, deferred_malformed, new_id, node_from_raw, now
 from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
@@ -1933,6 +1933,7 @@ class Runner:
         verifies: str = "",
         budget_tag: str = "",
         budget_tokens: int = 0,
+        deferred_id: str = "",
     ) -> dict[str, Any]:
         spec = self.config.agent(agent_name)
         if model:
@@ -2134,9 +2135,10 @@ class Runner:
                 retry_at = min(resets) if resets else now() + float(
                     self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
                 )
-                self.tree.defer({"agent": agent_name, "task": task, "timeout": timeout,
-                                 "model": model, "workdir": workdir}, retry_at, why,
-                                deferred_by=self.self_id())
+                queued = self.tree.defer(
+                    {"agent": agent_name, "task": task, "timeout": timeout,
+                     "model": model, "workdir": workdir}, retry_at, why,
+                    deferred_by=self.self_id())
                 # Nothing can run, so nothing should keep being started. Pausing is
                 # the difference between a system that stops and one that carries on
                 # writing code while the agents that check it are unreachable.
@@ -2151,6 +2153,11 @@ class Runner:
                                 deferral=True)
                 return {"deferred": True, "reason": why, "retry_after": retry_at,
                         "paused": True,
+                        # DQ-R11: the caller is told which entry this deferral
+                        # created, so it never has to identify it by diffing
+                        # the queue — another agent may defer in the same
+                        # window, and diffing takes that one instead.
+                        "deferred_id": queued["id"],
                         "note": "the tree is paused until this clears; deferred tasks "
                                 "restart by themselves when it does"}
             if chosen != spec.provider:
@@ -2219,6 +2226,11 @@ class Runner:
                 worktree=str(worktree_path), status="pending",
                 verifies=verifies if verifies in self.tree.read()["nodes"] else "",
                 budget_tag=budget_tag,
+                # DQ-R11: written in the transaction that creates the node, so
+                # a drain that dies between start() returning and its own
+                # bookkeeping leaves a node recovery can find — the restart
+                # happened once, and nothing starts the task a second time.
+                deferred_id=deferred_id,
                 routed_from=routed_from, routed_why=routed_why,
                 effort=spec.effort or "",
                 limits=limits, session=self.session(), model_pinned=bool(model),
@@ -5000,6 +5012,77 @@ class Runner:
         return {"running": running, "max_concurrent": limit,
                 "free_slots": max(0, limit - running)}
 
+    def _recover_stale_restarts(self) -> list[dict[str, Any]]:
+        """Settle `restarting` entries whose claimer pid is dead (DQ-R8).
+
+        A drain claims an entry before it restarts it and ends the entry only
+        in a later transaction, so a drain that dies mid-restart leaves the
+        entry claimed by a pid that will never return. The next drain settles
+        it: a node carrying the entry's `deferred_id` means the restart did
+        happen — count it and write the missing event; no such node means it
+        never happened — back to `waiting` for the next drain. Nothing new is
+        started here, so this runs before the pause check.
+
+        The pid check reads the tree outside any transaction, so the requeue
+        carries the claim it read (DQ-R12): if a concurrent drain resolved the
+        entry in between, the re-check inside requeue_deferred's transaction
+        refuses, and a `refused` entry is never put back into rotation.
+        """
+        resolved: list[dict[str, Any]] = []
+        for entry in self.tree.read()["deferred"]:
+            if not isinstance(entry, dict) or deferred_malformed(entry):
+                continue                          # DQ-R9: skipped, never crash
+            if entry.get("status") != "restarting":
+                continue
+            if procs.alive((entry.get("claim") or {}).get("pid")):
+                continue
+            carrier = next((n for n in self.tree.read()["nodes"].values()
+                            if n.get("deferred_id") == entry["id"]), None)
+            if carrier is not None:
+                if self.tree.exit_deferred(entry["id"], "restarted",
+                                           agent_id=carrier["id"]):
+                    resolved.append({"agent": (entry.get("spec") or {}).get("agent"),
+                                     "agent_id": carrier["id"]})
+            else:
+                self.tree.requeue_deferred(entry["id"], entry.get("claim"))
+        return resolved
+
+    def _prune_unreadable_entries(self) -> None:
+        """Drop list debris that is not an entry at all (DQ-R9).
+
+        A non-dict in the `deferred` list has no id to act on, no spec to
+        report, and no `cancel_deferred` can ever name it — leaving it in
+        would break every scan of the queue for ever. It is removed on sight.
+        A malformed entry that IS a dict keeps its place, shown as
+        `malformed`, until the orchestrator cancels it.
+        """
+        with self.tree.transaction() as data:
+            if any(not isinstance(d, dict) for d in data["deferred"]):
+                data["deferred"] = [d for d in data["deferred"]
+                                    if isinstance(d, dict)]
+
+    def _settle_interrupted(self, entry: dict[str, Any], claim: dict[str, Any]) -> None:
+        """Release one claimed entry after the drain itself was interrupted.
+
+        DQ-R10: the claim is released on every exit path, cancellation
+        included — an entry left `restarting` behind this server's live pid
+        would never be touched again, by recovery or by anything else.
+
+        DQ-R11 decides WHICH way it goes. The node carries `deferred_id` from
+        the transaction that created it, so a node found for the entry means
+        `start()` really ran before the interruption: the restart happened,
+        and returning the entry to the queue would start the task a second
+        time. It is settled as `restarted` — the event the drain never got to
+        write is written now. No node: the start never happened, and the entry
+        goes back to `waiting` for the next drain. The caller re-raises.
+        """
+        carrier = next((n for n in self.tree.read()["nodes"].values()
+                        if n.get("deferred_id") == entry["id"]), None)
+        if carrier is not None:
+            self.tree.exit_deferred(entry["id"], "restarted", agent_id=carrier["id"])
+        else:
+            self.tree.requeue_deferred(entry["id"], claim)
+
     async def resume_deferred(self) -> dict[str, Any]:
         """Restart tasks whose quota window has passed. Safe to call often.
 
@@ -5007,11 +5090,29 @@ class Runner:
         deferred on quota stayed deferred forever — the system waited for a
         reset it would never notice. This is the other half of pausing: a pause
         nobody lifts is a stop.
+
+        Each due entry is claimed before it is restarted (DQ-R8): the claim is
+        one tree transaction, and a concurrent drain skips what it did not
+        claim, so two drains never restart the same entry.
         """
+        self._prune_unreadable_entries()
+        recovered = self._recover_stale_restarts()
         paused = self.tree.pause_state()          # clears itself when expired
         if paused:
-            return {"paused": True, "reason": paused.get("reason", ""),
-                    "until": paused.get("until"), "restarted": []}
+            result: dict[str, Any] = {"paused": True,
+                                      "reason": paused.get("reason", ""),
+                                      "until": paused.get("until"),
+                                      "restarted": recovered}
+            if recovered:
+                # DQ-R2: the drain did something — a restart was settled — so
+                # the result must be reportable, pause or not. Without this,
+                # wait_for_any would drop the whole `deferred` field and the
+                # restart would be reported nowhere in the result.
+                result["still_deferred"] = sum(
+                    1 for d in self.tree.read()["deferred"]
+                    if isinstance(d, dict) and not deferred_malformed(d)
+                    and d.get("status", "waiting") == "waiting")
+            return result
 
         # LN-C4, finding 5: the pause is gone — lifted or expired — so nothing
         # is being held back by it any more and its deferral notices stop
@@ -5021,12 +5122,15 @@ class Runner:
                       and e.get("scope") == "tree")
 
         due = self.tree.due_deferred()
-        if not due:
+        if not due and not recovered:
             return {"paused": False, "restarted": []}
 
         budget_mod.invalidate_cache()             # the window moved; re-read it
         restarted, refused, dropped, stopped = [], [], [], ""
         for entry in due:
+            claim = self.tree.claim_deferred(entry["id"])
+            if not claim:
+                continue                          # another drain claimed it first
             task_spec = entry.get("spec") or {}
             agent = task_spec.get("agent")
             if not agent or agent not in self.config.agents:
@@ -5037,24 +5141,26 @@ class Runner:
                                 "reason": reason})
                 self.tree.exit_deferred(entry["id"], "dropped", reason=reason)
                 continue
-            known = {d["id"] for d in self.tree.read()["deferred"]}
             try:
                 result = await self.start(
                     agent, task_spec.get("task", ""),
                     workdir=task_spec.get("workdir"), timeout=task_spec.get("timeout"),
-                    model=task_spec.get("model"),
+                    model=task_spec.get("model"), deferred_id=entry["id"],
                 )
             except (ValueError, PermissionError) as exc:
                 # DQ-R3b: the request itself cannot be honoured, and waiting
                 # will not change that. Kept, marked, never retried.
                 result = {"error": f"{agent}: {exc}"}
-            except Exception as exc:
-                # Leave this entry queued — it has not been dealt with — and
-                # stop. One failure here is almost always systemic (the window
-                # closed again mid-drain), and grinding through the rest turns
-                # one problem into a batch of them.
-                stopped = f"{type(exc).__name__}: {exc}"[:300]
-                break
+            except BaseException:
+                # DQ-R10: `except Exception` never saw a CancelledError — an
+                # MCP client giving up on the wait — so a cancelled drain
+                # used to strand the entry `restarting` behind this server's
+                # own live pid, unrecoverable for the process's whole life.
+                # Whatever the interruption, the claim goes back first (see
+                # _settle_interrupted for which way it goes), then the
+                # interruption propagates.
+                self._settle_interrupted(entry, claim)
+                raise
             if result.get("error") and not result.get("deferred"):
                 reason = str(result.get("reason") or result["error"])
                 if agent not in reason:
@@ -5063,22 +5169,48 @@ class Runner:
                     reason += f" (pinned model {task_spec['model']!r})"
                 refused.append({"agent": agent, "deferred_id": entry["id"],
                                 "reason": reason})
-                self.tree.exit_deferred(entry["id"], "refused", reason=reason)
+                fields: dict[str, Any] = {"reason": reason}
+                if result.get("agent_id"):
+                    # DQ-R3c: a refusal leaves no node; if one exists anyway,
+                    # the entry records where it is.
+                    fields["node_id"] = result["agent_id"]
+                self.tree.exit_deferred(entry["id"], "refused", **fields)
                 continue
             if result.get("deferred"):
                 # A re-deferral from start() is a NEW entry, so ending the old
-                # one here is what stops the queue growing.
-                fresh = [d["id"] for d in self.tree.read()["deferred"]
-                         if d["id"] not in known]
+                # one here is what stops the queue growing. start() names the
+                # entry it created (DQ-R11) — matching it by id, never by
+                # diffing the queue, which would take an entry someone else
+                # deferred inside this window. The new entry keeps the old
+                # one's `deferred_by`, `None` (the orchestrator) included: the
+                # drain is a courier, not the deferrer (DQ-R8a/DQ-R4a).
+                new_id = result.get("deferred_id")
+                if new_id:
+                    with self.tree.transaction() as data:
+                        fresh = next((d for d in data["deferred"]
+                                      if isinstance(d, dict)
+                                      and d.get("id") == new_id), None)
+                        if fresh is not None:
+                            fresh["deferred_by"] = entry.get("deferred_by")
                 self.tree.exit_deferred(entry["id"], "re_deferred",
-                                        new_deferred_id=fresh[0] if fresh else None)
+                                        new_deferred_id=new_id)
                 break                             # the window closed again
-            self.tree.exit_deferred(entry["id"], "restarted",
-                                    agent_id=result.get("agent_id"))
-            restarted.append({"agent": agent, "agent_id": result.get("agent_id")})
+            agent_id = result.get("agent_id")
+            if agent_id:
+                # DQ-R8: the node records where it came from. Written when the
+                # node was created, since DQ-R11; this re-write is a no-op
+                # that keeps the invariant if that ever changes.
+                with self.tree.transaction() as data:
+                    node = data["nodes"].get(agent_id)
+                    if node is not None:
+                        node["deferred_id"] = entry["id"]
+            self.tree.exit_deferred(entry["id"], "restarted", agent_id=agent_id)
+            restarted.append({"agent": agent, "agent_id": agent_id})
         still = sum(1 for d in self.tree.read()["deferred"]
-                    if d.get("status", "waiting") == "waiting")
-        result = {"paused": False, "restarted": restarted, "still_deferred": still}
+                    if isinstance(d, dict) and not deferred_malformed(d)
+                    and d.get("status", "waiting") == "waiting")
+        result = {"paused": False, "restarted": restarted + recovered,
+                  "still_deferred": still}
         if refused:
             result["refused"] = refused
         if dropped:
@@ -5109,6 +5241,13 @@ class Runner:
                                   "refused": revived.get("refused", []),
                                   "dropped": revived.get("dropped", []),
                                   "still_deferred": revived["still_deferred"]}
+        # DQ-R2a: refused entries never expire and are never retried, so the
+        # count of the ones still queued rides on every result while it is
+        # non-zero — including a wait that drained nothing at all.
+        refused_total = sum(1 for d in self.tree.read()["deferred"]
+                            if isinstance(d, dict) and d.get("status") == "refused")
+        if refused_total:
+            result.setdefault("deferred", {})["refused_total"] = refused_total
         shown = notices.since(self.tree, self.self_id() or self.session() or "root")
         if shown:
             result["limit_notices"] = shown
