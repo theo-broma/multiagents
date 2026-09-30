@@ -4,8 +4,144 @@
 set -u
 BIN="${MULTIAGENTS_BIN:-opencode}"
 
+# MULTIAGENTS_OPENCODE_PLAN=zai-coding-plan selects the Z.AI Coding Plan (the
+# `opencode-zai` instance). Unset, empty or any other value is the Go behaviour
+# below, unchanged. The quota origin can be overridden with MULTIAGENTS_ZAI_ORIGIN,
+# which is for tests only.
+zai_plan() { [ "${MULTIAGENTS_OPENCODE_PLAN:-}" = "zai-coding-plan" ]; }
+
+# zai_py check|budget|usage. The key is read from opencode's auth store inside
+# python and sent with urllib, so it is never on a command line; every message
+# is a fixed string, so a server that echoes the key back cannot leak it.
+zai_py() {
+    python3 - "$1" "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" <<'PYEOF'
+import json, os, sys, urllib.error, urllib.request
+from datetime import datetime, timezone
+
+mode, auth = sys.argv[1], sys.argv[2]
+ENTRY = "zai-coding-plan"
+PATH = "/api/monitor/usage/quota/limit"
+
+def load_key():
+    """Returns (key, why) where why is set when there is no store or no parse."""
+    if not os.path.isfile(auth):
+        return None, "no opencode auth store at " + auth
+    try:
+        data = json.load(open(auth))
+    except Exception:
+        return None, "the opencode auth store is not valid JSON"
+    entry = data.get(ENTRY) if isinstance(data, dict) else None
+    key = entry.get("key") if isinstance(entry, dict) else None
+    if isinstance(key, str) and key:
+        return key, None
+    return None, None
+
+if mode == "check":
+    key, why = load_key()
+    if key:
+        print("z.ai coding plan credential present")
+        raise SystemExit(0)
+    print(why or "no '%s' entry with a key in the opencode auth store; "
+          "run `multiagents auth login opencode-zai` and choose Z.AI Coding Plan" % ENTRY)
+    raise SystemExit(10)
+
+def unknown(note):
+    if mode == "budget":
+        print(json.dumps({"known": False, "note": note}))
+    else:
+        print(note)
+    raise SystemExit(0)
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+def fetch(key):
+    origin = (os.environ.get("MULTIAGENTS_ZAI_ORIGIN") or "https://api.z.ai").rstrip("/")
+    req = urllib.request.Request(origin + PATH, headers={"Authorization": key})
+    opener = urllib.request.build_opener(NoRedirect)
+    opener.handlers = [h for h in opener.handlers
+                       if not isinstance(h, urllib.request.ProxyHandler)]
+    try:
+        with opener.open(req, timeout=12) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            return e.read()
+        except Exception:
+            return b""
+    except Exception:
+        unknown("z.ai quota endpoint is unreachable")
+
+def ms_iso(ms):
+    try:
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+    except Exception:
+        return None
+
+def number(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+key, _ = load_key()
+if not key:
+    unknown("no key: no '%s' entry with a key in the opencode auth store" % ENTRY)
+
+raw = fetch(key)
+try:
+    body = json.loads(raw)
+except Exception:
+    unknown("z.ai quota endpoint body is not JSON")
+if not isinstance(body, dict):
+    unknown("z.ai quota endpoint body is not JSON")
+if body.get("success") is False or body.get("code") not in (None, 0, 200):
+    unknown("z.ai quota request failed")
+data = body.get("data") if "data" in body else body
+limits = data.get("limits") if isinstance(data, dict) else None
+
+def find(pred):
+    for l in limits if isinstance(limits, list) else []:
+        if (isinstance(l, dict) and l.get("type") in ("TOKENS_LIMIT", "CREDIT_LIMIT")
+                and pred(l) and number(l.get("percentage")) is not None):
+            return l
+
+found = {}
+five = find(lambda l: l.get("unit") == 3 and l.get("number") == 5)
+week = find(lambda l: l.get("unit") == 6)
+if five: found["five_hour"] = five
+if week: found["weekly"] = week
+if not found:
+    unknown("z.ai quota endpoint reported no window")
+
+if mode == "usage":
+    for name, l in found.items():
+        used = float(l["percentage"])
+        n = min(10, max(0, int(round(used / 10))))
+        line = "%-8s %s %3.0f%%  %s" % (name, "#" * n + "." * (10 - n), used,
+                                        ms_iso(l.get("nextResetTime")) or "")
+        cur, cap = number(l.get("currentValue")), number(l.get("usage"))
+        if cur is not None and cap is not None:
+            line += "  %g/%g credits" % (cur, cap)
+        print(line.rstrip())
+    raise SystemExit(0)
+
+detail = {n: {"percent": l["percentage"], "resets_at": ms_iso(l.get("nextResetTime"))}
+          for n, l in found.items()}
+worst = max(detail, key=lambda n: detail[n]["percent"])
+pct = detail[worst]["percent"]
+print(json.dumps({
+    "known": True,
+    "headroom": round(max(0.0, 1.0 - pct / 100.0), 4),
+    "resets_at": detail[worst]["resets_at"],
+    "source": "api.z.ai" + PATH,
+    "note": "%s window is the constraint at %.0f%% used" % (worst, pct),
+    "windows": detail,
+}))
+PYEOF
+}
+
 case "${1:-check}" in
 check)
+    if zai_plan; then zai_py check; exit $?; fi
     out=$("$BIN" providers list 2>/dev/null) || {
         echo "could not run '$BIN providers list'"; exit 20; }
     # "0 credentials" means no stored login. An API key in the environment is
@@ -19,6 +155,10 @@ check)
     esac
     ;;
 login)
+    if zai_plan; then
+        echo "Choose the Z.AI Coding Plan provider, then paste its API key."
+        exec "$BIN" providers login
+    fi
     echo "opencode sign-in."
     echo "You will be asked to pick a provider, then a login method."
     echo "For an OpenCode Go subscription choose 'OpenCode' and follow the link."
@@ -29,6 +169,7 @@ login)
     exec "$BIN" providers login
     ;;
 budget)
+    if zai_plan; then zai_py budget; exit 0; fi
     # The Go subscription serves real headroom over HTTP:
     #   GET https://opencode.ai/zen/go/v1/usage   Authorization: Bearer <key>
     # returning percent-used and a reset time for three windows (rolling,
@@ -105,6 +246,7 @@ print(json.dumps({
     exit 0
     ;;
 usage)
+    if zai_plan; then zai_py usage; exit 0; fi
     # opencode serves three windows — rolling, weekly, monthly — and which one
     # is full changes what to do about it: a rolling window clears in hours, a
     # monthly one does not. So all three are shown rather than only the worst,

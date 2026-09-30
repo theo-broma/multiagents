@@ -106,6 +106,22 @@ providers:
           as: step
           fields: {}
 
+  # The Z.AI GLM Coding Plan through opencode: same CLI, script and stream
+  # rules, but its own family (its billing and models are unrelated to OpenCode
+  # Go, so failover between the two is never implicit) and real quota tracking
+  # from api.z.ai. Ships disabled. To enable it, set `enabled: true` for
+  # `opencode-zai` in .multiagents/config/providers.yaml, then run
+  # `multiagents auth login opencode-zai` and choose Z.AI Coding Plan.
+  # MULTIAGENTS_ZAI_ORIGIN overrides the quota endpoint's origin for tests only.
+  opencode-zai:
+    extends: opencode
+    family: opencode-zai
+    enabled: false
+    billing: plan
+    models_include: ["zai-coding-plan/*"]
+    env:
+      MULTIAGENTS_OPENCODE_PLAN: zai-coding-plan
+
   agy:
     bin: agy
     auth:
