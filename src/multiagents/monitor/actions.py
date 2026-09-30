@@ -272,7 +272,17 @@ def set_setting(paths, file: str = "", path: Any = (), value: Any = None,
             **result}
 
 
+
+def tmux_open(paths, agent_id: str) -> dict:
+    from ..tmux import TmuxError, open_window
+    try:
+        attach = open_window(paths, agent_id)
+    except TmuxError as exc:
+        return {"ok": False, "message": str(exc)}
+    return {"ok": True, "message": "attach command", "attach_command": attach}
+
 ACTIONS: dict[str, Callable[..., dict]] = {
+
     "stop_agent": stop_agent,
     "steer_agent": steer_agent,
     "merge_agent": merge_agent,
@@ -285,6 +295,7 @@ ACTIONS: dict[str, Callable[..., dict]] = {
     "launch_orchestrator": launch_orchestrator,
     "signal_process": signal_process,
     "set_setting": set_setting,
+    "tmux_open": tmux_open,
 }
 
 

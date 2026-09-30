@@ -436,7 +436,15 @@ def snapshot(paths: ProjectPaths, config: Config,
     roots = agent_tree(nodes, now)
     running = [_node_view(n, now, k) for k, n in nodes.items()
                if n.get("status") in ACTIVE]
+
+
     running.sort(key=lambda v: v["started_at"] or 0)
+    import shutil
+    has_tmux = shutil.which("tmux") is not None
+    for r in running:
+        r["actions"] = r.get("actions", [])
+        if has_tmux:
+            r["actions"].append("tmux_open")
     # Shown apart, and shown at all: it is state the orchestrator will act on,
     # and invisible state is how the last several surprises happened.
     parked = [_node_view(n, now, k) for k, n in nodes.items()
