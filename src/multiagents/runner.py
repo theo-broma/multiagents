@@ -269,7 +269,10 @@ TICKET = re.compile(r"(?im)^[ \t]*TICKET\((blocking|minor)\)[ \t]*:[ \t]*(.+)$")
 # judgement, which is the judgement the whole arrangement already relies on.
 VERDICT = re.compile(
     r"(?im)^[ \t]*VERDICT\((approved|rejected)(?:[ \t]*,[ \t]*(\d+))?\)[ \t]*:[ \t]*(.*)$")
-PROPOSED_FIX = re.compile(r"(?im)^[ \t]*PROPOSED_FIX[ \t]*:[ \t]*$")
+# A line that IS the marker: bare, with a colon, or as a Markdown heading.
+PROPOSED_FIX = re.compile(r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?PROPOSED_FIX[ \t]*:?[ \t]*$")
+FENCE_LINE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
 
 
 def _wrap_globs(patterns: list[str], limit: int = 12) -> str:
@@ -379,7 +382,8 @@ class Run:
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     internal_stop: bool = False       # steer() ending this turn to respawn it, not a real cancel
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
-    ticket: dict | None = None        # a TICKET filed from the final message
+    ticket: dict | None = None        # the last TICKET filed from the final message
+    tickets: list = field(default_factory=list)   # every TICKET filed from it
     # bug-c050b0: "asked to wrap up" lives on the Node (tree.py), not here —
     # steer()/_launch() replace the Run, and a flag kept there resets on every
     # replacement, same trap the retry counter hit first.
@@ -1196,31 +1200,95 @@ class Runner:
             "home directory is still the user's business and does not.\n"
         )
 
-    def _file_ticket(self, node_id: str, text: str) -> dict | None:
-        """Turn a finished bug-reporter message into a queued ticket.
+    @staticmethod
+    def _fenced_ranges(text: str) -> list[tuple[int, int]]:
+        """Character ranges of fenced code blocks, fences included. An
+        unclosed fence runs to the end, as in Markdown."""
+        ranges, opened, pos = [], None, 0
+        for line in text.splitlines(keepends=True):
+            fence = FENCE_LINE.match(line)
+            if opened is None:
+                if fence:
+                    opened = (pos, fence.group(1))
+            elif fence and fence.group(1)[0] == opened[1][0] \
+                    and len(fence.group(1)) >= len(opened[1]) \
+                    and not line.strip().strip(opened[1][0]):
+                ranges.append((opened[0], pos + len(line)))
+                opened = None
+            pos += len(line)
+        if opened is not None:
+            ranges.append((opened[0], len(text)))
+        return ranges
 
-        The LAST marker wins, not the first. The agent is reasoning about a
+    def _file_tickets(self, node_id: str, text: str) -> list[dict]:
+        """Turn a finished bug-reporter message into queued tickets.
+
+        Every real marker files one ticket. The agent is reasoning about a
         system whose own documentation contains the literal string
         `TICKET(blocking):` — its brief does, and so does the orchestrator's —
-        so a model that quotes the rule while thinking would otherwise turn the
-        rest of its monologue into the ticket. Its instructions say to *end*
-        with the marker, which makes the last occurrence the right one and
-        moves the failure into the rarer direction.
+        so a model that quotes the rule while thinking must not turn the rest
+        of its monologue into a ticket. Quoting is therefore recognised, not
+        guessed from position: a marker inside a fenced block, on a `>` line
+        or inside inline backticks is not real.
+
+        With two or more real markers an empty section is dropped and a
+        repeated title files once, the later section winning. A lone marker
+        always files, as it always did.
         """
-        matches = list(TICKET.finditer(text or ""))
-        if not matches:
-            return None
-        match = matches[-1]
-        severity, title = match.group(1).lower(), match.group(2).strip()
-        rest = text[match.end():]
-        fix = ""
-        split = PROPOSED_FIX.search(rest)
-        if split:
-            fix = rest[split.end():].strip()
-            rest = rest[:split.start()]
-        return self.tree.add_ticket(
-            node_id, title, rest.strip(), severity, fix, project_root=self.paths.root,
-        )
+        text = text or ""
+        fenced = self._fenced_ranges(text)
+
+        def in_fence(pos: int) -> bool:
+            return any(a <= pos < b for a, b in fenced)
+
+        # Inline code may wrap across lines but not across a blank one; fenced
+        # text is masked so a stray backtick inside it pairs with nothing.
+        masked = list(text)
+        for a, b in fenced:
+            masked[a:b] = ["." if c != "\n" else c for c in text[a:b]]
+        spans = []
+        for para in re.finditer(r"(?:[^\n]+\n?)+", "".join(masked)):
+            base = para.start()
+            spans += [(base + m.start(), base + m.end())
+                      for m in INLINE_CODE.finditer(para.group())]
+
+        matches = []
+        for m in TICKET.finditer(text):
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            if in_fence(m.start()) or re.match(r"[ \t]*>", text[line_start:]):
+                continue
+            if any(a <= m.start() < b for a, b in spans):
+                continue
+            matches.append(m)
+
+        sections = []
+        for i, match in enumerate(matches):
+            stop = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            rest, offset = text[match.end():stop], match.end()
+            fix = ""
+            split = next((s for s in PROPOSED_FIX.finditer(rest)
+                          if not in_fence(offset + s.start())), None)
+            if split:
+                fix = rest[split.end():].strip()
+                rest = rest[:split.start()]
+            sections.append((match.group(1).lower(), match.group(2).strip(),
+                             rest.strip(), fix))
+        if len(sections) > 1:
+            sections = [s for s in sections if s[2] or s[3]]
+            latest = {}
+            for n, (_, title, _, _) in enumerate(sections):
+                latest[title] = n
+            sections = [s for n, s in enumerate(sections) if latest[s[1]] == n]
+        return [
+            self.tree.add_ticket(node_id, title, body, severity, fix,
+                                 project_root=self.paths.root)
+            for severity, title, body, fix in sections
+        ]
+
+    def _file_ticket(self, node_id: str, text: str) -> dict | None:
+        """File the tickets in a message; return the last one, or None."""
+        tickets = self._file_tickets(node_id, text)
+        return tickets[-1] if tickets else None
 
     # ------------------------------------------------------------ ownership --
 
@@ -2640,9 +2708,11 @@ class Runner:
                 defects=int(found.group(2)) if found.group(2) else 0,
             )
 
-        ticket = self._file_ticket(node_id, text) if not run.awaiting else None
-        if ticket:
-            run.ticket = {k: ticket[k] for k in ("id", "severity", "title", "status")}
+        filed = self._file_tickets(node_id, text) if not run.awaiting else []
+        if filed:
+            run.tickets = [{k: t[k] for k in ("id", "severity", "title", "status")}
+                           for t in filed]
+            run.ticket = run.tickets[-1]
         if stopped_elsewhere:
             pass                          # its reason is the stopper's to give
         elif run.awaiting:
@@ -3516,6 +3586,10 @@ class Runner:
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
         payload.update(self._no_commits_note(node, text))
+        filed = [{k: t[k] for k in ("id", "severity", "title", "status")}
+                 for t in self.tree.read()["tickets"] if t.get("agent") == agent_id]
+        if filed:
+            payload["tickets"] = filed
         if mode == "full":
             payload["text"] = text
             payload["stderr_tail"] = data.get("stderr_tail", "")
@@ -4725,7 +4799,7 @@ class Runner:
             "usage": final.usage if final else {},
             "note": "advisory only — you decide whether to act on this",
             **view,
-            **({"ticket": run.ticket} if run.ticket else {}),
+            **({"ticket": run.ticket, "tickets": run.tickets} if run.ticket else {}),
         }
 
     async def answer_question(self, question_id: str, answer: str,
