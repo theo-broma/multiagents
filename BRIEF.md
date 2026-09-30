@@ -2690,3 +2690,16 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - ~07:45 UTC: the opus adversary on the D1 fixes (ag-03602e) REJECTED them with 7 findings. Its tests are merged (523c23e, tests/test_d1_adversary.py, 20 red). ag-42b581 (implementer-deep, GLM max) is fixing all 7, plus #8: `_limits_for` reads a call-sourced timeout back from tree.json (H4/H14 code). Decision: the limits and provenance of adopted or relaunched runs come from a host-owned launch record, never from tree.json. ag-6d3d5a (H8) hit max_steps=40 and was steered to finish and commit.
 - ~08:20 UTC: the opus adversary on H7 (ag-bd9c41) REJECTED it with 3 defects. Its tests are merged (954f6e5, tests/test_h7_adversary.py, 5 red). The defects: a claude API error counted as startup progress; steering a live run on a tripped provider kills it; losing the probe race gives a pin refusal. My decisions are spec amendments PS-R4a/5a/5b/1a (f0c2266). ag-303ef7 (implementer-deep, GLM max) is fixing them. In flight: ag-709ee5 (D3), ag-42b581 (D1 fixes), ag-6d3d5a (H8).
 - ~08:35 UTC: H8 interim fix merged (21c5816: a single argv element over 128 KiB is refused before launch). ag-b980d0 researcher (codex terra: the researcher has no claude or zai model in its roster) is doing the read-only H12 branch inventory. Deletion stays my decision, after reading it.
+- ~08:45 UTC — **H12 cleanup, partial.** Inventory is ag-b980d0 (.multiagents/runs/ag-b980d0/result.json).
+  - **Discarded.** Every branch tip was an ancestor of main, so nothing was lost:
+    - ag-852615, ag-12951a (branch 12951a-2), ag-5b326a, ag-6f199c and ag-fae464;
+    - ag-05199c, ag-0d1a3f and ag-604af7;
+    - ag-14a3e5, ag-da174a, ag-f8b8f7 and ag-fff50e.
+  - **Left alone:**
+    - **Refused as "seeded worktree is quarantined":** ag-37349e, ag-48a3d2, ag-c65ee1 and ag-cbf6c0. I did not force these.
+    - **Denied by the auto-mode classifier:** ag-6812e8 and ag-a3cfa5. These are for the user.
+    - **The standing advisor and dev-advisor sessions** (8e7d87, 4a29a4, …).
+    - **Unmerged work to triage:**
+      - tester/b689bf is superseded by 1568664 and 92af1c1, but deleting it needs `force`;
+      - tester/cf02a1 has a 486-line tests/test_phase3_build_env.py that is not on main;
+      - reviewer/98e037, reviewer/e4919f and reviewer/e8565d hold untriaged reports; e8565d has a SIGTERM terminal-cleanup finding.
