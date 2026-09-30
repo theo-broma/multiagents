@@ -25,6 +25,31 @@ from typing import Any, Iterable
 # Normalised event kinds the rest of the system understands.
 TEXT, TOOL, STEP, RESULT, RAW, ERROR = "text", "tool", "step", "result", "raw", "error"
 
+# H8: the kernel refuses any single argv element longer than MAX_ARG_STRLEN
+# (131072 bytes, the trailing NUL included) and the process then fails to
+# start with an opaque E2BIG. The prompt travels as one argv element, so an
+# oversize prompt must be refused here, in bytes, before anything launches.
+MAX_ARG_STRLEN = 131072
+
+
+def check_argv_limit(provider_name: str, argv: list[str]) -> None:
+    """Refuse an argv element the kernel would reject (H8).
+
+    Counted in UTF-8 bytes plus the NUL, the way execve counts. No run-file
+    prompt transport exists yet, so the only remedy is a shorter task —
+    which is what the error says rather than suggesting one silently.
+    """
+    for element in argv:
+        size = len(element.encode("utf-8")) + 1
+        if size > MAX_ARG_STRLEN:
+            raise RuntimeError(
+                f"provider {provider_name!r}: refusing to launch — one argv "
+                f"element is {size} bytes, over the kernel's 128 KiB "
+                f"({MAX_ARG_STRLEN}-byte) per-argument limit (MAX_ARG_STRLEN); "
+                "the process would fail to start with E2BIG. Give the agent "
+                "a shorter task — no prompt-file transport exists yet."
+            )
+
 
 _SELECTOR = re.compile(r"^([A-Za-z0-9_-]+)\[([A-Za-z0-9_-]+)=([^\]]+)\]$")
 
