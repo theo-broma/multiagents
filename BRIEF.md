@@ -2784,3 +2784,59 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - My decisions are spec amendments TM-R1a, TM-R1b and TM-R2a (1a689a9). The adversary's tests were merged into ag-51c6dc's worktree (aba9e04), and ag-51c6dc was steered to fix them.
   - Not covered by the adversary: partial, CRLF and empty-file follower cases; path-traversal bounds; tmux argv fuzzing.
 - ag-725897 (the D1 fixes) is still running the full suite in chunks.
+
+### HANDOFF #4 — 2026-09-30 08:10 UTC (orchestrator context ~260k; compact soon)
+**Quota state at 08:07 UTC:**
+
+| Provider | State |
+|---|---|
+| codex | weekly 100% until Oct 4 10:49 UTC |
+| z.ai GLM | 5 h window 100% until 10:57 UTC; weekly 35% |
+| agy Gemini | 5 h window 100% until 11:54 UTC; weekly 17% |
+| agy Claude/GPT pool | unused, but routing treats agy as down while the Gemini window is exhausted (ticket-worthy) |
+| claude (ours) | session 81% until 09:50 UTC; weekly 47% |
+| opencode Go | monthly 99% |
+
+**Merged today:**
+- H6: 697f109
+- H8: 21c5816
+- H7 fixes: 4dbf415
+- D3: f2b0f38
+- Adversary tests: 523c23e (D1), 954f6e5 (H7)
+- Spec amendments: D2, D3 and H7
+
+**In flight or pending:**
+1. **D2 (tmux viewer).**
+   - The implementation and the adversary's failing tests (tests/test_d2_adversary.py) are on branch agents/implementer/51c6dc. ag-51c6dc died on agy quota before it fixed anything.
+   - A replacement start_agent(implementer, model=claude-sonnet-4-6 [agy pool], verifies=ag-b8b511) was DEFERRED (tree paused, retry ~08:22 UTC).
+   - When it restarts, immediately run `merge_agent(ag-51c6dc, into=<its worktree>)`. Its task tells it to wait up to 3 minutes for viewer.py, tmux.py and test_d2_adversary.py.
+   - If it restarts on Gemini and fails again, re-run it after 11:54 UTC, or on GLM after 10:57 UTC.
+   - Findings to fix: TM-R1a, TM-R1b, TM-R2a (spec 1a689a9).
+2. **D1 fixes.**
+   - ag-725897 (agy gemini) was last seen running the full suite in 4 chunks. Its branch holds 0c94f3d, the squash of ag-42b581 and ag-e6c241, plus its own commits.
+   - It will likely die on the agy quota. If so, resume it on a new run, passing merge_agent(ag-725897, into=new) and its handoff (.multiagents/runs/ag-725897).
+   - Done means test_d1_adversary.py and test_d1_adversary_followup.py are green, and the neighbours stay green.
+   - Then merge, and set the ledger status if F-ids apply.
+3. **Remaining brief items:**
+   - H10 (live compaction check), not started.
+   - H12 leftovers for the user: the quarantined worktrees and the classifier-denied discards (see ~08:45).
+   - Triage of tester/cf02a1 (test_phase3_build_env.py) and reviewer/98e037, e4919f and e8565d (e8565d has a SIGTERM terminal-cleanup finding).
+   - H5 applies only under docker.
+4. **Tickets to file (gh missing):**
+   - the 7 in .multiagents/runs/ag-a0be27/result.json;
+   - codex sandbox commits;
+   - the researcher agy model/effort conflict (the router accepted `gemini-3.8-flash-medium` with `effort: low`);
+   - agy routing ignoring the separate Claude pool;
+   - agy long commands becoming background tasks, which trips the doom-loop watchdog.
+5. **Also outstanding:**
+   - advance wt-main to main, and the user runs /mcp;
+   - the D3 doctor section can then be checked live.
+
+**Roster now (project agents.yaml, gitignored):**
+- implementer-quick: agy gemini-3.8-flash-high
+- implementer and implementer-deep: agy gemini-3.1-pro-high
+- Fallbacks: GLM low, high and max, then codex.
+- advisor, adversary and dev-advisor: agy gemini-3.1-pro-high, with codex as fallback.
+- tester: claude sonnet.
+- researcher: codex terra, then agy gemini-3.1-pro-low.
+- agy re-enabled.
