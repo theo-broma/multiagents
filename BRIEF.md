@@ -3160,3 +3160,39 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **M.** Round 4 was rejected again (ag-467011, 4 defects). Binding designs RM-R1c and RM-R4f (7fd909d), from advisor turn 5, were steered back to ag-074735.
 
 **PS.** ag-dc8946 is fixing 11 findings.
+
+### HANDOFF #7: 2026-09-30 ~23:45 UTC (context wind-down)
+
+**User rules in force (see memory):**
+- Implementers run on glm-5.3-flash, whose default variant is already max; the models: routes are set to max.
+- The reviewer runs after every implementer, before merge.
+- Tickets are fixed in-house: no gh, no submit.
+- Egress and mounts need the user's approval.
+- TS is done with an opus implementer (implementer-deep pinned `model=opus`) consulting `gemini-advisor`.
+
+**In flight, wait on these:**
+
+**ag-f7ced5, reviewer on M round 5** (branch agents/implementer-deep/074735, commit 10101e9).
+- A previous reviewer, ag-859621, died (exit -1) after flagging: (a) the death check trusts a probe that can time out into "dead"; (b) an outer `finally` can release ownership despite the cleanup hold. f7ced5 must confirm or refute these.
+- **If approved:** cherry-pick the tester commit **f8c2b26** from agents/tester/35d54e into ag-074735's worktree (it re-derives 3 clock-step tests for RM-R4f), then `merge_agent ag-074735`. Verify tests/test_m_* and test_t1_* on main, then discard ag-35d54e.
+- **If rejected:** steer ag-074735, still following binding designs RM-R1c and RM-R4f.
+
+**ag-90626e, reviewer on TS Run A** (ag-2caa66, opus).
+- Run A result: pytest-xdist added. `-n auto` takes about 200 s, against 46 min serial, with 0 per-id differences from base 7fd909d over 4372 ids. There are 3 isolation fixes in tests. Manifests are in context/ts/manifests/ and AGENTS.md was updated.
+- **If approved:** merge. Then **Run B**: timing, TS-R2 and R3, on opus with gemini-advisor, with a reviewer and a robustness-tester for mutation. Run B must also fix the h7 `test_probe_claim_*` (10 ms real cooldown) and the sg_r7 wrapped_stop flake.
+- **Recapture the base after M and PS merge.**
+
+**ag-dc8946, PS implementer (glm).** It is fixing the 11 review findings (ag-4cdd7b); it was resumed after an ENOSPC.
+- **When done:** reviewer again. Then merge main (M) and reconcile the budget cache with RM-R4f and `_CacheEntry`. Merge the **tester branch ag-e77949 together with PS**: it holds the c2 harness at 6 providers and the subagent_mcp fixture.
+- **After PS merges:** no agy claude/gpt routes exist in agents.yaml today, so nothing to move.
+
+**/tmp** is a 14 GB tmpfs, and it filled up with pytest dirs. Use `--basetemp=/var/tmp/<agent-id>-pytest` outside any repo; AGENTS.md now says so. Old dirs (more than 3 h old) under /tmp/pytest-of-theobroma may be removed.
+
+**Queued, in-house, low priority:**
+- Q2b: an invalid explicit `--path` must fail. The tester changes test_q2_cli_path.py:18, then an implementer-quick, then the reviewer.
+- The pinned-start half-open self-deadlock (ticket ddcdf7f).
+- A `models:` route for the preferred provider is ignored (variant).
+- The codex readonly/sandbox cannot run pytest or git commit.
+- snapshot.py still names providers in 2 comments.
+
+**Pending user-facing items:** none blocking.
