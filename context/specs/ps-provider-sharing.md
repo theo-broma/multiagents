@@ -180,3 +180,25 @@ Move every agy route with a claude/gpt model in `.multiagents/config/agents.yaml
 - **What changes.** PS-R8 changes the packaged defaults only. Existing global (`~/.config/multiagents`) or project provider overrides are not rewritten.
 - **An existing global `agy` override** that lacks the new keys keeps today's behaviour. The provider-level keys deep-merge, so the new defaults apply unless the override replaces them.
 - **Documentation.** The providers.yaml comment says how to adopt the split.
+
+## Amendments of 2026-09-30, after the test suite (ag-adf1bc)
+
+**PS-R10: config edge cases.**
+- **Config errors at load:**
+  - an `auth_from` or `budget_from` that is empty or not a string;
+  - a `budget_windows` that is not a list of strings;
+  - a bad route on a disabled agent.
+- **A disabled budget owner** still provides its payload to an enabled dependent.
+- **Env conflicts.** An env key inherited through any `extends` base is never a conflict. Only keys written explicitly in the dependent's own declaration are checked (PS-R1a).
+- **Mixed windows.** When valid and invalid selected windows are mixed, the invalid ones are ignored and the valid ones count.
+- **The login hint.** For a dependent, the hint names the owner: "run: multiagents auth login agy".
+
+**PS-R4b: the execution context of an auth block.**
+- **Keyed by context.** An auth block records the execution context it was observed in (host or container), and recovery is matched on that context.
+- **No test.** There is no test for the container half, which is checked in review.
+
+**PS-R7b: deferred entries, as they actually arise.**
+- **Recording the provider.** A deferred entry records the provider it was deferred from, meaning the preferred provider that was unavailable. This is the "destination" of PS-R7a.
+- **Pinned starts.** They are refused rather than deferred, so a pinned entry with a recorded provider arises only from legacy data.
+
+**Characterisation tests.** The tester updates `tests/test_c2_auth_characterization.py` from five shipped providers to six.
