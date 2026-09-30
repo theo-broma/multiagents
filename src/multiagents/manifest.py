@@ -512,7 +512,7 @@ def _walk_pointer(base: Any, pointer: str) -> Any:
 def _yaml_literals(node: Any) -> list[str]:
     """The scalar at the pointer, or any scalar beneath it. A mapping also
     counts its keys — at any depth, so native dependencies expressed as
-    mapping keys (`part.reason`, `OPENCODE_CONFIG`) are covered."""
+    mapping keys (`part.reason`, or a provider env var) are covered."""
     if isinstance(node, dict):
         out: list[str] = []
         for key, value in node.items():

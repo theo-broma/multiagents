@@ -540,7 +540,7 @@ class Provider:
                              or output_usage))
                 # PS-R4a: some lines only look like the model having run. A
                 # provider declares those shapes in `stream.no_progress`, a
-                # list of matches like a rule's — Claude Code reports an API
+                # list of matches like a rule's — one CLI reports an API
                 # failure as an assistant message from the model "<synthetic>"
                 # inside a result whose `is_error` is true, and counting
                 # either as startup progress would keep a dead provider
