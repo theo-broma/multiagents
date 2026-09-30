@@ -2891,3 +2891,10 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - the doom_loop trip on agy background polls;
   - the researcher's model/effort conflict.
   - A researcher does the triage.
+- **H12 triage (researcher ag-bc6fd4, 2026-09-30).** The details are in the run result.
+  - tester/cf02a1: phase 3 R19/R20 tests, 27 red / 21 green on main. **KEEP**: phase 3 is paused, and this is a user call.
+  - reviewer/98e037: only #4 is still present, a `suppress(Exception)` in runner.py:2706-2729 that hides retry-launch failures. It is an S fix, **queued for implementer-quick on glm-5.3-flash** once z.ai is back.
+  - reviewer/e4919f: nothing worth doing. #3, the `rglob` on every call in server.py:190, is optional and low.
+  - reviewer/e8565d: #1-3 and #7 are fixed. #4 (transcripts.py:388, keys hardcoded to Claude's) waits until a second transcript reader exists. #5 and #6 are skipped.
+  - reviewer/bf6004: #5 is declined, as documented.
+  - **Branch cleanup:** the reviewer branches 98e037, e4919f, e8565d and bf6004 and tester/b689bf (superseded) can be discarded. The implementer leftovers are the quarantined worktrees and the discards the classifier denied, so they need the user.
