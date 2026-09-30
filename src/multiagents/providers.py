@@ -263,9 +263,15 @@ class Provider:
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
+        # PS-R1a: a relative explicit `bin` (one containing "/") is refused at
+        # config load, exactly as a relative `bin_search` entry is — never
+        # later, as a ValueError raised from `resolve_bin` mid-operation.
+        bin_name = str(data.get("bin", name))
+        if "/" in bin_name and not Path(bin_name).expanduser().is_absolute():
+            raise ValueError("bin: containing '/' must be an absolute path")
         return cls(
             name=name,
-            bin=data.get("bin", name),
+            bin=bin_name,
             spawn=data.get("spawn", {}) or {},
             stream=data.get("stream", {}) or {},
             bin_search=_bin_search(data.get("bin_search")),
@@ -323,7 +329,10 @@ class Provider:
         if "/" in self.bin:
             candidate = Path(self.bin).expanduser()
             if not candidate.is_absolute():
-                raise ValueError("bin: containing '/' must be an absolute path")
+                # PS-R1a: config load refuses a relative `bin`; a Provider
+                # built around that check resolves to nothing rather than
+                # raising here.
+                return ResolvedBin(None, None, "bin", searched)
             return check(candidate, "bin") or ResolvedBin(None, None, "bin", searched)
         path = (os.environ if env is None else env).get("PATH", "")
         if path:
@@ -529,6 +538,19 @@ class Provider:
                 progress = (kind not in (RAW, ERROR) and
                             (kind == TOOL or (assistant_text and bool(text.strip()))
                              or output_usage))
+                # PS-R4a: some lines only look like the model having run. A
+                # provider declares those shapes in `stream.no_progress`, a
+                # list of matches like a rule's — Claude Code reports an API
+                # failure as an assistant message from the model "<synthetic>"
+                # inside a result whose `is_error` is true, and counting
+                # either as startup progress would keep a dead provider
+                # admitted and recover a probe that never ran the model.
+                if progress and any(
+                        all(get_path(payload, key) == value
+                            for key, value in guard.items())
+                        for guard in self.stream.get("no_progress") or []
+                        if isinstance(guard, dict)):
+                    progress = False
                 return Event(
                     kind=kind,
                     name=str(extracted.get("name") or ""),

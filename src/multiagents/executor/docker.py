@@ -673,7 +673,14 @@ class DockerExecutor(Executor):
         resolve = getattr(provider, "resolve_bin", None)
         if resolve is None:
             return getattr(provider, "available", lambda: None)()
-        launcher = resolve().launcher
+        # PS-R1a: the mount derivation resolves against the same environment a
+        # native launch of this provider would — the ambient PATH with the
+        # instance's own `env:` applied (an instance may point PATH at the
+        # directory holding its account's CLI) — never the server's PATH alone.
+        merged = dict(os.environ)
+        for key, value in (getattr(provider, "env", None) or {}).items():
+            merged[key] = os.path.expanduser(os.path.expandvars(str(value)))
+        launcher = resolve(env=merged).launcher
         return str(launcher) if launcher is not None else None
 
     @staticmethod
