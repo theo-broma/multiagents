@@ -2771,3 +2771,4 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - I steered ag-149e0a with these fixes.
 - **D2 (ag-51c6dc, agy) is done.** I verified 197/197 green. It had left 25 scratch files at the repo root; they are now removed, and the diff is src-only (viewer.py, tmux.py, cli, monitor).
 - ag-b8b511, the adversary (agy gemini pro), is attacking D2: the sanitiser, the follower, paths and the socket, and tmux argv. D2 is merged only after its findings are resolved.
+- **D3 MERGED (f2b0f38).** The reviewer's fixes were applied. I verified 377 tests myself: the D3 suite plus h7, h7_adversary and h6. No adversary was run on D3: it is diagnostics only (lint and doctor), and nothing untrusted is in its path.
