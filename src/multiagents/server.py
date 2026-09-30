@@ -44,6 +44,7 @@ from . import gitops
 from .config import CONFIG_FILES
 from .config import load as load_config
 from .config import limit_number, seed_project
+from .drift import drift_summary
 from .executor import executor_for
 from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
@@ -310,6 +311,12 @@ def _runner_locked() -> Runner:
         seed_project(paths)
     _runner = Runner(paths, load_config(paths, seed=seed))
     _loaded, _failed, _load_error = _fingerprint(_runner), None, ""
+    # The one drift line, at the moment the runner is built and never again
+    # (CD-R4). Detection must not be able to take the server down with it.
+    try:
+        print(f"multiagents: {drift_summary(paths)}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
     return _runner
 
 
