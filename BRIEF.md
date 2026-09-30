@@ -2703,3 +2703,11 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
       - tester/b689bf is superseded by 1568664 and 92af1c1, but deleting it needs `force`;
       - tester/cf02a1 has a 486-line tests/test_phase3_build_env.py that is not on main;
       - reviewer/98e037, reviewer/e4919f and reviewer/e8565d hold untriaged reports; e8565d has a SIGTERM terminal-cleanup finding.
+- ~09:10 UTC — **D1 fixes.** ag-42b581 was interrupted at about 60%. Findings 1, 2, 3 and 8 are committed in a93e53c, with a new `launch_limits.py` (host-owned LaunchLimits). It was steered to finish F4 to F7 and the followup tests. Also in scope now: the adopted run's deadline comes from the host record, not command.json.
+- **D2 contract written** (60332af, context/specs/d2-tmux-viewer.md, TM-R1..R6). The advisor's gaps are folded in:
+  - the socket lives in the host-authority dir, not `.multiagents/`, which is docker-writable;
+  - callers are the CLI and the monitor only, with no MCP tool;
+  - a terminal-escape-safe formatter;
+  - id validation, and symlinks and FIFOs refused;
+  - truncation is handled.
+  ag-743603 is the D2 tester (sonnet).
