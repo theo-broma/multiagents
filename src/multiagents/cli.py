@@ -1557,6 +1557,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  {name:12} NOT FOUND ({provider.bin_error(resolved)})")
             problems += 1
 
+    from .manifest import cli_dependencies_section
+
+    print("\ncli dependencies")
+    problems += cli_dependencies_section(paths, config, providers)
+
     print("\nagents")
     problems += _report_agents(config, providers)
 
