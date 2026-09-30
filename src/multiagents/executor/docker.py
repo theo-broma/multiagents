@@ -40,10 +40,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,10 @@ from ..paths import ProjectPaths, server_install_paths, state_root
 from .. import gitops, procs
 from .base import Executor, FollowHandle, Handle, wrapper_argv
 from .local import LocalExecutor, _turn_start
+
+
+class NotRunning:
+    """A read-only exec probe found no running container."""
 
 
 class DockerHandle(Handle):
@@ -576,6 +582,99 @@ class DockerExecutor(Executor):
         self.paths = paths
         self.providers = providers or {}
         self.config_dir = config_dir
+
+    def exec_in_running(self, argv: list[str], timeout: float, *,
+                        env: dict[str, str] | None = None) -> tuple[int, str, str] | NotRunning:
+        """DM-R6: probe without creating, starting or seeding a container.
+
+        A private process group and pid record allow a second exec to kill
+        the container process on timeout. Killing only the Docker client
+        leaves its container process alive. Inspection and cleanup share the
+        overall timeout + 5 second deadline.
+        """
+        started = time.monotonic()
+        deadline = started + timeout
+        cleanup_deadline = deadline + 5
+
+        def remaining(until: float) -> float:
+            return max(0.001, until - time.monotonic())
+
+        try:
+            status = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Status}}", self.container],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=remaining(deadline))
+        except FileNotFoundError:
+            return NotRunning()
+        except subprocess.TimeoutExpired:
+            return 124, "", "container inspection timed out"
+        if status.returncode or status.stdout.strip() != "running":
+            return NotRunning()
+
+        pidfile = f"/tmp/multiagents-probe-{uuid.uuid4().hex}.pid"
+        wrapper = """import os, subprocess, sys
+try:
+    os.setsid()
+except PermissionError:
+    pass
+path = sys.argv[1]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, 'w') as stream:
+    stream.write(str(os.getpid()))
+try:
+    try:
+        rc = subprocess.call(sys.argv[2:], stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        rc = 127
+finally:
+    os.unlink(path)
+sys.exit(rc)
+"""
+        cleanup = "import os, signal, sys; p = sys.argv[1]; text = open(p).read().strip() if os.path.exists(p) else ''; pid = int(text) if text.isdigit() else 0; os.killpg(pid, signal.SIGKILL) if pid else None; os.unlink(p) if os.path.exists(p) else None"
+        command = ["docker", "exec", "--user", f"{os.getuid()}:{os.getgid()}"]
+        # Env files keep credentials out of the host process list. The
+        # running container retains its configured proxy environment.
+        with tempfile.NamedTemporaryFile(mode="w", prefix="multiagents-probe-") as envfile:
+            if env is not None:
+                envfile.write("".join(f"{k}={v}\n" for k, v in env.items()
+                                      if "\n" not in str(v)))
+                envfile.flush()
+                command += ["--env-file", envfile.name]
+            command += [self.container, "/usr/bin/python3", "-c", wrapper, pidfile, *argv]
+            child = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, start_new_session=True)
+            try:
+                out, err = child.communicate(timeout=remaining(deadline))
+                return child.returncode, out, err
+            except subprocess.TimeoutExpired:
+                killer = subprocess.Popen(
+                    ["docker", "exec", "--user", f"{os.getuid()}:{os.getgid()}",
+                     self.container, "/usr/bin/python3", "-c", cleanup, pidfile],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, start_new_session=True)
+                try:
+                    killer.wait(timeout=min(3, remaining(cleanup_deadline)))
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(killer.pid, signal.SIGKILL)
+                finally:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGKILL)
+                    for proc in (killer, child):
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            proc.wait(timeout=remaining(cleanup_deadline))
+                    child.stdout.close()
+                    child.stderr.close()
+                return 124, "", f"probe timed out after {timeout}s"
+            except BaseException:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(timeout=1)
+                child.stdout.close()
+                child.stderr.close()
+                raise
 
     # ------------------------------------------------------------- naming --
 

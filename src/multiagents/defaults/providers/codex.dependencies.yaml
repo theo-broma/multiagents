@@ -1,0 +1,612 @@
+# D3 native CLI dependencies; verified entries require real integration evidence.
+schema: 1
+provider: codex
+binary:
+  name: codex
+  version_command:
+  - --version
+  version_regex: (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)
+  version_stream: stdout
+dependencies:
+- id: layout.3
+  kind: layout
+  value: '3'
+  match: exact
+  used_by:
+  - providers.yaml#/codex/bin_versions_depth
+- id: state_path.codex
+  kind: state_path
+  value: .codex
+  match: exact
+  used_by:
+  - providers.yaml#/codex/container_private_home/0
+- id: flag.c
+  kind: flag
+  value: -c
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: flag.json
+  kind: flag
+  value: --json
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: flag.ignore-user-config
+  kind: flag
+  value: --ignore-user-config
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: flag.model
+  kind: flag
+  value: --model
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: flag.stdin
+  kind: flag
+  value: '-'
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.check-for-update-on-startup-false
+  kind: layout
+  value: check_for_update_on_startup=false
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.approval-policy-never
+  kind: layout
+  value: approval_policy="never"
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.sandbox-mode
+  kind: layout
+  value: sandbox_mode=
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.model-reasoning-effort
+  kind: layout
+  value: model_reasoning_effort=
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.read-only
+  kind: layout
+  value: read-only
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.workspace-write
+  kind: layout
+  value: workspace-write
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: layout.danger-full-access
+  kind: layout
+  value: danger-full-access
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: subcommand.exec
+  kind: subcommand
+  value: exec
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: subcommand.resume
+  kind: subcommand
+  value: resume
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::command
+- id: subcommand.mcp
+  kind: subcommand
+  value: mcp
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: subcommand.list
+  kind: subcommand
+  value: list
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.mcp-servers
+  kind: layout
+  value: mcp_servers=
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.features-multi-agent-false
+  kind: layout
+  value: features.multi_agent=false
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.command
+  kind: layout
+  value: command
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.args
+  kind: layout
+  value: args
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.env
+  kind: layout
+  value: env
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.enabled
+  kind: layout
+  value: enabled
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.required
+  kind: layout
+  value: required
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: layout.url
+  kind: layout
+  value: url
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: stream_field.name
+  kind: stream_field
+  value: name
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.transport
+  kind: stream_field
+  value: transport
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: stream_field.command
+  kind: stream_field
+  value: command
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.url
+  kind: stream_field
+  value: url
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::mcp_flags
+- id: env.codex-home
+  kind: env
+  value: CODEX_HOME
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::run_action
+- id: state_path.auth-json
+  kind: state_path
+  value: auth.json
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::run_profile
+- id: subcommand.login
+  kind: subcommand
+  value: login
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::check_action
+- id: subcommand.status
+  kind: subcommand
+  value: status
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::check_action
+- id: flag.device-auth
+  kind: flag
+  value: --device-auth
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::login_action
+- id: state_path.models-cache-json
+  kind: state_path
+  value: models_cache.json
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::models_action
+- id: stream_field.models
+  kind: stream_field
+  value: models
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::models_action
+- id: stream_field.slug
+  kind: stream_field
+  value: slug
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::models_action
+- id: stream_field.visibility
+  kind: stream_field
+  value: visibility
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::models_action
+- id: stream_field.display-name
+  kind: stream_field
+  value: display_name
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::models_action
+- id: stream_field.list
+  kind: stream_field
+  value: list
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::models_action
+- id: stream_field.type
+  kind: stream_field
+  value: type
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+- id: stream_field.thread-started
+  kind: stream_field
+  value: thread.started
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.thread-id
+  kind: stream_field
+  value: thread_id
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.turn-started
+  kind: stream_field
+  value: turn.started
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.turn-completed
+  kind: stream_field
+  value: turn.completed
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.turn-failed
+  kind: stream_field
+  value: turn.failed
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.usage
+  kind: stream_field
+  value: usage
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.input-tokens
+  kind: stream_field
+  value: input_tokens
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.cached-input-tokens
+  kind: stream_field
+  value: cached_input_tokens
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.output-tokens
+  kind: stream_field
+  value: output_tokens
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.error
+  kind: stream_field
+  value: error
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.message
+  kind: stream_field
+  value: message
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.item-started
+  kind: stream_field
+  value: item.started
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.item-updated
+  kind: stream_field
+  value: item.updated
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.item-completed
+  kind: stream_field
+  value: item.completed
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.item
+  kind: stream_field
+  value: item
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.status
+  kind: stream_field
+  value: status
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.agent-message
+  kind: stream_field
+  value: agent_message
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.text
+  kind: stream_field
+  value: text
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.command-execution
+  kind: stream_field
+  value: command_execution
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.mcp-tool-call
+  kind: stream_field
+  value: mcp_tool_call
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.file-change
+  kind: stream_field
+  value: file_change
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.web-search
+  kind: stream_field
+  value: web_search
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.id
+  kind: stream_field
+  value: id
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.server
+  kind: stream_field
+  value: server
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.tool
+  kind: stream_field
+  value: tool
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.arguments
+  kind: stream_field
+  value: arguments
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.changes
+  kind: stream_field
+  value: changes
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: stream_field.query
+  kind: stream_field
+  value: query
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::Normalizer.event
+- id: state_path.sessions
+  kind: state_path
+  value: sessions
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_rollout_files
+- id: state_path.rollout-jsonl
+  kind: state_path
+  value: '**/rollout-*.jsonl'
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_rollout_files
+- id: stream_field.timestamp
+  kind: stream_field
+  value: timestamp
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+- id: stream_field.payload
+  kind: stream_field
+  value: payload
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+- id: stream_field.token-count
+  kind: stream_field
+  value: token_count
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+- id: stream_field.rate-limits
+  kind: stream_field
+  value: rate_limits
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+- id: stream_field.primary
+  kind: stream_field
+  value: primary
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+  - src/multiagents/defaults/providers/codex.py::_snapshot_windows
+- id: stream_field.secondary
+  kind: stream_field
+  value: secondary
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_event
+  - src/multiagents/defaults/providers/codex.py::_snapshot_windows
+- id: stream_field.window-minutes
+  kind: stream_field
+  value: window_minutes
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_window
+- id: stream_field.used-percent
+  kind: stream_field
+  value: used_percent
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_window
+- id: stream_field.resets-at
+  kind: stream_field
+  value: resets_at
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_valid_window
+- id: subcommand.app-server
+  kind: subcommand
+  value: app-server
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.method
+  kind: stream_field
+  value: method
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.initialize
+  kind: stream_field
+  value: initialize
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.params
+  kind: stream_field
+  value: params
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.clientinfo
+  kind: stream_field
+  value: clientInfo
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.version
+  kind: stream_field
+  value: version
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.initialized
+  kind: stream_field
+  value: initialized
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.account-ratelimits-read
+  kind: stream_field
+  value: account/rateLimits/read
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.result
+  kind: stream_field
+  value: result
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_live_rate_limits
+- id: stream_field.ratelimitsbylimitid
+  kind: stream_field
+  value: rateLimitsByLimitId
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_rate_limits_windows
+- id: stream_field.ratelimits
+  kind: stream_field
+  value: rateLimits
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_rate_limits_windows
+- id: stream_field.ratelimitreachedtype
+  kind: stream_field
+  value: rateLimitReachedType
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_rate_limits_windows
+- id: stream_field.usedpercent
+  kind: stream_field
+  value: usedPercent
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_snapshot_windows
+- id: stream_field.windowdurationmins
+  kind: stream_field
+  value: windowDurationMins
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_snapshot_windows
+- id: stream_field.resetsat
+  kind: stream_field
+  value: resetsAt
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_snapshot_windows
+- id: text_match.authentication
+  kind: text_match
+  value: authentication
+  match: exact
+  used_by:
+  - src/multiagents/defaults/providers/codex.py::_rpc_error_kind
+verified: []
+not_dependencies:
+- selector: /spawn
+  reason: The Codex adapter consumes or emits this internal multiagents interface; native Codex dependencies
+    are declared against codex.py.
+- selector: /stream
+  reason: The Codex adapter consumes or emits this internal multiagents interface; native Codex dependencies
+    are declared against codex.py.
+- selector: /mcp/args
+  reason: The Codex adapter consumes or emits this internal multiagents interface; native Codex dependencies
+    are declared against codex.py.

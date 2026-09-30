@@ -1,0 +1,580 @@
+# D3 native CLI dependencies; verified entries require real integration evidence.
+schema: 1
+provider: claude
+binary:
+  name: claude
+  version_command:
+  - --version
+  version_regex: (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)
+  version_stream: stdout
+dependencies:
+- id: flag.p
+  kind: flag
+  value: -p
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/args/0
+- id: flag.model
+  kind: flag
+  value: --model
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/args/2
+- id: flag.output-format
+  kind: flag
+  value: --output-format
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/args/4
+- id: text_match.stream-json
+  kind: text_match
+  value: stream-json
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/args/5
+- id: flag.verbose
+  kind: flag
+  value: --verbose
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/args/6
+- id: flag.strict-mcp-config
+  kind: flag
+  value: --strict-mcp-config
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/args/7
+- id: flag.resume
+  kind: flag
+  value: --resume
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/resume/0
+- id: flag.permission-mode
+  kind: flag
+  value: --permission-mode
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/permission/full/0
+  - providers.yaml#/claude/spawn/permission/sandbox/0
+- id: text_match.bypasspermissions
+  kind: text_match
+  value: bypassPermissions
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/permission/full/1
+  - providers.yaml#/claude/spawn/permission/sandbox/1
+- id: flag.restricted
+  kind: flag
+  value: --restricted
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/permission/readonly/0
+- id: flag.tools
+  kind: flag
+  value: --tools
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/permission/readonly/1
+- id: text_match.read-glob-grep-webfetch
+  kind: text_match
+  value: Read,Glob,Grep,WebFetch
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/permission/readonly/2
+- id: flag.max-budget-usd
+  kind: flag
+  value: --max-budget-usd
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/optional/max_budget_usd/0
+- id: flag.autocompact
+  kind: flag
+  value: --autocompact
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/optional/autocompact/0
+- id: state_path.claude
+  kind: state_path
+  value: .claude
+  match: exact
+  used_by:
+  - providers.yaml#/claude/home_links/0
+  - providers.yaml#/claude/container_private_home/0
+- id: flag.mcp-config
+  kind: flag
+  value: --mcp-config
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/args/0
+- id: stream_field.session-id
+  kind: stream_field
+  value: session_id
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/session_id_paths/0
+- id: stream_field.type
+  kind: stream_field
+  value: type
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/match
+  - providers.yaml#/claude/stream/rules/1/match
+  - providers.yaml#/claude/stream/rules/2/match
+  - providers.yaml#/claude/stream/rules/3/match
+  - providers.yaml#/claude/stream/rules/4/match
+  - providers.yaml#/claude/stream/rules/5/match
+  - providers.yaml#/claude/stream/rules/6/match
+  - providers.yaml#/claude/stream/rules/7/match
+- id: stream_field.assistant
+  kind: stream_field
+  value: assistant
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/match/type
+  - providers.yaml#/claude/stream/rules/1/match/type
+  - providers.yaml#/claude/stream/rules/3/match/type
+- id: stream_field.message-content-type-tool-use-type
+  kind: stream_field
+  value: message.content[type=tool_use].type
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/match
+- id: stream_field.tool-use
+  kind: stream_field
+  value: tool_use
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/match/message.content[type=tool_use].type
+- id: stream_field.message-content-type-tool-use-name
+  kind: stream_field
+  value: message.content[type=tool_use].name
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/fields/name
+- id: stream_field.message-content-type-tool-use-input
+  kind: stream_field
+  value: message.content[type=tool_use].input
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/fields/args
+- id: stream_field.message-id
+  kind: stream_field
+  value: message.id
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/0/fields/turn
+  - providers.yaml#/claude/stream/rules/1/fields/turn
+  - providers.yaml#/claude/stream/rules/3/fields/turn
+- id: stream_field.message-content-type-text-type
+  kind: stream_field
+  value: message.content[type=text].type
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/1/match
+- id: stream_field.text
+  kind: stream_field
+  value: text
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/1/match/message.content[type=text].type
+- id: stream_field.message-content-type-text-text
+  kind: stream_field
+  value: message.content[type=text].text
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/1/fields/text
+- id: stream_field.result
+  kind: stream_field
+  value: result
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/match/type
+- id: stream_field.subtype
+  kind: stream_field
+  value: subtype
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/fields/status
+  - providers.yaml#/claude/stream/rules/2/status_map
+- id: stream_field.usage
+  kind: stream_field
+  value: usage
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/fields/tokens
+- id: stream_field.total-cost-usd
+  kind: stream_field
+  value: total_cost_usd
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/fields/cost
+- id: stream_field.stop-reason
+  kind: stream_field
+  value: stop_reason
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/status_map
+- id: stream_field.refusal
+  kind: stream_field
+  value: refusal
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/status_map/stop_reason
+- id: stream_field.error-max-turns
+  kind: stream_field
+  value: error_max_turns
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/2/status_map/subtype
+- id: stream_field.user
+  kind: stream_field
+  value: user
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/4/match/type
+- id: stream_field.system
+  kind: stream_field
+  value: system
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/5/match/type
+- id: stream_field.rate-limit-event
+  kind: stream_field
+  value: rate_limit_event
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/6/match/type
+- id: stream_field.tool-progress
+  kind: stream_field
+  value: tool_progress
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/7/match/type
+- id: text_match.hit-your-monthly-spend-limit
+  kind: text_match
+  value: hit your monthly spend limit
+  match: exact
+  used_by:
+  - providers.yaml#/claude/transcript/limit_markers/0/match
+- id: text_match.hit-your-usage-limit
+  kind: text_match
+  value: hit your usage limit
+  match: exact
+  used_by:
+  - providers.yaml#/claude/transcript/limit_markers/1/match
+- id: text_match.session-limit-reached
+  kind: text_match
+  value: session limit reached
+  match: exact
+  used_by:
+  - providers.yaml#/claude/transcript/limit_markers/2/match
+- id: state_path.claude-settings-json
+  kind: state_path
+  value: .claude/settings.json
+  match: exact
+  used_by:
+  - providers.yaml#/claude/container_private_seed/0
+- id: state_path.claude-daemon-lock
+  kind: state_path
+  value: .claude/daemon.lock
+  match: exact
+  used_by:
+  - providers.yaml#/claude/container_private_reset/0
+- id: state_path.claude-daemon-status-json
+  kind: state_path
+  value: .claude/daemon.status.json
+  match: exact
+  used_by:
+  - providers.yaml#/claude/container_private_reset/1
+- id: state_path.claude-daemon
+  kind: state_path
+  value: .claude/daemon
+  match: exact
+  used_by:
+  - providers.yaml#/claude/container_private_reset/2
+- id: state_path.claude-oauth-refresh-lock
+  kind: state_path
+  value: .claude/.oauth_refresh.lock
+  match: exact
+  used_by:
+  - providers.yaml#/claude/container_private_reset/3
+- id: state_path.claude-json
+  kind: state_path
+  value: .claude.json
+  match: exact
+  used_by:
+  - providers.yaml#/claude/home_copy/0
+- id: layout.mcpservers
+  kind: layout
+  value: mcpServers
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/config
+- id: layout.type
+  kind: layout
+  value: type
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/config/mcpServers/multiagents
+- id: layout.stdio
+  kind: layout
+  value: stdio
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/config/mcpServers/multiagents/type
+- id: layout.command
+  kind: layout
+  value: command
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/config/mcpServers/multiagents
+- id: layout.args
+  kind: layout
+  value: args
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/config/mcpServers/multiagents
+- id: layout.env
+  kind: layout
+  value: env
+  match: exact
+  used_by:
+  - providers.yaml#/claude/mcp/config/mcpServers/multiagents
+- id: subcommand.auth
+  kind: subcommand
+  value: auth
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+  - src/multiagents/defaults/providers/claude.sh::case:login
+- id: subcommand.status
+  kind: subcommand
+  value: status
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: flag.json
+  kind: flag
+  value: --json
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: stream_field.loggedin
+  kind: stream_field
+  value: loggedIn
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: stream_field.email
+  kind: stream_field
+  value: email
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: stream_field.expiresat
+  kind: stream_field
+  value: expiresAt
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+  - src/multiagents/defaults/providers/claude.sh::fn:project_token
+- id: stream_field.refreshtokenexpiresat
+  kind: stream_field
+  value: refreshTokenExpiresAt
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: stream_field.refreshtoken
+  kind: stream_field
+  value: refreshToken
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: state_path.credentials-json
+  kind: state_path
+  value: .credentials.json
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:check
+- id: subcommand.login
+  kind: subcommand
+  value: login
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:login
+- id: env.claude-config-dir
+  kind: env
+  value: CLAUDE_CONFIG_DIR
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:login
+  - src/multiagents/defaults/providers/claude.sh::fn:claude_sessions_root
+- id: state_path.projects
+  kind: state_path
+  value: /projects
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::fn:claude_sessions_root
+- id: stream_field.accesstoken
+  kind: stream_field
+  value: accessToken
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::fn:project_token
+- id: stream_field.scopes
+  kind: stream_field
+  value: scopes
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::fn:project_token
+- id: stream_field.subscriptiontype
+  kind: stream_field
+  value: subscriptionType
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::fn:project_token
+- id: stream_field.ratelimittier
+  kind: stream_field
+  value: rateLimitTier
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::fn:project_token
+- id: flag.p-2
+  kind: flag
+  value: -p
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:refresh
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: flag.model-2
+  kind: flag
+  value: --model
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:refresh
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: text_match.haiku
+  kind: text_match
+  value: haiku
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:refresh
+- id: flag.append-system-prompt-file
+  kind: flag
+  value: --append-system-prompt-file
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: flag.session-id
+  kind: flag
+  value: --session-id
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: flag.continue
+  kind: flag
+  value: --continue
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: flag.autocompact-2
+  kind: flag
+  value: --autocompact
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: flag.mcp-config-2
+  kind: flag
+  value: --mcp-config
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: flag.strict-mcp-config-2
+  kind: flag
+  value: --strict-mcp-config
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: flag.resume-2
+  kind: flag
+  value: --resume
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: flag.permission-mode-2
+  kind: flag
+  value: --permission-mode
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:launch
+- id: subcommand.compact
+  kind: subcommand
+  value: /compact
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: flag.output-format-2
+  kind: flag
+  value: --output-format
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: stream_field.compact-boundary
+  kind: stream_field
+  value: compact_boundary
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: stream_field.compactmetadata
+  kind: stream_field
+  value: compactMetadata
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: stream_field.trigger
+  kind: stream_field
+  value: trigger
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: stream_field.manual
+  kind: stream_field
+  value: manual
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: stream_field.pretokens
+  kind: stream_field
+  value: preTokens
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: stream_field.posttokens
+  kind: stream_field
+  value: postTokens
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/claude.sh::case:compact
+- id: env.anthropic-base-url
+  kind: env
+  value: ANTHROPIC_BASE_URL
+  match: fragment
+  used_by:
+  - src/multiagents/executor/docker.py::DockerExecutor.run_args
+  note: Shared executor code is outside integration_digest.
+- id: endpoint.anthropic-beta
+  kind: endpoint
+  value: anthropic-beta
+  match: exact
+  used_by:
+  - src/multiagents/budget.py::fetch_claude_usage
+- id: endpoint.oauth-2025-04-20
+  kind: endpoint
+  value: oauth-2025-04-20
+  match: exact
+  used_by:
+  - src/multiagents/budget.py::fetch_claude_usage
+verified: []

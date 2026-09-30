@@ -1,0 +1,440 @@
+# D3 native CLI dependencies; verified entries require real integration evidence.
+schema: 1
+provider: agy
+binary:
+  name: agy
+  version_command:
+  - --version
+  version_regex: (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)
+  version_stream: stdout
+dependencies:
+- id: flag.p
+  kind: flag
+  value: -p
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/0
+- id: flag.model
+  kind: flag
+  value: --model
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/2
+- id: flag.output-format
+  kind: flag
+  value: --output-format
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/4
+- id: text_match.stream-json
+  kind: text_match
+  value: stream-json
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/5
+- id: flag.add-dir
+  kind: flag
+  value: --add-dir
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/6
+- id: flag.print-timeout
+  kind: flag
+  value: --print-timeout
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/8
+- id: flag.conversation
+  kind: flag
+  value: --conversation
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/resume/0
+- id: flag.dangerously-skip-permissions
+  kind: flag
+  value: --dangerously-skip-permissions
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/permission/full/0
+  - providers.yaml#/agy/spawn/permission/sandbox/1
+  - providers.yaml#/agy/spawn/permission/readonly/1
+- id: flag.sandbox
+  kind: flag
+  value: --sandbox
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/permission/sandbox/0
+  - providers.yaml#/agy/spawn/permission/readonly/0
+- id: flag.effort
+  kind: flag
+  value: --effort
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/optional/effort/0
+- id: subcommand.agy
+  kind: subcommand
+  value: agy
+  match: exact
+  used_by:
+  - providers.yaml#/agy/models_cmd/0
+- id: subcommand.models
+  kind: subcommand
+  value: models
+  match: exact
+  used_by:
+  - providers.yaml#/agy/models_cmd/1
+- id: state_path.gemini-antigravity-cli
+  kind: state_path
+  value: .gemini/antigravity-cli
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/0
+- id: state_path.gemini-antigravity
+  kind: state_path
+  value: .gemini/antigravity
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/1
+- id: state_path.gemini-config
+  kind: state_path
+  value: .gemini/config
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/2
+- id: state_path.gemini-oauth-creds-json
+  kind: state_path
+  value: .gemini/oauth_creds.json
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/3
+- id: state_path.gemini-google-accounts-json
+  kind: state_path
+  value: .gemini/google_accounts.json
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/4
+- id: state_path.gemini-settings-json
+  kind: state_path
+  value: .gemini/settings.json
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/5
+- id: state_path.gemini-installation-id
+  kind: state_path
+  value: .gemini/installation_id
+  match: exact
+  used_by:
+  - providers.yaml#/agy/home_links/6
+- id: text_match.this-request-was-blocked-by-gemini-s-filters
+  kind: text_match
+  value: This request was blocked by Gemini's filters.*
+  match: exact
+  used_by:
+  - providers.yaml#/agy/refusal_markers/0
+- id: text_match.print-timeout
+  kind: text_match
+  value: print timeout
+  match: exact
+  used_by:
+  - providers.yaml#/agy/truncation_markers/0
+- id: stream_field.init-conversation-id
+  kind: stream_field
+  value: init.conversation_id
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/session_id_paths/0
+- id: stream_field.step-update-conversation-id
+  kind: stream_field
+  value: step_update.conversation_id
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/session_id_paths/1
+- id: stream_field.result-conversation-id
+  kind: stream_field
+  value: result.conversation_id
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/session_id_paths/2
+- id: stream_field.conversation-id
+  kind: stream_field
+  value: conversation_id
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/session_id_paths/3
+- id: stream_field.event
+  kind: stream_field
+  value: event
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/match
+  - providers.yaml#/agy/stream/rules/1/match
+  - providers.yaml#/agy/stream/rules/2/match
+  - providers.yaml#/agy/stream/rules/3/match
+- id: stream_field.step-update
+  kind: stream_field
+  value: step_update
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/match/event
+  - providers.yaml#/agy/stream/rules/1/match/event
+- id: stream_field.step-update-step-type
+  kind: stream_field
+  value: step_update.step_type
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/match
+- id: stream_field.tool
+  kind: stream_field
+  value: tool
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/match/step_update.step_type
+- id: stream_field.step-update-tool-name
+  kind: stream_field
+  value: step_update.tool_name
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/fields/name
+- id: stream_field.step-update-tool-info-parameters
+  kind: stream_field
+  value: step_update.tool_info.parameters
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/fields/args
+- id: stream_field.step-update-state
+  kind: stream_field
+  value: step_update.state
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/fields/state
+  - providers.yaml#/agy/stream/rules/1/fields/state
+- id: stream_field.step-update-step-index
+  kind: stream_field
+  value: step_update.step_index
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/0/fields/step
+  - providers.yaml#/agy/stream/rules/1/fields/step
+- id: stream_field.step-update-usage
+  kind: stream_field
+  value: step_update.usage
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/1/fields/tokens
+- id: stream_field.result
+  kind: stream_field
+  value: result
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/2/match/event
+- id: stream_field.result-status
+  kind: stream_field
+  value: result.status
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/2/fields/status
+- id: stream_field.result-response
+  kind: stream_field
+  value: result.response
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/2/fields/text
+- id: stream_field.result-usage
+  kind: stream_field
+  value: result.usage
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/2/fields/tokens
+- id: stream_field.init
+  kind: stream_field
+  value: init
+  match: exact
+  used_by:
+  - providers.yaml#/agy/stream/rules/3/match/event
+- id: state_path.gemini
+  kind: state_path
+  value: .gemini
+  match: exact
+  used_by:
+  - providers.yaml#/agy/container_private_home/0
+- id: state_path.gemini-config-mcp-config-json
+  kind: state_path
+  value: .gemini/config/mcp_config.json
+  match: exact
+  used_by:
+  - providers.yaml#/agy/mcp/home_file
+- id: layout.mcpservers
+  kind: layout
+  value: mcpServers
+  match: exact
+  used_by:
+  - providers.yaml#/agy/mcp/config
+- id: layout.command
+  kind: layout
+  value: command
+  match: exact
+  used_by:
+  - providers.yaml#/agy/mcp/config/mcpServers/multiagents
+- id: layout.args
+  kind: layout
+  value: args
+  match: exact
+  used_by:
+  - providers.yaml#/agy/mcp/config/mcpServers/multiagents
+- id: layout.env
+  kind: layout
+  value: env
+  match: exact
+  used_by:
+  - providers.yaml#/agy/mcp/config/mcpServers/multiagents
+- id: text_match.authentication-required
+  kind: text_match
+  value: authentication required
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:check
+- id: text_match.authentication-failed
+  kind: text_match
+  value: authentication failed
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:check
+- id: text_match.log-in
+  kind: text_match
+  value: log in
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:check
+- id: text_match.status-success
+  kind: text_match
+  value: '"status":"SUCCESS"'
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:check
+- id: text_match.gemini-3-8-flash-low
+  kind: text_match
+  value: gemini-3.8-flash-low
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:check
+- id: subcommand.usage
+  kind: subcommand
+  value: /usage
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: flag.log-file
+  kind: flag
+  value: --log-file
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: flag.print-timeout-2
+  kind: flag
+  value: --print-timeout
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: flag.output-format-2
+  kind: flag
+  value: --output-format
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: flag.p-2
+  kind: flag
+  value: -p
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.command
+  kind: stream_field
+  value: command
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.data
+  kind: stream_field
+  value: data
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.groups
+  kind: stream_field
+  value: groups
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.name
+  kind: stream_field
+  value: name
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.description
+  kind: stream_field
+  value: description
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.buckets
+  kind: stream_field
+  value: buckets
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.remaining-fraction
+  kind: stream_field
+  value: remaining_fraction
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.id
+  kind: stream_field
+  value: id
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.window
+  kind: stream_field
+  value: window
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: stream_field.reset-time
+  kind: stream_field
+  value: reset_time
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: text_match.gemini
+  kind: text_match
+  value: gemini
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:budget
+- id: subcommand.mcp
+  kind: subcommand
+  value: mcp
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:prepare
+- id: subcommand.add
+  kind: subcommand
+  value: add
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:prepare
+- id: flag.continue
+  kind: flag
+  value: --continue
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:launch
+- id: flag.prompt-interactive
+  kind: flag
+  value: --prompt-interactive
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/agy.sh::case:launch
+verified: []

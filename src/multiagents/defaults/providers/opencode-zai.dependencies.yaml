@@ -1,0 +1,478 @@
+# D3 native CLI dependencies; verified entries require real integration evidence.
+schema: 1
+provider: opencode-zai
+binary:
+  name: opencode
+  version_command:
+  - --version
+  version_regex: (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)
+  version_stream: stdout
+dependencies:
+- id: subcommand.run
+  kind: subcommand
+  value: run
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/args/0
+- id: flag.m
+  kind: flag
+  value: -m
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/args/2
+- id: flag.format
+  kind: flag
+  value: --format
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/args/4
+- id: text_match.json
+  kind: text_match
+  value: json
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/args/5
+- id: flag.dir
+  kind: flag
+  value: --dir
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/args/6
+- id: flag.s
+  kind: flag
+  value: -s
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/resume/0
+- id: flag.auto
+  kind: flag
+  value: --auto
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/permission/full/0
+  - providers.yaml#/opencode-zai/spawn/permission/sandbox/0
+  - providers.yaml#/opencode-zai/spawn/permission/readonly/0
+- id: flag.variant
+  kind: flag
+  value: --variant
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/spawn/optional/variant/0
+- id: subcommand.opencode
+  kind: subcommand
+  value: opencode
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/models_cmd/0
+- id: subcommand.models
+  kind: subcommand
+  value: models
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/models_cmd/1
+- id: state_path.local-share-opencode
+  kind: state_path
+  value: .local/share/opencode
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/home_links/0
+- id: state_path.config-opencode
+  kind: state_path
+  value: .config/opencode
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/home_links/1
+- id: state_path.cache-opencode
+  kind: state_path
+  value: .cache/opencode
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/home_links/2
+- id: stream_field.sessionid
+  kind: stream_field
+  value: sessionID
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/session_id_paths/0
+- id: stream_field.type
+  kind: stream_field
+  value: type
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/0/match
+  - providers.yaml#/opencode-zai/stream/rules/1/match
+  - providers.yaml#/opencode-zai/stream/rules/2/match
+  - providers.yaml#/opencode-zai/stream/rules/3/match
+- id: stream_field.text
+  kind: stream_field
+  value: text
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/0/match/type
+- id: stream_field.part-text
+  kind: stream_field
+  value: part.text
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/0/fields/text
+- id: stream_field.tool-use
+  kind: stream_field
+  value: tool_use
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/1/match/type
+- id: stream_field.part-tool
+  kind: stream_field
+  value: part.tool
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/1/fields/name
+- id: stream_field.part-state-input
+  kind: stream_field
+  value: part.state.input
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/1/fields/args
+- id: stream_field.part-state-status
+  kind: stream_field
+  value: part.state.status
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/1/fields/state
+- id: stream_field.step-finish
+  kind: stream_field
+  value: step_finish
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/2/match/type
+- id: stream_field.part-tokens
+  kind: stream_field
+  value: part.tokens
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/2/fields/tokens
+- id: stream_field.part-cost
+  kind: stream_field
+  value: part.cost
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/2/fields/cost
+- id: stream_field.part-reason
+  kind: stream_field
+  value: part.reason
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/2/fields/state
+  - providers.yaml#/opencode-zai/stream/rules/2/status_map
+- id: stream_field.content-filter
+  kind: stream_field
+  value: content-filter
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/2/status_map/part.reason
+- id: stream_field.length
+  kind: stream_field
+  value: length
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/2/status_map/part.reason
+- id: stream_field.step-start
+  kind: stream_field
+  value: step_start
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/3/match/type
+- id: layout.schema
+  kind: layout
+  value: $schema
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config
+- id: layout.https-opencode-ai-config-json
+  kind: layout
+  value: https://opencode.ai/config.json
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config/$schema
+- id: layout.mcp
+  kind: layout
+  value: mcp
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config
+- id: layout.type
+  kind: layout
+  value: type
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config/mcp/multiagents
+- id: layout.local
+  kind: layout
+  value: local
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config/mcp/multiagents/type
+- id: layout.enabled
+  kind: layout
+  value: enabled
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config/mcp/multiagents
+- id: layout.command
+  kind: layout
+  value: command
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config/mcp/multiagents
+- id: layout.environment
+  kind: layout
+  value: environment
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/config/mcp/multiagents
+- id: env.opencode-config
+  kind: env
+  value: OPENCODE_CONFIG
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/mcp/env
+- id: subcommand.providers
+  kind: subcommand
+  value: providers
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:check
+  - src/multiagents/defaults/providers/opencode.sh::case:login
+- id: subcommand.login
+  kind: subcommand
+  value: login
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:login
+- id: state_path.opencode-auth-json
+  kind: state_path
+  value: /opencode/auth.json
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:budget
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: env.xdg-data-home
+  kind: env
+  value: XDG_DATA_HOME
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:budget
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.key
+  kind: stream_field
+  value: key
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:budget
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.usage
+  kind: stream_field
+  value: usage
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:budget
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: flag.agent
+  kind: flag
+  value: --agent
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:launch
+- id: flag.continue
+  kind: flag
+  value: --continue
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:launch
+- id: env.opencode-config-2
+  kind: env
+  value: OPENCODE_CONFIG
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:launch
+- id: layout.schema-2
+  kind: layout
+  value: $schema
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.https-opencode-ai-config-json-2
+  kind: layout
+  value: https://opencode.ai/config.json
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.agent
+  kind: layout
+  value: agent
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.orchestrator
+  kind: layout
+  value: orchestrator
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.mode
+  kind: layout
+  value: mode
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.primary
+  kind: layout
+  value: primary
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.prompt
+  kind: layout
+  value: prompt
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.description
+  kind: layout
+  value: description
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.model
+  kind: layout
+  value: model
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.mcp-2
+  kind: layout
+  value: mcp
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.type-2
+  kind: layout
+  value: type
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.local-2
+  kind: layout
+  value: local
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.enabled-2
+  kind: layout
+  value: enabled
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.command-2
+  kind: layout
+  value: command
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: layout.cwd
+  kind: layout
+  value: cwd
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::case:prepare
+- id: stream_field.zai-coding-plan
+  kind: stream_field
+  value: zai-coding-plan
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.success
+  kind: stream_field
+  value: success
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.code
+  kind: stream_field
+  value: code
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.data
+  kind: stream_field
+  value: data
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.limits
+  kind: stream_field
+  value: limits
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.type-2
+  kind: stream_field
+  value: type
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.tokens-limit
+  kind: stream_field
+  value: TOKENS_LIMIT
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.credit-limit
+  kind: stream_field
+  value: CREDIT_LIMIT
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.percentage
+  kind: stream_field
+  value: percentage
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.unit
+  kind: stream_field
+  value: unit
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.number
+  kind: stream_field
+  value: number
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.nextresettime
+  kind: stream_field
+  value: nextResetTime
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: stream_field.currentvalue
+  kind: stream_field
+  value: currentValue
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: endpoint.https-api-z-ai
+  kind: endpoint
+  value: https://api.z.ai
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+- id: endpoint.api-monitor-usage-quota-limit
+  kind: endpoint
+  value: /api/monitor/usage/quota/limit
+  match: fragment
+  used_by:
+  - src/multiagents/defaults/providers/opencode.sh::fn:zai_py
+verified: []
