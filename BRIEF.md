@@ -651,6 +651,11 @@ ag-179b69 (D1) and ag-a43782 (H3 coverage) were limited at 20:19 CEST; both have
 - Researcher, reviewer and adversary use codex. If codex is down, wait for it; claude is reserved by the user for the orchestrator and tester.
 - `merge_agent(into=<worktree PATH>)` works for handing one run's work to another run; a node id is refused.
 
+**2026-09-30 ~03:10 UTC:**
+- **Merged ag-e67fb5, PS-R2a/PS-R2b (6e69bb1).** This was the first GLM run: glm-5.3 low, 230 s, clean, no tests touched, 716 passed.
+- **Still in flight:** ag-7fbf31 (H11) and ag-d61f60 (D1 fixes).
+- **Next** is unchanged from handoff #3.
+
 **Not in this phase:**
 - phases 2 and 3 of the review (the 72 by-design reds stay red);
 - tmux step 2;
