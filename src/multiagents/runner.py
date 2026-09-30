@@ -60,7 +60,8 @@ from .launch_limits import LaunchLimits
 from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
-from .tree import TERMINAL, Node, Tree, deferred_malformed, new_id, node_from_raw, now
+from .tree import (ACTIVE, DRIVER_ROLES, TERMINAL, Node, Tree,
+                   deferred_malformed, new_id, node_from_raw, now)
 from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
@@ -634,6 +635,11 @@ class Runner:
             budget = read_provider(provider.name, provider, self.executor(),
                                    global_config_dir(), self.paths.config,
                                    limits=self.config.limits)
+            if budget.stale:
+                # RM-R4c: a reading that routes as unknown feeds no
+                # prediction — its raw headroom must not enter the burn
+                # series the wind-down projects a wall from.
+                return
             self.tree.note_headroom(provider.name, budget.headroom,
                                     self.tree.rollup_usage().get("cost_usd", 0))
         except Exception:
@@ -658,7 +664,11 @@ class Runner:
         min_span = budget_number(budget_cfg, "burn_min_span_seconds", zero_ok=True)
         min_samples = budget_number(budget_cfg, "burn_min_samples", zero_ok=True)
         for name, budget in budgets.items():
-            if not budget.usable or budget.cooldown_until:
+            # RM-R4c: a stale reading routes as unknown (RM-R4b), so it is
+            # not evidence that a wall is minutes away — skipping only
+            # `unusable` let the stale raw number wind down the very
+            # provider the demotion had just made usable again.
+            if budget.stale or not budget.usable or budget.cooldown_until:
                 continue
             burn = self.tree.burn(name, min_span_seconds=min_span,
                                   min_samples=min_samples)
@@ -840,6 +850,60 @@ class Runner:
                 spec, "limits.max_concurrent", max_concurrent, "tree",
                 notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
                 f"{len(active)} already running"))
+
+    def _admission_reserved(self, spec: AgentSpec, node: Node) -> None:
+        """RM-R1a: the resumed consult's admission, with the slot reserved.
+
+        `_admission` alone checks and returns, and the resuming node only
+        holds a slot once its process is up — so two resumes competing for
+        the last slot could both pass while the other's node still read
+        `idle`, and both would launch. Here the check and the reservation
+        are one tree transaction: the node is written `pending`, the status
+        that always holds a slot (`_occupies_slot`), only when the count
+        taken in that same transaction says there is room. A refusal raises
+        before any write, so the conversation stays idle, exactly as
+        RM-R1 requires; `_release_reserved_slot` gives the slot back when
+        the turn fails after reserving.
+        """
+        limits = self.config.limits
+        max_concurrent = int(limits.get("max_concurrent", 4))
+        active = 0
+        with self.tree.transaction() as data:
+            for key, raw in data["nodes"].items():
+                if (key == node.id or raw.get("status") not in ACTIVE
+                        or raw.get("role", "") in DRIVER_ROLES):
+                    continue
+                try:
+                    other = node_from_raw(raw, key)
+                except (TypeError, ValueError):
+                    continue                  # HA-R12: a malformed entry is skipped
+                if _occupies_slot(other):
+                    active += 1
+            if active < max_concurrent:
+                entry = data["nodes"].get(node.id)
+                if entry is not None:
+                    entry["status"] = "pending"
+                return
+        # The refusal is recorded OUTSIDE the transaction: `_refused` writes
+        # a notice, and holding the tree's flock while it does would ask the
+        # same lock of a second file descriptor.
+        raise RuntimeError(self._refused(
+            f"{active} agents already running (max_concurrent={max_concurrent}). "
+            f"Wait for one to finish or stop it.",
+            spec, "limits.max_concurrent", max_concurrent, "tree",
+            notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
+            f"{active} already running"))
+
+    def _release_reserved_slot(self, node_id: str) -> None:
+        """RM-R1a: give back the slot a reserved resumed turn did not use.
+
+        Only a `pending` node is touched — once the turn is `running` the
+        slot belongs to the run, and its own finalization releases it.
+        """
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            if entry is not None and entry.get("status") == "pending":
+                entry["status"] = "idle"
 
     def _preflight(self, spec: AgentSpec, workdir: str | None = None,
                    budget_tag: str = "", *, pinned: bool = False) -> None:
@@ -1398,8 +1462,16 @@ class Runner:
             return spec
         explicit = False
         if provider.name != spec.provider:
-            _, overrides = spec.fallback_for(provider.name)
-            explicit = bool(overrides.get("effort"))
+            # RM-R5b: explicitness belongs to the ROUTE the model came from,
+            # not to the name routing landed on. When the landed provider is
+            # a family sibling of the route the effort was written on, that
+            # route travelled with the launch — its model did — and its
+            # effort is as explicit here as it would be on the route's own
+            # provider.
+            _, route = self._routed_spec(spec, provider.name)
+            if route:
+                _, overrides = spec.fallback_for(route)
+                explicit = bool(overrides.get("effort"))
         if explicit:
             raise ValueError(
                 f"refusing to start {spec.name!r} on {provider.name}: model "
@@ -2012,6 +2084,10 @@ class Runner:
         self._half_open(budgets, cooldowns)
         spend_now = self.tree.rollup_usage().get("cost_usd", 0)
         for name, entry in budgets.items():
+            # RM-R4c: a reading that routes as unknown is not a sample — its
+            # raw headroom must not enter the burn series.
+            if entry.stale:
+                continue
             self.tree.note_headroom(name, entry.headroom, spend_now)
         before_wind_down = copy.deepcopy(budgets)
         self._wind_down(budgets)
@@ -2051,13 +2127,19 @@ class Runner:
             # startup-blocked — a budget-exhausted preferred provider is
             # exactly when its own fallbacks should speak up. A pinned start
             # has no tiers: it asked for one provider.
+            # RM-R2b: a disabled sibling is never a route — including the
+            # family list's own entry for a listed key. `families` lists
+            # every provider, enabled or not, and a disabled one has no
+            # budget reading to answer the room question with.
             routes: list[str] = []
             if not model:
                 family_of = providers_mod.families(self.providers)
                 for name in (spec.models or spec.extra.get("models") or {}):
+                    here = self.providers.get(name)
+                    if here is not None and not here.enabled:
+                        continue
                     if name not in routes:
                         routes.append(name)
-                    here = self.providers.get(name)
                     for sibling in (family_of.get(here.family or name, [])
                                     if here is not None else []):
                         if sibling not in routes and self.providers[sibling].enabled:
@@ -2181,6 +2263,13 @@ class Runner:
                 if overrides:
                     routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
                 spec = routed
+            # RM-R7: the model/effort pair is settled BEFORE the startup
+            # claim, so a refusal here takes neither the half-open provider's
+            # only probe nor a startup.json run record — both would outlive
+            # the refused start, because the release in the try/finally below
+            # only runs for a claim that was actually taken. The event a
+            # normalisation emits is the only trace, and only on success.
+            spec = self._settle_effort(spec, provider, node_id)
             try:
                 startup_token = self.startup.claim(provider.name, node_id)
             except StartupUnavailable as exc:
@@ -2189,10 +2278,6 @@ class Runner:
                 unclaimable.add(provider.name)
                 continue
             break
-        # RM-R5a: routing has resolved the provider and model; the model/effort
-        # pair is settled before the first side effect below — no worktree, no
-        # node, no branch is left behind by a refusal here.
-        spec = self._settle_effort(spec, provider, node_id)
         launched = False
         try:
             # LM-R1/R2: resolved once, recorded on the node, reported to the
@@ -4459,26 +4544,41 @@ class Runner:
         an exact route shares its model ids, so it runs that route's model. An
         empty fallback model is not a route: it would run `--model ""`.
         """
+        routed, _ = self._routed_spec(spec, provider)
+        return routed
+
+    def _routed_spec(self, spec: AgentSpec,
+                     provider: str) -> tuple[AgentSpec | None, str]:
+        """`_usable_spec`, plus the name of the `models:` route that decided
+        it — "" when the agent's own configuration is what runs.
+
+        RM-R5b needs the route, not just the resolution: whether an effort
+        was EXPLICITLY written on this destination is judged against the
+        route the model came from, which is not always the provider routing
+        landed on (a family sibling runs the listed route). The walk is
+        `_usable_spec`'s own, kept in one place so the two answers cannot
+        drift.
+        """
         if provider == spec.provider:
-            return spec
+            return spec, ""
         alternative, overrides = spec.fallback_for(provider)
         if alternative:
-            return spec.replace(model=alternative, **overrides)
+            return spec.replace(model=alternative, **overrides), provider
         here = self.providers.get(provider)
         if here is None:
-            return None
+            return None, ""
         family = here.family or provider
         roster = self.providers.get(spec.provider)
         if roster is not None and (roster.family or spec.provider) == family:
-            return spec
+            return spec, ""
         # A sibling of a listed fallback shares that fallback's model ids.
         for name in (spec.models or {}):
             other = self.providers.get(name)
             if other is not None and (other.family or name) == family:
                 alternative, overrides = spec.fallback_for(name)
                 if alternative:
-                    return spec.replace(model=alternative, **overrides)
-        return None
+                    return spec.replace(model=alternative, **overrides), name
+        return None, ""
 
     @contextlib.asynccontextmanager
     async def _conversation_turn(self, agent_name: str, wait: float):
@@ -4716,6 +4816,11 @@ class Runner:
                 replaced = node
                 node = None
 
+        # RM-R1a: the id of a turn holding a reserved slot, "" for none. The
+        # reservation is written `pending`, so the release below only ever
+        # restores a node the launch never reached — one already `running`
+        # belongs to its run and is left alone.
+        reserved = ""
         if node is None:
             provider = self.providers.get(spec.provider)
             if provider is None or not provider.available():
@@ -4765,12 +4870,18 @@ class Runner:
             # effect, so the conversation stays idle, keeps its session and
             # its turn count, and the same consult succeeds once a slot
             # frees. A new conversation is already checked, in `_preflight`.
-            self._admission(spec)
+            # RM-R1a: the check and the reservation are one transaction, so
+            # the slot is ours from this moment; every exit below that does
+            # not launch gives it back.
+            self._admission_reserved(spec, node)
+            reserved = node_id
             node = self.authoritative(node, "conversation_refresh")
             if node is None:
+                self._release_reserved_slot(node_id)
                 return self._consult_result(agent_name, node_id, None,
                                             error="entry id differs from its key")
             if not self.unrecorded_branch_ok(node, "conversation_refresh"):
+                self._release_reserved_slot(node_id)
                 return self._consult_result(agent_name, node_id, None,
                                             error="branch is outside the container domain")
             if self.authority and not self.authority.get(node_id):
@@ -4779,6 +4890,7 @@ class Runner:
                 if not self.authority.safe_nested_path(operand):
                     self.mismatch(node_id, "conversation_refresh", ["worktree"],
                                   "unrecorded worktree is outside the container domain")
+                    self._release_reserved_slot(node_id)
                     return self._consult_result(agent_name, node_id, None,
                                                 error="unrecorded worktree is outside the container domain")
             turn = node.turns + 1
@@ -4808,6 +4920,7 @@ class Runner:
             if node.effort and spec is not None and spec.effort != node.effort:
                 spec = spec.replace(effort=node.effort)
             if provider is None or not provider.available():
+                self._release_reserved_slot(node_id)
                 raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
             # A conversation outlives its worktree: `clean` prunes worktrees,
             # and a standing advisor keeps its idle node and its session id
@@ -4818,20 +4931,26 @@ class Runner:
             # provider's session, not in the files.
             recreated = False
             if not worktree_path.is_dir() and gitops.is_repo(self.paths.root):
-                recreated = True
-                worktree_path = self.paths.worktree(node_id)
-                desired = (f"{self.config.branch_prefix}/{agent_name}/"
-                           f"{node_id.removeprefix('ag-')}")
-                branch = gitops.unique_branch(self.paths.root, desired)
-                if self.authority and self.authority.get(node_id):
-                    self.authority.rebind(node_id, branch, worktree_path)
-                branch = gitops.create_worktree(
-                    self.paths.root, worktree_path,
-                    branch, base, unique=False,
-                )
-                head = gitops.head_sha(worktree_path)
-                self.tree.update(node_id, worktree=str(worktree_path), branch=branch,
-                                 placed_on=head)
+                try:
+                    recreated = True
+                    worktree_path = self.paths.worktree(node_id)
+                    desired = (f"{self.config.branch_prefix}/{agent_name}/"
+                               f"{node_id.removeprefix('ag-')}")
+                    branch = gitops.unique_branch(self.paths.root, desired)
+                    if self.authority and self.authority.get(node_id):
+                        self.authority.rebind(node_id, branch, worktree_path)
+                    branch = gitops.create_worktree(
+                        self.paths.root, worktree_path,
+                        branch, base, unique=False,
+                    )
+                    head = gitops.head_sha(worktree_path)
+                    self.tree.update(node_id, worktree=str(worktree_path), branch=branch,
+                                     placed_on=head)
+                except BaseException:
+                    # RM-R1a: this turn holds a reserved slot and will not
+                    # launch — give it back before the error escapes.
+                    self._release_reserved_slot(node_id)
+                    raise
                 node = self.tree.get(node_id) or node
                 # The session remembers files that the new checkout does not
                 # have. Saying so puts the correction IN the conversation;
@@ -4884,6 +5003,14 @@ class Runner:
             self.tree.set_status(node_id, "failed", str(exc))
             return self._consult_result(agent_name, node_id, turn, view,
                                         error=str(exc))
+        except BaseException:
+            # RM-R1a: a reservation whose launch fails is released — the
+            # node must not sit `pending` for ever, holding a slot no run
+            # will ever account for. (`failed` above releases its own way.)
+            if reserved:
+                self._release_reserved_slot(node_id)
+            raise
+        reserved = ""
 
         limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
         try:
