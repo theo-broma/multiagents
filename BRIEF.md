@@ -2764,3 +2764,8 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - **D3 on agy (ag-149e0a) is DONE.** I verified the D3 suite myself: 286 passed. The stray files were removed (16b34e6).
   - My concern: the cleanup one-liner in exec_in_running was shaped to match the fake-docker log matcher. The in-container kill is real.
   - The reviewer ag-bf6004 (agy gemini pro, fallback from codex) is reviewing it before the merge.
+- **D3 review (ag-bf6004, agy) says rework, with 6 findings.**
+  - Taken: #1, os.setsid PermissionError, guarded; #2, the cleanup's empty-pidfile race, written as plain statements; #3, reaping on every exception; #4, the swallowed shipped-YAML error.
+  - #5, the regex shell parser: kept, with its assumptions documented and unparsable input reported as a finding. shfmt was declined because it would be a new dependency.
+  - #6: only the probe-state duplication is factored out; the module split was declined.
+  - I steered ag-149e0a with these fixes.
