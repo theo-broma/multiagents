@@ -157,11 +157,22 @@ class Budget:
     # it is changes what to do about it: a rolling window clears in hours, a
     # monthly one does not.
     windows: dict[str, Any] = field(default_factory=dict)
+    # RM-R4b: when the provider's script gives no `stale_seconds` but does say
+    # WHEN it took the reading (epoch seconds), the age is computed from that.
+    read_at: float | None = None
+    # RM-R4b: the reading's age exceeded `budget.max_reading_age_seconds`, so
+    # for ROUTING it is unknown — it can no longer testify that a window is
+    # full. The raw values above stay exactly as reported, for display.
+    stale: bool = False
 
     @property
     def usable(self) -> bool:
         if self.cooldown_until and self.cooldown_until > time.time():
             return False
+        if self.stale:
+            # An aged-out reading is not evidence about now: routing on it
+            # would spend a window that may have reset hours ago (RM-R4b).
+            return True
         if self.known and self.headroom is not None:
             return self.headroom > 0.02
         return True                        # unknown headroom is not "no headroom"
@@ -193,6 +204,10 @@ class Budget:
             data["resets_label"] = reset_label(self.resets_at)
         if self.stale_seconds is not None:
             data["stale_seconds"] = round(self.stale_seconds)
+        if self.read_at is not None:
+            data["read_at"] = self.read_at
+        if self.stale:
+            data["stale"] = True
         if self.spent:
             data["spent"] = self.spent
         if self.cooldown_until:
@@ -308,6 +323,98 @@ def _reset_margin(project_config: Path | None, limits: dict | None = None) -> fl
         except yaml.YAMLError:
             continue
     return limit_number(merged.get("limits") or {}, "quota_reset_margin_seconds")
+
+
+# RM-R4b: a reading older than this is no longer evidence about now — the
+# incident that named the requirement was a codex reading of "weekly 100%,
+# resets Oct 4" taken from rollout history 13 000 s old, although the window
+# had already been reset and the account had room.
+DEFAULT_READING_AGE = 3600.0
+
+
+def _number(value: Any) -> float | None:
+    """A finite number, or None: person- or script-typed, so a bool, a string
+    or NaN is not a value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def reading_age_bound(project: dict | None) -> float:
+    """`budget.max_reading_age_seconds` from a loaded project config.
+
+    For callers that already hold the config (a `Runner`); a malformed value
+    falls back to the shipped default rather than turning the bound off —
+    off would mean trusting readings of any age, which is the failure the
+    setting exists to prevent.
+    """
+    value = _number(((project or {}).get("budget") or {}).get("max_reading_age_seconds"))
+    return value if value is not None and value > 0 else DEFAULT_READING_AGE
+
+
+def _reading_age_bound_from_layers(project_config: Path | None) -> float:
+    """The same setting, read from the config layers themselves.
+
+    For a caller with no loaded config to hand (a one-shot CLI read), the
+    same fallback that `_reset_margin` uses: read the layers, and survive a
+    broken project.yaml by falling back to the shipped default.
+    """
+    import yaml
+
+    from .config import _read_yaml, deep_merge
+    from .paths import global_config_dir, shipped_defaults_dir
+
+    merged: dict = {}
+    for layer in (shipped_defaults_dir(), global_config_dir(), project_config):
+        if layer is None:
+            continue
+        try:
+            merged = deep_merge(merged, _read_yaml(Path(layer) / "project.yaml"))
+        except yaml.YAMLError:
+            continue
+    return reading_age_bound(merged)
+
+
+def _reading_age(b: Budget, now_: float, cached_at: float | None = None) -> float | None:
+    """A reading's age in seconds (RM-R4b), or None when it carries no age.
+
+    The provider's own `stale_seconds` is the authority when it gives one;
+    otherwise the optional `read_at` stamp, which is absolute and so grows on
+    its own. A cached reading KEEPS ageing: the time spent in the cache is
+    added to a `stale_seconds` age, and is inside an absolute `read_at` age
+    naturally. Age is never frozen — that is the point.
+    """
+    if b.stale_seconds is not None:
+        age = b.stale_seconds
+    elif b.read_at is not None:
+        return max(0.0, now_ - b.read_at)
+    else:
+        return None
+    if cached_at is not None:
+        age += max(0.0, now_ - cached_at)
+    return age
+
+
+def _apply_reading_age(b: Budget, bound: float, now_: float,
+                       cached_at: float | None = None) -> Budget:
+    """Demote a reading older than `bound` to unknown, for routing (RM-R4b).
+
+    Applied uniformly to every provider's reading on every retrieval — a
+    cache hit or a fresh fetch alike — and never cached itself, so the age is
+    always judged against the CURRENT clock, exactly like the reset margin
+    beside it. The raw values stay on the Budget untouched: display keeps the
+    last numbers and the age, marked stale. A reading with no age information
+    is never demoted. The per-window reset rule (QF-R1) runs first and stays
+    authoritative: demoting the WHOLE reading could bypass another window
+    that is still genuinely full, which is why RM-R4(a) was withdrawn.
+    """
+    age = _reading_age(b, now_, cached_at)
+    if age is None or b.stale or age <= bound:
+        return b
+    note = (f"reading is {age / 60:.0f} min old, over the "
+            f"{bound / 60:.0f} min reading age; treated as unknown for routing")
+    return replace(b, stale=True,
+                   note=(b.note + "; " if b.note else "") + note)
 
 
 # --------------------------------------------------------------------------
@@ -876,6 +983,7 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
         note=str(data.get("note") or ""),
         windows=data.get("windows") if isinstance(data.get("windows"), dict) else {},
         stale_seconds=_script_stale_seconds(data.get("stale_seconds")),
+        read_at=_script_read_at(data.get("read_at")),
     )
 
 
@@ -886,21 +994,34 @@ def _script_stale_seconds(value: Any) -> float | None:
     a little ahead is not a reading from the future. Anything else is
     ignored: a malformed age must not spoil the rest of the reading.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    if not math.isfinite(value):
-        return None
-    return max(0.0, float(value))
+    value = _number(value)
+    return None if value is None else max(0.0, value)
+
+
+def _script_read_at(value: Any) -> float | None:
+    """RM-R4b: a budget script's `read_at`, epoch seconds, the fallback age
+    source when the script gives no `stale_seconds`.
+
+    A finite number is taken as sent — a clock a little ahead gives a
+    negative age, which clamps to 0 at use, the same tolerance the
+    `stale_seconds` clamp shows. Anything else is ignored.
+    """
+    return _number(value)
 
 
 def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
                   project_config: Path | None = None,
                   spent: dict[str, int] | None = None,
                   use_cache: bool = True, force: bool = False,
-                  limits: dict | None = None) -> Budget:
+                  limits: dict | None = None,
+                  max_reading_age: float | None = None) -> Budget:
     now_ = time.time()
     source = str(config_dir)
     margin = _reset_margin(project_config, limits)
+    # RM-R4b: the caller's loaded config wins (`reading_age_bound`); a caller
+    # with none falls back to reading the layers itself, as the margin does.
+    bound = max_reading_age if max_reading_age is not None \
+        else _reading_age_bound_from_layers(project_config)
     if use_cache and not force:
         cached = _cache.get(name)
         if (cached and now_ - cached[0] < _CACHE_TTL
@@ -910,6 +1031,11 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
             # entry is still within `_CACHE_TTL`. The margin-adjusted result
             # is never itself cached.
             budget = _apply_reset_margin(cached[1], margin, now_)
+            # RM-R4b: nor does a cached reading stop ageing — the time spent
+            # in the cache counts toward the reading age, so a reading that
+            # was fresh when it was read can still age out before its next
+            # real refresh.
+            budget = _apply_reading_age(budget, bound, now_, cached_at=cached[0])
             # R16: never hand out the cache's own object — copy with
             # independent spent/windows dicts so item assignment by a
             # caller cannot reach the cached entry.  R17: merge the
@@ -935,6 +1061,7 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     _cache[name] = (now_, budget)
     _cache_source[name] = source
     budget = _apply_reset_margin(budget, margin, now_)
+    budget = _apply_reading_age(budget, bound, now_)
     # R16: return a copy so the fresh-read caller cannot poison the cache
     # either (Amendment 2 — F171).  Merge the caller's spent onto the copy.
     merged = {**budget.spent, **spent} if spent else dict(budget.spent)
@@ -949,7 +1076,8 @@ def read_all(providers: dict[str, Any] | None = None,
              cooldowns: dict[str, dict] | None = None,
              use_cache: bool = True,
              force: bool = False,
-             limits: dict | None = None) -> dict[str, Budget]:
+             limits: dict | None = None,
+             max_reading_age: float | None = None) -> dict[str, Budget]:
     """Read every provider's budget, driven by the loaded providers map.
 
     Previously a hardcoded three-name table that never consulted the providers
@@ -959,7 +1087,9 @@ def read_all(providers: dict[str, Any] | None = None,
     `limits` is the caller's own already-loaded (last-good) config, when it has
     one — see `_reset_margin`. A caller with no config of its own (a one-shot
     CLI read) can leave it unset; `quota_reset_margin_seconds` is then read
-    from `project_config` itself, same as before.
+    from `project_config` itself, same as before. `max_reading_age` (RM-R4b,
+    `budget.max_reading_age_seconds`) layers the same way: a loaded value
+    wins, otherwise it is read from the config layers.
     """
     from .paths import global_config_dir
 
@@ -980,7 +1110,7 @@ def read_all(providers: dict[str, Any] | None = None,
         executor = executor_for(name) if callable(executor_for) else _NullExecutor()
         budget = read_provider(name, provider, executor, config_dir, project_config,
                                spend_by_provider.get(name), use_cache, force,
-                               limits=limits)
+                               limits=limits, max_reading_age=max_reading_age)
         entry = cooldowns.get(name)
         if entry and entry.get("until", 0) > time.time():
             budget.cooldown_until = entry["until"]
@@ -1061,6 +1191,18 @@ def resets_soon(candidate: Budget | None, within: float) -> bool:
     return 0 < (when - time.time()) <= within
 
 
+def _known_reading(budget: Budget | None) -> bool:
+    """Is this a reading that says something usable about headroom?
+
+    RM-R3a's "known": the provider reported a number. A reading that is
+    merely not-refused (``known=False``, or no reading at all) is unknown,
+    not good — and so is one that has aged past the reading bound (RM-R4b):
+    a stale reading ranks as unknown inside its tier, never ahead of a
+    known one.
+    """
+    return budget is not None and budget.known and not budget.stale
+
+
 def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
                   reserved: set[str], load: dict[str, int] | None = None,
                   last_used: dict[str, float] | None = None) -> str | None:
@@ -1075,6 +1217,10 @@ def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
     The ranking is load: fewest agents running on it, then longest since it was
     last used. Both are read from the tree, so every MCP server process on the
     machine ranks them the same way.
+
+    RM-R3a: with load and last-use equal, an instance whose reading is KNOWN
+    and roomy is preferred over one whose headroom is unknown; an unknown
+    reading stays eligible and wins when nothing known can take the work.
     """
     load = load or {}
     last_used = last_used or {}
@@ -1085,7 +1231,9 @@ def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
     # Prefer instances not held for the orchestrator; fall back to those only
     # when nothing else can take it, and even then only above the reserve.
     workers = [name for name in free if name not in reserved]
-    return min(workers or free,
+    pool = workers or free
+    known = [name for name in pool if _known_reading(budgets.get(name))]
+    return min(known or pool,
                key=lambda name: (load.get(name, 0), last_used.get(name, 0.0), name))
 
 
@@ -1100,6 +1248,7 @@ def choose_provider(
     load: dict[str, int] | None = None,
     last_used: dict[str, float] | None = None,
     wait_for_reset_within: float = 0.0,
+    routes: list[str] | None = None,
 ) -> tuple[str | None, str]:
     """Pick a provider to run on. Returns ``(provider, reason)``.
 
@@ -1124,10 +1273,17 @@ def choose_provider(
     more runs into an authentication wall, with the agent's configured fallback
     sitting one place further down the chain, unused. Filtering here means the
     answer is always one the caller can act on.
+
+    ``routes`` (RM-R2a) is Tier B: the agent's own ``models:`` routes, each
+    followed by its family siblings, in the order the agent wrote them.
+    ``chain`` is then Tier C: the project ``fallback_chain`` entries not
+    already listed, with ``defer`` still ending the walk after both. Without
+    ``routes`` (older callers) the chain is walked as the one tier it was.
     """
     reserved = set(budgets) if reserved is None else set(reserved)
     allowed = None if allowed is None else set(allowed)
     siblings = [name for name in (family or []) if name != preferred]
+    routes = list(dict.fromkeys(routes or []))
 
     # With more than one account on this CLI, the agent's pin chooses the
     # FAMILY and the router chooses the instance. That is the point of a second
@@ -1136,6 +1292,10 @@ def choose_provider(
     # window to read the results in — and it should do that while the
     # orchestrator's account still looks healthy, not once it is already in
     # trouble.
+    #
+    # RM-R2a: preferred plus same-family instances are ONE pool (Tier A),
+    # chosen by reservation, load and last use; they are never split into two
+    # preference tiers.
     if siblings:
         chosen = pick_instance([preferred, *siblings], budgets, reserve,
                                reserved, load, last_used)
@@ -1157,21 +1317,51 @@ def choose_provider(
         return preferred, "preferred provider has headroom"
 
     skipped, no_room = [], []
-    for name in chain:
-        if name == "defer":
-            break
-        if name == preferred:
-            continue
-        if allowed is not None and name not in allowed:
-            skipped.append(name)
-            continue                    # no model for it; not a candidate
-        # The reserve applies to a fallback too. Otherwise work diverted off a
-        # constrained provider lands on the orchestrator's own and eats exactly
-        # the slice the reserve exists to keep.
-        if budgets.get(name) is not None \
-                and _has_room(budgets.get(name), reserve, name in reserved):
-            return name, f"{preferred} is constrained; falling back to {name}"
-        no_room.append(f"{name} ({_why_not(budgets.get(name), reserve, name in reserved)})")
+    stop = False
+
+    def try_tier(tier: list[str]) -> str | None:
+        """Walk one preference tier, twice (RM-R3a): candidates whose reading
+        is known AND roomy first, then the unknown ones, each pass in written
+        order. The ranking never moves a candidate across tiers.
+        """
+        nonlocal stop
+        order = [name for name in tier if name != preferred]
+        if "defer" in order:
+            order = order[:order.index("defer")]
+            stop = True                    # defer ends the walk, after this tier
+        roomy = [name for name in order
+                 if _known_reading(budgets.get(name))
+                 and _has_room(budgets.get(name), reserve, name in reserved)]
+        for names in (roomy, [name for name in order if name not in roomy]):
+            for name in names:
+                if allowed is not None and name not in allowed:
+                    skipped.append(name)
+                    continue               # no model for it; not a candidate
+                # The reserve applies to a fallback too. Otherwise work diverted
+                # off a constrained provider lands on the orchestrator's own and
+                # eats exactly the slice the reserve exists to keep.
+                if budgets.get(name) is not None \
+                        and _has_room(budgets.get(name), reserve, name in reserved):
+                    return name
+                no_room.append(f"{name} ({_why_not(budgets.get(name), reserve, name in reserved)})")
+        return None
+
+    chosen = try_tier(routes)
+    if chosen:
+        # RM-R2: the message says the route came from the agent's own list.
+        return chosen, (f"{preferred} is constrained; using {chosen} from "
+                        f"the agent's own models list")
+    if not stop:
+        # Tier C: the project chain entries neither Tier A nor Tier B listed.
+        listed = {preferred, *siblings, *routes}
+        chosen = try_tier([name for name in chain if name not in listed])
+        if chosen:
+            if routes:
+                # RM-R2: with the agent's own routes in play, say this one
+                # came from the project chain instead.
+                return chosen, (f"{preferred} is constrained; falling back to "
+                                f"{chosen} from the project fallback_chain")
+            return chosen, f"{preferred} is constrained; falling back to {chosen}"
 
     # Both halves, and the second one is the half that matters. Naming only the
     # providers skipped for lack of a MODEL made the message actively

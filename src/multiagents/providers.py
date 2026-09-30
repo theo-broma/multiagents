@@ -260,6 +260,14 @@ class Provider:
     # CX-C5: `metered` (dollars per run) or `plan` (paid through a
     # subscription, so a cost the stream never reports is not a zero).
     billing: str = "metered"
+    # RM-R5a: model ids that carry their effort as a suffix, e.g.
+    # `{"-low": "low", "-medium": "medium", "-high": "high"}`. A model id
+    # ending in one of these suffixes IMPLIES that effort, so an inherited
+    # `effort:` that contradicts it is normalised to the model's before
+    # launch, and one explicitly configured on the destination route is
+    # refused — the pair would otherwise be rejected by the CLI at launch,
+    # nine seconds into a run that already had a worktree and a branch.
+    effort_suffixes: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -308,6 +316,8 @@ class Provider:
             # Anything but `plan` is metered: a misspelling must not quietly
             # hide a real dollar figure.
             billing="plan" if data.get("billing") == "plan" else "metered",
+            effort_suffixes={str(k): str(v)
+                             for k, v in (data.get("effort_suffixes") or {}).items()},
         )
 
     # ------------------------------------------------------------- command --
@@ -367,6 +377,17 @@ class Provider:
     def usable(self) -> bool:
         """Enabled by the user AND actually present on this machine."""
         return self.enabled and self.available() is not None
+
+    def implied_effort(self, model: str) -> str | None:
+        """The effort this provider's model id declares by its suffix (RM-R5a).
+
+        The suffix is anchored at the END of the id: `gem-low-preview` does
+        not imply `low`. An id matching no suffix implies nothing.
+        """
+        for suffix, effort in self.effort_suffixes.items():
+            if suffix and model.endswith(suffix):
+                return effort
+        return None
 
     def build_command(
         self,

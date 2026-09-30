@@ -189,6 +189,11 @@ class Node:
     # to ask someone to read the code.
     routed_from: str = ""
     routed_why: str = ""
+    # RM-R5a: the effort this run actually carries, after a model id that
+    # declares its own suffix normalised the configured one. Persisted so a
+    # steer and a consult resume reuse the normalised value instead of
+    # re-deriving the contradicted one from the static config.
+    effort: str = ""
     # LM-R1/R2: this run's timeout, max_children and silence_timeout as
     # `{value, source}`, resolved when it started. The cap its own children
     # are counted against is read from here, so a roster edit after launch

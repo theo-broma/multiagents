@@ -822,6 +822,25 @@ class Runner:
 
     # ------------------------------------------------------------- guardrails --
 
+    def _admission(self, spec: AgentSpec) -> None:
+        """The `max_concurrent` occupancy rule (RM-R1, shared with start()).
+
+        A node counts against the tree's slot limit exactly as `_preflight`
+        counts it for `start()` — same filter, same refusal text and shape.
+        The idle node of a standing conversation holds no slot
+        (`_occupies_slot`), so only live agents are measured against the cap.
+        """
+        limits = self.config.limits
+        active = [n for n in self.tree.active() if _occupies_slot(n)]
+        max_concurrent = int(limits.get("max_concurrent", 4))
+        if len(active) >= max_concurrent:
+            raise RuntimeError(self._refused(
+                f"{len(active)} agents already running (max_concurrent={max_concurrent}). "
+                f"Wait for one to finish or stop it.",
+                spec, "limits.max_concurrent", max_concurrent, "tree",
+                notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
+                f"{len(active)} already running"))
+
     def _preflight(self, spec: AgentSpec, workdir: str | None = None,
                    budget_tag: str = "", *, pinned: bool = False) -> None:
         limits = self.config.limits
@@ -902,15 +921,10 @@ class Runner:
                 notices.provenance(self.config, "limits.max_depth", max_depth),
                 "it would be deeper than the tree allows"))
 
-        active = [n for n in self.tree.active() if _occupies_slot(n)]
-        max_concurrent = int(limits.get("max_concurrent", 4))
-        if len(active) >= max_concurrent:
-            raise RuntimeError(self._refused(
-                f"{len(active)} agents already running (max_concurrent={max_concurrent}). "
-                f"Wait for one to finish or stop it.",
-                spec, "limits.max_concurrent", max_concurrent, "tree",
-                notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
-                f"{len(active)} already running"))
+        # RM-R1: the occupancy rule `start()` is admitted by, extracted so a
+        # resumed consult turn is held to literally the same check and the
+        # same refusal text rather than a copy that can drift.
+        self._admission(spec)
 
         # LM-R1a: the cap is the SPAWNING parent's, as recorded when it
         # started; the requested child's own `max_children` governs its
@@ -1357,6 +1371,51 @@ class Runner:
             opaque_tools=frozenset(provider.opaque_tools),
             opaque_tool_args=tuple(provider.opaque_tool_args),
         )
+
+    def _settle_effort(self, spec: AgentSpec, provider: Provider,
+                       node_id: str) -> AgentSpec:
+        """Reconcile the effort with a model id that declares its own (RM-R5a).
+
+        A provider may map anchored model-id suffixes to efforts in
+        providers.yaml (`effort_suffixes`). After routing has resolved the
+        provider and model, and BEFORE any worktree or process side effect:
+
+        - an effort INHERITED onto this destination — the agent's top-level
+          `effort`, or a bare-string `models:` route — is normalised to the
+          model's implied effort, with an event recording the old value, the
+          effective pair and the reason; the normalised spec is what is
+          persisted (Node.effort), so steer and consult reuse it;
+        - an effort EXPLICITLY configured on this destination route is a
+          configuration contradiction: the start is refused, naming the
+          model, the effort and the route, rather than launching into the
+          CLI's own rejection eight seconds later;
+        - and a provider with no `effort_suffixes` is unchanged, as is any
+          pair that agrees or carries no effort at all (an empty route
+          `effort: ""` still just drops the option).
+        """
+        implied = provider.implied_effort(spec.model)
+        if implied is None or not spec.effort or spec.effort == implied:
+            return spec
+        explicit = False
+        if provider.name != spec.provider:
+            _, overrides = spec.fallback_for(provider.name)
+            explicit = bool(overrides.get("effort"))
+        if explicit:
+            raise ValueError(
+                f"refusing to start {spec.name!r} on {provider.name}: model "
+                f"{spec.model!r} implies effort {implied!r}, but the route "
+                f"under `models:` explicitly configures effort "
+                f"{spec.effort!r}. The CLI would reject the pair at launch. "
+                f"Fix the route's effort (or remove it to inherit the "
+                f"model's), then start again."
+            )
+        self.tree.emit(node_id, "effort_normalised",
+                       provider=provider.name, model=spec.model,
+                       effort=implied, was=spec.effort,
+                       reason=f"model id {spec.model!r} ends in a suffix "
+                              f"declaring effort {implied!r}; the inherited "
+                              f"effort was normalised to it")
+        return spec.replace(effort=implied)
 
     async def _launch(
         self,
@@ -1946,6 +2005,8 @@ class Runner:
             lambda _provider_name: self.executor(),
             global_config_dir(), self.paths.config, None, cooldowns,
             limits=self.config.limits,
+            # RM-R4b: a reading older than this routes as unknown.
+            max_reading_age=budget_mod.reading_age_bound(self.config.project),
         )
         self._half_open(budgets, cooldowns)
         spend_now = self.tree.rollup_usage().get("cost_usd", 0)
@@ -1982,10 +2043,26 @@ class Runner:
             # own, a `models:` entry naming one, or a sibling of either. A key
             # with an empty model is not one: routing there ran `--model ""`.
             chain = list(budget_cfg.get("fallback_chain", []))
+            # RM-R2a: the agent's own `models:` routes are their own tier,
+            # ahead of the project chain (RM-R2), in the order they are
+            # written; a route's family siblings join right after it. They
+            # are candidates always, not only when the preferred provider is
+            # startup-blocked — a budget-exhausted preferred provider is
+            # exactly when its own fallbacks should speak up. A pinned start
+            # has no tiers: it asked for one provider.
+            routes: list[str] = []
+            if not model:
+                family_of = providers_mod.families(self.providers)
+                for name in (spec.models or spec.extra.get("models") or {}):
+                    if name not in routes:
+                        routes.append(name)
+                    here = self.providers.get(name)
+                    for sibling in (family_of.get(here.family or name, [])
+                                    if here is not None else []):
+                        if sibling not in routes and self.providers[sibling].enabled:
+                            routes.append(sibling)
             if model:
                 family, chain = [], []
-            elif self.startup.availability(spec.provider):
-                chain = list(dict.fromkeys([*chain, *(spec.models or {})]))
             startup_blocked = {}
             for name, candidate in self.providers.items():
                 problem = self.startup.availability(name)
@@ -1999,7 +2076,7 @@ class Runner:
                     entry.note = problem["reason"] if problem else "startup_down"
             usable = {name for name in self.providers
                       if self._usable_spec(spec, name) is not None}
-            unmodelled = [name for name in dict.fromkeys([*chain, *family])
+            unmodelled = [name for name in dict.fromkeys([*routes, *chain, *family])
                           if name in self.providers and name not in usable
                           and self.providers[name].enabled]
             load, last_used = self._instance_load()
@@ -2013,10 +2090,14 @@ class Runner:
                     # Only the providers this agent has a model to run on. A
                     # candidate it cannot use is not a candidate, and discovering
                     # that afterwards is how a run ended up back on the provider
-                    # just ruled out.
+                    # just ruled out. (The `models:` keys are named explicitly,
+                    # even though `routes` supersedes them, so the guard below
+                    # — the chooser is never offered a provider the agent did
+                    # not name a model for — reads on its own.)
                     allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
-                             *family, *chain} & usable,
+                             *routes, *family, *chain} & usable,
                     family=family,
+                    routes=routes,
                     load=dict(load), last_used=dict(last_used),
                     wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
                 )
@@ -2101,6 +2182,10 @@ class Runner:
                 unclaimable.add(provider.name)
                 continue
             break
+        # RM-R5a: routing has resolved the provider and model; the model/effort
+        # pair is settled before the first side effect below — no worktree, no
+        # node, no branch is left behind by a refusal here.
+        spec = self._settle_effort(spec, provider, node_id)
         launched = False
         try:
             # LM-R1/R2: resolved once, recorded on the node, reported to the
@@ -2135,6 +2220,7 @@ class Runner:
                 verifies=verifies if verifies in self.tree.read()["nodes"] else "",
                 budget_tag=budget_tag,
                 routed_from=routed_from, routed_why=routed_why,
+                effort=spec.effort or "",
                 limits=limits, session=self.session(), model_pinned=bool(model),
             )
             if self.authority:
@@ -3674,14 +3760,21 @@ class Runner:
         the fallback's model and options, not the configured ones."""
         spec = self.config.agent(node.agent)
         if node.model_pinned:
-            return spec.replace(provider=node.provider, model=node.model), self.providers[node.provider]
-        routed = self._usable_spec(spec, node.provider)
-        if routed is None:
-            # Followed as it was launched; only a relaunch needs a model, and
-            # steer refuses that first (RT-R2).
-            alternative, overrides = spec.fallback_for(node.provider)
-            routed = spec.replace(model=alternative, **overrides)
-        return routed, self.providers[node.provider]
+            spec = spec.replace(provider=node.provider, model=node.model)
+        else:
+            routed = self._usable_spec(spec, node.provider)
+            if routed is None:
+                # Followed as it was launched; only a relaunch needs a model, and
+                # steer refuses that first (RT-R2).
+                alternative, overrides = spec.fallback_for(node.provider)
+                routed = spec.replace(model=alternative, **overrides)
+            spec = routed
+        # RM-R5a: the effort the node was launched with is what it keeps —
+        # a model id that declares its own suffix normalised the configured
+        # one, and the normalised spec is what is persisted.
+        if node.effort and spec.effort != node.effort:
+            spec = spec.replace(effort=node.effort)
+        return spec, self.providers[node.provider]
 
     # ------------------------------------------------------------- survival --
 
@@ -4620,6 +4713,9 @@ class Runner:
             depth = self.self_depth() + 1
             node_id = new_id()
             worktree_path = self.paths.worktree(node_id)
+            # RM-R5a: the model/effort pair is settled before the worktree and
+            # node below, the same side-effect-free point start() uses.
+            spec = self._settle_effort(spec, provider, node_id)
             branch = gitops.unique_branch(
                 self.paths.root,
                 f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}")
@@ -4629,6 +4725,7 @@ class Runner:
                 worktree=str(worktree_path), status="pending", conversation=True,
                 # A consult's timeout is per turn, so none is recorded as the
                 # run's own (LM-R1b): the next turn must not inherit it.
+                effort=spec.effort or "",
                 limits=self.config.effective_limits(spec), session=self.session(),
             )
             if self.authority:
@@ -4651,6 +4748,12 @@ class Runner:
                                provider=provider.name)
         else:
             node_id = node.id
+            # RM-R1: a resumed turn occupies a slot like any other start, and
+            # is refused like one when the tree is full — before any side
+            # effect, so the conversation stays idle, keeps its session and
+            # its turn count, and the same consult succeeds once a slot
+            # frees. A new conversation is already checked, in `_preflight`.
+            self._admission(spec)
             node = self.authoritative(node, "conversation_refresh")
             if node is None:
                 return self._consult_result(agent_name, node_id, None,
@@ -4685,6 +4788,13 @@ class Runner:
             else:
                 spec = route
                 provider = self.providers.get(node.provider)
+            # RM-R5a: the persisted effort is what this conversation runs
+            # with — a model id that declares its own suffix normalised the
+            # configured one at first launch, and the node carries the
+            # result. Re-deriving from the static config would resurrect the
+            # contradicted value.
+            if node.effort and spec is not None and spec.effort != node.effort:
+                spec = spec.replace(effort=node.effort)
             if provider is None or not provider.available():
                 raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
             # A conversation outlives its worktree: `clean` prunes worktrees,

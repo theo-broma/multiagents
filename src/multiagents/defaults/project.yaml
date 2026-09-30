@@ -496,6 +496,15 @@ budget:
     - opencode
     - agy
     - defer
+  # A budget reading older than this routes as UNKNOWN instead of as the
+  # number it reports: a reading can only testify about the moment it was
+  # taken, and an old "100%, resets Oct 4" has usually been reset since. The
+  # age is the provider script's own `stale_seconds`, else its `read_at`
+  # stamp, and it keeps growing while the reading sits in the 60 s cache.
+  # The raw reading stays visible (marked stale) in budget_status; only
+  # routing stops trusting it. Raise it for a provider whose readings are
+  # expensive to refresh.
+  max_reading_age_seconds: 3600
   # How long to cool a provider down after a quota failure when we cannot read
   # a real reset time from it.
   blind_cooldown_seconds: 900
