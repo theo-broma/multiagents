@@ -5239,6 +5239,15 @@ class Runner:
                     1 for d in self.tree.read()["deferred"]
                     if isinstance(d, dict) and not deferred_malformed(d)
                     and d.get("status", "waiting") == "waiting")
+            # DQ-R2a: refused entries never expire and are never retried, so
+            # the count of the ones still queued rides on this return while it
+            # is non-zero — a paused tree must not hide the entries it will
+            # not be draining.
+            refused_total = sum(1 for d in self.tree.read()["deferred"]
+                                if isinstance(d, dict)
+                                and d.get("status") == "refused")
+            if refused_total:
+                result["refused_total"] = refused_total
             return result
 
         # LN-C4, finding 5: the pause is gone — lifted or expired — so nothing

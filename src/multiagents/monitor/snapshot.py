@@ -58,9 +58,9 @@ _LINE_CACHE: dict[str, tuple[float, str, list[str], str]] = {}
 LINE_TTL = 30.0
 
 # A script's usage line may carry its reset as the raw UTC ISO string the API
-# sent (opencode.sh's `ms_iso` prints exactly that; the z.ai contract test
-# holds the script to it). Q6: a viewer read that UTC wall clock as local time
-# and concluded a quota an hour from resetting had already failed to come
+# sent (a provider script's `ms_iso` prints exactly that, and its contract
+# test holds the script to it). Q6: a viewer read that UTC wall clock as local
+# time and concluded a quota an hour from resetting had already failed to come
 # back. The display layer rewrites any ISO token through reset_display, so
 # every provider script gets countdown + local clock without growing a
 # formatter of its own — and a script that prints a reset in its own words is

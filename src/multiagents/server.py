@@ -911,6 +911,9 @@ def cancel_deferred(deferred_id: str) -> dict:
     entry = find_deferred(run.tree.read()["deferred"], deferred_id)
     if entry is None:
         return _ok({"error": f"no deferred entry {deferred_id!r}; list_deferred shows the queue"})
+    restarting = (f"{deferred_id} is restarting; cancel is refused while a "
+                  f"restart is in progress (DQ-R12). stop_agent the run "
+                  f"once it exists.")
     caller = run.self_id()
     if deferred_malformed(entry):
         # A broken entry has no owner that can be trusted; whoever defers or
@@ -922,18 +925,34 @@ def cancel_deferred(deferred_id: str) -> dict:
         # DQ-R12: the restart and the cancel would each believe they own the
         # outcome — the record could say cancelled while the run started
         # anyway. Refuse here; stop_agent reaches the run once it exists.
-        return _ok({"error": f"{deferred_id} is restarting; cancel is refused while a "
-                             f"restart is in progress (DQ-R12). stop_agent the run "
-                             f"once it exists."})
+        return _ok({"error": restarting})
     else:
         owner = entry.get("deferred_by")
         if caller is not None and not (owner and caller in run.tree.ancestry(owner)):
             return _ok({"error": f"{caller} may only cancel entries it deferred, or its "
                                  f"descendants' ({deferred_id} was deferred by "
                                  f"{owner or 'the orchestrator'})."})
-    if not run.tree.exit_deferred(deferred_id, "cancelled"):
+    outcome = run.tree.exit_deferred(deferred_id, "cancelled")
+    if outcome is True:
+        return _ok({"cancelled": deferred_id})
+    if outcome is False:
         return _ok({"error": f"no deferred entry {deferred_id!r}"})
-    return _ok({"cancelled": deferred_id})
+    # DQ-R12: a drain's claim held the entry when the transaction ran. The
+    # claim may dissolve straight after — a transient start failure requeues
+    # the entry — so the answer is made for what IS there now, not for the
+    # transaction's instant: `waiting` again means no run exists and the
+    # caller's cancel still stands, so it is honoured through the same
+    # transactional path.
+    state = find_deferred(run.tree.read()["deferred"], deferred_id)
+    if state is None:
+        return _ok({"error": f"no deferred entry {deferred_id!r}"})
+    if state.get("status") == "waiting":
+        retried = run.tree.exit_deferred(deferred_id, "cancelled")
+        if retried is True:
+            return _ok({"cancelled": deferred_id})
+        if retried is False:
+            return _ok({"error": f"no deferred entry {deferred_id!r}"})
+    return _ok({"error": restarting})
 
 
 # --------------------------------------------------------------------------
