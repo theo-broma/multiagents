@@ -2952,3 +2952,8 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     - the phase 0 invariant fixes (5e1eb4b, and the follow-up for the Q6 docstring).
   - **codex.** The user upgraded the CLI to 0.159.2, and gpt-6.1-sol now works through the agents' profile. The model list is refreshed, and every roster use of gpt-6-sol has become gpt-6.1-sol: advisor, dev-advisor, adversary, the tester's fallback, the implementer's codex fallback, and the reviewer.
   - **The advisor conversation ag-322b14 (gpt-6-sol) is stopped,** so that the next consult starts fresh on 6.1. This is the same-provider model-change bug.
+- 2026-09-30 ~12:20 UTC.
+  - **Q1 merged (15fba04):** a failed retry launch now emits `retry_failed` and ends the node `failed` with its cause. On main, test_core plus the Q1 file give 560 passed.
+  - **Spec M.** The contract m-routing-fixes.md has advisor amendments (0d996f2), and its tests are merged (e2e4767).
+  - **Implementation of M** runs on implementer-deep glm-5.3-flash, ag-3d566d.
+  - **T1 (ag-38d415, claude) is still running.** After it lands, the T1 amendment tests (3ce818e) need a glm implementer.
