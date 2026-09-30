@@ -2860,3 +2860,15 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     1. steer ag-d86348 to drop the alias, then carry in the tester's commit;
     2. verify the 197 tests plus the adversary tests;
     3. merge ag-d86348.
+- 09:05 UTC: **D2 MERGED (695099a).**
+  - The alias is gone: the follower uses only the real ACTIVE and TERMINAL sets.
+  - The adversary tests were corrected by the tester (7070c89).
+  - I verified it myself: 204 D2 tests pass, and test_core plus the monitor tests give 951 passed and 2 skipped.
+  - The superseded branches ag-51c6dc and ag-d4ba1a were discarded; their content is in the merge.
+- **Brief state:** H6, H7, H8, H11, D1, D2 and D3 are merged. What remains:
+  - H10, the live compaction check;
+  - the H12 leftovers for the user;
+  - triage of the cf02a1 branch and the reviewer reports;
+  - tickets;
+  - moving wt-main to main, followed by a /mcp.
+- The deferred duplicate df-e34d37 is still queued; stop it when it starts.
