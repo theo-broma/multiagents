@@ -33,6 +33,7 @@ from . import gitops
 from .budget import read_all, reset_label
 from .config import load as load_config
 from .config import seed_global, seed_project, sync_layer
+from .drift import find_shadowing
 from .models import refresh_models, validate_agent_models
 from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
@@ -1659,6 +1660,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         leaking = [k for k in config.env_passthrough
                    if k.partition("=")[0].strip() not in blocked]
         print(f"  env        passthrough={leaking or 'none'} blocked={len(blocked)} vars")
+
+    # A warning, never a problem: drift does not change the exit status, so
+    # a machine with a copied layer is told about it without failing checks.
+    print("\nconfig drift")
+    drift_items = find_shadowing(paths)
+    if not drift_items:
+        print("  none")
+    else:
+        for item in drift_items:
+            print(f"  {item.file}  {item.key_path}  [{item.kind}]")
+            print(f"    {item.detail}")
+            if item.kind == "stale_acknowledgement":
+                print("    fix: remove the acknowledgement — it matches no drift")
+            else:
+                print(f"    fix: remove the key so the shipped value applies, "
+                      f"or add {item.key_path} to drift_acknowledged")
 
     print(f"\n{'ok' if not problems else str(problems) + ' problem(s)'}")
     return 1 if problems else 0
