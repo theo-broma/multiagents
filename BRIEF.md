@@ -2686,3 +2686,4 @@ Resume in this order:
 - ag-e9d658 tester (sonnet) for D3 from d3-cli-dependency-manifest.md rev 2.
 - ag-0cbda0 implementer (GLM glm-5.3 high) on H6, fast path (known-cause bug, own regression tests).
 Next: adversary findings go back to a GLM implementer with the failing tests; D3 implementer-deep (GLM max) after the tester merges.
+- ~07:30 UTC: H6 merged (697f109, GLM; 10 regression tests). D3 tests merged (015f941, 285 red); the tester's interface assumptions are accepted as spec amendments (1caadba). In flight: ag-709ee5 implementer-deep (GLM max) on D3; ag-6d3d5a implementer-quick (GLM low) on the H8 interim size refusal; the two opus adversaries are still running.
