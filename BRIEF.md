@@ -3219,3 +3219,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **In flight:**
 - reviewer ag-b859f1 on M round 6 (fdb4fcb). If approved: cherry-pick f8c2b26 (tester ag-35d54e) into the ag-074735 worktree, merge, verify, and discard ag-35d54e.
 - PS ag-dc8946, fixing the 11 findings.
+- **Update, ~00:20 UTC.**
+  - **M round 6** was REJECTED by ag-b859f1 with 3 defects: exit_status taken as proof of death (P1); `identity` unbound under `home_policy: shared` (P1, which broke every launch in that mode); weakened auxiliary tests (P2). Steered to ag-074735 as round 7.
+  - **Asked the user** whether to move M's remaining work from glm to opus. It is now in its 7th review round.
+  - **PS ag-dc8946** has its 11 fixes done; re-review ag-2f0d3e has started.
+  - **Merge order:** M, then PS (plus tester ag-e77949), reconciling the cache per the reviewer.
