@@ -57,3 +57,40 @@
 ## Out of scope
 
 - agy pool splitting. It is a user decision, pending.
+
+## Amendments of 2026-09-30, after the advisor (ag-d20e1e, gpt-6.1-sol). They supersede the text above where they differ.
+
+**RM-R2a: the tiers, exactly.**
+- **Tier A** is the preferred provider together with its same-family instances. It stays **one pool**, chosen by reservation, load and last use as today (`budget.py` ~1064, ~1139). It is not two tiers.
+- **Tier B** is the agent's `models:` routes, in the order they are written, as one ordered tier. When a provider in Tier B has family siblings, the siblings join Tier B right after it.
+- **Tier C** is the project `fallback_chain` entries not already listed. `defer` still ends the chain, after Tiers B and C.
+- **Unchanged:** the existing short-reset wait before a cross-family fallback (`budget.py` ~1151).
+- **"Eligible" means eligible under the existing `usable` / `_usable_spec` rules.** A cross-family project entry with no explicit or inheritable model still cannot run, as today.
+
+**RM-R3a.** The known-before-unknown ranking applies inside Tier A's pool and inside Tier B. It never moves a candidate across tiers.
+
+**RM-R4 is replaced by RM-R4b.**
+- **The existing per-window reset rule stays as it is.** QF-R1 / `_apply_reset_margin` clears expired windows after the 120 s margin and recomputes the constraint. RM-R4(a) is withdrawn: demoting the whole reading could bypass another window that is still full.
+- **Age.** A reading carries an age in seconds:
+  - the provider's own `stale_seconds` when it gives one;
+  - otherwise a new optional script field, `read_at` (epoch seconds), when it gives that;
+  - on a cache hit, the age grows with the time spent in the cache. It is not frozen.
+- **A reading whose age exceeds `budget.max_reading_age_seconds`** (default 3600, configurable) routes as unknown, and the raw reading stays available for display, marked stale.
+- **A reading with no age information** is unchanged from today.
+- Verified by:
+  - a codex-shaped reading with `stale_seconds` 13000 at 100% routes as unknown;
+  - the same reading with `stale_seconds` 60 is unusable;
+  - a cached reading ages across cache hits;
+  - an expired window is still cleared per window by the existing rule.
+
+**RM-R5 is replaced by RM-R5a.**
+- **The mapping.** A provider may declare `effort_suffixes` in `providers.yaml`, a mapping from an anchored model-id suffix to an effort, e.g. `{"-low": low, "-medium": medium, "-high": high}` for agy. A model id that matches no suffix has no implied effort.
+- **Inherited effort.** When the effective effort was **inherited**, i.e. from the agent's top-level `effort` and not written on this provider's route, and it conflicts with the model's implied effort, it is normalised to the implied effort.
+- **Explicit effort.** When the conflicting effort was **explicitly configured for this destination route**, the start is refused before any side effect, with a message naming the model, the effort and the route.
+- **Persistence.** The normalised spec is what is persisted, and it is reused on steer and consult. An event records the old effort, the effective model and effort, and the reason.
+- **Unchanged:** providers that declare no `effort_suffixes`.
+- Verified by:
+  - the agy incident case (inherited `low`, model `-medium`) launches with the effort `medium` and writes an event;
+  - an explicit conflicting route effort is refused.
+
+**RM-R6a.** Nothing changes except what RM-R1..R5b describe.
