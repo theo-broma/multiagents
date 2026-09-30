@@ -56,6 +56,7 @@ from .redact import scrub
 from .auth import looks_like_auth_failure
 from .startup import StartupHealth, StartupUnavailable
 from .authority import HostAuthority
+from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
 from .tree import TERMINAL, Node, Tree, new_id, node_from_raw, now
@@ -405,15 +406,16 @@ class Run:
     fix_turn: bool = False
     fix_verdict: dict | None = None
     fix_timed_out: bool = False       # CI-R5: ended at `commit_fix_timeout`
-    # LN-C1: the `{value, source}` limits this turn was launched under, so a
-    # trip names the value in force rather than one resolved again later.
+    # LN-C1/LN-C2: the `{value, source, source_detail}` limits this turn was
+    # launched under, so a trip names the value in force — and the file and
+    # line it came from — at the launch, not ones resolved again later.
     limits: dict = field(default_factory=dict)
-    # LN-C5: the container's `oom_kill` count at launch (None: unreadable),
-    # and whether another run of ours shared the container meanwhile.
+    # LN-C5: the container's `oom_kill` count at launch (None: unreadable,
+    # or the run began under another server that never told us). Occupancy
+    # is judged from the shared host-side record, not kept here.
     oom_baseline: int | None = None
     oom_reader: Any = None
     oom_container: str = ""
-    oom_crowded: bool = False
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -472,9 +474,11 @@ class Runner:
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.startup = StartupHealth(paths)
         self.runs: dict[str, Run] = {}
-        # LN-C5: the runs this server has alive in each container, which is
-        # the only evidence that a container-wide OOM kill was a given run's.
-        self._container_runs: dict[str, dict[str, Run]] = {}
+        # LN-C5: which runs are alive in each container, decided from the
+        # host-side record every server of this project shares — never only
+        # this process's own runs, or a sibling started by a second Runner
+        # would not stop a `killed` attribution (review finding 1).
+        self.occupancy = ContainerOccupancy(paths)
         self.authority = (None if DockerExecutor({}, paths, {}, state_root()).inside()
                           else HostAuthority(paths, self.tree))
         reap_pending_branches(paths.root, self.tree, self.authority)
@@ -1339,7 +1343,11 @@ class Runner:
         env.update(identity)
         executor = self.executor(spec)
 
-        limits = self._limits_for(node_id, spec, timeout)
+        # LN-C2, finding 8: the provenance captured with the values at THIS
+        # launch — the file and line as they are now, not as they will be when
+        # a trip fires.
+        limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
+                                                                 timeout))
         wall = limits["timeout"]["value"]
         options = {"effort": spec.effort,
                    **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
@@ -1440,7 +1448,9 @@ class Runner:
 
     async def _track_container_run(self, run: Run, executor) -> None:
         """LN-C5: note the container's `oom_kill` count as this run starts,
-        and whether any other run of ours shares the container with it."""
+        and register it in the occupancy record every Runner of this project
+        shares — a sibling started by another server is as much a sibling as
+        one of ours (finding 1)."""
         reader = getattr(executor, "oom_kill_count", None)
         if not callable(reader):
             return                                  # not a container
@@ -1448,22 +1458,17 @@ class Runner:
         run.oom_container = str(getattr(executor, "container", "") or "")
         with contextlib.suppress(Exception):
             run.oom_baseline = await asyncio.to_thread(reader)
-        peers = self._container_runs.setdefault(run.oom_container, {})
-        for other_id, other in list(peers.items()):
-            if other_id == run.node_id or other.done.is_set() \
-                    or (other.task is not None and other.task.done()):
-                peers.pop(other_id, None)
-        if peers:
-            run.oom_crowded = True
-            for other in peers.values():
-                other.oom_crowded = True
-        peers[run.node_id] = run
+        handle_pid = getattr(run.handle, "pid", 0) or 0
+        self.occupancy.register(run.oom_container, run.node_id, handle_pid,
+                                getattr(run.handle, "pid_start", "") or "")
 
     async def _sigkill_notice(self, run: Run, code: int) -> None:
         """LN-C5: a run in the container died by SIGKILL. Attributed to
         `executor.docker.memory` only when the container's `oom_kill` count
-        rose during it AND it was the only run of ours in there; every other
-        case is a SIGKILL of unknown cause. `docker inspect … OOMKilled`
+        rose during it AND it was the only run in there, judged across every
+        Runner of this project; every other case is a SIGKILL of unknown
+        cause — including a run whose baseline is unknown because it began
+        under another server (finding 2). `docker inspect … OOMKilled`
         describes the container, not the exec'd process, and is not used."""
         node_id = run.node_id
         after = None
@@ -1471,14 +1476,15 @@ class Runner:
             after = await asyncio.to_thread(run.oom_reader)
         rose = (run.oom_baseline is not None and after is not None
                 and after > run.oom_baseline)
+        crowded = self.occupancy.others(run.oom_container, node_id)
         memory = (self.config.project.get("executor", {}).get("docker", {}) or {}).get("memory")
-        if rose and not run.oom_crowded and memory:
+        if rose and not crowded and memory:
             key = "executor.docker.memory"
             self._notice(key, memory, "killed", node_id,
-                         notices.provenance(self.config, key, memory),
-                         f"{node_id} ({run.spec.name}) was SIGKILLed when the "
-                         f"container ran out of memory",
-                         "raise it there if the work needs more", node=node_id)
+                          notices.provenance(self.config, key, memory),
+                          f"{node_id} ({run.spec.name}) was SIGKILLed when the "
+                          f"container ran out of memory",
+                          "raise it there if the work needs more", node=node_id)
             return
         if rose:
             why = (f"the container hit its memory limit at the time "
@@ -1486,7 +1492,10 @@ class Runner:
                    f"another run shared the container" if memory else
                    "the container's OOM killer fired at the time, but another "
                    "run shared the container")
-        elif after is None or run.oom_baseline is None:
+        elif run.oom_baseline is None:
+            why = ("its starting OOM counter is unknown — the run began under "
+                   "another server, or the counter could not be read at launch")
+        elif after is None:
             why = "the container's OOM counter could not be read"
         else:
             why = "the container's OOM counter did not change"
@@ -1968,8 +1977,12 @@ class Runner:
             return self._pin_refusal(provider.name, exc.reason, exc.retry_after)
         launched = False
         try:
-            # LM-R1/R2: resolved once, recorded on the node, reported to the caller.
-            limits = self.config.effective_limits(spec, timeout)
+            # LM-R1/R2: resolved once, recorded on the node, reported to the
+            # caller. LN-C2, finding 8: the provenance is resolved HERE, at
+            # launch, and travels with the run — a later edit of the yaml must
+            # not rewrite where a trip says the value came from.
+            limits = self._limits_detail(
+                agent_name, self.config.effective_limits(spec, timeout))
 
             # --- git isolation ---------------------------------------------------
             # EVERY agent gets a worktree, including read-only ones. `writes: false`
@@ -2032,7 +2045,7 @@ class Runner:
                 "workdir": str(worktree_path),
                 "status": "running",
                 "routing": why,
-                "effective_limits": self._limits_detail(agent_name, limits),
+                "effective_limits": limits,
                 "log": str(self.paths.run_dir(node_id)),
                 "pid": run.handle.pid if run.handle else None,
             }
@@ -2360,7 +2373,14 @@ class Runner:
             return
         node_id = run.node_id
         agent = run.spec.name
-        limits = run.limits or self._limits_for(node_id, run.spec)
+        # LN-C2, finding 8: prefer the limits (and their provenance) captured
+        # at the launch still in flight — `run.limits` for a run this server
+        # launched, the node's recorded launch limits for one it adopted.
+        limits = run.limits
+        if not limits:
+            recorded = self.tree.get(node_id)
+            limits = ((recorded.limits if recorded else None)
+                      or self._limits_for(node_id, run.spec))
         if trip.reason in ("timeout", "silence"):
             name = "timeout" if trip.reason == "timeout" else "silence_timeout"
             limit_key = "limits." + ("default_timeout" if name == "timeout"
@@ -2368,14 +2388,15 @@ class Runner:
             entry = limits.get(name) or {}
             value = entry.get("value")
             layer = entry.get("source")
+            detail = entry.get("source_detail")
             if layer == "call":
-                key, source = limit_key, notices.call_source(name, limit_key)
+                key, source = limit_key, detail or notices.call_source(name, limit_key)
             elif layer == "agent":
                 key = f"agents.{agent}.{name}"
-                source = notices.provenance(self.config, key, value, "agent")
+                source = detail or notices.provenance(self.config, key, value, "agent")
             else:
                 key = limit_key
-                source = notices.provenance(self.config, key, value, layer)
+                source = detail or notices.provenance(self.config, key, value, layer)
         elif trip.reason == "runaway_steps":
             value = run.supervisor.max_steps
             key = (f"agents.{agent}.max_steps" if run.spec.max_steps
@@ -2458,7 +2479,7 @@ class Runner:
         if stopped_elsewhere:
             status = "cancelled"
         if run.oom_reader is not None:
-            self._container_runs.get(run.oom_container, {}).pop(node_id, None)
+            self.occupancy.forget(run.oom_container, node_id)
             if code in (137, -9) and not stopped_elsewhere and not timed_out:
                 with contextlib.suppress(Exception):
                     await self._sigkill_notice(run, code)
@@ -2793,15 +2814,20 @@ class Runner:
                 gitops.commit_all,
                 Path(node.worktree), f"{node.agent}: work in progress ({node_id})",
                 role=node.agent, agent_id=node_id, git=self.agent_git(node))
-        if not result.ok and result.hook and allowed and attempt >= allowed:
-            # LN-C6: on exhaustion only — every attempt was used and the hook
-            # still refuses.
-            key = "limits.commit_fix_attempts"
-            self._notice(key, allowed, "stopped", node_id,
-                         notices.provenance(self.config, key, allowed),
-                         f"{node_id} used all {allowed} fix attempt(s) and the "
-                         f"{result.hook} hook still refuses its commit",
-                         "raise it there to allow more", node=node_id)
+        else:
+            if not result.ok and result.hook:
+                # LN-C6: exhaustion only. The `else` arm runs when the loop's
+                # own condition gave out — every attempt was used, or none was
+                # allowed, which exhausts a ceiling of zero just the same
+                # (finding 4) — never when a relaunch failed mid-loop.
+                key = "limits.commit_fix_attempts"
+                what = (f"{node_id} used all {allowed} fix attempt(s) and the "
+                        f"{result.hook} hook still refuses its commit" if allowed
+                        else f"no fix attempt was allowed for {node_id} and the "
+                             f"{result.hook} hook refuses its commit")
+                self._notice(key, allowed, "stopped", node_id,
+                              notices.provenance(self.config, key, allowed),
+                              what, "raise it there to allow more", node=node_id)
         return result, attempt, "", usage, None
 
     async def _finalize_fix_turn(self, run: Run, code: int | None,
@@ -3636,6 +3662,17 @@ class Runner:
                   supervisor=supervisor, turn_start=turn,
                   replay_to=int(follow.get("offset", turn)), adopted=True,
                   startup_token=self.startup.token_for(provider.name, node.id))
+        reader = getattr(executor, "oom_kill_count", None)
+        if callable(reader):
+            # LN-C5, finding 2: a docker run taken over mid-flight gets the
+            # SIGKILL judgement it could never have had without one. Its
+            # baseline is unknown — this server did not read the counter at
+            # the launch it did not perform — so a SIGKILL of an adopted run
+            # is `kill_uncertain`, never silently absent.
+            run.oom_reader = reader
+            run.oom_container = str(getattr(executor, "container", "") or "")
+            self.occupancy.rebind(run.oom_container, node.id, handle.pid,
+                                  handle.pid_start)
         self.runs[node.id] = run
         if live:
             self.tree.update(node.id, adopted_at=now())
@@ -4658,6 +4695,13 @@ class Runner:
         if paused:
             return {"paused": True, "reason": paused.get("reason", ""),
                     "until": paused.get("until"), "restarted": []}
+
+        # LN-C4, finding 5: the pause is gone — lifted or expired — so nothing
+        # is being held back by it any more and its deferral notices stop
+        # here rather than at the next successful start, which may never come
+        # (the deferred task may have been dropped or re-issued).
+        notices.clear(self.tree, lambda e: e.get("effect") == "deferred"
+                      and e.get("scope") == "tree")
 
         due = self.tree.due_deferred()
         if not due:
