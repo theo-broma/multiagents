@@ -2924,3 +2924,7 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - The T1 and T2 tests are merged (d646f77, e8d19ca), with spec amendments c01a85d and b942382.
   - In flight on claude sonnet: T1 impl ag-38d415 and T2 impl ag-9008e5.
   - Next, on glm-5.3-flash after 10:57: Q1, Q4, Q5, Q6, then batch M one at a time (1g, 3, 6).
+- 2026-09-30 ~10:45 UTC: codex reset early.
+  - **Verified.** One live `codex exec` through the multiagents profile brought its reading to 5h 0% and weekly 0% (the weekly window now resets 2026-10-07). The rollout reading had been about 3.6h stale, still saying weekly 100%.
+  - **Config change, per the user.** advisor, dev-advisor and adversary moved to provider codex, gpt-6-sol, effort medium, with agy gemini-3.1-pro-high as their fallback. The user said "GPT-6.1-sol"; only gpt-6-sol exists in the catalog.
+  - **The advisor catch-up consult is running on codex.**
