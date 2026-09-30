@@ -2734,3 +2734,9 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     `merge_agent(<old>, into=<new worktree>)`, and point it at
     .multiagents/runs/<old>/.
 - ag-743603 (the D2 tester, on sonnet) is still running.
+- ~10:00 UTC: the user reports agy works again; the PAUSE is lifted.
+  - **H7 fixes (ag-303ef7) are merged: 4dbf415.** I verified them myself: 180 passed across h7_adversary, h7_adversary_followup, h7_provider_startup, h6 and zai.
+  - **Resumed on codex**, with each old branch squash-merged into the new worktree:
+    - D1 fixes: ag-e6c241, implementer on gpt-6-sol, carrying a0a6924 from ag-42b581;
+    - D3: ag-92a8d7, implementer-deep on gpt-6-astra, carrying 02701e3 from ag-709ee5.
+  - ag-743603, the D2 tester, is still running.
