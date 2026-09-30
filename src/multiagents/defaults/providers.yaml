@@ -175,6 +175,16 @@ providers:
         readonly: ["--sandbox", "--dangerously-skip-permissions"]
       optional:
         effort: ["--effort", "{effort}"]
+    # The model ids carry their effort as a suffix, and the CLI refuses a
+    # contradicting `--effort` at launch ("--model gemini-3.8-flash-medium
+    # conflicts with --effort=low"). Declared here, the runner settles the
+    # pair before launch (RM-R5a): an inherited effort is normalised to the
+    # model's, an effort explicitly written on the destination route is
+    # refused, and an id with no matching suffix implies nothing.
+    effort_suffixes:
+      "-low": low
+      "-medium": medium
+      "-high": high
     # The multiagents server for an agent with spawn rights (see the claude
     # block for the placeholders). agy has no flag or variable naming an MCP
     # config: it reads ~/.gemini/config/mcp_config.json and nothing else
