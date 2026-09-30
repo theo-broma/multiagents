@@ -2988,3 +2988,7 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - The rest: malformed entries crash things, and a refused entry can be retried by a recovery race.
 - **Spec amended** with DQ-R9..R12.
 - **Fix run** ag-c604fe (implementer-deep glm), with the worktree squashed from agents/adversary/5917f6 (amendments plus tests) as e1347f6. When green, merge it; that one merge carries the amendments and the fixes. Afterwards discard ag-3a07cc and ag-5917f6, since both are carried.
+- **~13:20 UTC: M merged (28eb8a6).** The M tests and the phase0 invariants are green.
+  - **Side effect:** 18 tests in `test_t1_deferred_queue.py` went red. Their fixture defers through the `worker` agent, whose `models:` zeta fallback now routes first under RM-R2. Tester ag-978728 is fixing the fixture.
+  - **The T1 fix run ag-c604fe** is based on pre-M main. At merge time, check its T1 adversary and amendment tests against M: the same `worker` fixture issue may apply.
+  - **Not yet done:** an adversary run on M, since routing decides where credentials are spent. It should be run on claude opus, because codex refuses adversary work.
