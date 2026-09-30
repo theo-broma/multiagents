@@ -3197,3 +3197,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 
 **Pending user-facing items:** none blocking.
 - **Update, after handoff #7.** Reviewer ag-90626e rejected TS Run A with 2 findings: the h7 and sg_r7 flakes under the /var/tmp basetemp break parity (P1), and manifest.py asserts on duplicate testcase ids (P2). Both were steered back to ag-2caa66 (opus). **Next:** a reviewer again, then merge.
+- **Update.** Reviewer ag-f7ced5 rejected M round 5 with 3 defects:
+  - an "unknown" liveness is taken as dead (P1);
+  - the outer `finally` ignores `_cleanup_holds` (P1);
+  - `in_launch` is set too early, leaving a node `pending` (P2).
+
+  These were steered to ag-074735. **Next:** a reviewer again, then cherry-pick f8c2b26, then merge.
