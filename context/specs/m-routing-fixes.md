@@ -140,3 +140,21 @@
 - a malformed `max_reading_age_seconds`, which falls back to 3600.
 
 They must stay green.
+
+## Amendments of 2026-09-30, after the round-3 re-review (ag-53986b). They supersede RM-R4d where they differ.
+
+**RM-R4e: cache age, the exact rule.** This ends the cycle of patches.
+- **What the age is measured from.** The cache observes the wall clock only when the entry is read, so the age is measured from those observations.
+- **At every hit:**
+  - the entry's age grows by `now - last_seen`, when that is ≥ 0;
+  - `last_seen` becomes `max(last_seen, now)` and never moves backwards. This holds under concurrent hits too: updates to the entry are serialised, or use `max`.
+- **An observed backward step.** When `now < last_seen` at a hit, the entry is **permanently expired**: the next access re-reads the provider. A later forward recovery never makes it authoritative again.
+- **Accepted limit.** A backward step that happens and is recovered entirely *between* two reads cannot be observed. The age may then count less time than truly elapsed. This is accepted; a monotonic clock is not required.
+
+**RM-R1b: cleanup after a failed launch is complete and survives a second cancellation.**
+- **Where it applies.** Any exit between `executor.start()` succeeding and supervision being established.
+- **What it must do, all shielded from a further cancellation (e.g. `asyncio.shield`, or cleanup in a `finally` that re-catches cancellation):**
+  - stop the process;
+  - release the supervision lock;
+  - `occupancy.forget()` any registered container occupancy.
+- **The order.** The slot or claim is released only after that cleanup has run.
