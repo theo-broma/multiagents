@@ -2934,3 +2934,15 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - **User order, 2026-09-30 ~10:55 UTC: launch no more implementers on claude; wait for glm.**
   - The running claude implementers (T1 ag-38d415, T2 ag-9008e5) finish their current scope.
   - The work on the T1/T2 amendments (tests are in 3ce818e) goes to glm-5.3-flash implementers. So does batch Q (Q1, Q4, Q5, Q6) and then batch M.
+- 2026-09-30 ~11:20 UTC.
+  - **Merged:**
+    - Q5 (7f6064a), codex `file_change` declared opaque;
+    - T2 (a624f9d), all MT tests and the T2 amendments green: 76 plus 10 core ticket tests;
+    - Q4 (8e95077), the login names its store.
+  - **Implementers on glm-5.3-flash.** Q5 and Q6 each hit `max_steps` 40, so I raised it to 80.
+  - **In flight:**
+    - Q6 (ag-5b8b85, glm);
+    - Q1 (ag-7f69ce, glm);
+    - the phase 0 invariant fix (ag-4240d0, glm). Two phase0 guards have been red since the D3 and H7-fix merges, because comments name claude and opencode in manifest.py:224 and providers.py:644.
+    - T1 (ag-38d415, claude, finishing).
+  - **gpt-6.1-sol.** The user says it works in their terminal. Here, codex 0.158.0 `exec` gets a 400 "not supported when using Codex with a ChatGPT account", both via ~/.codex and via the agents' profile. ~/.codex/sessions has no successful gpt-6.1-sol session today, so the user's terminal may use another CODEX_HOME or machine. I have asked the user.
