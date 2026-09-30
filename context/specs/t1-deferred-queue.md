@@ -1,0 +1,68 @@
+# T1: the deferred queue never loses a task silently, the contract
+
+**Status:** contract, written by the orchestrator on 2026-09-30.
+- **Source:** ticket "a deferred task can be removed from the durable deferred queue with no event and no report", kept in context/tickets/2026-09-30-unfiled.md.
+- **What happened:** on 2026-09-30, the deferred task df-e34d37 left `tree.json` `deferred` during a `wait_for_agents`. No `created`, `deferred`, `dropped` or error event was recorded, and the result said only "no active agents".
+- **Scope:** the drain (`resume_deferred`), the `wait_for_agents` result, and two new MCP tools.
+- **Ids:** `DQ-R*`. They are never renumbered.
+
+## Behaviours
+
+**DQ-R1: every exit from the queue is an event.**
+- **When.** Each time an entry leaves the `deferred` list, one event is appended to `events.jsonl`.
+- **Fields.** The event has `kind: "deferred_exit"`, `deferred_id`, `agent` and `outcome`, where `outcome` is one of:
+  - `restarted`, with the new `agent_id`;
+  - `re_deferred`, with the new deferred id;
+  - `refused`, with `reason`;
+  - `dropped`, with `reason`;
+  - `cancelled`.
+- **No silent exit.** No code path removes an entry without writing this event.
+- Verified by: each outcome, driven through the drain or `cancel_deferred`, writes exactly one matching event, and the entry is gone from the queue afterwards (except under DQ-R3).
+
+**DQ-R2: the `wait_for_agents` result reports the drain.**
+- **The field.** When the drain did anything, the result carries `deferred: {"restarted": [...], "refused": [...], "dropped": [...], "still_deferred": n}`. It is always present in that case, **including** on the "no active agents" return and on a timeout.
+- **A restarted run.** A run started by the drain is an active agent from then on. It appears in `still_running`, or in `changed` if it finishes, like any other run.
+- Verified by:
+  - a due entry drained while no agent is active, where the result lists the restart and the new agent id;
+  - a due entry whose start is refused, where the result lists it under `refused` with the reason.
+
+**DQ-R3: a refused restart stays visible.**
+- **What counts as refused.** `start()` returns an error, or raises something that is not a quota or transient condition. Examples:
+  - the pinned model is no longer configured for any provider of that agent;
+  - the agent is no longer in the roster;
+  - a budget tag is spent.
+- **What happens to the entry.** It stays in the queue with `status: "refused"` and the `reason`. Two things follow:
+  - it is never retried automatically, and it no longer holds the pause (DQ-R6);
+  - it leaves the queue only through `cancel_deferred`.
+- **Transient errors.** Behaviour is unchanged: the entry stays queued with `status: "waiting"`, and the drain stops.
+- Verified by: a deferred entry pinned to a model later removed from `agents.yaml`. After the drain, `list_deferred` shows it as refused, with a reason naming the agent and the model.
+
+**DQ-R4: the MCP tool `list_deferred()`.**
+- **What it returns.** Every queued entry, each with:
+  - `id` and `agent`;
+  - `task`, the first 200 characters;
+  - `model`, or empty when there is none;
+  - `retry_after`, as ISO 8601 UTC;
+  - `status`, which is `waiting` or `refused`;
+  - `reason`;
+  - `deferred_by`, the caller's agent id, or `orchestrator`.
+- **Read-only.**
+- Verified by: after two deferrals and one refusal, the tool lists the three entries with the right statuses.
+
+**DQ-R5: the MCP tool `cancel_deferred(deferred_id)`.**
+- **What it does.** It removes the entry and writes a `deferred_exit` event with `outcome: "cancelled"`.
+- **Unknown ids.** An unknown id returns `{"error": ...}` and changes nothing.
+- **Authorisation.** The caller must be the one that deferred the entry, or one of its ancestors. The orchestrator may cancel any entry. This is the same rule as `stop_agent`'s `_may_act_on`.
+- Verified by:
+  - cancelling removes the entry and writes the event;
+  - an unknown id errors;
+  - a sibling's attempt to cancel is refused.
+
+**DQ-R6: the pause follows the waiting entries.**
+- **When it holds.** The tree-wide pause set by a deferral is held only while at least one entry is `waiting`.
+- **When it lifts.** When the last waiting entry leaves, whether it was restarted, refused, dropped or cancelled, the pause is lifted in the same step.
+- Verified by: one deferral followed by a cancel leaves `pause` empty, and `start_agent` works again at once.
+
+**DQ-R7: nothing else changes.**
+- A deferral still returns `deferred: true` with `retry_after`, and a due entry still restarts at the next `wait_for_agents`.
+- The existing suite stays green, apart from the known reds.
