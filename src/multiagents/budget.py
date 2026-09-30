@@ -383,15 +383,35 @@ def _reading_age(b: Budget, now_: float, cached_at: float | None = None) -> floa
     its own. A cached reading KEEPS ageing: the time spent in the cache is
     added to a `stale_seconds` age, and is inside an absolute `read_at` age
     naturally. Age is never frozen — that is the point.
+
+    RM-R4d: time going backwards never makes a reading fresher.
+
+    - A cached reading whose wall-clock elapsed has gone NEGATIVE — the clock
+      stepped backwards under it (NTP correction, VM resume) — is expired:
+      its age is past every bound, so routing treats it as unknown. Clamping
+      the negative elapsed to 0 would freeze the age for as long as the
+      clock stays behind, which is the defect; dropping the cache entry to
+      re-read would be worse, for the re-read would come back looking fresh
+      through the very step that makes the bookkeeping untrustworthy.
+    - A `read_at` more than 300 s in the future is a broken stamp — one sent
+      in milliseconds arrives looking years ahead — and expires the reading
+      too. Clamping its age to 0 would let a forged stamp stay fresh for
+      ever; a little ahead (within the 300 s) is still tolerated, as a
+      clock slightly fast has always been.
     """
     if b.stale_seconds is not None:
         age = b.stale_seconds
     elif b.read_at is not None:
+        if b.read_at - now_ > 300.0:
+            return math.inf
         return max(0.0, now_ - b.read_at)
     else:
         return None
     if cached_at is not None:
-        age += max(0.0, now_ - cached_at)
+        elapsed = now_ - cached_at
+        if elapsed < 0:
+            return math.inf
+        age += elapsed
     return age
 
 
@@ -411,7 +431,9 @@ def _apply_reading_age(b: Budget, bound: float, now_: float,
     age = _reading_age(b, now_, cached_at)
     if age is None or b.stale or age <= bound:
         return b
-    note = (f"reading is {age / 60:.0f} min old, over the "
+    age_text = (f"{age / 60:.0f} min old" if math.isfinite(age)
+                else "past every bound (the clock went backwards)")
+    note = (f"reading is {age_text}, over the "
             f"{bound / 60:.0f} min reading age; treated as unknown for routing")
     return replace(b, stale=True,
                    note=(b.note + "; " if b.note else "") + note)
@@ -1218,9 +1240,11 @@ def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
     last used. Both are read from the tree, so every MCP server process on the
     machine ranks them the same way.
 
-    RM-R3a: with load and last-use equal, an instance whose reading is KNOWN
-    and roomy is preferred over one whose headroom is unknown; an unknown
-    reading stays eligible and wins when nothing known can take the work.
+    RM-R3b: an instance whose reading is KNOWN and roomy is preferred to one
+    whose headroom is unknown BEFORE load and last use are compared — an
+    unknown sibling may itself be exhausted, so knownness outranks load.
+    An unknown reading stays eligible and wins when nothing known can take
+    the work.
     """
     load = load or {}
     last_used = last_used or {}

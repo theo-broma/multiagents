@@ -316,8 +316,7 @@ class Provider:
             # Anything but `plan` is metered: a misspelling must not quietly
             # hide a real dollar figure.
             billing="plan" if data.get("billing") == "plan" else "metered",
-            effort_suffixes={str(k): str(v)
-                             for k, v in (data.get("effort_suffixes") or {}).items()},
+            effort_suffixes=_effort_suffixes(data.get("effort_suffixes")),
         )
 
     # ------------------------------------------------------------- command --
@@ -714,3 +713,28 @@ def _bin_search(value: Any) -> list[str]:
         if not isinstance(directory, str) or not Path(directory).expanduser().is_absolute():
             raise ValueError("bin_search: entries must be absolute directories")
     return list(value)
+
+
+def _effort_suffixes(value: Any) -> dict[str, str]:
+    """RM-R5c: `effort_suffixes` maps an anchored model-id suffix to a
+    non-empty effort name, and is validated at load.
+
+    Anything else is a config error here, never a value that reaches a
+    launch: `str(v)` used to keep a YAML null (`-low:` with nothing after
+    it) as the effort string "None", which RM-R5a's normalisation then
+    passed to the CLI as `--effort None` — manufacturing exactly the
+    launch-time rejection the suffix map exists to prevent. A non-mapping
+    fails here too, rather than mid-start.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("effort_suffixes: must be a mapping of model-id "
+                         "suffix to effort")
+    out: dict[str, str] = {}
+    for key, effort in value.items():
+        if not isinstance(effort, str) or not effort:
+            raise ValueError(f"effort_suffixes: {str(key)!r} maps to "
+                             f"{effort!r}; the effort must be a non-empty string")
+        out[str(key)] = effort
+    return out
