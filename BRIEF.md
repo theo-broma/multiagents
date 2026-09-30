@@ -2847,3 +2847,16 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - I carried ag-51c6dc into it by hand, in commit 5824254: a squash, with BRIEF.md kept from main.
   - **Watch:** the earlier DEFERRED agy task (implementer, claude-sonnet-4-6) will auto-restart after the agy cooldown (~08:35 UTC). It is a DUPLICATE: stop and discard it.
 - Deferred duplicate df-e34d37 (agy implementer claude-sonnet-4-6, D2). No MCP tool can cancel a deferred task (`tree.drop_deferred` exists, but nothing exposes it). That is a ticket. When it restarts, stop_agent and discard it; D2 is ag-d86348.
+- 08:45 UTC: **D2 fixes done** (ag-d86348, claude sonnet, dd59986): all 7 findings.
+  - **Accepted:**
+    - the /tmp crash-log redirect was removed;
+    - a run dir counts as known only when non-empty;
+    - `open` falls through on a duplicate session.
+  - **Not accepted:** the follower treats the literal statuses "active" and "terminal" as markers, only to suit the adversary's FakeTree. That is code bent to a test.
+  - ag-d4ba1a, the tester (sonnet), is correcting two tests on a squash of d86348 (c196156):
+    - the FakeTree gets real statuses;
+    - the race test uses a known agent and catches BaseException.
+  - **Next:**
+    1. steer ag-d86348 to drop the alias, then carry in the tester's commit;
+    2. verify the 197 tests plus the adversary tests;
+    3. merge ag-d86348.
