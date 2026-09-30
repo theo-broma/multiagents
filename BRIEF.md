@@ -2740,3 +2740,4 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
     - D1 fixes: ag-e6c241, implementer on gpt-6-sol, carrying a0a6924 from ag-42b581;
     - D3: ag-92a8d7, implementer-deep on gpt-6-astra, carrying 02701e3 from ag-709ee5.
   - ag-743603, the D2 tester, is still running.
+- ~10:15 UTC: D2 tests merged (c40e4e2): 197 tests, which the tester validated against a throwaway reference implementation. Its interface assumptions are accepted into the contract (4f568d1). ag-cac49a, the implementer on codex gpt-6-sol, is implementing D2. In flight: ag-e6c241 (D1 fixes) and ag-92a8d7 (D3).
