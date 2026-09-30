@@ -3138,3 +3138,13 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **Test-speed measurement.** Researcher ag-613241 on codex could not run pytest: its readonly sandbox has a read-only HOME, /tmp and workspace. The orchestrator is measuring the chunks with `--durations` in its own shell. Output: scratchpad/durations.
 
 **Codex sandbox note.** Codex `readonly` and `sandbox` runs cannot run the test suite, and cannot always run git commit.
+
+### 2026-09-30 ~21:30 UTC
+
+**M.** Re-review ag-53986b rejected it with 4 defects. The spec was amended with RM-R4e (the exact cache-age rule, plus an accepted limit) and RM-R1b (shielded launch cleanup), commit 821a6a9. The findings were steered back to ag-074735.
+
+**PS.** Reviewer ag-4cdd7b rejected it with 11 defects. These were steered back to ag-dc8946, which reconciles with the M cache after M merges.
+
+**Tester ag-e77949.** It updated the c2 harness count to 6 and the subagent_mcp fixture (`models_include: ["*"]`). **Merge it together with PS**: one of its tests is red on main until PS lands.
+
+**The reviewer's timeout** was raised to 1800.
