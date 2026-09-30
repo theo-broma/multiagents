@@ -2772,3 +2772,15 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
 - **D2 (ag-51c6dc, agy) is done.** I verified 197/197 green. It had left 25 scratch files at the repo root; they are now removed, and the diff is src-only (viewer.py, tmux.py, cli, monitor).
 - ag-b8b511, the adversary (agy gemini pro), is attacking D2: the sanitiser, the follower, paths and the socket, and tmux argv. D2 is merged only after its findings are resolved.
 - **D3 MERGED (f2b0f38).** The reviewer's fixes were applied. I verified 377 tests myself: the D3 suite plus h7, h7_adversary and h6. No adversary was run on D3: it is diagnostics only (lint and doctor), and nothing untrusted is in its path.
+- **The D2 adversary (ag-b8b511, agy) REJECTED it with 7 defects.**
+  - The defects:
+    - truncation followed by growth is missed;
+    - bidi controls pass through unescaped;
+    - an unknown id is accepted;
+    - sys.exit takes down the monitor;
+    - a concurrent `open` crashes;
+    - a broken-symlink socket dir crashes;
+    - lone surrogates crash the viewer.
+  - My decisions are spec amendments TM-R1a, TM-R1b and TM-R2a (1a689a9). The adversary's tests were merged into ag-51c6dc's worktree (aba9e04), and ag-51c6dc was steered to fix them.
+  - Not covered by the adversary: partial, CRLF and empty-file follower cases; path-traversal bounds; tmux argv fuzzing.
+- ag-725897 (the D1 fixes) is still running the full suite in chunks.
