@@ -2985,6 +2985,26 @@ def cmd_mcp_config(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+
+def cmd_view(args) -> int:
+    from .viewer import view_stream
+    paths = _resolve(args.path)
+    view_stream(paths, args.id, args.follow)
+    return 0
+
+def cmd_tmux(args) -> int:
+    from .tmux import cmd_tmux_open, cmd_tmux_attach_cmd, cmd_tmux_close, cmd_tmux_kill
+    paths = _resolve(args.path)
+    if args.action == "open":
+        cmd_tmux_open(paths, args.id)
+    elif args.action == "attach-cmd":
+        cmd_tmux_attach_cmd(paths, args.id)
+    elif args.action == "close":
+        cmd_tmux_close(paths, args.id)
+    elif args.action == "kill":
+        cmd_tmux_kill(paths)
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="multiagents",
@@ -3196,6 +3216,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--provider", default="opencode-go")
     p.add_argument("--update", action="store_true", help="record the live catalog as the baseline")
     p.set_defaults(func=cmd_catalog)
+
+    
+    p = sub.add_parser("view", help="view an agent stream")
+    p.add_argument("id")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--follow", action="store_true", default=None)
+    group.add_argument("--no-follow", dest="follow", action="store_false")
+    p.set_defaults(func=cmd_view)
+
+    p = sub.add_parser("tmux", help="tmux viewer integration")
+    p.add_argument("action", choices=["open", "attach-cmd", "close", "kill"])
+    p.add_argument("id", nargs="?")
+    p.set_defaults(func=cmd_tmux)
 
     p = sub.add_parser("mcp-config", help="write and print the MCP registration")
     p.set_defaults(func=cmd_mcp_config)
