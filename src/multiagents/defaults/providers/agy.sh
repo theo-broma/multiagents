@@ -11,7 +11,16 @@
 # needs a login of its own, and why `container_private_home` masks the host's
 # ~/.gemini instead of sharing it.
 set -u
-BIN="${MULTIAGENTS_BIN:-agy}"
+BIN="${MULTIAGENTS_BIN:-}"
+require_bin() {
+    if [ -z "$BIN" ]; then
+        printf '%s\n' "${MULTIAGENTS_BIN_ERROR:-MULTIAGENTS_BIN is not set}" >&2
+        exit 20
+    fi
+}
+case "${1:-check}" in
+    prepare|launch|budget) require_bin ;;
+esac
 EXECUTOR="${MULTIAGENTS_EXECUTOR:-local}"
 TOKEN_REL=".gemini/antigravity-cli/antigravity-oauth-token"
 
@@ -36,6 +45,7 @@ check)
     fi
     # On the host the credential is in the keyring and cannot be inspected, so
     # ask the CLI. It fails fast when unauthenticated, before spending anything.
+    require_bin
     out=$("$BIN" -p "ok" --model gemini-3.8-flash-low --output-format json 2>&1) || true
     case "$out" in
         *"authentication required"*|*"authentication failed"*|*"log in"*)
@@ -46,6 +56,7 @@ check)
     esac
     ;;
 login)
+    require_bin
     if [ "$EXECUTOR" = "docker" ]; then
         container="${MULTIAGENTS_CONTAINER:?container name not provided}"
         echo "Antigravity sign-in, INSIDE the container."

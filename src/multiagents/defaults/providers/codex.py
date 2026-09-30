@@ -109,7 +109,8 @@ def codex_bin():
     # MULTIAGENTS_BIN is the resolved, absolute path to the native CLI (CX-C2).
     raw = os.environ.get("MULTIAGENTS_BIN")
     if not raw:
-        raise ValueError("MULTIAGENTS_BIN is not set; no native Codex CLI is configured")
+        raise ValueError(os.environ.get("MULTIAGENTS_BIN_ERROR") or
+                         "MULTIAGENTS_BIN is not set; no native Codex CLI is configured")
     path = Path(raw)
     if not (path.is_file() and os.access(path, os.X_OK)):
         raise ValueError(f"native Codex CLI not found or not executable at {raw}")
@@ -911,6 +912,10 @@ def _budget_from_rollouts(profile, now, reason):
 # ------------------------------------------------------------------------ dispatch --
 
 def action(name):
+    if name in {"check", "login"} and not os.environ.get("MULTIAGENTS_BIN"):
+        print(os.environ.get("MULTIAGENTS_BIN_ERROR") or "MULTIAGENTS_BIN is not set",
+              file=sys.stderr)
+        return 20
     if name == "check":
         return check_action()
     if name == "login":

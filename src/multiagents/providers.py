@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
-import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 # Normalised event kinds the rest of the system understands.
@@ -125,6 +126,7 @@ class Event:
     # `fields.turn` in providers.yaml). Empty when untagged.
     turn: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    startup_progress: bool = False
 
     def loop_signature(self) -> str | None:
         """Stable hash input for doom-loop detection: what was called, with what."""
@@ -138,11 +140,20 @@ class Event:
 
 
 @dataclass
+class ResolvedBin:
+    path: Path | None
+    launcher: Path | None
+    via: str
+    searched: list[str]
+
+
+@dataclass
 class Provider:
     name: str
     bin: str
     spawn: dict[str, Any]
     stream: dict[str, Any]
+    bin_search: list[str] = field(default_factory=list)
     models_cmd: list[str] = field(default_factory=list)
     models_parse: str = "lines"
     usage_mode: str = "cumulative"       # cumulative | delta
@@ -232,6 +243,7 @@ class Provider:
             bin=data.get("bin", name),
             spawn=data.get("spawn", {}) or {},
             stream=data.get("stream", {}) or {},
+            bin_search=_bin_search(data.get("bin_search")),
             models_cmd=list(data.get("models_cmd", []) or []),
             truncation_markers=data.get("truncation_markers", []) or [],
             refusal_markers=data.get("refusal_markers", []) or [],
@@ -269,13 +281,48 @@ class Provider:
 
     # ------------------------------------------------------------- command --
 
-    def available(self) -> str | None:
-        """Absolute path to the binary, or None if it is not on PATH.
+    def resolve_bin(self, env: dict[str, str] | None = None) -> ResolvedBin:
+        """Resolve this operation's host CLI, preserving its launcher path."""
+        searched: list[str] = []
 
-        Note this is *detected*, never configured. `enabled` records intent;
-        availability is a fact, and a stored fact goes stale and lies.
-        """
-        return shutil.which(self.bin)
+        def check(candidate: Path, via: str) -> ResolvedBin | None:
+            candidate = candidate.absolute()
+            searched.append(str(candidate))
+            try:
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return ResolvedBin(candidate.resolve(), candidate, via, searched)
+            except (OSError, RuntimeError):
+                pass
+            return None
+
+        if "/" in self.bin:
+            candidate = Path(self.bin).expanduser()
+            if not candidate.is_absolute():
+                raise ValueError("bin: containing '/' must be an absolute path")
+            return check(candidate, "bin") or ResolvedBin(None, None, "bin", searched)
+        path = (os.environ if env is None else env).get("PATH", "")
+        if path:
+            for directory in path.split(os.pathsep):
+                found = check(Path(directory) / self.bin, "PATH")
+                if found:
+                    return found
+        for directory in self.bin_search:
+            found = check(Path(directory).expanduser() / self.bin, "bin_search")
+            if found:
+                return found
+        return ResolvedBin(None, None, "bin_search" if self.bin_search else "PATH", searched)
+
+    def bin_error(self, resolved: ResolvedBin | None = None) -> str:
+        resolved = resolved if resolved is not None else self.resolve_bin()
+        places = ", ".join(resolved.searched) or "no directories (PATH is empty)"
+        return (f"Provider {self.name!r}: binary {self.bin!r} not found; searched: {places}. "
+                "Set bin: to an absolute path, or add its directory to bin_search: "
+                "in providers.yaml.")
+
+    def available(self) -> str | None:
+        """Absolute resolved CLI path, rechecked on every operation."""
+        resolved = self.resolve_bin()
+        return str(resolved.path) if resolved.path is not None else None
 
     @property
     def script_name(self) -> str:
@@ -408,7 +455,7 @@ class Provider:
             return None
 
         if self.stream_format == "text":
-            return Event(kind=TEXT, text=line, raw={"line": line})
+            return Event(kind=TEXT, text=line, raw={"line": line}, startup_progress=True)
 
         if not line.startswith("{"):
             # CLIs interleave human-readable notices with their JSON stream;
@@ -440,19 +487,37 @@ class Provider:
                 step = extracted.get("step")
                 raw_cost = extracted.get("cost")
                 cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+                kind = rule.get("as", RAW)
+                text = str(extracted.get("text") or "")
+                status = signal or str(extracted.get("status") or "")
+                # Result failures may carry error prose, not assistant output
+                # (e.g. the adapter's turn.failed). Content, tools and output
+                # usage are declared by each provider's rules; STEP alone is
+                # still only a watchdog signal.
+                assistant_text = (kind == TEXT or (kind == RESULT and
+                    status.upper() in {"", "SUCCESS", "OK", "COMPLETED", "DONE"}))
+                output_usage = any(
+                    isinstance(value, (int, float)) and value > 0
+                    for key, value in (tokens if isinstance(tokens, dict) else {}).items()
+                    if key in {"output", "output_tokens", "outputTokens",
+                               "candidatesTokenCount"})
+                progress = (kind not in (RAW, ERROR) and
+                            (kind == TOOL or (assistant_text and bool(text.strip()))
+                             or output_usage))
                 return Event(
-                    kind=rule.get("as", RAW),
+                    kind=kind,
                     name=str(extracted.get("name") or ""),
                     args=args if isinstance(args, dict) else ({} if args is None else {"_": args}),
-                    text=str(extracted.get("text") or ""),
+                    text=text,
                     state=str(extracted.get("state") or ""),
-                    status=signal or str(extracted.get("status") or ""),
+                    status=status,
                     tokens=tokens if isinstance(tokens, dict) else {},
                     cost=cost,
                     step=step if isinstance(step, int) else None,
                     session_id=session_id,
                     turn=str(extracted.get("turn") or ""),
                     raw=payload,
+                    startup_progress=progress,
                 )
 
         return Event(kind=RAW, session_id=session_id, raw=payload)
@@ -570,3 +635,14 @@ def families(providers: dict[str, Provider]) -> dict[str, list[str]]:
     for name, provider in providers.items():
         out.setdefault(provider.family or name, []).append(name)
     return {family: sorted(names) for family, names in out.items()}
+
+
+def _bin_search(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("bin_search: must be a list of absolute directories")
+    for directory in value:
+        if not isinstance(directory, str) or not Path(directory).expanduser().is_absolute():
+            raise ValueError("bin_search: entries must be absolute directories")
+    return list(value)

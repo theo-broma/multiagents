@@ -25,6 +25,7 @@ providers:
 
   opencode:
     bin: opencode
+    bin_search: ["~/.opencode/bin"]
     # Script implementing the check/login contract; see auth/README.md.
     auth:
       script: opencode.sh

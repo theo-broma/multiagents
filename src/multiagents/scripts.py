@@ -52,6 +52,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .providers import Provider
+
 # Actions that must never take longer than a moment: they run on the hot path.
 CAPTURE_TIMEOUT = 20
 LOGIN_TIMEOUT = 900
@@ -93,10 +95,8 @@ def build_env(provider_name: str, provider: Any, executor: Any,
               extra: dict[str, str] | None = None) -> dict[str, str]:
     """The situation, handed to the script through the environment."""
     env = dict(os.environ)
-    binary = getattr(provider, "available", lambda: None)() or getattr(provider, "bin", "")
     env.update({
         "MULTIAGENTS_PROVIDER": provider_name,
-        "MULTIAGENTS_BIN": str(binary or ""),
         "MULTIAGENTS_EXECUTOR": getattr(executor, "kind", "local"),
         "MULTIAGENTS_UID": str(os.getuid()),
         "MULTIAGENTS_GID": str(os.getgid()),
@@ -128,6 +128,15 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     for key, value in (getattr(provider, "env", None) or {}).items():
         env[key] = os.path.expanduser(os.path.expandvars(str(value)))
     env.update(extra or {})
+    resolver = provider
+    if not hasattr(resolver, "resolve_bin"):
+        resolver = Provider.from_dict(provider_name, {
+            "bin": getattr(provider, "bin", provider_name),
+            "bin_search": getattr(provider, "bin_search", []),
+        })
+    resolved = resolver.resolve_bin(env=env)
+    env["MULTIAGENTS_BIN"] = str(resolved.path) if resolved.path is not None else ""
+    env["MULTIAGENTS_BIN_ERROR"] = "" if resolved.path is not None else resolver.bin_error(resolved)
     return env
 
 

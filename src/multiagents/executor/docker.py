@@ -667,6 +667,16 @@ class DockerExecutor(Executor):
                        Path("/opt"), Path("/var"), Path("/nix"), Path("/snap"))
 
     @staticmethod
+    def _host_launcher(provider: Any) -> str | None:
+        """The host CLI's path as found, before symlinks are resolved (PS-R2).
+        A provider without `resolve_bin` answers through `available()`."""
+        resolve = getattr(provider, "resolve_bin", None)
+        if resolve is None:
+            return getattr(provider, "available", lambda: None)()
+        launcher = resolve().launcher
+        return str(launcher) if launcher is not None else None
+
+    @staticmethod
     def _declares_depth(provider: Any) -> bool:
         """Whether `provider` asks for a versions root that is to be honoured:
         `bin_versions_depth` set on an enabled provider (CX-C3, CX-C20)."""
@@ -722,7 +732,7 @@ class DockerExecutor(Executor):
         for provider in self.providers.values():
             if not self._declares_depth(provider):
                 continue
-            binary = getattr(provider, "available", lambda: None)()
+            binary = self._host_launcher(provider)
             if not binary:
                 continue
             resolved = self._resolve_launcher(binary)
@@ -742,7 +752,7 @@ class DockerExecutor(Executor):
         for name, provider in self.providers.items():
             if not self._declares_depth(provider):
                 continue
-            binary = getattr(provider, "available", lambda: None)()
+            binary = self._host_launcher(provider)
             if not binary:
                 continue
             root = self._depth_root(provider, self._resolve_launcher(binary))
@@ -816,7 +826,7 @@ class DockerExecutor(Executor):
 
         if self.config.get("mount_cli_from_host", True):
             for provider in self.providers.values():
-                binary = getattr(provider, "available", lambda: None)()
+                binary = self._host_launcher(provider)
                 if binary:
                     # Mount the path as found on PATH *and* its resolved target.
                     # claude's entry in ~/.local/bin is a symlink into a
@@ -2175,7 +2185,8 @@ class DockerExecutor(Executor):
         for provider in self.providers.values():
             if provider.bin != argv[0]:
                 continue
-            binary = provider.available()
+            found = provider.resolve_bin()
+            binary = found.launcher
             if not binary:
                 break
             launcher_path = Path(binary)
@@ -2183,6 +2194,8 @@ class DockerExecutor(Executor):
             if (self._depth_root(provider, resolved) is not None
                     or self._versions_dir(launcher_path, resolved) is not None):
                 return [str(resolved), *argv[1:]]
+            if found.via == "bin_search":
+                return [str(launcher_path), *argv[1:]]
             break
         return argv
 
@@ -2201,7 +2214,7 @@ class DockerExecutor(Executor):
         """
         if not self.config.get("mount_cli_from_host", True):
             return provider.bin
-        binary = super().native_bin(provider_name, provider, env)
+        binary = provider.resolve_bin(env={**os.environ, **env}).launcher
         if not binary:
             return ""
         launcher = Path(binary)
@@ -2209,7 +2222,7 @@ class DockerExecutor(Executor):
         if (self._depth_root(provider, resolved) is not None
                 or self._versions_dir(launcher, resolved) is not None):
             return str(resolved)
-        return binary
+        return str(binary)
 
     def adapter_env(self, argv: list[str], env: dict[str, str],
                     provider: str = "") -> dict[str, str]:
