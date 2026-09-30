@@ -107,3 +107,22 @@ The tester's assumptions 1, 2 and 4 are accepted:
 - **Where it lives.** The claim is stored in the entry as `claim: {"pid": <int>, "at": <epoch float>}`.
 - **The pause.** A `restarting` entry holds the pause, as a `waiting` one does.
 - **A re-deferral.** A re-deferred entry keeps its original `deferred_by`.
+
+## Amendments of 2026-09-30, after the adversary (ag-5917f6)
+
+**DQ-R9: a malformed entry is tolerated.**
+- **What counts.** A malformed queue entry is any of these: not a dict, missing `id` or `retry_after`, a non-numeric `retry_after`, or a claim that is not a dict with an int `pid`.
+- **What happens to it.** It is skipped by the drain and shown by `list_deferred` with `status: "malformed"`.
+- **No crash.** It never makes `wait_for_agents`, `list_deferred` or `start_agent` raise.
+- **Removal.** Only `cancel_deferred`, by the orchestrator, removes it.
+
+**DQ-R10: a claim is released on every exit path.** This includes cancellation, i.e. `BaseException`/`CancelledError`. A cancelled drain returns the entry to `waiting`, and then re-raises.
+
+**DQ-R11: the queue and the node agree after a crash.**
+- **Where `deferred_id` is written.** The node's `deferred_id` is written in the same transaction that creates the node. A crash between `start()` returning and the drain's bookkeeping can then never lead to a second start.
+- **Re-deferral.** A re-deferral names its own new entry explicitly, never by diffing the queue.
+- **Owner.** A re-deferral keeps the original owner, including the orchestrator (`None`), and never takes the drainer's identity.
+
+**DQ-R12: cancel versus restart.**
+- **Refusal.** `cancel_deferred` on an entry in `restarting` is refused ("restart in progress"). The caller may `stop_agent` the resulting run once it exists.
+- **Recovery.** Requeueing a dead claim is done inside one transaction that re-checks the entry is still `restarting` with the same claim.
