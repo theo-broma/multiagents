@@ -3067,3 +3067,23 @@ The fix is running in implementer-deep ag-074735 (glm), and the tests were squas
 - `asyncio.to_thread` hangs in its sandbox.
 
 This is a candidate ticket, to fix in-house later.
+
+### 2026-09-30 ~17:00 UTC: the Gemini review of glm-5.3-flash's work, at the user's request
+
+Both reviewers ran on gemini-3.1-pro-high.
+
+**ag-37f81c, on M and T1.** VERDICT(rejected, 3):
+1. `_settle_effort` bleeds across fallback candidates. Sent by steer to ag-074735.
+2. A `cancel_deferred` race (DQ-R12).
+3. `refused_total` is dropped on the paused early return (DQ-R2a).
+Findings 2 and 3 go to implementer ag-ce8fce, together with the leftover in snapshot.py.
+
+**ag-fdbf30, on the small Q fixes.** VERDICT(rejected, 2):
+1. Q2: an invalid explicit `--path` falls back silently. Not acted on yet: it needs a check of whether the fallback was deliberate in the Q2 ticket. Pending.
+2. The phase-0 leftover in monitor/snapshot.py. Sent to ag-ce8fce.
+
+**Summary.** Well-structured code with good idiom fit and spec-id comments. Weak on concurrency, transaction boundaries and edge cases, and it fixes symptoms: it satisfies the test glob rather than the rule.
+
+**Workaround applied.** agy's lapsed breaker was cleared through `Tree.note_run_outcome`. The bug is ticketed (ddcdf7f).
+
+**Codex sandbox.** Under the reviewer's agy sandbox, `run_command git` failed. Diffs were exported into `_review/` in its worktree.
