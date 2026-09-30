@@ -14,11 +14,12 @@ Two rules hold this together:
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
 
-from ..budget import read_all, reset_label, reserved_providers
+from ..budget import read_all, reset_display, reset_label, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
 from ..providers import load_providers
@@ -56,6 +57,21 @@ def _alive(pid: int | None, start: str = "") -> bool:
 _LINE_CACHE: dict[str, tuple[float, str, list[str], str]] = {}
 LINE_TTL = 30.0
 
+# A script's usage line may carry its reset as the raw UTC ISO string the API
+# sent (opencode.sh's `ms_iso` prints exactly that; the z.ai contract test
+# holds the script to it). Q6: a viewer read that UTC wall clock as local time
+# and concluded a quota an hour from resetting had already failed to come
+# back. The display layer rewrites any ISO token through reset_display, so
+# every provider script gets countdown + local clock without growing a
+# formatter of its own — and a script that prints a reset in its own words is
+# left exactly as it wrote it.
+ISO_STAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+
+
+def _readable_resets(line: str) -> str:
+    return ISO_STAMP.sub(lambda m: reset_display(m.group()) or m.group(), line)
+
 
 def _usage_lines(name: str, provider: Any, executor: Any, budget: dict,
                  paths: ProjectPaths) -> tuple[list[str], str]:
@@ -84,7 +100,9 @@ def _usage_lines(name: str, provider: Any, executor: Any, budget: dict,
         name, provider, executor, "usage", global_config_dir(), paths.config,
         timeout=10, extra_env={"MULTIAGENTS_BUDGET": payload})
     if code == 0 and out.strip():
-        lines, source = [line.rstrip() for line in out.strip().splitlines()[:12]], "script"
+        lines = [line.rstrip() for line in out.strip().splitlines()[:12]]
+        lines = [_readable_resets(line) for line in lines]
+        source = "script"
     else:
         lines, source = _generic_usage(budget), "built-in"
     _LINE_CACHE[name] = (time.time(), payload, lines, source)

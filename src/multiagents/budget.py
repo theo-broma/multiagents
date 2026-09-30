@@ -88,6 +88,57 @@ def reset_label(stamp: Any, now: float | None = None) -> str:
     return f"{local:%b %d %H:%M %Z} \u00b7 in {ago}"
 
 
+# reset_display's countdown grammar: "2d03h", "1h05", "7m", "<1m". Shorter
+# than reset_label's on purpose — it sits inside a usage line, where the slot
+# is narrow and the "(HH:MM ZONE)" after it carries the units.
+def _countdown(left: float) -> str:
+    days, rest = divmod(int(left), 86400)
+    hours, rest = divmod(rest, 3600)
+    if days:
+        return f"{days}d{hours:02d}h"
+    if hours:
+        return f"{hours}h{rest // 60:02d}"
+    if rest >= 60:
+        return f"{rest // 60}m"
+    return "<1m"
+
+
+def reset_display(stamp: Any, now: float | None = None) -> str:
+    """A reset time as it fits a usage line: countdown first, then local clock.
+
+    Provider scripts print their own usage lines and several stamp them with
+    the raw UTC ISO string the API sent (opencode.sh's ``ms_iso``). Q6: a
+    viewer at UTC+2 read "10:57" as local time and concluded a quota that was
+    still an hour away had already failed to come back. :func:`reset_label`
+    already renders the generic path, but a script's line passes the monitor
+    untouched — so the display layer rewrites each ISO token with this, and
+    every provider benefits without each script growing its own formatter.
+
+    Countdown leads because it is the half that cannot be misread ("resets in
+    1h05"); the clock time follows with its zone ("12:57 CEST") so a countdown
+    near zero can still be checked against the viewer's watch. Unparsable text
+    comes back unchanged — a script may print something that merely looks like
+    a timestamp, and inventing a rendering for it would be worse than the raw
+    string.
+    """
+    if not stamp:
+        return ""
+    text = str(stamp)
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if when.tzinfo is None:
+        # No offset to trust. Converting would invent an error rather than fix
+        # one, so it is shown as sent and marked as unanchored.
+        return when.strftime("%b %d %H:%M") + " (no timezone)"
+    local = when.astimezone()
+    left = when.timestamp() - (time.time() if now is None else now)
+    if left <= 0:
+        return f"reset due ({local:%H:%M %Z})"
+    return f"resets in {_countdown(left)} ({local:%H:%M %Z})"
+
+
 @dataclass
 class Budget:
     provider: str
