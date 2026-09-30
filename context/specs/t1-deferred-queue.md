@@ -66,3 +66,20 @@
 **DQ-R7: nothing else changes.**
 - A deferral still returns `deferred: true` with `retry_after`, and a due entry still restarts at the next `wait_for_agents`.
 - The existing suite stays green, apart from the known reds.
+
+## Amendments of 2026-09-30, after the test suite (ag-b7bb12)
+
+The tester's assumptions 1, 2 and 4 are accepted:
+- `list_deferred` returns either a bare list or a one-list dict;
+- the new deferred id may be any field of a `re_deferred` event;
+- a `restarted` item carries the new agent id.
+
+**DQ-R3a: an agent removed from the roster is `dropped`, not `refused`.**
+- **What happens.** The entry leaves the queue, and the `deferred_exit` event records `outcome: dropped` with a reason. The `wait_for_agents` result lists it under `deferred.dropped`, which keeps `test_resume_deferred_reports_tasks_whose_agent_is_gone`.
+- **What `refused` now covers.** A pinned model that is no longer configured, a spent budget tag, and any other refusal returned as a value.
+
+**DQ-R3b: which raised errors are refusals.**
+- **Refusals:** a `ValueError` or `PermissionError` raised by `start()`, and any error dict returned by `start()`. These count as `refused`.
+- **Transient:** any other exception, for example `RuntimeError`, `OSError` or `TimeoutError`. The entry stays `waiting`, and the drain stops, as it does today.
+
+**DQ-R6a: pauses of other origins.** DQ-R6 concerns only the pause set by a deferral. A pause set another way (auth, provider_down, …) is unchanged by this contract.
