@@ -44,9 +44,10 @@ class LocalExecutor(Executor):
         entry = self.providers.get(provider)
         if entry is not None and not entry.adapter and argv and argv[0] == entry.bin:
             found = entry.resolve_bin(env=env)
-            if found.path is None:
+            if found.launcher is None:
                 raise FileNotFoundError(entry.bin_error(found))
-            argv = [str(found.path), *argv[1:]]
+            # H7 PS-R2a: argv[0] is the launcher, not the realpath.
+            argv = [str(found.launcher), *argv[1:]]
         env = self.adapter_env(argv, env, provider)
         if run_dir is not None:
             return await self._start_wrapped(argv, cwd, env, run_dir, deadline,

@@ -72,12 +72,13 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
             models[name] = provider.parse_models(out)
             continue
         resolved = provider.resolve_bin()
-        if resolved.path is None:
+        if resolved.launcher is None:
             problems[name] = provider.bin_error(resolved)
             continue
         command = list(provider.models_cmd)
         if command[0] in {provider.bin, Path(provider.bin).name}:
-            command[0] = str(resolved.path)
+            # H7 PS-R2a: invoke through the launcher, not the realpath.
+            command[0] = str(resolved.launcher)
         try:
             proc = subprocess.run(
                 command, capture_output=True, text=True, timeout=120,

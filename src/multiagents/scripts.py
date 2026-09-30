@@ -121,13 +121,6 @@ def build_env(provider_name: str, provider: Any, executor: Any,
             env["MULTIAGENTS_PRIVATE_VAULT"] = str(next(iter(vault.values())))
         if getattr(executor, "auth_proxy_enabled", lambda: False)():
             env["MULTIAGENTS_AUTH_PROXY"] = "1"
-    # The instance's own environment, expanded. This is what separates two
-    # accounts on one CLI, so it is applied to EVERY action: a `check` that
-    # inspects profile A while `launch` runs as profile B would report on an
-    # account nobody is using.
-    for key, value in (getattr(provider, "env", None) or {}).items():
-        env[key] = os.path.expanduser(os.path.expandvars(str(value)))
-    env.update(extra or {})
     resolver = provider
     if not hasattr(resolver, "resolve_bin"):
         resolver = Provider.from_dict(provider_name, {
@@ -135,8 +128,17 @@ def build_env(provider_name: str, provider: Any, executor: Any,
             "bin_search": getattr(provider, "bin_search", []),
         })
     resolved = resolver.resolve_bin(env=env)
-    env["MULTIAGENTS_BIN"] = str(resolved.path) if resolved.path is not None else ""
-    env["MULTIAGENTS_BIN_ERROR"] = "" if resolved.path is not None else resolver.bin_error(resolved)
+    # H7 PS-R2a: invocation uses the launcher path, symlinks not resolved.
+    # PS-R2b: set before the provider's own `env:` so a provider value wins.
+    env["MULTIAGENTS_BIN"] = str(resolved.launcher) if resolved.launcher is not None else ""
+    env["MULTIAGENTS_BIN_ERROR"] = "" if resolved.launcher is not None else resolver.bin_error(resolved)
+    # The instance's own environment, expanded. This is what separates two
+    # accounts on one CLI, so it is applied to EVERY action: a `check` that
+    # inspects profile A while `launch` runs as profile B would report on an
+    # account nobody is using.
+    for key, value in (getattr(provider, "env", None) or {}).items():
+        env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+    env.update(extra or {})
     return env
 
 
