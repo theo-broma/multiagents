@@ -29,6 +29,7 @@ from multiagents import budget as budget_mod  # noqa: E402
 from multiagents.config import AgentSpec  # noqa: E402
 from multiagents.providers import load_providers  # noqa: E402
 from multiagents.runner import Runner  # noqa: E402
+from multiagents import startup as startup_mod  # noqa: E402
 from multiagents.startup import StartupHealth, StartupUnavailable  # noqa: E402
 
 SHIPPED = yaml.safe_load(
@@ -255,23 +256,52 @@ def _other_server_claims(paths) -> str:
     return out.stdout.strip()
 
 
-def test_probe_claim_of_a_dead_server_is_released_on_reconcile(tmp_path):
+class _FrozenClock:
+    """`startup`'s clock, this process only: `time()` stands still until
+    moved, so the 10 ms cooldown cannot run out between marking the provider
+    down and `_mark_down`'s check that it is down. Measured under `-n auto`
+    with the basetemp on disk: `_write`'s two fsyncs took longer than 10 ms
+    and both tests below failed on that check. Starts at the real time, so a
+    subprocess on the real clock still sees the cooldown expire after a real
+    sleep past it."""
+
+    def __init__(self):
+        self.now = time.time()
+
+    def time(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _past_the_cooldown(clock: _FrozenClock, seconds: float) -> None:
+    clock.now += seconds          # for this process
+    time.sleep(seconds)           # for another server, on the real clock
+
+
+def test_probe_claim_of_a_dead_server_is_released_on_reconcile(tmp_path, monkeypatch):
     """Survived: `_reconcile` keeping record["probe"] after deleting the run."""
+    clock = _FrozenClock()
+    monkeypatch.setattr(startup_mod, "time", clock)
     paths = h.make_paths(tmp_path / "project")
     health = StartupHealth(paths)
     _mark_down(health, "p", cooldown=0.01)
-    time.sleep(0.05)
+    _past_the_cooldown(clock, 0.05)
     assert _other_server_claims(paths)          # that server has now exited
     assert health.availability("p") is None
     assert health.claim("p", "ag-next-probe")
 
 
-def test_probe_claim_held_while_the_host_lives_even_if_the_child_is_gone(tmp_path):
+def test_probe_claim_held_while_the_host_lives_even_if_the_child_is_gone(tmp_path,
+                                                                        monkeypatch):
     """Survived: `and` -> `or` in `_reconcile`. The host still has to drain
     and classify an exited child, so its claim stays."""
+    clock = _FrozenClock()
+    monkeypatch.setattr(startup_mod, "time", clock)
     health = StartupHealth(h.make_paths(tmp_path / "project"))
     _mark_down(health, "p", cooldown=0.01)
-    time.sleep(0.05)
+    _past_the_cooldown(clock, 0.05)
     token = health.claim("p", "ag-probe")
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait()

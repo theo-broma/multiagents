@@ -81,7 +81,7 @@ def test_mutation_reserve_boundary_just_below_is_caught():
 # Mutation: does the suite catch a flipped severity threshold?
 # ===========================================================================
 
-def test_mutation_severity_warning_boundary_at_75_is_caught():
+def test_mutation_severity_warning_boundary_at_75_is_caught(tmp_path):
     """If `>= 75` became `> 75`, this test would fail.
 
     The existing suite tests percent=80 as "warning", but does not pin the exact
@@ -90,21 +90,21 @@ def test_mutation_severity_warning_boundary_at_75_is_caught():
     """
     h.invalidate_cache()
     profile = h.claude_profile_dir(
-        Path("/tmp/test-sev-75"),
+        tmp_path / "test-sev-75",
         cached_usage={"limits": [{"percent": 75.0}]},
     )
     b = h.budget_mod.read_claude(fetch=False, config_dir=profile)
     assert b.severity == "warning", "percent exactly at 75 must be warning"
 
 
-def test_mutation_severity_critical_boundary_at_90_is_caught():
+def test_mutation_severity_critical_boundary_at_90_is_caught(tmp_path):
     """If `>= 90` became `> 90`, this test would fail.
 
     Pins that percent=90 reads as "critical", not "warning".
     """
     h.invalidate_cache()
     profile = h.claude_profile_dir(
-        Path("/tmp/test-sev-90"),
+        tmp_path / "test-sev-90",
         cached_usage={"limits": [{"percent": 90.0}]},
     )
     b = h.budget_mod.read_claude(fetch=False, config_dir=profile)

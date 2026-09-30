@@ -108,22 +108,21 @@ def test_tmux_open_sys_exits_on_bad_socket_dir(tmp_path):
         pytest.fail("Monitor action raised SystemExit instead of returning an error")
 
 # 3. Monitor action returns ok for foreign agent
-def test_tmux_open_approves_foreign_agent(tmp_path):
+def test_tmux_open_approves_foreign_agent(tmp_path, monkeypatch):
     paths = FakePaths(tmp_path)
     agent_id = "ag-333333"
     
-    tmux.check_tmux = lambda: None
+    # monkeypatch, not assignment: a bare `tmux.check_tmux = ...` outlived this
+    # test and let a later one in the same process find tmux on an empty PATH
+    # (test_d2_monitor's without-tmux test, red under xdist).
+    monkeypatch.setattr(tmux, "check_tmux", lambda: None)
     import subprocess
-    orig_run = subprocess.run
     def mock_run(*args, **kwargs):
         return subprocess.CompletedProcess(args, 0, stdout="ma-testproj\n")
-    subprocess.run = mock_run
+    monkeypatch.setattr(subprocess, "run", mock_run)
     
-    try:
-        result = actions.perform(paths, "tmux_open", {"agent_id": agent_id})
-        assert result.get("ok") is False, "Foreign agent should be rejected"
-    finally:
-        subprocess.run = orig_run
+    result = actions.perform(paths, "tmux_open", {"agent_id": agent_id})
+    assert result.get("ok") is False, "Foreign agent should be rejected"
 
 # 4. Concurrent tmux open race condition
 def test_tmux_open_concurrent_race_condition(proj):

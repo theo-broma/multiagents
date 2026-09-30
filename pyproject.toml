@@ -14,6 +14,7 @@ dependencies = [
 # `uv sync` installs this group by default, so tests run without extra flags.
 dev = [
     "pytest>=8.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [project.scripts]
