@@ -2957,3 +2957,8 @@ Next: adversary findings go back to a GLM implementer with the failing tests; D3
   - **Spec M.** The contract m-routing-fixes.md has advisor amendments (0d996f2), and its tests are merged (e2e4767).
   - **Implementation of M** runs on implementer-deep glm-5.3-flash, ag-3d566d.
   - **T1 (ag-38d415, claude) is still running.** After it lands, the T1 amendment tests (3ce818e) need a glm implementer.
+- 2026-09-30 ~12:50 UTC.
+  - **T1 base merged (180e483):** 46 of the T1 tests pass.
+  - **One old test contradicts DQ-R2.** In `test_core.py::test_draining_stops_when_the_window_closes_mid_batch`, `still_deferred` should be 3 (what is left waiting). Tester ag-0ce81a is updating it.
+  - **The T1 amendments** (DQ-R8/R8a, R4a, R2a, R3c; 13 red) are on glm, ag-3a07cc.
+  - **M** is on glm, ag-3d566d, with 4 commits so far and its suite running.
