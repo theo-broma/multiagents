@@ -138,6 +138,27 @@ return you receive the CW-R4 message and follow its checklist first. Any
 sentence saying the driver compacts only with nothing running is removed.
 Verified by: a test on the rendered brief.
 
+**CW-R8 — the compaction is told what to keep.** Both paths pass focus
+instructions to the provider's `compact` action, which forwards them to the
+provider's own compaction when it supports it (claude: `/compact <focus>`, as
+one quoted argument) and ignores them otherwise. The text comes from
+`limits.compact_focus` (a string; empty means none) with a shipped default in
+`defaults/project.yaml`, in substance: keep the ids of agents in flight and
+what each is for, decisions made but not yet written down, the next steps,
+and where durable state lives (`BRIEF.md` handoff, specs, ledger); drop raw
+tool output, test logs and diffs. Bounded (≤ 1 000 characters; longer is
+truncated, never an error). The success check of R8c.3/R8f.15 is unchanged.
+It does not replace CW-R4: what happens during the compaction cannot be in
+its summary. Decided after advisor ag-d20e1e t7: keystroke injection into the
+live CLI (tmux/PTY) and installing a PreCompact hook are **out of scope** —
+the CLI inherits the terminal directly (`driver.py` ~196-249) and injection
+cannot know the CLI is at its prompt.
+Verified by: script tests — empty focus → today's exact invocation; non-empty
+focus with spaces, quotes, `$`, backticks and a newline reaches the CLI as
+one argument unaltered; over-long focus is truncated; the transcript
+verification still decides success. Plus one live smoke check by the
+orchestrator against the installed CLI before merge.
+
 ## Unchanged
 
 R8f.1 probe, R8f.3 grace and cancel, R8f.5 failure/once-per-crossing,
