@@ -305,6 +305,10 @@ def sync_layer(source: Path, target: Path, force: bool = False,
             report["customised"].append(name)
 
     if not dry_run:
+        # seed_global/seed_project mkdir their target first; a caller that
+        # points sync_layer at a layer that does not exist yet — a project
+        # whose .multiagents/ was never seeded — must still get its manifest.
+        target.mkdir(parents=True, exist_ok=True)
         _write_manifest(target, manifest)
     return report
 
