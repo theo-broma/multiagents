@@ -28,6 +28,7 @@ from typing import Any
 import yaml
 
 from .paths import ProjectPaths, global_config_dir, shipped_defaults_dir
+from .providers import load_providers
 
 # The heading that marks the half of a brief addressed to whoever CALLS the
 # agent, rather than to the agent itself. It is authored in the agent's own file
@@ -699,18 +700,57 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         for name in CONFIG_FILES:
             merged[name] = deep_merge(merged[name], _read_yaml(layer / name))
 
+    providers_raw = merged["providers.yaml"].get("providers", {}) or {}
+    # PS-R1/R5/R6: the providers (and their sharing keys) are built and
+    # validated here, so a config error surfaces at load, and the roster's
+    # routes are checked against the allowlists of the providers they name.
+    providers = load_providers(providers_raw)
     agents_raw = merged["agents.yaml"].get("agents", {}) or {}
     agents = {
         name: AgentSpec.from_dict(name, data or {})
         for name, data in agents_raw.items()
         if not (data or {}).get("disabled")
     }
+    _validate_routes(agents_raw, providers)
 
     return Config(
         project=merged["project.yaml"],
-        providers=merged["providers.yaml"].get("providers", {}) or {},
+        providers=providers_raw,
         agents=agents,
         models=merged["models.yaml"].get("models", {}) or {},
         instruction_dirs=[layer / "agents" for layer in reversed(layers)],
         layers=layers,
     )
+
+
+def _validate_routes(agents_raw: dict, providers: dict) -> None:
+    """PS-R6: every route a roster names must run on a provider that allows it.
+
+    A route is the agent's own provider+model or one `models:` entry. The
+    error names the agent, the route, the model and — when one exists — a
+    provider whose allowlist would take the model, so the fix is legible
+    without hunting. Disabled agents are checked too: a parked agent with a
+    broken route is still config that cannot work (PS-R10).
+    """
+    for name, data in agents_raw.items():
+        spec = AgentSpec.from_dict(name, data or {})
+        routes = [(spec.provider, spec.model)]
+        routes += [(route, spec.fallback_for(route)[0])
+                   for route in (spec.models or {})]
+        for route_provider, model in routes:
+            if not model or route_provider not in providers:
+                continue
+            if providers[route_provider].allows_model(model):
+                continue
+            acceptors = sorted(
+                other for other, provider in providers.items()
+                if other != route_provider and provider.allows_model(model))
+            way_out = (f" {acceptors[0]} allows it" if len(acceptors) == 1
+                       else f" These do: {', '.join(acceptors)}"
+                       if acceptors else
+                       " No declared provider's allowlist accepts it")
+            raise ValueError(
+                f"agent {name!r}: route {route_provider} names model "
+                f"{model!r}, which {route_provider} does not allow."
+                f"{way_out}. Fix agents.yaml: give the route a model the "
+                f"provider allows, or route it to a provider that does.")

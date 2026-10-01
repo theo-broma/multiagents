@@ -739,22 +739,83 @@ class Runner:
         except ValueError:
             return 0
 
-    def _auth_ok(self, name: str) -> bool | None:
+    def _credential_group(self, name: str) -> list[str]:
+        """PS-R4: the credential group of `name` — its owner (or itself) plus
+        every provider that borrows from it. Auth failures and recoveries
+        move the whole group together; quota and provider_down never do."""
+        provider = self.providers.get(name)
+        owner = str(getattr(provider, "auth_from", "") or "") if provider else ""
+        key = owner or name
+        return [member for member, entry in sorted(self.providers.items())
+                if (str(getattr(entry, "auth_from", "") or "") or member) == key]
+
+    @staticmethod
+    def _auth_context(executor: Any) -> str:
+        """PS-R4b: the execution context a check speaks for — whose login it
+        reads. Under docker the agents' login is the CONTAINER's; anywhere
+        else it is the host's own."""
+        return "container" if getattr(executor, "kind", "local") == "docker" \
+            else "host"
+
+    def _context_executor(self, context: str) -> Any:
+        """PS-R4b: an executor whose check speaks for `context`'s login —
+        the kind that observed a block made under an agent's executor
+        override (`executor: local` in a docker project, or the reverse).
+        Probing such a block through the project executor asked the wrong
+        login, so it could only time out (review ag-3644ef, finding 4)."""
+        return self.executor(AgentSpec(
+            "-", "", "", executor="docker" if context == "container" else "local"))
+
+    def _block_auth(self, name: str, seconds: float, context: str) -> str:
+        """PS-R4: mark `name`'s whole credential group unauthenticated in
+        `context`, in one transaction (`Tree.block_auth`). Returns the reason
+        recorded on `name` itself.
+
+        The login hint names the credential OWNER (PS-R10): logging in as a
+        dependent would fix nothing, since it has no login of its own."""
+        owner, _ = self._auth_target(name)
+        reason = (f"{name} is not authenticated — run "
+                  f"`multiagents auth login {owner}`")
+        reasons = {member: reason if member == name
+                   else f"{reason} (shared credentials with {name})"
+                   for member in self._credential_group(name)}
+        # A block written before contexts were recorded is the default
+        # context's: a failure observed there replaces it.
+        legacy = {""} if context == self._auth_context(self.executor()) else set()
+        self.tree.block_auth(reasons, now() + seconds, context, supersedes=legacy)
+        return reason
+
+    def _auth_target(self, name: str) -> tuple[str, Any]:
+        """Whose `check` answers for `name`'s credentials (PS-R2/R3): the
+        credential owner's, when it borrows one; its own otherwise."""
+        provider = self.providers.get(name)
+        owner = str(getattr(provider, "auth_from", "") or "")
+        if owner in self.providers:
+            return owner, self.providers[owner]
+        return name, provider
+
+    def _auth_ok(self, name: str, executor: Any = None) -> bool | None:
         """Ask the provider's own `check` action. None = it would not say.
 
         Structured, not prose: `check` is part of the script contract and
         answers with an exit code (0 authenticated, 10 not). Reading it is the
         opposite of the thing this project refuses to do — it is asking the CLI
         rather than guessing from what a model wrote.
+
+        PS-R2: for a credential-dependent the OWNER's check answers — that is
+        whose login a failure (or a recovery) is about. PS-R4b: the check runs
+        through the EXECUTOR the question is about (the failed run's own, when
+        recovering one), because a container login and the host's are
+        different credentials and a pass in one says nothing about the other.
         """
         from . import auth, scripts as scripts_mod
 
-        provider = self.providers.get(name)
+        check_name, provider = self._auth_target(name)
         if provider is None:
             return None
         code, out, err = scripts_mod.run_action(
-            name, provider, self.executor(), "check", global_config_dir(),
-            self.paths.config, timeout=20)
+            check_name, provider, executor if executor is not None else self.executor(),
+            "check", global_config_dir(), self.paths.config, timeout=20)
         if code == auth.AUTHENTICATED:
             return True
         if code == auth.NOT_AUTHENTICATED:
@@ -854,7 +915,14 @@ class Runner:
         for name, budget in budgets.items():
             state = health.get(name) or {}
             entry = cooldowns.get(name) or {}
-            if not state.get("tripped"):
+            tripped = bool(state.get("tripped"))
+            # PS-R4: a provider can carry an authentication block its own runs
+            # never earned — a group member's failure marked it too. Such a
+            # block is probed like a tripped one, or a shared login could stay
+            # locked out for the whole window after the owner recovered.
+            auth_block = bool(entry.get("needs_login")) and \
+                entry.get("cause") == "auth"
+            if not tripped and not auth_block:
                 continue                                  # healthy
             cooling = entry.get("until", 0) > now()
             # A cooling provider is already routed around and needs no trial —
@@ -877,18 +945,30 @@ class Runner:
                 self.tree.begin_trial(name)
             if not entry.get("needs_login"):
                 continue                      # a real run is the trial; let it
-            ok = self._auth_ok(name)
-            if ok:
-                self.tree.clear_cooldown(name)
-                self.tree.clear_provider_health(name)
-                budget.cooldown_until = None
+            # PS-R4b: the probe asks the login the block was observed in, and
+            # its answer clears or re-asserts only blocks from that context —
+            # a host pass never clears a container failure, or the reverse.
+            default = self._auth_context(self.executor())
+            context = entry.get("context") or default
+            contexts = {context, ""} if context == default else {context}
+            if context == default:
+                ok = self._auth_ok(name)      # the project executor's login
             else:
-                reason = (f"{name} is not authenticated — run "
-                          f"`multiagents auth login {name}`")
-                self.tree.set_cooldown(name, now() + auth_window, reason,
-                                       needs_login=True, cause="auth")
+                ok = self._auth_ok(name, self._context_executor(context))
+            if ok:
+                # PS-R4/R4a: every member's AUTHENTICATION block lifts
+                # together, and nothing else.
+                lifted = self.tree.clear_auth(self._credential_group(name),
+                                              contexts)
+                for member in lifted:
+                    if member in budgets:
+                        live = self.tree.cooldown(member)
+                        budgets[member].cooldown_until = \
+                            live.get("until") if live else None
+                self.tree.clear_provider_health(name)
+            else:
+                budget.note = self._block_auth(name, auth_window, context)
                 budget.cooldown_until = now() + auth_window
-                budget.note = reason
 
     def _maybe_cool_family(self, tripped: str, _seconds: float) -> None:
         """Stop the router walking every account of a broken integration.
@@ -2173,6 +2253,15 @@ class Runner:
         reading `self.runs[node_id]` during that window would otherwise get a
         fresh event nobody will ever set.
         """
+        # PS-R6: no launch — first, free retry, commit-fix turn, steer's
+        # respawn, a conversation's next turn — runs a model the destination
+        # provider does not allow. Admission refuses earlier and more kindly;
+        # this is the one place every path passes through, so it is the one
+        # that cannot be bypassed by a spec rebuilt the wrong way. Refused
+        # before anything is taken, like the hold check below.
+        refusal = self._model_refusal(provider.name, spec.model or "")
+        if refusal:
+            raise RuntimeError(refusal)
         if self._held(node_id):
             # RM-R1d: a second process on a node whose previous launch is
             # not confirmed dead. Refused before anything is taken, so the
@@ -2181,9 +2270,16 @@ class Runner:
         try:
             home = None
             if self.config.home_policy == "per-agent":
-                home = prepare_home(self.paths.home(node_id), provider.home_links,
-                                    "per-agent", agent=spec.name,
-                                    copies=provider.home_copy)
+                # PS-R2: a provider that borrows its credentials gets the
+                # owner's credential files in its private HOME too — the
+                # owner's links and copies first, then its own.
+                owner = getattr(provider, "auth_owner", None)
+                links = list(dict.fromkeys(
+                    [*(owner.home_links if owner else []), *provider.home_links]))
+                copies = list(dict.fromkeys(
+                    [*(owner.home_copy if owner else []), *provider.home_copy]))
+                home = prepare_home(self.paths.home(node_id), links,
+                                    "per-agent", agent=spec.name, copies=copies)
             identity = {
                 "MULTIAGENTS_AGENT_ID": node_id,
                 "MULTIAGENTS_PARENT_ID": parent or "",
@@ -2208,7 +2304,11 @@ class Runner:
             # second subscription a second account rather than the same one twice.
             # After build_env, because build_env starts from a clean slate and this
             # is not passthrough: it is configuration, not inheritance.
-            for key, value in (provider.env or {}).items():
+            # PS-R2: a provider that borrows its credentials launches with its
+            # own env with the OWNER's laid over it (`credential_env`,
+            # attached at config load); without it, its own env alone.
+            for key, value in (getattr(provider, "credential_env", None)
+                               or provider.env or {}).items():
                 env[key] = os.path.expanduser(os.path.expandvars(str(value)))
             # Identity last: it is what the server's gates trust (SM-R3), so no
             # configuration may restate it.
@@ -2688,6 +2788,46 @@ class Runner:
             result["retry_after"] = retry_after
         return result
 
+    def _model_refusal(self, provider_name: str, model: str) -> str | None:
+        """PS-R6: why `provider_name` may not run `model`, or None when it may.
+
+        The one allowlist check every admission and every launch asks, always
+        of the CURRENT declaration (`self.providers`) and of the model
+        actually being run — never of a Provider object a run retained from
+        before a reload, nor of a spec rebuilt from the roster (reviews
+        ag-2f0d3e 4/5, ag-3644ef 1). An unknown provider or one without an
+        allowlist allows everything, as always. The text names a provider
+        whose allowlist would take the model, when one exists; nothing is
+        substituted."""
+        provider = self.providers.get(provider_name)
+        if provider is None or provider.allows_model(model or ""):
+            return None
+        acceptors = sorted(name for name, entry in self.providers.items()
+                           if name != provider_name and entry.allows_model(model))
+        way_out = (f" {acceptors[0]} allows it." if len(acceptors) == 1
+                   else f" These allow it: {', '.join(acceptors)}."
+                   if acceptors else "")
+        return (f"{provider_name} does not allow model {model!r} (its "
+                f"models_include exclude it).{way_out} No model or provider "
+                f"is substituted; name a model that provider allows, or route "
+                f"the agent to a provider that does.")
+
+    def _runs_allowed_model(self, spec: AgentSpec, name: str) -> bool:
+        """PS-R6 (review ag-2f0d3e, finding 3): would the model this agent
+        actually runs on `name` be allowed by `name`'s allowlist? Routing
+        asks this of every candidate — a same-family sibling that shares the
+        model namespace does not share the allowlist, and must never be
+        chosen to run a model it excludes."""
+        routed = self._usable_spec(spec, name)
+        return routed is not None \
+            and self.providers[name].allows_model(routed.model or "")
+
+    def _family_of(self, name: str) -> str:
+        """PS-R7a: a provider's family; an unknown name is its own family of
+        one, so a destination that has since left the map is a change."""
+        provider = self.providers.get(name)
+        return (getattr(provider, "family", "") or name) if provider else name
+
     def _pin_problem(self, spec: AgentSpec) -> dict | None:
         provider = self.providers.get(spec.provider)
         if provider is None or not provider.enabled:
@@ -2775,6 +2915,7 @@ class Runner:
         budget_tag: str = "",
         budget_tokens: int = 0,
         deferred_id: str = "",
+        recorded_provider: str = "",
     ) -> dict[str, Any]:
         spec = self.config.agent(agent_name)
         if model:
@@ -2806,14 +2947,25 @@ class Runner:
                 offers = ", ".join(
                     f"{name}:{spec.fallback_for(name)[0]}" for name in (spec.models or {})
                     if spec.fallback_for(name)[0]) or "none"
+                # PS-R6: and, when the allowlist is why, who would take it.
+                refusal = self._model_refusal(spec.provider, model)
                 raise ValueError(
                     f"{spec.provider} does not serve a model called {model!r}. "
                     f"A model id belongs to its provider's namespace. "
                     f"{agent_name!r} can also run on: {offers} — naming one of "
                     f"those models here runs it on that provider."
+                    + (f" {refusal}" if refusal else "")
                 )
             else:
                 spec = spec.replace(model=model)
+            # PS-R6: a pin runs only on a provider whose allowlist accepts the
+            # model — the same rule the roster is validated against at load,
+            # here at admission, before any side effect. A provider without an
+            # allowlist allows everything, as always.
+            refusal = self._model_refusal(spec.provider, spec.model)
+            if refusal:
+                message = f"refusing to start {agent_name!r}: {refusal}"
+                return {"reason": message, "error": message, "message": message}
         if budget_tag and budget_tokens:
             # First value wins, so a re-declaration cannot lift a spent ceiling.
             self.tree.set_budget(budget_tag, budget_tokens,
@@ -2882,9 +3034,14 @@ class Runner:
                 if spec.provider in self.providers else "", [])
             # A disabled sibling is never a candidate (CX-C6): `read_all` omits
             # it, and a provider with no budget would otherwise read as one
-            # with room.
+            # with room. Neither is a sibling whose allowlist rejects the
+            # model this agent would run there (PS-R6, review ag-2f0d3e
+            # finding 3): sharing a model namespace is not sharing an
+            # allowlist.
             family = [name for name in family
                       if name == spec.provider or self.providers[name].enabled]
+            family = [name for name in family
+                      if self._runs_allowed_model(spec, name)]
             # RT-R1: a candidate is a provider this agent has a model on — its
             # own, a `models:` entry naming one, or a sibling of either. A key
             # with an empty model is not one: routing there ran `--model ""`.
@@ -2911,7 +3068,8 @@ class Runner:
                         routes.append(name)
                     for sibling in (family_of.get(here.family or name, [])
                                     if here is not None else []):
-                        if sibling not in routes and self.providers[sibling].enabled:
+                        if sibling not in routes and self.providers[sibling].enabled \
+                                and self._runs_allowed_model(spec, sibling):
                             routes.append(sibling)
             if model:
                 family, chain = [], []
@@ -2927,7 +3085,7 @@ class Runner:
                         (problem or {}).get("retry_after") or 0)
                     entry.note = problem["reason"] if problem else "startup_down"
             usable = {name for name in self.providers
-                      if self._usable_spec(spec, name) is not None}
+                      if self._runs_allowed_model(spec, name)}
             unmodelled = [name for name in dict.fromkeys([*routes, *chain, *family])
                           if name in self.providers and name not in usable
                           and self.providers[name].enabled]
@@ -2988,7 +3146,13 @@ class Runner:
                 )
                 queued = self.tree.defer(
                     {"agent": agent_name, "task": task, "timeout": timeout,
-                     "model": model, "workdir": workdir}, retry_at, why,
+                     "model": model, "workdir": workdir,
+                     # PS-R7a/R7b: where this entry was headed — the preferred
+                     # provider that was unavailable. A restart refuses the
+                     # pin if that provider no longer allows the model, and
+                     # never silently re-routes it to another family.
+                     "provider": spec.provider},
+                    retry_at, why,
                     deferred_by=self.self_id())
                 # Nothing can run, so nothing should keep being started. Pausing is
                 # the difference between a system that stops and one that carries on
@@ -3032,6 +3196,27 @@ class Runner:
                 if overrides:
                     routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
                 spec = routed
+            # PS-R7a (review ag-2f0d3e, finding 6): a pinned restart that
+            # records its destination may not be carried, by a roster change
+            # since, onto a DIFFERENT family. The recorded provider allowed
+            # the model (checked by the drain); "or on its normal routing"
+            # means this family's routing, never another vendor's.
+            # PS-R6: routing never picks a provider whose allowlist excludes
+            # the model (roster routes are checked at load), so this refuses
+            # only a spec that reached here some other way — before the node
+            # exists, rather than as a failed run.
+            refusal = self._model_refusal(provider.name, spec.model)
+            if refusal:
+                message = f"refusing to start {agent_name!r}: {refusal}"
+                return {"reason": message, "error": message, "message": message}
+            if recorded_provider and model and self._family_of(provider.name) \
+                    != self._family_of(recorded_provider):
+                return self._pin_refusal(
+                    provider.name,
+                    f"the task was deferred on {recorded_provider}, and this "
+                    f"pin would run it on {provider.name}, a different "
+                    f"family; nothing is substituted. Route the agent back "
+                    f"to {recorded_provider} (or its family) and re-issue it")
             # RM-R7: an explicitly contradicted effort refuses BEFORE the
             # startup claim, so the refusal takes neither the half-open
             # provider's only probe nor a startup.json run record — both
@@ -4035,6 +4220,8 @@ class Runner:
                 run.provider.name, ok=status in ("done", "merged"),
                 threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
                 kind=status,
+                # PS-R4b: a success proves the login of this run's context.
+                context=self._auth_context(self.executor(run.spec)),
                 # Both ends of the output. A CLI puts the reason it stopped at
                 # the END — the limit message that started all this was in the
                 # last 120 characters, and what was recorded was the first 120,
@@ -4052,22 +4239,30 @@ class Runner:
                 # does not, and cycling half-hourly against it wastes runs and
                 # hides the fact that only a person can fix it.
                 name = run.provider.name
-                authenticated = await asyncio.to_thread(self._auth_ok, name)
+                # PS-R4b: the question "is it still authenticated?" is asked
+                # of the login THIS run used — through the run's own executor,
+                # not the project default, which a per-agent executor override
+                # may not agree with.
+                run_executor = self.executor(run.spec)
+                authenticated = await asyncio.to_thread(self._auth_ok, name,
+                                                        run_executor)
                 if authenticated is False:
                     seconds = float(self.config.limits.get(
                         "provider_auth_cooldown_seconds", 6 * 3600))
-                    reason = (f"{name} is not authenticated — run "
-                              f"`multiagents auth login {name}`")
+                    # PS-R4: the whole credential group, in one transaction
+                    # that preserves whatever else each member was cooling on
+                    # and leaves another context's block standing.
+                    self._block_auth(name, seconds,
+                                     self._auth_context(run_executor))
                 else:
                     seconds = float(self.config.limits.get(
                         "provider_down_cooldown_seconds", 1800))
                     reason = (f"{trip['failures']} runs in a row failed — check "
-                              f"`multiagents auth login {name}` and "
+                              f"`multiagents auth login "
+                              f"{self._auth_target(name)[0]}` and "
                               f"`multiagents doctor`")
-                self.tree.set_cooldown(name, now() + seconds, reason,
-                                       needs_login=authenticated is False,
-                                       cause="auth" if authenticated is False
-                                       else "provider_down")
+                    self.tree.set_cooldown(name, now() + seconds, reason,
+                                           cause="provider_down")
                 self._maybe_cool_family(name, seconds)
         return status, limited
 
@@ -4661,6 +4856,13 @@ class Runner:
                 # steer refuses that first (RT-R2).
                 alternative, overrides = spec.fallback_for(node.provider)
                 routed = spec.replace(model=alternative, **overrides)
+            # PS-R7 (review ag-2f0d3e, finding 5): the session is the RECORDED
+            # model's. A roster edit since must not substitute another model
+            # under a resume — the allowlist admission then judges the model
+            # the conversation actually ran and refuses it if it is no longer
+            # allowed, instead of quietly moving the session to a new one.
+            if node.model and routed.model != node.model:
+                routed = routed.replace(model=node.model)
             spec = routed
         # RM-R5a: the effort the node was launched with is what it keeps —
         # a model id that declares its own suffix normalised the configured
@@ -5052,6 +5254,16 @@ class Runner:
             refusal = await self._pin_health(spec.replace(provider=provider.name))
             if refusal:
                 return {**refusal, "steered": False}
+
+        # PS-R6: the respawn must be admittable before the live run is
+        # stopped. The run was admitted when it started; a roster change
+        # since must not be carried into a relaunch of a model the provider
+        # no longer allows — and must not cost the live run to find out.
+        refusal = self._model_refusal(provider.name, spec.model)
+        if refusal:
+            message = f"refusing to steer {agent_id}: {refusal}"
+            return {"agent_id": agent_id, "steered": False, "reason": message,
+                    "error": f"{message} The live run was left untouched."}
 
         # A truncated `writes: false` agent may have had its worktree reclaimed
         # by `_drop_if_empty` once its empty branch made it look worth nothing
@@ -5620,10 +5832,21 @@ class Runner:
         placed = True       # the worktree was just cut from base this turn
         replaced = None     # the conversation this turn replaces (CX-C28)
 
-        route = None
         if node is not None:
-            route = self._conversation_route(spec, node)
-            if route is None:
+            # PS-R7: a conversation whose recorded provider no longer allows
+            # its model is refused BEFORE anything else is decided about it —
+            # including the roster having moved the agent elsewhere (CX-C28),
+            # which would otherwise quietly replace it with a new
+            # conversation (review ag-a50515, finding 5). The node keeps its
+            # session, status and turn count, and nothing is launched.
+            refusal = self._model_refusal(node.provider, node.model)
+            if refusal:
+                raise ValueError(
+                    f"refusing to resume {agent_name!r}'s conversation "
+                    f"{node.id}: {refusal} Nothing was launched and nothing "
+                    f"was changed. To start a new conversation, stop this one "
+                    f"(stop_agent {node.id}) and consult again.")
+            if self._conversation_route(spec, node) is None:
                 # Not resumed anywhere: not on the provider the roster dropped,
                 # and its session means nothing to any other. A new
                 # conversation on the current roster takes its place.
@@ -5721,12 +5944,14 @@ class Runner:
                 # attached. Prefer the in-process Run's mutated spec when one
                 # survives; otherwise rebuild it from the live node the way
                 # `start()` built it originally.
+                # PS-R7 (review ag-3644ef, finding 1): rebuilt, the spec
+                # carries the RECORDED model — the session is that model's —
+                # not the one the roster names for the route today.
                 run = self.runs.get(node_id)
                 if run is not None:
                     spec, provider = run.spec, run.provider
                 else:
-                    spec = route
-                    provider = self.providers.get(node.provider)
+                    spec, provider = self._spec_of(node)
                 # RM-R5a: the persisted effort is what this conversation runs
                 # with — a model id that declares its own suffix normalised the
                 # configured one at first launch, and the node carries the
@@ -6114,11 +6339,33 @@ class Runner:
                                 "reason": reason})
                 self.tree.exit_deferred(entry["id"], "dropped", reason=reason)
                 continue
+            # PS-R7a: a NEW entry records the provider it was deferred from,
+            # and the restart is held to it. If that provider no longer
+            # allows the pinned model, the entry is refused under PS-R7 —
+            # checked HERE, before start's pin resolution, because start
+            # would legitimately carry the pin to a `models:` fallback, and
+            # the recorded destination's refusal is exactly what must prevent
+            # the silent re-route to another provider. No recorded provider
+            # (a legacy entry) routes as it always did.
+            recorded = task_spec.get("provider")
+            pinned = task_spec.get("model")
+            refusal = self._model_refusal(recorded, pinned) \
+                if recorded and pinned else None
+            if refusal:
+                reason = f"{agent}: {refusal}"
+                refused.append({"agent": agent, "deferred_id": entry["id"],
+                                "reason": reason})
+                self.tree.exit_deferred(entry["id"], "refused", reason=reason)
+                continue
             try:
                 result = await self.start(
                     agent, task_spec.get("task", ""),
                     workdir=task_spec.get("workdir"), timeout=task_spec.get("timeout"),
                     model=task_spec.get("model"), deferred_id=entry["id"],
+                    # PS-R7a: a PINNED entry with a recorded destination may
+                    # restart on that destination or its family's routing —
+                    # never on a family a roster change moved it to.
+                    recorded_provider=(recorded or "") if pinned else "",
                 )
             except (ValueError, PermissionError) as exc:
                 # DQ-R3b: the request itself cannot be honoured, and waiting

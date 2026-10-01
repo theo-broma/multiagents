@@ -346,6 +346,14 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
                          force=getattr(args, "force", False))
 
 
+def _credential_owner(name: str, providers: dict) -> tuple[str, object]:
+    """PS-R3: `(name, provider)` of whoever holds `name`'s login — its
+    `auth_from` owner, or itself."""
+    owner = str(getattr(providers.get(name), "auth_from", "") or "")
+    return (owner, providers[owner]) if owner in providers \
+        else (name, providers.get(name))
+
+
 def _ensure_authenticated(paths, config, providers, interactive: bool = True) -> int:
     """Check every enabled provider and offer to fix what is broken.
 
@@ -361,21 +369,31 @@ def _ensure_authenticated(paths, config, providers, interactive: bool = True) ->
     # provider has two stored logins and they are repaired by two different
     # commands — offering the container's login for a signed-out host is how
     # `build` could end on "ready: multiagents run" and have run fail at once.
+    #
+    # PS-R3: what is checked, offered and logged in is the credential OWNER —
+    # once, however many enabled dependents borrow it, and even when the
+    # owner itself is disabled. Checking the owner and then running the
+    # dependent's login repaired nothing (review ag-3644ef, finding 5).
     broken = []
-    for name, provider in sorted(enabled.items()):
-        state = auth_mod.check(name, provider, executor_of(name),
+    seen = set()
+    for name, _ in sorted(enabled.items()):
+        owner, provider = _credential_owner(name, providers)
+        if owner in seen:
+            continue
+        seen.add(owner)
+        state = auth_mod.check(owner, provider, executor_of(owner),
                                global_config_dir(), project_config)
         mark = "ok " if state.ok else "!! "
-        print(f"  {mark}{name:10} {state.detail[:70]}")
+        print(f"  {mark}{owner:10} {state.detail[:70]}")
         if not state.ok:
-            broken.append((name, provider, ""))
+            broken.append((owner, provider, ""))
 
     for name, state in sorted(_driver_host_states(
             config, providers, executor_of, project_config).items()):
         mark = "ok " if state.ok else "!! "
         print(f"  {mark}{name:10} {state.detail[:70]}   ← host, where run execs")
         if not state.ok:
-            broken.append((name, providers[name], auth_mod.HOST))
+            broken.append((*_credential_owner(name, providers), auth_mod.HOST))
 
     if not broken:
         return 0
@@ -2195,6 +2213,12 @@ def cmd_auth(args: argparse.Namespace) -> int:
         if provider is None:
             print(f"unknown provider {name!r}; known: {sorted(providers)}", file=sys.stderr)
             return 2
+        # PS-R3: a dependent borrows the owner's login action — and says so,
+        # because the browser session that follows is the owner's account.
+        owner, provider = _credential_owner(name, providers)
+        if owner != name:
+            print(f"{name} uses {owner}'s login")
+            name = owner
         extra = {}
         if getattr(args, "account", ""):
             # Passed to the script rather than resolved here: only it knows

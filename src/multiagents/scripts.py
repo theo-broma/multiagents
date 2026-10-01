@@ -136,7 +136,13 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     # accounts on one CLI, so it is applied to EVERY action: a `check` that
     # inspects profile A while `launch` runs as profile B would report on an
     # account nobody is using.
-    for key, value in (getattr(provider, "env", None) or {}).items():
+    #
+    # PS-R2: a provider that borrows its credentials runs with the OWNER's
+    # environment overlaid with its own — `credential_env`, attached at config
+    # load. Providers without the key keep their own `env`, exactly as before.
+    env_map = getattr(provider, "credential_env", None) or \
+        (getattr(provider, "env", None) or {})
+    for key, value in env_map.items():
         env[key] = os.path.expanduser(os.path.expandvars(str(value)))
     env.update(extra or {})
     return env

@@ -21,3 +21,4 @@ __pycache__/
 
 # Scratch notes and agent-written suggestions kept locally, not shipped.
 suggestions.md
+.pytest-tmp/

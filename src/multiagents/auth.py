@@ -18,7 +18,7 @@ in :mod:`multiagents.scripts`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,8 @@ class AuthState:
     script: str = ""
     fix: str = ""
     profile: str = ""              # "" | "host"
+    # PS-R3: set when this provider borrows its credentials, naming the owner.
+    auth_from: str = ""
 
     @property
     def ok(self) -> bool:
@@ -56,6 +58,8 @@ class AuthState:
 
     def to_dict(self) -> dict[str, Any]:
         out = {"provider": self.provider, "status": self.status, "authenticated": self.ok}
+        if self.auth_from:
+            out["auth_from"] = self.auth_from
         if self.profile:
             out["profile"] = self.profile
         if self.detail:
@@ -80,7 +84,17 @@ def check(provider_name: str, provider: Any, executor: Any,
     passed to the script rather than interpreted here, because which profiles
     a provider even has is the script's business — the same reason `check`
     itself is a script and not a branch in this file.
+
+    PS-R2/R3: a provider that borrows its credentials is checked through the
+    OWNER's script and environment — that is where its login actually lives.
+    The fix still names this provider unless the load attached the owner
+    (`auth_from`), in which case it names the owner: logging in as the
+    dependent would fix nothing.
     """
+    owner_name = str(getattr(provider, "auth_from", "") or "")
+    owner = getattr(provider, "auth_owner", None)
+    if owner is not None and owner_name:
+        provider = owner
     script = _scripts.resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return AuthState(provider_name, "no_script",
@@ -98,24 +112,51 @@ def check(provider_name: str, provider: Any, executor: Any,
     # The host profile is not repaired by the same command: under docker
     # `auth login <p>` signs into the CONTAINER, which is the whole confusion
     # this is here to end, so the fix has to name the other one.
-    fix = (f"multiagents auth login {provider_name}"
+    fix = (f"multiagents auth login {owner_name or provider_name}"
            + (" --host" if profile == HOST else ""))
     if code == AUTHENTICATED:
         return AuthState(provider_name, "authenticated", line, str(script),
-                         profile=profile)
+                         profile=profile, auth_from=owner_name)
     if code == NOT_AUTHENTICATED:
         return AuthState(provider_name, "not_authenticated", line, str(script),
-                         fix, profile)
+                         fix, profile, owner_name)
     return AuthState(provider_name, "unknown", line or f"exit {code}", str(script),
-                     fix, profile)
+                     fix, profile, owner_name)
 
 
 def check_all(providers: dict[str, Any], executor_for: Any,
               config_dir: Path, project_config: Path | None = None) -> dict[str, AuthState]:
-    return {
-        name: check(name, provider, executor_for(name), config_dir, project_config)
-        for name, provider in providers.items()
-    }
+    """Check every provider, credential groups sharing one check (PS-R3).
+
+    Each credential OWNER is checked once; every provider that declares
+    `auth_from` on it reports the owner's state and names it. A disabled
+    owner is still checked — it holds the login its dependents use — and an
+    owner missing from the map (a hand-built provider that never went through
+    the loader) leaves its dependents unknown rather than checked as if they
+    owned a login of their own.
+    """
+    states: dict[str, AuthState] = {}
+    for name, provider in providers.items():
+        if getattr(provider, "auth_from", ""):
+            continue
+        states[name] = check(name, provider, executor_for(name),
+                             config_dir, project_config)
+    for name, provider in providers.items():
+        owner_name = str(getattr(provider, "auth_from", "") or "")
+        if not owner_name:
+            continue
+        owner_state = states.get(owner_name)
+        if owner_state is None:
+            states[name] = AuthState(
+                name, "unknown",
+                detail=f"credential owner {owner_name!r} was not checked",
+                fix=f"multiagents auth login {owner_name}", auth_from=owner_name)
+            continue
+        fix = (f"multiagents auth login {owner_name}"
+               + (" --host" if owner_state.profile == HOST else ""))
+        states[name] = replace(owner_state, provider=name, fix=fix,
+                               auth_from=owner_name)
+    return states
 
 
 def login_command(provider_name: str, provider: Any, executor: Any,

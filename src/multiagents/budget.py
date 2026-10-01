@@ -34,6 +34,7 @@ valuable, which makes this the thing that earns the system its keep.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import json
 import math
@@ -42,7 +43,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .redact import register_literal, scrub
 
@@ -246,10 +247,15 @@ def _effective_windows(b: Budget) -> dict[str, dict]:
     only does that once there is more than one bucket), so a reading with a
     top-level ``resets_at`` and no ``windows`` is treated as one window here,
     per the spec's Decisions section.
+
+    PS-R5: a window the reading marks ``counted: false`` never constrains
+    this provider — not at fetch time and not in the recomputation here. A
+    window with no flag at all counts, which keeps every reading that never
+    heard of the flag exactly as it was.
     """
     if b.windows:
         return {name: detail for name, detail in b.windows.items()
-                if isinstance(detail, dict)}
+                if isinstance(detail, dict) and detail.get("counted", True)}
     if b.headroom is not None and b.resets_at:
         return {"_default": {"percent": (1 - b.headroom) * 100,
                              "resets_at": b.resets_at}}
@@ -277,9 +283,13 @@ def _apply_reset_margin(b: Budget, margin: float, now_: float) -> Budget:
             new_windows[name] = {**new_windows[name], "percent": 0.0, "resets_at": None}
     if not remaining:
         return replace(b, headroom=1.0, resets_at=None, severity="normal",
-                      windows=new_windows)
-    worst = max(remaining, key=lambda name: remaining[name].get("percent") or 0)
-    worst_percent = remaining[worst].get("percent") or 0
+                       windows=new_windows)
+    # Usage comes from `_window_used`, so a window that reports only a
+    # `headroom` is read as what it says (review ag-2f0d3e, finding 9) —
+    # a bare `.get("percent") or 0` read its 0.5 headroom as 0% used and
+    # returned full headroom after a recomputation.
+    worst = max(remaining, key=lambda name: _window_used(remaining[name]) or 0.0)
+    worst_percent = _window_used(remaining[worst]) or 0.0
     return replace(
         b, headroom=max(0.0, 1.0 - worst_percent / 100.0),
         resets_at=remaining[worst].get("resets_at"),
@@ -1019,6 +1029,20 @@ class _CacheEntry:
         return iter((self.wall, self.budget))
 
 
+# PS-R5: one fetch per budget source at a time (see `_source_reading`). The
+# generation counts a source's completed fetches, so a caller that queued on
+# the lock can tell a payload published while it waited from one it had
+# already judged too old.
+_fetch_locks: dict[str, threading.Lock] = {}
+_fetch_locks_guard = threading.Lock()
+_fetch_generation: dict[str, int] = {}
+
+
+def _fetch_lock(name: str) -> threading.Lock:
+    with _fetch_locks_guard:
+        return _fetch_locks.setdefault(name, threading.Lock())
+
+
 def invalidate_cache() -> None:
     _cache.clear()
     _cache_source.clear()
@@ -1092,94 +1116,249 @@ def _script_read_at(value: Any) -> float | None:
     return _number(value)
 
 
+# --------------------------------------------------------------------------
+# PS-R5: a shared quota source, projected per provider
+# --------------------------------------------------------------------------
+
+def _window_used(detail: dict) -> float | None:
+    """A window's percent USED, or None when it does not say one.
+
+    `percent` is what every window carries; a window that gives only a
+    `headroom` is converted, so either spelling counts.
+    """
+    percent = _number(detail.get("percent"))
+    if percent is not None:
+        return percent
+    headroom = _number(detail.get("headroom"))
+    if headroom is not None:
+        return (1.0 - headroom) * 100.0
+    return None
+
+
+def _project_reading(name: str, base: Budget, provider: Any) -> Budget:
+    """Read the shared payload as THIS provider's, through its own selector.
+
+    PS-R5. The base is the budget source's own reading. A provider with no
+    `budget_from` and no `budget_windows` of its own is returned untouched —
+    the unchanged path. A dependent without a selector keeps the payload's
+    own counted flags and headroom, as today, but drops the source's note:
+    it describes the source's pool, not this provider's.
+
+    With a selector, every window it matches counts — overriding the
+    payload's flags (PS-R5a) — and headroom, severity, constraining window
+    and reset are recomputed from the counted windows only. Windows it does
+    not match stay in the reading for display, marked `counted: false`, and
+    never constrain — `_effective_windows` sees to the second half, so the
+    reset-margin recomputation cannot smuggle one back in. A selector that
+    matches no valid window makes the reading unknown; it never falls back
+    to the source's aggregate, whose constraint is somebody else's.
+    """
+    owner_name = getattr(provider, "budget_from", "") or ""
+    selector = getattr(provider, "budget_windows", None)
+    if selector is None and not owner_name:
+        return base
+    windows = base.windows if isinstance(base.windows, dict) else {}
+    if selector is None:
+        return replace(base, provider=name, spent={},
+                       note=("" if owner_name else base.note))
+    selected = {key: detail for key, detail in windows.items()
+                if isinstance(detail, dict)
+                and _window_used(detail) is not None
+                and any(fnmatch.fnmatch(key, pattern) for pattern in selector)}
+    marked: dict[str, Any] = {}
+    for key, detail in windows.items():
+        if isinstance(detail, dict):
+            marked[key] = {**detail, "counted": key in selected}
+        else:
+            # Not a window at all — kept for display, never counted.
+            marked[key] = detail
+    # Spend is per provider: a dependent never inherits the source's.
+    projected = replace(base, provider=name, windows=marked,
+                        spent={} if owner_name else dict(base.spent))
+    if not selected:
+        return replace(projected, known=False, headroom=None,
+                       severity="unknown", resets_at=None, note=(
+                           "no window in the shared budget reading matches "
+                           "this provider's budget_windows "
+                           f"({', '.join(selector)})"))
+    worst = max(selected, key=lambda key: _window_used(selected[key]) or 0.0)
+    used = _window_used(selected[worst]) or 0.0
+    return replace(
+        projected,
+        known=True,
+        headroom=max(0.0, 1.0 - used / 100.0),
+        severity=("critical" if used >= 90 else "warning" if used >= 75
+                  else "normal"),
+        resets_at=selected[worst].get("resets_at"),
+        note=("" if owner_name else base.note),
+    )
+
+
+class _SourceReading(NamedTuple):
+    """What `_source_reading` hands back: the raw payload, its age
+    bookkeeping (RM-R4b/R4d), and the clock it was judged at."""
+    raw: Budget
+    wall: float          # the wall stamp the payload was cached under
+    elapsed: float       # cache time, forward wall movement only
+    now: float           # the clock this read was judged at
+
+
+def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
+                    project_config: Path | None, use_cache: bool = True,
+                    force: bool = False, limits: dict | None = None,
+                    providers: dict[str, Any] | None = None,
+                    _pass: set[str] | None = None) -> _SourceReading:
+    """The RAW budget payload behind `name` — its own script's answer, or,
+    PS-R5, its budget source's — with the cache entry's age bookkeeping.
+
+    PS-R5: what is cached is the budget SOURCE's raw payload, under the
+    source's name, and nothing else. No provider's PROJECTION is ever
+    cached: every read projects the payload afresh (`read_provider`), so
+    refreshing the source leaves no stale dependent reading behind and a
+    selector-less dependent sees the raw aggregate, not the source's own
+    projection.
+
+    One fetch serves everybody reading the same source:
+    - within a caller's pass (`_pass`, the sources already read in it) — a
+      `read_all` that bypasses the cache, forced or not, fetches a shared
+      source once, not once per provider;
+    - across concurrent callers — a miss fetches under the source's own
+      lock (`_fetch_lock`; provider I/O runs outside `_cache_lock`, which
+      alone could not deduplicate it), and a caller that queued on it takes
+      the payload published since its generation snapshot instead of
+      fetching again. The snapshot is taken BEFORE the cache is looked at,
+      and everything is judged again under the lock.
+
+    RM-R4e/R4f (batch M): every look at an entry happens under `_cache_lock`
+    — the identity check first, then the backward-step check (a hit that
+    sees the clock behind the entry's `seen` drops it and re-reads; the
+    dropped budget is never returned), then the forward-only `elapsed`
+    accumulation. A replacement and its source identity publish together
+    under the same lock, and every look reads its clock under that lock
+    too, so a payload published concurrently is never taken for a backward
+    step.
+
+    The source's Provider object is carried on the dependent at load
+    (`budget_owner`), so a lone dependent — read without its owner in the
+    map — still reaches the owner's script.
+    """
+    _pass = set() if _pass is None else _pass
+    owner_name = getattr(provider, "budget_from", "") or ""
+    if owner_name:
+        owner_provider = getattr(provider, "budget_owner", None) \
+            or (providers or {}).get(owner_name)
+        if owner_provider is None:
+            moment = time.time()
+            return _SourceReading(
+                Budget(provider=name, known=False,
+                       note=f"budget source {owner_name!r} is not a declared "
+                            f"provider"), moment, 0.0, moment)
+        # One level (PS-R5 load rules): the owner reads its own source.
+        return _source_reading(owner_name, owner_provider, executor,
+                               config_dir, project_config, use_cache, force,
+                               limits, providers, _pass)
+    source = str(config_dir)
+
+    def take(generation: int | None) -> _SourceReading | None:
+        """The cached entry, aged to now, when this caller may use it; None
+        for a miss. Call under `_cache_lock`: the clock is read HERE, under
+        the lock (review ag-e6b702), so no entry can be published between
+        the reading and the look — a publication that slipped in between
+        left `seen` ahead of the sample, and the fresh entry was destroyed
+        as a backward step (RM-R4e)."""
+        moment = time.time()
+        stored = _cache.get(name)
+        if isinstance(stored, tuple):
+            # A bare (wall, budget) pair — an old caller or a test that
+            # backdated the entry by writing the shape it knew. It carries no
+            # bookkeeping of its own, so it ages by the wall clock alone.
+            entry = _CacheEntry(stored[0], stored[1])
+        else:
+            entry = stored
+        if entry is None or _cache_source.get(name) != source:
+            return None
+        if not (name in _pass
+                or (use_cache and not force and moment - entry.wall < _CACHE_TTL)
+                or (generation is not None
+                    and _fetch_generation.get(name, 0) != generation)):
+            return None
+        if moment < entry.seen:
+            # RM-R4f: a backward step. Invalidated, and the ordinary fetch
+            # path runs in this same call; the dropped budget is never
+            # returned. (A step that lands and recovers entirely between two
+            # reads is unobservable — the accepted limit.)
+            if _cache.get(name) is stored:
+                _cache.pop(name, None)
+            return None
+        entry.elapsed += moment - entry.seen          # moment >= seen
+        entry.seen = moment
+        return _SourceReading(entry.budget, entry.wall, entry.elapsed, moment)
+
+    generation = _fetch_generation.get(name, 0)
+    with _cache_lock:
+        hit = take(None)
+    if hit is not None:
+        return hit
+    with _fetch_lock(name):
+        with _cache_lock:
+            hit = take(generation)
+            generation = _fetch_generation.get(name, 0)
+            # Read before the fetch, so the entry's age covers it; any later
+            # look reads its clock under the lock, after this publication.
+            moment = time.time()
+        if hit is not None:
+            _pass.add(name)
+            return hit
+        try:
+            budget = _from_script(name, provider, executor, config_dir, project_config)
+            if budget is None:
+                builtin = _BUILTIN.get(name)
+                budget = builtin(project_config=project_config, force=force, limits=limits) if builtin is read_claude else (
+                    builtin(spent=None) if builtin else
+                    Budget(provider=name, known=False, source="none",
+                           note="no budget action and no built-in reader")
+                )
+        except Exception as exc:              # telemetry must never break a run
+            budget = Budget(provider=name, known=False,
+                            note=f"{type(exc).__name__}: {exc}")
+        # The reader's own RAW budget — before any projection, margin or the
+        # caller's spent, all of which are per-read overlays (R17, QF-R1).
+        # RM-R4f: it publishes with its source identity, under the lock.
+        with _cache_lock:
+            _cache[name] = _CacheEntry(moment, budget)
+            _cache_source[name] = source
+            _fetch_generation[name] = generation + 1
+    _pass.add(name)
+    return _SourceReading(budget, moment, 0.0, moment)
+
+
 def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
                   project_config: Path | None = None,
                   spent: dict[str, int] | None = None,
                   use_cache: bool = True, force: bool = False,
                   limits: dict | None = None,
-                  max_reading_age: float | None = None) -> Budget:
-    now_ = time.time()
-    source = str(config_dir)
+                  max_reading_age: float | None = None,
+                  providers: dict[str, Any] | None = None,
+                  _pass: set[str] | None = None) -> Budget:
     margin = _reset_margin(project_config, limits)
     # RM-R4b: the caller's loaded config wins (`reading_age_bound`); a caller
     # with none falls back to reading the layers itself, as the margin does.
     bound = max_reading_age if max_reading_age is not None \
         else _reading_age_bound_from_layers(project_config)
-    hit = None
-    if use_cache and not force:
-        # RM-R4f: the identity check happens first, under the lock. An entry
-        # that is no longer current, or was read for a different config-dir
-        # identity, is an ordinary miss: it is neither returned nor aged.
-        with _cache_lock:
-            raw_entry = _cache.get(name)
-            if isinstance(raw_entry, tuple):
-                # A bare (wall, budget) pair — an old caller or a test that
-                # backdated the entry by writing the shape it knew. It
-                # carries no bookkeeping of its own, so it ages by the wall
-                # clock alone.
-                entry = _CacheEntry(raw_entry[0], raw_entry[1])
-            else:
-                entry = raw_entry
-            if (entry is not None
-                    and now_ - entry.wall < _CACHE_TTL
-                    and _cache_source.get(name) == source):
-                if now_ < entry.seen:
-                    # RM-R4f: this hit has observed the clock BEHIND the
-                    # entry — a backward step. The entry is invalidated and
-                    # the ordinary fetch path runs in this same call,
-                    # whatever the entry's age metadata says: the
-                    # invalidated budget is never returned. (A step that
-                    # lands and recovers entirely between two reads is
-                    # unobservable — the accepted limit.) The fetch itself
-                    # runs outside the lock, below.
-                    if _cache.get(name) is raw_entry:
-                        _cache.pop(name, None)
-                else:
-                    # QF-R1: the margin is re-applied fresh on every
-                    # retrieval, cache hit or not — a window's own reset can
-                    # lapse while the cache entry is still within
-                    # `_CACHE_TTL`. The margin-adjusted result is never
-                    # itself cached.
-                    # RM-R4b/RM-R4d: nor does a cached reading stop ageing —
-                    # the time spent in the cache counts toward the reading
-                    # age, so a reading that was fresh when it was read can
-                    # still age out before its next real refresh. That time
-                    # is this entry's own, accumulated from the wall clock's
-                    # forward movement (see `_CacheEntry`), and it is added
-                    # once, inside `_reading_age`.
-                    entry.elapsed += now_ - entry.seen      # now_ >= seen
-                    entry.seen = now_
-                    hit = _apply_reset_margin(entry.budget, margin, now_)
-                    hit = _apply_reading_age(hit, bound, now_,
-                                             cached_at=entry.wall,
-                                             elapsed=entry.elapsed)
-    if hit is not None:
-        # R16: never hand out the cache's own object — copy with
-        # independent spent/windows dicts so item assignment by a caller
-        # cannot reach the cached entry.  R17: merge the caller's spent over
-        # the reader's (F122), never replace.
-        merged = {**hit.spent, **spent} if spent else dict(hit.spent)
-        return replace(hit, spent=merged, windows=dict(hit.windows))
-    try:
-        budget = _from_script(name, provider, executor, config_dir, project_config)
-        if budget is None:
-            builtin = _BUILTIN.get(name)
-            budget = builtin(project_config=project_config, force=force, limits=limits) if builtin is read_claude else (
-                builtin(spent) if builtin else
-                Budget(provider=name, known=False, source="none",
-                       note="no budget action and no built-in reader")
-            )
-    except Exception as exc:              # telemetry must never break a run
-        budget = Budget(provider=name, known=False,
-                        note=f"{type(exc).__name__}: {exc}")
-    # RM-R4f: the replacement budget and its source identity publish
-    # together, under the lock — the fetch above ran outside it, so a
-    # concurrent reader never sees one without the other.
-    with _cache_lock:
-        _cache[name] = _CacheEntry(now_, budget)
-        _cache_source[name] = source
+    # PS-R5: EVERY read — cache hit or fresh, the source's own or a
+    # dependent's — passes through projection → reset margin → age bound →
+    # provider-local spend. The cache holds the budget SOURCE's raw payload
+    # only; an early return on a hit would hand the source its raw aggregate
+    # back, counting windows its selector excludes. The age is the cache
+    # entry's own (RM-R4b/R4d): deriving a projection does not reset it.
+    read = _source_reading(name, provider, executor, config_dir,
+                           project_config, use_cache, force, limits,
+                           providers, _pass)
+    now_ = read.now
+    budget = _project_reading(name, read.raw, provider)
     budget = _apply_reset_margin(budget, margin, now_)
-    budget = _apply_reading_age(budget, bound, now_)
+    budget = _apply_reading_age(budget, bound, now_, cached_at=read.wall,
+                                elapsed=read.elapsed)
     # R16: return a copy so the fresh-read caller cannot poison the cache
     # either (Amendment 2 — F171).  Merge the caller's spent onto the copy.
     merged = {**budget.spent, **spent} if spent else dict(budget.spent)
@@ -1222,13 +1401,19 @@ def read_all(providers: dict[str, Any] | None = None,
         kind = "local"
 
     out: dict[str, Budget] = {}
+    # One pass, one set: a shared source fetched for the first provider is
+    # not fetched again for a dependent of it (PS-R5).
+    _pass: set[str] = set()
     for name, provider in providers.items():
         if provider is not None and not getattr(provider, "enabled", True):
             continue
         executor = executor_for(name) if callable(executor_for) else _NullExecutor()
         budget = read_provider(name, provider, executor, config_dir, project_config,
                                spend_by_provider.get(name), use_cache, force,
-                               limits=limits, max_reading_age=max_reading_age)
+                               limits=limits, max_reading_age=max_reading_age,
+                               # PS-R5: a dependent resolves its budget source
+                               # through the same map.
+                               providers=providers, _pass=_pass)
         entry = cooldowns.get(name)
         if entry and entry.get("until", 0) > time.time():
             budget.cooldown_until = entry["until"]

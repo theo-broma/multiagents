@@ -240,7 +240,7 @@ def test_rf_r4_recorded_agy_response_is_refused(tmp_path, monkeypatch):
     script = h.fake_cli(tmp_path, events=[event])
     agy = {**agy, "bin": script["bin"], "spawn": script["spawn"]}
     r = h.make_runner(tmp_path / "project", monkeypatch,
-                      agents={"worker": h.AgentSpec("worker", "agy", "m")},
+                      agents={"worker": h.AgentSpec("worker", "agy", "gemini-x")},
                       providers={"agy": agy})
     agent_id = _run(r)
     assert r.tree.get(agent_id).status == "refused"

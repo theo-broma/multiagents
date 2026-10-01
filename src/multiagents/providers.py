@@ -228,6 +228,26 @@ class Provider:
     extends: str = ""
     family: str = ""
     env: dict[str, str] = field(default_factory=dict)
+    # PS-R1/R5: providers that share tooling but keep their own models and
+    # quota. `auth_from` names the credential OWNER — this provider logs in
+    # as, and shares the container profile of, that one. One level only: an
+    # owner that declares its own `auth_from` is a config error, so there are
+    # no chains or cycles to walk. `budget_from` names the quota
+    # source the same way, and `budget_windows` says which windows of the
+    # shared payload count for this provider (None = undeclared; the payload's
+    # own counted flags then stand, as they always have).
+    auth_from: str = ""
+    budget_from: str = ""
+    budget_windows: list[str] | None = None
+    # Attached by `load_providers`, not parsed from yaml: the owner's Provider
+    # object (so a lone dependent can still reach its owner's script), and the
+    # effective credential environment — the owner's `env` overlaid with this
+    # provider's own. None (a Provider built directly rather than loaded)
+    # means "use `env` alone", which is what every provider without the key
+    # has always done.
+    auth_owner: "Provider | None" = None
+    budget_owner: "Provider | None" = None
+    credential_env: dict[str, str] | None = None
     # Tools whose reported arguments do not identify the call (e.g. a
     # file-viewer that never reports which range it viewed) — repeating one
     # must not trip doom_loop on its own. See Supervisor.opaque_tools.
@@ -308,6 +328,9 @@ class Provider:
             # and a provider that extends nothing is its own family of one.
             family=data.get("family") or data.get("extends") or name,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
+            auth_from=_owner_key(name, "auth_from", data),
+            budget_from=_owner_key(name, "budget_from", data),
+            budget_windows=_budget_windows(name, data),
             opaque_tools=list(data.get("opaque_tools", []) or []),
             opaque_tool_args=list(data.get("opaque_tool_args", []) or []),
             mcp=dict(data.get("mcp") or {}),
@@ -692,8 +715,13 @@ def billed_rows(rows: list[dict[str, Any]],
 
 def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:
     resolved = resolve_inheritance(raw)
-    return {name: Provider.from_dict(name, data or {})
-            for name, data in resolved.items()}
+    providers = {name: Provider.from_dict(name, data or {})
+                 for name, data in resolved.items()}
+    # PS-R1/R5: the sharing keys are validated against the RAW blocks (only
+    # there can an explicit `env:` entry be told from an inherited one), then
+    # the owners are attached.
+    _validate_sharing(providers, raw)
+    return providers
 
 
 def families(providers: dict[str, Provider]) -> dict[str, list[str]]:
@@ -713,6 +741,111 @@ def _bin_search(value: Any) -> list[str]:
         if not isinstance(directory, str) or not Path(directory).expanduser().is_absolute():
             raise ValueError("bin_search: entries must be absolute directories")
     return list(value)
+
+
+def _owner_key(provider_name: str, key: str, data: dict) -> str:
+    """PS-R10: a sharing key must be a non-empty string, when it is present.
+
+    A missing key is unset; anything written — empty, null, a number, a list,
+    a boolean — is a config error at load, never a value that reaches an
+    auth or budget read.
+    """
+    if key not in (data or {}):
+        return ""
+    value = data[key]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"provider {provider_name!r}: {key}: must name a "
+                         f"provider (a non-empty string), not {value!r}")
+    return value
+
+
+def _budget_windows(provider_name: str, data: dict) -> list[str] | None:
+    """PS-R10: `budget_windows` is a list of glob strings, or absent.
+
+    An empty list is a real answer — it selects nothing, so the provider's
+    reading is unknown — and is kept distinct from an absent key, which leaves
+    the payload's own counted flags in force. An explicitly written null is
+    neither: it is a config error, not a silent return to aggregate selection
+    (review ag-4cdd7b, finding 11).
+    """
+    if "budget_windows" not in (data or {}):
+        return None
+    value = data["budget_windows"]
+    if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value):
+        raise ValueError(f"provider {provider_name!r}: budget_windows: must be "
+                         f"a list of window-name globs, not {value!r}")
+    return list(value)
+
+
+def credential_owner(name: str, providers: dict[str, Any] | None) -> str:
+    """The provider whose credentials `name` uses: its `auth_from` owner,
+    or itself. One level, guaranteed by the load checks in `load_providers`."""
+    provider = (providers or {}).get(name)
+    owner = str(getattr(provider, "auth_from", "") or "")
+    return owner or name
+
+
+def _validate_sharing(providers: dict[str, Provider], raw: dict[str, Any]) -> None:
+    """PS-R1/PS-R5 load rules, and the per-provider attachments they enable.
+
+    Each facet is judged on its own key: `auth_from` names a provider that
+    does not itself declare `auth_from`, and `budget_from` one that does not
+    itself declare `budget_from` — no chains, no cycles, one level. Borrowing
+    one facet from a provider that borrows the OTHER is not a chain (review
+    ag-3644ef, finding 7): `budget_from: login` where `login` takes its
+    credentials elsewhere still reads `login`'s own budget source.
+
+    The env-conflict rule is checked against the RAW blocks, because
+    `resolve_inheritance` has already folded `env:` dicts together and could
+    no longer tell an explicitly written key from an inherited one (PS-R1a):
+    only an explicit value that differs from the owner's is rejected.
+
+    With all of that satisfied, each dependent is attached to its owners'
+    Provider objects and gets its effective credential environment — the
+    owner's `env` overlaid with its own, which the absence of conflicts makes
+    unambiguous.
+    """
+    for name, provider in providers.items():
+        for key, attach in (("auth_from", "auth_owner"),
+                            ("budget_from", "budget_owner")):
+            owner_name = getattr(provider, key)
+            if not owner_name:
+                continue
+            if owner_name == name:
+                raise ValueError(f"provider {name!r}: {key}: cannot name the "
+                                 f"provider itself")
+            owner = providers.get(owner_name)
+            if owner is None:
+                raise ValueError(f"provider {name!r}: {key}: names provider "
+                                 f"{owner_name!r}, which is not declared in "
+                                 f"providers.yaml")
+            if getattr(owner, key):
+                raise ValueError(f"provider {name!r}: {key}: names provider "
+                                 f"{owner_name!r}, which declares its own "
+                                 f"{key}; this is shared one level only, so "
+                                 f"{owner_name!r} must own it outright")
+            setattr(provider, attach, owner)
+        owner = provider.auth_owner
+        if owner is None:
+            continue
+        explicit = (raw.get(name) or {}).get("env") or {}
+        clashes = sorted(
+            key for key, value in explicit.items()
+            if key in owner.env and str(owner.env[key]) != str(value))
+        if clashes:
+            raise ValueError(
+                f"provider {name!r}: auth_from: {provider.auth_from!r} owns these "
+                f"credentials, and its environment already sets "
+                f"{', '.join(clashes)}; sharing the login means sharing those "
+                f"values, so the differing entries must go")
+        # PS-R2/R1a: this provider's own `env` with the owner's laid OVER it.
+        # The credential keys always come from the owner: an explicit
+        # conflict is rejected above, and a value merely inherited through
+        # `extends` from some other base must not replace the owner's
+        # profile (review ag-a50515, finding 3) — the check would read the
+        # owner's login while the launch used another one.
+        provider.credential_env = {**provider.env, **owner.env}
 
 
 def _effort_suffixes(value: Any) -> dict[str, str]:

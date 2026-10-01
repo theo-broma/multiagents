@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import ProjectPaths, server_install_paths, state_root
+from ..providers import credential_owner
 from .. import gitops, procs
 from .base import Executor, FollowHandle, Handle, wrapper_argv
 from .local import LocalExecutor, _turn_start
@@ -1371,6 +1372,13 @@ sys.exit(rc)
             return []                  # the host's job; nothing in here can do it
         notes = []
         for name, provider in self.providers.items():
+            # PS-R2: credentials are renewed once per credential OWNER. The
+            # members of a group share one store, so renewing per member
+            # would either renew the same token repeatedly or — worse, if the
+            # provider rotates refresh tokens — race two renewals against
+            # one token.
+            if credential_owner(name, self.providers) != name:
+                continue
             backing = self.private_state(name)
             if not backing:
                 continue
@@ -1613,6 +1621,12 @@ sys.exit(rc)
         entry came first — correct only while exactly one provider had a
         private home, and silently wrong the moment a second did.
 
+        PS-R2: keyed by CREDENTIAL OWNER. A provider that borrows its login
+        resolves to its owner's backing directory, so a group shares one
+        profile, one mount and one refresh — asking for a dependent's own
+        state and asking for the owner's give the same answer. Without
+        `auth_from` every provider keeps its own, as before.
+
         Shared across projects by default: the credential is one account, and
         scoping it per project would mean logging in again for every repository.
         Set ``credential_scope: project`` if you genuinely want separate
@@ -1627,8 +1641,16 @@ sys.exit(rc)
         for name, entry in self.providers.items():
             if provider and name != provider:
                 continue
-            for relative in getattr(entry, "container_private_home", []) or []:
-                out[Path.home() / relative] = root / name / relative
+            owner = credential_owner(name, self.providers)
+            if owner != name and not provider:
+                continue          # allocated once, under the owner
+            # PS-R2 (review finding 8): WHICH paths are privatised is the
+            # OWNER's declaration — the credential store being mounted is
+            # the owner's, so a dependent that declares no private home of
+            # its own still resolves to the owner's paths, never to nothing.
+            owner_entry = self.providers.get(owner) or entry
+            for relative in getattr(owner_entry, "container_private_home", []) or []:
+                out[Path.home() / relative] = root / owner / relative
         return out
 
     def transcript_state(self, provider: str = "") -> dict[Path, Path]:
@@ -1732,8 +1754,12 @@ sys.exit(rc)
         for name, entry in self.providers.items():
             if provider and name != provider:
                 continue
-            if getattr(entry, "container_private_home", None):
-                out[name] = root / name / "vault"
+            owner = credential_owner(name, self.providers)
+            if owner != name and not provider:
+                continue          # PS-R2: one vault, held by the owner
+            owner_entry = self.providers.get(owner) or entry
+            if getattr(owner_entry, "container_private_home", None):
+                out[owner] = root / owner / "vault"
         return out
 
     # ----------------------------------------------------------- lifecycle --
