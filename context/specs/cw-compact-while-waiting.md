@@ -240,3 +240,42 @@ config parsing.
   tree *and* not a symlink at any component, the handshake is treated as
   exposed (`safepoint_exposed`). Exposure is re-evaluated on every proposal,
   never cached across proposals.
+
+## CW-R2b — authenticate, do not hide (decided 2026-10-01 ~18:45 UTC, after review r6 ag-e63308 and advisor ag-d20e1e t9)
+
+Detecting whether a container can see the handshake proved unwinnable
+(docker reports configured, not retained, bind sources; unknown runtimes).
+The safety now rests on authentication; exposure detection is withdrawn.
+
+- **Key.** The driver generates a fresh 256-bit key per driver run and passes
+  it to the CLI it launches by environment; the root MCP server reads it from
+  its inherited environment. It is never written to disk, logs, transcripts
+  or MCP configuration.
+- **Never forwarded.** The key is stripped after every overlay from every
+  environment built for anything else: agent environments (including
+  `env_passthrough` and provider env overlays), `runner.server_env` for nested
+  servers, the docker executor's env files, and `scripts.build_env` for
+  provider actions. Tests prove each path.
+- **What is signed.** Registration, request, acknowledgement, commit and
+  cancellation records each carry a MAC over a canonical encoding of every
+  decision-relevant field and a distinct record type: nonce, session, driver /
+  CLI / server identities with start times. Constant-time verification; no
+  unsigned fallback; a record failing verification is ignored for
+  authorisation (it may only ever deny or delay a compaction).
+- **No replay reopening.** Once a server has acknowledged, its admission stays
+  closed until an authenticated cancellation or the confirmed death of the
+  requesting driver. A missing, deleted or malformed file never reopens
+  admission and never authorises a stop.
+- **Participants.** Registrations are authenticated; late-registration
+  ordering and fail-closed enumeration (unknown blocks) stay as they are —
+  deleting a genuine registration must not make the driver think a server is
+  absent.
+- **Kept as defence in depth:** host-only directory by default, no symlink
+  followed on the handshake path. **Withdrawn:** `safepoint_exposed`, the
+  conservative ancestor rule and `docker inspect` probing (the "Second attack"
+  exposure bullets and CW-R2a's exposure check).
+- **Scope unchanged:** agents running locally as the host user can read the
+  server's environment and are outside the guarantee.
+- Verified by tests covering: forged MACs, deletion, replay of an old ack
+  after cancellation, tampered state, an omitted participant, and key leakage
+  into each environment-building path.
