@@ -83,3 +83,58 @@ def test_q2b_skills_subcommand_without_path_outside_project_still_works(tmp_path
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert cli.main(["skills"]) == 0
+
+
+# Q2b follow-up: an explicit --path inside a project means that project; a
+# --path that does not exist is a typo and is never created.
+
+def test_q2b_explicit_subdirectory_path_resolves_to_ancestor_project(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    (proj / "src").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    paths = cli._resolve_if_project(str(proj / "src"))
+    assert paths is not None and paths.root == proj.resolve()
+
+
+def test_q2b_subcommand_with_subdirectory_path_writes_nothing_below_it(tmp_path, monkeypatch):
+    # `upgrade-config --layer project` is the cheapest offline subcommand that
+    # writes into the resolved project; refresh-models would probe real CLIs.
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    (proj / "src").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cli.main(["--path", str(proj / "src"), "upgrade-config", "--layer", "project"])
+    assert not (proj / "src" / ".multiagents").exists()
+
+
+def test_q2b_explicit_missing_path_inside_project_exits_and_is_not_created(
+        tmp_path, monkeypatch, capsys):
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    typo = proj / "typo"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(SystemExit) as exc:
+        cli._resolve_if_project(str(typo))
+    assert exc.value.code == 2
+    assert str(typo) in capsys.readouterr().err
+    assert not typo.exists()
+
+
+def test_q2b_subcommand_with_missing_path_inside_project_does_not_create_it(
+        tmp_path, monkeypatch, capsys):
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    typo = proj / "typo"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--path", str(typo), "upgrade-config", "--layer", "project"])
+    assert exc.value.code == 2
+    assert str(typo) in capsys.readouterr().err
+    assert not typo.exists()
