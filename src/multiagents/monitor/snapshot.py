@@ -78,10 +78,10 @@ def _usage_lines(name: str, provider: Any, executor: Any, budget: dict,
     """How this provider wants its usage shown. ``(lines, source)``.
 
     The shape of a quota differs per provider and there is no honest common
-    denominator: claude has two rolling windows and a credit pool, opencode
-    serves three windows over HTTP, and agy has two windows for its own models
-    plus two more for a resold pool it does not spend against.
-    Flattening those into one bar would invent precision for two of them.
+    denominator: one provider has rolling windows plus a credit pool, another
+    serves several windows over HTTP, another has windows of its own beside
+    two more for a resold pool it does not spend against.
+    Flattening those into one bar would invent precision for most of them.
 
     So a provider may implement the ``usage`` action and print whatever its own
     numbers deserve, receiving the parsed budget as ``MULTIAGENTS_BUDGET`` so it
@@ -385,9 +385,9 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
                         "text": f"{entry['name']} has no headroom",
                         "detail": f"resets {reset_label(budget.get('resets_at')) or '?'}"})
         elif entry.get("below_reserve"):
-            # The state that sent a question to the maintainer: opencode's
-            # five-hour window was empty, its WEEKLY window was not, and every
-            # implementer was silently running on the fallback.
+            # The state that sent a question to the maintainer: one provider's
+            # short window was empty while its long one still had room, and
+            # every implementer was silently running on the fallback.
             out.append({"level": "warn", "kind": "provider",
                         "text": f"{entry['name']} is below the "
                                 f"{entry.get('reserve', 0.15) * 100:.0f}% reserve — "
