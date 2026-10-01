@@ -30,13 +30,13 @@ sweep worktrees and agent homes into the repository under test.
 
 What this does NOT cover, checked rather than assumed. `budget.py` binds
 `CLAUDE_STATE` and `CLAUDE_CREDENTIALS` from `Path.home()` at import time, so
-no environment variable set in a fixture can move them — an advisor proposed
-redirecting `HOME` for exactly this and it would not have worked. Auditing a
-full run by wrapping `open()` and recording every path under the real home
-found none: the only hit was the package's own shipped `opencode.sh`, matched
-on its name. So nothing reads the developer's billing state today, and the
-`HOME` redirect is not worth its blast radius. A test that called the budget
-readers unmocked would reintroduce it, and would have to mock them instead.
+an environment variable set in a fixture cannot move them; a test that called
+those readers unmocked would reach the real home and has to mock them instead.
+Shipped scripts are different: they run as subprocesses and read `HOME` and
+`XDG_*` when they start, so `opencode.sh budget` (auth store plus a live usage
+endpoint) is kept off the real credentials by clearing `XDG_*` and pointing
+`HOME` at a per-test directory (2026-10-01; full suite showed no test depending
+on the real HOME).
 """
 
 from __future__ import annotations
@@ -69,6 +69,9 @@ def _caller_environment_is_invisible(monkeypatch):
     for name in list(os.environ):
         if name.startswith(("MULTIAGENTS_", "CLAUDE_")):
             monkeypatch.delenv(name, raising=False)
+    for name in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+                 "XDG_STATE_HOME"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +88,12 @@ def _machine_state_is_disposable(_caller_environment_is_invisible,
     root = tmp_path_factory.mktemp("machine")
     monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(root / "state"))
     monkeypatch.setenv("MULTIAGENTS_CONFIG_DIR", str(root / "config"))
+    # A shipped budget script (`opencode.sh budget`) reads its auth store from
+    # ${XDG_DATA_HOME:-$HOME/.local/share} and curls the usage endpoint; with
+    # the XDG variables gone, HOME is the only way left to the real one.
+    home = root / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
 
 
 @pytest.fixture(autouse=True)
