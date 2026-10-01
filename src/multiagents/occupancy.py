@@ -42,7 +42,22 @@ class ContainerOccupancy:
     # ------------------------------------------------------------------ io --
 
     @contextlib.contextmanager
-    def locked(self) -> Iterator[dict]:
+    def locked(self, strict: bool = False) -> Iterator[dict]:
+        """The records, under the lock. `strict` (RM-R1e): the file or an
+        OSError, never the in-memory fallback — not even once this store
+        has degraded, so a caller that must know its write is durable can
+        retry until it is."""
+        if strict:
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with self.lock_path.open("a+b") as lock:
+                os.fchmod(lock.fileno(), 0o600)
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    yield self._read_file()
+                finally:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+            return
         if self.memory is None:
             try:
                 with self.lock_path.open("a+b") as lock:
@@ -62,13 +77,26 @@ class ContainerOccupancy:
         if self.memory is not None:
             return self.memory
         try:
+            return self._read_file()
+        except OSError:
+            return {}
+
+    def _read_file(self) -> dict:
+        """The file's records; a missing or malformed file is empty, any
+        other read failure raises."""
+        try:
             records = json.loads(self.file.read_text())
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            return {}
+        except ValueError:
             return {}
         return records if isinstance(records, dict) else {}
 
-    def commit(self, records: dict) -> None:
-        if self.memory is not None:
+    def commit(self, records: dict, strict: bool = False) -> None:
+        """Persist `records`. A failed write degrades this store to memory
+        — unless `strict` (RM-R1e), when it raises and nothing degrades: a
+        silent fallback to memory never counts as a durable write."""
+        if self.memory is not None and not strict:
             return
         try:
             fd, name = tempfile.mkstemp(dir=self.directory, prefix=".occupancy-")
@@ -82,6 +110,8 @@ class ContainerOccupancy:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(name)
         except OSError:
+            if strict:
+                raise
             self.memory = records
 
     # ------------------------------------------------------------ records --
@@ -180,6 +210,47 @@ class ContainerOccupancy:
                 runs.pop(node_id, None)   # garbage: nothing to keep
             self._reconcile(records)
             self.commit(records)
+
+    # ------------------------------------------ durable confirmation (RM-R1e) --
+    #
+    # `register`, `rebind` and `forget` degrade to memory when the file cannot
+    # be written, which is right for LN-C5's attribution and wrong for a hold
+    # that may only be lifted once its occupancy is durably settled. These
+    # confirm against the FILE, repair it if it disagrees, and raise when
+    # that cannot be done — never satisfied by the in-memory fallback.
+
+    def ensure_live(self, container: str, node_id: str, pid: int,
+                    pid_start: str = "") -> dict:
+        """Durably: `node_id` is a live occupant of `container`, spoken for
+        by this server. OSError when that cannot be written."""
+        with self.locked(strict=True) as records:
+            runs = records.get(container)
+            entry = runs.get(node_id) if isinstance(runs, dict) else None
+            if (isinstance(entry, dict) and entry.get("ended") is None
+                    and entry.get("owner_pid") == os.getpid()):
+                return dict(entry)
+            if not isinstance(runs, dict):
+                runs = records[container] = {}
+            self._reconcile(records)
+            entry = runs[node_id] = self._entry(pid, pid_start)
+            self.commit(records, strict=True)
+            return dict(entry)
+
+    def ensure_ended(self, container: str, node_id: str) -> None:
+        """Durably: `node_id` no longer occupies `container` (its entry is
+        stamped ended, or gone). OSError when that cannot be written."""
+        with self.locked(strict=True) as records:
+            runs = records.get(container)
+            entry = runs.get(node_id) if isinstance(runs, dict) else None
+            if node_id not in (runs or {}) or (
+                    isinstance(entry, dict) and entry.get("ended") is not None):
+                return
+            if isinstance(entry, dict):
+                entry["ended"] = now()
+            else:
+                runs.pop(node_id, None)
+            self._reconcile(records)
+            self.commit(records, strict=True)
 
     def others(self, container: str, node_id: str,
                since: float | None = None) -> bool:

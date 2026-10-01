@@ -34,7 +34,7 @@ import tempfile
 import textwrap
 import time
 import traceback
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +44,7 @@ from . import config as config_mod
 from .config import AgentSpec, Config, budget_number, limit_number, matches_any
 from .executor import build_env, get_executor, prepare_home, private_file
 from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_status,
-                            running, stop_wrapped)
+                            running, session_alive, stop_wrapped)
 from . import providers as providers_mod
 from . import notices
 from . import procs
@@ -247,7 +247,14 @@ def _occupies_slot(node: Node) -> bool:
     `running` and `stuck` stop counting the moment a recorded pid is
     checked and found dead, by pid identity (`procs.alive`, immune to pid
     reuse) rather than by the status label alone.
+
+    RM-R1d: a node carrying the durable `cleanup_hold` — a failed-launch
+    cleanup that could not confirm its process's death — counts whatever
+    its pid liveness, in every Runner: the hold is tree state, not one
+    process's memory.
     """
+    if node.cleanup_hold:
+        return True
     if node.status == "pending":
         return True
     if node.status == "running":
@@ -255,6 +262,133 @@ def _occupies_slot(node: Node) -> bool:
     if node.status == "stuck":
         return node.pid is not None and procs.alive(node.pid, node.pid_start)
     return False
+
+
+# RM-R1c: how long the failed-launch cleanup keeps confirming death before
+# it reports failure and holds ownership. A stop whose process will not die
+# must not hang the caller for ever, but nothing is released unconfirmed.
+LAUNCH_CONFIRM_SECONDS = 30.0
+
+
+# RM-R1e: the gap between the two empty session scans that confirm a run's
+# end. A cheap narrowing of the fork race, not a proof.
+SESSION_RESCAN_SECONDS = 0.05
+
+
+def _unknown_probe() -> None:
+    """The probe of a run whose execution identity is not known: it can
+    never be confirmed dead (RM-R1c)."""
+    return None
+
+
+def _positively_ended(pid: int | None, pid_start: str, probe_raw: Any) -> bool:
+    """Whether the launched run has POSITIVELY ended (RM-R1c).
+
+    Positive evidence from the actual process or container only:
+
+    - the pid the host holds — the wrapper locally, the `docker exec`
+      client for a container run — gone (zombie-aware, immune to pid
+      reuse), AND no live process left in its session: the wrapper leads
+      one, and the agent it starts stays in it, so a dead wrapper alone is
+      not a dead run (review ag-43f57f). A session that cannot be read is
+      unknown;
+    - for a container run, the executor's raw probe DEFINITELY reporting the
+      run dead, asked of the container; a missing pid file there, or an
+      unanswerable container, is None — unknown.
+
+    An exit-status file is never proof, and unknown is never death: the
+    check answers False, so the cleanup keeps its hold (reviews ag-f7ced5,
+    ag-b859f1). A local run with no pid known at all is unknown too.
+    Blocking.
+    """
+    if pid:
+        if running(pid, pid_start or ""):
+            return False                    # positively alive
+        if session_alive(pid) is not False:
+            return False                    # its session lives, or can't be read
+        # RM-R1e: one /proc snapshot cannot see a member that forks while
+        # the scan runs. A second empty scan after a short gap narrows that
+        # window; it is not a proof, and the residue is an accepted limit.
+        time.sleep(SESSION_RESCAN_SECONDS)
+        if session_alive(pid) is not False:
+            return False
+    elif probe_raw is None:
+        return False                        # no identity at all: unknown
+    if probe_raw is None:
+        return True                         # local: the session is the whole run
+    try:
+        answer = probe_raw()
+    except Exception:
+        return False                        # an unanswerable probe is unknown
+    if answer is None:
+        return False                        # unknown: never death
+    return not answer                       # the probe's positive "dead"
+
+
+def _held_refusal(node_id: str) -> str:
+    return (f"{node_id}'s previous launch failed and its process is not yet "
+            f"confirmed dead, so it cannot be relaunched; its slot is held "
+            f"until it is (RM-R1d). Stop it, or try again later.")
+
+
+def _same_hold(current: Any, record: dict) -> bool:
+    """Is the durable hold still the one `record` describes?"""
+    return isinstance(current, dict) and all(
+        current.get(k) == record.get(k) for k in ("since", "owner"))
+
+
+def _recorded_wrapper(run_dir: Path) -> int | None:
+    """The pid in a local run's `wrapper.pid`, or None."""
+    try:
+        text = (run_dir / "wrapper.pid").read_text().split()
+        return int(text[0]) if text else None
+    except (OSError, ValueError):
+        return None
+
+
+@dataclass
+class _Hold:
+    """RM-R1c/R1d: the owning Runner's side of one launch hold.
+
+    The durable half is the node's `cleanup_hold` field in `tree.json`,
+    which every Runner's admission honours. It is written BEFORE the
+    process is started — a launch whose reservation cannot be written does
+    not happen (review ag-43f57f) — and records what recovery needs: the
+    process identity once there is one, and the execution identity it was
+    launched under (executor kind and container), never re-read from a
+    config that may have changed since (review ag-43f57f).
+
+    This half keeps what only the owner has: the handle's identity to
+    re-check, and the lock, claim and occupancy released once death is
+    confirmed. Phases:
+
+    - `launching`: the reservation, until supervision is established; the
+      launch path itself owns every release;
+    - `cleanup`: the launch failed after the process started. Nothing is
+      released until death is confirmed (`_end_hold`);
+    - `lifting`: nothing left to release; only the durable field is still
+      to be cleared, because a tree write failed.
+    """
+    record: dict
+    pid: int | None
+    pid_start: str
+    probe_raw: Any
+    provider: str
+    token: str
+    phase: str = "launching"
+    container: str = ""
+    run: Any = None
+    done: Any = None
+    durable: bool = False
+    # Death confirmed, and which of its releases have gone through.
+    confirmed: bool = False
+    done_releases: set = field(default_factory=set)
+    # The status a caller asked for while the hold was up, applied when it
+    # ends: a held node keeps its status, which is also its durable slot
+    # reservation should a later hold write not reach the tree.
+    then: tuple[str, str] | None = None
+    task: Any = None
+
 
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
 # a file that mentions the marker must not park itself.
@@ -832,24 +966,58 @@ class Runner:
 
     # ------------------------------------------------------------- guardrails --
 
+    def _occupants(self, nodes: dict, exclude: str = "") -> int:
+        """How many nodes hold a `max_concurrent` slot — the ONE count every
+        admission and `capacity()` uses.
+
+        A node carrying a launch-cleanup hold (RM-R1d: the durable
+        `cleanup_hold`, or this Runner's own hold whose durable write has
+        not landed) occupies in ANY status: a `stop()` can mark it
+        `cancelled` while the process it could not confirm dead may still
+        run (review ag-f27608). Every other node counts by the SL-R4 rule,
+        and only while active. Drivers never count; a malformed entry is
+        skipped (HA-R12).
+        """
+        count = 0
+        for key, raw in nodes.items():
+            if (key == exclude or not isinstance(raw, dict)
+                    or raw.get("role", "") in DRIVER_ROLES):
+                continue
+            if raw.get("cleanup_hold") or key in self._holds:
+                count += 1
+                continue
+            if raw.get("status") not in ACTIVE:
+                continue
+            try:
+                node = node_from_raw(raw, key)
+            except (TypeError, ValueError):
+                continue
+            if _occupies_slot(node):
+                count += 1
+        return count
+
+    def _refuse_full(self, spec: AgentSpec, active: int,
+                     max_concurrent: int) -> RuntimeError:
+        return RuntimeError(self._refused(
+            f"{active} agents already running (max_concurrent={max_concurrent}). "
+            f"Wait for one to finish or stop it.",
+            spec, "limits.max_concurrent", max_concurrent, "tree",
+            notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
+            f"{active} already running"))
+
     def _admission(self, spec: AgentSpec) -> None:
         """The `max_concurrent` occupancy rule (RM-R1, shared with start()).
 
         A node counts against the tree's slot limit exactly as `_preflight`
-        counts it for `start()` — same filter, same refusal text and shape.
+        counts it for `start()` — same count, same refusal text and shape.
         The idle node of a standing conversation holds no slot
         (`_occupies_slot`), so only live agents are measured against the cap.
         """
-        limits = self.config.limits
-        active = [n for n in self.tree.active() if _occupies_slot(n)]
-        max_concurrent = int(limits.get("max_concurrent", 4))
-        if len(active) >= max_concurrent:
-            raise RuntimeError(self._refused(
-                f"{len(active)} agents already running (max_concurrent={max_concurrent}). "
-                f"Wait for one to finish or stop it.",
-                spec, "limits.max_concurrent", max_concurrent, "tree",
-                notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
-                f"{len(active)} already running"))
+        self._settle_holds()
+        max_concurrent = int(self.config.limits.get("max_concurrent", 4))
+        active = self._occupants(self.tree.read()["nodes"])
+        if active >= max_concurrent:
+            raise self._refuse_full(spec, active, max_concurrent)
 
     def _admission_reserved(self, spec: AgentSpec, node: Node) -> None:
         """RM-R1a: the resumed consult's admission, with the slot reserved.
@@ -864,42 +1032,75 @@ class Runner:
         before any write, so the conversation stays idle, exactly as
         RM-R1 requires; `_release_reserved_slot` gives the slot back when
         the turn fails after reserving.
+
+        RM-R1d: a conversation whose previous launch still carries a cleanup
+        hold is refused outright — resuming it would put a second process
+        on the session while the first is not confirmed dead.
         """
-        limits = self.config.limits
-        max_concurrent = int(limits.get("max_concurrent", 4))
-        active = 0
+        self._settle_holds()
+        max_concurrent = int(self.config.limits.get("max_concurrent", 4))
         with self.tree.transaction() as data:
-            for key, raw in data["nodes"].items():
-                if (key == node.id or raw.get("status") not in ACTIVE
-                        or raw.get("role", "") in DRIVER_ROLES):
-                    continue
-                try:
-                    other = node_from_raw(raw, key)
-                except (TypeError, ValueError):
-                    continue                  # HA-R12: a malformed entry is skipped
-                if _occupies_slot(other):
-                    active += 1
-            if active < max_concurrent:
-                entry = data["nodes"].get(node.id)
+            entry = data["nodes"].get(node.id)
+            held = bool((entry or {}).get("cleanup_hold")) or node.id in self._holds
+            active = self._occupants(data["nodes"], exclude=node.id)
+            if not held and active < max_concurrent:
                 if entry is not None:
                     entry["status"] = "pending"
                 return
         # The refusal is recorded OUTSIDE the transaction: `_refused` writes
         # a notice, and holding the tree's flock while it does would ask the
         # same lock of a second file descriptor.
-        raise RuntimeError(self._refused(
-            f"{active} agents already running (max_concurrent={max_concurrent}). "
-            f"Wait for one to finish or stop it.",
-            spec, "limits.max_concurrent", max_concurrent, "tree",
-            notices.provenance(self.config, "limits.max_concurrent", max_concurrent),
-            f"{active} already running"))
+        if held:
+            raise RuntimeError(_held_refusal(node.id))
+        raise self._refuse_full(spec, active, max_concurrent)
+
+    def _admission_add(self, spec: AgentSpec, node: Node) -> None:
+        """RM-R1a: start()'s admission, one transaction with the node insert.
+
+        `_preflight` checked occupancy long before this point, and the
+        telemetry await in between is a window: a resumed consult reserves
+        the last slot there (its own RM-R1a reservation), and a start that
+        trusted its earlier check would launch into a full tree — occupancy
+        2 under `max_concurrent=1`. So the count and the write that takes
+        the slot are one transaction, exactly as `_admission_reserved` does
+        for a resumed consult: the node enters the tree `pending`, the
+        status that always holds a slot (`_occupies_slot`), only when the
+        count taken in that same transaction says there is room. A refusal
+        raises before any write; the refusal itself is recorded OUTSIDE the
+        transaction, as above.
+        """
+        self._settle_holds()
+        max_concurrent = int(self.config.limits.get("max_concurrent", 4))
+        admitted = False
+        with self.tree.transaction() as data:
+            active = self._occupants(data["nodes"])
+            if active < max_concurrent:
+                data["nodes"][node.id] = asdict(node)
+                if node.parent and node.parent in data["nodes"]:
+                    kids = data["nodes"][node.parent].setdefault("children", [])
+                    if node.id not in kids:
+                        kids.append(node.id)
+                admitted = True
+        if not admitted:
+            raise self._refuse_full(spec, active, max_concurrent)
+        self.tree.emit(
+            node.id, "created",
+            agent=node.agent, provider=node.provider, model=node.model,
+            parent=node.parent, depth=node.depth, branch=node.branch,
+        )
 
     def _release_reserved_slot(self, node_id: str) -> None:
         """RM-R1a: give back the slot a reserved resumed turn did not use.
 
         Only a `pending` node is touched — once the turn is `running` the
         slot belongs to the run, and its own finalization releases it.
+        RM-R1c: while a launch cleanup holds the node (death not confirmed)
+        the give-back is deferred to the hold's end: the `pending` status is
+        the durable reservation should the hold itself not have reached the
+        tree.
         """
+        if self._defer_while_held(node_id, "idle", ""):
+            return
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node_id)
             if entry is not None and entry.get("status") == "pending":
@@ -1436,30 +1637,20 @@ class Runner:
             opaque_tool_args=tuple(provider.opaque_tool_args),
         )
 
-    def _settle_effort(self, spec: AgentSpec, provider: Provider,
-                       node_id: str) -> AgentSpec:
-        """Reconcile the effort with a model id that declares its own (RM-R5a).
+    def _effort_conflict(self, spec: AgentSpec, provider: Provider) -> None:
+        """Refuse an effort EXPLICITLY configured against the model's own (RM-R5a).
 
-        A provider may map anchored model-id suffixes to efforts in
-        providers.yaml (`effort_suffixes`). After routing has resolved the
-        provider and model, and BEFORE any worktree or process side effect:
-
-        - an effort INHERITED onto this destination — the agent's top-level
-          `effort`, or a bare-string `models:` route — is normalised to the
-          model's implied effort, with an event recording the old value, the
-          effective pair and the reason; the normalised spec is what is
-          persisted (Node.effort), so steer and consult reuse it;
-        - an effort EXPLICITLY configured on this destination route is a
-          configuration contradiction: the start is refused, naming the
-          model, the effort and the route, rather than launching into the
-          CLI's own rejection eight seconds later;
-        - and a provider with no `effort_suffixes` is unchanged, as is any
-          pair that agrees or carries no effort at all (an empty route
-          `effort: ""` still just drops the option).
+        The pre-claim half of `_settle_effort`. A refusal must happen before
+        the startup claim (RM-R7) — a contradiction is a configuration error,
+        and taking the half-open provider's only probe or writing a
+        startup.json run record for a start that then refuses would outlive
+        it — so the routing loop runs this for EVERY candidate, while the
+        normalisation below only ever runs for the candidate whose claim
+        succeeded.
         """
         implied = provider.implied_effort(spec.model)
         if implied is None or not spec.effort or spec.effort == implied:
-            return spec
+            return
         explicit = False
         if provider.name != spec.provider:
             # RM-R5b: explicitness belongs to the ROUTE the model came from,
@@ -1481,6 +1672,41 @@ class Runner:
                 f"Fix the route's effort (or remove it to inherit the "
                 f"model's), then start again."
             )
+
+    def _settle_effort(self, spec: AgentSpec, provider: Provider,
+                       node_id: str) -> AgentSpec:
+        """Reconcile the effort with a model id that declares its own (RM-R5a).
+
+        A provider may map anchored model-id suffixes to efforts in
+        providers.yaml (`effort_suffixes`). After routing has resolved the
+        provider and model, and BEFORE any worktree or process side effect:
+
+        - an effort INHERITED onto this destination — the agent's top-level
+          `effort`, or a bare-string `models:` route — is normalised to the
+          model's implied effort, with an event recording the old value, the
+          effective pair and the reason; the normalised spec is what is
+          persisted (Node.effort), so steer and consult reuse it;
+        - an effort EXPLICITLY configured on this destination route is a
+          configuration contradiction: the start is refused, naming the
+          model, the effort and the route, rather than launching into the
+          CLI's own rejection eight seconds later (the pre-claim check is
+          `_effort_conflict`, which the routing loop runs for every
+          candidate; this method re-checks only as a belt for callers that
+          settle without a claim, as the consult path does);
+        - and a provider with no `effort_suffixes` is unchanged, as is any
+          pair that agrees or carries no effort at all (an empty route
+          `effort: ""` still just drops the option).
+
+        Called once for the provider the run actually launches on. In
+        start()'s loop that is after `startup.claim` succeeded — settling
+        inside the loop let a failed claim hand the next candidate the
+        previous one's normalised effort and leave it an event naming a
+        provider the run never launched on.
+        """
+        implied = provider.implied_effort(spec.model)
+        if implied is None or not spec.effort or spec.effort == implied:
+            return spec
+        self._effort_conflict(spec, provider)
         self.tree.emit(node_id, "effort_normalised",
                        provider=provider.name, model=spec.model,
                        effort=implied, was=spec.effort,
@@ -1488,6 +1714,434 @@ class Runner:
                               f"declaring effort {implied!r}; the inherited "
                               f"effort was normalised to it")
         return spec.replace(effort=implied)
+
+    # ------------------------------------------------- launch-cleanup hold --
+
+    @property
+    def _holds(self) -> dict[str, _Hold]:
+        return self.__dict__.setdefault("_launch_holds", {})
+
+    @property
+    def _hold_owner(self) -> str:
+        """Which Runner owns a hold: two Runners can share one process."""
+        return self.__dict__.setdefault("_launch_hold_owner", os.urandom(8).hex())
+
+    def _owner_fields(self) -> dict:
+        owner = os.getpid()
+        return {"owner_pid": owner, "owner_start": procs.start_time(owner) or "",
+                "owner": self._hold_owner}
+
+    def _reserve_launch(self, node_id: str, provider_name: str,
+                        startup_token: str, executor: Any) -> _Hold:
+        """RM-R1d: the durable reservation, taken BEFORE the process starts.
+
+        From here until supervision is established the node occupies its
+        slot through `cleanup_hold`, whatever its status and whatever pid it
+        still records — a retry's `running` node names its dead predecessor
+        until the new pid is written, and that write can fail. The write is
+        required: a launch whose reservation cannot be made durable does not
+        happen (review ag-43f57f). It records the execution identity, which
+        recovery uses instead of whatever the config says later.
+        """
+        kind = str(getattr(executor, "kind", "local") or "local")
+        identity = {"kind": kind,
+                    "container": str(getattr(executor, "container", "") or "")
+                    if kind == "docker" else ""}
+        hold = _Hold(
+            record={"since": now(), **self._owner_fields(),
+                    "pid": None, "pid_start": "", "executor": identity,
+                    "occupancy": "", "then": None},
+            pid=None, pid_start="",
+            probe_raw=self._raw_alive_probe(executor, node_id),
+            provider=provider_name, token=startup_token)
+        self.tree.update(node_id, cleanup_hold=dict(hold.record))
+        hold.durable = True
+        self._holds[node_id] = hold
+        return hold
+
+    def _record_launched(self, node_id: str, hold: _Hold, handle: Any) -> None:
+        """RM-R1d: the NEW process identity, on the node and on its hold, in
+        one transaction — before any other step that can fail, so admission
+        never judges the node by the retry's dead predecessor. The in-memory
+        hold learns it first, so a failed write still leaves the owner able
+        to confirm this process's death."""
+        hold.pid = handle.pid
+        hold.pid_start = (getattr(handle, "pid_start", "")
+                          or (procs.start_time(handle.pid) if handle.pid else "")
+                          or "")
+        hold.record = dict(hold.record, pid=hold.pid, pid_start=hold.pid_start)
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            if entry is not None:
+                entry["pid"] = hold.pid
+                entry["pid_start"] = hold.pid_start
+                entry["cleanup_hold"] = dict(hold.record)
+
+    def _retire_hold(self, node_id: str) -> None:
+        """The reservation's end when nothing is left to release: supervision
+        is established (the node now occupies as a live `running` one), or
+        nothing was started. If the tree cannot be written, the hold stays
+        and `_settle_holds` lifts it later — counted a little longer, never
+        released early."""
+        hold = self._holds.get(node_id)
+        if hold is None:
+            return
+        hold.phase = "lifting"
+        try:
+            self._lift_hold(node_id, hold.then, record=hold.record)
+        except Exception:
+            return
+        self._holds.pop(node_id, None)
+
+    def _launch_cleanup_task(self, handle: Any, node_id: str, *,
+                             run: Any = None, done: Any = None,
+                             oom_container: str = "") -> asyncio.Task:
+        """RM-R1c: THE failed-launch cleanup, as one task.
+
+        It stops the launched process, CONFIRMS that the actual run has
+        ended — `handle.wait()` alone is not proof, since it may return on
+        an exit-status file, and `stop()` has only bounded settling — then
+        releases the supervision lock, the container occupancy, the startup
+        claim and the concurrency slot, and only then removes the tracking
+        and signals `run.done` (`_end_hold`). Nothing is released merely
+        because stop returned, raised or timed out: if death cannot be
+        confirmed within the bound, the failure is reported and the hold
+        stays up; `_settle_holds` re-checks it and ends it once death is
+        confirmed, here or — after this server is gone — in any Runner.
+
+        The launch's durable hold already exists (`_reserve_launch`), so
+        nothing here has to be written before the stop: termination is
+        always attempted (review ag-f27608).
+        """
+        hold = self._holds[node_id]
+        hold.phase = "cleanup"
+        hold.run, hold.done, hold.container = run, done, oom_container
+        # Best effort, never before the stop's chance: the pid (if its own
+        # write failed) and the occupancy reach the durable hold now, or on
+        # a later `_settle_holds` pass.
+        hold.record = dict(hold.record, occupancy=oom_container)
+        self._persist_hold(node_id, hold)
+
+        async def cleanup() -> bool:
+            try:
+                await handle.stop()
+            except BaseException:
+                # RM-R1c: stop returning, raising or timing out decides
+                # nothing — not even a cancellation raised from inside it.
+                # Death is judged by the confirmation below.
+                pass
+            if await self._confirm_ended(hold.pid, hold.pid_start,
+                                         hold.probe_raw):
+                self._end_hold(node_id)
+                return True
+            # RM-R1c: termination failed. Ownership and occupancy are kept
+            # until death is confirmed; report and hold.
+            with contextlib.suppress(Exception):
+                self.tree.emit(node_id, "launch_cleanup_failed",
+                               detail="the launched process did not confirm "
+                                      "its end after stopping; ownership and "
+                                      "occupancy are held until it does")
+            return False
+
+        hold.task = asyncio.ensure_future(cleanup())
+        return hold.task
+
+    def _persist_hold(self, node_id: str, hold: _Hold) -> None:
+        """Rewrite the durable hold with what changed (its deferred status,
+        its occupancy), best effort — retried by `_settle_holds`. The hold
+        itself is durable already: this only keeps it current."""
+        try:
+            self.tree.update(node_id, cleanup_hold=dict(
+                hold.record, then=list(hold.then) if hold.then else None))
+            hold.durable = True
+        except Exception:
+            hold.durable = False
+
+    def _end_hold(self, node_id: str) -> None:
+        """RM-R1c, steps 3 and 4: death is confirmed. Release the supervision
+        lock, the container occupancy and the startup claim, apply the
+        status a caller deferred, lift the durable hold — the slot — and
+        only then drop the tracking and wake the waiters. The same sequence
+        whether this Runner launched the run or took the hold over from an
+        owner that crashed (review ag-43f57f).
+
+        Each release is confirmed before the next step, and the hold — the
+        slot — is lifted only once all of them are (review ag-598c45): a
+        startup claim whose release write failed would otherwise keep a
+        half-open provider `startup_down` with nothing left to retry it. Any
+        release or the lift that does not go through leaves the entry,
+        marked `confirmed`, and `_settle_holds` retries: the slot is held a
+        little longer, never released early.
+        """
+        hold = self._holds.get(node_id)
+        if hold is None:
+            return
+        hold.confirmed = True
+        if "lock" not in hold.done_releases:
+            self._release(node_id)
+            hold.done_releases.add("lock")
+        if "occupancy" not in hold.done_releases:
+            if hold.container:
+                try:
+                    self.occupancy.forget(hold.container, node_id)
+                    self.occupancy.ensure_ended(hold.container, node_id)
+                except Exception:
+                    return                # not durably ended: retried later
+            hold.done_releases.add("occupancy")
+        if "claim" not in hold.done_releases:
+            if hold.token:
+                with contextlib.suppress(Exception):
+                    self._startup_finish(hold.provider, node_id, hold.token)
+                if self.startup.holds(hold.provider, node_id, hold.token) is not False:
+                    return                # not confirmed gone: retried later
+            hold.done_releases.add("claim")
+        try:
+            self._lift_hold(node_id, hold.then, record=hold.record)
+        except Exception:
+            return
+        del self._holds[node_id]
+        if hold.run is not None and self.runs.get(node_id) is hold.run:
+            self.runs.pop(node_id, None)
+        done = hold.run.done if hold.run is not None else hold.done
+        if done is not None:
+            done.set()
+
+    def _lift_hold(self, node_id: str, then: Any, record: dict | None = None
+                   ) -> None:
+        """Apply a deferred status, then clear the durable hold — only the
+        hold that was confirmed (`record`), never a newer one. The status
+        goes first, so the node is never seen with neither its hold nor its
+        final status. A status the node left meanwhile (`stop()` marking it
+        `cancelled`) is not overwritten."""
+        if then:
+            status, reason = then
+            current = self.tree.get(node_id)
+            if current is not None and current.status in ACTIVE:
+                self.tree.set_status(node_id, status, reason)
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            if entry is None or not entry.get("cleanup_hold"):
+                return
+            if record is not None and not _same_hold(entry["cleanup_hold"], record):
+                return
+            entry["cleanup_hold"] = None
+
+    def _defer_while_held(self, node_id: str, status: str, reason: str) -> bool:
+        """While a launch hold is up, a caller's status change is recorded on
+        the hold and applied when it ends (RM-R1c): the node's present status
+        stays its durable slot reservation. True when deferred."""
+        hold = self._holds.get(node_id)
+        if hold is not None:
+            hold.then = (status, reason)
+            self._persist_hold(node_id, hold)
+            return True
+        node = self.tree.get(node_id)
+        if node is None or not node.cleanup_hold:
+            return False
+        with contextlib.suppress(Exception):
+            with self.tree.transaction() as data:
+                entry = data["nodes"].get(node_id) or {}
+                if isinstance(entry.get("cleanup_hold"), dict):
+                    entry["cleanup_hold"]["then"] = [status, reason]
+        return True
+
+    def _settle_holds(self) -> None:
+        """RM-R1c/R1d: the recovery path of a launch hold (review ag-f27608).
+        Run before every admission and capacity count, and on every adoption
+        pass (server startup and its periodic pass).
+
+        - A hold another owner left, once that owner is gone (its pid
+          identity dead, as startup.json and the occupancy records judge a
+          crashed owner): taken over (`_take_over_hold`) — this Runner then
+          owns every release the dead owner would have run.
+        - This Runner's own holds, once their cleanup task has returned:
+          death is re-checked from the same positive evidence the cleanup
+          uses, against the execution identity the hold recorded; on
+          confirmation the hold ends with every release it owns. A hold
+          whose durable half could not be lifted or rewritten is retried.
+
+        A live owner's hold is that owner's to end.
+        """
+        try:
+            nodes = self.tree.read()["nodes"]
+        except Exception:
+            nodes = {}
+        for node_id, raw in nodes.items():
+            held = raw.get("cleanup_hold") if isinstance(raw, dict) else None
+            if not isinstance(held, dict) or node_id in self._holds:
+                continue
+            if held.get("owner") != self._hold_owner and procs.alive(
+                    held.get("owner_pid"), held.get("owner_start") or ""):
+                continue                  # a live owner ends its own
+            with contextlib.suppress(Exception):
+                self._take_over_hold(node_id, raw, held)
+        for node_id, hold in list(self._holds.items()):
+            if hold.phase == "launching":
+                continue                  # its launch is still deciding
+            if hold.phase == "lifting":
+                self._retire_hold(node_id)
+                continue
+            if hold.task is not None and not hold.task.done():
+                continue                  # its own cleanup is still deciding
+            if not hold.durable:
+                self._persist_hold(node_id, hold)
+            if hold.confirmed or _positively_ended(hold.pid, hold.pid_start,
+                                                  hold.probe_raw):
+                self._end_hold(node_id)
+
+    def _take_over_hold(self, node_id: str, raw: dict, held: dict) -> None:
+        """RM-R1d (review ag-43f57f): a crashed owner's hold becomes this
+        Runner's own, so its end runs the owner's release sequence — the
+        supervision flock, the startup claim, the container occupancy, the
+        slot — and nothing is released before death is confirmed.
+
+        The flock first (a live server that holds it is never robbed); then,
+        in one transaction, the exact hold is re-validated and rewritten to
+        name this Runner. Any failure on the way leaves the hold as it was,
+        the flock given back — including a startup claim or an occupancy
+        record whose durable read or write cannot be confirmed (RM-R1e).
+        The run is not stopped again: its process is
+        judged by positive evidence alone, against the execution identity
+        the hold recorded, so the hold stays for as long as that cannot be
+        had.
+        """
+        if not self._claim(node_id):
+            return
+        provider = str(raw.get("provider") or "")
+        try:
+            # RM-R1e: a claim read that failed is unknown, never "no claim".
+            token = (self.startup.token_for(provider, node_id, strict=True)
+                     if provider else "")
+        except Exception:
+            self._release(node_id)
+            return
+        container = str(held.get("occupancy") or "")
+        if container:
+            # The occupancy record speaks for the held run until its death
+            # is confirmed: rebound to this Runner first, or reconciliation
+            # prunes it with its dead owner while the run may live, and a
+            # sibling's OOM kill is attributed as if it were alone (review
+            # ag-598c45). Failing that, nothing is taken over this pass.
+            try:
+                pid = held.get("pid") or 0
+                pid_start = str(held.get("pid_start") or "")
+                self.occupancy.rebind(container, node_id, pid, pid_start)
+                self.occupancy.ensure_live(container, node_id, pid, pid_start)
+            except Exception:
+                self._release(node_id)
+                return
+        taken = dict(held, **self._owner_fields())
+        try:
+            with self.tree.transaction() as data:
+                entry = data["nodes"].get(node_id)
+                if entry is None or not _same_hold(entry.get("cleanup_hold"), held):
+                    taken = None
+                else:
+                    entry["cleanup_hold"] = taken
+        except Exception:
+            taken = None
+        if taken is None:
+            self._release(node_id)
+            return
+        pid = taken.get("pid")
+        pid_start = str(taken.get("pid_start") or "")
+        identity = taken.get("executor")
+        if not pid and isinstance(identity, dict) and identity.get("kind") == "local":
+            # The owner died between the start and the pid's write: the
+            # wrapper's own record, removed before every launch, is this
+            # run's or nothing.
+            recorded = _recorded_wrapper(self.paths.run_dir(node_id))
+            pid, pid_start = (recorded, "") if recorded else (None, "")
+        then = taken.get("then")
+        self._holds[node_id] = _Hold(
+            record=taken, pid=pid, pid_start=pid_start,
+            probe_raw=self._identity_probe(identity, node_id),
+            provider=provider,
+            token=token,
+            phase="cleanup", container=str(taken.get("occupancy") or ""),
+            durable=True,
+            then=tuple(then) if then else (
+                "failed", "its launch failed and its server exited before the "
+                          "process was confirmed dead"))
+        self.tree.emit(node_id, "launch_hold_taken_over",
+                       previous_owner=held.get("owner_pid"))
+
+    def _identity_probe(self, identity: Any, node_id: str) -> Any:
+        """The raw liveness probe for the execution identity a hold recorded
+        — never the executor the current config names (review ag-43f57f).
+        A local run needs none; a container run asks THAT container; a hold
+        with no readable identity can never be confirmed dead."""
+        if not isinstance(identity, dict):
+            return _unknown_probe
+        kind = identity.get("kind")
+        if kind == "local":
+            return None
+        if kind == "docker" and identity.get("container"):
+            docker = dict(self.config.project.get("executor", {}).get("docker", {}))
+            docker["container_name"] = str(identity["container"])
+            try:
+                executor = get_executor("docker", docker, paths=self.paths,
+                                        providers=self.providers,
+                                        config_dir=global_config_dir())
+            except Exception:
+                return _unknown_probe
+            return self._raw_alive_probe(executor, node_id) or _unknown_probe
+        return _unknown_probe
+
+    def _raw_alive_probe(self, executor: Any, node_id: str) -> Any:
+        """The executor's own three-valued liveness answer, or None when it
+        has none — a local run's pid identity is the whole story.
+
+        RM-R1c (review ag-f7ced5): death is confirmed from THIS raw answer,
+        never from the FollowHandle's `_alive`, whose container probe counts
+        an unanswerable container as alive for `UNKNOWN_ALIVE_SECONDS` and
+        then reports dead — an expired Docker liveness grace period is
+        "unknown", and unknown is never death.
+        """
+        wrapper_alive = getattr(executor, "wrapper_alive", None)
+        if wrapper_alive is None:
+            return None
+        return lambda: wrapper_alive(node_id)
+
+    async def _confirm_ended(self, pid: int | None, pid_start: str,
+                             probe_raw: Any = None, bound: float = None) -> bool:
+        """Whether the launched run has POSITIVELY ended: the pid identity
+        gone (a local run — immune to pid reuse), or the executor's raw
+        container probe definitely saying the wrapper is dead. "Unknown" is
+        never death: a Docker probe past its liveness grace reports None,
+        and treating that as death released ownership over a process that
+        may well be alive (review ag-f7ced5). Blocking, so it runs off the
+        loop. The bound only stops a process that refuses to die from
+        hanging the caller for ever: past it the cleanup reports failure
+        and the hold stays up (RM-R1c)."""
+        if bound is None:
+            bound = LAUNCH_CONFIRM_SECONDS
+        deadline = time.monotonic() + bound
+        while True:
+            if await asyncio.to_thread(_positively_ended, pid, pid_start,
+                                       probe_raw):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.2)
+
+    async def _await_cleanup(self, task: asyncio.Task) -> None:
+        """RM-R1c: await THE one cleanup task through any number of our own
+        cancellations — there is no retry limit and no replacement task, and
+        nothing is detached. A cancellation of the task itself is not ours,
+        and is not looped on. The task's outcome is retrieved here so nothing
+        goes unobserved; the launch's original failure is the one that
+        propagates to the caller."""
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    break
+                continue
+        if not task.cancelled():
+            task.exception()
 
     async def _launch(
         self,
@@ -1519,146 +2173,201 @@ class Runner:
         reading `self.runs[node_id]` during that window would otherwise get a
         fresh event nobody will ever set.
         """
-        home = None
-        if self.config.home_policy == "per-agent":
-            home = prepare_home(self.paths.home(node_id), provider.home_links,
-                                "per-agent", agent=spec.name,
-                                copies=provider.home_copy)
-        identity = {
-            "MULTIAGENTS_AGENT_ID": node_id,
-            "MULTIAGENTS_PARENT_ID": parent or "",
-            "MULTIAGENTS_DEPTH": str(depth),
-            "MULTIAGENTS_BRANCH": branch,
-            "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
-            "MULTIAGENTS_ROOT": str(self.paths.data),
-            "MULTIAGENTS_PROJECT": str(self.paths.root),
-        }
-        env = build_env(
-            passthrough=self.config.env_passthrough,
-            blocked=self.config.env_block,
-            home=home,
-            identity=identity,
-        )
-        # SM-R2: the variables a provider is handed the server through are
-        # not inherited. Passed through, one would give an agent without spawn
-        # rights whatever server it names; a spawner gets ours below.
-        for key in (provider.mcp or {}).get("env") or {}:
-            env.pop(str(key), None)
-        # The provider instance's own environment — the thing that makes a
-        # second subscription a second account rather than the same one twice.
-        # After build_env, because build_env starts from a clean slate and this
-        # is not passthrough: it is configuration, not inheritance.
-        for key, value in (provider.env or {}).items():
-            env[key] = os.path.expanduser(os.path.expandvars(str(value)))
-        # Identity last: it is what the server's gates trust (SM-R3), so no
-        # configuration may restate it.
-        env.update(identity)
-        executor = self.executor(spec)
-
-        # LN-C2, finding 8: the provenance captured with the values at THIS
-        # launch — the file and line as they are now, not as they will be when
-        # a trip fires.
-        limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
-                                                                 timeout))
-        # LN-C2, adversary findings 3/8: written where the container cannot
-        # reach, so a later adoption or relaunch reads what THIS launch ran
-        # under, not what the node's forgeable record in `tree.json` claims.
-        launched = now()
-        self.launch_limits.record(node_id, limits, launched)
-        wall = limits["timeout"]["value"]
-        options = {"effort": spec.effort,
-                   **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
-        argv = provider.build_command(
-            prompt=prompt, model=spec.model, workdir=str(workdir),
-            permission=spec.permission, session_id=session_id, options=options,
-            timeout=int(wall),
-        )
-        if provider.adapter:
-            # CX-C1: the adapter runs at its absolute path. The executor is
-            # told whose run it is by name (CX-C16), not by this path.
-            adapter = scripts.resolve_adapter(provider, global_config_dir(),
-                                              self.paths.config)
-            if adapter is None:
-                raise RuntimeError(
-                    f"provider {provider.name!r} names adapter "
-                    f"{provider.adapter!r}, which is in none of the provider "
-                    f"script directories (project, global, shipped)")
-            argv[0] = str(adapter)
-
-        run_dir = self.paths.run_dir(node_id)
-        dfd = _run_dir_fd(run_dir)
+        if self._held(node_id):
+            # RM-R1d: a second process on a node whose previous launch is
+            # not confirmed dead. Refused before anything is taken, so the
+            # hold keeps everything it owns.
+            raise RuntimeError(_held_refusal(node_id))
         try:
-            existing = os.listdir(dfd)
-        finally:
-            os.close(dfd)
-        # SM-R1/R2: the server goes to an agent that may spawn, and only to one.
-        if spec.can_spawn:
-            server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
-            argv += server_argv
-            env.update(server_env)
-        else:
-            self._withdraw_server(provider, home)
-        # H8: refused before anything starts — the kernel's per-argument
-        # limit (checked over the fully assembled argv, adapter and server
-        # arguments included).
-        providers_mod.check_argv_limit(provider.name, argv)
-        turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
-        _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
-        launched = now()
-        # Environment KEYS only — values may be secret and this file is on disk.
-        # `launched_at` and `timeout` are what a server adopting this run
-        # restarts its wall clock from (SV-R8).
-        _run_write(run_dir, "command.json", json.dumps(scrub({
-            "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
-            "provider": provider.name, "model": spec.model,
-            "permission": spec.permission, "resumed": bool(session_id),
-            "launched_at": launched, "timeout": wall,
-        }), indent=2))
+            home = None
+            if self.config.home_policy == "per-agent":
+                home = prepare_home(self.paths.home(node_id), provider.home_links,
+                                    "per-agent", agent=spec.name,
+                                    copies=provider.home_copy)
+            identity = {
+                "MULTIAGENTS_AGENT_ID": node_id,
+                "MULTIAGENTS_PARENT_ID": parent or "",
+                "MULTIAGENTS_DEPTH": str(depth),
+                "MULTIAGENTS_BRANCH": branch,
+                "MULTIAGENTS_CAN_SPAWN": "1" if spec.can_spawn else "0",
+                "MULTIAGENTS_ROOT": str(self.paths.data),
+                "MULTIAGENTS_PROJECT": str(self.paths.root),
+            }
+            env = build_env(
+                passthrough=self.config.env_passthrough,
+                blocked=self.config.env_block,
+                home=home,
+                identity=identity,
+            )
+            # SM-R2: the variables a provider is handed the server through are
+            # not inherited. Passed through, one would give an agent without spawn
+            # rights whatever server it names; a spawner gets ours below.
+            for key in (provider.mcp or {}).get("env") or {}:
+                env.pop(str(key), None)
+            # The provider instance's own environment — the thing that makes a
+            # second subscription a second account rather than the same one twice.
+            # After build_env, because build_env starts from a clean slate and this
+            # is not passthrough: it is configuration, not inheritance.
+            for key, value in (provider.env or {}).items():
+                env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+            # Identity last: it is what the server's gates trust (SM-R3), so no
+            # configuration may restate it.
+            env.update(identity)
+            executor = self.executor(spec)
 
-        problems = executor.preflight()
-        if problems:
-            raise RuntimeError("; ".join(problems))
-        # SV-R5: owned before it exists, so no other server's adoption pass
-        # can find it running and unowned in between.
-        if not self._claim(node_id):
-            raise RuntimeError(f"{node_id} is supervised by another server")
+            # LN-C2, finding 8: the provenance captured with the values at THIS
+            # launch — the file and line as they are now, not as they will be when
+            # a trip fires.
+            limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
+                                                                     timeout))
+            # LN-C2, adversary findings 3/8: written where the container cannot
+            # reach, so a later adoption or relaunch reads what THIS launch ran
+            # under, not what the node's forgeable record in `tree.json` claims.
+            launched = now()
+            self.launch_limits.record(node_id, limits, launched)
+            wall = limits["timeout"]["value"]
+            options = {"effort": spec.effort,
+                       **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
+            argv = provider.build_command(
+                prompt=prompt, model=spec.model, workdir=str(workdir),
+                permission=spec.permission, session_id=session_id, options=options,
+                timeout=int(wall),
+            )
+            if provider.adapter:
+                # CX-C1: the adapter runs at its absolute path. The executor is
+                # told whose run it is by name (CX-C16), not by this path.
+                adapter = scripts.resolve_adapter(provider, global_config_dir(),
+                                                  self.paths.config)
+                if adapter is None:
+                    raise RuntimeError(
+                        f"provider {provider.name!r} names adapter "
+                        f"{provider.adapter!r}, which is in none of the provider "
+                        f"script directories (project, global, shipped)")
+                argv[0] = str(adapter)
+
+            run_dir = self.paths.run_dir(node_id)
+            dfd = _run_dir_fd(run_dir)
+            try:
+                existing = os.listdir(dfd)
+            finally:
+                os.close(dfd)
+            # SM-R1/R2: the server goes to an agent that may spawn, and only to one.
+            if spec.can_spawn:
+                server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
+                argv += server_argv
+                env.update(server_env)
+            else:
+                self._withdraw_server(provider, home)
+            # H8: refused before anything starts — the kernel's per-argument
+            # limit (checked over the fully assembled argv, adapter and server
+            # arguments included).
+            providers_mod.check_argv_limit(provider.name, argv)
+            turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
+            _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
+            launched = now()
+            # Environment KEYS only — values may be secret and this file is on disk.
+            # `launched_at` and `timeout` are what a server adopting this run
+            # restarts its wall clock from (SV-R8).
+            _run_write(run_dir, "command.json", json.dumps(scrub({
+                "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
+                "provider": provider.name, "model": spec.model,
+                "permission": spec.permission, "resumed": bool(session_id),
+                "launched_at": launched, "timeout": wall,
+            }), indent=2))
+
+            problems = executor.preflight()
+            if problems:
+                raise RuntimeError("; ".join(problems))
+            # RM-R1d (review ag-7c0716): everything that can fail comes
+            # BEFORE the flock. Supervisor construction parses the limits
+            # and can raise on a malformed one; building it here means a
+            # failure never has to walk back a held `_claim`.
+            supervisor = self._supervisor(spec, provider, wall,
+                                          limits["silence_timeout"]["value"])
+            # SV-R5: owned before it exists, so no other server's adoption pass
+            # can find it running and unowned in between.
+            if not self._claim(node_id):
+                raise RuntimeError(f"{node_id} is supervised by another server")
+        except BaseException:
+            # Nothing was started, so there is nothing to stop or confirm:
+            # everything this turn owns goes back here, on every path. The
+            # startup claim — steer takes its own before calling in (review
+            # ag-cef33c); token-guarded, so a caller's own release is a
+            # no-op. And the supervision flock, which a relaunch still holds
+            # from the turn it replaced (steer's internal stop keeps it for
+            # the relaunch): with no process started, nothing is supervised
+            # any more, and a lock kept would make the node unadoptable for
+            # this server's whole lifetime (review ag-f27608). The caller's
+            # own handler settles the node's status.
+            self._release(node_id)
+            self._startup_finish(provider.name, node_id, startup_token)
+            raise
 
         # SV-R1/R4: under the launch wrapper, which writes the output and the
         # exit status to the run dir and ends the run at its wall clock even
         # when no server is left to.
-        handle = None
+        handle = hold = None
         try:
             startup_token = startup_token or self.startup.claim(provider.name, node_id)
+            # RM-R1d: the durable reservation exists before the process does;
+            # a reservation that cannot be written means no launch.
+            hold = self._reserve_launch(node_id, provider.name, startup_token,
+                                        executor)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
                                           deadline=launched + wall if wall else 0,
                                           provider=provider.name)
+            self._record_launched(node_id, hold, handle)
             self.startup.bind(provider.name, node_id, startup_token, handle.pid,
                               getattr(handle, "pid_start", "") or "")
         except BaseException:
-            # Nothing started, so nothing is followed: a lock kept here would
-            # make the node unadoptable for this server's whole lifetime.
-            if handle is not None:
-                await handle.stop()
-            self._release(node_id)
-            self._startup_finish(provider.name, node_id, startup_token)
+            if handle is None:
+                # Nothing started, so nothing is followed: a lock kept here
+                # would make the node unadoptable for this server's whole
+                # lifetime, and the reservation has nothing left to hold.
+                self._retire_hold(node_id)
+                self._release(node_id)
+                self._startup_finish(provider.name, node_id, startup_token)
+                raise
+            # RM-R1c: the process did start, so the one cleanup task stops
+            # it and confirms its death before anything goes; nothing is
+            # released merely because stop returned.
+            await self._await_cleanup(
+                self._launch_cleanup_task(handle, node_id, done=done))
             raise
+        # RM-R1c (review ag-cef33c): the Run is assembled from ready parts
+        # only — the supervisor was built in the prologue, and the handle is
+        # attached here — so nothing between executor.start succeeding and
+        # the guard below can raise outside the cleanup's ownership.
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
-            supervisor=self._supervisor(spec, provider, wall,
-                                        limits["silence_timeout"]["value"]),
+            supervisor=supervisor,
             turn_start=getattr(handle, "offset", 0), limits=limits,
             startup_token=startup_token,
             **({"done": done} if done is not None else {}),
         )
         self.runs[node_id] = run
-        await self._track_container_run(run, executor)
-        self.tree.update(node_id, pid=handle.pid,
-                         pid_start=getattr(handle, "pid_start", "")
-                         or procs.start_time(handle.pid),
-                         follow={"turn": run.turn_start, "offset": run.turn_start,
-                                 "log": _size(run_dir / "stream.jsonl")},
-                         adopted_at=None)
-        self.tree.set_status(node_id, "running")
+        try:
+            await self._track_container_run(run, executor)
+            self.tree.update(node_id,
+                             follow={"turn": run.turn_start, "offset": run.turn_start,
+                                     "log": _size(run_dir / "stream.jsonl")},
+                             adopted_at=None)
+            self.tree.set_status(node_id, "running")
+        except BaseException:
+            # RM-R1c (review ag-467011): the process is ALIVE here and no
+            # consumer follows it yet. ONE cleanup task stops it, confirms
+            # its death, and only then releases the supervision lock, the
+            # container occupancy, the startup claim and the concurrency
+            # slot, and signals `run.done`. The caller awaits that same task
+            # through any number of its own cancellations — nothing is
+            # released merely because stop returned, and if death cannot be
+            # confirmed, ownership and occupancy are held.
+            await self._await_cleanup(self._launch_cleanup_task(
+                handle, node_id, run=run, oom_container=run.oom_container))
+            raise
+        # Supervised: the node occupies as a live `running` one from here,
+        # so the reservation is lifted.
+        self._retire_hold(node_id)
         run.task = asyncio.create_task(self._consume(run))
         # Owned by the Runner, not by the run: asking an agent to wrap up means
         # stopping and relaunching it, which a task belonging to that same run
@@ -1671,10 +2380,17 @@ class Runner:
         """LN-C5: note the container's `oom_kill` count as this run starts,
         and register it in the occupancy record every Runner of this project
         shares — a sibling started by another server is as much a sibling as
-        one of ours (finding 1). Nothing here may fail a launch that already
-        started a process (adversary finding 2): the run must always get its
-        consumer, so a record that cannot be written costs the OOM
-        attribution its evidence, not the run its supervision."""
+        one of ours (finding 1).
+
+        RM-R1e (review ag-2792f3) supersedes adversary finding 2 here: the
+        registration is a write the launch hold depends on, so it must be
+        confirmed durable. One that cannot be — the hold naming the
+        container, or the occupancy entry itself — fails the launch into
+        the one cleanup task, which stops the just-started process and
+        releases everything once its death is confirmed. A run left going
+        unregistered would let another server's store attribute a SIGKILL
+        as an OOM kill of a lone occupant. A reading of the `oom_kill`
+        counter that fails still costs only the attribution its baseline."""
         reader = getattr(executor, "oom_kill_count", None)
         if not callable(reader):
             return                                  # not a container
@@ -1683,15 +2399,43 @@ class Runner:
         with contextlib.suppress(Exception):
             run.oom_baseline = await asyncio.to_thread(reader)
         handle_pid = getattr(run.handle, "pid", 0) or 0
+        hold = self._holds.get(run.node_id)
+        if hold is not None:
+            # RM-R1e: the launch hold names the container BEFORE the run is
+            # registered there, durably, so a crash before any cleanup still
+            # leaves recovery the occupancy record to rebind and end. If the
+            # hold cannot say so, the run is not registered at all.
+            hold.container = run.oom_container
+            hold.record = dict(hold.record, occupancy=run.oom_container)
+            try:
+                self.tree.update(run.node_id, cleanup_hold=dict(
+                    hold.record, then=list(hold.then) if hold.then else None))
+            except Exception as exc:
+                self._unrecorded_occupancy(run.node_id, "the launch hold "
+                                           "could not record the container")
+                raise RuntimeError(
+                    f"the launch hold could not record container "
+                    f"{run.oom_container!r}: {type(exc).__name__}: {exc}") from exc
         try:
-            entry = self.occupancy.register(
-                run.oom_container, run.node_id, handle_pid,
-                getattr(run.handle, "pid_start", "") or "")
+            pid_start = getattr(run.handle, "pid_start", "") or ""
+            entry = self.occupancy.register(run.oom_container, run.node_id,
+                                            handle_pid, pid_start)
             run.oom_since = entry.get("since")
-        except Exception:
-            # Unwritable record: `others` fails closed without it, which is
-            # `kill_uncertain` — the answer LN-C5 prefers to a wrong `killed`.
-            pass
+            entry = self.occupancy.ensure_live(run.oom_container, run.node_id,
+                                               handle_pid, pid_start)
+            run.oom_since = entry.get("since")
+        except Exception as exc:
+            # RM-R1e: never taken for a durable registration. Reported, and
+            # the launch fails into cleanup rather than run unregistered.
+            detail = f"{type(exc).__name__}: {exc}"
+            self._unrecorded_occupancy(run.node_id, detail)
+            raise RuntimeError(
+                f"the run could not be registered in container "
+                f"{run.oom_container!r}'s occupancy record: {detail}") from exc
+
+    def _unrecorded_occupancy(self, node_id: str, detail: str) -> None:
+        with contextlib.suppress(Exception):
+            self.tree.emit(node_id, "occupancy_unrecorded", detail=detail[:300])
 
     async def _sigkill_notice(self, run: Run, code: int) -> None:
         """LN-C5: a run in the container died by SIGKILL. Attributed to
@@ -1981,9 +2725,34 @@ class Runner:
                                      entry.cooldown_until if entry else None)
         return None
 
+    def _held(self, node_id: str) -> bool:
+        """RM-R1d: whether a launch hold stands between this node and a new
+        launch or a release: this Runner's own launch in progress or cleanup
+        not yet confirmed, or the durable `cleanup_hold` another Runner set.
+        This Runner's hold with nothing left to release (`lifting`) is not."""
+        hold = self._holds.get(node_id)
+        if hold is not None:
+            return hold.phase != "lifting"
+        node = self.tree.get(node_id)
+        return node is not None and bool(node.cleanup_hold)
+
+    def _mark_launch_failed(self, node_id: str, reason: str) -> None:
+        """Mark a node `failed` — once its launch cleanup, if one holds it,
+        has confirmed the process dead (RM-R1c). Until then the status stays
+        what it is: `pending` is also the slot's durable reservation should
+        the hold itself not have reached the tree."""
+        if not self._defer_while_held(node_id, "failed", reason):
+            self.tree.set_status(node_id, "failed", reason)
+
     def _startup_finish(self, provider: str, node_id: str, token: str,
                         failed: bool = False, error: str = "") -> None:
         if not token:
+            return
+        hold = self._holds.get(node_id)
+        if (hold is not None and hold.phase == "cleanup" and not hold.confirmed
+                and hold.token == token):
+            # RM-R1c: this claim belongs to a launch cleanup that has not
+            # confirmed death; it goes with everything else the hold owns.
             return
         event = self.startup.finish(
             provider, node_id, token, failed=failed, error=error,
@@ -2263,13 +3032,13 @@ class Runner:
                 if overrides:
                     routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
                 spec = routed
-            # RM-R7: the model/effort pair is settled BEFORE the startup
-            # claim, so a refusal here takes neither the half-open provider's
-            # only probe nor a startup.json run record — both would outlive
-            # the refused start, because the release in the try/finally below
-            # only runs for a claim that was actually taken. The event a
-            # normalisation emits is the only trace, and only on success.
-            spec = self._settle_effort(spec, provider, node_id)
+            # RM-R7: an explicitly contradicted effort refuses BEFORE the
+            # startup claim, so the refusal takes neither the half-open
+            # provider's only probe nor a startup.json run record — both
+            # would outlive the refused start, because the release in the
+            # try/finally below only runs for a claim that was actually
+            # taken.
+            self._effort_conflict(spec, provider)
             try:
                 startup_token = self.startup.claim(provider.name, node_id)
             except StartupUnavailable as exc:
@@ -2280,6 +3049,15 @@ class Runner:
             break
         launched = False
         try:
+            # RM-R5a/RM-R7: the pair is settled HERE, inside the block whose
+            # finally releases the startup claim — after the claim, so the
+            # normalisation and its event belong only to the provider the
+            # run launches on (ag-37f81c), and inside the protection, so an
+            # exception during normalisation releases the claim instead of
+            # leaking it (review ag-f21a0c). `spec` was reset from
+            # `configured_spec` at the loop top, so this settles the
+            # un-normalised candidate.
+            spec = self._settle_effort(spec, provider, node_id)
             # LM-R1/R2: resolved once, recorded on the node, reported to the
             # caller. LN-C2, finding 8: the provenance is resolved HERE, at
             # launch, and travels with the run — a later edit of the yaml must
@@ -2320,29 +3098,40 @@ class Runner:
                 effort=spec.effort or "",
                 limits=limits, session=self.session(), model_pinned=bool(model),
             )
-            if self.authority:
-                self.authority.add(node)
-            if not workdir:
-                gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
-            self.tree.add(node)
-            if routed_from:
-                # Loud enough to find later. This decision changes which model does
-                # the work, and until now it left no trace anywhere.
-                self.tree.emit(node_id, "routed", **{"from": routed_from,
-                                                     "to": provider.name,
-                                                     "model": spec.model,
-                                                     "reason": routed_why})
-
-            prompt = self.compose_prompt(spec, task, node, worktree_path)
+            # RM-R1a: admission is one transaction with the insert, so the
+            # slot is ours from this moment; every exit below that does not
+            # launch gives it back.
+            self._admission_add(spec, node)
             try:
-                run = await self._launch(
-                    node_id=node_id, spec=spec, provider=provider, prompt=prompt,
-                    workdir=worktree_path, branch=branch, parent=parent, depth=depth,
-                    timeout=timeout, startup_token=startup_token,
-                )
-            except RuntimeError as exc:
-                self.tree.set_status(node_id, "failed", str(exc))
-                return {"agent_id": node_id, "status": "failed", "error": str(exc)}
+                if self.authority:
+                    self.authority.add(node)
+                if not workdir:
+                    gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
+                if routed_from:
+                    # Loud enough to find later. This decision changes which model does
+                    # the work, and until now it left no trace anywhere.
+                    self.tree.emit(node_id, "routed", **{"from": routed_from,
+                                                         "to": provider.name,
+                                                         "model": spec.model,
+                                                         "reason": routed_why})
+
+                prompt = self.compose_prompt(spec, task, node, worktree_path)
+                try:
+                    run = await self._launch(
+                        node_id=node_id, spec=spec, provider=provider, prompt=prompt,
+                        workdir=worktree_path, branch=branch, parent=parent, depth=depth,
+                        timeout=timeout, startup_token=startup_token,
+                    )
+                except RuntimeError as exc:
+                    self._mark_launch_failed(node_id, str(exc))
+                    return {"agent_id": node_id, "status": "failed", "error": str(exc)}
+            except BaseException as exc:
+                # RM-R1a: the slot this start took is given back visibly —
+                # or, while a launch cleanup holds the node (RM-R1c), once
+                # that cleanup confirms the process dead.
+                self._mark_launch_failed(
+                    node_id, f"start did not launch: {type(exc).__name__}: {exc}")
+                raise
 
             launched = True
             return {
@@ -2620,13 +3409,20 @@ class Runner:
                     node_id, "failed",
                     f"the post-mortem crashed: {type(exc).__name__}: {exc}")
         finally:
+            # This run's own claim: its process has ended, and a relaunch's
+            # claim is a different token (a held one is kept by the hold).
             self._startup_finish(provider.name, node_id, run.startup_token)
-            if not relaunched:
+            if not relaunched and not self._held(node_id):
                 self._release(node_id)
                 # LN-C4: the node ended, so its own notices have stopped.
                 with contextlib.suppress(Exception):
                     notices.clear_node(self.tree, node_id)
                 run.done.set()
+            # RM-R1c (review ag-f7ced5): while a launch cleanup holds this
+            # node — a relaunch (free retry, commit fix) whose process could
+            # not be confirmed dead — the supervision lock and the waiters
+            # stay: releasing either would hand the run over while its
+            # process may still be alive. The hold's end releases both.
 
     def _maybe_clear_stuck(self, run: Run, node_id: str) -> None:
         """SL-R3: drop `stuck` the moment the agent visibly moves on.
@@ -2989,8 +3785,8 @@ class Runner:
                     # failed launch anywhere else: `failed`, with the cause.
                     detail = f"{type(exc).__name__}: {exc}"[:300]
                     self.tree.emit(node_id, "retry_failed", detail=detail)
-                    self.tree.set_status(node_id, "failed",
-                                         f"retry launch failed: {detail}")
+                    self._mark_launch_failed(
+                        node_id, f"retry launch failed: {detail}")
                     return False
                 retried.startup_progress = retried.startup_progress or run.startup_progress
                 self.tree.set_status(node_id, "running", "retried once after "
@@ -3895,13 +4691,24 @@ class Runner:
         session role: the initializer's agents are not the orchestrator's to
         finish. Only nodes nobody holds (SV-R5) — the lock, not the status,
         decides that, so a live but slow server is never robbed.
+
+        Every pass, the root's or not, first settles launch-cleanup holds
+        (RM-R1d): a hold whose process has since died — its owner still
+        here, or gone with a crash — is lifted, so its slot comes back.
         """
+        with contextlib.suppress(Exception):
+            self._settle_holds()
         if self.self_id():
             return []
         mine = self._role_of(self.session())
         taken = []
         for node in self.tree.active():
             if node.status not in self.ADOPTABLE or node.id in self._locks:
+                continue
+            if node.cleanup_hold:
+                # RM-R1d (review ag-43f57f): a held node is not a run to
+                # follow — its launch failed. Its hold is taken over and
+                # ended by `_settle_holds`, with the owner's releases.
                 continue
             if self._role_of(node.session) != mine:
                 continue
@@ -4377,6 +5184,13 @@ class Runner:
         # startup_down`. Refused here, the live run is left untouched,
         # pinned or not. The claim is handed to `_launch` so the window
         # between this check and the respawn cannot close.
+        if self._held(agent_id):
+            # RM-R1d: its previous launch's process is not confirmed dead.
+            # Refused before the claim and before the stop below, so nothing
+            # is taken and nothing live is ended for a relaunch that cannot
+            # happen.
+            return {"agent_id": agent_id, "steered": False,
+                    "error": _held_refusal(agent_id)}
         try:
             startup_token = self.startup.claim(provider.name, agent_id)
         except StartupUnavailable as exc:
@@ -4407,7 +5221,7 @@ class Runner:
                 startup_token=startup_token,
             )
         except RuntimeError as exc:
-            self.tree.set_status(agent_id, "failed", str(exc))
+            self._mark_launch_failed(agent_id, str(exc))
             return {"agent_id": agent_id, "steered": False, "error": str(exc)}
         self.tree.set_status(agent_id, "running", "steered")
 
@@ -4875,124 +5689,140 @@ class Runner:
             # not launch gives it back.
             self._admission_reserved(spec, node)
             reserved = node_id
-            node = self.authoritative(node, "conversation_refresh")
-            if node is None:
-                self._release_reserved_slot(node_id)
-                return self._consult_result(agent_name, node_id, None,
-                                            error="entry id differs from its key")
-            if not self.unrecorded_branch_ok(node, "conversation_refresh"):
-                self._release_reserved_slot(node_id)
-                return self._consult_result(agent_name, node_id, None,
-                                            error="branch is outside the container domain")
-            if self.authority and not self.authority.get(node_id):
-                operand = (Path(node.worktree) if node.worktree
-                           else self.paths.worktree(node_id))
-                if not self.authority.safe_nested_path(operand):
-                    self.mismatch(node_id, "conversation_refresh", ["worktree"],
-                                  "unrecorded worktree is outside the container domain")
+            try:
+                node = self.authoritative(node, "conversation_refresh")
+                if node is None:
                     self._release_reserved_slot(node_id)
                     return self._consult_result(agent_name, node_id, None,
-                                                error="unrecorded worktree is outside the container domain")
-            turn = node.turns + 1
-            worktree_path = Path(node.worktree)
-            prompt = message
-            session_id = node.session_id
-            # Resume as the conversation is actually running, not as the agent
-            # is configured — the same defect and the same fix as steer()'s
-            # (bug-ad011c): a conversation routed to a fallback at an earlier
-            # turn has a spec and provider that disagree with the static
-            # config, and resuming from the wrong one hands `_launch` the
-            # preferred provider's model with the fallback's options still
-            # attached. Prefer the in-process Run's mutated spec when one
-            # survives; otherwise rebuild it from the live node the way
-            # `start()` built it originally.
-            run = self.runs.get(node_id)
-            if run is not None:
-                spec, provider = run.spec, run.provider
-            else:
-                spec = route
-                provider = self.providers.get(node.provider)
-            # RM-R5a: the persisted effort is what this conversation runs
-            # with — a model id that declares its own suffix normalised the
-            # configured one at first launch, and the node carries the
-            # result. Re-deriving from the static config would resurrect the
-            # contradicted value.
-            if node.effort and spec is not None and spec.effort != node.effort:
-                spec = spec.replace(effort=node.effort)
-            if provider is None or not provider.available():
-                self._release_reserved_slot(node_id)
-                raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
-            # A conversation outlives its worktree: `clean` prunes worktrees,
-            # and a standing advisor keeps its idle node and its session id
-            # across all of that. Resuming into a directory that is gone made
-            # the CLI fail on chdir with an error naming a path, which reads as
-            # a container problem rather than a stale checkout. Cut a fresh
-            # worktree and carry the session — the context lives in the
-            # provider's session, not in the files.
-            recreated = False
-            if not worktree_path.is_dir() and gitops.is_repo(self.paths.root):
-                try:
-                    recreated = True
-                    worktree_path = self.paths.worktree(node_id)
-                    desired = (f"{self.config.branch_prefix}/{agent_name}/"
-                               f"{node_id.removeprefix('ag-')}")
-                    branch = gitops.unique_branch(self.paths.root, desired)
-                    if self.authority and self.authority.get(node_id):
-                        self.authority.rebind(node_id, branch, worktree_path)
-                    branch = gitops.create_worktree(
-                        self.paths.root, worktree_path,
-                        branch, base, unique=False,
-                    )
-                    head = gitops.head_sha(worktree_path)
-                    self.tree.update(node_id, worktree=str(worktree_path), branch=branch,
-                                     placed_on=head)
-                except BaseException:
-                    # RM-R1a: this turn holds a reserved slot and will not
-                    # launch — give it back before the error escapes.
+                                                error="entry id differs from its key")
+                if not self.unrecorded_branch_ok(node, "conversation_refresh"):
                     self._release_reserved_slot(node_id)
-                    raise
-                node = self.tree.get(node_id) or node
-                # The session remembers files that the new checkout does not
-                # have. Saying so puts the correction IN the conversation;
-                # without it the agent acts on a directory listing from its
-                # memory and then has to invent a reason its work vanished.
-                prompt = (
-                    f"[system] Your working directory was recreated at "
-                    f"{worktree_path} and is empty — the previous checkout was "
-                    f"cleaned up between turns. Anything you wrote there is "
-                    f"gone; what you remember of this conversation is intact.\n\n"
-                ) + prompt
-            # The conversation outlives the code it last read: work merged into
-            # base between turns must reach this turn (bug-7f6ba7). A worktree
-            # just recreated above is already on base.
-            if not recreated:
-                placed = False
-                if worktree_path.is_dir():
-                    if self.authority and not self.authority.get(node_id):
-                        try:
-                            with self.authority.pinned_worktree(worktree_path) as pinned:
-                                notice, head, behind = self._refresh_conversation(
-                                    node, pinned, base, base_sha)
-                        except (OSError, ValueError) as exc:
-                            self.mismatch(node_id, "conversation_refresh", ["worktree"], str(exc))
-                            notice, head, behind = "", "", None
-                    else:
-                        notice, head, behind = self._refresh_conversation(
-                            node, worktree_path, base, base_sha)
-                    prompt = notice + prompt
+                    return self._consult_result(agent_name, node_id, None,
+                                                error="branch is outside the container domain")
+                if self.authority and not self.authority.get(node_id):
+                    operand = (Path(node.worktree) if node.worktree
+                               else self.paths.worktree(node_id))
+                    if not self.authority.safe_nested_path(operand):
+                        self.mismatch(node_id, "conversation_refresh", ["worktree"],
+                                      "unrecorded worktree is outside the container domain")
+                        self._release_reserved_slot(node_id)
+                        return self._consult_result(agent_name, node_id, None,
+                                                    error="unrecorded worktree is outside the container domain")
+                turn = node.turns + 1
+                worktree_path = Path(node.worktree)
+                prompt = message
+                session_id = node.session_id
+                # Resume as the conversation is actually running, not as the agent
+                # is configured — the same defect and the same fix as steer()'s
+                # (bug-ad011c): a conversation routed to a fallback at an earlier
+                # turn has a spec and provider that disagree with the static
+                # config, and resuming from the wrong one hands `_launch` the
+                # preferred provider's model with the fallback's options still
+                # attached. Prefer the in-process Run's mutated spec when one
+                # survives; otherwise rebuild it from the live node the way
+                # `start()` built it originally.
+                run = self.runs.get(node_id)
+                if run is not None:
+                    spec, provider = run.spec, run.provider
                 else:
-                    head, behind = "", None
+                    spec = route
+                    provider = self.providers.get(node.provider)
+                # RM-R5a: the persisted effort is what this conversation runs
+                # with — a model id that declares its own suffix normalised the
+                # configured one at first launch, and the node carries the
+                # result. Re-deriving from the static config would resurrect the
+                # contradicted value.
+                if node.effort and spec is not None and spec.effort != node.effort:
+                    spec = spec.replace(effort=node.effort)
+                if provider is None or not provider.available():
+                    self._release_reserved_slot(node_id)
+                    raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
+                # A conversation outlives its worktree: `clean` prunes worktrees,
+                # and a standing advisor keeps its idle node and its session id
+                # across all of that. Resuming into a directory that is gone made
+                # the CLI fail on chdir with an error naming a path, which reads as
+                # a container problem rather than a stale checkout. Cut a fresh
+                # worktree and carry the session — the context lives in the
+                # provider's session, not in the files.
+                recreated = False
+                if not worktree_path.is_dir() and gitops.is_repo(self.paths.root):
+                    try:
+                        recreated = True
+                        worktree_path = self.paths.worktree(node_id)
+                        desired = (f"{self.config.branch_prefix}/{agent_name}/"
+                                   f"{node_id.removeprefix('ag-')}")
+                        branch = gitops.unique_branch(self.paths.root, desired)
+                        if self.authority and self.authority.get(node_id):
+                            self.authority.rebind(node_id, branch, worktree_path)
+                        branch = gitops.create_worktree(
+                            self.paths.root, worktree_path,
+                            branch, base, unique=False,
+                        )
+                        head = gitops.head_sha(worktree_path)
+                        self.tree.update(node_id, worktree=str(worktree_path), branch=branch,
+                                         placed_on=head)
+                    except BaseException:
+                        # RM-R1a: this turn holds a reserved slot and will not
+                        # launch — give it back before the error escapes.
+                        self._release_reserved_slot(node_id)
+                        raise
+                    node = self.tree.get(node_id) or node
+                    # The session remembers files that the new checkout does not
+                    # have. Saying so puts the correction IN the conversation;
+                    # without it the agent acts on a directory listing from its
+                    # memory and then has to invent a reason its work vanished.
+                    prompt = (
+                        f"[system] Your working directory was recreated at "
+                        f"{worktree_path} and is empty — the previous checkout was "
+                        f"cleaned up between turns. Anything you wrote there is "
+                        f"gone; what you remember of this conversation is intact.\n\n"
+                    ) + prompt
+                # The conversation outlives the code it last read: work merged into
+                # base between turns must reach this turn (bug-7f6ba7). A worktree
+                # just recreated above is already on base.
+                if not recreated:
+                    placed = False
+                    if worktree_path.is_dir():
+                        if self.authority and not self.authority.get(node_id):
+                            try:
+                                with self.authority.pinned_worktree(worktree_path) as pinned:
+                                    notice, head, behind = self._refresh_conversation(
+                                        node, pinned, base, base_sha)
+                            except (OSError, ValueError) as exc:
+                                self.mismatch(node_id, "conversation_refresh", ["worktree"], str(exc))
+                                notice, head, behind = "", "", None
+                        else:
+                            notice, head, behind = self._refresh_conversation(
+                                node, worktree_path, base, base_sha)
+                        prompt = notice + prompt
+                    else:
+                        head, behind = "", None
+            except BaseException:
+                # RM-R1a: this exit is not a launch — the reserved slot
+                # goes back before the error escapes. (An inner handler
+                # above may have released already; the release is a no-op
+                # once the node is no longer `pending`.)
+                self._release_reserved_slot(node_id)
+                raise
 
-        if placed:
-            try:
-                behind = (gitops.commits_on(worktree_path, base_sha, head,
-                                            root=self.paths.root)
-                          if base_sha and head else None)
-            except gitops.GitError as exc:
-                self.git_unreadable(node_id, worktree_path, exc)
-                behind = None
-        view = self._worktree_view(worktree_path, head, base_sha, behind)
-        self.tree.update(node_id, turns=turn)
+        try:
+            if placed:
+                try:
+                    behind = (gitops.commits_on(worktree_path, base_sha, head,
+                                                root=self.paths.root)
+                              if base_sha and head else None)
+                except gitops.GitError as exc:
+                    self.git_unreadable(node_id, worktree_path, exc)
+                    behind = None
+            view = self._worktree_view(worktree_path, head, base_sha, behind)
+            self.tree.update(node_id, turns=turn)
+        except BaseException:
+            # RM-R1a: the view or the turn write faulted after the
+            # reservation — this turn will not launch, so its slot goes
+            # back before the error escapes.
+            if reserved:
+                self._release_reserved_slot(node_id)
+            raise
         try:
             run = await self._launch(
                 node_id=node_id, spec=spec, provider=provider, prompt=prompt,
@@ -5000,15 +5830,21 @@ class Runner:
                 depth=node.depth, session_id=session_id, timeout=timeout,
             )
         except RuntimeError as exc:
-            self.tree.set_status(node_id, "failed", str(exc))
+            self._mark_launch_failed(node_id, str(exc))
             return self._consult_result(agent_name, node_id, turn, view,
                                         error=str(exc))
-        except BaseException:
+        except BaseException as exc:
             # RM-R1a: a reservation whose launch fails is released — the
             # node must not sit `pending` for ever, holding a slot no run
             # will ever account for. (`failed` above releases its own way.)
+            # A first turn's node was created `pending` for this launch and
+            # is marked failed like start()'s (review ag-43f57f). Either
+            # waits for the launch cleanup's confirmation while it holds.
             if reserved:
                 self._release_reserved_slot(node_id)
+            else:
+                self._mark_launch_failed(
+                    node_id, f"consult did not launch: {type(exc).__name__}: {exc}")
             raise
         reserved = ""
 
@@ -5134,7 +5970,8 @@ class Runner:
         slots free is not doing less work, it is taking four times as long to
         do it.
         """
-        running = len([n for n in self.tree.active() if _occupies_slot(n)])
+        self._settle_holds()
+        running = self._occupants(self.tree.read()["nodes"])
         limit = int(self.config.limits.get("max_concurrent", 4))
         return {"running": running, "max_concurrent": limit,
                 "free_slots": max(0, limit - running)}

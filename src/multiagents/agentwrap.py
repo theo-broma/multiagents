@@ -109,6 +109,15 @@ def main(argv):
         os.unlink(status_path)
     except FileNotFoundError:
         pass
+    # RM-R1c: the wrapper leads its own session, so "no live process left in
+    # it" is what the death of the whole run means — the agent only
+    # `setpgrp`s and stays in it. Already so under both executors; made so
+    # here whatever started it.
+    if os.getsid(0) != os.getpid():
+        try:
+            os.setsid()
+        except OSError:
+            pass
     _write_atomic(os.path.join(run_dir, WRAPPER_PID), "%d\n" % os.getpid())
 
     out = open(os.path.join(run_dir, OUTPUT), "ab")

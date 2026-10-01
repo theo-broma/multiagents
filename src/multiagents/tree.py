@@ -173,6 +173,12 @@ class Node:
     # :mod:`multiagents.procs`. Recorded beside it so a recovery after a reboot
     # can tell this agent's pid from whatever now holds it.
     pid_start: str = ""
+    # RM-R1d: a failed-launch cleanup that could not confirm this node's
+    # death holds its concurrency slot DURABLY — `{"since": ..., "owner_pid":
+    # ...}` while held, None once death is confirmed. `_occupies_slot`
+    # counts it in every Runner, whatever the pid's liveness: the hold is
+    # tree state, not one process's memory.
+    cleanup_hold: dict | None = None
     children: list[str] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
     steps: int = 0

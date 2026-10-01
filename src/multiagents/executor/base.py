@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import shutil
 import signal
@@ -151,6 +152,36 @@ def running(pid: int | None, start: str = "") -> bool:
     except (OSError, IndexError):
         return True
     return state not in ("Z", "X")
+
+
+def session_alive(sid: int | None) -> bool | None:
+    """Is any live (non-zombie) process left in session `sid`? None when
+    that cannot be told — no /proc, an unreadable one, any process entry
+    that exists but cannot be read (review ag-598c45: only ENOENT/ESRCH mean
+    gone), or no `sid` — which is never "no" (RM-R1c: a run is dead only on
+    positive evidence).
+
+    A launch wrapper leads its own session and the agent it starts stays in
+    it, so an empty session is the whole run gone, not just the wrapper."""
+    if not sid or sid <= 0:
+        return None
+    try:
+        entries = os.listdir("/proc")
+        Path("/proc/self/stat").read_text()
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            fields = Path(f"/proc/{entry}/stat").read_text().rpartition(")")[2].split()
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                continue                      # gone between listing and reading
+            return None                       # unreadable (EACCES…): unknown
+        if len(fields) > 3 and fields[3] == str(sid) and fields[0] not in ("Z", "X"):
+            return True
+    return False
 
 
 # A run-dir file the host reads only a few bytes of (SG-R7).
