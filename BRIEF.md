@@ -3330,3 +3330,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - PC tester ag-a76c01 (claude sonnet) — check status; may also need resume.
   - Tickets bug-ba55a9 (WIP auto-commit commits unmerged index) and bug-1213a0 (codex content-safety refusal → startup_down; steer vs start disagree) are open, to fix in-house later.
   - Next after CW merge: implementer-deep (opus) builds PC, then SC (same implementer, separate pass).
+  - Per-file reds on merged CW branch: phase2 72, test_sc_* 120, test_bp_budget_read_cost 2 (BP not built). ZERO CW reds. CW mergeable once r9 review approves.
