@@ -14,10 +14,14 @@ case "${1:-check}" in
 esac
 
 # MULTIAGENTS_OPENCODE_PLAN=zai-coding-plan selects the Z.AI Coding Plan (the
-# `opencode-zai` instance). Unset, empty or any other value is the Go behaviour
-# below, unchanged. The quota origin can be overridden with MULTIAGENTS_ZAI_ORIGIN,
-# which is for tests only.
+# `opencode-zai` instance). MULTIAGENTS_OPENCODE_PLAN=deepinfra selects Deep
+# Infra (the `opencode-deepinfra` instance), which is metered — real dollars
+# per token, no quota windows anywhere — so its budget is honestly unknown.
+# Unset, empty or any other value is the Go behaviour below, unchanged. The
+# quota origin can be overridden with MULTIAGENTS_ZAI_ORIGIN, which is for
+# tests only.
 zai_plan() { [ "${MULTIAGENTS_OPENCODE_PLAN:-}" = "zai-coding-plan" ]; }
+di_plan() { [ "${MULTIAGENTS_OPENCODE_PLAN:-}" = "deepinfra" ]; }
 
 # zai_py check|budget|usage. The key is read from opencode's auth store inside
 # python and sent with urllib, so it is never on a command line; every message
@@ -148,9 +152,57 @@ print(json.dumps({
 PYEOF
 }
 
+# di_py check|budget. DeepInfra has no quota endpoint: it bills per token
+# against its own key, so there is nothing to fetch and headroom is honestly
+# unknown. `check` reads opencode's auth store for the `deepinfra` entry; the
+# key is never printed, and no message is built from store content.
+di_py() {
+    python3 - "$1" "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" <<'PYEOF'
+import json, os, sys
+
+mode, auth = sys.argv[1], sys.argv[2]
+ENTRY = "deepinfra"
+
+def load_key():
+    """Returns (key, why) where why is set when there is no store or no parse."""
+    if not os.path.isfile(auth):
+        return None, "no opencode auth store at " + auth
+    try:
+        data = json.load(open(auth))
+    except Exception:
+        return None, "the opencode auth store is not valid JSON"
+    entry = data.get(ENTRY) if isinstance(data, dict) else None
+    key = entry.get("key") if isinstance(entry, dict) else None
+    if isinstance(key, str) and key:
+        return key, None
+    return None, None
+
+if mode == "check":
+    key, why = load_key()
+    if key:
+        print("Deep Infra credential present")
+        raise SystemExit(0)
+    print(why or "no '%s' entry with a key in the opencode auth store; "
+          "run `multiagents auth login opencode-deepinfra` and choose Deep Infra" % ENTRY)
+    raise SystemExit(10)
+
+# budget. No windows, headroom unknown — never zero, and a missing window is
+# not "no headroom". No network call: the branch is taken before the Go probe
+# and no key is read, let alone sent anywhere.
+print(json.dumps({
+    "known": False,
+    "headroom": None,
+    "windows": {},
+    "note": "DeepInfra is metered billing with no quota surface; headroom "
+            "is unknown and spend is tracked per run by this project",
+}))
+PYEOF
+}
+
 case "${1:-check}" in
 check)
     if zai_plan; then zai_py check; exit $?; fi
+    if di_plan; then di_py check; exit $?; fi
     out=$("$BIN" providers list 2>/dev/null) || {
         echo "could not run '$BIN providers list'"; exit 20; }
     # "0 credentials" means no stored login. An API key in the environment is
@@ -168,6 +220,10 @@ login)
         echo "Choose the Z.AI Coding Plan provider, then paste its API key."
         exec "$BIN" providers login
     fi
+    if di_plan; then
+        echo "Choose the Deep Infra provider, then paste its API key."
+        exec "$BIN" providers login
+    fi
     echo "opencode sign-in."
     echo "You will be asked to pick a provider, then a login method."
     echo "For an OpenCode Go subscription choose 'OpenCode' and follow the link."
@@ -178,6 +234,9 @@ login)
     exec "$BIN" providers login
     ;;
 budget)
+    # DeepInfra is metered: the branch is taken BEFORE the Go probe, so no
+    # network call is made and no key is read.
+    if di_plan; then di_py budget; exit 0; fi
     if zai_plan; then zai_py budget; exit 0; fi
     # The Go subscription serves real headroom over HTTP:
     #   GET https://opencode.ai/zen/go/v1/usage   Authorization: Bearer <key>
