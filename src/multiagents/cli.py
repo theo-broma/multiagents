@@ -45,16 +45,53 @@ from .tree import ACTIVE, Tree
 GITIGNORE_LINE = ".multiagents/"
 
 
+def _explicit_root(explicit: str) -> Path:
+    """The project root an explicit `--path` names, or exit 2 saying why not.
+
+    The ONE place an explicit `--path` is interpreted, so no caller can bypass
+    the rules: a path that does not exist is refused BEFORE the upward search
+    (a typo under a project must not be adopted as its root, and write
+    commands must not create it); so is a path that is not a directory, and an
+    explicitly empty one; a path inside a project resolves upward to that
+    project's root, exactly as the cwd does; and a path naming no project at
+    all is a user error, reported like every other one — message naming the
+    path on stderr, exit 2. Pure: commands that never use a project still
+    call it, so a bad `--path` fails everywhere without writing anything.
+    """
+    if explicit == "":
+        print(f"{explicit!r} does not name a directory.", file=sys.stderr)
+        raise SystemExit(2)
+    start = Path(explicit).expanduser().resolve()
+    if not start.exists():
+        print(f"{explicit} does not exist.", file=sys.stderr)
+        raise SystemExit(2)
+    if not start.is_dir():
+        print(f"{explicit} is not a directory.", file=sys.stderr)
+        raise SystemExit(2)
+    root = find_project_root(start)
+    if root is None:
+        print(f"No .multiagents/ found at {explicit} or above. "
+              "Run `multiagents init` first.", file=sys.stderr)
+        raise SystemExit(2)
+    return root
+
+
 def _resolve(explicit: str | None = None) -> ProjectPaths:
-    if explicit:
-        paths = ProjectPaths(Path(explicit).expanduser().resolve())
-    else:
+    """The project a command runs against: `--path` when given, the cwd otherwise.
+
+    An explicit `--path` goes through `_explicit_root`. `None` (no `--path`)
+    keeps the historical behaviour: search upward from the cwd, refuse when
+    there is no project.
+    """
+    if explicit is None:
         root = find_project_root()
         if root is None:
             print("No .multiagents/ found here or above. Run `multiagents init` first.",
                   file=sys.stderr)
             raise SystemExit(2)
-        paths = ProjectPaths(root)
+    else:
+        root = _explicit_root(explicit)
+    paths = ProjectPaths(root)
     # Refreshed on every command that names a project rather than only at init,
     # so `docker status --all` can resolve projects created before the registry
     # existed. A no-op once the entry is current.
@@ -67,12 +104,14 @@ def _resolve(explicit: str | None = None) -> ProjectPaths:
 def _resolve_if_project(explicit: str | None = None) -> ProjectPaths | None:
     """`_resolve`, or None when there is no project to resolve.
 
-    The existence check looks where the command was pointed: `--path` when
-    given, the cwd otherwise. Checking the cwd alone made `--path P` from
-    outside a project behave as if P did not exist.
+    Every rule about an explicit `--path` lives in `_explicit_root` — this
+    only adds the None contract these subcommands need: with no `--path` and
+    no project at the cwd they run against global config alone instead of
+    refusing.
     """
-    start = Path(explicit).expanduser().resolve() if explicit else None
-    return _resolve(explicit) if find_project_root(start) else None
+    if explicit is None:
+        return _resolve(None) if find_project_root() else None
+    return _resolve(explicit)
 
 
 # --------------------------------------------------------------------------
@@ -826,7 +865,22 @@ def _refuse_nesting(root: Path, allow_nested: bool) -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    root = Path(args.path or ".").expanduser().resolve()
+    # The global `--path` and the positional both name the directory to
+    # initialise; they parse into separate dests so neither silently discards
+    # the other. Either may name a directory that does not exist yet —
+    # creating it is the command's job — but an explicitly EMPTY one names
+    # nothing, and silently initialising the cwd is how `or "."` would read it.
+    given = [p for p in (args.path, getattr(args, "init_path", None)) if p is not None]
+    for explicit in given:
+        if explicit == "":
+            print(f"{explicit!r} does not name a directory.", file=sys.stderr)
+            raise SystemExit(2)
+    roots = {Path(p).expanduser().resolve() for p in given}
+    if len(roots) > 1:
+        print(f"--path {args.path} and the positional path {args.init_path} "
+              "name different directories; give one.", file=sys.stderr)
+        raise SystemExit(2)
+    root = roots.pop() if roots else Path(".").resolve()
     refusal = _refuse_nesting(root, args.nested)
     if refusal:
         print(refusal, file=sys.stderr)
@@ -1868,6 +1922,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     Per-project `.multiagents/` directories, your repositories and the branches
     agents committed to are all left alone — only machine-level state goes.
     """
+    # Machine-level, so `--path` is not used — but a bad one is still refused,
+    # and without `_resolve`'s registry write, which would itself be state.
+    if getattr(args, "path", None) is not None:
+        _explicit_root(args.path)
     targets = [p for p in _machine_state() if p.exists()]
     dirty, repos = _worktree_survey()
     # Retain exact registrations before removing machine state. A global Git
@@ -2857,7 +2915,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_docker(args: argparse.Namespace) -> int:
+    # An explicit --path is validated before `--all` lists globally: a bad
+    # one is a user error whatever else the command was asked to do.
     if args.action == "status" and getattr(args, "all", False):
+        if args.path is not None:
+            _resolve(args.path)
         return _docker_status_all()
     paths = _resolve(args.path)
     ex = _docker_executor(paths)
@@ -3008,6 +3070,8 @@ def cmd_docker(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp_config(args: argparse.Namespace) -> int:
+    if getattr(args, "path", None) is not None:
+        _explicit_root(args.path)   # unused here, but a bad one is still refused
     path = driver._write_mcp_config()
     print(path)
     print(path.read_text())
@@ -3049,7 +3113,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="set up a project")
-    p.add_argument("path", nargs="?", help="project directory (default: cwd)")
+    # Its own dest: sharing `path` with the global `--path` let the absent
+    # positional overwrite it with None.
+    p.add_argument("init_path", nargs="?", metavar="path",
+                   help="project directory (default: cwd)")
     p.add_argument("--force", action="store_true", help="overwrite existing config files")
     p.add_argument("--nested", action="store_true",
                    help="allow a project inside another project's directory tree")
