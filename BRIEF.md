@@ -3263,3 +3263,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
    - the manual clear of a cleanup hold;
    - the snapshot.py provider names;
    - the codex sandbox unable to run pytest.
+
+### 2026-10-01 ~05:10 UTC — after /mcp + /compact
+
+- **In flight:** TS Run B, implementer-deep ag-6e59b2 (opus, gemini-advisor), then reviewer + robustness-tester; Q2b tester ag-f4e66c (then implementer-quick + reviewer); snapshot.py comment cleanup, implementer-quick ag-19d3c3 (then reviewer).
+- **R8f (self-compaction) status, checked:** works — events show 2 real compactions (09-24 01:36, 09-27 04:03: 291k→10k, 207k→4.5k) and 1 cancel (09-26). None since the driver restart of 09-29 05:14, because R8f needs ≥300 s with the transcript unchanged and no unseen root results; with a background `wait_for_agents` almost always in flight that quiet window rarely occurs. Not a bug; a possible improvement (compact while blocked in a long wait) is a design proposal for the user, not scheduled.
