@@ -217,3 +217,16 @@ config parsing.
 - **Scope:** this protects against containerised agents. Local agents running
   as the host user are outside that guarantee, as they are for every other
   host-authority file.
+
+## Second attack (ag-6ebca1, 2026-10-01) — decisions
+
+- **Exposure is judged on resolved paths.** Mount sources, the handshake
+  directory and every ancestor are compared after resolving symlinks; a
+  symlink at `<state>/safepoints` or `<slug>` (or anywhere on the path) makes
+  the handshake refuse (`safepoint_exposed` or `safe_point_error`) rather than
+  write through it. Tests: tests/test_cw_attack2.py.
+- **Accepted limitation:** with `/proc` mounted `hidepid=1` (entries listed
+  but unreadable), an unrelated unreadable process makes enumeration unknown
+  and interactive compaction never proceeds. This follows "unknown blocks";
+  documented, not fixed. (`hidepid=2` hides such processes entirely and is
+  unaffected.)
