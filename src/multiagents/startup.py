@@ -162,8 +162,24 @@ class StartupHealth:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise StartupUnavailable(provider) from exc
 
-    def token_for(self, provider: str, run_id: str) -> str:
-        """Recover host authority for an adopted run, never from tree.json."""
+    def holds(self, provider: str, run_id: str, token: str) -> bool | None:
+        """Does `token` still hold its claim? None when that cannot be read.
+
+        A release (`finish`) reports nothing when its write fails; this is
+        how a caller that must not move on before the claim is really gone
+        confirms it (RM-R1c, review ag-598c45)."""
+        try:
+            with self._lock():
+                record = self._read().get(provider)
+                return bool(record) and self._current(record, run_id, token)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def token_for(self, provider: str, run_id: str, strict: bool = False) -> str:
+        """Recover host authority for an adopted run, never from tree.json.
+        "" when the run holds no claim. A storage failure is "" too —
+        unless `strict` (RM-R1e), when it raises: a read that failed is
+        unknown, never "no claim"."""
         try:
             with self._lock():
                 records = self._read()
@@ -179,6 +195,8 @@ class StartupHealth:
                 self._write(records)
                 return run["token"]
         except (OSError, ValueError, KeyError, TypeError):
+            if strict:
+                raise
             return ""
 
     def progress(self, provider: str, run_id: str, token: str) -> bool:

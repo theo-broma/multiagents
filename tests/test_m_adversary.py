@@ -224,18 +224,28 @@ def test_a_stale_reading_does_not_wind_its_provider_down(tmp_path, monkeypatch):
 
 def test_cached_reading_age_is_not_frozen_by_a_backwards_clock_step(tmp_path, monkeypatch):
     # The wall clock steps back 2 h (NTP correction, VM resume) just after a
-    # 3590 s-old full reading was cached. `now - cached_at` is then negative:
-    # the entry counts as inside the 60 s TTL for the next two hours, and its
-    # age gains max(0, negative) = 0. 3000 s later it is still served, still
-    # 3590 s "old", and still vetoes a provider whose real reading is ~6600 s
-    # old.
+    # 3590 s-old full reading was cached. Under RM-R4f the next cache hit sees
+    # `now < last_seen`, invalidates the entry and re-reads in the same call;
+    # the invalidated budget is never returned. The provider's fresh answer
+    # (a real reading ~6600 s old) decides, so acme is no longer vetoed.
     a = Aged(tmp_path, monkeypatch, {**FULL, "stale_seconds": 3590})
     assert a.provider() == "zeta"
 
+    real_read = budget_mod._from_script
+    reads = []
+
+    def second_opinion(*args):
+        reads.append(args)
+        budget = real_read(*args)
+        budget.stale_seconds = 6600      # the honest, older measurement
+        return budget
+
+    monkeypatch.setattr(budget_mod, "_from_script", second_opinion)
     real = time.time
     monkeypatch.setattr(time, "time", lambda: real() - 7200 + 3000)
 
     assert a.provider() == "acme", "the cached reading's age froze after a clock step"
+    assert reads, "a backward clock step did not trigger a re-read"
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ import contextlib
 import hashlib
 import json
 import math
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -375,48 +376,72 @@ def _reading_age_bound_from_layers(project_config: Path | None) -> float:
     return reading_age_bound(merged)
 
 
-def _reading_age(b: Budget, now_: float, cached_at: float | None = None) -> float | None:
+def _reading_age(b: Budget, now_: float, cached_at: float | None = None,
+                 elapsed: float | None = None) -> float | None:
     """A reading's age in seconds (RM-R4b), or None when it carries no age.
 
     The provider's own `stale_seconds` is the authority when it gives one;
     otherwise the optional `read_at` stamp, which is absolute and so grows on
-    its own. A cached reading KEEPS ageing: the time spent in the cache is
-    added to a `stale_seconds` age, and is inside an absolute `read_at` age
-    naturally. Age is never frozen — that is the point.
+    its own. A cached reading KEEPS ageing — age is never frozen; that is
+    the point.
 
     RM-R4d: time going backwards never makes a reading fresher.
 
-    - A cached reading whose wall-clock elapsed has gone NEGATIVE — the clock
-      stepped backwards under it (NTP correction, VM resume) — is expired:
-      its age is past every bound, so routing treats it as unknown. Clamping
-      the negative elapsed to 0 would freeze the age for as long as the
-      clock stays behind, which is the defect; dropping the cache entry to
-      re-read would be worse, for the re-read would come back looking fresh
-      through the very step that makes the bookkeeping untrustworthy.
+    - A cached reading whose wall-clock stamp is now AHEAD of the current
+      one — the clock stepped backwards under it (NTP correction, VM
+      resume) — is expired: its age is past every bound, so routing treats
+      it as unknown. Clamping the negative elapsed to 0 would freeze the age
+      for as long as the clock stays behind, which is the defect; dropping
+      the cache entry to re-read would be worse, for the re-read would come
+      back looking fresh through the very step that makes the bookkeeping
+      untrustworthy.
+    - `elapsed` is the time spent in the cache, accumulated from the wall
+      clock's FORWARD movement alone (review ag-f21a0c). A wall
+      `now_ - cached_at` would shrink on such a step and only catch up
+      afterwards, freezing the age in between; a monotonic clock would not
+      see the synthetic time the tests drive through `time.time` at all.
+      Forward movement has the monotonic properties RM-R4d asks for: the
+      age never decreases and never stops growing while the clock moves.
+      It is added ONCE, on top of the age the reading already had: for an
+      absolute `read_at` the wall elapsed is already inside `now_ -
+      read_at`, so adding it again counted the cached time twice (review
+      ag-f21a0c).
     - A `read_at` more than 300 s in the future is a broken stamp — one sent
       in milliseconds arrives looking years ahead — and expires the reading
       too. Clamping its age to 0 would let a forged stamp stay fresh for
       ever; a little ahead (within the 300 s) is still tolerated, as a
       clock slightly fast has always been.
     """
+    if b.read_at is not None and b.read_at - now_ > 300.0:
+        # RM-R4d: a read_at more than 300 s ahead is a broken stamp — one
+        # sent in milliseconds arrives looking years ahead — and expires the
+        # reading whatever its stale_seconds says. Clamping its age to 0
+        # would let a forged stamp stay fresh for ever; a little ahead
+        # (within the 300 s) is still tolerated, as a clock slightly fast
+        # has always been.
+        return math.inf
+    if cached_at is not None and now_ < cached_at:
+        return math.inf
     if b.stale_seconds is not None:
         age = b.stale_seconds
     elif b.read_at is not None:
-        if b.read_at - now_ > 300.0:
-            return math.inf
+        if cached_at is None:
+            return max(0.0, now_ - b.read_at)
+        if elapsed is not None:
+            # A cache hit: the age the reading already had when it was
+            # cached, grown by the time spent in the cache.
+            return max(0.0, cached_at - b.read_at) + elapsed
         return max(0.0, now_ - b.read_at)
     else:
         return None
-    if cached_at is not None:
-        elapsed = now_ - cached_at
-        if elapsed < 0:
-            return math.inf
-        age += elapsed
-    return age
+    if elapsed is not None:
+        return age + elapsed
+    return age + (now_ - cached_at if cached_at is not None else 0.0)
 
 
 def _apply_reading_age(b: Budget, bound: float, now_: float,
-                       cached_at: float | None = None) -> Budget:
+                       cached_at: float | None = None,
+                       elapsed: float | None = None) -> Budget:
     """Demote a reading older than `bound` to unknown, for routing (RM-R4b).
 
     Applied uniformly to every provider's reading on every retrieval — a
@@ -428,7 +453,7 @@ def _apply_reading_age(b: Budget, bound: float, now_: float,
     authoritative: demoting the WHOLE reading could bypass another window
     that is still genuinely full, which is why RM-R4(a) was withdrawn.
     """
-    age = _reading_age(b, now_, cached_at)
+    age = _reading_age(b, now_, cached_at, elapsed)
     if age is None or b.stale or age <= bound:
         return b
     age_text = (f"{age / 60:.0f} min old" if math.isfinite(age)
@@ -946,7 +971,7 @@ _BUILTIN = {"claude": read_claude, "opencode": read_opencode, "agy": read_agy}
 # Budget is consulted on every spawn for routing. Without a cache that means
 # three subprocesses per agent start, on the event loop.
 _CACHE_TTL = 60.0
-_cache: dict[str, tuple[float, Budget]] = {}
+_cache: dict[str, _CacheEntry] = {}
 
 # What a cached entry was actually read from. A cache hit used to be judged on
 # provider name alone, so a second caller sharing a name with an unrelated
@@ -956,6 +981,42 @@ _cache: dict[str, tuple[float, Budget]] = {}
 # into `_cache`'s value tuple, so the two things a cache hit is judged against
 # — freshness and identity — stay independently checkable.
 _cache_source: dict[str, str] = {}
+
+# RM-R4e: serialises a cache entry's hit updates, so concurrent hits cannot
+# move `seen` backwards or count the same interval twice.
+_cache_lock = threading.Lock()
+
+
+class _CacheEntry:
+    """One cache slot: the raw reading and its own ageing bookkeeping.
+
+    RM-R4d/RM-R4e (reviews ag-f21a0c, ag-53986b): the cache time a hit adds
+    to a reading's age belongs to THIS entry. An age floor keyed by name
+    survived a replacement reading and wrote an old entry's age over a fresh
+    one; held inside the entry it dies with it — a fresh read builds a new
+    one, so the bookkeeping is always synchronised with replacement.
+
+    `elapsed` is accumulated from the wall clock's forward movement only
+    (`seen` is the last wall time a hit was judged at): a plain
+    `now - wall` shrinks when the clock steps back and only catches up
+    afterwards, which freezes the age in between — the thing RM-R4d
+    forbids. Forward movement never goes back and never stops growing
+    while the clock moves, and a hit that observes the clock behind `seen`
+    has caught a backward step: under RM-R4e the entry is permanently
+    expired and dropped.
+    """
+
+    __slots__ = ("wall", "budget", "elapsed", "seen")
+
+    def __init__(self, wall: float, budget: Budget) -> None:
+        self.wall = wall                # the wall stamp the entry was cached under
+        self.budget = budget            # the reader's own RAW budget (R17)
+        self.elapsed = 0.0              # cache time, forward wall movement only
+        self.seen = wall                # last wall time a hit was judged at
+
+    def __iter__(self):
+        """Unpack as the `(wall, budget)` pair the entry replaced."""
+        return iter((self.wall, self.budget))
 
 
 def invalidate_cache() -> None:
@@ -1044,26 +1105,61 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     # with none falls back to reading the layers itself, as the margin does.
     bound = max_reading_age if max_reading_age is not None \
         else _reading_age_bound_from_layers(project_config)
+    hit = None
     if use_cache and not force:
-        cached = _cache.get(name)
-        if (cached and now_ - cached[0] < _CACHE_TTL
-                and _cache_source.get(name) == source):
-            # QF-R1: the margin is re-applied fresh on every retrieval, cache
-            # hit or not — a window's own reset can lapse while the cache
-            # entry is still within `_CACHE_TTL`. The margin-adjusted result
-            # is never itself cached.
-            budget = _apply_reset_margin(cached[1], margin, now_)
-            # RM-R4b: nor does a cached reading stop ageing — the time spent
-            # in the cache counts toward the reading age, so a reading that
-            # was fresh when it was read can still age out before its next
-            # real refresh.
-            budget = _apply_reading_age(budget, bound, now_, cached_at=cached[0])
-            # R16: never hand out the cache's own object — copy with
-            # independent spent/windows dicts so item assignment by a
-            # caller cannot reach the cached entry.  R17: merge the
-            # caller's spent over the reader's (F122), never replace.
-            merged = {**budget.spent, **spent} if spent else dict(budget.spent)
-            return replace(budget, spent=merged, windows=dict(budget.windows))
+        # RM-R4f: the identity check happens first, under the lock. An entry
+        # that is no longer current, or was read for a different config-dir
+        # identity, is an ordinary miss: it is neither returned nor aged.
+        with _cache_lock:
+            raw_entry = _cache.get(name)
+            if isinstance(raw_entry, tuple):
+                # A bare (wall, budget) pair — an old caller or a test that
+                # backdated the entry by writing the shape it knew. It
+                # carries no bookkeeping of its own, so it ages by the wall
+                # clock alone.
+                entry = _CacheEntry(raw_entry[0], raw_entry[1])
+            else:
+                entry = raw_entry
+            if (entry is not None
+                    and now_ - entry.wall < _CACHE_TTL
+                    and _cache_source.get(name) == source):
+                if now_ < entry.seen:
+                    # RM-R4f: this hit has observed the clock BEHIND the
+                    # entry — a backward step. The entry is invalidated and
+                    # the ordinary fetch path runs in this same call,
+                    # whatever the entry's age metadata says: the
+                    # invalidated budget is never returned. (A step that
+                    # lands and recovers entirely between two reads is
+                    # unobservable — the accepted limit.) The fetch itself
+                    # runs outside the lock, below.
+                    if _cache.get(name) is raw_entry:
+                        _cache.pop(name, None)
+                else:
+                    # QF-R1: the margin is re-applied fresh on every
+                    # retrieval, cache hit or not — a window's own reset can
+                    # lapse while the cache entry is still within
+                    # `_CACHE_TTL`. The margin-adjusted result is never
+                    # itself cached.
+                    # RM-R4b/RM-R4d: nor does a cached reading stop ageing —
+                    # the time spent in the cache counts toward the reading
+                    # age, so a reading that was fresh when it was read can
+                    # still age out before its next real refresh. That time
+                    # is this entry's own, accumulated from the wall clock's
+                    # forward movement (see `_CacheEntry`), and it is added
+                    # once, inside `_reading_age`.
+                    entry.elapsed += now_ - entry.seen      # now_ >= seen
+                    entry.seen = now_
+                    hit = _apply_reset_margin(entry.budget, margin, now_)
+                    hit = _apply_reading_age(hit, bound, now_,
+                                             cached_at=entry.wall,
+                                             elapsed=entry.elapsed)
+    if hit is not None:
+        # R16: never hand out the cache's own object — copy with
+        # independent spent/windows dicts so item assignment by a caller
+        # cannot reach the cached entry.  R17: merge the caller's spent over
+        # the reader's (F122), never replace.
+        merged = {**hit.spent, **spent} if spent else dict(hit.spent)
+        return replace(hit, spent=merged, windows=dict(hit.windows))
     try:
         budget = _from_script(name, provider, executor, config_dir, project_config)
         if budget is None:
@@ -1076,12 +1172,12 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     except Exception as exc:              # telemetry must never break a run
         budget = Budget(provider=name, known=False,
                         note=f"{type(exc).__name__}: {exc}")
-    # Cache the reader's own RAW budget BEFORE merging the caller's spent —
-    # the caller's keys are a per-call overlay, not durable state (R17) — and
-    # before the margin is applied, so a later cache hit re-judges the margin
-    # against ITS OWN current clock rather than reusing a stale verdict.
-    _cache[name] = (now_, budget)
-    _cache_source[name] = source
+    # RM-R4f: the replacement budget and its source identity publish
+    # together, under the lock — the fetch above ran outside it, so a
+    # concurrent reader never sees one without the other.
+    with _cache_lock:
+        _cache[name] = _CacheEntry(now_, budget)
+        _cache_source[name] = source
     budget = _apply_reset_margin(budget, margin, now_)
     budget = _apply_reading_age(budget, bound, now_)
     # R16: return a copy so the fresh-read caller cannot poison the cache

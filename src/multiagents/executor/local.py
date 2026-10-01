@@ -78,6 +78,9 @@ class LocalExecutor(Executor):
         """
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "exit_status").unlink(missing_ok=True)
+        # RM-R1c: no predecessor's pid file may speak for this run.
+        (run_dir / "wrapper.pid").unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
         offset = _turn_start(run_dir / "output.ndjson")
         # A plain Popen, not asyncio's: an asyncio subprocess transport kills
         # its process when it is closed or collected, which is at the latest

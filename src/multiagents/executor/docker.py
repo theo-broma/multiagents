@@ -160,14 +160,37 @@ exit 0
 """
 
 
-# SV-R1/R6: is the wrapper whose pid `$0` holds still alive, in the pid
-# namespace it was recorded in? 0 yes, 1 no (no pid, no process, a zombie).
+# SV-R1/R6: is the run whose wrapper pid `$0` holds still alive, in the pid
+# namespace it was recorded in? 0 yes, 1 no, 2 unknown.
+# RM-R1c (review ag-43f57f): "no" must be positive. A missing or malformed
+# `wrapper.pid` is unknown — the wrapper may not have written it yet, and it
+# is removed before every launch, so it never names a predecessor. And a
+# dead wrapper is not a dead run: the agent it started only `setpgrp`s, so
+# it stays in the wrapper's session (the wrapper leads one: `docker exec`
+# makes it so, and the wrapper makes sure). The run is dead only when no
+# live process is left in that session. A /proc that cannot be read, or a
+# process entry that still exists but cannot be read (review ag-598c45), is
+# unknown, never an empty session. "Empty" takes two scans a short gap apart
+# (RM-R1e): a member forking during one scan is a narrowed, accepted limit.
 _ALIVE_SCRIPT = r"""
-w=$(cat "$0" 2>/dev/null); case "$w" in ''|*[!0-9]*) exit 1 ;; esac
-kill -0 "$w" 2>/dev/null || exit 1
-s=$(sed 's/.*) //' "/proc/$w/stat" 2>/dev/null | cut -c1)
-[ "$s" = Z ] || [ "$s" = X ] && exit 1
-exit 0
+w=$(cat "$0" 2>/dev/null); case "$w" in ''|*[!0-9]*) exit 2 ;; esac
+[ -r /proc/self/stat ] || exit 2
+scan() {
+  for f in /proc/[0-9]*/stat; do
+    l=$(cat "$f" 2>/dev/null)
+    if [ -z "$l" ]; then
+      [ -d "${f%/stat}" ] && return 2
+      continue
+    fi
+    set -- $(printf '%s\n' "$l" | sed 's/.*) //')
+    [ "${f%/stat}" = "/proc/$w" ] || [ "$4" = "$w" ] || continue
+    [ "$1" = Z ] || [ "$1" = X ] || return 0
+  done
+  return 1
+}
+scan; r=$?; [ "$r" -ne 1 ] && exit "$r"
+sleep 0.05 2>/dev/null || sleep 1
+scan
 """
 # How long the container may go unanswerable before a wrapper nobody can
 # see is taken for dead: a daemon restart is seconds, a removed container
@@ -2229,7 +2252,7 @@ sys.exit(rc)
             code = _run(argv, timeout=30).returncode
         except (OSError, subprocess.TimeoutExpired):
             return None
-        return {0: True, 1: False}.get(code)
+        return {0: True, 1: False}.get(code)     # 2 and anything else: unknown
 
     def liveness(self, agent_id: str):
         """A `FollowHandle.probe` for a wrapped agent in the container. An
@@ -2416,6 +2439,10 @@ sys.exit(rc)
         base, parts = gitops.beneath(run_dir)
         os.close(gitops._open_beneath(base, parts, create=True))
         gitops._unlink_beneath(base, parts, "exit_status")
+        # RM-R1c: no predecessor's pid file may speak for this run — a
+        # missing one reads as "unknown", a stale one could read as "dead".
+        gitops._unlink_beneath(base, parts, "wrapper.pid")
+        gitops._unlink_beneath(base, parts, pid_file.name)
         offset = _turn_start_beneath(base, parts, "output.ndjson")
         # Entered through `sh`, as every other command here enters the
         # container. The PATH it sees is the host's, carried in `env` for
