@@ -90,10 +90,9 @@ providers:
     # Which model namespaces `refresh-models` records as available.
     #   opencode/*     free zen tier, unmetered
     #   opencode-go/*  the Go subscription
-    # deepinfra/* is deliberately excluded: those bill against a separate
-    # DEEPINFRA_API_KEY rather than the subscription, so listing them would
-    # invite agents onto an account you are not intending to spend from.
-    # Add "deepinfra/*" here if you ever want them back.
+    # deepinfra/* is deliberately excluded here: those models bill against a
+    # separate DEEPINFRA_API_KEY rather than the subscription. They have their
+    # own instance below — see `opencode-deepinfra`.
     models_include:
       - "opencode/*"
       - "opencode-go/*"
@@ -144,6 +143,25 @@ providers:
     models_include: ["zai-coding-plan/*"]
     env:
       MULTIAGENTS_OPENCODE_PLAN: zai-coding-plan
+
+  # DeepInfra models through the same opencode CLI: its own family (DeepInfra
+  # bills real money against its own DEEPINFRA_API_KEY, unrelated to the Go
+  # subscription or the Z.AI plan, so failover to it is never implicit) and
+  # metered billing — every token is a real dollar cost the stream reports.
+  # There is no quota surface to read, so `budget` reports unknown headroom
+  # and never probes anything.
+  #
+  # Ships DISABLED. To enable it, set `enabled: true` for `opencode-deepinfra`
+  # in .multiagents/config/providers.yaml, then run
+  # `multiagents auth login opencode-deepinfra` and choose Deep Infra.
+  opencode-deepinfra:
+    extends: opencode
+    family: opencode-deepinfra
+    enabled: false
+    billing: metered
+    models_include: ["deepinfra/*"]
+    env:
+      MULTIAGENTS_OPENCODE_PLAN: deepinfra
 
   agy:
     bin: agy
