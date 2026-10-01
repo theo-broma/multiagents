@@ -176,3 +176,70 @@ split out of `deepinfra-provider.md` (DI-R5) after the advisor's code check.
 - Caps across projects or accounts.
 - Caps on tokens rather than USD.
 - A strict upper bound on overshoot.
+
+## Amendments after the advisor's second check (2026-10-01, before tests)
+
+These override any earlier wording they contradict.
+
+**SC-R3a: no automatic resume of a capped session.**
+- Deferral with `spend_cap` applies to **fresh starts only**, using the
+  existing deferred-start path.
+- A session stopped by a cap (SC-R4) is **never** re-launched
+  automatically. A `steer_agent`, consult or resume on a session whose
+  model or provider is still capped is refused immediately. The error
+  names:
+  - the cap that binds;
+  - the spend;
+  - the reset time. When several caps bind, it is the latest of their
+    resets.
+- Once every applicable cap permits it, the same `steer_agent` resumes the
+  same node and session, also after a server restart. A node with no
+  captured session id is reported "not resumable", as today.
+- This replaces the "resumed capped session is deferred" bullet in SC-R3.
+
+**SC-R3b: every launch is guarded, not only public admission.**
+- The cap check runs immediately before **every** spawn of a metered
+  provider's CLI. That covers automatic retries, wrap-up turns, fallbacks
+  and deferred restarts. A launch admitted just before a crossing is
+  therefore refused at spawn.
+- Cap edits are seen at the next check. A deferred start whose cap was
+  raised or removed is restarted at the next `wait_for_agents`, before its
+  stored due time.
+
+**SC-R4a: the stop, precisely.**
+- **The verdict.** A cap stop finalises the run as `limited` with
+  `reason: spend_cap` and `until` set to the latest applicable reset. That
+  verdict:
+  - never counts toward failure breakers;
+  - never sets a provider quota cooldown;
+  - never triggers an automatic retry or fallback.
+  The branch and worktree are kept.
+- **Across processes.** The crossing writes a durable stop request scoped to
+  the capped provider or model. Every active run in this project draws on
+  that scope, and every one of them is stopped within 15 s, whichever
+  process (root or nested MCP server) owns it. Each runner acknowledges the
+  stop durably.
+- **A lowered cap.** Lowering a cap below the period's spend stops active
+  runs at their next observed cost event, and refuses new launches.
+- **One event per crossing.** One `spend_cap` event is recorded per
+  (scope, period start, cap value). Simultaneous provider and model
+  crossings give one event each.
+
+**SC-R2a: the ledger's integrity.**
+- **One locked transaction.** Deduplicating, appending, updating the period
+  aggregate and claiming the crossing all happen in one transaction, under
+  an interprocess lock that is stable across processes. The ledger is a
+  dedicated store, never the tree's event log.
+- **Dedup key.** `(provider, session id, step id)`. When a step id is
+  absent, the key is `(agent id, turn, stream position)`. A replay keeps
+  the first observation time.
+- **Ordering.** A charge is committed **before** any replay or adoption
+  checkpoint moves past it.
+- **Torn writes.** A torn last entry is recovered from: it is ignored or
+  completed, and never corrupts earlier entries.
+- **Fail closed, only when a cap is configured.** If a cap applies and the
+  ledger cannot be read or written, launches under that cap are refused
+  with the cause `spend_cap_unreadable`. With no cap configured, ledger
+  errors are reported once and never block anything.
+- **The upgrade.** The ledger's creation time is persisted. Every period
+  that began before it is reported as partial in `budget_status`.
