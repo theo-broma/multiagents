@@ -3233,3 +3233,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **Update.** Opus M ag-cc25b3, review round 1 (ag-43f57f): REJECTED with 6. Death confirmation is not positive (a missing pid file, or a dead wrapper whose child is alive); an in-memory retry hold; recovery probes the wrong executor; adoption's release sequence; a first consult left pending. Steered to ag-cc25b3.
 - **Update.** Opus M review round 2 (ag-598c45) REJECTED it with 3: an EACCES /proc entry taken as gone (P1); _end_hold not confirming the claim release (P2); a hold takeover not rebinding occupancy (P2). Steered to ag-cc25b3.
 - **Update.** PS review round 3 (ag-3644ef) REJECTED it with 7, so PS was escalated to **opus**: ag-57e6fb, with dc8946 and tester e77949 squashed in. **After it merges:** discard ag-dc8946 and ag-e77949.
+- **Update, 01:02 UTC.**
+  - **M:** opus review round 3 (ag-5189c2) REJECTED it with 4. The fork race is accepted as a limit, and durable-write confirmation is required (spec 7dd867e).
+  - **PS:** opus ag-57e6fb failed on the Claude limit (WIP 84bd3c6).
+  - **Both steers were refused** because the Claude session window reset at 01:00 still reads 100%. A wake is armed for 01:05 UTC.
+  - **Next:** steer ag-cc25b3 with the round-3 decisions (they are in the spec), and steer ag-57e6fb with "carry on".
