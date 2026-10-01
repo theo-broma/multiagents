@@ -3338,3 +3338,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - PC tests merged (ag-a76c01: 69 red / 26 green; blocked-head R3a test needs SC → stays red until SC; retry/wrap-up/deferred restarts on full provider uncovered). Waiting: BP r4 reviewer ag-7631f3, CW r10 reviewer ag-c7285d. PC implementation waits for CW merge.
   - BP r4 (ag-7631f3) REJECTED 3 P2 (cache key collision, borrowed snapshot closed by parent, growing cached YAMLError traceback). Steered ag-547be2 for r5.
   - CW r10 (ag-c7285d) REJECTED 2 P2 (no re-check of deadline/transcript after final enumeration; deleted grant never re-issued). Steered ag-647544 r11.
+  - CW r11 ag-647544 done (667065c; 295 CW tests green; suite reds only phase2/SC/BP). Reviewer r11 started.
