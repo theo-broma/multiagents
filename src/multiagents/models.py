@@ -70,7 +70,16 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
 
     def failed(name: str, reason: str) -> None:
         problems[name] = reason
-        old = previous.get(name)
+        # PS-R6: retained entries are kept only while the allowlist still
+        # admits them. A split that narrows a provider's models_include must
+        # not leave a model the provider will refuse sitting in models.yaml
+        # as if it were available. Shape first: a previous catalog can hold
+        # entries that are not model dicts at all, or dicts whose id is not
+        # a string (`id: null`) — either would raise instead of being
+        # dropped (reviews ag-4cdd7b finding 10, ag-2f0d3e finding 10).
+        old = [m for m in previous.get(name, [])
+               if isinstance(m, dict) and isinstance(m.get("id"), str)
+               and provider.allows_model(m["id"])]
         if old:
             models[name] = old
             problems[name] = f"{reason}; kept {len(old)} models from the previous list"
@@ -87,7 +96,8 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
         if provider.models_static:
             models[name] = [
                 m for m in provider.models_static
-                if isinstance(m, dict) and provider.allows_model(m.get("id", ""))
+                if isinstance(m, dict) and isinstance(m.get("id"), str)
+                and provider.allows_model(m["id"])
             ]
             continue
 

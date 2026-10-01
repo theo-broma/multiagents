@@ -219,19 +219,22 @@ def test_concurrent_hits_never_move_seen_backwards(tmp_path, monkeypatch):
     budget = bmod.Budget("acme", known=True, headroom=1.0)
     tmp = Path(tmp_path)
 
+    # Edited by the opus PS run (review ag-e6b702): the cache reads its
+    # clock UNDER `_cache_lock`, so the fake clock may no longer block inside
+    # the read — a barrier there deadlocks against the lock. The two hits are
+    # released together by a barrier BEFORE either takes the lock, and each
+    # thread's first clock read returns its own wall; which one reaches the
+    # lock first is still left to the race, and the property is unchanged.
     for _ in range(100):
         walls: dict[int, float] = {}
         barrier = threading.Barrier(2, timeout=10)
-        calls = {"n": 0}
-        lock = threading.Lock()
+        first_read: set[int] = set()
 
         def fake_time():
-            with lock:
-                calls["n"] += 1
-                which = calls["n"]
-            if which <= 2:
-                barrier.wait()
-                return walls[threading.get_ident()]
+            ident = threading.get_ident()
+            if ident in walls and ident not in first_read:
+                first_read.add(ident)
+                return walls[ident]
             return real_time()
 
         monkeypatch.setattr(bmod.time, "time", fake_time)
@@ -242,6 +245,7 @@ def test_concurrent_hits_never_move_seen_backwards(tmp_path, monkeypatch):
         def hit(late: bool):
             ident = threading.get_ident()
             walls[ident] = t0 + 30 if late else t0 + 20
+            barrier.wait()
             bmod.read_provider("acme", object(), None, tmp,
                                max_reading_age=3600.0)
 

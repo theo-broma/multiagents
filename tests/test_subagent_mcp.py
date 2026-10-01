@@ -255,9 +255,12 @@ class Project:
         cfg = self.root / ".multiagents" / "config"
         cfg.mkdir(parents=True, exist_ok=True)
         # Only the binary changes: the shipped block, its script, and anything
-        # this work adds to either are what is under test.
+        # this work adds to either are what is under test. The placeholder
+        # model "m" is outside the shipped allowlists (PS-R6/PS-R8b), so the
+        # override opens the allowlist; these tests are not about routing.
         (cfg / "providers.yaml").write_text(yaml.safe_dump(
-            {"providers": {provider: {"bin": str(self.fake)}}}))
+            {"providers": {provider: {"bin": str(self.fake),
+                                      "models_include": ["*"]}}}))
         project: dict = {"team": ""}
         if executor == "docker":
             project["executor"] = {"kind": "docker", "docker": {"network": "bridge"}}

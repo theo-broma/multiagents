@@ -94,6 +94,7 @@ def test_rf_r3_r1_adopted_opencode_filter_without_exit_status_is_refused(
     agents = yaml.safe_load(agents_path.read_text())
     for agent in agents["agents"].values():
         agent["provider"] = "opencode"
+        agent["model"] = "opencode/m"
     agents_path.write_text(yaml.safe_dump(agents))
 
     steps = [["touch", str(p.marker("started"))],

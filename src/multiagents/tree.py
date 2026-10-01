@@ -313,6 +313,78 @@ _node_from_raw = node_from_raw
 TREE_MAX_BYTES = 256 * 1024 * 1024
 
 
+
+# PS-R4/R4a/R4b: a provider's cooldown record is a COMPOSITE when it holds an
+# authentication block. Stored on it:
+# - `auth`: one block per execution context (`{context: {until, reason}}`).
+#   The host's login and the container's are different credentials, so a
+#   failure in one never replaces, and a recovery in one never clears, the
+#   other's block;
+# - `also_quota`: the one non-auth block (quota, provider_down, family) the
+#   provider is cooling on as well. It coexists with the auth blocks instead
+#   of overwriting them or being overwritten by them, and is what remains
+#   when they are recovered.
+# The top-level fields every reader already understands (`until`, `reason`,
+# `cause`, `needs_login`, `context`) are DERIVED from those two, by
+# `_compose_cooldown`, on every read: a live auth block wins (the latest
+# expiry among them), then a live non-auth block, then the latest expired
+# auth block — so an auth block that lapsed under a live quota cooldown
+# reads as the quota cooldown, and comes back as the auth block once the
+# quota one is over, for the half-open probe to check.
+# A record with no auth block is the plain record it always was.
+
+def _split_cooldown(record: dict | None) -> tuple[dict[str, dict], dict | None]:
+    """`(auth blocks by context, the non-auth block)` of a cooldown record of
+    any shape: composite, a single auth record from before contexts, or
+    plain."""
+    if not record:
+        return {}, None
+    if "auth" in record:
+        return dict(record["auth"]), record.get("also_quota")
+    if record.get("cause") == "auth":
+        return ({record.get("context", ""): {"until": record.get("until", 0),
+                                             "reason": record.get("reason", "")}},
+                record.get("also_quota"))
+    return {}, dict(record)
+
+
+def _compose_cooldown(auth: dict[str, dict], other: dict | None,
+                      moment: float) -> dict | None:
+    """The record for these parts, with its derived top-level fields; None
+    when nothing is left. Expired parts are pruned, except the latest auth
+    block while no auth block is live — it is still owed a probe."""
+    if other is not None and other.get("until", 0) <= moment:
+        other = None
+    if not auth:
+        return dict(other) if other else None
+    live = {c: b for c, b in auth.items() if b.get("until", 0) > moment}
+    if not live:
+        latest = max(auth, key=lambda c: auth[c].get("until", 0))
+        auth = {latest: auth[latest]}
+    else:
+        auth = live
+    record: dict = {"auth": auth}
+    if other:
+        record["also_quota"] = dict(other)
+    if live or not other:
+        context = max(auth, key=lambda c: auth[c].get("until", 0))
+        record.update(until=auth[context].get("until", 0),
+                      reason=auth[context].get("reason", ""),
+                      needs_login=True, cause="auth", context=context)
+    else:
+        record.update({key: other[key] for key in ("until", "reason", "cause")
+                       if key in other})
+    return record
+
+
+def _put_cooldown(cooldowns: dict, provider: str, auth: dict[str, dict],
+                  other: dict | None, moment: float) -> None:
+    record = _compose_cooldown(auth, other, moment)
+    if record is None:
+        cooldowns.pop(provider, None)
+    else:
+        cooldowns[provider] = record
+
 class Tree:
     """Read/modify/write access to ``tree.json`` under an exclusive lock."""
 
@@ -384,6 +456,13 @@ class Tree:
         data.setdefault("pause", {})
         data.setdefault("provider_health", {})
         data.setdefault("cooldowns", {})
+        # PS-R4: composite records re-derive their head against the clock.
+        moment = now()
+        for provider, record in list(data["cooldowns"].items()):
+            if isinstance(record, dict) and ("auth" in record
+                                             or record.get("cause") == "auth"):
+                _put_cooldown(data["cooldowns"], provider,
+                              *_split_cooldown(record), moment)
         data.setdefault("questions", [])
         data.setdefault("tickets", [])
         return data
@@ -946,8 +1025,12 @@ class Tree:
     # spawn into it is the failure worth preventing.
 
     def note_run_outcome(self, provider: str, ok: bool, threshold: int = 3,
-                         reason: str = "", kind: str = "") -> dict | None:
-        """Record how a run ended. Returns trip details when the breaker opens."""
+                         reason: str = "", kind: str = "",
+                         context: str = "") -> dict | None:
+        """Record how a run ended. Returns trip details when the breaker opens.
+
+        `context` is the execution context the run used (PS-R4b): a success
+        proves that login, and only that one."""
         if not provider:
             return None
         with self.transaction() as data:
@@ -963,7 +1046,15 @@ class Tree:
                 # The health record is not what routing reads. Leaving the
                 # cooldown behind kept a working provider out of the pool for
                 # the rest of its penalty box.
-                data["cooldowns"].pop(provider, None)
+                auth, other = _split_cooldown(data["cooldowns"].get(provider))
+                if not auth:
+                    data["cooldowns"].pop(provider, None)
+                else:
+                    # PS-R4a/R4b: the run proves the login of its own
+                    # context. Blocks from other contexts, and the non-auth
+                    # block preserved beside them, stay.
+                    auth.pop(context, None)
+                    _put_cooldown(data["cooldowns"], provider, auth, other, now())
                 return None
             health["consecutive_failures"] += 1
             health["last_reason"] = reason[:200]
@@ -1215,22 +1306,36 @@ class Tree:
             return len(data["deferred"]) < before
 
     def set_cooldown(self, provider: str, until: float, reason: str,
-                     needs_login: bool = False, cause: str | None = None) -> None:
+                     needs_login: bool = False, cause: str | None = None,
+                     context: str = "", also_quota: dict | None = None) -> None:
+        """Cool `provider` until `until`.
+
+        An authentication block (`cause="auth"` or `needs_login`) is written
+        for its execution `context` beside any others (see `_compose_cooldown`);
+        `also_quota` sets the non-auth block it coexists with. Any other block
+        is the provider's non-auth block: it replaces the previous one, and
+        never an authentication block (PS-R4a) — a quota or provider_down
+        write that landed on a live auth block used to erase it, reopening a
+        provider whose login was still broken."""
+        if needs_login or cause == "auth":
+            with self.transaction() as data:
+                auth, other = _split_cooldown(data["cooldowns"].get(provider))
+                auth[context] = {"until": until, "reason": reason}
+                _put_cooldown(data["cooldowns"], provider, auth,
+                              dict(also_quota) if also_quota else other, now())
+            self.emit("-", "cooldown", provider=provider, until=until,
+                      reason=reason, needs_login=True)
+            return
         record = {"until": until, "reason": reason}
-        if needs_login:
-            # Recorded because it changes what recovery means. A rate limit
-            # heals by waiting; a revoked token never does, and the trial that
-            # tests it should be the provider's own `check`, not somebody's
-            # agent run.
-            record["needs_login"] = True
         if cause is not None:
             # See `pause`'s cause note — same taxonomy, same "no cause means
             # not quota" rule.
             record["cause"] = cause
         with self.transaction() as data:
-            data["cooldowns"][provider] = record
+            auth, _ = _split_cooldown(data["cooldowns"].get(provider))
+            _put_cooldown(data["cooldowns"], provider, auth, record, now())
         self.emit("-", "cooldown", provider=provider, until=until, reason=reason,
-                  needs_login=needs_login)
+                  needs_login=False)
 
     def clear_cooldown(self, provider: str) -> bool:
         """Let a provider back in early, because it demonstrably works.
@@ -1245,6 +1350,59 @@ class Tree:
         if gone:
             self.emit("-", "cooldown_cleared", provider=provider)
         return gone
+
+    def block_auth(self, reasons: dict[str, str], until: float, context: str,
+                   supersedes: set[str] | frozenset[str] = frozenset()) -> None:
+        """PS-R4: mark each member of `reasons` unauthenticated in `context`,
+        in ONE transaction for the whole credential group.
+
+        Each member keeps its blocks from other contexts and its non-auth
+        block. `supersedes` names contexts this one replaces — the blocks
+        written before contexts were recorded belong to the default one."""
+        with self.transaction() as data:
+            moment = now()
+            for member, reason in reasons.items():
+                auth, other = _split_cooldown(data["cooldowns"].get(member))
+                for old in supersedes:
+                    auth.pop(old, None)
+                auth[context] = {"until": until, "reason": reason}
+                _put_cooldown(data["cooldowns"], member, auth, other, moment)
+        for member, reason in reasons.items():
+            self.emit("-", "cooldown", provider=member, until=until,
+                      reason=reason, needs_login=True)
+
+    def clear_auth(self, members: list[str] | tuple[str, ...],
+                   contexts: set[str] | frozenset[str]) -> dict[str, dict]:
+        """PS-R4a/R4b: lift the members' authentication blocks observed in
+        `contexts`, and nothing else, in ONE transaction. Returns `{member:
+        its record before}` for each member that had one lifted.
+
+        Judged on the live record: blocks from other contexts stay, and the
+        non-auth block — a quota cooldown, even one that landed while the
+        check ran — is what the member is left with, until its own expiry."""
+        removed: dict[str, dict] = {}
+        with self.transaction() as data:
+            moment = now()
+            for member in members:
+                record = data["cooldowns"].get(member)
+                auth, other = _split_cooldown(record)
+                if not any(context in auth for context in contexts):
+                    continue
+                removed[member] = record
+                for context in contexts:
+                    auth.pop(context, None)
+                _put_cooldown(data["cooldowns"], member, auth, other, moment)
+        for member in removed:
+            self.emit("-", "cooldown_cleared", provider=member)
+        return removed
+
+    def clear_cooldown_restoring(self, provider: str, cause: str | None = None,
+                                 context: str | None = None) -> dict | None:
+        """`clear_auth` for one provider and context: its record before, or
+        None when it held no such block."""
+        if cause not in (None, "auth"):
+            return None
+        return self.clear_auth([provider], {context or ""}).get(provider)
 
     def cooldown(self, provider: str) -> dict | None:
         entry = self.read()["cooldowns"].get(provider)
@@ -1265,10 +1423,13 @@ class Tree:
         """
         cleared: dict[str, Any] = {"cooldowns": [], "pause": False}
         with self.transaction() as data:
+            moment = now()
             for provider in list(data["cooldowns"]):
-                entry = data["cooldowns"][provider]
-                if provider in usable and entry.get("cause") == "quota":
-                    del data["cooldowns"][provider]
+                auth, other = _split_cooldown(data["cooldowns"][provider])
+                if provider in usable and (other or {}).get("cause") == "quota":
+                    # PS-R4a: only the quota block; an auth block beside it
+                    # is not quota's to lift.
+                    _put_cooldown(data["cooldowns"], provider, auth, None, moment)
                     cleared["cooldowns"].append(provider)
             pause = data.get("pause") or {}
             if (pause.get("cause") == "quota" and pause.get("providers")

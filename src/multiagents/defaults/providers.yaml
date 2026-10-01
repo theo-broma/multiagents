@@ -20,6 +20,28 @@
 # ALWAYS use the streaming output format, never a single-shot JSON result.
 # Live status, silence detection and doom-loop detection all read this stream;
 # a CLI that only reports at exit is a black box for its whole lifetime.
+#
+# Sharing tooling between providers (PS-R1/R5). Three keys let providers share
+# one CLI's plumbing while keeping their own models and their own quota:
+#   auth_from: <provider>    borrow that provider's credentials everywhere:
+#                            its check, its login, its container profile and
+#                            its refresh, and its `env:` (overlaid with this
+#                            block's own). One level only: the owner may
+#                            not itself declare `auth_from`.
+#   budget_from: <provider>  read this provider's quota from that provider's
+#                            budget source — the payload is fetched once per
+#                            cache period and shared. One level only, too.
+#   budget_windows: [globs]  which windows of a budget payload COUNT for this
+#                            provider (glob over the window keys, e.g.
+#                            "gemini*"). Allowed on any provider; on the
+#                            quota source it restricts the source too. Absent,
+#                            the payload's own `counted` flags stand.
+# An existing install adopts the split without touching its overrides: add a
+# block like the `agy-partner` example below, whose `extends:` copies the
+# integration and whose `family:` keeps it out of agy's failover set.
+# The split lives in the shipped defaults; a global or project override that
+# does not name these keys keeps them from the defaults (provider blocks
+# deep-merge), and one that replaces `models_include:` replaces it outright.
 
 providers:
 
@@ -253,6 +275,15 @@ providers:
       - ".gemini"
     models_cmd: ["agy", "models"]
     models_parse: tsv
+    # PS-R8/R8a: agy bills two pools from one binary, and only the Gemini one
+    # is this provider's. The allowlist keeps its catalog to the models it
+    # actually spends against; `budget_windows` keeps its headroom to the
+    # windows that bill it. The Claude/GPT buckets stay in the reading,
+    # marked `counted: false`, for agy-partner to claim.
+    models_include:
+      - "gemini-*"
+    budget_windows:
+      - "gemini*"
     home_links:
       # State and conversation history.
       - ".gemini/antigravity-cli"
@@ -296,6 +327,29 @@ providers:
         - match: {event: "init"}
           as: step
           fields: {}
+
+  # PS-R8: agy's OTHER pool, as its own provider. Same CLI, same login, same
+  # budget script — `extends:` copies the integration, `auth_from:` shares the
+  # credentials, `budget_from:` shares the quota reading — but its own family
+  # (failover between the two is never implicit), its own allowlist and its
+  # own `budget_windows`, so each is constrained only by the windows that
+  # actually bill it. A full partner bucket leaves agy usable, and a full
+  # Gemini bucket leaves the partner usable. Nothing routes here until an
+  # agent names one of its models.
+  #
+  # No `notes:` of its own on purpose: the inherited agy notes describe the
+  # Gemini pool and would be wrong here. Document the split in comments, and
+  # let the budget reading's generic note stand in for one.
+  agy-partner:
+    extends: agy
+    family: agy-partner
+    auth_from: agy
+    budget_from: agy
+    models_include:
+      - "claude-*"
+      - "gpt-*"
+    budget_windows:
+      - "3p-*"
 
   # Claude Code as a full provider: orchestrator AND delegate.
   claude:
