@@ -207,12 +207,13 @@ def test_p0_r8c_1_no_reading_never_compacts(loop, why):
 
 
 @pytest.mark.parametrize("status", ["pending", "running", "stuck"])
-def test_p0_r8c_1_a_live_agent_blocks_it(loop, status):
+def test_p0_r8c_1_cw_r1_a_live_agent_does_not_block_it(loop, status):
+    """CW-R1: an active node no longer prevents the compaction."""
     lp = loop()
     lp.reading(OVER)
     lp.node(status)
-    lp.run([productive()], max_turns=2)
-    assert COMPACT not in lp.actions(), f"compacted with a {status} agent in the tree"
+    lp.run([productive()], max_turns=1)
+    assert lp.actions() == [LAUNCH, COMPACT], f"not compacted with a {status} agent"
 
 
 @pytest.mark.parametrize("status", ["done", "merged", "failed", "killed"])
@@ -234,21 +235,20 @@ def test_p0_r8c_1_driver_roles_do_not_count_as_live(loop):
     assert lp.actions() == [LAUNCH, COMPACT]
 
 
-def test_p0_r8c_1_a_deferred_task_blocks_it(loop):
+def test_p0_r8c_1_cw_r1_a_deferred_task_does_not_block_it(loop):
     lp = loop()
     lp.reading(OVER)
     lp.tree.defer({"agent": "coder", "task": "later"}, tree_now() + 3600, "quota")
-    lp.run([productive()], max_turns=2)
-    assert COMPACT not in lp.actions()
+    lp.run([productive()], max_turns=1)
+    assert lp.actions() == [LAUNCH, COMPACT]
 
 
-def test_p0_r8c_1_a_deferred_task_that_is_already_due_still_blocks_it(loop):
-    """"no deferred task queued" — due or not, it is queued."""
+def test_p0_r8c_1_cw_r1_a_deferred_task_that_is_already_due_does_not_block_it(loop):
     lp = loop()
     lp.reading(OVER)
     lp.tree.defer({"agent": "coder", "task": "now"}, tree_now() - 10, "quota")
     lp.run([productive()], max_turns=1)
-    assert COMPACT not in lp.actions()
+    assert lp.actions() == [LAUNCH, COMPACT]
 
 
 def test_p0_r8c_1_never_after_a_failed_turn(loop):
@@ -276,9 +276,9 @@ def test_p0_r8c_1_never_after_a_limited_turn(loop):
     assert lp.actions() == [LAUNCH]
 
 
-def test_p0_r8c_1_a_live_agent_finished_by_a_later_turn_then_compacts(loop, monkeypatch):
-    """The idle-tree condition is read after each turn, not once per run: the
-    agent that blocked turn 1's compaction finishes during turn 2."""
+def test_p0_r8c_1_cw_r1_a_live_agent_finished_by_a_later_turn_changes_nothing(loop, monkeypatch):
+    """CW-R1: the agent no longer blocks turn 1's compaction, so it compacts
+    after both turns, whether or not the agent finishes during turn 2."""
     lp = loop()
     lp.reading(OVER)
     lp.node("running")
@@ -295,7 +295,7 @@ def test_p0_r8c_1_a_live_agent_finished_by_a_later_turn_then_compacts(loop, monk
 
     monkeypatch.setattr(driver.subprocess, "Popen", popen)
     lp.run([productive()], max_turns=2)
-    assert lp.actions() == [LAUNCH, LAUNCH, COMPACT]
+    assert lp.actions() == [LAUNCH, COMPACT, LAUNCH, COMPACT]
 
 
 def _finish(tree: Tree, node_id: str) -> None:
