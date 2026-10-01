@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 import re
 import sys
+import time as _real_time
 from pathlib import Path
 
 import pytest
@@ -434,7 +435,7 @@ def test_p0_r8f_20_an_explicit_min_runtime_is_honoured(session):
 def test_p0_r8f_20_a_malformed_min_runtime_is_the_default_60s(session, value):
     """With restart_on_crash on, a crash well inside the default 60 s is the
     same fault read again: not retried, the run ends with 1. (`inf` agrees with
-    the default here; the slow test below is the one that tells them apart.)"""
+    the default here; the test below is the one that tells them apart.)"""
     s = _crash_session(session, value)
     code, out = _run(s, [{"exit": 1}, {"exit": 0}])
     assert len(s.calls("launch")) == 1, (
@@ -443,12 +444,39 @@ def test_p0_r8f_20_a_malformed_min_runtime_is_the_default_60s(session, value):
     assert code == 1, out
 
 
-def test_p0_r8f_20_an_inf_min_runtime_still_retries_a_crash_past_60s(session):
-    """Slow (about 61 s): the only way to tell `inf` from the default is a
-    crash after more than 60 s, which the default retries and `inf` never
-    would."""
+class _LaterTime:
+    """The `time` module as the driver sees it, with a monotonic clock that a
+    test moves on. Everything else is the real module."""
+
+    def __init__(self):
+        self.skew = 0.0
+
+    def monotonic(self) -> float:
+        return _real_time.monotonic() + self.skew
+
+    def __getattr__(self, name):
+        return getattr(_real_time, name)
+
+
+def test_p0_r8f_20_an_inf_min_runtime_still_retries_a_crash_past_60s(session, monkeypatch):
+    """The only way to tell `inf` from the default is a crash after more than
+    60 s, which the default retries and `inf` never would.
+
+    TS-R2: the child really lives 1.5 s, and the driver's monotonic clock is
+    moved on 60 s as each attached run returns, so the driver measures about
+    61.5 s for it. The 60 s compared against is still the shipped default."""
+    clock = _LaterTime()
+    monkeypatch.setattr(driver, "time", clock)
+    attached = driver._run_attached
+
+    def ran_a_minute_longer(*args, **kwargs):
+        code = attached(*args, **kwargs)
+        clock.skew += 60
+        return code
+
+    monkeypatch.setattr(driver, "_run_attached", ran_a_minute_longer)
     s = _crash_session(session, float("inf"))
-    code, out = _run(s, [{"life": 61, "exit": 1}, {"exit": 0}])
+    code, out = _run(s, [{"life": 1.5, "exit": 1}, {"exit": 0}])
     assert len(s.calls("launch")) == 2, (
         f"a crash after 61s was not retried with restart_min_runtime_seconds "
         f"= inf ({s.seq()}):\n{out}")

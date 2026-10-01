@@ -1,0 +1,184 @@
+### A consult lock-wait result loses its keys
+  KILLED    test_consult_fresh_worktree.py::test_decided_lock_wait_timeout_result_carries_every_key
+     E   AssertionError: lock-wait timeout result lacks ['agent_id', 'base_commit', 'behind', 'commit', 'turn']: {'agent': 'advisor', 'error': "'advisor' was still answering another consult after 2s; this one did not run"}
+     worktree.py:959: AssertionError: lock-wait timeout result lacks ['agent_id', 'base_commit', 'behind', 'commit', 'turn']: {'agent': 'advisor', 'error': "'advisor' was still answering another consult after 2s; this one did not run"}
+1 failed in 3.28s
+### B inf min-runtime taken as given (no default fallback)
+  KILLED    test_phase0_r8f_leftovers.py::test_p0_r8f_20_an_inf_min_runtime_still_retries_a_crash_past_60s
+     E   AssertionError: a crash after 61s was not retried with restart_min_runtime_seconds = inf (['launch']):
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_phase0_r8f_leftovers.py:480: AssertionError: a crash after 61s was not retried with restart_min_runtime_seconds = inf (['launch']):
+1 failed in 2.57s
+### C2 linger default 30 s instead of 60 s
+  KILLED    test_d2_view.py::test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal
+     E   AssertionError: lingered 30.2s, TM-R3 says about 60 s
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d2_view.py:395: AssertionError: lingered 30.2s, TM-R3 says about 60 s
+1 failed in 0.32s
+### C3 truncation fingerprint not checked
+  KILLED    test_d2_adversary.py::test_follower_drops_lines_when_file_grows_after_truncation
+     E   AssertionError: Truncation was not detected because the file grew larger than its previous size
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d2_adversary.py:98: AssertionError: Truncation was not detected because the file grew larger than its previous size
+1 failed in 1.29s
+### D3 trip provenance read from the config as it is now
+  KILLED    test_d1_review_findings.py::test_d1_f8_provenance_is_captured_at_launch_not_read_from_current_yaml[timeout]
+  KILLED    test_d1_review_findings.py::test_d1_f8_provenance_is_captured_at_launch_not_read_from_current_yaml[silence_timeout]
+     E   AssertionError: {'layer': 'builtin', 'file': None, 'line': None, 'override_file': '/var/tmp/ag-6e59b2-mut/popen-gw1/test_d1_f8_provenance_is_captu0/project/.multiagents/config/agents.yaml', ...}
+     sts/test_d1_review_findings.py:372: AssertionError: {'layer': 'builtin', 'file': None, 'line': None, 'override_file': '/var/tmp/ag-6e59b2-mut/popen-gw1/test_d1_f8_provenance_is_captu0/project/.multiagents/config/agents.yaml', ...}
+     E   AssertionError: {'layer': 'builtin', 'file': None, 'line': None, 'override_file': '/var/tmp/ag-6e59b2-mut/popen-gw0/test_d1_f8_provenance_is_captu0/project/.multiagents/config/agents.yaml', ...}
+     sts/test_d1_review_findings.py:372: AssertionError: {'layer': 'builtin', 'file': None, 'line': None, 'override_file': '/var/tmp/ag-6e59b2-mut/popen-gw0/test_d1_f8_provenance_is_captu0/project/.multiagents/config/agents.yaml', ...}
+2 failed in 4.91s
+### D4 adopted run's limits read from tree.json
+  KILLED    test_d1_adversary.py::test_adv_adopted_run_provenance_is_not_taken_from_container_writable_tree_json
+     E   AssertionError: {'file': '/forged/elsewhere.yaml', 'layer': 'agent', 'line': 999}
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_adversary.py:256: AssertionError: {'file': '/forged/elsewhere.yaml', 'layer': 'agent', 'line': 999}
+1 failed in 5.54s
+### D5 steer's recorded call timeout read from tree.json
+  KILLED    test_d1_adversary_followup.py::test_d1_finding8_steer_keeps_original_call_value_despite_forged_tree
+  KILLED    test_d1_adversary_followup.py::test_d1_finding8_deleted_host_record_falls_back_to_current_config
+     E   AssertionError: No trips! steered={'agent_id': 'ag-8b0d0c', 'steered': True, 'status': 'running', 'confirmed': True}, stuck events=[]
+     a/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_adversary_followup.py:103: AssertionError: No trips! steered={'agent_id': 'ag-8b0d0c', 'steered': True, 'status': 'running', 'confirmed': True}, stuck events=[]
+     E   AssertionError: No trips! steered={'agent_id': 'ag-27142a', 'steered': True, 'status': 'running', 'confirmed': True}
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_adversary_followup.py:160: AssertionError: No trips! steered={'agent_id': 'ag-27142a', 'steered': True, 'status': 'running', 'confirmed': True}
+2 failed in 4.19s
+### D6 steer forgets the call timeout
+  KILLED    test_h4_h14_routing_limits.py::test_lm_r1b_steer_keeps_original_call_timeout
+     E   AssertionError: []
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_h4_h14_routing_limits.py:394: AssertionError: []
+1 failed in 4.04s
+### D7 notice mirror written after the state lock is released
+  KILLED    test_d1_adversary.py::test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice
+     E   AssertionError: a cleared notice is shown as active: [{'level': 'warn', 'kind': 'limit', 'text': 'limit: limits.max_concurrent = 1 — refused.', 'detail': '1 time(s) since 08:26:59'}]
+     39ff1/ag-6e59b2/tests/test_d1_adversary.py:218: AssertionError: a cleared notice is shown as active: [{'level': 'warn', 'kind': 'limit', 'text': 'limit: limits.max_concurrent = 1 — refused.', 'detail': '1 time(s) since 08:26:59'}]
+1 failed in 0.53s
+### D8 occupancy ignores a sibling that already ended
+  KILLED    test_d1_adversary.py::test_adv_oom_sibling_that_ended_before_the_kill_is_still_a_sibling
+     E   AssertionError: {'t': 1790836023.7236915, 'agent': 'ag-169d6e', 'kind': 'limit_hit', 'key': 'executor.docker.memory', ...}
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_adversary.py:69: AssertionError: {'t': 1790836023.7236915, 'agent': 'ag-169d6e', 'kind': 'limit_hit', 'key': 'executor.docker.memory', ...}
+1 failed in 3.76s
+### D9 occupancy ignores a live sibling
+  KILLED    test_d1_review_findings.py::test_d1_f1_oom_increase_with_a_sibling_in_another_runner_is_kill_uncertain
+     E   AssertionError: {'t': 1790836026.1908684, 'agent': 'ag-b5ff95', 'kind': 'limit_hit', 'key': 'executor.docker.memory', ...}
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_review_findings.py:132: AssertionError: {'t': 1790836026.1908684, 'agent': 'ag-b5ff95', 'kind': 'limit_hit', 'key': 'executor.docker.memory', ...}
+1 failed in 3.91s
+### D1 wall-clock timeout never trips
+  KILLED    test_d1_limit_notices.py::test_ln_c1_ln_c2_ln_c6_agent_watchdog_source[timeout-timeout]
+  KILLED    test_d1_limit_notices.py::test_ln_c1_ln_c6_project_watchdog_rows[limits.default_timeout-default_timeout]
+  KILLED    test_d1_limit_notices.py::test_ln_c2_call_timeout_overrides_agent_and_project_source
+  KILLED    test_d1_review_findings.py::test_d1_f8_provenance_is_captured_at_launch_not_read_from_current_yaml[timeout]
+  KILLED    test_d1_adversary.py::test_adv_adopted_run_provenance_is_not_taken_from_container_writable_tree_json
+  KILLED    test_d1_adversary_followup.py::test_d1_finding8_steer_keeps_original_call_value_despite_forged_tree
+  KILLED    test_d1_adversary_followup.py::test_d1_finding8_deleted_host_record_falls_back_to_current_config
+  KILLED    test_h4_h14_routing_limits.py::test_lm_r1_project_timeout_is_enforced_on_start
+  KILLED    test_h4_h14_routing_limits.py::test_lm_r1b_consult_uses_project_timeout
+  KILLED    test_h4_h14_routing_limits.py::test_lm_r1b_steer_keeps_original_call_timeout
+  KILLED    test_phase0_watchdog.py::test_p0_r2_9_a_failing_poll_is_recorded_and_the_next_poll_runs
+  KILLED    test_phase0_watchdog.py::test_p0_r2_1_and_r2_5_timeout_after_loop_is_a_second_stuck_event
+  KILLED    test_phase0_watchdog.py::test_p0_r2_9_wall_timeout_reaches_the_tree
+     E   AssertionError: []
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_h4_h14_routing_limits.py:238: AssertionError: []
+     E   AssertionError: ('limits.default_timeout', [])
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_limit_notices.py:79: AssertionError: ('limits.default_timeout', [])
+     E   AssertionError: ('limits.default_timeout', [])
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_limit_notices.py:79: AssertionError: ('limits.default_timeout', [])
+     E   AssertionError: ('agents.worker.timeout', [])
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_limit_notices.py:79: AssertionError: ('agents.worker.timeout', [])
+     E   AssertionError: No trips! steered={'agent_id': 'ag-5189e7', 'steered': True, 'status': 'running', 'confirmed': True}, stuck events=[]
+     a/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_adversary_followup.py:103: AssertionError: No trips! steered={'agent_id': 'ag-5189e7', 'steered': True, 'status': 'running', 'confirmed': True}, stuck events=[]
+     E   AssertionError: No trips! steered={'agent_id': 'ag-c0c254', 'steered': True, 'status': 'running', 'confirmed': True}
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_adversary_followup.py:160: AssertionError: No trips! steered={'agent_id': 'ag-c0c254', 'steered': True, 'status': 'running', 'confirmed': True}
+     E   AssertionError: ('agents.worker.timeout', [])
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_limit_notices.py:79: AssertionError: ('agents.worker.timeout', [])
+     E   AssertionError: []
+13 failed in 12.87s
+### D2 silence never trips
+  KILLED    test_d1_limit_notices.py::test_ln_c1_ln_c2_ln_c6_agent_watchdog_source[silence_timeout-silence_timeout]
+  KILLED    test_d1_limit_notices.py::test_ln_c1_ln_c6_project_watchdog_rows[limits.silence_timeout-silence_timeout]
+  KILLED    test_d1_review_findings.py::test_d1_f8_provenance_is_captured_at_launch_not_read_from_current_yaml[silence_timeout]
+  KILLED    test_h4_h14_routing_limits.py::test_lm_r1_project_silence_timeout_is_enforced_on_start
+     E   assert False
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_h4_h14_routing_limits.py:250: assert False
+     E   AssertionError: ('limits.silence_timeout', [])
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_limit_notices.py:79: AssertionError: ('limits.silence_timeout', [])
+     E   AssertionError: ('agents.worker.silence_timeout', [])
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d1_limit_notices.py:79: AssertionError: ('agents.worker.silence_timeout', [])
+4 failed in 5.04s
+### E1 a failing poll ends the watch loop
+  KILLED    test_phase0_watchdog.py::test_p0_r2_9_a_failing_poll_is_recorded_and_the_next_poll_runs
+     E   AssertionError: the failed poll is recorded as an event
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_phase0_watchdog.py:469: AssertionError: the failed poll is recorded as an event
+1 failed in 3.91s
+### E2 timeout re-reported on every poll
+  KILLED    test_phase0_watchdog.py::test_p0_r2_8_idle_polls_after_a_terminal_trip_write_nothing
+     E   AssertionError: idle polls appended to the events log
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_phase0_watchdog.py:490: AssertionError: idle polls appended to the events log
+1 failed in 3.86s
+### E3 a steered turn inherits the tripped wall clock
+  KILLED    test_phase0_watchdog.py::test_p0_r2_7_steer_starts_a_fresh_watchdog_timeout
+     E   AssertionError: assert ['timeout'] == ['timeout', 'timeout']
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_phase0_watchdog.py:508: AssertionError: assert ['timeout'] == ['timeout', 'timeout']
+1 failed in 10.12s
+### F1 a stream event does not clear a silence trip
+  KILLED    test_stuck_lifecycle.py::test_sl_r3_any_stream_event_clears_a_silence_trip
+     E   AssertionError: stuck
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_stuck_lifecycle.py:511: AssertionError: stuck
+1 failed in 4.92s
+### F2 a declared (opaque) tool exempts silence
+  KILLED    test_stuck_lifecycle.py::test_sl_r6_silence_still_bounds_a_declared_tool
+     E   AssertionError: []
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_stuck_lifecycle.py:842: AssertionError: []
+1 failed in 4.91s
+### C1 view never leaves after a terminal run
+  KILLED    test_d2_view.py::test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags1]
+  KILLED    test_d2_view.py::test_tm_r1_follow_prints_new_events_then_final_status_when_the_run_ends
+  KILLED    test_d2_view.py::test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal
+     E   AssertionError: the view did not exit after its linger
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d2_view.py:383: AssertionError: the view did not exit after its linger
+     E   AssertionError: all-of-it
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_d2_view.py:359: AssertionError: all-of-it
+     E   assert None is not None
+3 failed in 91.00s (0:01:30)
+### G1 unadoptable node left detached
+  KILLED    test_agent_survival_adversary.py::test_adversary_adoption_does_not_loop_forever_on_corrupt_node
+     E   AssertionError: corrupt node was left in adoptable status 'detached', causing infinite retry loop
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_agent_survival_adversary.py:196: AssertionError: corrupt node was left in adoptable status 'detached', causing infinite retry loop
+1 failed in 5.08s
+### G2 silence counted from launch across the server gap
+  SURVIVED  test_agent_survival.py::test_sv_r8_the_servers_downtime_is_not_silence
+1 passed in 9.94s
+### H1 wrap-up flag kept on the Run (bug-c050b0)
+  KILLED    test_burn_rate_baseline.py::test_br_r5_one_wrap_up_per_agent_through_steers_and_many_passes
+  KILLED    test_burn_rate_baseline.py::test_br_r5_each_agent_is_asked_once_not_once_per_provider
+     E   AssertionError: ['prompt.1.md', 'prompt.2.md', 'prompt.3.md']
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_burn_rate_baseline.py:525: AssertionError: ['prompt.1.md', 'prompt.2.md', 'prompt.3.md']
+     E   AssertionError: 7 wrap_up events for one node
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_burn_rate_baseline.py:494: AssertionError: 7 wrap_up events for one node
+2 failed in 3.56s
+### I1 consult turns not locked
+  KILLED    test_consult_fresh_worktree.py::test_cf_r7_two_concurrent_consults_never_overlap_and_never_refresh_mid_turn
+     E   AssertionError: two turns of one node ran at the same time
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_consult_fresh_worktree.py:788: AssertionError: two turns of one node ran at the same time
+1 failed in 1.45s
+### I2 a steer never hears the first event
+  KILLED    test_core.py::test_a_steer_says_whether_anything_answered
+     E   AssertionError: {'agent_id': 'ag-1', 'steered': True, 'status': 'running', 'confirmed': False, ...}
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_core.py:1458: AssertionError: {'agent_id': 'ag-1', 'steered': True, 'status': 'running', 'confirmed': False, ...}
+1 failed in 1.03s
+### J1 reload rebuilds the tree
+  KILLED    test_phase0_config_reload.py::test_p0_r5_6_tree_and_in_flight_runs_are_the_same_objects_after_a_reload
+     E   assert <multiagents.tree.Tree object at 0x7ac2eda491d0> is <multiagents.tree.Tree object at 0x7ac2edb3d550>
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_phase0_config_reload.py:377: assert <multiagents.tree.Tree object at 0x7ac2eda491d0> is <multiagents.tree.Tree object at 0x7ac2edb3d550>
+1 failed in 2.53s
+### J2 reload rewrites running supervisors' max_steps
+  KILLED    test_phase0_config_reload.py::test_p0_r5_3_a_running_agent_keeps_the_config_it_started_with
+     E   AssertionError: assert 222 == 111
+     /home/theobroma/.multiagents/worktrees/multiagents-3e439ff1/ag-6e59b2/tests/test_phase0_config_reload.py:265: AssertionError: assert 222 == 111
+1 failed in 2.55s
+### G3 silence counted from launch, replay keeps the old clock
+  KILLED    test_agent_survival.py::test_sv_r8_the_servers_downtime_is_not_silence
+     E   AssertionError: reported stuck after adoption: stuck: 'silence: no stream event for 7s' [{'t': 1790836239.30453, 'agent': 'ag-f40f43', 'kind': 'stuck', 'reason': 'silence', 'detail': 'no stream event for 7s'}]
+     ent_survival.py:567: AssertionError: reported stuck after adoption: stuck: 'silence: no stream event for 7s' [{'t': 1790836239.30453, 'agent': 'ag-f40f43', 'kind': 'stuck', 'reason': 'silence', 'detail': 'no stream event for 7s'}]
+1 failed in 12.00s
+### G4 (G3 against the ORIGINAL sv_r8)
+  KILLED    test_zz_tmp_sv_orig.py::test_sv_r8_the_servers_downtime_is_not_silence
+     E   AssertionError: reported stuck after adoption: stuck: 'silence: no stream event for 19s' [{'t': 1790836274.63261, 'agent': 'ag-085dda', 'kind': 'stuck', 'reason': 'silence', 'detail': 'no stream event for 19s'}]
+     mp_sv_orig.py:564: AssertionError: reported stuck after adoption: stuck: 'silence: no stream event for 19s' [{'t': 1790836274.63261, 'agent': 'ag-085dda', 'kind': 'stuck', 'reason': 'silence', 'detail': 'no stream event for 19s'}]
+1 failed in 21.76s

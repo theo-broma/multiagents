@@ -610,6 +610,13 @@ def _write_own(target: Path, text: str) -> None:
 
 
 class Runner:
+    # How often `_watch_timers` looks at a run's silence and wall clock, and
+    # how much longer than the other turn's own limit a consult waits for that
+    # turn to end (CF-R7). Class attributes so a test can shorten them for one
+    # Runner; nothing in production sets them.
+    WATCH_POLL_SECONDS = 5.0
+    CONSULT_LOCK_SLACK_SECONDS = 60.0
+
     def __init__(self, paths: ProjectPaths, config: Config):
         self.paths = paths
         self.config = config
@@ -4355,7 +4362,7 @@ class Runner:
                 run.supervisor.progress_when_last_quiet = await asyncio.to_thread(
                     _worktree_state, progress_dir, self.paths.root)
         while True:
-            await asyncio.sleep(5)
+            await asyncio.sleep(self.WATCH_POLL_SECONDS)
             try:
                 # Only while the agent is quiet, and only if it has a tree of
                 # its own. The silence check needs a CURRENT reading to tell a
@@ -5806,7 +5813,8 @@ class Runner:
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
         # Waiting for the other turn is bounded by how long that turn may run.
-        wait = self.config.effective_limits(spec, timeout)["timeout"]["value"] + 60
+        wait = (self.config.effective_limits(spec, timeout)["timeout"]["value"]
+                + self.CONSULT_LOCK_SLACK_SECONDS)
         try:
             async with self._conversation_turn(agent_name, wait) as ours:
                 if ours:

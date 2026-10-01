@@ -11,9 +11,11 @@ Every test here was red against 942df35 when written.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -46,7 +48,8 @@ def test_adv_oom_sibling_that_ended_before_the_kill_is_still_a_sibling(tmp_path,
     interval"; "an increase during a run that had concurrent siblings" is
     `kill_uncertain`. Here the counter rises while a sibling is alive; the
     sibling then exits cleanly, and only afterwards is the worker SIGKILLed."""
-    r, _ = _docker_project(tmp_path, monkeypatch, kill_delay=5, sleeper_delay=1)
+    # TS-R2: the worker outlives the sibling by 1.5 s rather than 4 s.
+    r, _ = _docker_project(tmp_path, monkeypatch, kill_delay=2.5, sleeper_delay=1)
     counter = [10]
     monkeypatch.setattr(DockerExecutor, "oom_kill_count", lambda self: counter[0], raising=False)
 
@@ -171,16 +174,36 @@ def test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice(tmp_path, monkeypa
     _node(r, "ag-existing")
     real_mirror = notices._mirror
     hit_committed, clear_done = threading.Event(), threading.Event()
+    # TS-R2: set when B has to wait for the state lock. A mirror written under
+    # that lock (the fix) makes B wait for A, so A must stop holding its mirror
+    # back once B is blocked; it used to wait out a 10 s timeout instead.
+    clear_blocked = threading.Event()
     gate = {"hold": True}
 
     def slow_mirror(tree, state):
         if gate["hold"] and threading.current_thread().name == "server-a":
             gate["hold"] = False
             hit_committed.set()
-            clear_done.wait(10)
+            for _ in range(1000):
+                if clear_done.is_set() or clear_blocked.is_set():
+                    break
+                time.sleep(0.01)
         real_mirror(tree, state)
 
+    class Flock:
+        def __getattr__(self, name):
+            return getattr(fcntl, name)
+
+        def flock(self, fd, op):
+            if op == fcntl.LOCK_EX and threading.current_thread().name != "server-a":
+                try:
+                    return fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    clear_blocked.set()
+            return fcntl.flock(fd, op)
+
     monkeypatch.setattr(notices, "_mirror", slow_mirror)
+    monkeypatch.setattr(notices, "fcntl", Flock())
     a = threading.Thread(target=_hit, args=(r.tree,), name="server-a")
     a.start()
     assert hit_committed.wait(10)
@@ -205,13 +228,14 @@ def test_adv_adopted_run_provenance_is_not_taken_from_container_writable_tree_js
     record in `tree.json` — which the running agent can write. Forge that
     record between the two servers and the `stuck` notice names the forged
     file, line and value instead of agents.yaml's."""
-    r_old, _, agent_file = _project(tmp_path, monkeypatch, agent_lines=["timeout: 3"], delay=12)
+    r_old, _, agent_file = _project(tmp_path, monkeypatch, agent_lines=["timeout: 2"], delay=4,
+                                    retry=False)
     real_file = str(agent_file.resolve())
 
     async def scenario():
         node_id = (await r_old.start("worker", "outlives its server"))["agent_id"]
         await r_old.shutdown(detach=True)
-        forged = {"value": 3, "source": "agent",
+        forged = {"value": 2, "source": "agent",
                   "source_detail": {"layer": "agent", "file": "/forged/elsewhere.yaml",
                                     "line": 999}}
         with r_old.tree.transaction() as data:

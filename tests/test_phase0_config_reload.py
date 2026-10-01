@@ -248,7 +248,7 @@ def test_p0_r5_2_start_agent_announces_the_reload_it_triggered(project):
 # ---------------------------------------------------------------- P0-R5.3 --
 
 def test_p0_r5_3_a_running_agent_keeps_the_config_it_started_with(project):
-    project.bin = _fake_agent(project.tmp, "slow", project.marker, delay=4)
+    project.bin = _fake_agent(project.tmp, "slow", project.marker, delay=2.5)  # TS-R2
     project.providers["fakep"] = _provider(project.bin)
     project.write_providers()
 
@@ -356,7 +356,7 @@ def test_p0_r5_5_no_load_config_call_when_nothing_changed(project, monkeypatch):
 # ---------------------------------------------------------------- P0-R5.6 --
 
 def test_p0_r5_6_tree_and_in_flight_runs_are_the_same_objects_after_a_reload(project):
-    project.bin = _fake_agent(project.tmp, "slow", project.marker, delay=3)
+    project.bin = _fake_agent(project.tmp, "slow", project.marker, delay=2)  # TS-R2
     project.providers["fakep"] = _provider(project.bin)
     project.write_providers()
 

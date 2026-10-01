@@ -351,7 +351,9 @@ def test_tm_r1_no_follow_with_no_stream_yet_exits_zero(proj):
 @pytest.mark.parametrize("flags", [(), ("--follow",)])
 def test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits(proj, flags):
     proj.add_agent(AID, "failed", [ev("text", text="all-of-it")])
-    f = proj.follow("view", AID, *flags)
+    # TS-R2: a 1 s linger instead of TM-R3's 60 s; the 60 s default is pinned
+    # by test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal.
+    f = proj.follow("view", AID, *flags, linger=1)
     try:
         code = f.wait_exit(90)          # TM-R3 allows a grace period of about 60 s
         assert code is not None, f.out
@@ -360,6 +362,37 @@ def test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits(proj, 
         assert f.out.lower().rindex("failed") > f.out.index("all-of-it")
     finally:
         f.stop()
+
+
+def test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal(proj, monkeypatch, capsys):
+    """TM-R3 at the production default, on a fake clock (TS-R2, TS-R3a): a
+    followed view of a terminal run keeps following for 60 s, then exits. The
+    subprocess tests above shorten the linger; this is what keeps its default
+    and its two sides tested."""
+    from multiagents import viewer
+
+    class Clock:
+        start = now = 1_000_000.0
+
+        def time(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+            if self.now - self.start > 600:
+                raise AssertionError("the view did not exit after its linger")
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    clock = Clock()
+    monkeypatch.setattr(viewer, "time", clock)
+    proj.add_agent(AID, "done", [ev("text", text="the-end")])
+    viewer.view_stream(proj.paths, AID, follow=True)
+    out = capsys.readouterr().out
+    assert "the-end" in out and "final status: done" in out, out
+    lingered = clock.now - clock.start
+    assert 60 < lingered <= 61, f"lingered {lingered:.1f}s, TM-R3 says about 60 s"
 
 
 def test_tm_r1_terminal_run_without_a_stream_does_not_wait_forever(proj):
@@ -387,7 +420,7 @@ def test_tm_r1_default_on_an_active_run_is_to_follow(proj):
 
 def test_tm_r1_follow_prints_new_events_then_final_status_when_the_run_ends(proj):
     proj.add_agent(AID, "running", [ev("text", text="early")])
-    f = proj.follow("view", AID, "--follow")
+    f = proj.follow("view", AID, "--follow", linger=1)      # TS-R2, as above
     try:
         assert f.wait_for("early")
         proj.append(AID, ev("text", text="later"), ev("result", status="SUCCESS", text="wrapped"))

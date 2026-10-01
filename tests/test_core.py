@@ -1422,14 +1422,19 @@ def test_routing_says_why_each_fallback_was_passed_over(tmp_path):
     assert "no model named for opencode" in why, why
 
 
-def test_a_steer_says_whether_anything_answered(tmp_path):
+def test_a_steer_says_whether_anything_answered(tmp_path, monkeypatch):
     """bug-4374b7. Three silent agents were steered, all three returned
     `steered: true`, one resumed and two never spoke again — and nothing in the
     reply distinguished them. `confirmed` is that distinction."""
     import asyncio
     from types import SimpleNamespace
+    from multiagents import runner as runner_mod
     from multiagents.runner import Run
     from multiagents.tree import Node
+
+    # TS-R2: the silent case waits out the whole confirmation window, 5 s in
+    # production; its length is not what this asserts.
+    monkeypatch.setattr(runner_mod, "STEER_CONFIRM_SECONDS", 0.5)
 
     r = _runner(tmp_path, {"b": AgentSpec("b", "p", "m")}, {"p": {"bin": "sh"}})
     r.tree.add(Node(id="ag-1", agent="b", provider="p", model="m",

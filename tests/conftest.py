@@ -41,8 +41,10 @@ readers unmocked would reintroduce it, and would have to mock them instead.
 
 from __future__ import annotations
 
+import inspect
 import os
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -130,6 +132,122 @@ def _no_provider_subprocesses(request, monkeypatch):
     from multiagents.monitor import snapshot
 
     monkeypatch.setattr(snapshot, "providers_view", lambda *a, **k: [])
+
+
+@pytest.fixture(autouse=True)
+def _no_host_cli_budget(request, monkeypatch, tmp_path_factory):
+    """Keep `budget` and `models` from running a shipped provider script
+    against the developer's own CLI.
+
+    `Runner.start` reads every enabled provider's budget, and the shipped
+    providers are the real ones: `agy.sh budget` runs the `agy` it finds on
+    PATH as `agy -p /usage`, and `codex.py budget` talks to the real codex.
+    Measured 2026-10-01 (TS Run B): on a machine with agy installed but not
+    answering, twelve tests paid its 10 s script timeout each, and which twelve
+    depended on the order tests landed on an xdist worker, because
+    `budget._cache` is per process with a 60 s life. That is the host leak the
+    docstring at the top of this file describes for the budget readers. The
+    same run measured `init` listing models through the real `opencode models`
+    and `agy models`, about 7 s per init.
+
+    Where the `budget` or `models` action would run a SHIPPED script with a CLI that the
+    test did not build under the basetemp, the script still runs, but as on a
+    machine without that CLI: `MULTIAGENTS_BIN` empty, `MULTIAGENTS_BIN_ERROR`
+    saying why. Every shipped script reads its CLI only from there, so what
+    comes back is that script's own no-CLI answer (an unknown reading, or 64
+    for claude's built-in reader). A test that points a shipped script at a
+    fake CLI of its own is untouched, and so is one marked `real_providers`.
+    """
+    if request.node.get_closest_marker("real_providers"):
+        return
+    from multiagents import scripts
+    from multiagents.paths import shipped_defaults_dir
+
+    real = scripts.run_action
+    basetemp = tmp_path_factory.getbasetemp().resolve()
+    shipped = shipped_defaults_dir() / "providers"
+
+    def effective(value, cwd, search_path):
+        """The file `value` names when exec'd from `cwd` (None: this process's
+        directory) with `search_path` as PATH. A relative path, and a relative
+        or empty PATH entry, resolve against that directory, not ours (review
+        ag-7236bf). None when a bare name is found nowhere."""
+        base = Path.cwd() / cwd if cwd is not None else Path.cwd()
+        if "/" in value:
+            return base / value
+        for entry in search_path.split(os.pathsep):
+            candidate = base / entry / value
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    def host_cli(name, provider, executor, config_dir, project_config, extra_env, cwd):
+        """The CLI the shipped script would run, when it is the host's: read
+        from MULTIAGENTS_BIN as the script will see it, after the provider's
+        own `env:`/`credential_env` and the caller's extra_env (review
+        ag-dc89fc), not from the provider's `bin`."""
+        script = scripts.resolve(name, provider, config_dir, project_config)
+        twin = shipped / script.name if script is not None else None
+        if twin is None or not twin.is_file() or script.read_bytes() != twin.read_bytes():
+            return None
+        try:
+            env = scripts.build_env(name, provider, executor, extra_env)
+        except Exception:                                    # noqa: BLE001
+            return None             # run_action reports it as it always has
+        value = env.get("MULTIAGENTS_BIN") or ""
+        if not value:
+            return None
+        binary = effective(value, cwd, env.get("PATH", ""))
+        if binary is None or binary.resolve().is_relative_to(basetemp):
+            return None
+        return binary
+
+    signature = inspect.signature(real)
+
+    def run_action(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        call = bound.arguments
+        if call["action"] in ("budget", "models"):
+            binary = host_cli(call["provider_name"], call["provider"], call["executor"],
+                              call["config_dir"], call["project_config"], call["extra_env"],
+                              call["cwd"])
+            if binary is not None:
+                call["extra_env"] = {**(call["extra_env"] or {}),
+                                     "MULTIAGENTS_BIN": "",
+                                     "MULTIAGENTS_BIN_ERROR":
+                                         f"tests do not run the host's {binary}"}
+        return real(*bound.args, **bound.kwargs)
+
+    monkeypatch.setattr(scripts, "run_action", run_action)
+
+    # `models_cmd` (opencode, agy) is run by models.py itself, not by a
+    # script: the same host CLIs, refused as an exec on a machine without them
+    # would be.
+    import errno
+    import subprocess
+    import yaml
+    from multiagents import models
+
+    names = {str(block.get("bin")) for block in (yaml.safe_load(
+        (shipped_defaults_dir() / "providers.yaml").read_text()).get("providers") or {}
+    ).values() if isinstance(block, dict) and block.get("bin")}
+
+    class Subprocess:
+        def __getattr__(self, name):
+            return getattr(subprocess, name)
+
+        def run(self, command, *args, **kwargs):
+            env = kwargs.get("env")
+            exe = effective(str(command[0]), kwargs.get("cwd"),
+                            (os.environ if env is None else env).get("PATH", ""))
+            if (exe is not None and exe.name in names
+                    and not exe.resolve().is_relative_to(basetemp)):
+                raise FileNotFoundError(errno.ENOENT,
+                                        "tests do not run the host's CLI", str(exe))
+            return subprocess.run(command, *args, **kwargs)
+
+    monkeypatch.setattr(models, "subprocess", Subprocess())
 
 
 def pytest_configure(config):

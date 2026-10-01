@@ -14,6 +14,9 @@ from .tree import ACTIVE, TERMINAL, Tree
 _BIDI = frozenset([0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F),
                    *range(0x2066, 0x206A)])
 _FINGERPRINT = 64
+# How long a view keeps following after its run turned terminal (TM-R3). A
+# module constant so a test can shorten it; nothing in production sets it.
+LINGER_SECONDS = 60
 
 def _validate_id(agent_id: str):
     if not re.match(r"^ag-[0-9a-f]{6}(-[0-9]+)?\Z", agent_id):
@@ -101,8 +104,8 @@ def view_stream(paths: ProjectPaths, agent_id: str, follow: bool | None):
     head = b""          # first bytes consumed, the fingerprint of the file
     tail = b""          # last bytes consumed
 
-    # The view exits within 90 s after the run turns terminal; it lingers 60 s
-    # so that the window stays readable (TM-R3).
+    # The view exits within 90 s after the run turns terminal; it lingers
+    # LINGER_SECONDS so that the window stays readable (TM-R3).
     terminal_time = None
 
     while True:
@@ -190,7 +193,7 @@ def view_stream(paths: ProjectPaths, agent_id: str, follow: bool | None):
             if terminal_time is None:
                 terminal_time = time.time()
                 _emit(f"final status: {_status(node)}")
-            if time.time() - terminal_time > 60:
+            if time.time() - terminal_time > LINGER_SECONDS:
                 break
         time.sleep(0.2)
 

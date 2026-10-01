@@ -479,11 +479,12 @@ def test_br_r5_one_wrap_up_per_agent_through_steers_and_many_passes(
             seed(r.tree, "p", GENUINE)
             assert await until(lambda: wrap_ups(r, agent), 10), "never asked at all"
             # The wrap-up's own steer has replaced the run; let many passes of
-            # whatever watches the replacement go by, still draining.
-            await keep_draining(3.0)
+            # whatever watches the replacement go by, still draining. (TS-R2:
+            # 1 s is about ten passes at FAST's 0.1 s poll; it was 3 s.)
+            await keep_draining(1.0)
             # And a steer from outside replaces it again.
             await r.steer(agent, "carry on")
-            await keep_draining(3.0)
+            await keep_draining(1.0)
             return agent, wrap_ups(r, agent), wrap_up_steers(r, agent), \
                 wrap_up_prompts(r, agent)
         finally:
@@ -505,7 +506,14 @@ def test_br_r5_each_agent_is_asked_once_not_once_per_provider(tmp_path, monkeypa
         a = await started(r, "worker")
         b = await started(r, "other")
         try:
+            # TS-R2: drain until both have been asked (at most the 5 s this
+            # used to wait out), then about ten more passes for a repeat.
             deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not (
+                    wrap_up_prompts(r, a) and wrap_up_prompts(r, b)):
+                seed(r.tree, "p", GENUINE)
+                await asyncio.sleep(0.1)
+            deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
                 seed(r.tree, "p", GENUINE)
                 await asyncio.sleep(0.1)

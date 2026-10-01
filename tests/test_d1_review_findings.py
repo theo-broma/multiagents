@@ -109,7 +109,8 @@ def test_d1_f1_oom_increase_with_a_sibling_in_another_runner_is_kill_uncertain(t
     """LN-C5: `killed` needs this to be the only process the *runner* started
     that was alive in the container. A sibling started by a second Runner
     (another server process, same project and container) is a sibling."""
-    r_a, project_file = _docker_project(tmp_path, monkeypatch, kill_delay=2, sleeper_delay=6)
+    # TS-R2: the sibling outlives the worker by 2 s rather than 4 s.
+    r_a, project_file = _docker_project(tmp_path, monkeypatch, kill_delay=1, sleeper_delay=3)
     r_b = Runner(r_a.paths, load(r_a.paths, seed=False))
     counter = [10]
     monkeypatch.setattr(DockerExecutor, "oom_kill_count", lambda self: counter[0], raising=False)
@@ -349,7 +350,8 @@ def test_d1_f7_cursors_of_ended_callers_are_pruned(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("field", ["timeout", "silence_timeout"])
 def test_d1_f8_provenance_is_captured_at_launch_not_read_from_current_yaml(tmp_path, monkeypatch, field):
-    r, _, agent_file = _project(tmp_path, monkeypatch, agent_lines=[f"{field}: 2"], delay=8)
+    r, _, agent_file = _project(tmp_path, monkeypatch, agent_lines=[f"{field}: 2"], delay=4,
+                                    retry=False)
     launch_file = str(agent_file.resolve())
 
     async def scenario():

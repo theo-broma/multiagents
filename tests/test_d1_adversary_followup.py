@@ -15,8 +15,10 @@ from multiagents.tree import now
 from multiagents.authority import HostAuthority
 
 # How long a dummy provider needs to sleep to comfortably trigger a 1s timeout
-# (Must be > 5s because _watch_timers polls every 5s)
-OUTLIVES_TIMEOUT = 8.0
+# (Must be well past 1 s plus one WATCH_POLL, the interval _watch_timers polls
+# at here; it is 5 s in production, TS-R2)
+WATCH_POLL = 0.25
+OUTLIVES_TIMEOUT = 3.0
 
 def _budgets(monkeypatch, **headroom):
     import multiagents.budget
@@ -29,6 +31,7 @@ def _budgets(monkeypatch, **headroom):
 def _runner(tmp_path, monkeypatch, *, agent=None, project=None, providers=None):
     if agent is None:
         agent = AgentSpec(name="worker", provider="acme", model="m1")
+    monkeypatch.setattr(Runner, "WATCH_POLL_SECONDS", WATCH_POLL)
     return h.make_runner(tmp_path / "project", monkeypatch,
                          agents={"worker": agent}, providers=providers or {},
                          project=project or {})
