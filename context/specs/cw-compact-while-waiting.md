@@ -230,3 +230,13 @@ config parsing.
   and interactive compaction never proceeds. This follows "unknown blocks";
   documented, not fixed. (`hidepid=2` hides such processes entirely and is
   unaffected.)
+- **Mount sources under container-writable places (review ag-3e9254 r5).**
+  A running bind keeps its original target even if the configured source
+  alias is later renamed. Decided, conservatively: if any configured mount
+  source has, lexically or resolved, an ancestor that a container can write
+  (the project root, worktrees, agent homes, or any other mount that is not
+  read-only), and that source is not provably unrelated to the handshake by
+  being both lexically and resolved outside the state root's `safepoints`
+  tree *and* not a symlink at any component, the handshake is treated as
+  exposed (`safepoint_exposed`). Exposure is re-evaluated on every proposal,
+  never cached across proposals.
