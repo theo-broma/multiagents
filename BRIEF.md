@@ -3244,3 +3244,22 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **MERGED: M (opus ag-cc25b3), as 14f06b1, after the final review ag-144f19 APPROVED it.** Full parallel suite on main: 171 failed (the same known reds: 72 phase2, 97 PS, 2 c2), 4285 passed, in 306 s. ag-074735 and ag-35d54e were discarded. **Remaining:** PS opus ag-57e6fb (round 2 fixes), then a reviewer, then merge main and reconcile the cache (M is merged now). Then TS Run B.
 - **Update.** PS opus round-2 fixes are done. Steered 57e6fb to merge main (M) and reconcile the cache, then run the full suite; the only allowed reds are phase2. **Next:** the final reviewer, then merge, then discard ag-dc8946, ag-e77949 and ag-dcc1c8.
 - **Update.** The final PS review (ag-e6b702, Gemini, because codex was constrained) found 1 P1: in _source_reading the clock is read before _cache_lock, so a concurrent publish looks like a backward step. Steered to 57e6fb (read the clock under the lock; adapt the round4 auxiliary test). **Next:** a short re-review, then merge.
+
+### 2026-10-01 ~03:00 UTC: PS merged
+
+**MERGED: PS (opus ag-57e6fb), as 77ee8a9, after re-review ag-ea1d60 APPROVED it.**
+- The full parallel suite on main gives **72 failed, all `test_phase2_*` by design**, with 4445 passed, in 252 s.
+- The live config loads, with the providers agy, agy-partner, claude, codex, opencode and opencode-zai.
+- ag-dc8946, ag-e77949 and ag-dcc1c8 were discarded.
+- **The running MCP server still runs the old code.** A server restart (`/mcp` reconnect) is needed to pick up M and PS, as well as the cancel_deferred/list_deferred tools from T1.
+
+**Next, per the brief:**
+1. **TS Run B** (timing, TS-R2/R3/R3a/R2a/R2b): implementer-deep `model=opus` with gemini-advisor, then a reviewer and a robustness-tester. Recapture the base: main is now 77ee8a9, and the known reds are only the 72 in phase2.
+2. **Queued tickets, in-house:**
+   - Q2b, the `--path` failure;
+   - the pinned-start half-open self-deadlock;
+   - the `models:` route variant for the preferred provider being ignored;
+   - the setsid launch-window race (strict xfail);
+   - the manual clear of a cleanup hold;
+   - the snapshot.py provider names;
+   - the codex sandbox unable to run pytest.
