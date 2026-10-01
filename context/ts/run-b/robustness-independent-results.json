@@ -1,0 +1,224 @@
+[
+  {
+    "label": "N1 watch default 5 -> 0.01",
+    "file": "src/multiagents/runner.py",
+    "line": 617,
+    "test": "tests/test_phase0_watchdog.py::test_p0_r2_9_wall_timeout_reaches_the_tree",
+    "baseline": {
+      "code": 124,
+      "output": ""
+    },
+    "mutant": null
+  },
+  {
+    "label": "N2 consult slack default 60 -> 0",
+    "file": "src/multiagents/runner.py",
+    "line": 618,
+    "test": "tests/test_consult_fresh_worktree.py::test_decided_lock_wait_timeout_result_carries_every_key",
+    "baseline": {
+      "code": 124,
+      "output": ""
+    },
+    "mutant": null
+  },
+  {
+    "label": "N3 wall deadline one second late",
+    "file": "src/multiagents/supervisor.py",
+    "line": 283,
+    "test": "tests/test_d1_limit_notices.py::test_ln_c1_ln_c2_ln_c6_agent_watchdog_source[timeout-timeout]",
+    "baseline": {
+      "code": 124,
+      "output": ""
+    },
+    "mutant": null
+  },
+  {
+    "label": "N4 silence deadline one second late",
+    "file": "src/multiagents/supervisor.py",
+    "line": 286,
+    "test": "tests/test_d1_limit_notices.py::test_ln_c1_ln_c2_ln_c6_agent_watchdog_source[silence_timeout-silence_timeout]",
+    "baseline": {
+      "code": 124,
+      "output": ""
+    },
+    "mutant": null
+  },
+  {
+    "label": "N5 crash retry threshold one second late",
+    "file": "src/multiagents/driver.py",
+    "line": 770,
+    "test": "tests/test_phase0_r8f_leftovers.py::test_p0_r8f_20_an_inf_min_runtime_still_retries_a_crash_past_60s",
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 2.93s\n"
+    },
+    "mutant": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 2.99s\n"
+    }
+  },
+  {
+    "label": "N6 viewer at deadline exits early",
+    "file": "src/multiagents/viewer.py",
+    "line": 196,
+    "test": "tests/test_d2_view.py::test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal",
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.33s\n"
+    },
+    "mutant": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.32s\n"
+    }
+  },
+  {
+    "label": "N7 silent steer reports confirmed",
+    "file": "src/multiagents/runner.py",
+    "line": 5498,
+    "test": "tests/test_core.py::test_a_steer_says_whether_anything_answered",
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 2.26s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_________________ test_a_steer_says_whether_anything_answered __________________\ntests/test_core.py:1458: in test_a_steer_says_whether_anything_answered\n    assert out[\"steered\"] is True and out[\"confirmed\"] is expected, out\nE   AssertionError: {'agent_id': 'ag-1', 'steered': True, 'status': 'running', 'confirmed': True, ...}\nE   assert (True is True and True is False)\n=========================== short test summary info ============================\nFAILED tests/test_core.py::test_a_steer_says_whether_anything_answered - Asse...\n1 failed in 2.57s\n"
+    }
+  },
+  {
+    "label": "N8 second agent never asked to wrap up",
+    "file": "src/multiagents/runner.py",
+    "line": 2771,
+    "test": "tests/test_burn_rate_baseline.py::test_br_r5_each_agent_is_asked_once_not_once_per_provider",
+    "baseline": {
+      "code": 124,
+      "output": ""
+    },
+    "mutant": null
+  },
+  {
+    "label": "A1 author mirror outside lock",
+    "file": "src/multiagents/notices.py",
+    "line": 383,
+    "test": "tests/test_d1_adversary.py::test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice",
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.45s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice ___________\ntests/test_d1_adversary.py:218: in test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice\n    assert not alerts, f\"a cleared notice is shown as active: {alerts}\"\nE   AssertionError: a cleared notice is shown as active: [{'level': 'warn', 'kind': 'limit', 'text': 'limit: limits.max_concurrent = 1 \u2014 refused.', 'detail': '1 time(s) since 08:53:15'}]\nE   assert not [{'level': 'warn', 'kind': 'limit', 'text': 'limit: limits.max_concurrent = 1 \u2014 refused.', 'detail': '1 time(s) since 08:53:15'}]\n=========================== short test summary info ============================\nFAILED tests/test_d1_adversary.py::test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice\n1 failed in 0.44s\n"
+    }
+  },
+  {
+    "label": "A2 author fingerprint ignored",
+    "file": "src/multiagents/viewer.py",
+    "line": 127,
+    "test": "tests/test_d2_adversary.py::test_follower_drops_lines_when_file_grows_after_truncation",
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.17s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_follower_drops_lines_when_file_grows_after_truncation __________\ntests/test_d2_adversary.py:98: in test_follower_drops_lines_when_file_grows_after_truncation\n    assert \"--- stream truncated ---\" in out, \"Truncation was not detected because the file grew larger than its previous size\"\nE   AssertionError: Truncation was not detected because the file grew larger than its previous size\nE   assert '--- stream truncated ---' in 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\nfinal status: done\\n'\n=========================== short test summary info ============================\nFAILED tests/test_d2_adversary.py::test_follower_drops_lines_when_file_grows_after_truncation\n1 failed in 1.19s\n"
+    }
+  },
+  {
+    "label": "A3 author viewer default 30",
+    "file": "src/multiagents/viewer.py",
+    "line": 19,
+    "test": "tests/test_d2_view.py::test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal",
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.27s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal ___________\ntests/test_d2_view.py:395: in test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal\n    assert 60 < lingered <= 61, f\"lingered {lingered:.1f}s, TM-R3 says about 60 s\"\nE   AssertionError: lingered 30.2s, TM-R3 says about 60 s\nE   assert 60 < 30.199999992968515\n=========================== short test summary info ============================\nFAILED tests/test_d2_view.py::test_tm_r3_the_view_lingers_60s_after_the_run_is_terminal\n1 failed in 0.30s\n"
+    }
+  },
+  {
+    "label": "N9/10 final status printed before buffered stream",
+    "file": "src/multiagents/viewer.py",
+    "line": 141,
+    "test": [
+      "tests/test_d2_view.py::test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags0]",
+      "tests/test_d2_view.py::test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags1]"
+    ],
+    "baseline": {
+      "code": 0,
+      "output": "..                                                                       [100%]\n2 passed in 1.72s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "FF                                                                       [100%]\n=================================== FAILURES ===================================\n_ test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags0] _\ntests/test_d2_view.py:362: in test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits\n    assert f.out.lower().rindex(\"failed\") > f.out.index(\"all-of-it\")\nE   AssertionError: assert 14 > 21\nE    +  where 14 = <built-in method rindex of str object at 0x7f269781ba00>('failed')\nE    +    where <built-in method rindex of str object at 0x7f269781ba00> = 'final status: failed\\nall-of-it\\n'.rindex\nE    +      where 'final status: failed\\nall-of-it\\n' = <built-in method lower of str object at 0x7f269781b9b0>()\nE    +        where <built-in method lower of str object at 0x7f269781b9b0> = 'final status: failed\\nall-of-it\\n'.lower\nE    +          where 'final status: failed\\nall-of-it\\n' = <d2_support.Follower object at 0x7f2697f9a300>.out\nE    +  and   21 = <built-in method index of str object at 0x7f269781b910>('all-of-it')\nE    +    where <built-in method index of str object at 0x7f269781b910> = 'final status: failed\\nall-of-it\\n'.index\nE    +      where 'final status: failed\\nall-of-it\\n' = <d2_support.Follower object at 0x7f2697f9a300>.out\n_ test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags1] _\ntests/test_d2_view.py:362: in test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits\n    assert f.out.lower().rindex(\"failed\") > f.out.index(\"all-of-it\")\nE   AssertionError: assert 14 > 21\nE    +  where 14 = <built-in method rindex of str object at 0x7f2697b834b0>('failed')\nE    +    where <built-in method rindex of str object at 0x7f2697b834b0> = 'final status: failed\\nall-of-it\\n'.rindex\nE    +      where 'final status: failed\\nall-of-it\\n' = <built-in method lower of str object at 0x7f2697b836e0>()\nE    +        where <built-in method lower of str object at 0x7f2697b836e0> = 'final status: failed\\nall-of-it\\n'.lower\nE    +          where 'final status: failed\\nall-of-it\\n' = <d2_support.Follower object at 0x7f2697b33920>.out\nE    +  and   21 = <built-in method index of str object at 0x7f2697b83780>('all-of-it')\nE    +    where <built-in method index of str object at 0x7f2697b83780> = 'final status: failed\\nall-of-it\\n'.index\nE    +      where 'final status: failed\\nall-of-it\\n' = <d2_support.Follower object at 0x7f2697b33920>.out\n=========================== short test summary info ============================\nFAILED tests/test_d2_view.py::test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags0]\nFAILED tests/test_d2_view.py::test_tm_r1_terminal_run_prints_everything_and_final_status_then_exits[flags1]\n2 failed in 1.55s\n"
+    }
+  },
+  {
+    "label": "N11 poll replays old stream lines",
+    "file": "src/multiagents/viewer.py",
+    "line": 141,
+    "test": [
+      "tests/test_d2_view.py::test_tm_r1_follow_prints_new_events_then_final_status_when_the_run_ends"
+    ],
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.78s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___ test_tm_r1_follow_prints_new_events_then_final_status_when_the_run_ends ____\ntests/test_d2_view.py:431: in test_tm_r1_follow_prints_new_events_then_final_status_when_the_run_ends\n    assert f.out.count(\"early\") == 1 and f.out.count(\"later\") == 1\nE   AssertionError: assert (3 == 1)\nE    +  where 3 = <built-in method count of str object at 0x779b6dbb5f70>('early')\nE    +    where <built-in method count of str object at 0x779b6dbb5f70> = 'early\\nearly\\nlater\\nresult: wrapped\\n--- stream truncated ---\\nearly\\nlater\\nresult: wrapped\\nfinal status: cancelled\\n'.count\nE    +      where 'early\\nearly\\nlater\\nresult: wrapped\\n--- stream truncated ---\\nearly\\nlater\\nresult: wrapped\\nfinal status: cancelled\\n' = <d2_support.Follower object at 0x779b6e0c9250>.out\n=========================== short test summary info ============================\nFAILED tests/test_d2_view.py::test_tm_r1_follow_prints_new_events_then_final_status_when_the_run_ends\n1 failed in 0.81s\n"
+    }
+  },
+  {
+    "label": "N12 fingerprint size default zero",
+    "file": "src/multiagents/viewer.py",
+    "line": 16,
+    "test": [
+      "tests/test_d2_adversary.py::test_follower_drops_lines_when_file_grows_after_truncation"
+    ],
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.12s\n"
+    },
+    "mutant": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.13s\n"
+    }
+  },
+  {
+    "label": "N13 notice state lock removed",
+    "file": "src/multiagents/notices.py",
+    "line": 293,
+    "test": [
+      "tests/test_d1_adversary.py::test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice"
+    ],
+    "baseline": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.32s\n"
+    },
+    "mutant": {
+      "code": 1,
+      "output": "F                                                                        [100%]\n=================================== FAILURES ===================================\n__________ test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice ___________\ntests/test_d1_adversary.py:218: in test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice\n    assert not alerts, f\"a cleared notice is shown as active: {alerts}\"\nE   AssertionError: a cleared notice is shown as active: [{'level': 'warn', 'kind': 'limit', 'text': 'limit: limits.max_concurrent = 1 \u2014 refused.', 'detail': '1 time(s) since 08:55:16'}]\nE   assert not [{'level': 'warn', 'kind': 'limit', 'text': 'limit: limits.max_concurrent = 1 \u2014 refused.', 'detail': '1 time(s) since 08:55:16'}]\n=========================== short test summary info ============================\nFAILED tests/test_d1_adversary.py::test_adv_a_stale_mirror_cannot_resurrect_a_cleared_notice\n1 failed in 0.26s\n"
+    }
+  },
+  {
+    "label": "N14 tail fingerprint ignored",
+    "file": "src/multiagents/viewer.py",
+    "line": 72,
+    "test": "tests/test_d2_adversary.py::test_follower_drops_lines_when_file_grows_after_truncation",
+    "baseline": {
+      "code": 0,
+      "output": "............                                                             [100%]\n12 passed in 2.49s\n"
+    },
+    "mutant": {
+      "code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.09s\n"
+    },
+    "regression": {
+      "code": 1,
+      "output": "FFF                                                                      [100%]\n=================================== FAILURES ===================================\n___ test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head[64] ____\ntests/test_ts_run_b_mutants.py:139: in test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head\n    assert \"--- stream truncated ---\" in output, output\nE   AssertionError: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAold\nE     final status: done\nE     \nE   assert '--- stream truncated ---' in 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAold\\nfinal status: done\\n'\n___ test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head[128] ___\ntests/test_ts_run_b_mutants.py:139: in test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head\n    assert \"--- stream truncated ---\" in output, output\nE   AssertionError: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nE     AAAAAAAAold\nE     final status: done\nE     \nE   assert '--- stream truncated ---' in 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\nAAAAAAAAold\\nfinal status: done\\n'\n___ test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head[256] ___\ntests/test_ts_run_b_mutants.py:139: in test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head\n    assert \"--- stream truncated ---\" in output, output\nE   AssertionError: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nE     AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nE     AAAAAAAAAAAAAAAAold\nE     final status: done\nE     \nE   assert '--- stream truncated ---' in 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA...AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\nAAAAAAAAAAAAAAAAold\\nfinal status: done\\n'\n=========================== short test summary info ============================\nFAILED tests/test_ts_run_b_mutants.py::test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head[64]\nFAILED tests/test_ts_run_b_mutants.py::test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head[128]\nFAILED tests/test_ts_run_b_mutants.py::test_ts_r3a_follower_detects_truncate_and_regrow_with_the_same_head[256]\n3 failed in 0.26s\n"
+    }
+  }
+]
