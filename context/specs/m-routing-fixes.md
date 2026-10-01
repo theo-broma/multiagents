@@ -190,3 +190,7 @@ They must stay green.
 - **Keep the hold in `tree.json`.** The cleanup hold is a durable node field in `tree.json`, for example `cleanup_hold: {"since": ..., "owner_pid": ...}`. It is not only in memory. It is set in the same transaction as the step that starts the cleanup, and cleared only once death is confirmed.
 - **Admission honours it.** In **every** Runner, `_occupies_slot()` counts a node that carries `cleanup_hold` as occupying, whatever its pid liveness.
 - **Anything that can fail comes before the flock.** Supervisor and limits construction happen **before** `_claim()` takes the supervision flock. If it cannot be moved there, a failure after `_claim()` calls `_release()`.
+
+**RM-R1e: accepted limits.** The orchestrator decided this on 2026-10-01, after opus ag-cc25b3.
+- **A grandchild that calls `setsid`** leaves the wrapper's session and escapes the death check. This is accepted as a known limit, the same blind spot as the kill path (see the strict-xfail `tests/test_ts_launch_window_stop.py` and the ticket in context/tickets/2026-09-30-unfiled.md).
+- **A cleanup hold whose process cannot be identified** stays until an operator clears it. That is the case when the owner crashed between start and record, and no pid file exists. There is no time-based lifting. A manual clear is tracked as a ticket.
