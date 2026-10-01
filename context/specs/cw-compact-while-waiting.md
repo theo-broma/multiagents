@@ -279,3 +279,8 @@ The safety now rests on authentication; exposure detection is withdrawn.
 - Verified by tests covering: forged MACs, deletion, replay of an old ack
   after cancellation, tampered state, an omitted participant, and key leakage
   into each environment-building path.
+
+**Decision (2026-10-01, orchestrator): the no-symlink rule covers the handshake's own components only.**
+- The tester (ag-e2adb4) noted that only the last two components of the handshake path are opened without following symlinks. A symlinked state root is therefore followed.
+- This is intended. Under CW-R2b, authentication is the guarantee and the no-symlink handling is defence in depth. The state root is the user's own configuration.
+- The guard: records forged under a symlinked state root are rejected. This is tested in `test_cw_attack2.py`.
