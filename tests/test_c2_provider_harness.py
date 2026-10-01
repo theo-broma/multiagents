@@ -93,11 +93,12 @@ def test_read_provider_caches_until_invalidated(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_shipped_providers_yaml_parses_into_the_six_real_providers():
-    # CX-D1: codex ships as a default provider; ZA-R1: so does opencode-zai,
+    # DI-R1: opencode-deepinfra ships too (disabled). CX-D1: codex ships as a
+    # default provider; ZA-R1: so does opencode-zai,
     # extending opencode but disabled by default; PS-R8: so does agy-partner.
     providers = h.shipped_providers()
     assert set(providers) == {"claude", "opencode", "agy", "codex", "opencode-zai",
-                              "agy-partner"}
+                              "agy-partner", "opencode-deepinfra"}
     assert providers["opencode-zai"].enabled is False
     assert providers["claude"].script_name == "claude.sh"
     assert providers["agy"].script_name == "agy.sh"

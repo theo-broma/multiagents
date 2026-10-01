@@ -619,7 +619,7 @@ def test_load_providers_builds_the_six_real_shipped_providers():
     providers = h.shipped_providers()
     # PS-R8: agy-partner is the sixth.
     assert set(providers) == {"claude", "opencode", "agy", "codex", "opencode-zai",
-                              "agy-partner"}
+                              "agy-partner", "opencode-deepinfra"}
     assert providers["opencode-zai"].enabled is False
     assert providers["claude"].script_name == "claude.sh"
     assert providers["claude"].bin == "claude"
@@ -760,4 +760,5 @@ def test_shipped_providers_yaml_folds_into_six_independent_families():
     assert families == {"claude": ["claude"], "agy": ["agy"],
                         "opencode": ["opencode"], "codex": ["codex"],
                         "opencode-zai": ["opencode-zai"],
-                        "agy-partner": ["agy-partner"]}
+                        "agy-partner": ["agy-partner"],
+                        "opencode-deepinfra": ["opencode-deepinfra"]}
