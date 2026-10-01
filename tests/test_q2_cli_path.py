@@ -185,3 +185,109 @@ def test_q2b_empty_path_exits_outside_any_project(tmp_path, monkeypatch, capsys)
     with pytest.raises(SystemExit) as exc:
         cli.main(["--path", "", "upgrade-config", "--dry-run", "--layer", "project"])
     assert exc.value.code == 2
+
+
+# Q2b round 3: `init` takes its directory from the global --path or its own
+# positional (the directory need not be a project yet); the two must agree.
+# `docker status --all` validates an explicit --path before listing anything.
+
+def _listing(d):
+    return sorted(p.name for p in d.iterdir())
+
+
+def test_q2b_init_with_empty_path_exits_and_creates_nothing_in_cwd(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--path", "", "init"])
+    assert exc.value.code == 2
+    assert _listing(cwd) == []
+
+
+def test_q2b_init_global_path_without_positional_initialises_that_path(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cli.main(["--path", str(target), "init"])  # the exit code reflects git/auth setup, not the path
+    assert (target / ".multiagents").is_dir()
+    assert _listing(cwd) == []
+
+
+def test_q2b_init_global_path_that_does_not_exist_yet_is_created(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    target = tmp_path / "fresh"
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cli.main(["--path", str(target), "init"])  # the exit code reflects git/auth setup, not the path
+    assert (target / ".multiagents").is_dir()
+    assert _listing(cwd) == []
+
+
+def test_q2b_init_positional_path_still_initialises_it(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cli.main(["init", str(target)])  # the exit code reflects git/auth setup, not the path
+    assert (target / ".multiagents").is_dir()
+    assert _listing(cwd) == []
+
+
+def test_q2b_init_same_path_given_both_ways_is_accepted(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cli.main(["--path", str(target), "init", str(target)])  # the exit code reflects git/auth setup, not the path
+    assert (target / ".multiagents").is_dir()
+
+
+def test_q2b_init_conflicting_global_and_positional_paths_exit_naming_both(
+        tmp_path, monkeypatch, capsys):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--path", str(a), "init", str(b)])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert str(a) in err and str(b) in err
+    assert _listing(a) == [] and _listing(b) == [] and _listing(cwd) == []
+
+
+@pytest.mark.parametrize("kind", ["empty", "missing"])
+def test_q2b_docker_status_all_rejects_invalid_explicit_path_before_listing(
+        kind, tmp_path, monkeypatch, capsys):
+    # Must exit before docker is touched: a docker probe or listing here is
+    # a failure of the test, not something to be answered.
+    import multiagents.executor.docker as dk
+
+    def _no_docker(*a, **k):
+        raise AssertionError("docker was touched before the --path was validated")
+
+    monkeypatch.setattr(dk, "docker_state", _no_docker)
+    monkeypatch.setattr(dk, "list_containers", _no_docker)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    bad = "" if kind == "empty" else str(tmp_path / "missing")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--path", bad, "docker", "status", "--all"])
+    assert exc.value.code == 2
+    if bad:
+        assert bad in capsys.readouterr().err
+    assert not (tmp_path / "missing").exists()
