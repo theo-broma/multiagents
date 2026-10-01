@@ -215,7 +215,12 @@ class Server:
     """One `python -m multiagents.server` process, spoken to over stdio."""
 
     def __init__(self, project: "Project", *, session: str = ORCH_SESSION,
-                 agent_id: str = "", depth: int = 0, handshake: bool = True):
+                 agent_id: str = "", depth: int = 0, handshake: bool = True,
+                 intervals: dict[str, float] | None = None):
+        """`intervals` shortens production intervals in this server only
+        (TS-R2), e.g. {"ADOPT_SECONDS": 0.5, "Runner.WATCH_POLL_SECONDS":
+        0.25}, each a name in `multiagents.runner`. The server is then started
+        through `-c`, which sets them and runs the module as `-m` would."""
         self.project = project
         env = project.env(session=session)
         if agent_id:
@@ -223,8 +228,16 @@ class Server:
                         "MULTIAGENTS_CAN_SPAWN": "1", "MULTIAGENTS_PARENT_ID": ""})
         self.stderr_path = project.base / f"server-{time.monotonic_ns()}.err"
         self._err = self.stderr_path.open("w")
+        argv = [sys.executable, "-m", "multiagents.server"]
+        if intervals:
+            sets = "; ".join(f"setattr({'r.' + n.rsplit('.', 1)[0] if '.' in n else 'r'}, "
+                             f"{n.rsplit('.', 1)[-1]!r}, {float(v)!r})"
+                             for n, v in intervals.items())
+            argv[1:] = ["-c", "import runpy, multiagents.runner as r; " + sets + "; "
+                        "runpy.run_module('multiagents.server', run_name='__main__', "
+                        "alter_sys=True)"]
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "multiagents.server"],
+            argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err,
             env=env, cwd=str(project.root), text=True, bufsize=1)
         project.servers.append(self)

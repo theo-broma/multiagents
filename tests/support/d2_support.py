@@ -429,8 +429,17 @@ class D2Project:
         not_implemented(cp.stderr.decode("utf-8", "replace"), args)
         return cp
 
-    def follow(self, *args: str, cwd=None) -> Follower:
-        proc = subprocess.Popen(self.argv(*args), stdout=subprocess.PIPE,
+    def follow(self, *args: str, cwd=None, linger: float | None = None) -> Follower:
+        """`linger` shortens the view's TM-R3 linger after a terminal run, in
+        the child only: the CLI is started through `-c`, which sets
+        `viewer.LINGER_SECONDS` and then runs `multiagents.cli` as `-m` would."""
+        argv = self.argv(*args)
+        if linger is not None:
+            argv[1:3] = ["-c", "import runpy, multiagents.viewer as v; "
+                         f"v.LINGER_SECONDS = {float(linger)!r}; "
+                         "runpy.run_module('multiagents.cli', run_name='__main__', "
+                         "alter_sys=True)"]
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, env=self.env(False),
                                 cwd=cwd or self.root, stdin=subprocess.DEVNULL)
         return Follower(proc)

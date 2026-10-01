@@ -8,7 +8,10 @@ the tree and the events log.
 
 Time is real and short (hundredths of a second) at the supervisor level, as the
 existing watchdog tests in `test_core.py` do. The runner's timer loop polls on
-its own fixed interval (5 s today), so the runner-level tests take seconds each.
+its own interval, 5 s in production (`Runner.WATCH_POLL_SECONDS`). The
+runner-level tests set it to WATCH_POLL (TS-R2), except
+`test_p0_r2_9_wall_timeout_reaches_the_tree`, which keeps the production
+cadence so one test still runs the real 5 s poll.
 
 P0-R2.6 ("the first trip is reported exactly as today") is verified by the
 existing tests in `test_core.py`, which this file leaves untouched.
@@ -351,7 +354,12 @@ async def _until(predicate, timeout: float) -> bool:
 NO_RETRY = {"retry_silent_failure_under_seconds": 0}
 
 
-def _runner(tmp_path, monkeypatch, prov, *, project=None, **spec_kw):
+WATCH_POLL = 0.25
+
+
+def _runner(tmp_path, monkeypatch, prov, *, project=None, watch_poll=WATCH_POLL, **spec_kw):
+    if watch_poll is not None:
+        monkeypatch.setattr(h.Runner, "WATCH_POLL_SECONDS", watch_poll)
     spec = h.AgentSpec("worker", "p", "m", **spec_kw)
     return h.make_runner(tmp_path, monkeypatch, agents={"worker": spec},
                          providers={"p": prov}, project=project)
@@ -393,7 +401,7 @@ def test_p0_r2_2_runner_rearm_defaults_to_doom_loop_repeats(tmp_path, monkeypatc
 
 def test_p0_r2_1_and_r2_5_timeout_after_loop_is_a_second_stuck_event(tmp_path, monkeypatch):
     """Two stuck events, and the node's status and reason follow the latest."""
-    prov = _cli(tmp_path, [_tool_line() for _ in range(3)], then_sleep=12)
+    prov = _cli(tmp_path, [_tool_line() for _ in range(3)], then_sleep=4)
     r = _runner(tmp_path, monkeypatch, prov, timeout=1,
                 project={"limits": {"doom_loop_repeats": 3}})
 
@@ -421,9 +429,12 @@ SAID = {"type": "text", "text": "working"}
 
 
 def test_p0_r2_9_wall_timeout_reaches_the_tree(tmp_path, monkeypatch):
-    """timeout=1 and an agent alive ~7 s: the first poll (at ~5 s) trips."""
+    """timeout=1 and an agent alive ~7 s: the first poll (at ~5 s) trips.
+
+    TS-R2a: the one runner-level watchdog test left on the production 5 s
+    poll, so the shipped cadence itself still trips a run end to end."""
     prov = _cli(tmp_path, [_step_line(), SAID], then_sleep=7)
-    r = _runner(tmp_path, monkeypatch, prov, timeout=1)
+    r = _runner(tmp_path, monkeypatch, prov, timeout=1, watch_poll=None)
 
     async def go():
         res = await r.start("worker", "go")
@@ -434,8 +445,8 @@ def test_p0_r2_9_wall_timeout_reaches_the_tree(tmp_path, monkeypatch):
 
 
 def test_p0_r2_9_a_failing_poll_is_recorded_and_the_next_poll_runs(tmp_path, monkeypatch):
-    """check_timers raises once (poll 1, ~5 s); the failure lands in the event
-    log and poll 2 (~10 s) still reports the timeout."""
+    """check_timers raises once (poll 1); the failure lands in the event
+    log and poll 2 still reports the timeout."""
     real = Supervisor.check_timers
     calls = {"n": 0}
 
@@ -445,7 +456,7 @@ def test_p0_r2_9_a_failing_poll_is_recorded_and_the_next_poll_runs(tmp_path, mon
             raise RuntimeError("boom-injected")
         return real(self, *a, **kw)
     monkeypatch.setattr(Supervisor, "check_timers", flaky)
-    prov = _cli(tmp_path, [_step_line(), SAID], then_sleep=13)
+    prov = _cli(tmp_path, [_step_line(), SAID], then_sleep=3)
     r = _runner(tmp_path, monkeypatch, prov, timeout=1)
 
     async def go():
@@ -461,7 +472,7 @@ def test_p0_r2_9_a_failing_poll_is_recorded_and_the_next_poll_runs(tmp_path, mon
 
 
 def test_p0_r2_8_idle_polls_after_a_terminal_trip_write_nothing(tmp_path, monkeypatch):
-    prov = _cli(tmp_path, [_step_line()], then_sleep=20)
+    prov = _cli(tmp_path, [_step_line()], then_sleep=5)
     r = _runner(tmp_path, monkeypatch, prov, timeout=1)
 
     async def go():
@@ -471,7 +482,7 @@ def test_p0_r2_8_idle_polls_after_a_terminal_trip_write_nothing(tmp_path, monkey
         await asyncio.sleep(0.5)                 # let the trip's own writes land
         tree_before = r.paths.tree_file.read_bytes()
         events_before = r.paths.events_file.read_bytes()
-        await asyncio.sleep(11)                  # at least two further timer polls
+        await asyncio.sleep(1.5)                 # at least two further timer polls
         after = (r.paths.tree_file.read_bytes(), r.paths.events_file.read_bytes())
         await r.stop(agent)
         return tree_before, events_before, after
@@ -481,7 +492,7 @@ def test_p0_r2_8_idle_polls_after_a_terminal_trip_write_nothing(tmp_path, monkey
 
 
 def test_p0_r2_7_steer_starts_a_fresh_watchdog_timeout(tmp_path, monkeypatch):
-    prov = _cli(tmp_path, [_step_line()], then_sleep=12)
+    prov = _cli(tmp_path, [_step_line()], then_sleep=4)
     r = _runner(tmp_path, monkeypatch, prov, timeout=1)
 
     async def go():

@@ -542,11 +542,14 @@ def test_sv_r7_a_server_killed_during_replay_loses_and_doubles_nothing(project):
 # ===========================================================================
 
 def test_sv_r8_the_servers_downtime_is_not_silence(project):
-    """silence_timeout 6 s. Last output 1 s before the server goes; the gap
-    is over 2x the timeout; after adoption the agent stays quiet for 5.5 s —
+    """silence_timeout 2 s. Last output 1 s before the server goes; the gap
+    is over 2x the timeout; after adoption the agent stays quiet for 1 s —
     under the timeout counted from adoption, far over it counted from the
-    last output — then finishes."""
-    p = project(agent_overrides={"silence_timeout": 6})
+    last output — then finishes.
+
+    TS-R2: was 6 s / 12 s / 5.5 s with the watchdog's 5 s poll, so the quiet
+    second was looked at once at most; server b polls every 0.25 s."""
+    p = project(agent_overrides={"silence_timeout": 2})
     steps = [h.step_start(SID), h.text(SID, "spoke"), ["touch", str(p.marker("started"))],
              ["wait_for", str(p.marker("go")), 90],
              h.step_finish(SID, 1, 1, 0), ["exit", 0]]
@@ -556,10 +559,10 @@ def test_sv_r8_the_servers_downtime_is_not_silence(project):
     time.sleep(1)
     a.eof()
     assert a.exited(SERVER_EXIT)
-    time.sleep(12)
-    b = p.server()
+    time.sleep(4.5)
+    b = p.server(intervals={"Runner.WATCH_POLL_SECONDS": 0.25})
     assert wait_adopted(p, b, agent_id), p.describe(agent_id)
-    time.sleep(5.5)
+    time.sleep(1.0)
     stuck = [e for e in p.events(agent_id, "stuck")]
     assert p.status(agent_id) != "stuck" and not stuck, (
         f"reported stuck after adoption: {p.describe(agent_id)} {stuck}")

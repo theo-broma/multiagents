@@ -30,7 +30,11 @@ class FakePaths:
         return d
 
 # 1. Truncation bug
-def test_follower_drops_lines_when_file_grows_after_truncation(tmp_path, capsys):
+def test_follower_drops_lines_when_file_grows_after_truncation(tmp_path, capsys, monkeypatch):
+    # TS-R2: 1 s of TM-R3's 60 s linger. The rewrite lands in the same poll
+    # that sees the run terminal, so the view needs the linger's later polls
+    # to notice it; their number is not what this is about.
+    monkeypatch.setattr(viewer, "LINGER_SECONDS", 1)
     paths = FakePaths(tmp_path)
     agent_id = "ag-111111"
     run_dir = paths.run_dir(agent_id)
@@ -42,7 +46,7 @@ def test_follower_drops_lines_when_file_grows_after_truncation(tmp_path, capsys)
     class FakeTree:
         def __init__(self, *args): pass
         def get(self, id): return {"status": "running"}
-    viewer.Tree = FakeTree
+    monkeypatch.setattr(viewer, "Tree", FakeTree)      # not leaked (TS-R1)
     
     # We will patch fh.readline to simulate the file truncation while the viewer is running!
     import builtins
@@ -149,7 +153,7 @@ def test_tmux_open_concurrent_race_condition(proj):
     assert proj.tmux.windows(proj.sock, proj.session).count(aid) == 1
 
 # 5. Lone surrogate crash
-def test_follower_crashes_on_lone_surrogate(tmp_path, capsys):
+def test_follower_crashes_on_lone_surrogate(tmp_path, capsys, monkeypatch):
     paths = FakePaths(tmp_path)
     agent_id = "ag-555555"
     run_dir = paths.run_dir(agent_id)
@@ -161,7 +165,7 @@ def test_follower_crashes_on_lone_surrogate(tmp_path, capsys):
     class FakeTree:
         def __init__(self, *args): pass
         def get(self, id): return {"status": "TERMINAL"}
-    viewer.Tree = FakeTree
+    monkeypatch.setattr(viewer, "Tree", FakeTree)      # not leaked (TS-R1)
     
     try:
         viewer.view_stream(paths, agent_id, follow=False)
@@ -186,7 +190,7 @@ def test_tmux_open_crashes_on_broken_symlink_socket_dir(tmp_path):
         pass
 
 # 7. Bidi overrides escape
-def test_follower_escapes_bidi_overrides(tmp_path, capsys):
+def test_follower_escapes_bidi_overrides(tmp_path, capsys, monkeypatch):
     paths = FakePaths(tmp_path)
     agent_id = "ag-777777"
     run_dir = paths.run_dir(agent_id)
@@ -198,7 +202,7 @@ def test_follower_escapes_bidi_overrides(tmp_path, capsys):
     class FakeTree:
         def __init__(self, *args): pass
         def get(self, id): return {"status": "TERMINAL"}
-    viewer.Tree = FakeTree
+    monkeypatch.setattr(viewer, "Tree", FakeTree)      # not leaked (TS-R1)
     
     viewer.view_stream(paths, agent_id, follow=False)
     out, err = capsys.readouterr()

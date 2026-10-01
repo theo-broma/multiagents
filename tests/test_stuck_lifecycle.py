@@ -154,9 +154,13 @@ def open_gate(probe: Path, name: str) -> None:
 LOOP = {"doom_loop_repeats": 2}
 
 
-def make(tmp_path, monkeypatch, providers: dict, *, limits=None, agents=None, **spec_kw):
+def make(tmp_path, monkeypatch, providers: dict, *, limits=None, agents=None,
+         watch_poll=None, **spec_kw):
     """A Runner over a fresh project. `providers` is {name: dict}; the default
-    agent `worker` runs on the first one."""
+    agent `worker` runs on the first one. `watch_poll` replaces the timer
+    loop's 5 s production interval (TS-R2)."""
+    if watch_poll is not None:
+        monkeypatch.setattr(h.Runner, "WATCH_POLL_SECONDS", watch_poll)
     first = next(iter(providers))
     agents = agents or {"worker": h.AgentSpec("worker", first, "m", **spec_kw)}
     return h.make_runner(tmp_path / "proj", monkeypatch, agents=agents,
@@ -497,10 +501,11 @@ def test_sl_r3_a_worktree_change_clears_stuck(tmp_path, monkeypatch):
 
 def test_sl_r3_any_stream_event_clears_a_silence_trip(tmp_path, monkeypatch):
     """silence_timeout=1; the timer loop needs two looks at a still tree, so
-    the trip lands within ~10-15 s. Then a plain text event arrives."""
+    the trip lands within two or three polls (0.25 s here, TS-R2; 5 s in
+    production). Then a plain text event arrives."""
     plan = [text("starting"), gate("a"), text("back again"), gate("b")]
     stuck, later, pids, alive, invocations, kinds = _r3_run_marked(
-        tmp_path, monkeypatch, plan, silence_timeout=1)
+        tmp_path, monkeypatch, plan, silence_timeout=1, watch_poll=0.25)
     assert stuck == "stuck"
     assert kinds[:1] == ["silence"], kinds
     assert later == "running", later
@@ -829,8 +834,11 @@ def test_sl_r6_runaway_steps_still_bounds_a_declared_tool(tmp_path, monkeypatch)
 
 
 def test_sl_r6_silence_still_bounds_a_declared_tool(tmp_path, monkeypatch):
-    plan = [tool("peek", path="a.py")] * 3 + [["sleep", 14], text("done"), ["exit", 0]]
-    r, agent = _r6(tmp_path, monkeypatch, plan, declared=["peek"], silence_timeout=1)
+    # TS-R2: a 0.25 s timer poll instead of 5 s, so 4 s of silence is
+    # several polls past the 1 s limit rather than 14 s of it.
+    plan = [tool("peek", path="a.py")] * 3 + [["sleep", 4], text("done"), ["exit", 0]]
+    r, agent = _r6(tmp_path, monkeypatch, plan, declared=["peek"], silence_timeout=1,
+                   watch_poll=0.25)
     assert "silence" in trips(r, agent), trips(r, agent)
     assert "doom_loop" not in trips(r, agent)
 

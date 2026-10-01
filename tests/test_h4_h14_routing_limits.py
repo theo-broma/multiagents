@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent / "support"))
 import c3_harness as h  # noqa: E402
 from multiagents import budget as budget_mod  # noqa: E402
 from multiagents.config import AgentSpec  # noqa: E402
+from multiagents.runner import Runner  # noqa: E402
 from multiagents.tree import Node  # noqa: E402
 from test_conversation_provider_change import _calls, _fake_cli, _flag  # noqa: E402
 
@@ -50,6 +51,7 @@ def _limit(result, field):
 
 
 def _runner(tmp_path, monkeypatch, *, agent=None, project=None, providers=None):
+    monkeypatch.setattr(Runner, "WATCH_POLL_SECONDS", WATCH_POLL)
     if providers is None:
         provider, _ = _fake_cli(tmp_path, "acme")
         providers = {"acme": provider}
@@ -214,8 +216,10 @@ def _slow_provider(tmp_path, seconds=3):
 # LM-R1 as amended 2026-09-29 (SV-R4: a watchdog never kills): the wall-clock
 # observable is a `stuck` report with reason `timeout` once the effective value
 # has passed, not a kill. The runs below outlive the effective timeout plus the
-# watchdog's ~5 s polling, and are far shorter than any other candidate value.
-OUTLIVES_TIMEOUT = 9
+# watchdog's polling, and are far shorter than any other candidate value.
+# TS-R2: the watchdog polls every WATCH_POLL here instead of production's 5 s.
+WATCH_POLL = 0.25
+OUTLIVES_TIMEOUT = 3
 
 
 def _timed_out(runner, agent_id):
@@ -240,7 +244,7 @@ def test_lm_r1_project_timeout_is_enforced_on_start(tmp_path, monkeypatch):
 def test_lm_r1_project_silence_timeout_is_enforced_on_start(tmp_path, monkeypatch):
     _budgets(monkeypatch, acme=1.0)
     r = _runner(tmp_path, monkeypatch,
-                providers={"acme": _slow_provider(tmp_path, seconds=12)},
+                providers={"acme": _slow_provider(tmp_path, seconds=OUTLIVES_TIMEOUT)},
                 project={"limits": {"silence_timeout": 1}})
     _start(r)
     assert any(event.get("reason") == "silence" for event in _events(r, "stuck"))

@@ -25,7 +25,19 @@ def _known_provider_headroom(monkeypatch):
         "fake": budget_mod.Budget("fake", known=True, headroom=1.0)})
 
 
-def _project(tmp_path, monkeypatch, *, project_lines=(), agent_lines=(), delay=0):
+# TS-R2: `Runner._watch_timers` looks every 5 s in production. A trip is
+# what these tests are about, not the cadence of the poll that finds it.
+WATCH_POLL = 0.25
+
+
+def _project(tmp_path, monkeypatch, *, project_lines=(), agent_lines=(), delay=0,
+             retry=True):
+    """`retry=False` turns off the one free retry of a run that died saying
+    nothing (`retry_silent_failure_under_seconds: 0`, written after
+    `project_lines` so their line numbers do not move)."""
+    monkeypatch.setattr(Runner, "WATCH_POLL_SECONDS", WATCH_POLL)
+    if not retry:
+        project_lines = [*project_lines, "retry_silent_failure_under_seconds: 0"]
     root = h.make_git_repo(tmp_path / "project")
     paths = ProjectPaths(root)
     paths.ensure()
@@ -137,7 +149,8 @@ def test_ln_c2_builtin_source_points_to_shipped_default_and_project_override(tmp
 
 @pytest.mark.parametrize("field,key", [("timeout", "timeout"), ("silence_timeout", "silence_timeout")])
 def test_ln_c1_ln_c2_ln_c6_agent_watchdog_source(tmp_path, monkeypatch, field, key):
-    r, _, agent_file = _project(tmp_path, monkeypatch, agent_lines=[f"{field}: 1"], delay=7)
+    r, _, agent_file = _project(tmp_path, monkeypatch, agent_lines=[f"{field}: 1"], delay=3,
+                                 retry=False)
     result = _try_start(r)
     assert isinstance(result, dict) and result.get("agent_id"), result
     hit = _assert_hit(r, f"agents.worker.{key}", 1, "stuck")
@@ -147,7 +160,7 @@ def test_ln_c1_ln_c2_ln_c6_agent_watchdog_source(tmp_path, monkeypatch, field, k
 
 def test_ln_c2_call_timeout_overrides_agent_and_project_source(tmp_path, monkeypatch):
     r, _, _ = _project(tmp_path, monkeypatch, project_lines=["default_timeout: 10"],
-                        agent_lines=["timeout: 9"], delay=7)
+                        agent_lines=["timeout: 9"], delay=3, retry=False)
     result = _try_start(r, timeout=1)
     assert isinstance(result, dict) and result.get("agent_id"), result
     hit = _assert_hit(r, "limits.default_timeout", 1, "stuck")
@@ -319,7 +332,8 @@ def test_ln_c1_ln_c6_reserve_headroom_defers_only_when_reserve_causes_it(tmp_pat
 ])
 def test_ln_c1_ln_c6_project_watchdog_rows(tmp_path, monkeypatch, key, field):
     r, project_file, _ = _project(tmp_path, monkeypatch,
-                                  project_lines=[f"{field}: 1"], delay=7)
+                                  project_lines=[f"{field}: 1"], delay=3,
+                                  retry=False)
     result = _try_start(r)
     assert isinstance(result, dict) and result.get("agent_id"), result
     hit = _assert_hit(r, key, 1, "stuck",

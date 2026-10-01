@@ -20,12 +20,14 @@ result is the one the contract names.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -746,12 +748,25 @@ def _refused_cleanly(outcome):
     return bool(outcome.get("error")) and "index.lock" not in str(outcome["error"])
 
 
-def test_cf_r7_two_concurrent_consults_never_overlap_and_never_refresh_mid_turn(proj):
+def test_cf_r7_two_concurrent_consults_never_overlap_and_never_refresh_mid_turn(proj, monkeypatch):
     start_conversation(proj)
     proj.advance_base("v2\n")
+    # TS-R2: A's turn is held open until B has been refused the lock at least
+    # once (B is then inside A's turn, waiting), not for a fixed 4 s.
+    real_flock = fcntl.flock
+    b_blocked = threading.Event()
+
+    def flock(fd, op):
+        try:
+            return real_flock(fd, op)
+        except BlockingIOError:
+            b_blocked.set()
+            raise
+
+    monkeypatch.setattr(fcntl, "flock", flock)
 
     async def both():
-        a = asyncio.ensure_future(proj.runner.consult("advisor", "SLOW first", timeout=60))
+        a = asyncio.ensure_future(proj.runner.consult("advisor", "HOLD first", timeout=60))
         # Let A refresh and start its turn, then move base under it.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 20
@@ -759,6 +774,10 @@ def test_cf_r7_two_concurrent_consults_never_overlap_and_never_refresh_mid_turn(
             await asyncio.sleep(0.02)
         proj.advance_base("v3\n")
         b = asyncio.ensure_future(proj.runner.consult("advisor", "second", timeout=60))
+        deadline = loop.time() + 20
+        while not b_blocked.is_set() and not b.done() and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        (proj.probe / "release").write_text("")
         return await asyncio.gather(a, b, return_exceptions=True)
 
     ra, rb = asyncio.run(both())
@@ -768,7 +787,7 @@ def test_cf_r7_two_concurrent_consults_never_overlap_and_never_refresh_mid_turn(
     later = turns[1:]                              # turn 1 was before this test
     assert not any(t["overlap"] for t in later), (
         "two turns of one node ran at the same time")
-    slow = [t for t in later if "SLOW first" in t["prompt"]]
+    slow = [t for t in later if "HOLD first" in t["prompt"]]
     assert len(slow) == 1
     assert slow[0]["start"] == slow[0]["end"], (
         "the worktree changed under a running turn — a second consult "
@@ -909,10 +928,13 @@ def test_decided_enolck_from_the_lock_fails_at_once_instead_of_waiting(proj, mon
             f"ENOLCK is not another consult answering: {error!r}")
 
 
-def test_decided_lock_wait_timeout_result_carries_every_key(proj):
+def test_decided_lock_wait_timeout_result_carries_every_key(proj, monkeypatch):
     """Every consult result carries agent, agent_id, turn, commit,
     base_commit and behind, null when unknown — the lock-wait timeout too."""
     first, _ = start_conversation(proj)
+    # TS-R2: the slack is 60 s in production; what is asserted here is the
+    # shape of the result once the wait runs out, not how long the wait is.
+    monkeypatch.setattr(proj.runner, "CONSULT_LOCK_SLACK_SECONDS", 1.0)
 
     async def both():
         a = asyncio.ensure_future(
@@ -922,7 +944,7 @@ def test_decided_lock_wait_timeout_result_carries_every_key(proj):
         while not (proj.probe / "busy").exists() and loop.time() < deadline:
             await asyncio.sleep(0.02)
         try:
-            # timeout=1: B waits at most 1 + 60 s for A's turn, then gives up.
+            # timeout=1: B waits at most 1 + 1 s for A's turn, then gives up.
             b = await proj.runner.consult("advisor", "second", timeout=1)
         finally:
             (proj.probe / "release").write_text("")

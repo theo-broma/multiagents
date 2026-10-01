@@ -181,11 +181,12 @@ def test_adversary_adoption_does_not_loop_forever_on_corrupt_node(project):
     cfg_agents = p.root / ".multiagents" / "config" / "agents.yaml"
     cfg_agents.write_text(yaml.safe_dump({"agents": {}}))
 
-    # A new server starts up and its adoption loop runs
-    server2 = p.server()
+    # A new server starts up and its adoption loop runs. TS-R2: every 0.5 s
+    # instead of production's ADOPT_SECONDS=5.
+    server2 = p.server(intervals={"ADOPT_SECONDS": 0.5})
 
-    # Give the adoption loop time to run two cycles (ADOPT_SECONDS=5)
-    time.sleep(11.0)
+    # Give the adoption loop time to run at least two cycles
+    time.sleep(2.0)
 
     failed_events = p.events(agent_id, "adopt_failed")
     node = p.node(agent_id)
