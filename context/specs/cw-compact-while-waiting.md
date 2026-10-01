@@ -164,3 +164,24 @@ orchestrator against the installed CLI before merge.
 R8f.1 probe, R8f.3 grace and cancel, R8f.5 failure/once-per-crossing,
 R8f.6 exec path never compacts, R8f.12/R8f.19 user exit wins, all R8f.9
 config parsing.
+
+## Decisions on the tester's questions (ag-db8d42), 2026-10-01
+
+- **CW-R8 interface:** the focus reaches the `compact` action in the
+  environment variable `MULTIAGENTS_COMPACT_FOCUS` (empty or unset = none).
+- **CW-R2 bound:** `limits.compact_safe_point_seconds`, default `60`, parsed
+  as R8f.9. With no launch or transition in flight the stop does not wait for
+  the bound.
+- **CW-R2 test seam:** the `sitecustomize` gate in `tests/support/cw_gate/`
+  holding the agent wrapper's `Popen` is accepted; the implementation keeps
+  that launch path or adapts the seam and says so.
+- **CW-R4 `awaiting decision`:** the row label when the node is
+  `awaiting_user` at relaunch. Deferred earliest restart: ISO-8601 UTC.
+- **CW-R5, amended:** the CW-R4 message reports what is known at relaunch;
+  adoption being asynchronous, a row may say `not yet adopted`. A later
+  adoption failure surfaces through `agent_tree`, the `adopt_failed` event and
+  the node's `failed` status — never silently. The checklist's `agent_tree`
+  step is the orchestrator's route to it.
+- **CW-R6:** `compact_at_tokens: 0` emits no `compact_blocked` (the feature
+  is off, not blocked). `probe_failed` is emitted once per rest episode; every
+  other reason once per change.
