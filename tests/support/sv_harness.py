@@ -452,8 +452,12 @@ class Project:
     # --- environment -------------------------------------------------------
 
     def env(self, *, session: str = ORCH_SESSION) -> dict[str, str]:
+        # XDG_* are dropped with HOME replaced: the shipped opencode.sh reads its
+        # auth store from $XDG_DATA_HOME before $HOME, so a caller whose
+        # XDG_DATA_HOME points at a real (or agent) home made the server fetch
+        # the host's live opencode quota and defer every task as "exhausted".
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("MULTIAGENTS_", "CLAUDE_"))}
+               if not k.startswith(("MULTIAGENTS_", "CLAUDE_", "XDG_"))}
         env.update({
             "PYTHONPATH": SRC + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""),
             "HOME": str(self.user_home),
