@@ -138,3 +138,50 @@ def test_q2b_subcommand_with_missing_path_inside_project_does_not_create_it(
     assert exc.value.code == 2
     assert str(typo) in capsys.readouterr().err
     assert not typo.exists()
+
+
+# Q2b round 2: every command resolves an explicit --path the same way, through
+# `_resolve` itself: missing -> exit 2, subdirectory -> ancestor project,
+# given-but-empty -> exit 2, not given -> unchanged.
+
+def test_q2b_resolve_subdirectory_path_resolves_to_ancestor_project(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    (proj / "src").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cli._resolve(str(proj / "src")).root == proj.resolve()
+
+
+def test_q2b_tree_with_missing_path_exits_and_does_not_create_it(tmp_path, monkeypatch, capsys):
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    typo = proj / "typo"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--path", str(typo), "tree"])
+    assert exc.value.code == 2
+    assert str(typo) in capsys.readouterr().err
+    assert not typo.exists()
+
+
+def test_q2b_tree_with_subdirectory_path_reads_the_project_tree(tmp_path, monkeypatch, capsys):
+    proj = tmp_path / "proj"
+    (proj / ".multiagents").mkdir(parents=True)
+    (proj / "src").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert cli.main(["--path", str(proj), "tree"]) == 0
+    expected = capsys.readouterr().out
+    assert cli.main(["--path", str(proj / "src"), "tree"]) == 0
+    assert capsys.readouterr().out == expected
+    assert not (proj / "src" / ".multiagents").exists()
+
+
+def test_q2b_empty_path_exits_outside_any_project(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--path", "", "upgrade-config", "--dry-run", "--layer", "project"])
+    assert exc.value.code == 2
