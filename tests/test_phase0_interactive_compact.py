@@ -200,7 +200,9 @@ class Session:
         self.ctl = tmp_path / "fake.ctl.json"
         # Hermetic: nothing of the environment this suite runs in (which may be
         # an agent's own) reaches the fake's logged MULTIAGENTS_* environment.
-        for name in [n for n in os.environ if n.startswith("MULTIAGENTS_")]:
+        # MULTIAGENTS_STATE_DIR stays: it keeps state in the suite's tmp dir.
+        for name in [n for n in os.environ
+                     if n.startswith("MULTIAGENTS_") and n != "MULTIAGENTS_STATE_DIR"]:
             monkeypatch.delenv(name)
         monkeypatch.setenv("FAKE_LOG", str(self.log))
         monkeypatch.setenv("FAKE_CTL", str(self.ctl))

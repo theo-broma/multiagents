@@ -73,7 +73,7 @@ def test_unwritable_handshake_does_not_authorize_cli_stop(stop):
     # An agent can leave a directory at the barrier's filename. The actual
     # request write then fails while the live server registration remains.
     name = f"safepoint-barrier-{safepoint._key(SESSION)}.json"
-    (stop.paths.data / "launch" / name).mkdir()
+    (safepoint.directory(stop.paths) / name).mkdir(parents=True)
     assert not stop._reach_safe_point("announced-transcript"), "failed request was treated as a safe point"
 
 
