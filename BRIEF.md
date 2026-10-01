@@ -3238,3 +3238,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **PS:** opus ag-57e6fb failed on the Claude limit (WIP 84bd3c6).
   - **Both steers were refused** because the Claude session window reset at 01:00 still reads 100%. A wake is armed for 01:05 UTC.
   - **Next:** steer ag-cc25b3 with the round-3 decisions (they are in the spec), and steer ag-57e6fb with "carry on".
+- **Update, ~01:40 UTC.** Opus PS ag-57e6fb is done: the 7 findings are fixed and the PS reds are gone. 2 fixture reds (test_h2 rf_r4, plus an h1_h2_review2 opencode test) went to tester ag-dcc1c8, whose commit is to be cherry-picked onto 57e6fb. Reviewer ag-a50515 is on PS (opus round 1). Reviewer ag-2792f3 is on M (opus round 4). **Merge order:** M (cc25b3), then PS (57e6fb plus the tester commit), reconciling the cache per opus's plan.
