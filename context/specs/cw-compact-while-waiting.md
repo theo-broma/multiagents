@@ -185,3 +185,35 @@ config parsing.
 - **CW-R6:** `compact_at_tokens: 0` emits no `compact_blocked` (the feature
   is off, not blocked). `probe_failed` is emitted once per rest episode; every
   other reason once per change.
+
+## CW-R2a — the safe point cannot be forged (decided 2026-10-01, after review ag-db4940 #4 and advisor ag-d20e1e t8)
+
+- **Where:** the handshake (registration, request, acknowledgement) lives in a
+  host-only directory under the host state root, keyed by project (e.g.
+  `<state>/safepoints/<project-key>/`), never in the project's `launch/` and
+  never in anything mounted into a container. Driver and server resolve it
+  from one explicit, trusted source; the test harness is adapted, never a
+  second root silently chosen. No discovery through container-writable state.
+- **Exposure check:** if the effective container mounts (state-root override,
+  `extra_mounts`) expose that directory or an ancestor, CW compaction is
+  refused for that run (`compact_blocked`, reason `safepoint_exposed`). Paths
+  are resolved, symlinks not followed.
+- **Binding:** an acknowledgement counts only if it names the request's nonce,
+  the session, and the server's pid **and start time**.
+- **Fail closed:** any error registering, writing the request, enumerating
+  servers or reading acknowledgements cancels the compaction; an empty
+  enumeration is "no server", never "all acknowledged", unless the driver can
+  positively establish no root server exists for the session.
+- **Late servers:** a server registers and checks for an active barrier
+  **before** serving tools or starting launch-capable work, with admission
+  closed until that check passes; barrier publication and registration are
+  ordered so a server arriving after enumeration is either seen by the driver
+  or sees the barrier.
+- **No reopening while the driver may still stop:** admission stays closed
+  through a committed shutdown; a server-side expiry never reopens admission
+  while a matching acknowledgement could still be accepted (expiry removes or
+  invalidates the acknowledgement first, and the driver checks its own
+  deadline before accepting).
+- **Scope:** this protects against containerised agents. Local agents running
+  as the host user are outside that guarantee, as they are for every other
+  host-authority file.
