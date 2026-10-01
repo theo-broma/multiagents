@@ -3336,3 +3336,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - ~23:50 UTC: BP opus ag-547be2 done (ed48944; r3 fixes, BP-R3 15.67s→0.78s; suite reds all known). BP reviewer r4 ag-c? started (see tree).
   - ~00:00 UTC 10-02: CW r10 ag-647544 done (220e6d7: pre-commit re-enumeration + signed GRANT mechanism for late servers, ungranted admissions wait ≤30 s). Suite: only phase2/SC/BP reds. Reviewer r10 started.
   - PC tests merged (ag-a76c01: 69 red / 26 green; blocked-head R3a test needs SC → stays red until SC; retry/wrap-up/deferred restarts on full provider uncovered). Waiting: BP r4 reviewer ag-7631f3, CW r10 reviewer ag-c7285d. PC implementation waits for CW merge.
+  - BP r4 (ag-7631f3) REJECTED 3 P2 (cache key collision, borrowed snapshot closed by parent, growing cached YAMLError traceback). Steered ag-547be2 for r5.
