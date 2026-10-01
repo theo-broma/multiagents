@@ -544,22 +544,18 @@ def test_p0_r8f_2_1_the_reading_is_this_sessions_not_the_newest(session):
 
 
 # SV-R11 (context/specs/agent-survival.md) replaced R8f.2.2's idle-tree
-# condition: what blocks a compaction is a final result the orchestrator has
-# not yet seen, not an agent that is running. That a running, detached, stuck
-# or pending agent no longer blocks is asserted once, in
-# test_agent_survival.py::test_sv_r11_an_agent_without_an_unseen_result_does_
-# not_block_compaction. What was `test_p0_r8f_2_2_a_live_agent_blocks_it`,
-# whose [running] case asserted the opposite, now asserts the blocking half.
+# condition with "no unseen result", and CW-R1 (context/specs/cw-compact-while-
+# waiting.md) removed that too: running agents, unseen results and deferred
+# tasks no longer prevent a compaction. The tests below, which asserted the
+# blocking, now assert that the compaction proceeds (changed deliberately, CW-R1).
 
 @pytest.mark.parametrize("status", ["done", "failed"])
-def test_p0_r8f_2_2_sv_r11_an_unseen_final_result_blocks_it(session, status):
-    """The agent finished and nothing has returned that to the orchestrator:
-    compacting now would drop the one context that has to read it."""
+def test_p0_r8f_2_2_cw_r1_an_unseen_final_result_does_not_block_it(session, status):
     s = session()
     s.reading(OVER)
     s.finished(status)
-    s.run(KEEP)
-    assert_not_stopped(s)
+    s.run(stopped_then())
+    assert_stop_compact_resume(s)
 
 
 @pytest.mark.parametrize("via", ["check_agent", "wait_for_agents", "collect_agent"])
@@ -572,34 +568,32 @@ def test_p0_r8f_2_2_sv_r11_a_result_the_orchestrator_has_seen_does_not(session, 
     assert_stop_compact_resume(s)
 
 
-def test_p0_r8f_2_2_sv_r11_seeing_it_running_is_not_seeing_its_result(session):
-    """Seen means the *final* status was returned. A check while the agent was
-    still running does not cover the result it produced afterwards."""
+def test_p0_r8f_2_2_cw_r1_a_result_seen_while_running_does_not_block_either(session):
     s = session()
     s.reading(OVER)
     agent_id = s.node("running")
     s.see(agent_id, "check_agent")
     s.tree.set_status(agent_id, "done")
-    s.run(KEEP)
-    assert_not_stopped(s)
+    s.run(stopped_then())
+    assert_stop_compact_resume(s)
 
 
-def test_p0_r8f_2_2_sv_r11_one_unseen_result_blocks_despite_a_seen_one(session):
+def test_p0_r8f_2_2_cw_r1_an_unseen_result_does_not_block_despite_a_seen_one(session):
     s = session()
     s.reading(OVER)
     s.see(s.finished("done"))
     s.finished("failed")
-    s.run(KEEP)
-    assert_not_stopped(s)
+    s.run(stopped_then())
+    assert_stop_compact_resume(s)
 
 
 @pytest.mark.parametrize("retry_in", [3600, -10])
-def test_p0_r8f_2_2_a_deferred_task_blocks_it_due_or_not(session, retry_in):
+def test_p0_r8f_2_2_cw_r1_a_deferred_task_does_not_block_it_due_or_not(session, retry_in):
     s = session()
     s.reading(OVER)
     s.tree.defer({"agent": "coder", "task": "later"}, tree_now() + retry_in, "quota")
-    s.run(KEEP)
-    assert_not_stopped(s)
+    s.run(stopped_then())
+    assert_stop_compact_resume(s)
 
 
 @pytest.mark.parametrize("status", ["done", "failed", "merged", "interrupted"])
