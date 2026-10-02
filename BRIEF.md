@@ -2729,6 +2729,24 @@ Not scheduled. Noted "pour planification"; for the next phase via `multiagents i
   - **Windows.** Time zone (UTC or local); windows that cross midnight; days
     of the week.
 
+- **The user's follow-up (2026-10-02): nodes and loops.**
+  - **Name.** Call them **nodes** rather than tickets.
+  - **Composite nodes.** A node may itself contain several nodes, and may
+    be defined as a **loop**.
+  - **Loop counters.** A loop node records the number of iterations done and
+    a maximum. The default is no loop.
+  - **Action when the maximum is reached.** One of:
+    - close the node;
+    - return to the orchestrator for a decision;
+    - replace one of the node's models, extend the limit and change the
+      limit-reached action.
+    The last one generalises today's rule: at review round 3, escalate to
+    opus.
+  - **Orchestrator's note.** "node" is also already taken in the code: tree
+    nodes, `node_id`, `agent_tree`. The contract should either merge the two
+    concepts (a tree node becomes the run of a plan node) or name them
+    distinctly, for example a *plan node* versus a *run*.
+
 ### 2026-09-30 ~07:00 UTC — user chose claude opus as adversary; 4 runs in flight
 - ag-bd9c41 adversary (opus) on H7, verifies ag-d06a0b.
 - ag-03602e adversary (opus) on D1 fixes (942df35), verifies ag-d61f60.
