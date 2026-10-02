@@ -3784,3 +3784,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - `_launch` releases the inherited lock behind a live predecessor;
   - an unconfirmed death has no owner and no re-check.
   ag-1827ab is steered for round 4. **MiMo at `high` found codex-grade issues this time**, unlike at the default variant.
+- **FO round 4:** ag-12d4f1 committed 3dfa7a6. Effort is now attributed by source entry; the full suite shows only the 72 phase2 reds. Its readonly flag is again only a sync of main's copy.
