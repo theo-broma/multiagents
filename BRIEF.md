@@ -3412,3 +3412,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - BA-R3: a visible event when the WIP commit is refused.
 - Next for bug-ba55a9: an implementer on `gitops.py`, holding the runner part until PC merges.
 - bug-1213a0 is waiting for PC to merge, because it touches `runner.py`.
+- PC review round 1 (ag-836960) returned CHANGES_REQUESTED with 12 findings: 7 P1 and 5 P2.
+- I steered ag-03733f to fix them, after merging main.
+- My decisions on the implementer's open points:
+  - (a) queue ownership must follow the server, not the queuing agent;
+  - (b) the 60 s slack is OK, as long as there is one enforced deadline;
+  - (c) a resume must also check the tree-wide limit.
+- Robustness results from ag-145a37 will follow as a second batch.
