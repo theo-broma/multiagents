@@ -3628,3 +3628,20 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the loop-reviewer, repeated until it accepts;
   - the codex reviewer;
   - merge.
+- **Advisor check of FS/FO/SF; specs revised (cb48de5):**
+  - **FS shrinks.** `_routed_spec` already rejects unnamed providers except family siblings, and every current family is a singleton, so the "no silent fallback" rule already holds. What is left:
+    - keep today's ordering;
+    - defer after exhaustion;
+    - remove family widening on every path;
+    - legacy sessions stay on their recorded sibling.
+  - **FO adds:**
+    - primary-provider entry merge;
+    - precedence: pin > `models.P` > top-level;
+    - validation against the destination provider's `spawn.optional`.
+  - **SF adds:**
+    - cumulative crossing evidence;
+    - the SF-R3 release scope.
+- **Testers:**
+  - SF: ag-effa3f, steered with the revision;
+  - FO: ag-f939e4;
+  - FS: ag-702ff1.
