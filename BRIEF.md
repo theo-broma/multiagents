@@ -3866,4 +3866,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **CB, ag-152774: verified.**
     - The handover commit af30b03 already held the complete round-4 work. The two round-4 tests are red on 70f6d50 and green on HEAD.
     - Full suite: no new reds. The extras (FO/FS 33, SF 9) are red on main because their tests were merged ahead of the code.
-    - The loop-reviewer is ag-6?? (`verifies=ag-152774`). NEXT: codex, then merge.
+    - The loop-reviewer is ag-45bb04 (`verifies=ag-152774`). NEXT: codex, then merge.
