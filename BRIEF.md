@@ -3863,3 +3863,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - New tests: `tests/test_fo_round5.py`. Full suite: 72 phase2 reds only.
     - The loop-reviewer is ag-35604a (`verifies=ag-12d4f1`). NEXT: codex round 3, then merge.
   - **AGENTS.md, 72c7c17:** the basetemp path must not contain `ag-`, because a basetemp containing `ag-1` turns a test_core test red.
+  - **CB, ag-152774: verified.**
+    - The handover commit af30b03 already held the complete round-4 work. The two round-4 tests are red on 70f6d50 and green on HEAD.
+    - Full suite: no new reds. The extras (FO/FS 33, SF 9) are red on main because their tests were merged ahead of the code.
+    - The loop-reviewer is ag-6?? (`verifies=ag-152774`). NEXT: codex, then merge.
