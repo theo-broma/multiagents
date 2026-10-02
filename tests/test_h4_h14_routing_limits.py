@@ -97,12 +97,32 @@ def test_rt_r1_nonempty_fallback_routes_with_its_model(tmp_path, monkeypatch):
     assert not _events(r, "route_skipped")
 
 
-def test_rt_r1_same_family_sibling_inherits_nonempty_model(tmp_path, monkeypatch):
+def test_rt_r1_unlisted_same_family_sibling_is_not_a_fallback(tmp_path, monkeypatch):
+    # Revised by FS-R2: a family sibling is a candidate only if listed in
+    # `models:`; with the preferred provider exhausted the start defers.
     main, main_probe = _fake_cli(tmp_path, "acme")
     other, other_probe = _fake_cli(tmp_path, "acme2")
     other["family"] = "acme"
     _budgets(monkeypatch, acme=0.0, acme2=1.0)
     r = _runner(tmp_path, monkeypatch,
+                providers={"acme": main, "acme2": other})
+
+    result = _start(r)
+
+    assert result.get("deferred"), result
+    assert not result.get("agent_id"), result
+    assert not _calls(main_probe) and not _calls(other_probe)
+
+
+def test_rt_r1_listed_same_family_sibling_inherits_nonempty_model(tmp_path, monkeypatch):
+    # The original intent, with the sibling listed (entry names no model, FO-R1c).
+    main, main_probe = _fake_cli(tmp_path, "acme")
+    other, other_probe = _fake_cli(tmp_path, "acme2")
+    other["family"] = "acme"
+    _budgets(monkeypatch, acme=0.0, acme2=1.0)
+    agent = AgentSpec.from_dict("worker", {"provider": "acme", "model": "m1",
+                                           "models": {"acme2": {"effort": "low"}}})
+    r = _runner(tmp_path, monkeypatch, agent=agent,
                 providers={"acme": main, "acme2": other})
 
     result = _start(r)

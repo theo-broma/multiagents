@@ -333,8 +333,9 @@ def test_rm_r2_routing_message_names_the_provider_and_says_it_is_the_agents_own(
 
 
 # RM-R2a, Tier A: the preferred provider and its siblings are one pool, and
-# it comes before the agent's models routes.
-def test_rm_r2a_tier_a_sibling_comes_before_a_models_route(tmp_path, monkeypatch):
+# it comes before the agent's models routes. Revised by FS-R2: only a sibling
+# the agent LISTS in `models:` is in the pool; an unlisted one never is.
+def test_rm_r2a_tier_a_unlisted_sibling_is_skipped_for_a_models_route(tmp_path, monkeypatch):
     runner, probes = _routing_setup(
         tmp_path, monkeypatch, {"zeta": "z1"}, ["defer"],
         ["acme", "acme2", "zeta"], families={"acme2": "acme"})
@@ -343,8 +344,25 @@ def test_rm_r2a_tier_a_sibling_comes_before_a_models_route(tmp_path, monkeypatch
 
     result = _start(runner)
 
+    assert result.get("provider") == "zeta", result
+    assert _flag(_calls(probes["zeta"])[0], "--model") == "z1"
+    assert not _ran(probes, "acme2")
+
+
+def test_rm_r2a_tier_a_listed_sibling_comes_before_a_models_route(tmp_path, monkeypatch):
+    # The original intent, with the sibling listed (FS-R2, FO-R1c): the entry
+    # names no model, so the sibling runs the agent's own.
+    runner, probes = _routing_setup(
+        tmp_path, monkeypatch, {"acme2": {"effort": "low"}, "zeta": "z1"}, ["defer"],
+        ["acme", "acme2", "zeta"], families={"acme2": "acme"})
+    runner.providers["acme"].family = "acme"
+    _budgets(monkeypatch, acme=0.0, acme2=1.0, zeta=1.0)
+
+    result = _start(runner)
+
     assert result.get("provider") == "acme2", result
     assert _flag(_calls(probes["acme2"])[0], "--model") == "m1"
+    assert not _ran(probes, "zeta")
 
 
 def test_rm_r2a_tier_a_preferred_still_wins_when_it_has_room(tmp_path, monkeypatch):
@@ -356,7 +374,8 @@ def test_rm_r2a_tier_a_preferred_still_wins_when_it_has_room(tmp_path, monkeypat
 
 
 # RM-R2a, Tier B: a listed route's family siblings join right after it.
-def test_rm_r2a_tier_b_sibling_of_a_listed_route_comes_before_the_next_route(
+# Revised by FS-R2: an unlisted sibling of a listed route is never a candidate.
+def test_rm_r2a_tier_b_unlisted_sibling_of_a_listed_route_is_skipped_for_the_next_route(
         tmp_path, monkeypatch):
     runner, probes = _routing_setup(
         tmp_path, monkeypatch, {"zeta": "z1", "yotta": "y1"}, ["defer"],
@@ -365,8 +384,26 @@ def test_rm_r2a_tier_b_sibling_of_a_listed_route_comes_before_the_next_route(
 
     result = _start(runner)
 
+    assert result.get("provider") == "yotta", result
+    assert _flag(_calls(probes["yotta"])[0], "--model") == "y1"
+    assert not _ran(probes, "zeta2")
+
+
+def test_rm_r2a_tier_b_listed_sibling_of_a_listed_route_comes_before_the_next_route(
+        tmp_path, monkeypatch):
+    # The original intent, with the sibling listed. Which model a listed
+    # options-only sibling runs (zeta's z1 or the agent's m1) is not fixed by
+    # FS or FO-R1c, so only the provider is asserted.
+    runner, probes = _routing_setup(
+        tmp_path, monkeypatch,
+        {"zeta": "z1", "zeta2": {"effort": "low"}, "yotta": "y1"}, ["defer"],
+        ["acme", "zeta", "zeta2", "yotta"], families={"zeta2": "zeta", "zeta": "zeta"})
+    _budgets(monkeypatch, acme=0.0, zeta=0.0, zeta2=1.0, yotta=1.0)
+
+    result = _start(runner)
+
     assert result.get("provider") == "zeta2", result
-    assert _flag(_calls(probes["zeta2"])[0], "--model") == "z1"
+    assert not _ran(probes, "yotta")
 
 
 def test_rm_r2a_a_cross_family_chain_entry_with_no_model_still_cannot_run(
@@ -434,11 +471,29 @@ def test_rm_r3a_tier_b_written_order_holds_between_two_known_routes(tmp_path, mo
     assert _start(runner).get("provider") == "zeta"     # order, not headroom
 
 
-def test_rm_r3a_tier_a_pool_prefers_a_known_reading_over_an_unknown_one(
+def test_rm_r3a_tier_a_pool_ignores_an_unlisted_sibling_with_a_known_reading(
         tmp_path, monkeypatch):
-    # Assumption: with equal load the known reading wins inside the pool.
+    # FS-R2: the pool holds only the preferred provider and listed siblings, so
+    # an unlisted sibling's known reading cannot outrank the preferred one's
+    # unknown reading.
     runner, probes = _routing_setup(
         tmp_path, monkeypatch, {}, [], ["acme", "acme2"], families={"acme2": "acme"})
+    runner.providers["acme"].family = "acme"
+    _budgets(monkeypatch, acme=None, acme2=0.5)
+
+    result = _start(runner)
+
+    assert result.get("provider") == "acme", result
+    assert not _ran(probes, "acme2")
+
+
+def test_rm_r3a_tier_a_pool_prefers_a_known_reading_over_an_unknown_one(
+        tmp_path, monkeypatch):
+    # The original intent, with the sibling listed. Assumption: with equal load
+    # the known reading wins inside the pool.
+    runner, probes = _routing_setup(
+        tmp_path, monkeypatch, {"acme2": {"effort": "low"}}, [], ["acme", "acme2"],
+        families={"acme2": "acme"})
     runner.providers["acme"].family = "acme"
     _budgets(monkeypatch, acme=None, acme2=0.5)
 
@@ -879,7 +934,10 @@ def test_rm_r6a_agent_without_models_defers_rather_than_using_an_unmodelled_chai
     assert [e.get("provider") for e in skipped] == ["zeta"]
 
 
-def test_rm_r6a_agent_without_models_still_uses_a_same_family_sibling(tmp_path, monkeypatch):
+def test_rm_r6a_agent_without_models_does_not_use_an_unlisted_same_family_sibling(
+        tmp_path, monkeypatch):
+    # Withdrawn behaviour (FS-R2): family siblings are not candidates. The
+    # exhausted agent defers.
     runner, probes = _routing_setup(tmp_path, monkeypatch, {}, [], ["acme", "acme2"],
                                     families={"acme2": "acme"})
     runner.providers["acme"].family = "acme"
@@ -887,8 +945,9 @@ def test_rm_r6a_agent_without_models_still_uses_a_same_family_sibling(tmp_path, 
 
     result = _start(runner)
 
-    assert result.get("provider") == "acme2", result
-    assert _flag(_calls(probes["acme2"])[0], "--model") == "m1"
+    assert result.get("deferred"), result
+    assert not result.get("agent_id"), result
+    assert not (_ran(probes, "acme") or _ran(probes, "acme2"))
 
 
 def test_rm_r6a_a_chain_entry_the_agent_has_a_model_for_still_routes(tmp_path, monkeypatch):
