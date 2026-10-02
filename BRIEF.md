@@ -3838,3 +3838,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - No user decision is pending.
 
 **When FO, FS, SF and CB are all merged:** report to the user and hand back per the protocol.
+- **Post-handoff results (same session):**
+  - **FO loop round 4, ag-948bd9: ACCEPT.** No defects; full suite shows only the 72 phase2 reds. NEXT: codex reviewer round 2 on `agents/implementer/12d4f1` (3dfa7a6), then merge, then FS.
+  - **CB ag-ba1672 degenerated** into a "Run. Emitting. OK." text loop and never ran its commit. multiagents auto-committed its worktree as WIP 851e1a0 (diff below). NEXT: have a fresh `implementer-quick`, or a steer if usable, verify that the WIP actually contains both round-4 fixes (profile in the cache identity; script-backed providers exempt) plus the tests, run them, and commit cleanly. Do not trust the WIP blindly.
