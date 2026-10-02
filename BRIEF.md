@@ -3502,3 +3502,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - 1 BA-R3.
 - **BA-R3 merged as f9f7ee6:** reviewer ag-1712d7 approved with no findings. bug-ba55a9 is resolved as fixed, in-house and not submitted.
 - **Claude session limit (09:30 UTC).** It cut off SC ag-8362a3 and tester ag-155fae. Both were steered back after the reset.
+- **RC tests merged as 61bccd3** from tester ag-155fae: 45 tests, 24 red (RC-R1, R2, R3). RC-R4, RC-R5 and H7 are green.
+  - **Not covered:**
+    - a refused commit-fix turn finishing its startup claim;
+    - steer's PC rollback when it loses the probe;
+    - wall-timeout precedence.
+  - **Recording field names are unpinned:** the tests search the reason, the result and the events.
+- **RC implementation:** implementer ag-cfd0bd (glm), on classification and startup-finish only.
