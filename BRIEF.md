@@ -3702,3 +3702,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **SF:** loop-reviewer ag-7c0db2 returned ACCEPT after round 1 (306 tests passed; three P3s: an untried retry of tree evidence, a silent `except` in `_remember_stop`, pre-existing evidence from binding caps). The final codex reviewer ag-904ab8 is running with `verifies=ag-1827ab`.
 - **FO:** loop-reviewer ag-d1e0f6 is running round 1 on `agents/implementer/12d4f1`.
 - **Config:** loop-reviewer `timeout` raised from 1800 to 3600 in agents.yaml, which is not versioned.
+- **SF codex review ag-904ab8: CHANGES_REQUESTED.** Four P2s, all in steer's pre-spawn cleanup:
+  - a non-RuntimeError from `executor.start` skips cleanup;
+  - the predecessor's hold blocks release of this steer's own resources;
+  - the inherited supervision lock stays held after an early refusal;
+  - a failed neutral release has no retry owner.
+  One P3: tree evidence is dropped once the ledger write succeeds. Steered ag-1827ab for loop round 2 (variant stays at xhigh). NEXT: a new loop-reviewer on it, then the codex reviewer.
