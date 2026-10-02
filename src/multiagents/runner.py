@@ -571,6 +571,9 @@ class Run:
     text_parts: list[str] = field(default_factory=list)
     final_assistant_message: str = ""
     refusal_signal: str = ""
+    # RC-R2 (review ag-997df9 finding 3): the verdict's evidence as structure —
+    # {"source", "pattern", "excerpt"} — so result.json can carry it verbatim.
+    refusal: dict | None = None
     final_status: str = ""
     startup_token: str = ""
     startup_progress: bool = False
@@ -3319,7 +3322,8 @@ class Runner:
             self.tree.set_status(node_id, "failed", reason)
 
     def _startup_finish(self, provider: str, node_id: str, token: str,
-                        failed: bool = False, error: str = "") -> None:
+                        failed: bool = False, error: str = "",
+                        resolved: bool = False) -> None:
         if not token:
             return
         hold = self._holds.get(node_id)
@@ -3330,6 +3334,7 @@ class Runner:
             return
         event = self.startup.finish(
             provider, node_id, token, failed=failed, error=error,
+            resolved=resolved,
             threshold=int(self.config.limits.get("startup_failure_threshold", 2)),
             cooldown=float(self.config.limits.get("provider_down_cooldown_seconds", 1800)))
         if event:
@@ -4105,7 +4110,13 @@ class Runner:
             code = -1
         finally:
             watchdog.cancel()
-            stderr_task.cancel()
+            # RC-R2 (bug-1213a0): stderr is drained to EOF before the run is
+            # classified, so the verdict does not depend on how much of it the
+            # async drain got to before the process was reaped. Bounded: a
+            # grandchild still holding the pipe must not hold the post-mortem
+            # — on timeout wait_for cancels the drain, as the bare cancel did.
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(stderr_task, 2.0)
             stream_log.close()
             if not run.detaching and (run.stop_requested
                     or asyncio.current_task().cancelling()):
@@ -4370,10 +4381,13 @@ class Runner:
         # CI-R5: a commit a git hook refused goes back to the agent, in the
         # same session and worktree, before anything here is recorded — so
         # the node stays `running` and `result.json` is written once.
+        # RC-R3 (review ag-2d1240): a refused turn is never resumed either —
+        # the provider answered and declined the prompt. Its commit failure
+        # is still reported below, as CI-R2 would.
         fix_attempts = 0
         if (commit_result is not None and not commit_result.ok and commit_result.hook
                 and not stopped_elsewhere
-                and status not in ("limited", "quota", "unauthenticated")
+                and status not in ("limited", "quota", "unauthenticated", "refused")
                 and session_id and run.provider.spawn.get("resume")):
             commit_result, fix_attempts, ended_by, fix_usage, fix_cut = \
                 await self._commit_fix_loop(run, node, commit_result, session_id)
@@ -4385,10 +4399,11 @@ class Runner:
                 return ended_by != "stopped"
             usage = _merge_usage(usage, fix_usage, run.provider.usage_mode)
             if fix_cut is not None:
-                # A status that tells the orchestrator to wait or to
-                # re-authenticate wins over the commit failure, which is still
-                # reported: the run ends as the cut would end any run, and a
-                # `limited` one stays resumable.
+                # A status that tells the orchestrator to wait, to
+                # re-authenticate — or, since RC-R3, one the provider refused —
+                # wins over the commit failure, which is still reported: the
+                # run ends as the cut would end any run, and a `limited` one
+                # stays resumable.
                 status, limited = fix_cut["status"], fix_cut["limited"]
 
         # A run that ends with nothing to say still ended for a reason.
@@ -4419,10 +4434,16 @@ class Runner:
                     f"it succeeded after {fix_attempts} fix attempt(s).").strip()
 
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
-        _run_write(run_dir, "result.json", json.dumps(scrub({
+        record = {
             "status": status, "exit_code": code, "session_id": session_id,
             "usage": usage, "text": text, "stderr_tail": stderr,
-        }), indent=2))
+        }
+        if run.refusal:
+            # RC-R2 (review ag-997df9 finding 3): the verdict's evidence is in
+            # the result artifact too, not only the reason and the events —
+            # result.json is what survives the tree.
+            record["refusal"] = run.refusal
+        _run_write(run_dir, "result.json", json.dumps(scrub(record), indent=2))
 
         self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
         # Filed even when the run failed: a partial write-up of a real defect is
@@ -4603,9 +4624,13 @@ class Runner:
                     reason = "produced no output"
             self.tree.set_status(node_id, status, self._with_trip(prior_stuck, reason))
 
+        # RC-R3 (bug-1213a0): a refusal finishes the startup claim as a
+        # success — the provider answered — and so resolves a half-open probe
+        # it held, rather than re-arming the outage for another cooldown.
         self._startup_finish(run.provider.name, node_id, run.startup_token,
                              failed=status == "failed" and not run.startup_progress
                              and not run.stop_requested and not timed_out,
+                             resolved=status == "refused",
                              error=(stderr or text).splitlines()[0] if (stderr or text) else status)
 
         # Auto-merge this agent's own children upward: their work is still
@@ -4635,8 +4660,8 @@ class Runner:
         Returns the last commit result, the attempts made, how the loop ended
         ("" when it ran its course, else "stopped", "steered" or "detached"),
         the fix turns' usage, and — when a fix turn was cut off by its
-        provider (`limited`, `quota`, `unauthenticated`) — that turn's
-        verdict, whose status becomes the run's.
+        provider (`limited`, `quota`, `unauthenticated`, `refused`) — that
+        turn's verdict, whose status becomes the run's.
         """
         node_id = run.node_id
         limits = self.config.limits
@@ -4696,6 +4721,17 @@ class Runner:
                 return result, attempt, "stopped", usage, None
             if verdict["status"] in ("limited", "quota", "unauthenticated"):
                 return result, attempt, "", usage, verdict   # cannot be resumed again
+            if verdict["status"] == "refused":
+                # RC-R3 (bug-1213a0, review ag-997df9 finding 1): a refusal is
+                # not retried either — the provider answered and declined the
+                # turn. The loop ends here and the refusal becomes the run's
+                # verdict: the commit could not be fixed because the provider
+                # refused, and reporting `done` over that buries it. The
+                # evidence lives on the fix turn's Run; this run's record
+                # carries it (result.json, reason, events).
+                run.refusal = fix.refusal
+                run.refusal_signal = fix.refusal_signal
+                return result, attempt, "", usage, verdict
             if verdict["status"] == "awaiting_user":
                 # The fix turn asked rather than fixed: the question is the
                 # run's, as an ordinary turn's is, and nothing is committed
@@ -4751,6 +4787,7 @@ class Runner:
         self._startup_finish(run.provider.name, run.node_id, run.startup_token,
                              failed=status == "failed" and not run.startup_progress
                              and not run.stop_requested and not timed_out,
+                             resolved=status == "refused",
                              error=(stderr or text).splitlines()[0] if (stderr or text) else status)
 
         run.fix_verdict = {"status": status, "limited": limited, "usage": usage}
@@ -5024,6 +5061,43 @@ class Runner:
         return {"until": until, "detail": detail,
                 "reason": f"{provider.name} stopped it: {detail}"}
 
+    @staticmethod
+    def _refusal_record(source: str, pattern: str, matched: str) -> dict:
+        """RC-R2 (bug-1213a0): the evidence a refusal verdict records — the
+        source it matched, the marker that matched, and a bounded excerpt of
+        the text itself. The FULL match is redacted before it is bounded:
+        slicing first can cut a registered secret in half, and a half secret
+        is one scrub can no longer recognise (review ag-997df9, finding 2).
+        Enough to check the verdict without keeping the stderr tail around."""
+        return {"source": source, "pattern": pattern,
+                "excerpt": scrub(matched)[:200]}
+
+    def _record_refusal(self, run: Run, source: str, pattern: str,
+                        matched: str) -> str:
+        """Set both forms of the refusal evidence on the run: the structured
+        record result.json carries, and the one-line signal for the reason."""
+        run.refusal = self._refusal_record(source, pattern, matched)
+        run.refusal_signal = (f"{source} matched refusal marker {pattern!r}: "
+                              f'"{run.refusal["excerpt"]}"')
+        return run.refusal_signal
+
+    def _stderr_refusal(self, run: Run, code: int, stderr: str) -> str:
+        """RC-R2 (bug-1213a0): a run that exited non-zero with a refusal
+        marker in its stderr tail is a refusal, not a failure. Consulted only
+        where the run would otherwise be `failed` — a clean exit, a stop we
+        requested and a wall clock we imposed all outrank what the CLI printed
+        on the way out. `re.search`, unlike the final message's fullmatch:
+        stderr is a stream the marker sits inside, not a message it sums up."""
+        if code == 0 or getattr(run, "stop_requested", False) \
+                or getattr(getattr(run, "handle", None), "timed_out", False):
+            return ""
+        for pattern in getattr(run.provider, "refusal_markers", []):
+            match = re.search(pattern, stderr or "", re.IGNORECASE)
+            if match:
+                self._record_refusal(run, "stderr", pattern, match.group(0))
+                return "refused"
+        return ""
+
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:
         # Before everything, including the clean-exit shortcut below. A CLI that
         # cut its own turn short exits 0 with a stream that parses perfectly, so
@@ -5039,7 +5113,7 @@ class Runner:
         message = getattr(run, "final_assistant_message", "").strip()
         for pattern in getattr(run.provider, "refusal_markers", []):
             if re.fullmatch(pattern, message, re.IGNORECASE):
-                run.refusal_signal = f'response matched refusal marker "{message[:150]}"'
+                self._record_refusal(run, "assistant message", pattern, message)
                 return "refused"
         succeeded = code == 0 and (
             not run.final_status
@@ -5057,10 +5131,13 @@ class Runner:
         # model that simply said nothing, and the fix is entirely different.
         if looks_like_auth_failure(run.final_status, stderr):
             return "unauthenticated"
+        # RC-R2: the two `failed` verdicts a non-zero exit can reach. Stderr
+        # markers are consulted here and nowhere earlier — a structured
+        # refusal, a truncation, quota and auth all keep their verdicts.
         if run.final_status and run.final_status.upper() not in {"SUCCESS", "OK", "COMPLETED"}:
-            return "failed"
+            return self._stderr_refusal(run, code, stderr) or "failed"
         if code != 0:
-            return "failed"
+            return self._stderr_refusal(run, code, stderr) or "failed"
         if not text.strip():
             # A headless agent that produced nothing USUALLY hit an auto-denied
             # permission — but not always, and the difference is visible. Nine
