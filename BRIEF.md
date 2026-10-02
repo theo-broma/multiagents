@@ -3693,3 +3693,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 4. **Report to the user** when all three have merged, then hand back.
    - The "variant override for start/steer" item is noted for later; it is not to be started.
    - The ignored-`models.P.variant` bug is what FO fixes.
+- **FO implementer ag-12d4f1 (DeepSeek high)** is done. One commit, 1a511df: all 35 FO tests pass and the full suite is at baseline.
+  - **Approach:** `AgentSpec.routed()` builds a per-run spec, and `Config.warnings` emits FO-R3 warnings.
+  - **NEXT:** loop-reviewer on branch `agents/implementer/12d4f1` with `verifies=ag-12d4f1`. It was not started because of the context wind-down.
+- **SF loop-reviewer ag-7c0db2** is still running. Its "stuck" reports are silence during pytest under the old 180 s limit.
