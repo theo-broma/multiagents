@@ -3791,3 +3791,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - An unconfirmed predecessor now gets a durable hold through the existing machinery.
   - 923 targeted tests pass; the full suite is at baseline.
   - Loop-reviewer ag-20e4d8 is running round 4.
+- **CB round 3:** ag-ba1672 committed 70f6d50.
+  - A profile is honoured only by a profile-capable reader, judged by signature, and is rejected at load otherwise.
+  - The full suite shows only the expected reds.
+  - A loop-reviewer is running round 3.
