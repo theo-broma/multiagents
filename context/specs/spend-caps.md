@@ -243,3 +243,20 @@ These override any earlier wording they contradict.
   errors are reported once and never block anything.
 - **The upgrade.** The ledger's creation time is persisted. Every period
   that began before it is reported as partial in `budget_status`.
+
+## Decisions during review (orchestrator, 2026-10-02)
+
+**SC-R3c: admission reads the current cap, not a cached one.**
+- **Which caps apply.** Every admission point uses the caps as currently written in the config files, read at the moment of the check: public admission, the spawn guard right before `executor.start()`, queued and deferred resumes, steer, consult and commit-fix launches. A cached copy is allowed only if its file mtime and size are re-validated at each check.
+- **Effect.** A lowered cap that another process has already crossed binds in this process at its next launch. A raised cap admits again.
+- **Rejected alternative.** Refusing on any crossing record regardless of the current cap would block after a genuine cap raise.
+
+**SC-R4b: a crossing binds only within its period.**
+- A crossing recorded in a period that has since ended does not stop runs in the new period. The spend that crossed it no longer counts against the new period's cap.
+- A run that has not observed the crossing before the period rolls over keeps running. This is correct, not a missed stop: the run would be re-admitted at that instant anyway.
+- The 15 s stop window of SC-R4a applies only while the crossing's period is current.
+
+**SC-R4c: the crossing event's agent list.**
+- **Normal case.** The `spend_cap` event names the agents stopped because of that crossing.
+- **Recovered event.** When the event is recovered by a watcher after the claimer died, it carries `recovered: true`. Its agent list is the agents recorded as stopped for that crossing id: each stopping run records its own stop against the crossing id in the ledger. It is not the agents active at recovery time.
+- **Write failures.** An announcement is recorded as done only after the event write succeeded. A failed event write leaves the crossing unannounced, so a later watcher retries.
