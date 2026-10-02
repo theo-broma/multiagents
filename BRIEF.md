@@ -3790,4 +3790,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - `_launch(release_lock=False)` on the steer path.
   - An unconfirmed predecessor now gets a durable hold through the existing machinery.
   - 923 targeted tests pass; the full suite is at baseline.
-  - Loop-reviewer ag-<next> is running round 4.
+  - Loop-reviewer ag-20e4d8 is running round 4.
