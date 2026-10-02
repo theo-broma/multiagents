@@ -602,9 +602,42 @@ class AgentSpec:
             model = str(entry.get("model") or entry.get("id") or "")
             fields = set(AgentSpec.__dataclass_fields__)
             overrides = {k: v for k, v in entry.items()
-                         if k in fields and k not in ("name", "model", "models", "set_fields")}
+                         if k in fields and k not in ("name", "provider", "model",
+                                                      "models", "set_fields")}
             return model, overrides
         return str(entry or ""), {}
+
+    def routed(self, provider: str, pinned_model: str = "") -> AgentSpec:
+        """The per-run spec on `provider`: the `models.P` entry merged over the
+        top-level values, without mutating this spec (FO-R1).
+
+        A dict entry contributes both its dataclass fields (`effort`,
+        `permission`, …) and every option it names (`variant`, or any key a
+        provider's `spawn.optional` consumes). Options are not dataclass
+        fields, so they live in `extra` and reach the command line through the
+        launch options. An explicit `pinned_model` — a per-run `model=` pin —
+        wins over the entry's model but not over its options. A bare-string
+        entry changes only the model (FO-R2).
+        """
+        entry = (self.models or {}).get(provider)
+        if not isinstance(entry, dict):
+            model = pinned_model or (str(entry) if entry else "")
+            return self.replace(model=model) if model and model != self.model else self
+        fields = set(AgentSpec.__dataclass_fields__)
+        # `provider` is a dataclass field, but a `models:` entry may not move
+        # the run to another provider — the key names the destination. It is
+        # excluded here (and reported by `_warn_unknown_entry_keys`).
+        changes = {k: v for k, v in entry.items()
+                   if k in fields
+                   and k not in ("name", "provider", "model", "models",
+                                 "set_fields", "extra")}
+        extra = {**self.extra,
+                 **{k: v for k, v in entry.items()
+                    if k not in fields and k not in ("model", "id")}}
+        model = (pinned_model
+                 or str(entry.get("model") or entry.get("id") or "")
+                 or self.model)
+        return self.replace(model=model, extra=extra, **changes)
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> AgentSpec:
@@ -649,6 +682,10 @@ class Config:
     # so a limit notice can name the file and line a value came from. Empty
     # for a Config built in code, which has no file to point at.
     layers: list[Path] = field(default_factory=list)
+    # FO-R3: config warnings raised while loading, so a caller can surface
+    # them. An unknown option in a `models:` entry is reported here rather
+    # than failing the load; dedup, if any, is at display (FO-R3b).
+    warnings: list[str] = field(default_factory=list)
 
     # --- convenience accessors, all with defaults so a sparse config works ---
 
@@ -854,6 +891,47 @@ class Config:
         return ""
 
 
+# FO-R3: a `models:` entry may carry structural keys (`model`, `id`) and any
+# option the DESTINATION provider consumes via its resolved `spawn.optional`.
+# `provider` is a dataclass field but may not be set here — the key names the
+# destination, it does not choose one — so it is reported like any other key.
+# FO-R3b: the warning is deduplicated at DISPLAY, never here. Every Config
+# carries all of its warnings, so a reload (the MCP server reloads on every
+# tool call) still surfaces them; there is no log/stderr emitter today for a
+# process-global set to protect.
+def _warn_unknown_entry_keys(agents_raw: dict, providers: dict,
+                             warnings: list[str]) -> None:
+    """FO-R3: report a `models:` key nothing can consume.
+
+    Valid: a dataclass field (except `provider`), `model`/`id`, or an option
+    the DESTINATION provider consumes via its resolved `spawn.optional`. A
+    shipped and a project-defined provider are treated alike: a key is only
+    valid where that provider actually renders it. Anything else names the
+    agent, the provider and the key, and the load carries on — a mistyped
+    option is a warning, not a broken roster.
+    """
+    for name, data in agents_raw.items():
+        spec = AgentSpec.from_dict(name, data or {})
+        for provider, entry in (spec.models or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            dest = providers.get(provider)
+            consumed = set((dest.spawn.get("optional") or {})) if dest else set()
+            for key in entry:
+                # FO-R3a: `provider` is always reported, even when P's own
+                # `spawn.optional` happens to declare a `provider` placeholder.
+                # The key names the destination; it never chooses one.
+                if key != "provider" and (
+                        key in ("model", "id")
+                        or key in AgentSpec.__dataclass_fields__
+                        or key in consumed):
+                    continue
+                warnings.append(
+                    f"agent {name!r}: `models.{provider}` names {key!r}, which "
+                    f"is neither a field it may set nor an option "
+                    f"{provider!r} consumes; it will be ignored")
+
+
 def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
     """Load the merged configuration for a project (or the global one alone).
 
@@ -890,6 +968,8 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         if not (data or {}).get("disabled")
     }
     _validate_routes(agents_raw, providers)
+    warnings: list[str] = []
+    _warn_unknown_entry_keys(agents_raw, providers, warnings)
 
     return Config(
         project=merged["project.yaml"],
@@ -898,6 +978,7 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         models=merged["models.yaml"].get("models", {}) or {},
         instruction_dirs=[layer / "agents" for layer in reversed(layers)],
         layers=layers,
+        warnings=warnings,
     )
 
 

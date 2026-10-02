@@ -2656,18 +2656,17 @@ class Runner:
         implied = provider.implied_effort(spec.model)
         if implied is None or not spec.effort or spec.effort == implied:
             return
-        explicit = False
-        if provider.name != spec.provider:
-            # RM-R5b: explicitness belongs to the ROUTE the model came from,
-            # not to the name routing landed on. When the landed provider is
-            # a family sibling of the route the effort was written on, that
-            # route travelled with the launch — its model did — and its
-            # effort is as explicit here as it would be on the route's own
-            # provider.
+        # FO-R1b generalised: an effort is explicit whenever it came from a
+        # `models.<X>` entry, whatever X is and however the destination was
+        # reached. The destination's own entry is merged last, so it is the
+        # first place to look; when the destination is a family sibling of a
+        # listed route, that route's entry supplied the effort that travelled.
+        # Only a top-level effort is inherited, and stays normalised.
+        explicit = bool(spec.fallback_for(provider.name)[1].get("effort"))
+        if not explicit:
             _, route = self._routed_spec(spec, provider.name)
-            if route:
-                _, overrides = spec.fallback_for(route)
-                explicit = bool(overrides.get("effort"))
+            if route and route != provider.name:
+                explicit = bool(spec.fallback_for(route)[1].get("effort"))
         if explicit:
             raise ValueError(
                 f"refusing to start {spec.name!r} on {provider.name}: model "
@@ -3274,8 +3273,22 @@ class Runner:
             launched = now()
             self.launch_limits.record(node_id, limits, launched)
             wall = limits["timeout"]["value"]
-            options = {"effort": spec.effort,
-                       **{k: v for k, v in spec.extra.items() if isinstance(v, (str, int))}}
+            # FO-R1: every scalar option reaches the command line, floats
+            # included (`max_budget_usd: 0.5` is a real budget, and the old
+            # `isinstance(v, (str, int))` filter dropped it silently). Bools
+            # are scalars too and `build_command` renders them deliberately.
+            # A dict or list is not an option value: it is reported, never
+            # dropped without a trace.
+            options = {"effort": spec.effort}
+            for key, value in spec.extra.items():
+                if value is None or value == "":
+                    continue
+                if isinstance(value, (str, int, float)):
+                    options[key] = value
+                else:
+                    self.tree.emit(node_id, "option_not_renderable",
+                                   provider=provider.name, option=str(key),
+                                   value_type=type(value).__name__)
             argv = provider.build_command(
                 prompt=prompt, model=spec.model, workdir=str(workdir),
                 permission=spec.permission, session_id=session_id, options=options,
@@ -3779,13 +3792,14 @@ class Runner:
                 f"is substituted; name a model that provider allows, or route "
                 f"the agent to a provider that does.")
 
-    def _runs_allowed_model(self, spec: AgentSpec, name: str) -> bool:
+    def _runs_allowed_model(self, spec: AgentSpec, name: str,
+                            pinned_model: str = "") -> bool:
         """PS-R6 (review ag-2f0d3e, finding 3): would the model this agent
         actually runs on `name` be allowed by `name`'s allowlist? Routing
         asks this of every candidate — a same-family sibling that shares the
         model namespace does not share the allowlist, and must never be
         chosen to run a model it excludes."""
-        routed = self._usable_spec(spec, name)
+        routed = self._usable_spec(spec, name, pinned_model=pinned_model)
         return routed is not None \
             and self.providers[name].allows_model(routed.model or "")
 
@@ -3913,6 +3927,9 @@ class Runner:
             # A pin stays a pin on the node.
             queued_pinned = bool((queued.get("spec") or {}).get("pinned"))
             queued_model, model = model or (queued.get("spec") or {}).get("model") or "", None
+        # FO-R1: a model chosen by a per-run pin (or recorded on a queued start)
+        # outranks the `models.P` entry's model, but not its options.
+        pinned = bool(model) or queued_pinned or bool(queued_model)
         if model:
             # A model id belongs to one provider's namespace. In a real session
             # the orchestrator sent `claude --model opencode-go/kimi-k2.7-code`
@@ -4038,6 +4055,9 @@ class Runner:
         # (PC-R3a), with the model it would have run there.
         pc_full: dict[str, tuple[ProviderFull, str]] = {}
         configured_spec = spec
+        # FO-R1: the model routing must keep when it is a per-run pin, "" when
+        # the `models.P` entry is free to name one.
+        pinned_spec = spec.model if pinned else ""
         while True:
             spec = configured_spec
             provider = self.providers[spec.provider]
@@ -4056,7 +4076,7 @@ class Runner:
             family = [name for name in family
                       if name == spec.provider or self.providers[name].enabled]
             family = [name for name in family
-                      if self._runs_allowed_model(spec, name)]
+                      if self._runs_allowed_model(spec, name, pinned_spec)]
             # RT-R1: a candidate is a provider this agent has a model on — its
             # own, a `models:` entry naming one, or a sibling of either. A key
             # with an empty model is not one: routing there ran `--model ""`.
@@ -4084,7 +4104,7 @@ class Runner:
                     for sibling in (family_of.get(here.family or name, [])
                                     if here is not None else []):
                         if sibling not in routes and self.providers[sibling].enabled \
-                                and self._runs_allowed_model(spec, sibling):
+                                and self._runs_allowed_model(spec, sibling, pinned_spec):
                             routes.append(sibling)
             if model or queued:
                 family, chain = [], []
@@ -4110,7 +4130,7 @@ class Runner:
             for name, candidate in self.providers.items():
                 if getattr(current_caps.get(name), "spend_cap", None) is None:
                     continue
-                routed = self._usable_spec(spec, name)
+                routed = self._usable_spec(spec, name, pinned_model=pinned_spec)
                 if routed is None:
                     continue
                 refusal = self._cap_refusal(name, routed.model or "")
@@ -4122,7 +4142,7 @@ class Runner:
                     entry, cooldown_until=max(entry.cooldown_until or 0, refusal["until"]),
                     note=refusal["reason"])
             usable = {name for name in self.providers
-                      if self._runs_allowed_model(spec, name)}
+                      if self._runs_allowed_model(spec, name, pinned_spec)}
             unmodelled = [name for name in dict.fromkeys([*routes, *chain, *family])
                           if name in self.providers and name not in usable
                           and self.providers[name].enabled]
@@ -4164,7 +4184,8 @@ class Runner:
                 if full is not None:
                     if queued:
                         return {"pc_full": True, "gone": full.gone, "reason": str(full)}
-                    routed = self._usable_spec(configured_spec, chosen)
+                    routed = self._usable_spec(configured_spec, chosen,
+                                               pinned_model=pinned_spec)
                     pc_full[chosen] = (full, routed.model if routed else spec.model)
                     continue
             if chosen is None and pc_full:
@@ -4278,6 +4299,12 @@ class Runner:
                         "deferred_id": queued["id"],
                         "note": "the tree is paused until this clears; deferred tasks "
                                 "restart by themselves when it does"}
+            # FO-R1: the chosen provider's `models.P` entry is merged in even
+            # when it IS the agent's own provider — the primary is a route too.
+            routed = self._usable_spec(spec, chosen, pinned_model=pinned_spec)
+            if routed is None:              # choose_provider offers only `allowed`
+                raise RuntimeError(f"routing chose {chosen!r}, where agent "
+                                   f"{agent_name!r} has no model")
             if chosen != spec.provider:
                 # The model id belongs to the original provider's namespace, so it
                 # is meaningless to the new one — failing over without remapping
@@ -4290,15 +4317,11 @@ class Runner:
                 # that: an agent whose configured fallback sat one place further
                 # down the chain ran five times into a revoked token instead.
                 _, overrides = spec.fallback_for(chosen)
-                routed = self._usable_spec(spec, chosen)
-                if routed is None:          # choose_provider offers only `allowed`
-                    raise RuntimeError(f"routing chose {chosen!r}, where agent "
-                                       f"{agent_name!r} has no model")
                 provider = self.providers[chosen]
                 routed_from, routed_why = spec.provider, why
                 if overrides:
                     routed_why += f" ({', '.join(f'{k}={v!r}' for k, v in overrides.items())})"
-                spec = routed
+            spec = routed
             # PS-R7a (review ag-2f0d3e, finding 6): a pinned restart that
             # records its destination may not be carried, by a roster change
             # since, onto a DIFFERENT family. The recorded provider allowed
@@ -6209,7 +6232,10 @@ class Runner:
         the fallback's model and options, not the configured ones."""
         spec = self.config.agent(node.agent)
         if node.model_pinned:
-            spec = spec.replace(provider=node.provider, model=node.model)
+            # FO-R1: the pin keeps its model, but the destination's `models:`
+            # entry still contributes its options to the relaunch.
+            spec = spec.routed(node.provider, pinned_model=node.model)
+            spec = spec.replace(provider=node.provider)
         else:
             routed = self._usable_spec(spec, node.provider)
             if routed is None:
@@ -7100,7 +7126,8 @@ class Runner:
         """
         return self._usable_spec(spec, node.provider)
 
-    def _usable_spec(self, spec: AgentSpec, provider: str) -> AgentSpec | None:
+    def _usable_spec(self, spec: AgentSpec, provider: str,
+                     pinned_model: str = "") -> AgentSpec | None:
         """What `spec` runs as on `provider`, or None when it has no model
         there (RT-R1..R3). Start, steer and consult all ask this, so what
         counts as a usable model cannot drift between them.
@@ -7110,11 +7137,11 @@ class Runner:
         an exact route shares its model ids, so it runs that route's model. An
         empty fallback model is not a route: it would run `--model ""`.
         """
-        routed, _ = self._routed_spec(spec, provider)
+        routed, _ = self._routed_spec(spec, provider, pinned_model=pinned_model)
         return routed
 
-    def _routed_spec(self, spec: AgentSpec,
-                     provider: str) -> tuple[AgentSpec | None, str]:
+    def _routed_spec(self, spec: AgentSpec, provider: str,
+                     pinned_model: str = "") -> tuple[AgentSpec | None, str]:
         """`_usable_spec`, plus the name of the `models:` route that decided
         it — "" when the agent's own configuration is what runs.
 
@@ -7124,26 +7151,38 @@ class Runner:
         landed on (a family sibling runs the listed route). The walk is
         `_usable_spec`'s own, kept in one place so the two answers cannot
         drift.
+
+        FO-R1: the agent's OWN provider is a route too. When `models.P` exists
+        its options are merged over the top-level values (through
+        `AgentSpec.routed`), and a per-run `pinned_model` wins over the entry's
+        model without losing its options.
         """
         if provider == spec.provider:
-            return spec, ""
-        alternative, overrides = spec.fallback_for(provider)
+            return spec.routed(provider, pinned_model=pinned_model), ""
+        alternative, _ = spec.fallback_for(provider)
         if alternative:
-            return spec.replace(model=alternative, **overrides), provider
+            return spec.routed(provider), provider
         here = self.providers.get(provider)
         if here is None:
             return None, ""
         family = here.family or provider
         roster = self.providers.get(spec.provider)
         if roster is not None and (roster.family or spec.provider) == family:
-            return spec, ""
+            # FO-R1c: a same-family destination still takes its own entry —
+            # options-only included — over the top-level values.
+            return spec.routed(provider), ""
         # A sibling of a listed fallback shares that fallback's model ids.
         for name in (spec.models or {}):
             other = self.providers.get(name)
             if other is not None and (other.family or name) == family:
-                alternative, overrides = spec.fallback_for(name)
+                alternative, _ = spec.fallback_for(name)
                 if alternative:
-                    return spec.replace(model=alternative, **overrides), name
+                    routed = spec.routed(name)
+                    if provider != name and provider in (spec.models or {}):
+                        # FO-R1c: the landed sibling's own entry wins over the
+                        # route's model and options, options-only included.
+                        routed = routed.routed(provider)
+                    return routed, name
         return None, ""
 
     @contextlib.asynccontextmanager
@@ -7492,6 +7531,9 @@ class Runner:
         # belongs to its run and is left alone.
         reserved = ""
         if node is None:
+            # FO-R1: a new conversation runs on the agent's own provider, and
+            # that provider's `models:` entry still applies.
+            spec = spec.routed(spec.provider)
             provider = self.providers.get(spec.provider)
             if provider is None or not provider.available():
                 raise FileNotFoundError(f"provider {spec.provider!r} is unavailable")
