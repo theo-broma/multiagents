@@ -3542,3 +3542,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - **SC-R4b:** a crossing binds only within its period, which declines finding #5.
     - **SC-R4c:** the recovered event is marked `recovered: true` and lists the recorded stops; a crossing counts as announced only after a successful write.
   - The remaining 8 were steered back to ag-8362a3 (opus).
+- **SC round 3:** ag-8362a3 fixed 8 of the 9 round-2 findings and left #5 alone as declined. Fixes and tests are in 0120a58.
+  - **#2 deviation accepted:** `spend_pending` is durable in the tree and retried at the next turn, instead of holding the old checkpoint.
+  - **Tests:** 275 green.
+  - **Flake:** `test_rc_r4_half_open_probe_free_steer_may_take_it_and_resolves_it` flaked once under load.
+  - **Review:** reviewer round 3 is ag-1ef2a0.
