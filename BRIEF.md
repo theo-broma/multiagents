@@ -3517,3 +3517,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - a raced fresh start ends `failed` rather than deferred;
     - a lowered cap stops every run at the next event;
     - a consult refusal goes through the generic error.
+- **SC test fix merged as bfb1567** (tester ag-efab73).
+- **SC review round 1:** reviewer ag-d45444 rejected with 14 findings (6 P1, 8 P2). The full list is in `.multiagents/runs/ag-d45444/result.json`. All 14 were steered back to ag-8362a3.
+  - **Decision:** a raced fresh start must be deferred, not failed (SC-R3). This overrules the implementer's deferral.
+  - **Decision:** when spend and concurrency both refuse, both causes are reported.
+  - Robustness tester ag-d84aee is still running on the previous tip; its findings come as round 2.
