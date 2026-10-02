@@ -3778,3 +3778,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - 363 targeted tests pass; the full suite is at baseline.
   - Loop-reviewer ag-d89877 is running.
 - **FO-R3b test rewrite merged** (95a8bda).
+- **CB round 2:** ag-ba1672 committed f96076c. An extends instance without a profile field is now unknown, and `budget_builtin` is resolved at load. The full suite shows only the expected reds. Loop-reviewer ag-368f54 is running.
