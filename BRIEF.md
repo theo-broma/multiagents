@@ -3720,3 +3720,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   P3: `routed()` applies the `provider` key. Steered ag-12d4f1 for loop round 2 (variant high).
 - **Note on the review itself:** a good one, with a concrete check against the spec beyond the tests.
 - **SF round 2:** ag-1827ab committed e4b9878, fixing all five codex points. It adds `tests/test_sf_review_r1.py` (5 tests, red before the fix and green after); the related tests total 360 passed, and the full suite is at baseline. Loop-reviewer ag-c36577 (variant high) is checking it. It was asked to reproduce, not just reason.
+- **FO round 2:** ag-12d4f1 committed 9292a07, fixing both P2s and the P3, and added `tests/test_fo_review_r1.py` (8 tests). Two FO tests now conflict with the review: they encoded validity as the union of shipped providers.
+  - **Decision FO-R3a** (spec, 5435fb4): validity is decided by the destination provider alone.
+  - Tester ag-28b16f is correcting `test_fo_r3_valid_keys_are_not_reported`; merge it before FO.
+  - Loop-reviewer ag-22ac54 (high) is checking round 2.
+- **SF:** loop-reviewer ag-c36577 (high) is checking round 2.
