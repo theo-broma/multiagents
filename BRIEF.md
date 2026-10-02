@@ -3464,3 +3464,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **PC round-2 fixes are done.** Commits a342904 and 1a4a5d5. The PC suite is at 105/107.
 - **Tester ag-c78ca1** is fixing the R3d robustness test. Its config is invalid: `advisor` still names `acme/m1`.
 - **Reviewer round 3** is ag-f2696d.
+- **PC round 3** (ag-f2696d): rejected with 5 findings. It verified that all 7 round-2 fixes hold.
+  - Findings: docker wrapper liveness, a claim leak on stream-open failure, pinned queued-start validation order, terminal status during the post-mortem, and adopting an exited wrapper.
+  - ag-03733f steered for round 4. The R3d test fix is merged as 6cdae4e.
