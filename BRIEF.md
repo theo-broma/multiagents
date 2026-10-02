@@ -3919,3 +3919,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tester ag-f6de5d is writing `tests/test_ab_agy_second_account.py`. NEXT: implementer (codex), then reviewer, then merge. After that, write the `agy-b` provider entry, tell the user to switch to docker, recreate the container and run `multiagents docker login agy-b`.
 - **User asked (2026-10-03) whether the docker bug is fixed and whether to go back to docker.** It is NOT fixed: the container claude 401 ("1a") was deferred. Bug-reporter ag-b41640 (agy flash) is diagnosing it with a live `docker exec` probe (no rm/down, no config edits, no credential contents) and is also checking claude-b, codex, agy and deepinfra under docker. NEXT: contract, then tester, then implementer, then reviewer; then the user switches executor and recreates. AB (agy-b) only works under docker.
 - Reviewer `silence_timeout` 180 → 900.
+- **FS comparative review, ag-c2ee3d (Gemini): MERGE_B.**
+  - Branch A dropped `family` from `choose_provider`, which breaks Tier-A pooling of listed siblings, and it emits `route_skipped` for non-candidate chain entries, which violates FS-R4.
+  - **ag-5d1bd2 (B) is steered** to borrow A's `resume` flag in place of its `_bound_spec`.
+  - **Tester ag-95cfbb is rewriting the last two stale tests:** `test_rt_r1_skips_unmodelled...` and `test_rm_r6a_...unmodelled_chain_entry`. Ruling: no `route_skipped` for non-candidate chain entries.
+  - NEXT: merge the tests and then B, discard A (ag-0441db), and `resolve_ticket(bug-ac396a, fixed)`. A codex/Gemini re-review of B's borrowing is optional (small diff); read the diff myself.
