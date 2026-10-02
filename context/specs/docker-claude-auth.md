@@ -52,6 +52,38 @@
 - codex, opencode, deepinfra and agy under docker are unchanged.
 - **Verified by:** the existing docker, authproxy, budget and login suites stay green.
 
+## Revision after the advisor's check (2026-10-03, before tests)
+
+These override any earlier wording they contradict.
+
+**DK-R4a: identity the sidecar can trust.**
+- Today the sidecar token authenticates only an identity string minted from the project slug (`docker.py` ~2000, `authproxy.py` ~75-109).
+- Pinning requires the host to mint, per launch, a signed claim that carries the provider (or the account it is pinned to). The signing is the same HMAC scheme as today. An unsigned header is never trusted.
+- This enforces routing identity, not isolation between agents in one container. Say so in a code comment.
+
+**DK-R4b: account namespace.**
+- `default` is reserved for the top-level vault login. An existing `accounts/default` is a load-time error whose message says how to rename it.
+- Labels are validated: lowercase letters, digits, `-` and `_`.
+- A pinned provider's label refers to the vault of the provider it takes its credentials from (its `extends`/`auth_from` owner). An inherited private profile does not get a separate vault for this purpose.
+- `docker login <pinned provider> --account X`, with X different from the pin, is refused.
+- The pin configuration reaches the sidecar before it admits requests, and survives a sidecar restart or config reload, because it is derived from config at each start.
+
+**DK-R2a: bounded failover that keeps pins.**
+- At most one attempt per eligible account.
+- A retry happens only before any response byte has been sent to the agent.
+- Pins are enforced on 401 AND on 429/529: today's rate-limit handling unpins (`authproxy.py` ~209-216), and that must stop for pinned agents.
+- "Credential changed" is detected by content (e.g. a hash), not by mtime alone.
+
+**DK-R3a: check and renewal under pins.**
+- For a pinned provider, `check` and auth status report THAT account's status. "Any usable account" applies only to unpinned providers.
+- Renewal enumerates every account, even when the default is healthy. Today the refresh gate looks only at the top-level file (`docker.py` ~1395-1402).
+
+**DK-R5 (precise): budget under docker.**
+- Under docker, the budget resolves the selected vault account(s) explicitly, and never falls back to host credentials. Today `claude.sh budget` returns 64 and the built-in reads host credentials (`budget.py` ~493, ~535-563, ~1032).
+- **Pinned provider:** the quota of its account.
+- **Unpinned provider:** each eligible account (the pool minus pinned accounts) is read, and headroom is the **best** usable account's, because routing fails over to it. The windows are reported per account. If no account is readable, the result is unknown.
+- The account selection is part of the budget cache identity.
+
 ## Out of scope
 
 - Switching this project to docker, and recreating the container: the user does that, guided by the orchestrator.
