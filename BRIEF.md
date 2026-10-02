@@ -3746,3 +3746,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - P0-R8 (no provider vocabulary in `src/*.py`) must stay green, so the profile variable becomes a declarative provider field (`budget_profile_env: CLAUDE_CONFIG_DIR` on the shipped claude provider, inherited through `extends`).
   - The c2 characterization test that pins the old bug goes to the tester; the implementer must not touch it.
   - Config: implementer-quick `timeout` raised from 900 to 2700 and `max_steps` from 80 to 200.
+- **CB implemented:** ag-ba1672 committed f4ebe8c (the declarative `budget_profile_env`; P0-R8 green; full suite shows only the expected reds plus the c2 test). It was stopped at its 900 s steer timeout with the work done.
+  - Loop-reviewer ag-5fe8b6 is running.
+  - Tester ag-ded12c, the first run on `claude-b`, is rewriting `test_a_second_named_claude_account_gets_no_builtin_at_all`. Merge it with CB.
+- **SF and FO loop-reviewers round 2** (ag-c36577, ag-22ac54) both hit 3600 s. Both were steered to wrap up.
+- **Observation:** MiMo loop reviews take more than 60 minutes each and are the bottleneck.
