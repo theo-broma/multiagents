@@ -3867,3 +3867,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - The handover commit af30b03 already held the complete round-4 work. The two round-4 tests are red on 70f6d50 and green on HEAD.
     - Full suite: no new reds. The extras (FO/FS 33, SF 9) are red on main because their tests were merged ahead of the code.
     - The loop-reviewer is ag-45bb04 (`verifies=ag-152774`). NEXT: codex, then merge.
+- **SR, ticket bug-dc522a** (blocking; fixed in-house, never submitted).
+  - **Bug:** steer on a stuck run dies with -15, because the old wrapper writes `exit_status` into the shared run dir after the new launch. Also, steer reuses `run.spec`, so the limits are stale.
+  - **Contract:** `context/specs/steer-exit-race.md`, at 059ef59 plus the advisor revision 01197a8.
+  - **Tester:** ag-5a55ff (claude-b) writes `tests/test_sr_steer_exit_race.py`.
+  - NEXT: merge the tests, then **after the SF merge** (both touch the steer path) run `implementer-deep`, the loop-reviewer, codex, and the merge. Then `resolve_ticket(bug-dc522a, fixed)`.
+  - Until then, **avoid steering a run that is stuck on its wall clock**. Steering one that is still running worked (ag-d38d1c).
+- The loop-reviewer timeout was raised to 5400 after SF round-5 review ag-d38d1c hit 3600. ag-d38d1c was steered to wrap up.
