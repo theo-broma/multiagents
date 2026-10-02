@@ -92,3 +92,5 @@ These override any earlier wording they contradict.
 - `models: {P: m}`, where P is the agent's own provider, runs on model m. This follows FO-R1 (precise) and FO-R2.
 - FO-R4's "behave exactly as today" is narrowed to configs with no `models:` entry for the destination.
 - The only agent with a bare entry for its own provider is the project's `adversary` (`claude-b: opus`), and that entry equals its top-level model. Nothing changes in practice.
+
+**FO-R1b (generalised, 2026-10-02, loop round 3).** An `effort` from any `models.<X>` entry is explicit, whatever X is: primary, fallback or family sibling, options-only or carrying a model. It is attributed to the entry it came from, never to the route name, and is refused on conflict. Only a top-level `effort` is normalised.
