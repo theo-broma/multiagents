@@ -170,8 +170,12 @@ def validate_agent_models(config: Any) -> list[str]:
 
     A warning, not an error: the list may simply be stale, and refusing to run
     on that basis would be worse than the mistake it prevents.
+
+    FO-R3: the warnings `config.load` raised while reading the roster — an
+    unconsumed option in a `models:` entry — ride the same list, so `doctor`
+    (the channel that shows config warnings) surfaces them too.
     """
-    warnings: list[str] = []
+    warnings: list[str] = list(getattr(config, "warnings", None) or [])
     for name, spec in config.agents.items():
         available = config.models.get(spec.provider) or []
         if not available:

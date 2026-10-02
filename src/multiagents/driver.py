@@ -35,7 +35,7 @@ from .config import limit_number, shipped_limits
 from .executor import executor_for
 from .executor.local import LocalExecutor
 from .paths import global_config_dir
-from .providers import load_providers
+from .providers import load_providers, option_text
 from .transcripts import session_context, session_transcript
 from .tree import Node, Tree, now as tree_now
 
@@ -134,7 +134,7 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
     # `launch` is exec'd by the script, not built into a command list by us.
     autocompact = spec.extra.get("autocompact")
     if autocompact not in (None, ""):
-        context["MULTIAGENTS_AUTOCOMPACT"] = str(autocompact)
+        context["MULTIAGENTS_AUTOCOMPACT"] = option_text(autocompact)
     return context
 
 

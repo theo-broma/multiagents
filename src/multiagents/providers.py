@@ -119,6 +119,19 @@ def _given(value: Any) -> bool:
     return value is not None and value != ""
 
 
+def option_text(value: Any) -> str:
+    """An option value as it appears on the command line.
+
+    A bool is rendered deliberately as ``true``/``false``; ``str(True)`` is
+    ``"True"``, which no CLI accepts and which reached argv by accident.
+    Numbers keep their own text, so a fractional ``0.5`` stays ``0.5`` rather
+    than being rounded or dropped.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _render_value(obj: Any, values: dict[str, Any]) -> Any:
     """`obj` with every string that is exactly ``{name}`` replaced by that value.
 
@@ -452,7 +465,7 @@ class Provider:
             # returns partial output, which parses as a clean finish.
             "timeout": str(int(timeout or 0)),
             "timeout_s": f"{int(timeout or 0)}s",
-            **{k: str(v) for k, v in (options or {}).items() if _given(v)},
+            **{k: option_text(v) for k, v in (options or {}).items() if _given(v)},
         }
 
         def render(tokens: Iterable[str]) -> list[str]:
