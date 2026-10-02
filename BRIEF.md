@@ -3592,3 +3592,13 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - bug-ac396a (minor routing);
     - the older items listed earlier.
 - **zai/glm** is at 99% weekly and `usable: false`, so the router no longer routes to it. Per the user's instruction, I am pausing and reporting; I await the next strategy.
+
+### 2026-10-02 — USER STRATEGY: deepinfra models, loop review
+- **Implementers:** quick, implementer and deep run on `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash`. Starting variants: quick = default, implementer = high, deep = xhigh.
+- **New `loop-reviewer`:** `deepinfra/XiaomiMiMo/MiMo-V2.6-Flash`.
+- **The loop:**
+  - implementer ↔ loop-reviewer, until the loop-reviewer accepts;
+  - then `reviewer` (codex) accepts for merge or relaunches the loop;
+  - every 5 loops, the implementer goes up one level (default → high → xhigh → max), capped at max.
+- **No spend cap** on deepinfra (user).
+- **Status:** the advisor is checking variant support and mid-loop variant changes before `agents.yaml` is edited.
