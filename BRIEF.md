@@ -3876,3 +3876,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - The loop-reviewer timeout was raised to 5400 after SF round-5 review ag-d38d1c hit 3600. ag-d38d1c was steered to wrap up.
 - **SF loop round 5, ag-d38d1c: ACCEPT.** Both fixes were reproduced as green; its repro file is `/var/tmp/ag-d38d1c-wt/tests/test_zz_loop_repro.py`. It also raised one unreproduced observation: a raising `_steer_predecessor` may be read as a confirmed death. The codex final review is ag-f63a66 (`verifies=ag-1827ab`), asked to settle that point. NEXT: on APPROVE, merge SF; then the SR implementer.
 - **FO loop round 5, ag-35604a:** stuck on its 3600 s wall clock but still working. Deliberately NOT steered, because of the SR bug. Let it finish on its own.
+- **FO loop round 5, ag-35604a: ACCEPT.** No defects. Full suite: 72 phase2 reds only. Its minor notes: the `provider` warning wording, and timestamp/Decimal scalars. The codex final round 3 is ag-NEXT (`verifies=ag-12d4f1`). On APPROVE: merge FO, then FS ×2.
+- **The SR tester ag-5a55ff** is stuck on its 1500 s wall clock but still working. Not steered (SR bug); let it finish.
