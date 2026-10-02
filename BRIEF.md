@@ -3708,3 +3708,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the inherited supervision lock stays held after an early refusal;
   - a failed neutral release has no retry owner.
   One P3: tree evidence is dropped once the ledger write succeeds. Steered ag-1827ab for loop round 2 (variant stays at xhigh). NEXT: a new loop-reviewer on it, then the codex reviewer.
+- **Loop-reviewer variant set to `high`** (user: "raisonnement supérieur, essaye max"). In opencode, MiMo-V2.6-Flash offers only low, medium and high, so high is its maximum. Runs already in flight keep the default.
+- **Evaluation of loop-reviewer ag-7c0db2 (SF, default variant):**
+  - Its SF-R1/R2 analysis was correct, and its P3 #1 was confirmed by codex.
+  - It read the exact regions behind the four codex P2s (runner ~6947-6988, ~3915-3928) and argued them correct without reproducing them. In particular, its claim that "the `_held` guard cannot drop the queue restore" was disproved by codex's in-memory repro.
+  - Cost: about $0.026 over 36 minutes, against 9 minutes for codex.
+  - Verdict: a useful first filter for spec conformance, but weak on concurrency and cleanup invariants, and slow.
