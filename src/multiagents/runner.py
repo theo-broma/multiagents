@@ -4400,12 +4400,16 @@ class Runner:
         # the agent's work would otherwise be stranded, uncommitted, with
         # nothing telling anyone. Reported here rather than by changing
         # `status`: a commit failure doesn't by itself make the run failed.
+        # BA-R3 (bug-ba55a9): the note names the run's own work-in-progress
+        # commit and says it was refused — "commit failed" alone read as the
+        # agent's own commit having failed, and said nothing about why.
         if commit_result is not None and not commit_result.ok:
             detail = commit_result.err or commit_result.out
             # CI-R4: bound the git output carried into the result text, so a
             # noisy hook can't bury the agent's own answer.
             detail_for_text = detail if len(detail) <= 500 else detail[:500] + " [truncated]"
-            text = f"{text}\n\ncommit failed: {detail_for_text}".strip()
+            text = (f"{text}\n\nthe work-in-progress commit was refused: "
+                    f"{detail_for_text}").strip()
             if fix_attempts:
                 text += (f"\n(the agent was resumed {fix_attempts} time(s) to "
                          f"satisfy the git hook; it still refused the commit)")
