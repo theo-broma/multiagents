@@ -3905,3 +3905,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - That makes seven rounds of whack-a-mole, so the task now asks for a **structural fix**: ONE per-node pending-cleanup record, with idempotent steps retried by settle until done; unknown liveness keeps the lock.
   - Moved to **implementer-deep ag-60dd6f** (codex gpt-6.1-sol high). ag-1827ab's work was handed over with `merge_agent(into)` as 0790219, which sits on top of current main (FO merged, SR tests present).
   - Tests go in `tests/test_sf_review_r4.py`. NEXT: reviewer (Gemini), then merge; then SR.
+- **CB MERGED, dfc8fb0** (Gemini reviewer ag-bc1f98: APPROVE; its branch held only a `diff.txt` and was discarded).
+- **FS branch A, ag-0441db** (DeepSeek max, 3c2da8b and 8d4c0fc): 36/36 FS and 58/58 FO tests pass.
+  - **Six stale RM/RT/M tests** still assume unlisted-sibling routing, so tester ag-272624 is updating them.
+  - **FS-R5 note:** `initializer` and `orchestrator` (claude, no `models:`) lose the implicit claude-b fallback. That is fine.
+  - **Waiting for branch B,** ag-5d1bd2. Then ONE reviewer compares A and B and proposes cross-borrowings; merge the better one and discard the other; then `resolve_ticket(bug-ac396a, fixed)`.
+- **User question (agy, 2026-10-03):** can agy have two accounts like claude/claude-b? Researcher ag-b643b9 is investigating; answer the user when it returns.
