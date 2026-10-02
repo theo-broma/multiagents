@@ -3509,3 +3509,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - wall-timeout precedence.
   - **Recording field names are unpinned:** the tests search the reason, the result and the events.
 - **RC implementation:** implementer ag-cfd0bd (glm), on classification and startup-finish only.
+- **SC implemented** by ag-8362a3 (opus), branch `agents/implementer-deep/8362a3`, about 850 lines including the new `spendcap.py`.
+  - **Tests:** 140 of 141 SC green, PC fully green, full suite 74 reds (72 phase2, BA-R3, one SC).
+  - **The one SC red is a test bug.** `test_r2_a_capped_provider_still_counts_a_discarded_runs_spend` refuses a start on a predicted cost, which contradicts SC-R3 and the 0.99-admitted test. I agree with the implementer; tester ag-efab73 is fixing it.
+  - **Review:** reviewer ag-d45444 and robustness-tester ag-d84aee are running in parallel, with the SC branch squashed into the robustness-tester's worktree.
+  - **The implementer's deferrals to judge:**
+    - a raced fresh start ends `failed` rather than deferred;
+    - a lowered cap stops every run at the next event;
+    - a consult refusal goes through the generic error.
