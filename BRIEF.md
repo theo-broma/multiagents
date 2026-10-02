@@ -3780,3 +3780,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **FO-R3b test rewrite merged** (95a8bda).
 - **CB round 2:** ag-ba1672 committed f96076c. An extends instance without a profile field is now unknown, and `budget_builtin` is resolved at load. The full suite shows only the expected reds. Loop-reviewer ag-368f54 is running.
 - **FO loop round 3, ag-c1d8af: REJECT.** P2: an explicit effort in a family-destination entry is normalised, because it is attributed to the route `""`. P3: the same fault with an earlier route. FO-R1b is generalised in the spec. ag-12d4f1 is steered for loop round 4.
+- **SF loop round 3, ag-d89877 (MiMo high): REJECT.** Two reproduced P2s:
+  - `_launch` releases the inherited lock behind a live predecessor;
+  - an unconfirmed death has no owner and no re-check.
+  ag-1827ab is steered for round 4. **MiMo at `high` found codex-grade issues this time**, unlike at the default variant.
