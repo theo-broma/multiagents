@@ -3959,3 +3959,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **Do not steer a run that is stuck on its wall clock** (bug SR). A stuck run keeps running; let it finish.
 - **FS MERGED, ded3ac2** (branch B with A's `resume` flag borrowed). On main, 288 tests pass across FS, routing, FO, budget and conversation. Branch A (ag-0441db) was discarded, and bug-ac396a is resolved as fixed (not submitted).
 - **SF structural round, ag-60dd6f: 7d4f816.** It introduces one per-node cleanup record, `_Hold.steer`, with every step retried until done. Tests: `tests/test_sf_review_r4.py` (8). Focused SF tests: 33 pass. Full suite: no new reds; its CB red comes from the pre-CB base and is fixed on main. The reviewer is ag-69ee0a (Gemini). NEXT: merge on APPROVE, then the SR implementer-deep.
+
+- 2026-10-03: SF review ag-69ee0a REJECTED 7d4f816 (3 new: second steer clobbers pending cleanup; adopted hold pid=None spins on confirm; restore not idempotent). Steered ag-60dd6f with them. Discard reviewer branch ag-69ee0a (only patch files). AB tester ag-f6de5d, DK tester ag-a83388 still running.
