@@ -3742,3 +3742,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Fixed in-house by implementer-quick ag-ba1672 (budget.py plus `tests/test_budget_extends_reader.py`).
   - No ticket filed, per the tickets-in-house rule.
   - NEXT: loop-reviewer, then the codex reviewer, then merge.
+- **CB decisions** (ag-ba1672, steered):
+  - P0-R8 (no provider vocabulary in `src/*.py`) must stay green, so the profile variable becomes a declarative provider field (`budget_profile_env: CLAUDE_CONFIG_DIR` on the shipped claude provider, inherited through `extends`).
+  - The c2 characterization test that pins the old bug goes to the tester; the implementer must not touch it.
+  - Config: implementer-quick `timeout` raised from 900 to 2700 and `max_steps` from 80 to 200.
