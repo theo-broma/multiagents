@@ -258,6 +258,13 @@ class Provider:
     auth_from: str = ""
     budget_from: str = ""
     budget_windows: list[str] | None = None
+    # The environment variable that relocates this provider's quota/credential
+    # profile to a second account, when its built-in reader takes a directory
+    # rather than reading the default one. Declared here, not named in the
+    # reader: an instance that `extends` this provider inherits the field, and
+    # the reader resolves the instance's own value so two accounts are not
+    # conflated. Empty means the reader has no profile to point at.
+    budget_profile_env: str = ""
     # Attached by `load_providers`, not parsed from yaml: the owner's Provider
     # object (so a lone dependent can still reach its owner's script), and the
     # effective credential environment — the owner's `env` overlaid with this
@@ -267,6 +274,12 @@ class Provider:
     auth_owner: "Provider | None" = None
     budget_owner: "Provider | None" = None
     credential_env: dict[str, str] | None = None
+    # Attached by `load_providers`, never parsed: the provider name whose
+    # built-in budget reader this provider's `extends` chain reaches (itself
+    # when it has one). "" means no built-in applies. Recorded where the whole
+    # map is loaded so a caller that reads one provider alone — the watchdog,
+    # `refresh-quota`, a runner — gets the same answer as `read_all`.
+    budget_builtin: str = ""
     # Tools whose reported arguments do not identify the call (e.g. a
     # file-viewer that never reports which range it viewed) — repeating one
     # must not trip doom_loop on its own. See Supervisor.opaque_tools.
@@ -358,6 +371,7 @@ class Provider:
             auth_from=_owner_key(name, "auth_from", data),
             budget_from=_owner_key(name, "budget_from", data),
             budget_windows=_budget_windows(name, data),
+            budget_profile_env=_profile_env_key(name, data),
             opaque_tools=list(data.get("opaque_tools", []) or []),
             opaque_tool_args=list(data.get("opaque_tool_args", []) or []),
             mcp=dict(data.get("mcp") or {}),
@@ -753,7 +767,67 @@ def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:
         provider.max_concurrent = _max_concurrent(name, raw.get(name) or {})
         provider.spend_cap = spendcap.parse(name, raw.get(name) or {},
                                             provider.models_include)
+        provider.budget_builtin = _builtin_owner(name, raw)
+        _validate_budget_profile(name, provider, raw)
     return providers
+
+
+def _validate_budget_profile(name: str, provider: "Provider",
+                             raw: dict[str, Any]) -> None:
+    """A declared `budget_profile_env` must name a reader that takes a profile.
+
+    The variable relocates an INSTANCE's account, and only a reader that
+    declares `config_dir` can be pointed at one. Declaring the variable for a
+    reader that takes only the caller's spend would read the base account and
+    relabel it, so it is refused here, at load, rather than mis-reported later.
+    Decided by the reader's signature, never by name.
+
+    A provider that declares its OWN script (`script:` or `auth.script:`) is
+    exempt: that script may implement the `budget` action and read its own
+    state, in which case the built-in reader is never reached and its
+    signature says nothing. Inheritance is judged on the RAW block, so a script
+    merely folded in from a base does not exempt the instance.
+    """
+    field = provider.budget_profile_env
+    if not field:
+        return
+    block = raw.get(name) or {}
+    if block.get("script") or (block.get("auth") or {}).get("script"):
+        return
+    from .budget import _BUILTIN, reader_takes_profile
+
+    reader = _BUILTIN.get(provider.budget_builtin)
+    if reader is not None and not reader_takes_profile(reader):
+        raise ValueError(
+            f"provider {name!r}: budget_profile_env: {field!r} cannot apply — "
+            f"the built-in reader it inherits from {provider.budget_builtin!r} "
+            f"reads only the default account, so it has no profile to point at; "
+            f"remove the key, or give this provider its own `script` "
+            f"implementing the `budget` action, which then reads its own state")
+
+
+def _builtin_owner(name: str, raw: dict[str, Any]) -> str:
+    """The provider whose built-in budget reader `name` reaches through
+    `extends`; itself when it has one, "" when none does.
+
+    Resolved here because this is where the whole map is in hand. A caller that
+    later reads a single provider has only its immediate `extends`, and a
+    two-hop chain would otherwise resolve differently per caller. The registry
+    of readers lives in `budget`, imported lazily so neither module needs the
+    other at import time.
+    """
+    from .budget import _BUILTIN
+
+    seen = {name}
+    current = name
+    while current:
+        if current in _BUILTIN:
+            return current
+        current = (raw.get(current) or {}).get("extends") or ""
+        if current in seen:
+            return ""
+        seen.add(current)
+    return ""
 
 
 def _max_concurrent(provider_name: str, data: dict) -> int | None:
@@ -824,6 +898,59 @@ def _budget_windows(provider_name: str, data: dict) -> list[str] | None:
         raise ValueError(f"provider {provider_name!r}: budget_windows: must be "
                          f"a list of window-name globs, not {value!r}")
     return list(value)
+
+
+def _profile_env_key(provider_name: str, data: dict) -> str:
+    """`budget_profile_env` is the name of an environment variable, or absent.
+
+    A missing key is unset (the reader reads its default profile); anything
+    written — null, a number, a list, an empty string — is a config error at
+    load, never a value that reaches a budget read.
+    """
+    if "budget_profile_env" not in (data or {}):
+        return ""
+    value = data["budget_profile_env"]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"provider {provider_name!r}: budget_profile_env: must "
+                         f"name an environment variable (a non-empty string), "
+                         f"not {value!r}")
+    return value
+
+
+def expand_env_value(value: Any) -> str:
+    """One `env:` value with `$VAR` and `~` resolved, the way a launch resolves it.
+
+    The single definition of that expression: `build_env`, `_launch` and the
+    built-in budget reader all call it, so a value cannot mean one directory to
+    the CLI and another to whoever reports its quota.
+    """
+    return os.path.expanduser(os.path.expandvars(str(value)))
+
+
+def resolved_profile(provider: Any) -> str:
+    """The provider's account profile, resolved as every launch resolves it.
+
+    `budget_profile_env` names the variable that relocates the CLI's account;
+    this is its value after `$VAR`/`~` expansion — the same expansion
+    `build_env` and `_launch` give every `env:` value. A value still relative
+    after that is made absolute against the user's home: a profile is per-user
+    state, and neither the launching process's cwd nor the agent's worktree —
+    which differ between the launcher and the budget reader — is a meaningful
+    base for it. Empty when the provider declares no variable, or sets it to
+    nothing.
+    """
+    field = getattr(provider, "budget_profile_env", "") or ""
+    if not field:
+        return ""
+    env = getattr(provider, "credential_env", None) \
+        or getattr(provider, "env", None) or {}
+    value = env.get(field)
+    if not value:
+        return ""
+    resolved = expand_env_value(value)
+    if not os.path.isabs(resolved):
+        resolved = str(Path.home() / resolved)
+    return resolved
 
 
 def credential_owner(name: str, providers: dict[str, Any] | None) -> str:

@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from .safepoint import strip_key
-from .providers import Provider
+from .providers import Provider, expand_env_value, resolved_profile
 
 # Actions that must never take longer than a moment: they run on the hot path.
 CAPTURE_TIMEOUT = 20
@@ -144,7 +144,15 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     env_map = getattr(provider, "credential_env", None) or \
         (getattr(provider, "env", None) or {})
     for key, value in env_map.items():
-        env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+        env[key] = expand_env_value(value)
+    # The account profile is resolved by the same helper the budget reader
+    # uses, so the CLI and the reader can never be pointed at different
+    # directories — including a relative value, which the helper makes
+    # absolute rather than leaving it to each process's cwd.
+    profile_field = getattr(provider, "budget_profile_env", "") or ""
+    profile = resolved_profile(provider)
+    if profile_field and profile:
+        env[profile_field] = profile
     env.update(extra or {})
     # CW-R2b: a provider action never gets the safe-point key, whatever this
     # process, the provider's env or the caller says. The driver adds it to

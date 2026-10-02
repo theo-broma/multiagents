@@ -53,7 +53,8 @@ from . import procs
 from . import scripts
 from . import paths as paths_mod
 from .paths import ProjectPaths, global_config_dir, state_root
-from .providers import Event, Provider, get_path, load_providers
+from .providers import (Event, Provider, expand_env_value, get_path,
+                        load_providers, resolved_profile)
 from .redact import scrub
 from .safepoint import Gate, strip_key
 from .auth import looks_like_auth_failure
@@ -3256,7 +3257,15 @@ class Runner:
             # attached at config load); without it, its own env alone.
             for key, value in (getattr(provider, "credential_env", None)
                                or provider.env or {}).items():
-                env[key] = os.path.expanduser(os.path.expandvars(str(value)))
+                env[key] = expand_env_value(value)
+            # The account profile, resolved by the same helper the budget
+            # reader uses, so the CLI and the reader can never be pointed at
+            # different directories — including a relative value, which the
+            # helper makes absolute rather than leaving to each cwd.
+            profile_field = getattr(provider, "budget_profile_env", "") or ""
+            profile = resolved_profile(provider)
+            if profile_field and profile:
+                env[profile_field] = profile
             # Identity last: it is what the server's gates trust (SM-R3), so no
             # configuration may restate it.
             env.update(identity)
