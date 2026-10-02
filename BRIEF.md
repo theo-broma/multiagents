@@ -3924,3 +3924,36 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **ag-5d1bd2 (B) is steered** to borrow A's `resume` flag in place of its `_bound_spec`.
   - **Tester ag-95cfbb is rewriting the last two stale tests:** `test_rt_r1_skips_unmodelled...` and `test_rm_r6a_...unmodelled_chain_entry`. Ruling: no `route_skipped` for non-candidate chain entries.
   - NEXT: merge the tests and then B, discard A (ag-0441db), and `resolve_ticket(bug-ac396a, fixed)`. A codex/Gemini re-review of B's borrowing is optional (small diff); read the diff myself.
+
+**HANDOFF #4, 2026-10-03 (orchestrator context near wind-down).** The user said "je te laisse continuer en autonomie".
+
+**Roster now** (agents.yaml, not versioned):
+- **Implementers:** codex `gpt-6.1-sol`, effort low (quick), medium (default) and high (deep), with `models: null`.
+- **Reviewer:** agy `gemini-3.1-pro-high`, with a codex high fallback and `silence_timeout` 900.
+- **No loop-reviewer.**
+- **Testers** run on claude-b sonnet.
+
+**Merged this session:** FO 3f884b0, CB dfc8fb0, the SR tests 1c3788e, and the FS stale-test rewrites f66ded6 and b3359df.
+
+**In flight:**
+- **FS:** ag-5d1bd2 (branch B, DeepSeek), steered to borrow A's `resume` flag.
+  - NEXT: read the diff, then merge B and discard A (ag-0441db, `force`).
+  - Then `resolve_ticket(bug-ac396a, fixed)`.
+- **SF:** ag-60dd6f (implementer-deep, codex high), the structural single-cleanup-owner fix on top of main (0790219).
+  - NEXT: reviewer, then merge.
+  - Then **SR** (`context/specs/steer-exit-race.md`, tests on main): implementer-deep, reviewer, merge, `resolve_ticket(bug-dc522a)`.
+- **AB:** tester ag-f6de5d is writing `tests/test_ab_agy_second_account.py`. Contract: `context/specs/agy-second-account.md`.
+  - NEXT: merge the tests, then implementer (codex), reviewer, merge.
+- **DK:** tester ag-a83388 is writing `tests/test_dk_docker_claude_auth.py`. Contract: `context/specs/docker-claude-auth.md` (a00c87a plus 065d594). Ticket bug-07d880.
+  - NEXT: merge the tests, then implementer-deep, reviewer, merge.
+  - AB and DK both touch `docker.py`/auth, so run their implementers sequentially or check for overlap.
+
+**After DK and AB merge, the return to docker** (the user wants it):
+1. Add the `agy-b` provider (spec AB background) and claude-b's pin (`container_account`, or whatever DK named it).
+2. Tell the user to set `executor.kind: docker` and run `multiagents docker rm && multiagents docker up`, but only with no agents running.
+3. Then `multiagents docker login claude`, `... claude-b` and `... agy-b`.
+- Codex, opencode/deepinfra and agy were verified to work under docker (ag-b41640).
+
+**Tickets:** fix in-house and never submit: bug-ac396a (FS), bug-dc522a (SR), bug-07d880 (DK).
+
+**Do not steer a run that is stuck on its wall clock** (bug SR). A stuck run keeps running; let it finish.
