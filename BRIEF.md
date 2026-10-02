@@ -3769,3 +3769,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **P2:** an extends instance whose base has no `budget_profile_env` reports the base account's reading.
   - **P3:** multi-hop `extends` resolution depends on the caller's providers map.
   - Everything else was reproduced correct. ag-ba1672 is steered for round 2.
+- **FO round 3:** ag-12d4f1 committed 26a6afd (R3b, R1b and R1c fixed; adds `tests/test_fo_review_r2.py`; full suite shows 72 phase2 reds plus 1 stale test). Its `readonly_violation` on the FO test file is only a sync of main's copy and is harmless at merge.
+  - Tester ag-3ec8fe is rewriting `test_fo_r3_the_warning_is_emitted_once_per_agent_provider_key` for FO-R3b. Merge it before FO.
+  - Loop-reviewer ag-c1d8af is on round 3.
