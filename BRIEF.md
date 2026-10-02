@@ -3795,3 +3795,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - A profile is honoured only by a profile-capable reader, judged by signature, and is rejected at load otherwise.
   - The full suite shows only the expected reds.
   - A loop-reviewer is running round 3.
+- **CB loop round 3, ag-d1cfc1: ACCEPT.** One P3: the load error message suggests a script remedy that does not clear the error. Codex reviewer running.
