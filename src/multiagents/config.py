@@ -14,15 +14,21 @@ rather than invisible built-ins.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import copy
 import hashlib
 import json
 import math
 import re
 import shutil
+import threading
 from collections.abc import Sequence
+from contextvars import ContextVar
 from dataclasses import MISSING, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 import yaml
@@ -83,9 +89,168 @@ def _read_yaml(path: Path) -> dict:
         return yaml.safe_load(handle) or {}
 
 
+# BP-R1: one parse per version of a file, shared by every layer reader.
+# A budget read used to re-parse the same files per helper per provider, and
+# `shipped_limits` kept its own private parse beside them. Everything that
+# reads a config layer file goes through `read_yaml_cached` now: a memo
+# validated by (mtime_ns, size), so a file is parsed once while it is
+# unchanged and re-read the moment it moves (BP-R2). Keyed by the resolved
+# path: one file reached through a symlink or two spellings is one entry.
+# The version stamp is (dev, ino, mtime_ns, ctime_ns, size), not mtime and
+# size alone: a same-size replacement can carry the old mtime (a rename of a
+# copy2'd file, a `touch -r`), but a rename brings a new inode and an
+# in-place write or utime moves ctime, which nobody can set (BP review r4).
+_yaml_cache: dict[Path, tuple[tuple[int, ...], dict, yaml.YAMLError | None]] = {}
+
+
+def _current_owner() -> tuple[int, Any]:
+    """The thread and asyncio task running now: who may use a snapshot."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:                      # no event loop in this thread
+        task = None
+    return threading.get_ident(), task
+
+
+class _Snapshot:
+    """One read's view of the files, valid only while its read is active."""
+
+    __slots__ = ("files", "open", "owner")
+
+    def __init__(self) -> None:
+        self.files: dict[Path, tuple[dict, yaml.YAMLError | None]] = {}
+        self.open = True
+        self.owner = _current_owner()
+
+
+# The per-CALL view BP-R1 asks for: inside `parse_once()` every read of a
+# file — a budget helper's, and `load`'s own — returns the version the call
+# first saw, so a file rewritten mid-read is neither parsed twice nor seen
+# in two versions by one call. A ContextVar so concurrent reads on other
+# threads keep their own. But a thread or asyncio task started with a copy
+# of the context inherits the variable, and its read is not this call:
+# borrowing the view would lose it mid-read when this call exits (BP review
+# r4), and judge a finished call's view after (round 2). So a snapshot
+# serves only the thread and task that opened it — anyone else opens their
+# own — and is closed on exit all the same.
+_snapshot: ContextVar[_Snapshot | None] = ContextVar("config_snapshot", default=None)
+
+
+def _active_snapshot() -> _Snapshot | None:
+    snap = _snapshot.get()
+    if snap is None or not snap.open or snap.owner != _current_owner():
+        return None
+    return snap
+
+
+@contextlib.contextmanager
+def parse_once():
+    """Hold one view of the config files for the duration of one read.
+
+    Nested uses share the outer view: a `read_provider` inside a `read_all`
+    is part of that call.
+    """
+    if _active_snapshot() is not None:
+        yield
+        return
+    snap = _Snapshot()
+    token = _snapshot.set(snap)
+    try:
+        yield
+    finally:
+        snap.open = False
+        _snapshot.reset(token)
+
+
+def _forget(path: Path) -> None:
+    """This process just rewrote `path` (seeding): every later read sees it.
+
+    Evicted from the memo as well as from the call's view — `copy2` gives
+    the new file the shipped file's mtime, so the stamp alone is not what
+    this process should trust about its own write (BP review r4).
+    """
+    key = path.resolve()
+    _yaml_cache.pop(key, None)
+    if (snap := _active_snapshot()) is not None:
+        snap.files.pop(key, None)
+
+
+def _parse_versioned(key: Path) -> tuple[dict, yaml.YAMLError | None]:
+    """`key`'s parse — from the memo while its version stamp stands still."""
+    try:
+        stat = key.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return {}, None                       # no file here
+    # Any other stat failure (a permission error on the way) propagates:
+    # the caller decides whether that is fatal, and nothing is memoised.
+    if not S_ISREG(stat.st_mode):
+        return {}, None                       # what `_read_yaml`'s is_file said
+    stamp = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns,
+             stat.st_size)
+    hit = _yaml_cache.get(key)
+    if hit is not None and hit[0] == stamp:
+        return hit[1], hit[2]
+    try:
+        parsed, error = _read_yaml(key), None
+    except yaml.YAMLError as exc:
+        # Kept without its traceback: the cache must not pin this parse's
+        # frames, and every strict read raises a fresh copy (see below).
+        parsed, error = {}, exc.with_traceback(None)
+    _yaml_cache[key] = (stamp, parsed, error)
+    return parsed, error
+
+
+def _stat_ok(path: Path) -> bool:
+    try:
+        path.stat()
+    except OSError:
+        return False
+    return True
+
+
+def read_yaml_cached(path: Path, *, strict: bool = False) -> dict:
+    """`_read_yaml`, parsed at most once per version of the file.
+
+    A missing file reads as empty. A malformed one reads as empty too —
+    the "skip this layer" the budget's layer readers always did — unless
+    `strict`: `load` and the shipped defaults read raised on a broken file
+    before and still do, and a strict read also surfaces a file it cannot
+    stat (BP review round 3) instead of treating it as absent. The parse
+    error is cached beside the parse, so a broken file is parsed once per
+    version whichever policy reads it — and raised as a fresh copy each
+    time, since re-raising one stored exception grows its traceback by
+    every raise and pins every frame it passed through (BP review r4).
+
+    Returns a copy the caller owns: the memo and the call's snapshot are
+    shared, and `deep_merge` hands nested lists and maps straight through,
+    so a caller mutating a loaded config must not change the next load
+    (BP review round 3).
+    """
+    key = path.resolve()
+    snap = _active_snapshot()
+    if snap is not None and key in snap.files:
+        parsed, error = snap.files[key]
+    else:
+        try:
+            parsed, error = _parse_versioned(key)
+        except OSError:
+            # Unstattable: a strict read surfaces it; a layer read skips the
+            # layer, as `_read_yaml`'s is_file() did. Not snapshotted, so a
+            # strict read later in the call still sees the error.
+            if strict or _stat_ok(key):
+                raise
+            return {}
+        if snap is not None:
+            snap.files[key] = (parsed, error)
+    if error is not None and strict:
+        raise copy.copy(error)
+    return copy.deepcopy(parsed)
+
+
 @lru_cache(maxsize=1)
 def _shipped_section_cached(section: str) -> dict[str, Any]:
-    return dict(_read_yaml(shipped_defaults_dir() / "project.yaml").get(section) or {})
+    return dict(read_yaml_cached(shipped_defaults_dir() / "project.yaml",
+                                 strict=True).get(section) or {})
 
 
 def shipped_limits() -> dict[str, Any]:
@@ -283,6 +448,7 @@ def sync_layer(source: Path, target: Path, force: bool = False,
             if not dry_run:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
+                _forget(dst)
                 manifest[name] = shipped
             continue
         if _digest(dst) == shipped:
@@ -300,6 +466,7 @@ def sync_layer(source: Path, target: Path, force: bool = False,
                     shutil.copy2(dst, backup)
                     report.setdefault("backed_up", []).append(str(backup))
                 shutil.copy2(src, dst)
+                _forget(dst)
                 manifest[name] = shipped
         else:
             report["customised"].append(name)
@@ -700,9 +867,16 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         layers.append(paths.config)
 
     merged: dict[str, dict] = {name: {} for name in CONFIG_FILES}
-    for layer in layers:
-        for name in CONFIG_FILES:
-            merged[name] = deep_merge(merged[name], _read_yaml(layer / name))
+    # BP-R1: through the shared parse cache and, inside a budget read, that
+    # read's snapshot — so the read's helpers and this load see one version
+    # of each file and parse it once between them (BP review rounds 2, 3).
+    # Strict: a malformed or unstattable file raised out of load before and
+    # still does — only the budget layer reads degrade to {}.
+    with parse_once():
+        for layer in layers:
+            for name in CONFIG_FILES:
+                merged[name] = deep_merge(merged[name],
+                                          read_yaml_cached(layer / name, strict=True))
 
     providers_raw = merged["providers.yaml"].get("providers", {}) or {}
     # PS-R1/R5/R6: the providers (and their sharing keys) are built and
