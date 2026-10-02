@@ -3901,3 +3901,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **No loop-reviewer.**
 - **CB round 5, ag-152774: b1e0212.** A shared `expand_env_value`/`resolved_profile` (providers.py ~907) is used by `build_env`, `_launch` and the reader; a relative profile value becomes absolute against home. The final review is ag-bc1f98 (Gemini). NEXT: merge on APPROVE.
 - SF's final codex review ag-52701a is still running. It was started before the switch, and that is fine.
+- **SF codex round 2, ag-52701a: REQUEST_CHANGES, 3 more P2s.** A pid-less hold never resolves (6878); a startup refusal bypasses the restore retry (7195); a failed `_pc_unreserve` has no retry owner (6845).
+  - That makes seven rounds of whack-a-mole, so the task now asks for a **structural fix**: ONE per-node pending-cleanup record, with idempotent steps retried by settle until done; unknown liveness keeps the lock.
+  - Moved to **implementer-deep ag-60dd6f** (codex gpt-6.1-sol high). ag-1827ab's work was handed over with `merge_agent(into)` as 0790219, which sits on top of current main (FO merged, SR tests present).
+  - Tests go in `tests/test_sf_review_r4.py`. NEXT: reviewer (Gemini), then merge; then SR.
