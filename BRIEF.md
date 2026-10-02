@@ -2746,6 +2746,10 @@ Not scheduled. Noted "pour planification"; for the next phase via `multiagents i
     nodes, `node_id`, `agent_tree`. The contract should either merge the two
     concepts (a tree node becomes the run of a plan node) or name them
     distinctly, for example a *plan node* versus a *run*.
+  - **Decided by the user (2026-10-02):** keep **node** for the planned
+    unit, and **run** for its execution. Today's tree "nodes" (`node_id`,
+    `agent_tree`) are runs in this vocabulary, and the contract must rename
+    or alias them accordingly.
 
 ### 2026-09-30 ~07:00 UTC — user chose claude opus as adversary; 4 runs in flight
 - ag-bd9c41 adversary (opus) on H7, verifies ag-d06a0b.
