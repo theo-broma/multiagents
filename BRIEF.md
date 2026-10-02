@@ -3725,3 +3725,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tester ag-28b16f is correcting `test_fo_r3_valid_keys_are_not_reported`; merge it before FO.
   - Loop-reviewer ag-22ac54 (high) is checking round 2.
 - **SF:** loop-reviewer ag-c36577 (high) is checking round 2.
+- **FO-R3a test correction merged** (6e15882; 48/48 on the FO branch). The spec notes that dataclass fields such as `effort` stay valid under every provider.

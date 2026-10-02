@@ -68,3 +68,4 @@ These override any earlier wording they contradict.
 - **Why.** FO-R3 exists so that an option dropped at launch is never silent. The union reading lets exactly those options through.
 - **`provider` is not an override.** A `provider` key in an entry is ignored and reported. It never moves the run.
 - **Surfacing.** The warnings are returned by `validate_agent_models()`, which is what `multiagents doctor` prints.
+- **Dataclass fields are always valid.** A field such as `effort` is valid under any provider: FO-R3 reports unknown keys, not fields a provider ignores. Whether a provider honours `effort` is decided by the routing rules (RM-R5b), not by FO-R3. Noted by the tester on 2026-10-02.
