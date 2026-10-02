@@ -3467,3 +3467,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **PC round 3** (ag-f2696d): rejected with 5 findings. It verified that all 7 round-2 fixes hold.
   - Findings: docker wrapper liveness, a claim leak on stream-open failure, pinned queued-start validation order, terminal status during the post-mortem, and adopting an exited wrapper.
   - ag-03733f steered for round 4. The R3d test fix is merged as 6cdae4e.
+- **PC round 4** (ag-c689f3): rejected with 2 findings, both on the docker probe. One: a transport error is cached as a confirmed death. Two: blocking probes run inside the tree transaction.
+- **Decision:** probe only during reconciliation, outside the lock and in a thread, and record the verdict per identity. Counting reads only that record: confirmed dead releases the slot, anything else counts as held.
+- ag-03733f has been steered for round 5.
