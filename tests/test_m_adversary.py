@@ -100,13 +100,12 @@ def test_explicit_effort_refusal_leaves_no_startup_run_record(tmp_path, monkeypa
 # RM-R5a: explicit route effort on a family sibling of the route
 # ---------------------------------------------------------------------------
 
-def test_explicit_route_effort_is_refused_on_the_routes_sibling_too(tmp_path, monkeypatch):
-    # `models: {zeta: {model: gem-high, effort: low}}`. zeta2 is zeta's
-    # family sibling, so it runs zeta's route — model AND explicit effort
-    # (`_usable_spec`). On zeta the pair is refused; on zeta2 the identical,
-    # explicitly written effort is silently rewritten to `high`, because
-    # `_settle_effort` looks the route up under the sibling's own name and
-    # finds none, so it calls the effort "inherited".
+def test_explicit_route_effort_unlisted_sibling_of_the_route_is_not_a_fallback(
+        tmp_path, monkeypatch):
+    # Revised by FS-R1/FS-R2. `models: {zeta: {model: gem-high, effort: low}}`;
+    # zeta2 is zeta's family sibling but unlisted, so it is not a candidate.
+    # With acme and zeta exhausted the start defers (FS-R1) and nothing runs on
+    # zeta2, so the explicit effort is neither rewritten nor refused there.
     providers, probes = _fakes(tmp_path, "acme", "zeta", "zeta2",
                                families={"zeta": "zeta", "zeta2": "zeta"})
     for name in ("zeta", "zeta2"):
@@ -120,11 +119,9 @@ def test_explicit_route_effort_is_refused_on_the_routes_sibling_too(tmp_path, mo
 
     result = _start(runner)
 
-    assert result.get("error"), (
-        f"an explicitly configured conflicting route effort launched on the "
-        f"route's sibling instead of being refused: {result}; "
-        f"argv={_calls(probes['zeta2'])}")
-    assert not _calls(probes["zeta2"])
+    assert result.get("deferred"), result
+    assert not result.get("agent_id"), result
+    assert not (_calls(probes["zeta2"]) or _calls(probes["zeta"]) or _calls(probes["acme"]))
 
 
 # ---------------------------------------------------------------------------
