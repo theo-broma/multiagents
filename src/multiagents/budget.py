@@ -299,6 +299,34 @@ def _apply_reset_margin(b: Budget, margin: float, now_: float) -> Budget:
     )
 
 
+# BP-R1: one parse per file per read. The config layers behind a budget read
+# used to be re-read per helper per provider — `_reset_margin` and
+# `_reading_age_bound_from_layers` each merged the three project.yamls on
+# every call: ~17 YAML parses on every spawn and every poll. Both now read
+# through `config.read_yaml_cached`, and `read_all`/`read_provider` hold a
+# `config.parse_once()` view open for the call, so every helper inside it —
+# and the `config.load` behind `_fetching_allowed` — sees one version of
+# each file, parsed once. The next call stats the files afresh (BP-R2).
+def _merged_project_layers(project_config: Path | None) -> dict:
+    """The project.yaml of every layer, lowest first, deep-merged.
+
+    What `_reset_margin` and `_reading_age_bound_from_layers` each re-read
+    per call, now read once and shared between them (BP-R1): each file comes
+    through `config.read_yaml_cached`, in the call's view. The same
+    layers in the same order as before, so the merged result is
+    byte-for-byte today's.
+    """
+    from .config import deep_merge, read_yaml_cached
+    from .paths import global_config_dir, shipped_defaults_dir
+
+    merged: dict = {}
+    for layer in (shipped_defaults_dir(), global_config_dir(), project_config):
+        if layer is None:
+            continue
+        merged = deep_merge(merged, read_yaml_cached(Path(layer) / "project.yaml"))
+    return merged
+
+
 def _reset_margin(project_config: Path | None, limits: dict | None = None) -> float:
     """``limits.quota_reset_margin_seconds``, layered like every other limit.
 
@@ -310,29 +338,17 @@ def _reset_margin(project_config: Path | None, limits: dict | None = None) -> fl
     unreadable and is holding the limits that survived it.
 
     Only a caller with no last-good config to hand (a one-shot CLI read, a
-    provider script probe) falls through to reading the layers itself, and a
-    parse error there — the one failure this project.yaml is actually prone
-    to — falls back to the shipped default rather than propagating, since
-    there is no previous reading to prefer instead.
+    provider script probe) falls through to reading the layers itself — once
+    per file, through the shared layer cache (BP-R1) — and a parse error
+    there, the one failure this project.yaml is actually prone to, skips the
+    layer and falls back towards the shipped default rather than propagating,
+    since there is no previous reading to prefer instead.
     """
     from .config import limit_number
 
     if limits is not None:
         return limit_number(limits, "quota_reset_margin_seconds")
-
-    import yaml
-
-    from .config import _read_yaml, deep_merge
-    from .paths import global_config_dir, shipped_defaults_dir
-
-    merged: dict = {}
-    for layer in (shipped_defaults_dir(), global_config_dir(), project_config):
-        if layer is None:
-            continue
-        try:
-            merged = deep_merge(merged, _read_yaml(Path(layer) / "project.yaml"))
-        except yaml.YAMLError:
-            continue
+    merged = _merged_project_layers(project_config)
     return limit_number(merged.get("limits") or {}, "quota_reset_margin_seconds")
 
 
@@ -367,23 +383,11 @@ def _reading_age_bound_from_layers(project_config: Path | None) -> float:
     """The same setting, read from the config layers themselves.
 
     For a caller with no loaded config to hand (a one-shot CLI read), the
-    same fallback that `_reset_margin` uses: read the layers, and survive a
-    broken project.yaml by falling back to the shipped default.
+    same fallback that `_reset_margin` uses: read the layers — once per
+    file, through the shared layer cache (BP-R1) — and survive a broken
+    project.yaml by falling back to the shipped default.
     """
-    import yaml
-
-    from .config import _read_yaml, deep_merge
-    from .paths import global_config_dir, shipped_defaults_dir
-
-    merged: dict = {}
-    for layer in (shipped_defaults_dir(), global_config_dir(), project_config):
-        if layer is None:
-            continue
-        try:
-            merged = deep_merge(merged, _read_yaml(Path(layer) / "project.yaml"))
-        except yaml.YAMLError:
-            continue
-    return reading_age_bound(merged)
+    return reading_age_bound(_merged_project_layers(project_config))
 
 
 def _reading_age(b: Budget, now_: float, cached_at: float | None = None,
@@ -1340,6 +1344,29 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
                   max_reading_age: float | None = None,
                   providers: dict[str, Any] | None = None,
                   _pass: set[str] | None = None) -> Budget:
+    """One provider's budget, margin- and age-corrected (see `_read_provider`).
+
+    BP-R1: one read parses each config file at most once. Called inside a
+    `read_all` it shares that call's `parse_once` view; called alone it holds
+    one for its own duration, so the margin and the age bound below always
+    judge the same version of a file even if it moves between them.
+    """
+    from .config import parse_once
+
+    with parse_once():
+        return _read_provider(name, provider, executor, config_dir, project_config,
+                              spent, use_cache, force, limits, max_reading_age,
+                              providers, _pass)
+
+
+def _read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
+                   project_config: Path | None = None,
+                   spent: dict[str, int] | None = None,
+                   use_cache: bool = True, force: bool = False,
+                   limits: dict | None = None,
+                   max_reading_age: float | None = None,
+                   providers: dict[str, Any] | None = None,
+                   _pass: set[str] | None = None) -> Budget:
     margin = _reset_margin(project_config, limits)
     # RM-R4b: the caller's loaded config wins (`reading_age_bound`); a caller
     # with none falls back to reading the layers itself, as the margin does.
@@ -1404,22 +1431,27 @@ def read_all(providers: dict[str, Any] | None = None,
     # One pass, one set: a shared source fetched for the first provider is
     # not fetched again for a dependent of it (PS-R5).
     _pass: set[str] = set()
-    for name, provider in providers.items():
-        if provider is not None and not getattr(provider, "enabled", True):
-            continue
-        executor = executor_for(name) if callable(executor_for) else _NullExecutor()
-        budget = read_provider(name, provider, executor, config_dir, project_config,
-                               spend_by_provider.get(name), use_cache, force,
-                               limits=limits, max_reading_age=max_reading_age,
-                               # PS-R5: a dependent resolves its budget source
-                               # through the same map.
-                               providers=providers, _pass=_pass)
-        entry = cooldowns.get(name)
-        if entry and entry.get("until", 0) > time.time():
-            budget.cooldown_until = entry["until"]
-            budget.severity = "critical"
-            budget.note = (budget.note + " | " if budget.note else "") + entry.get("reason", "cooling down")
-        out[name] = budget
+    # BP-R1: one parse per config file for the WHOLE call — every provider's
+    # margin and age bound, and any built-in reader's, judge the same parse.
+    from .config import parse_once
+
+    with parse_once():
+        for name, provider in providers.items():
+            if provider is not None and not getattr(provider, "enabled", True):
+                continue
+            executor = executor_for(name) if callable(executor_for) else _NullExecutor()
+            budget = read_provider(name, provider, executor, config_dir, project_config,
+                                   spend_by_provider.get(name), use_cache, force,
+                                   limits=limits, max_reading_age=max_reading_age,
+                                   # PS-R5: a dependent resolves its budget source
+                                   # through the same map.
+                                   providers=providers, _pass=_pass)
+            entry = cooldowns.get(name)
+            if entry and entry.get("until", 0) > time.time():
+                budget.cooldown_until = entry["until"]
+                budget.severity = "critical"
+                budget.note = (budget.note + " | " if budget.note else "") + entry.get("reason", "cooling down")
+            out[name] = budget
     return out
 
 
