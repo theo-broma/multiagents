@@ -3874,3 +3874,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - NEXT: merge the tests, then **after the SF merge** (both touch the steer path) run `implementer-deep`, the loop-reviewer, codex, and the merge. Then `resolve_ticket(bug-dc522a, fixed)`.
   - Until then, **avoid steering a run that is stuck on its wall clock**. Steering one that is still running worked (ag-d38d1c).
 - The loop-reviewer timeout was raised to 5400 after SF round-5 review ag-d38d1c hit 3600. ag-d38d1c was steered to wrap up.
+- **SF loop round 5, ag-d38d1c: ACCEPT.** Both fixes were reproduced as green; its repro file is `/var/tmp/ag-d38d1c-wt/tests/test_zz_loop_repro.py`. It also raised one unreproduced observation: a raising `_steer_predecessor` may be read as a confirmed death. The codex final review is ag-?? (`verifies=ag-1827ab`), asked to settle that point. NEXT: on APPROVE, merge SF; then the SR implementer.
+- **FO loop round 5, ag-35604a:** stuck on its 3600 s wall clock but still working. Deliberately NOT steered, because of the SR bug. Let it finish on its own.
