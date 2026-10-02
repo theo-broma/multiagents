@@ -3555,3 +3555,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - P2: a failed `record_stop` is never retried.
   - P2: a reroute duplicates the `deferred_id`.
   - All six were steered back to ag-8362a3, asking for simplification over patching.
+- **SC round 4:** ag-8362a3 fixed all six round-3 findings in a8efaf3, with tests in `test_sc_review_r3.py`. The full suite shows known reds only.
+  - **Accepted residual:** a crash between node creation and spawn follows DQ-R11.
+  - Reviewer round 4 is ag-f0cf70.
+- **RC review round 2:** reviewer ag-2d1240 confirmed the round-1 fixes. One P2 remains: a refused original turn still passes the commit-fix gate. It was steered to ag-cfd0bd, round 2 of 3 for glm.
