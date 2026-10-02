@@ -3957,3 +3957,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 **Tickets:** fix in-house and never submit: bug-ac396a (FS), bug-dc522a (SR), bug-07d880 (DK).
 
 **Do not steer a run that is stuck on its wall clock** (bug SR). A stuck run keeps running; let it finish.
+- **FS MERGED, ded3ac2** (branch B with A's `resume` flag borrowed). On main, 288 tests pass across FS, routing, FO, budget and conversation. Branch A (ag-0441db) was discarded, and bug-ac396a is resolved as fixed (not submitted).
