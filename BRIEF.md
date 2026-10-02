@@ -3480,3 +3480,18 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - it runs when no limit is configured.
 
   I steered ag-03733f for round 7 with exact fixes. Then a narrow review; if it is clean, merge.
+
+### 2026-10-02 ~09:10 UTC — PC merged; SC, BA-R3 and RC started
+- **PC merged as be4c905** after 8 review rounds:
+  - round 7: 1 finding (consult wake during shutdown), fixed;
+  - round 8: 1 P2, deferred.
+- **Deferred follow-up from round 8:** if shutdown begins during `steer()`'s internal stop, `_launch` refuses before its cleanup guard. The startup half-open probe claim then leaks until the server pid exits (runner.py ~2687).
+- **The user restarted `multiagents run` and `/mcp`.** CW is active.
+- **In flight:**
+  - **SC:** implementer-deep ag-8362a3, pinned to claude opus. The roster default is glm; the user rule is to use claude while the weekly quota lasts.
+  - **BA-R3** (bug-ba55a9 part 2): implementer-quick ag-48dce9 (glm).
+  - **bug-1213a0:** the contract is `context/specs/refusal-classification.md` (RC-R1..R5, commit 39e45e2), with the advisor's gaps folded in. Tester ag-155fae is writing the red tests.
+- **Next:**
+  - each run gets a reviewer, then merge;
+  - RC then needs an implementer;
+  - resolve bug-ba55a9 and bug-1213a0 when merged.
