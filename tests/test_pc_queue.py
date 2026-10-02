@@ -150,26 +150,28 @@ def test_r3_a_queued_task_does_not_launch_while_the_holder_is_still_running(w):
 
 
 def test_r3_fifo_with_three_queued_starts(w):
+    # markers that cannot occur in the shipped prompt (which says "read it first")
+    first, qs = "zz-h0", ("zz-q1", "zz-q2", "zz-q3")
     g = acme_world(w, 1)
-    g.hold("first")
-    for t in ("q1", "q2", "q3"):
+    g.hold(first)
+    for t in qs:
         g.hold(t)
 
     async def go():
-        await w.started("worker", "first")
+        await w.started("worker", first)
         await pc.await_until(lambda: g.spawns() == 1)
-        for t in ("q1", "q2", "q3"):
+        for t in qs:
             assert pc.deferred_for_pc(await w.start("worker", t))
         order = []
-        for tag, nxt in (("first", 2), ("q1", 3), ("q2", 4)):
+        for tag, nxt in ((first, 2), (qs[0], 3), (qs[1], 4)):
             g.release(tag)
             assert await pump(w, lambda: g.spawns() == nxt), f"{tag} released, nothing launched"
             order.append(g.argv_text())
-        g.release("q3")
+        g.release(qs[2])
         await w.settle()
         return order
     order = asyncio.run(go())
-    assert "q1" in order[0] and "q2" in order[1] and "q3" in order[2], order
+    assert qs[0] in order[0] and qs[1] in order[1] and qs[2] in order[2], order
 
 
 def test_r3a_a_new_arrival_never_overtakes_an_eligible_queued_entry(w):
