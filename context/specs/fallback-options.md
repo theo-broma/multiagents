@@ -91,4 +91,4 @@ These override any earlier wording they contradict.
 **FO-R4a: a bare-string entry for the primary provider sets the model.**
 - `models: {P: m}`, where P is the agent's own provider, runs on model m. This follows FO-R1 (precise) and FO-R2.
 - FO-R4's "behave exactly as today" is narrowed to configs with no `models:` entry for the destination.
-- No shipped or project agent has a bare entry for its own provider, so nothing changes in practice.
+- The only agent with a bare entry for its own provider is the project's `adversary` (`claude-b: opus`), and that entry equals its top-level model. Nothing changes in practice.
