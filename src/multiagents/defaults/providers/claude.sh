@@ -542,7 +542,16 @@ compact)
     if [ -s "$transcript" ] && [ -n "$(tail -c1 "$transcript")" ]; then
         before=$((before + 1))
     fi
-    out=$("$BIN" -p "/compact" --resume "$sid" --output-format json 2>&1)
+    # CW-R8: what to keep, as the command's own argument — one argument,
+    # never re-parsed by a shell, cut to its bound rather than refused. The
+    # trailing x survives the command substitution's newline stripping.
+    prompt="/compact"
+    if [ -n "${MULTIAGENTS_COMPACT_FOCUS:-}" ]; then
+        focus=$(python3 -c 'import os, sys; sys.stdout.write(os.environ["MULTIAGENTS_COMPACT_FOCUS"][:1000])'; printf x)
+        focus=${focus%x}
+        [ -n "$focus" ] && prompt="/compact $focus"
+    fi
+    out=$("$BIN" -p "$prompt" --resume "$sid" --output-format json 2>&1)
     code=$?
     if [ "$code" -ne 0 ]; then
         printf 'compact failed: %s\n' "$(printf '%s' "$out" | tail -1 | head -c 200)" >&2

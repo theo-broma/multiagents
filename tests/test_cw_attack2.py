@@ -25,29 +25,33 @@ def config(extra_mounts=()):
     )
 
 
+def forge_ack_from_visible_files(paths, nonce, pid):
+    """What a writer who can see the handshake directory but lacks the key
+    can do: copy every readable field (the registration's MAC included) into
+    an acknowledgement, with and without a record type."""
+    record = safepoint._read(paths, f"safepoint-server-{pid}.json")
+    for forged in ({**record, "nonce": nonce},
+                   {**record, "type": "ack", "nonce": nonce},
+                   {k: v for k, v in record.items() if k != "mac"} | {"nonce": nonce}):
+        safepoint._write(paths, f"safepoint-server-{pid}.safe", forged)
+        assert not safepoint.acknowledged(paths, pid, nonce)
+
+
 @pytest.mark.parametrize("ancestor", [False, True], ids=["handshake", "safepoints-parent"])
-def test_symlink_bind_mount_cannot_expose_the_handshake(tmp_path, monkeypatch, ancestor):
+def test_r2b_forged_ack_through_a_bind_mount_alias_is_rejected(tmp_path, monkeypatch, ancestor):
+    """CW-R2b: exposure is no longer detected; a writer reaching the handshake
+    through a bind-mount alias is harmless because it cannot sign."""
     paths = ProjectPaths(tmp_path / "project")
     paths.root.mkdir()
     state = tmp_path / "host-state"
     monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(state))
     where = safepoint.directory(paths)
     where.mkdir(parents=True)
-    # Docker resolves the source of a bind mount. The alias's lexical path
-    # neither contains nor is contained by the handshake's lexical path.
     alias = paths.root / "mounted-alias"
     alias.symlink_to(where.parent if ancestor else where, target_is_directory=True)
     cfg = config([str(alias)])
-    try:
-        mounts = DockerExecutor(cfg.project["executor"]["docker"], paths, {}, state).mounts()
-    except ValueError:
-        assert safepoint.exposed(paths, cfg)
-        return
+    mounts = DockerExecutor(cfg.project["executor"]["docker"], paths, {}, state).mounts()
     assert any(source == alias for source, _ in mounts)
-    assert where == alias.resolve() or alias.resolve() in where.parents
-    # Simulate only the write access granted by that mount: copy the bound
-    # fields from the readable registration and barrier, and manufacture an
-    # acknowledgement while a launch remains in flight.
     session = "cw-attack2-session"
     safepoint.register(paths, session)
     nonce = safepoint.request(paths, session, os.getpid())
@@ -55,12 +59,12 @@ def test_symlink_bind_mount_cannot_expose_the_handshake(tmp_path, monkeypatch, a
     record = json.loads((visible / f"safepoint-server-{os.getpid()}.json").read_text())
     gate = safepoint.Gate()
     with gate.enter("launch before pid is recorded"):
+        # Written through the alias, exactly as the mount would allow.
         (visible / f"safepoint-server-{os.getpid()}.safe").write_text(
             json.dumps({**record, "nonce": nonce}))
         assert gate.transitions == 1
-        assert safepoint.acknowledged(paths, os.getpid(), nonce)
-    assert safepoint.exposed(paths, cfg), (
-        "a writable Docker bind resolves into the host handshake, but exposure was accepted")
+        assert not safepoint.acknowledged(paths, os.getpid(), nonce)
+    forge_ack_from_visible_files(paths, nonce, os.getpid())
 
 
 @pytest.mark.parametrize("component", ["state-root", "safepoints", "project-key"])
@@ -80,17 +84,20 @@ def test_symlink_in_handshake_path_into_project_is_refused(tmp_path, monkeypatch
     else:
         where.parent.mkdir(parents=True)
         where.symlink_to(writable, target_is_directory=True)
-    # This is not merely path overlap: production request I/O follows the
-    # alias and writes an actual nonce into the container-writable project.
+    session = "cw-attack2-session"
+    if component == "state-root":
+        # The state root itself is not exposure-checked any more (CW-R2b):
+        # whatever lands in the writable project is unforgeable and any
+        # record an agent plants there is rejected.
+        safepoint.register(paths, session)
+        nonce = safepoint.request(paths, session, os.getpid())
+        forge_ack_from_visible_files(paths, nonce, os.getpid())
+        return
     try:
-        nonce = safepoint.request(paths, "cw-attack2-session", 4200)
+        safepoint.request(paths, session, 4200)
     except OSError:
         return  # Refusing to publish through a symlink satisfies the boundary.
-    barrier = where / f"safepoint-barrier-{safepoint._key('cw-attack2-session')}.json"
-    assert paths.root in barrier.resolve().parents
-    assert nonce in barrier.resolve().read_text()
-    assert safepoint.exposed(paths, config()), (
-        "handshake request landed inside the writable project without safepoint_exposed")
+    pytest.fail("the handshake request was written through a symlinked path component")
 
 
 @pytest.mark.parametrize("state", ["drain", "commit"])
@@ -172,16 +179,28 @@ def test_agent_environment_does_not_inherit_host_safepoint_dir(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("mount", ["safepoints", "state-root", "home"])
-def test_direct_ancestor_mounts_are_refused(tmp_path, monkeypatch, mount):
+def test_r2b_forged_records_under_a_direct_ancestor_mount_are_rejected(tmp_path, monkeypatch, mount):
+    """A container mounting an ancestor of the handshake sees and can write
+    it; with no key it can neither acknowledge nor open admission."""
     paths = ProjectPaths(tmp_path / "project")
     paths.root.mkdir()
     home = tmp_path / "host-home"
     state = home / ".multiagents"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("MULTIAGENTS_STATE_DIR", str(state))
-    safepoint.directory(paths).mkdir(parents=True)
     source = {"safepoints": state / "safepoints", "state-root": state, "home": home}[mount]
-    assert safepoint.exposed(paths, config([str(source)]))
+    session = "ancestor-session"
+    safepoint.register(paths, session)
+    assert source in safepoint.directory(paths).parents
+    nonce = safepoint.request(paths, session, os.getpid())
+    forge_ack_from_visible_files(paths, nonce, os.getpid())
+    # An unsigned "cancel" or fresh "request" planted in the barrier is not
+    # an authenticated request for this process.
+    name = f"safepoint-barrier-{safepoint._key(session)}.json"
+    barrier = safepoint._read(paths, name)
+    safepoint._write(paths, name, {k: v for k, v in barrier.items() if k != "mac"}
+                     | {"type": "cancel", "state": "cancelled"})
+    assert safepoint.request_for(paths, session) is None
 
 
 @pytest.mark.parametrize("reused", [False, True])

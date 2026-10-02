@@ -596,7 +596,10 @@ def build_env(
     _add_git_config_override(env, "gc.auto", "0")
     _add_git_config_override(env, "maintenance.auto", "false")
     env.update(identity)
-    return env
+    # CW-R2b: the safe-point key is never an agent's, even when passthrough
+    # or the identity names it.
+    from ..safepoint import strip_key
+    return strip_key(env)
 
 
 def _add_git_config_override(env: dict[str, str], key: str, value: str) -> None:

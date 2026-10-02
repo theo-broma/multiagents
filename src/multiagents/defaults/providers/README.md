@@ -84,6 +84,12 @@ read JSON.
                             live session to compact it. Any other value of the
                             variable is a real compaction.
 
+                            MULTIAGENTS_COMPACT_FOCUS (empty or unset = none):
+                            what the compaction should keep, at most 1000
+                            characters. Forwarded to the CLI's own compaction
+                            where it takes instructions, ignored otherwise;
+                            the probe ignores it.
+
     <provider>.sh models    non-interactive; the provider's models, one per
                             line or as its `models_parse` expects
                             exit 64 = not implemented; nothing is listed

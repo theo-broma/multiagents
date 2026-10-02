@@ -85,3 +85,101 @@ def alive(pid: int | None, start: str = "") -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def parent(pid: int) -> int | None:
+    """Field 4 of ``/proc/<pid>/stat``, the parent's pid, or None if unknown."""
+    if pid is None or pid <= 0:
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # Split after the last ')' for the reason `start_time` gives: `rest`
+    # starts at field 3, so field 4 is index 1.
+    fields = raw.rpartition(")")[2].split()
+    try:
+        return int(fields[1])
+    except (IndexError, ValueError):
+        return None
+
+
+class _Gone(Exception):
+    """The process does not exist (any more)."""
+
+
+def _stat(pid: int) -> list[str]:
+    """``/proc/<pid>/stat`` from field 3 on. Raises `_Gone` when there is no
+    such process, `OSError` or `ValueError` when it exists and cannot be
+    read: unknown is not gone."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        raise _Gone(pid) from None
+    fields = raw.rpartition(")")[2].split()
+    if len(fields) < 2:
+        raise ValueError(f"unreadable /proc/{pid}/stat")
+    int(fields[1])
+    return fields
+
+
+def living(pid: int | None, start: str = "") -> bool:
+    """`alive`, and not a zombie: a process that has exited but not been
+    reaped still answers `kill(pid, 0)`, and is dead for every purpose a
+    caller of this has."""
+    if not alive(pid, start):
+        return False
+    try:
+        return _stat(int(pid))[0] not in ("Z", "X")
+    except (_Gone, OSError, ValueError):
+        # Gone since `alive` looked, or no /proc to ask: `alive` has decided.
+        return True
+
+
+def descends_from(pid: int, ancestor: int) -> bool | None:
+    """Is `ancestor` among `pid`'s ancestors? None where that cannot be read —
+    no `/proc`, an unreadable entry, or a chain broken while it was walked."""
+    seen: set[int] = set()
+    cursor = pid
+    while cursor and cursor not in seen:
+        seen.add(cursor)
+        try:
+            up = int(_stat(cursor)[1])
+        except _Gone:
+            return False if cursor == pid else None
+        except (OSError, ValueError):
+            return None
+        if up == ancestor:
+            return True
+        if up <= 1:
+            return False
+        cursor = up
+    return False
+
+
+def descendants(pid: int) -> list[int] | None:
+    """Every live process below `pid`, from ``/proc``; None where that cannot
+    be established — no `/proc`, or any process whose parent cannot be read
+    (it could be below `pid`, so an answer without it would be a guess)."""
+    proc = Path("/proc")
+    try:
+        names = [n for n in os.listdir(proc) if n.isdigit()]
+    except OSError:
+        return None
+    children: dict[int, list[int]] = {}
+    for name in names:
+        try:
+            up = int(_stat(int(name))[1])
+        except _Gone:
+            continue                    # exited since the listing
+        except (OSError, ValueError):
+            return None
+        children.setdefault(up, []).append(int(name))
+    out, todo = [], list(children.get(pid, []))
+    while todo:
+        child = todo.pop()
+        if child in out:
+            continue
+        out.append(child)
+        todo.extend(children.get(child, []))
+    return out

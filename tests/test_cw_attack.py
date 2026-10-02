@@ -21,6 +21,13 @@ CLI = 4200
 SERVER = 4201
 
 
+def register_as(paths, pid, monkeypatch):
+    """A root server's registration, made through the public (signing) path."""
+    with monkeypatch.context() as patch:
+        patch.setattr(safepoint.os, "getpid", lambda: pid)
+        safepoint.register(paths, SESSION)
+
+
 @pytest.fixture
 def stop(tmp_path, monkeypatch):
     paths = ProjectPaths(tmp_path / "project")
@@ -28,8 +35,7 @@ def stop(tmp_path, monkeypatch):
     monkeypatch.setattr(safepoint.procs, "alive", lambda pid, start="": pid in {CLI, SERVER, SERVER + 1})
     monkeypatch.setattr(safepoint.procs, "start_time", lambda pid: f"start-{pid}")
     monkeypatch.setattr(safepoint.procs, "descends_from", lambda pid, ancestor: ancestor == CLI)
-    safepoint._write(paths, f"safepoint-server-{SERVER}.json",
-                     {"pid": SERVER, "start": f"start-{SERVER}", "session": SESSION})
+    register_as(paths, SERVER, monkeypatch)
     compaction = driver._AttachedCompaction.__new__(driver._AttachedCompaction)
     compaction.paths = paths
     compaction.cli = CLI
@@ -188,8 +194,7 @@ def test_ack_waits_for_all_admitted_transitions_and_the_quiet_period(stop, monke
 
 def test_unknown_proc_ancestry_and_two_registered_servers_require_both_acks(stop, monkeypatch):
     monkeypatch.setattr(safepoint.procs, "descends_from", lambda *args: None)
-    safepoint._write(stop.paths, f"safepoint-server-{SERVER + 1}.json",
-                     {"pid": SERVER + 1, "start": f"start-{SERVER + 1}", "session": SESSION})
+    register_as(stop.paths, SERVER + 1, monkeypatch)
     request = safepoint.request
 
     def request_and_ack_only_first(*args):

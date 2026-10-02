@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import copy
 import fcntl
+import functools
 import signal
 import hashlib
 import json
@@ -53,6 +54,7 @@ from . import paths as paths_mod
 from .paths import ProjectPaths, global_config_dir, state_root
 from .providers import Event, Provider, get_path, load_providers
 from .redact import scrub
+from .safepoint import Gate, strip_key
 from .auth import looks_like_auth_failure
 from .startup import StartupHealth, StartupUnavailable
 from .authority import HostAuthority
@@ -584,7 +586,7 @@ def server_env(env: dict[str, str], node_id: str) -> dict[str, str]:
         "MULTIAGENTS_AGENT_ID": node_id,
     })
     out.setdefault("PATH", os.environ.get("PATH") or os.defpath)
-    return out
+    return strip_key(out)                # CW-R2b: never a nested server's
 
 
 def _resolves(command: str, path: str) -> bool:
@@ -607,6 +609,22 @@ def _write_own(target: Path, text: str) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def _admitted(what: str):
+    """CW-R2: a Runner entry point that launches, admitted through its
+    safe-point gate — refused while the server is stopping for a compaction,
+    and counted until it returns, so the stop waits for it. Nested entry
+    points (an answer resumes through `steer`) cannot be split: the gate only
+    closes with nothing counted."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        async def admitted(self, *args, **kwargs):
+            await self.gate.wait_granted()
+            with self.gate.enter(what):
+                return await fn(self, *args, **kwargs)
+        return admitted
+    return decorate
 
 
 class Runner:
@@ -1805,6 +1823,12 @@ class Runner:
     # ------------------------------------------------- launch-cleanup hold --
 
     @property
+    def gate(self) -> Gate:
+        """CW-R2: whether this Runner admits launches while its server stops
+        for a compaction, and how many admitted transitions are in flight."""
+        return self.__dict__.setdefault("_safe_point_gate", Gate())
+
+    @property
     def _holds(self) -> dict[str, _Hold]:
         return self.__dict__.setdefault("_launch_holds", {})
 
@@ -2365,6 +2389,9 @@ class Runner:
                 env.update(server_env)
             else:
                 self._withdraw_server(provider, home)
+            # CW-R2b: the safe-point key, after the last overlay — passthrough,
+            # the provider's env, its `mcp.env` — so none can hand it to an agent.
+            strip_key(env)
             # H8: refused before anything starts — the kernel's per-argument
             # limit (checked over the fully assembled argv, adapter and server
             # arguments included).
@@ -2775,8 +2802,11 @@ class Runner:
             self.tree.emit(node_id, "wrap_up", provider=run.provider.name,
                            seconds_left=round(left))
             try:
-                await self.steer(node_id, WRAP_UP.format(
-                    provider=run.provider.name, minutes=max(1, round(left / 60))))
+                # Started by the Runner itself, so not refused at the
+                # safe point (CW-R2): it waits for the gate to reopen.
+                with await self.gate.enter_when_open():
+                    await self.steer(node_id, WRAP_UP.format(
+                        provider=run.provider.name, minutes=max(1, round(left / 60))))
             except Exception as exc:            # never let this kill the run
                 self.tree.emit(node_id, "wrap_up_failed", detail=str(exc)[:200])
             return
@@ -2910,6 +2940,7 @@ class Runner:
 
     # ----------------------------------------------------------------- start --
 
+    @_admitted("a new agent")
     async def start(
         self,
         agent_name: str,
@@ -3958,14 +3989,18 @@ class Runner:
                 # leave a window where a concurrent reader gets a Run whose
                 # `done` nobody but this line will ever fix up.
                 try:
-                    retried = await self._launch(
-                        node_id=node_id, spec=run.spec, provider=run.provider,
-                        prompt=_run_read(run_dir, "prompt.md"),
-                        workdir=Path(fresh.worktree), branch=fresh.branch,
-                        parent=fresh.parent, depth=fresh.depth,
-                        session_id=session_id or None,
-                        done=run.done,
-                    )
+                    # CW-R2: a retry is not a new admission; past the safe
+                    # point it waits, and a server that exits meanwhile
+                    # leaves the node to the next one's adoption.
+                    with await self.gate.enter_when_open():
+                        retried = await self._launch(
+                            node_id=node_id, spec=run.spec, provider=run.provider,
+                            prompt=_run_read(run_dir, "prompt.md"),
+                            workdir=Path(fresh.worktree), branch=fresh.branch,
+                            parent=fresh.parent, depth=fresh.depth,
+                            session_id=session_id or None,
+                            done=run.done,
+                        )
                 except Exception as exc:
                     # A retry that cannot even start must not propagate out of
                     # `_finalize` — `_consume` would read that as the
@@ -4083,15 +4118,17 @@ class Runner:
             self.tree.emit(node_id, "commit_fix_attempt", attempt=attempt,
                            hook=result.hook, detail=output[-400:])
             try:
-                fix = await self._launch(
-                    node_id=node_id, spec=run.spec, provider=run.provider,
-                    prompt=COMMIT_FIX.format(
-                        hook=result.hook, attempt=attempt, allowed=allowed,
-                        output=output[-COMMIT_FIX_OUTPUT_CHARS:]),
-                    workdir=Path(node.worktree), branch=node.branch,
-                    parent=node.parent, depth=node.depth,
-                    session_id=session_id, timeout=wall, done=run.done,
-                )
+                # CW-R2: like the free retry, waits out a safe point.
+                with await self.gate.enter_when_open():
+                    fix = await self._launch(
+                        node_id=node_id, spec=run.spec, provider=run.provider,
+                        prompt=COMMIT_FIX.format(
+                            hook=result.hook, attempt=attempt, allowed=allowed,
+                            output=output[-COMMIT_FIX_OUTPUT_CHARS:]),
+                        workdir=Path(node.worktree), branch=node.branch,
+                        parent=node.parent, depth=node.depth,
+                        session_id=session_id, timeout=wall, done=run.done,
+                    )
             except Exception as exc:
                 self.tree.emit(node_id, "commit_fix_failed",
                                detail=f"could not resume: {type(exc).__name__}: {exc}"[:400])
@@ -5196,6 +5233,7 @@ class Runner:
         self.tree.set_status(agent_id, "cancelled", "stopped by parent")
         return {"agent_id": agent_id, "status": "cancelled"}
 
+    @_admitted("the steer")
     async def steer(self, agent_id: str, message: str) -> dict[str, Any]:
         """Redirect a running agent.
 
@@ -5831,6 +5869,18 @@ class Runner:
     async def _consult_turn(
         self, agent_name: str, spec: AgentSpec, message: str, timeout: int | None,
     ) -> dict[str, Any]:
+        """One turn, admitted through the safe-point gate (CW-R2) — counted
+        while the worktree is refreshed and the turn launched, not while the
+        reply is awaited."""
+        await self.gate.wait_granted()
+        with self.gate.enter(f"the consult of {agent_name}") as ticket:
+            return await self._consult_turn_admitted(agent_name, spec, message,
+                                                     timeout, ticket)
+
+    async def _consult_turn_admitted(
+        self, agent_name: str, spec: AgentSpec, message: str, timeout: int | None,
+        ticket,
+    ) -> dict[str, Any]:
         node = self._find_conversation(agent_name)
         turn = 1
         # Base is resolved once per turn and reused by the refresh, the result
@@ -6080,6 +6130,7 @@ class Runner:
                     node_id, f"consult did not launch: {type(exc).__name__}: {exc}")
             raise
         reserved = ""
+        ticket.end()            # launched: the reply is not a transition
 
         limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
         try:
@@ -6136,6 +6187,7 @@ class Runner:
             **({"ticket": run.ticket, "tickets": run.tickets} if run.ticket else {}),
         }
 
+    @_admitted("the answer")
     async def answer_question(self, question_id: str, answer: str,
                               answered_by: str = "orchestrator") -> dict[str, Any]:
         """Answer a parked agent's question and resume it with its context.
@@ -6292,6 +6344,10 @@ class Runner:
         one tree transaction, and a concurrent drain skips what it did not
         claim, so two drains never restart the same entry.
         """
+        if self.gate.closed:
+            # CW-R2: the server is stopping; the entries stay queued for the
+            # next one, untouched.
+            return {"paused": False, "restarted": []}
         self._prune_unreadable_entries()
         recovered = self._recover_stale_restarts()
         paused = self.tree.pause_state()          # clears itself when expired
