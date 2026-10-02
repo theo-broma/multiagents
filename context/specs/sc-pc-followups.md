@@ -44,3 +44,8 @@
   - a queue entry it had claimed, restored to its place.
 - **What is kept.** The predecessor's cleanup hold stays until its death is confirmed.
 - **Verified by.** Once the predecessor is dead, there is **no phantom slot**: the PC count equals the live runs. A slot count restored to its pre-steer value is not required.
+
+**SF-R3a (orchestrator decision, 2026-10-02, after the tester's question).**
+- **When it applies:** a steer that holds the half-open probe claim and ends before spawn, for any reason (cap, shutdown, cancellation, other refusal).
+- **What it does:** it releases the claim as **neutral**. It is not a failure and it does not re-arm the cooldown, because nothing was launched and nothing was learnt about provider health.
+- **Result:** the provider goes back to half-open with the probe free (`availability` is `None`), so the next start or steer can take the probe.
