@@ -3882,3 +3882,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the `provider` warning wording at `config.py:930`;
   - timestamp/Decimal scalars get an event rather than being rendered.
 - **FS ×2 started:** ag-0441db and ag-5d1bd2 (implementer, variant max). NEXT: one loop-reviewer compares both and proposes cross-borrowings, relayed by steer; then codex; merge the better branch and discard the other; then `resolve_ticket(bug-ac396a, fixed)`.
+- **SR tests merged, 1c3788e** (tester ag-5a55ff): 23 red, 7 green, 6 skipped. The contract gained SR-R2b, which gates the free retry (7a6419c). The SR implementer-deep starts after the SF merge.
+- `test_c2 ...second_named_claude_account...` is red on main until CB merges. That is expected.
