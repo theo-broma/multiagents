@@ -53,3 +53,18 @@ models:
   - an option the **destination provider P** consumes via its resolved `spawn.optional`. Shipped providers consume `variant`, `effort`, `max_budget_usd` and `autocompact`.
 - **Anything else** is reported as a config warning naming the agent, the provider and the key.
 - **"Once".** The warning is emitted once per distinct (agent, provider, key) per process, through the same channel as other config warnings.
+
+## Decision during review (2026-10-02)
+
+These override any earlier wording they contradict.
+
+**FO-R3a: validity is decided by the destination provider alone.**
+- The sentence "Shipped providers consume `variant`, `effort`, `max_budget_usd` and `autocompact`" describes the union of all shipped providers. It does not extend what any single provider accepts.
+- A key in `models.P` is valid only when it is a dataclass field, is structural (`model`, `id`), or is consumed by **P's own** resolved `spawn.optional`.
+- Examples:
+  - `models: {opencode-zai: {max_budget_usd: 5}}` is reported, because opencode only consumes `variant`.
+  - `models: {codex: {variant: max}}` is reported, because codex only consumes `effort`.
+  - `models: {claude: {max_budget_usd: 5}}` is not reported.
+- **Why.** FO-R3 exists so that an option dropped at launch is never silent. The union reading lets exactly those options through.
+- **`provider` is not an override.** A `provider` key in an entry is ignored and reported. It never moves the run.
+- **Surfacing.** The warnings are returned by `validate_agent_models()`, which is what `multiagents doctor` prints.
