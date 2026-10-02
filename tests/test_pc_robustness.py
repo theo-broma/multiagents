@@ -119,26 +119,60 @@ def test_r3a_queued_start_keeps_its_selected_model_after_roster_reload(w, monkey
     assert selected == ["acme/m1"], selected
 
 
-def test_r3b_conversation_lock_wait_does_not_extend_consult_deadline(w):
+def test_r3c_consult_deadline_is_timeout_plus_slack_while_conversation_lock_is_held(w, monkeypatch):
     build(w)
+    g = w.fakes["acme"]
+    # PC-R3c: the one deadline is start + timeout + slack. Shorten the slack
+    # (CF-R7's 60 s) so the structure is checkable in seconds.
+    monkeypatch.setattr(type(w.runner), "CONSULT_LOCK_SLACK_SECONDS", 2.0)
+    timeout, slack = 1, 2.0
 
     async def go():
-        async with w.runner._conversation_turn("advisor", 10) as held:
+        async with w.runner._conversation_turn("advisor", 30) as held:
             assert held
-            second = asyncio.create_task(w.server.consult("advisor", "expired-question", timeout=1))
-            await asyncio.sleep(2.5)
-            returned_on_time = second.done()
-            result = second.result() if returned_on_time else None
-            if not second.done():
-                second.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await second
-            return returned_on_time, result
+            began = asyncio.get_running_loop().time()
+            second = asyncio.create_task(
+                w.server.consult("advisor", "expired-question", timeout=timeout))
+            await asyncio.sleep(timeout + slack * 0.5)
+            early = second.done()          # past `timeout`, before the deadline
+            result = await asyncio.wait_for(second, timeout + slack + 5)
+            return early, asyncio.get_running_loop().time() - began, result
 
-    on_time, result = asyncio.run(go())
-    assert on_time, "one-second consult still waiting for the conversation lock at 2.5s"
+    early, elapsed, result = asyncio.run(go())
+    assert not early, "gave up before timeout + slack had passed"
+    assert elapsed >= timeout + slack - 0.2, elapsed
     assert result.get("error"), result
+    assert g.spawns() == 0, g.calls()
     assert not w.deferred(), w.deferred()
+
+
+def test_r3d_queued_start_with_invalid_recorded_model_is_blocked_not_reresolved(w):
+    g = build(w)
+    runner = w.runner
+    result = runner._pc_queue_start(
+        (ProviderFull("acme", 1, ["ag-holder"]), "acme/m1"),
+        "worker", "queued-invalid-model", model=None, timeout=None,
+        workdir=None, verifies="", budget_tag="")
+    assert pc.deferred_for_pc(result)
+    # The roster moves on: m1 leaves the catalog and the agent now names m2.
+    w.p.providers["acme"]["models_include"] = ["acme/m2"]
+    w.p.agents["worker"]["model"] = "acme/m2"
+    entry_id = result["deferred_id"]
+
+    def settled():
+        return any(e.get("id") == entry_id and e.get("blocked") for e in w.deferred())
+
+    async def go():
+        # Raising the limit wakes the queue with a free slot: the entry is tried.
+        pc.set_limit(w, "acme", 3)
+        return await pc.await_until(settled, timeout=10)
+
+    assert asyncio.run(go()), (w.deferred(), g.spawns())
+    entries = [e for e in w.deferred() if e.get("id") == entry_id]
+    assert entries, w.deferred()
+    assert g.spawns() == 0, g.calls()      # never launched, on m2 or anything
+    assert not [n for n in w.runner.tree.read()["nodes"].values()
+                if n.get("model") == "acme/m2"], "re-resolved to another model"
 
 
 @pytest.mark.parametrize("new_limit", [3, None])
