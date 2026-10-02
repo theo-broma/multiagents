@@ -1238,6 +1238,26 @@ def _commit_all(worktree: Path, message: str, *, role: str | None,
         if filtered:
             names = ", ".join(filtered[:50])
             return GitResult(False, "", f"refused host commit for filtered paths: {names}", 1)
+    # BA-R1 (bug-ba55a9): `git add -A` resolves an unmerged entry by staging
+    # the conflicted file as it stands — markers included — so the WIP commit
+    # would record the conflict itself. Refuse before touching anything; once
+    # the conflicts are resolved and staged, `ls-files -u` is empty and the
+    # commit proceeds as usual. A merge or squash awaiting its commit without
+    # unmerged entries (BA-R2) is not refused on those markers alone.
+    unmerged = git.run(worktree, "ls-files", "--unmerged", "-z", strip=False)
+    if not unmerged.ok:
+        # A check git could not run is not a clean index: committing on would
+        # be the original bug. Refuse before staging; the next call retries.
+        return GitResult(False, "", f"refused to commit: the unmerged-entry "
+                         f"check failed: {unmerged.err or unmerged.out}",
+                         unmerged.code or 1)
+    if unmerged.out:
+        names = sorted({line.split("\t", 1)[1]
+                        for line in unmerged.out.split("\0") if line})
+        listed = ", ".join(names[:20]) + (", ..." if len(names) > 20 else "")
+        return GitResult(False, "", f"refused to commit: the index has unmerged "
+                         f"entries ({listed}); resolve the conflicts and stage "
+                         f"them first", 1)
     # CI-R2: a failed `git add` is a failed commit. Ignored, it left the work
     # unstaged and the staged diff empty, which then read as a clean tree.
     added = git.run(worktree, "add", "-A")
