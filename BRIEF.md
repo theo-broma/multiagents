@@ -3441,3 +3441,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - (b) the 60 s slack is OK, as long as there is one enforced deadline;
   - (c) a resume must also check the tree-wide limit.
 - Robustness results from ag-145a37 will follow as a second batch.
+- **PC round 1 fixes:** done on branch commits 7c21a5d and 61ad6c3.
+  - PC suite 85/86, with only the SC test red. CW is green.
+  - I accepted the 15 s blocked re-check.
+  - Reviewer round 2 is ag-5eb6ce. Robustness tester ag-145a37 is still running against the old tip.
+- **bug-ba55a9:**
+  - The red tests merged as 3ba0fea (17 red, 9 BA-R2 green).
+  - implementer-quick ag-b09f8c (glm) is on BA-R1/R2, `gitops.py` only.
+  - BA-R3 (runner) waits until PC merges.
