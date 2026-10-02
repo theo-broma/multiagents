@@ -11,9 +11,9 @@ Silences, stated rather than invented:
   accept the warning from any of: the `logging` module, `warnings.warn`,
   stdout/stderr, or a `warnings` attribute on the loaded Config. See the run
   report.
-- FO-R3's "once per process" is keyed on (agent, provider, key); each test
-  uses names no other test uses so the process-wide memory cannot leak between
-  tests (or between xdist workers).
+- FO-R3b: every Config carries all its FO-R3 warnings; loading never dedups
+  across loads. "Once per process" applies only to emission to a log channel,
+  of which there is none today, so it is not tested here.
 """
 from __future__ import annotations
 
@@ -436,17 +436,28 @@ def test_fo_r3_an_unknown_key_does_not_fail_the_load_and_the_agent_is_usable(tmp
     assert spec.model == "opencode/x"
 
 
-def test_fo_r3_the_warning_is_emitted_once_per_agent_provider_key(tmp_path, cap):
+def test_fo_r3b_a_reloaded_config_still_carries_the_warning_and_validation_returns_it(tmp_path, cap):
     agents = {"fo3-agent-c": {
         "provider": "opencode", "model": "opencode/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "bogus_fo3_key_c": 1}}}}
 
-    first = _all_text(cap, _load(tmp_path / "a", agents))
-    second = _all_text(cap, _load(tmp_path / "b", agents))
+    first = _load(tmp_path / "a", agents)
+    second = _load(tmp_path / "b", agents)
 
-    assert first.count("bogus_fo3_key_c") >= 1, "no warning on the first load"
-    assert "bogus_fo3_key_c" not in second, (
-        f"the same (agent, provider, key) was reported again: {second!r}")
+    for label, config in (("first", first), ("reloaded", second)):
+        lines = [str(w) for w in (getattr(config, "warnings", None) or [])]
+        mine = [w for w in lines if "bogus_fo3_key_c" in w]
+        assert len(mine) == 1, (
+            f"{label} Config.warnings must carry the (agent, provider, key) "
+            f"exactly once; saw {lines!r}")
+        assert "fo3-agent-c" in mine[0] and "opencode-zai" in mine[0], mine
+        assert len(lines) == len(set(lines)), (
+            f"{label} Config.warnings has duplicate lines: {lines!r}")
+
+    from multiagents.models import validate_agent_models
+    returned = [str(w) for w in validate_agent_models(second)]
+    assert any("bogus_fo3_key_c" in w for w in returned), (
+        f"validate_agent_models() on the reloaded config must return it: {returned!r}")
 
 
 def test_fo_r3_a_distinct_key_is_reported_in_its_own_right(tmp_path, cap):
