@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import spendcap
+from .spendcap import SpendCap
+
 # Normalised event kinds the rest of the system understands.
 TEXT, TOOL, STEP, RESULT, RAW, ERROR = "text", "tool", "step", "result", "raw", "error"
 
@@ -150,6 +153,9 @@ class Event:
     # One model turn's id, when the provider's rules declare one (see
     # `fields.turn` in providers.yaml). Empty when untagged.
     turn: str = ""
+    # SC-R2a: the provider's own id for the step a cost belongs to (`fields.
+    # step_id`), the spend ledger's dedup key. Empty when not reported.
+    step_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
     startup_progress: bool = False
 
@@ -293,6 +299,9 @@ class Provider:
     # by `load_providers` from the RAW block, never through `extends`: the
     # limit belongs to the instance that declares it.
     max_concurrent: int | None = None
+    # SC-R1: the validated `spend_cap` block, or None (the default: no cap).
+    # Like `max_concurrent`, read from the RAW block, never through `extends`.
+    spend_cap: SpendCap | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -611,6 +620,7 @@ class Provider:
                     step=step if isinstance(step, int) else None,
                     session_id=session_id,
                     turn=str(extracted.get("turn") or ""),
+                    step_id=str(extracted.get("step_id") or ""),
                     raw=payload,
                     startup_progress=progress,
                 )
@@ -728,6 +738,8 @@ def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:
     _validate_sharing(providers, raw)
     for name, provider in providers.items():
         provider.max_concurrent = _max_concurrent(name, raw.get(name) or {})
+        provider.spend_cap = spendcap.parse(name, raw.get(name) or {},
+                                            provider.models_include)
     return providers
 
 

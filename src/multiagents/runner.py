@@ -48,6 +48,7 @@ from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_statu
                             running, session_alive, stop_wrapped)
 from . import providers as providers_mod
 from . import notices
+from . import spendcap
 from . import procs
 from . import scripts
 from . import paths as paths_mod
@@ -519,6 +520,19 @@ SHUT_TEXT = "the server is shutting down; nothing was launched"
 PC_BLOCKED_RECHECK_SECONDS = 15.0
 
 
+# SC-R2a (#2): the tree key holding charges the ledger could not take yet.
+SPEND_PENDING = "spend_pending"
+
+
+class SpendCapRefused(RuntimeError):
+    """SC-R3b: a launch refused at spawn because a spend cap binds (or the
+    ledger a cap needs is unusable). `refusal` is `Runner._cap_refusal`'s."""
+
+    def __init__(self, refusal: dict):
+        self.refusal = refusal
+        super().__init__(refusal["reason"])
+
+
 class _ConsultLockError(RuntimeError):
     """A conversation's turn lock failed for a reason other than contention."""
 
@@ -625,6 +639,16 @@ class Run:
     oom_reader: Any = None
     oom_container: str = ""
     oom_since: float | None = None
+    # SC-R4: set when a spend cap stops this run — `{cause, reason, until,
+    # caps}` — and read by `_finalize`, which ends it `limited`.
+    cap_stop: dict | None = None
+    # SC-R4a (#1): when this turn passed its spawn-time cap check; a crossing
+    # recorded after it stops the run, one recorded before does not.
+    launched_at: float = 0.0
+    # SC-R2a (#3): charges not yet committed, retried first with the next
+    # one, and the stream offset the replay checkpoint may not pass meanwhile.
+    pending_charges: list = field(default_factory=list)
+    charge_hold: int | None = None
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -697,6 +721,14 @@ class Runner:
     # turn to end (CF-R7). Class attributes so a test can shorten them for one
     # Runner; nothing in production sets them.
     WATCH_POLL_SECONDS = 5.0
+    # SC-R4a: how often an active run looks for another process's crossing;
+    # well inside the 15 s within which every run on the scope is stopped.
+    SPEND_CAP_POLL_SECONDS = 2.0
+    # SC-R4a (#13): how long a crossing's claimer has to record its event
+    # before another process records it instead.
+    ANNOUNCE_GRACE_SECONDS = 10.0
+    # #2: how often, with no held charge known, the tree is asked for one.
+    PENDING_CHARGE_CHECK_SECONDS = 5.0
     CONSULT_LOCK_SLACK_SECONDS = 60.0
 
     def __init__(self, paths: ProjectPaths, config: Config):
@@ -718,6 +750,14 @@ class Runner:
         self.authority = (None if DockerExecutor({}, paths, {}, state_root()).inside()
                           else HostAuthority(paths, self.tree))
         reap_pending_branches(paths.root, self.tree, self.authority)
+        # SC-R2: the project's spend ledger, and the ledger errors already
+        # reported (each once: with no cap they never block anything).
+        self.ledger = spendcap.Ledger(paths.data / spendcap.LEDGER_NAME)
+        self._ledger_errors: set[str] = set()
+        # SC-R4: stops of runs another run's crossing ended, kept referenced.
+        self._cap_tasks: set[asyncio.Task] = set()
+        # SC-R4c: (crossing id, node) stops whose record has not landed yet.
+        self._unrecorded_stops: set[tuple[str, str]] = set()
 
     def authoritative(self, node: Node, action: str) -> Node | None:
         """Use recorded operands, reporting container-written disagreements once.
@@ -1449,6 +1489,480 @@ class Runner:
                        deferred_id=entry_id, op=op)
         self.tree.emit("system", "deferred_exit", deferred_id=entry_id,
                        outcome="restarted", agent_id=agent_id)
+
+    # ------------------------------------------------------------ spend caps --
+
+    def _cap_providers(self) -> dict[str, Provider]:
+        """SC-R3c: the providers as the config files say NOW, for their caps.
+
+        Every admission point asks through here, and the copy kept is
+        re-validated at each check by the mtime and size of every layer's
+        `providers.yaml`, so a cap another process lowered (or raised) binds
+        at this process's next launch, whatever its last config reload. An
+        edit that fails to load never weakens the caps in force: the previous
+        ones stay, and the error is reported once."""
+        files = [Path(layer) / "providers.yaml" for layer in self.config.layers]
+        stamp = []
+        for path in files:
+            try:
+                st = path.stat()
+                stamp.append((str(path), st.st_mtime_ns, st.st_size))
+            except OSError:
+                stamp.append((str(path), None, None))
+        cached = self.__dict__.get("_cap_cache")
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            merged: dict[str, Any] = {}
+            for path in files:
+                merged = config_mod.deep_merge(
+                    merged, config_mod.read_yaml_cached(path, strict=True))
+            current = load_providers(merged.get("providers", {}) or {})
+        except Exception as exc:
+            self._ledger_failed(RuntimeError(f"spend caps not re-read, the caps in "
+                                             f"force stay: {type(exc).__name__}: {exc}"))
+            current = cached[1] if cached is not None else self.providers
+        self.__dict__["_cap_cache"] = (stamp, current)
+        return current
+
+    def _caps(self, provider_name: str, model: str) -> list[spendcap.Cap]:
+        """SC-R1/R3c: the caps in force for `model` on `provider_name`, read
+        from the config files as they are now. A plan provider is never
+        capped (SC-R2)."""
+        provider = self._cap_providers().get(provider_name)
+        if provider is None or provider.billing == "plan" or provider.spend_cap is None:
+            return []
+        return provider.spend_cap.caps_for(provider_name, model or "")
+
+    def _ledger_failed(self, exc: Exception) -> None:
+        """SC-R2a: a ledger error, reported once per distinct error."""
+        text = f"{type(exc).__name__}: {exc}"[:400]
+        if text in self._ledger_errors:
+            return
+        self._ledger_errors.add(text)
+        self.tree.emit(self.self_id() or "system", "spend_ledger_error", error=text)
+
+    @staticmethod
+    def _cap_text(state: dict) -> str:
+        label = (f"{state['provider']} model {state['model']}" if state["model"]
+                 else state["provider"])
+        return (f"{label} reached its spend cap of ${state['usd']:g} per "
+                f"{state['period']} (${state['spend']:g} spent this {state['period']}; "
+                f"resets {spendcap.iso(state['resets_at'])})")
+
+    def _cap_verdict(self, binding: list[dict]) -> dict:
+        """The refusal or stop for caps that bind: every one of them named,
+        and `until` the latest of their resets (SC-R3a/SC-R4a)."""
+        until = max(state["resets_at"] for state in binding)
+        # SC-R4c: the crossings this verdict answers, kept on the node when it
+        # stops (`_cap_stopped_event`) so recovery can name it from the tree.
+        crossing_ids = [spendcap.crossing_id(
+            f"model:{s['provider']}:{s['model']}" if s["model"] else f"provider:{s['provider']}",
+            s.get("period_start", spendcap.period_start(s["resets_at"] - 1, s["period"])),
+            s["usd"]) for s in binding]
+        caps = [{"provider": s["provider"], "model": s["model"] or None,
+                 "cap": s["usd"], "period": s["period"], "spend": s["spend"],
+                 "resets_at": spendcap.iso(s["resets_at"])} for s in binding]
+        return {"cause": spendcap.CAUSE, "until": until, "caps": caps,
+                "crossing_ids": crossing_ids,
+                "reason": f"{spendcap.CAUSE}: "
+                          + "; ".join(self._cap_text(s) for s in binding)}
+
+    def _ledger_unusable(self, provider_name: str, exc: Exception | None = None) -> dict:
+        """SC-R2a: the verdict for a cap whose ledger cannot be used."""
+        retry = now() + float(self.config.project.get("budget", {})
+                              .get("blind_cooldown_seconds", 900))
+        detail = f" ({exc})" if exc is not None else ""
+        return {"cause": spendcap.UNREADABLE, "until": retry, "caps": [],
+                "reason": f"{spendcap.UNREADABLE}: {provider_name} has a spend cap "
+                          f"and the spend ledger cannot be read or written"
+                          f"{detail}; launches under the cap are refused until it can"}
+
+    def _cap_refusal(self, provider_name: str, model: str) -> dict | None:
+        """SC-R3/R3a/R3b: why the spend caps refuse a launch of `model` on
+        `provider_name` now, or None. With no cap, never anything — the
+        ledger is not even read (SC-R6). With one, a ledger that cannot be
+        read and written refuses (`spend_cap_unreadable`, SC-R2a)."""
+        caps = self._caps(provider_name, model)
+        if not caps:
+            return None
+        try:
+            self.ledger.probe()
+        except OSError as exc:
+            self._ledger_failed(exc)
+            return self._ledger_unusable(provider_name, exc)
+        # Charges on this scope that could not be committed earlier count
+        # before anything is admitted under it — read from the tree now, never
+        # from the cheap cache the uncapped path uses (r3 #2). One that still
+        # cannot be committed leaves the spend unknown: refused (r3 #1).
+        if not self._flush_pending(provider=provider_name, fresh=True):
+            return self._ledger_unusable(provider_name, RuntimeError(
+                "a held charge on this provider could not be committed"))
+        at = now()
+        binding = [state for state in (self.ledger.describe(cap, at) for cap in caps)
+                   if state["reached"]]
+        return self._cap_verdict(binding) if binding else None
+
+    def _charge(self, run: Run, event: Event, session_id: str, position: int,
+                replayed: bool, line_start: int | None = None) -> bool:
+        """SC-R2/R2a/R4: one cost event of a metered run, into the ledger,
+        and what its caps say about it. False when it could not be committed.
+
+        A replayed line (adoption) is never charged: the server before this
+        one committed every charge before its checkpoint moved past it, so a
+        line inside that checkpoint is either charged already or was seen by
+        a server from before the ledger existed — and SC-R2 has no backfill
+        (#10).
+
+        A charge that cannot be committed is never dropped (#2). It is kept
+        in the tree (`spend_pending`), which outlives the run, and retried by
+        any later charge on its provider, by the node's next steer or
+        adoption, by every cap check on the provider and by every drain; on
+        the run as well when even the tree cannot take it. Meanwhile
+        `run.charge_hold` keeps the replay checkpoint from moving past it,
+        and under a cap the caller fails closed and stops the run."""
+        if replayed:
+            return True
+        provider, model = run.provider.name, run.spec.model or ""
+        # R-3: an unambiguous encoding — a separator could appear in an id.
+        if event.step_id:
+            key = json.dumps(["step", provider, session_id or run.node_id, event.step_id])
+        else:
+            key = json.dumps(["pos", run.node_id, run.turn_start, position])
+        entry = {"key": key, "usd": event.cost, "at": now(), "provider": provider,
+                 "model": model, "agent": run.spec.name, "node": run.node_id}
+        queue = [*run.pending_charges, entry]
+        run.pending_charges = []
+        flushed = self._flush_pending(provider=provider)
+        crossings, binding, done = [], [], 0
+        if flushed:
+            for pending in queue:
+                try:
+                    new, binding = self._commit_charge(pending)
+                except OSError as exc:
+                    self._ledger_failed(exc)
+                    break
+                crossings += new
+                done += 1
+        left = queue[done:]
+        if left and not self._hold_charges(left):
+            run.pending_charges = left            # the tree refused them too
+        for crossing in crossings:
+            self._crossed(run.node_id, crossing)
+        if left or not flushed:
+            if run.charge_hold is None:
+                run.charge_hold = position if line_start is None else line_start
+            return False
+        if not self._has_pending(node=run.node_id):
+            run.charge_hold = None
+        if binding and run.cap_stop is None:
+            run.cap_stop = self._cap_verdict(binding)
+        return True
+
+    def _commit_charge(self, entry: dict) -> tuple[list[dict], list[dict]]:
+        return self.ledger.charge(
+            key=entry["key"], provider=entry["provider"], model=entry["model"],
+            agent=entry["agent"], node=entry["node"], usd=entry["usd"],
+            at=entry["at"], caps=self._caps(entry["provider"], entry["model"]))
+
+    def _hold_charges(self, entries: list[dict]) -> bool:
+        """#2: keep charges the ledger refused in the tree, which survives
+        the run and the server, until a retry commits them."""
+        try:
+            with self.tree.transaction() as data:
+                held = data.setdefault(SPEND_PENDING, [])
+                keys = {e.get("key") for e in held if isinstance(e, dict)}
+                held.extend(e for e in entries if e["key"] not in keys)
+        except Exception as exc:                            # noqa: BLE001
+            self._ledger_failed(exc)
+            return False
+        self.__dict__["_pending_seen"] = True
+        return True
+
+    def _has_pending(self, *, node: str | None = None,
+                     provider: str | None = None) -> bool:
+        return bool(self._pending(node=node, provider=provider))
+
+    def _pending(self, *, node: str | None = None, provider: str | None = None,
+                 fresh: bool = False) -> list[dict]:
+        # One tree read per PENDING_CHARGE_CHECK_SECONDS while nothing is
+        # known to be held, so a cost event costs no tree read of its own.
+        # `fresh` (a cap check) always reads.
+        if (not fresh and not self.__dict__.get("_pending_seen")
+                and now() - self.__dict__.get("_pending_checked", 0.0)
+                < self.PENDING_CHARGE_CHECK_SECONDS):
+            return []
+        try:
+            held = self.tree.read().get(SPEND_PENDING) or []
+        except Exception:                                   # noqa: BLE001
+            return []
+        self.__dict__["_pending_checked"] = now()
+        self.__dict__["_pending_seen"] = bool(held)
+        return [e for e in held if isinstance(e, dict) and isinstance(e.get("key"), str)
+                and (node is None or e.get("node") == node)
+                and (provider is None or e.get("provider") == provider)]
+
+    def _flush_pending(self, *, node: str | None = None, provider: str | None = None,
+                       fresh: bool = False) -> bool:
+        """#2: retry the held charges (of one node or provider, or all).
+        True when none of them is left. A crossing one of them causes is
+        handled as any other: announced, and — only while its period is
+        current (SC-R4b) — its scope's runs stopped."""
+        held = self._pending(node=node, provider=provider, fresh=fresh)
+        if not held:
+            return True
+        done: list[str] = []
+        ok = True
+        for entry in held:
+            try:
+                new, _ = self._commit_charge(entry)
+            except OSError as exc:
+                self._ledger_failed(exc)
+                ok = False
+                break
+            done.append(entry["key"])
+            for crossing in new:
+                self._crossed(entry["node"], crossing)
+        if done:
+            with contextlib.suppress(Exception):
+                with self.tree.transaction() as data:
+                    data[SPEND_PENDING] = [
+                        e for e in data.get(SPEND_PENDING) or []
+                        if not (isinstance(e, dict) and e.get("key") in done)]
+        return ok
+
+    def _on_scope(self, provider: str, model: str, node_provider: str,
+                  node_model: str) -> bool:
+        return node_provider == provider and (not model or node_model == model)
+
+    def _scope_agents(self, provider: str, model: str) -> list[str]:
+        return sorted(
+            node_id for node_id, raw in self.tree.read()["nodes"].items()
+            if isinstance(raw, dict) and raw.get("status") in (*ACTIVE, "steered")
+            and self._on_scope(provider, model, raw.get("provider") or "",
+                               raw.get("model") or ""))
+
+    def _announce(self, crossing: dict, agents: list[str], recovering: bool) -> None:
+        """The crossing's one `spend_cap` event (SC-R4a), recorded once across
+        processes through the ledger's announcement. A recovery first looks
+        for the event itself, in case its claimer died between the two."""
+        ident = crossing.get("id") or spendcap.crossing_id(
+            crossing["scope"], crossing["period_start"], crossing["cap"])
+        provider, model = crossing["provider"], crossing.get("model") or ""
+
+        def emit() -> None:
+            if recovering and self._event_recorded(ident):
+                return
+            # SC-R4c: a write that fails raises, so the announcement is not
+            # recorded and a later watcher retries it.
+            self.tree.emit_checked(crossing.get("by") or self.self_id() or "system",
+                           spendcap.CAUSE, provider=provider,
+                           **({"model": model} if model else {}),
+                           cap=crossing["cap"], spend=crossing["spend"],
+                           period=crossing["period"], until=crossing["until"],
+                           agents=agents, crossing_id=ident,
+                           **({"recovered": True} if recovering else {}))
+        try:
+            self.ledger.announce(ident, emit)
+        except OSError as exc:
+            self._ledger_failed(exc)
+
+    def _event_recorded(self, ident: str) -> bool:
+        """A `spend_cap` event for crossing `ident` is in the log: a whole,
+        parseable line naming it — a torn line is not a delivery (r3 #4)."""
+        try:
+            with self.paths.events_file.open("r", errors="replace") as fh:
+                for line in fh:
+                    # A whole JSON object is a delivery with or without its
+                    # newline (r4 #3); a torn one does not parse.
+                    if ident not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(event, dict) and event.get("kind") == spendcap.CAUSE
+                            and event.get("crossing_id") == ident):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    def _announce_pending(self) -> None:
+        """#13: a crossing claimed by a process that died before recording
+        its event is announced by the first process to see it, once its
+        claimer has had ANNOUNCE_GRACE_SECONDS to do it itself."""
+        self._record_stops()
+        try:
+            self.ledger.poll()
+            pending = self.ledger.unannounced(now() - self.ANNOUNCE_GRACE_SECONDS)
+        except OSError as exc:
+            self._ledger_failed(exc)
+            return
+        for crossing in pending:
+            # SC-R4c: the recovered event names the runs recorded as stopped
+            # by this crossing — in the ledger, or durably `limited` by it on
+            # their node (a stop whose ledger record never landed, r4 #2) —
+            # never whoever happens to be active now.
+            agents = sorted(set(self.ledger.stops.get(crossing["id"], [])) | {
+                node_id for node_id, raw in self.tree.read()["nodes"].items()
+                if isinstance(raw, dict) and raw.get("status") == "limited"
+                and crossing["id"] in (raw.get("spend_cap_crossings") or [])})
+            self._announce(crossing, agents, recovering=True)
+
+    def _crossed(self, node_id: str, crossing: dict) -> None:
+        """SC-R4/R4a: a crossing this process claimed for `node_id`'s charge.
+        Its one `spend_cap` event names the runs it stops — every active run
+        drawing on the scope, all launched before it: this process's own are
+        stopped now, other processes' at their next poll of the ledger, where
+        the crossing is the durable stop request."""
+        provider, model = crossing["provider"], crossing["model"]
+        if spendcap.period_start(now(), crossing["period"]) != crossing["period_start"]:
+            # SC-R4b (r3 #3): a held charge from a period that has ended
+            # crossed that period's cap. It is recorded, and stops nothing now.
+            self._announce(crossing, [], recovering=False)
+            return
+        agents = self._scope_agents(provider, model)
+        if node_id not in agents:
+            agents.append(node_id)
+        for other in list(self.runs.values()):
+            if (other.node_id != node_id and other.cap_stop is None
+                    and other.handle is not None and not other.done.is_set()
+                    and self._on_scope(provider, model, other.provider.name,
+                                       other.spec.model or "")):
+                self._stop_for_cap(other, crossing)
+        self._announce(crossing, agents, recovering=False)
+
+    def _stop_for_cap(self, run: Run, crossing: dict) -> None:
+        """Stop `run` for a cap: its verdict from every cap of its own that
+        binds, else from the crossing that stopped it."""
+        at = now()
+        binding = [state for state in (self.ledger.describe(cap, at) for cap in
+                                       self._caps(run.provider.name, run.spec.model or ""))
+                   if state["reached"]]
+        if not binding:
+            binding = [{"provider": crossing["provider"], "model": crossing["model"],
+                        "usd": crossing["cap"], "period": crossing["period"],
+                        "spend": crossing["spend"], "resets_at": crossing["until"],
+                        "period_start": crossing["period_start"]}]
+        run.cap_stop = self._cap_verdict(binding)
+        ident = crossing.get("id") or spendcap.crossing_id(
+            crossing["scope"], crossing["period_start"], crossing["cap"])
+        # SC-R4c: the stop is recorded against the crossing that caused it —
+        # retried until it lands (r3 #5).
+        self._unrecorded_stops.add((ident, run.node_id))
+        self._record_stops()
+        task = asyncio.ensure_future(run.handle.stop())
+        self._cap_tasks.add(task)
+        task.add_done_callback(self._cap_tasks.discard)
+
+    def _record_stops(self) -> None:
+        """r3 #5: write the stop records not yet in the ledger. Retried at
+        every watcher poll, at every finalization and before a recovery."""
+        for ident, node_id in sorted(self._unrecorded_stops):
+            try:
+                self.ledger.record_stop(ident, node_id)
+            except OSError as exc:
+                self._ledger_failed(exc)
+                return
+            self._unrecorded_stops.discard((ident, node_id))
+
+    async def _watch_spend_caps(self, run: Run) -> None:
+        """SC-R4a: the stop requests other processes' crossings wrote. Every
+        active metered run polls the ledger — a stat when nothing changed —
+        for a crossing on its scope, this period, recorded after it launched
+        (`Ledger.stop_request`), whatever cap this process has configured
+        (#1). It also announces crossings whose claimer died (#13)."""
+        while run.cap_stop is None or self._unrecorded_stops:
+            await asyncio.sleep(self.SPEND_CAP_POLL_SECONDS)
+            if self._unrecorded_stops:
+                self._record_stops()
+            if run.cap_stop is not None or run.handle is None:
+                continue
+            provider = self.providers.get(run.provider.name) or run.provider
+            if provider.billing == "plan":
+                continue
+            try:
+                self.ledger.poll()
+            except OSError as exc:
+                self._ledger_failed(exc)
+                continue
+            if self.ledger.crossings:
+                self._announce_pending()
+            crossing = self.ledger.stop_request(run.provider.name, run.spec.model or "",
+                                                run.launched_at, now())
+            if crossing is not None and run.cap_stop is None:
+                self._stop_for_cap(run, crossing)
+
+    def _with_concurrency(self, reason: str, providers: Any) -> str:
+        """PC/SC: a cap refusal's text, with the concurrency refusal of any
+        of `providers` that is also full, so both causes are reported."""
+        full = []
+        for name in providers:
+            with contextlib.suppress(Exception):
+                refused = self._pc_full(name)
+                if refused is not None and not refused.gone:
+                    full.append(str(refused))
+        return "; ".join([reason, *full])
+
+    def _cap_raced_start(self, node_id: str, refusal: dict, agent_name: str,
+                         task: str, *, spec: AgentSpec, provider: str,
+                         model: str | None, timeout: int | None,
+                         workdir: str | None, queued: dict | None) -> dict[str, Any] | None:
+        """SC-R3 (#7): a fresh start a cap refused at spawn. Its node, which
+        never ran, is `refused`. A queued entry goes back to its place and a
+        pin is refused, both causes named; otherwise None: the caller routes
+        the task again, as admission does (#6)."""
+        reason = self._with_concurrency(refusal["reason"], [provider])
+        # r3 #6: the node never ran, so it gives up the deferred entry's
+        # identity FIRST — only the node that launches carries it, and a
+        # crash from here on leaves no carrier: the entry is requeued.
+        self.tree.update(node_id, deferred_id="")
+        if not self._defer_while_held(node_id, "refused", reason):
+            self.tree.set_status(node_id, "refused",
+                                 f"{reason}; refused at spawn, nothing ran")
+        if queued is not None:
+            self.tree.restore_deferred(queued)
+            return {"blocked": True, "reason": reason, "retry_after": refusal["until"]}
+        if model:
+            return {**self._pin_refusal(provider, reason, refusal["until"]),
+                    "refused_node": node_id}
+        return None
+
+    def _cap_defer_route(self, node_id: str, refusal: dict, agent_name: str,
+                         task: str, *, spec: AgentSpec, provider: str,
+                         timeout: int | None, workdir: str | None) -> dict[str, Any]:
+        """A fresh start deferred on the one route a cap refused at spawn,
+        released early when that cap is raised (SC-R3b)."""
+        reason = self._with_concurrency(refusal["reason"], [provider])
+        entry = self.tree.defer(
+            {"agent": agent_name, "task": task, "timeout": timeout, "model": None,
+             "workdir": workdir, "provider": provider},
+            refusal["until"], reason, deferred_by=self.self_id(),
+            cause=spendcap.CAUSE,
+            extra={"spend_cap_routes": [[provider, spec.model or ""]],
+                   "refused_node": node_id})
+        return {"deferred": True, "reason": reason, "retry_after": refusal["until"],
+                "paused": False, "cause": spendcap.CAUSE, "deferred_id": entry["id"],
+                "refused_node": node_id}
+
+    def _cap_released(self) -> list[dict]:
+        """SC-R3b: waiting `spend_cap` deferrals not yet due whose cap was
+        raised or removed — one of the routes they were refused on admits
+        now — restarted at the next drain, before their stored time."""
+        current = now()
+        out = []
+        for entry in self.tree.read()["deferred"]:
+            if (not isinstance(entry, dict) or deferred_malformed(entry)
+                    or entry.get("cause") != spendcap.CAUSE
+                    or entry.get("status", "waiting") != "waiting"
+                    or entry["retry_after"] <= current):
+                continue
+            routes = [r for r in entry.get("spend_cap_routes") or []
+                      if isinstance(r, list) and len(r) == 2]
+            if any(self._cap_refusal(str(p), str(m or "")) is None for p, m in routes):
+                out.append(entry)
+        return out
 
     def _occupants(self, nodes: dict, exclude: str = "") -> int:
         """How many nodes hold a `max_concurrent` slot — the ONE count every
@@ -2687,6 +3201,10 @@ class Runner:
         refusal = self._model_refusal(provider.name, spec.model or "")
         if refusal:
             raise RuntimeError(refusal)
+        # SC-R3b: and none spawns a metered CLI under a cap that binds — the
+        # free retry, a wrap-up or commit-fix turn, a fallback, a deferred
+        # restart — read from the ledger as it stands now, so a launch
+        # admitted just before another run's crossing is still refused.
         if self.__dict__.get("_pc_shutting_down"):
             # Round 7: once shutdown has begun nothing launches — start,
             # steer, consult, free retry, queued retry or commit-fix turn —
@@ -2846,6 +3364,15 @@ class Runner:
             # a reservation that cannot be written means no launch.
             hold = self._reserve_launch(node_id, provider.name, startup_token,
                                         executor)
+            # SC-R3b: no launch — first, free retry, commit-fix or wrap-up
+            # turn, steer's respawn, a fallback, a deferred restart — spawns a
+            # metered CLI under a cap that binds, read from the ledger right
+            # before the spawn (#2). Inside this block, so a refusal gives
+            # back the hold, the supervision lock and the startup claim (#6).
+            launched_at = now()
+            capped = self._cap_refusal(provider.name, spec.model or "")
+            if capped:
+                raise SpendCapRefused(capped)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
                                           deadline=launched + wall if wall else 0,
                                           provider=provider.name)
@@ -2875,7 +3402,10 @@ class Runner:
             node_id=node_id, provider=provider, spec=spec, handle=handle,
             supervisor=supervisor,
             turn_start=getattr(handle, "offset", 0), limits=limits,
-            startup_token=startup_token,
+            startup_token=startup_token, launched_at=launched_at,
+            # #2: charges an earlier turn of this node could not commit
+            # anywhere stay with the node's next turn, never dropped.
+            pending_charges=list(getattr(self.runs.get(node_id), "pending_charges", None) or []),
             **({"done": done} if done is not None else {}),
         )
         self.runs[node_id] = run
@@ -3313,6 +3843,15 @@ class Runner:
         node = self.tree.get(node_id)
         return node is not None and bool(node.cleanup_hold)
 
+    def _mark_cap_refused(self, node_id: str, session_id: str | None,
+                          refusal: dict) -> None:
+        """SC-R3a: a launch a spend cap refused at spawn. A node with a
+        session ends `limited` (resumable once the cap permits); one without
+        has nothing to resume and fails like any refused launch."""
+        status = "limited" if session_id else "failed"
+        if not self._defer_while_held(node_id, status, refusal["reason"]):
+            self.tree.set_status(node_id, status, refusal["reason"])
+
     def _mark_launch_failed(self, node_id: str, reason: str) -> None:
         """Mark a node `failed` — once its launch cleanup, if one holds it,
         has confirmed the process dead (RM-R1c). Until then the status stays
@@ -3357,6 +3896,7 @@ class Runner:
         deferred_id: str = "",
         recorded_provider: str = "",
         queued: dict | None = None,
+        _cap_raced: bool = False,
     ) -> dict[str, Any]:
         """`queued` is a provider-concurrency entry being drained (PC-R3a):
         it runs on the provider it queued on and nowhere else, claims its
@@ -3560,6 +4100,27 @@ class Runner:
                         (problem or {}).get("retry_after") or 0)
                     entry.note = (problem["reason"] if problem else
                                   PC_CAUSE if name in pc_full else "startup_down")
+            # SC-R3: a provider whose cap binds — or the model this agent
+            # would run on it, whose own cap binds — is routed around like an
+            # exhausted provider, for THIS start only: it is a copy of the
+            # reading that is marked, so a model cap never cools the provider
+            # for anyone else. Asked of every candidate's own resolved model.
+            capped: dict[str, dict] = {}
+            current_caps = self._cap_providers()
+            for name, candidate in self.providers.items():
+                if getattr(current_caps.get(name), "spend_cap", None) is None:
+                    continue
+                routed = self._usable_spec(spec, name)
+                if routed is None:
+                    continue
+                refusal = self._cap_refusal(name, routed.model or "")
+                if refusal is None:
+                    continue
+                capped[name] = refusal | {"model": routed.model or ""}
+                entry = budgets.get(name) or budget_mod.Budget(name, known=False)
+                budgets[name] = replace(
+                    entry, cooldown_until=max(entry.cooldown_until or 0, refusal["until"]),
+                    note=refusal["reason"])
             usable = {name for name in self.providers
                       if self._runs_allowed_model(spec, name)}
             unmodelled = [name for name in dict.fromkeys([*routes, *chain, *family])
@@ -3612,10 +4173,21 @@ class Runner:
                                             verifies=verifies, budget_tag=budget_tag)
             if chosen is None and queued:
                 # PC-R3a: a head refused for another reason keeps its place.
+                # SC-R3: a cap is such a reason, named with its reset.
+                target = spec.provider
+                if target in capped:
+                    return {"blocked": True,
+                            "reason": self._with_concurrency(capped[target]["reason"],
+                                                             [target]),
+                            "retry_after": capped[target]["until"]}
                 return {"blocked": True, "reason": why}
             if chosen is None and model:
                 entry = budgets.get(spec.provider)
-                problem = startup_blocked.get(spec.provider) or {}
+                problem = startup_blocked.get(spec.provider) or capped.get(spec.provider) or {}
+                if spec.provider in capped and spec.provider not in startup_blocked:
+                    # #9: a pin refused by a cap names a full provider too.
+                    problem = dict(problem, reason=self._with_concurrency(
+                        problem["reason"], [spec.provider]))
                 return self._pin_refusal(spec.provider, problem.get("reason") or why,
                                          problem.get("retry_after") or
                                          (entry.cooldown_until if entry else None))
@@ -3644,6 +4216,20 @@ class Runner:
                 retry_at = min(resets) if resets else now() + float(
                     self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
                 )
+                # SC-R3: refused by a spend cap on any route this agent has —
+                # the cause is `spend_cap` (or `spend_cap_unreadable`), each
+                # binding cap is named, and the entry records the routes the
+                # caps refused, so a raised or removed cap releases it early.
+                cap_routes = {name: refusal for name, refusal in capped.items()
+                              if name in options or name in routes or name in family
+                              or name in chain}
+                cause = None
+                if cap_routes:
+                    cause = spendcap.CAUSE
+                    # PC/SC: where a route is both capped and full, both
+                    # causes are reported (#12).
+                    why = self._with_concurrency("; ".join(dict.fromkeys(
+                        r["reason"] for r in cap_routes.values())), cap_routes) + f" ({why})"
                 queued = self.tree.defer(
                     {"agent": agent_name, "task": task, "timeout": timeout,
                      "model": model, "workdir": workdir,
@@ -3653,7 +4239,10 @@ class Runner:
                      # never silently re-routes it to another family.
                      "provider": spec.provider},
                     retry_at, why,
-                    deferred_by=self.self_id())
+                    deferred_by=self.self_id(), cause=cause,
+                    extra={"spend_cap_routes": [[name, r["model"]]
+                                                for name, r in cap_routes.items()]}
+                    if cap_routes else None)
                 # Nothing can run, so nothing should keep being started. Pausing is
                 # the difference between a system that stops and one that carries on
                 # writing code while the agents that check it are unreachable.
@@ -3664,8 +4253,22 @@ class Runner:
                 # problem into everybody's.
                 unavailable = sorted(name for name in options
                                      if name in budgets and not budgets[name].usable)
-                self.tree.pause(retry_at, why, providers=unavailable or sorted(options),
-                                deferral=True)
+                # SC-R3: a cap pauses nothing. It binds one route of one agent
+                # (a model cap leaves its siblings admitted), and its entry is
+                # released by the cap's own check, not by a pause lifting.
+                if cap_routes:
+                    unavailable = [n for n in unavailable if n not in cap_routes]
+                paused = not cap_routes or bool(unavailable)
+                if paused:
+                    self.tree.pause(retry_at, why, providers=unavailable or sorted(options),
+                                    deferral=True)
+                if not paused:
+                    return {"deferred": True, "reason": why, "retry_after": retry_at,
+                            "paused": False, "cause": cause,
+                            "deferred_id": queued["id"],
+                            "note": "it restarts by itself when the period ends, or "
+                                    "at the next wait_for_agents once the cap is "
+                                    "raised or removed"}
                 return {"deferred": True, "reason": why, "retry_after": retry_at,
                         "paused": True,
                         # DQ-R11: the caller is told which entry this deferral
@@ -3823,6 +4426,32 @@ class Runner:
                         workdir=worktree_path, branch=branch, parent=parent, depth=depth,
                         timeout=timeout, startup_token=startup_token,
                     )
+                except SpendCapRefused as exc:
+                    # SC-R3/R3b (#7): admitted, then a crossing landed before
+                    # the spawn. Nothing ran; the node is `refused`, and the
+                    # task goes through admission again (#6) — which now sees
+                    # the cap, so it tries the remaining routes, then defers.
+                    refused = self._cap_raced_start(
+                        node_id, exc.refusal, agent_name, task, spec=spec,
+                        provider=provider.name, model=model, timeout=timeout,
+                        workdir=workdir, queued=queued if queued_id else None)
+                    if refused is not None:
+                        return refused
+                    self._startup_finish(provider.name, node_id, startup_token)
+                    startup_token = ""
+                    if _cap_raced:
+                        # Raced twice: admission and the spawn keep disagreeing
+                        # (a cap flapping). Deferred on this route, no further
+                        # re-routing.
+                        return self._cap_defer_route(
+                            node_id, exc.refusal, agent_name, task, spec=spec,
+                            provider=provider.name, timeout=timeout, workdir=workdir)
+                    again = await self.start(
+                        agent_name, task, workdir=workdir, timeout=timeout,
+                        model=model, verifies=verifies, budget_tag=budget_tag,
+                        deferred_id=deferred_id, recorded_provider=recorded_provider,
+                        _cap_raced=True)
+                    return {**again, "refused_node": node_id}
                 except RuntimeError as exc:
                     self._mark_launch_failed(node_id, str(exc))
                     return {"agent_id": node_id, "status": "failed", "error": str(exc)}
@@ -3905,6 +4534,7 @@ class Runner:
                                os.O_WRONLY | os.O_APPEND | os.O_CREAT, "a")
         stderr_task = asyncio.create_task(handle.drain_stderr())
         watchdog = asyncio.create_task(self._watch_timers(run))
+        capwatch = asyncio.create_task(self._watch_spend_caps(run))
         usage: dict[str, Any] = {}
         cost_total = 0.0
         session_id = ""
@@ -3920,12 +4550,22 @@ class Runner:
         def follow() -> dict[str, int]:
             # SV-R7: written in the same transaction as the counts it stands
             # for, so a server that dies between the two cannot exist.
-            return {"turn": run.turn_start, "offset": getattr(handle, "offset", 0),
+            # SC-R2a (#3): never past a charge the ledger has not committed.
+            offset = getattr(handle, "offset", 0)
+            if run.charge_hold is not None:
+                offset = min(offset, run.charge_hold)
+            return {"turn": run.turn_start, "offset": offset,
                     "log": _size(run_dir / "stream.jsonl") if stream_log.closed
                     else stream_log.tell()}
 
+        line_end = getattr(handle, "offset", 0)
+        # #2: a steer or adoption of this node retries what its earlier turns
+        # could not charge, before its own first cost.
+        self.__dict__["_pending_seen"] = True
+        self._flush_pending(node=node_id)
         try:
             async for line in handle.lines():
+                line_start, line_end = line_end, getattr(handle, "offset", 0)
                 event = provider.parse_line(line)
                 if event is None:
                     continue
@@ -3979,6 +4619,15 @@ class Runner:
                     # opencode web console shows on its usage page.
                     cost_total += event.cost
                     usage["cost_usd"] = round(cost_total, 6)
+                    if provider.billing != "plan" and not self._charge(
+                            run, event, event.session_id or session_id,
+                            getattr(handle, "offset", 0), replayed, line_start):
+                        # SC-R2a: the charge is not in the ledger, so the
+                        # checkpoint below holds before this line. Under a
+                        # cap that is fail-closed: the run is stopped.
+                        if run.cap_stop is None and self._caps(provider.name,
+                                                                 run.spec.model or ""):
+                            run.cap_stop = self._ledger_unusable(provider.name)
                 captured_session = bool(event.session_id and not session_id)
                 if captured_session:
                     session_id = event.session_id
@@ -4020,6 +4669,12 @@ class Runner:
                         usage=usage or None, session_id=session_id or None,
                         events=batch, follow=follow(),
                     )
+
+                # SC-R4: a cap this run's spend reached, or another run's
+                # crossing on its scope: stop now; `_finalize` records it.
+                if run.cap_stop is not None:
+                    await handle.stop()
+                    break
 
                 # A decision only a human can make: stop now rather than let
                 # the agent spend another token building on a guess.
@@ -4110,6 +4765,7 @@ class Runner:
             code = -1
         finally:
             watchdog.cancel()
+            capwatch.cancel()
             # RC-R2 (bug-1213a0): stderr is drained to EOF before the run is
             # classified, so the verdict does not depend on how much of it the
             # async drain got to before the process was reaped. Bounded: a
@@ -4357,7 +5013,13 @@ class Runner:
                     await self._sigkill_notice(run, code)
             self.occupancy.forget(run.oom_container, node_id)
 
-        if not stopped_elsewhere:
+        if not stopped_elsewhere and self._cap_verdict_of(run, status):
+            # SC-R4a: the cap's verdict — resumable `limited`, never fed to the
+            # failure breaker, never a provider cooldown, never retried or
+            # moved to a fallback.
+            status, limited = "limited", run.cap_stop
+            self._cap_stopped_event(run)
+        elif not stopped_elsewhere:
             status, limited = await self._provider_health_after(run, status, text, stderr)
         else:
             limited = None
@@ -4405,6 +5067,11 @@ class Runner:
                 # run ends as the cut would end any run, and a `limited` one
                 # stays resumable.
                 status, limited = fix_cut["status"], fix_cut["limited"]
+                if fix_cut.get("cap_stop") is not None:
+                    # SC-R4a (#5): a fix turn a cap stopped ends the run as a
+                    # cap stop, with the same verdict.
+                    run.cap_stop = fix_cut["cap_stop"]
+                    self._cap_stopped_event(run)
 
         # A run that ends with nothing to say still ended for a reason.
         said_nothing = not text.strip()
@@ -4641,9 +5308,10 @@ class Runner:
             await self._merge_pending_children(node_id)
             await self._maybe_merge_into_parent(node_id)
 
-        if not run.awaiting and not stopped_elsewhere:
+        if not run.awaiting and not stopped_elsewhere and run.cap_stop is None:
             # A parked agent still owns its worktree and will resume in it, and
-            # a stopped one is left as a stop leaves it: resumable.
+            # a stopped one is left as a stop leaves it: resumable — a cap
+            # stop included, whose branch and worktree are kept (SC-R4, #11).
             self._drop_if_empty(node_id, run.spec)
         return False
 
@@ -4685,6 +5353,13 @@ class Runner:
                         parent=node.parent, depth=node.depth,
                         session_id=session_id, timeout=wall, done=run.done,
                     )
+            except SpendCapRefused as exc:
+                # SC-R4a (#3): a cap refused the fix turn's spawn — the run
+                # ends as a cap stop, `limited` and resumable, never `done`.
+                self.tree.emit(node_id, "commit_fix_failed",
+                               detail=f"refused at spawn: {exc}"[:400])
+                return result, attempt, "", usage, {
+                    "status": "limited", "limited": exc.refusal, "cap_stop": exc.refusal}
             except Exception as exc:
                 self.tree.emit(node_id, "commit_fix_failed",
                                detail=f"could not resume: {type(exc).__name__}: {exc}"[:400])
@@ -4777,6 +5452,13 @@ class Runner:
             # question is not a failure. A question from a fix turn parks the
             # run like any other (CI-R5, after adversarial tester ag-6ceb2b).
             status = "awaiting_user"
+        elif run.cap_stop is not None or (
+                not timed_out and self._cap_verdict_of(
+                    run, self._classify(run, -1 if code is None else code, text, stderr))):
+            # SC-R4a (#5): a fix turn a cap stopped — or that failed while its
+            # cap binds — is a cap stop: `limited`, never the provider's
+            # failure, and the loop ends the run with this verdict.
+            status, limited = "limited", run.cap_stop
         elif timed_out:
             # Our bound ended it, so nothing it printed on the way out is the
             # provider's verdict: the run keeps the status it ended with.
@@ -4790,7 +5472,8 @@ class Runner:
                              resolved=status == "refused",
                              error=(stderr or text).splitlines()[0] if (stderr or text) else status)
 
-        run.fix_verdict = {"status": status, "limited": limited, "usage": usage}
+        run.fix_verdict = {"status": status, "limited": limited, "usage": usage,
+                           "cap_stop": run.cap_stop if status == "limited" else None}
         return True
 
     async def _provider_health_after(self, run: Run, status: str, text: str,
@@ -4877,6 +5560,32 @@ class Runner:
                                            cause="provider_down")
                 self._maybe_cool_family(name, seconds)
         return status, limited
+
+    def _cap_verdict_of(self, run: Run, status: str) -> bool:
+        """SC-R4a/R3b: is this ended run a cap stop? It is when a cap stopped
+        it, and when it failed while a cap binds — retried, it would launch
+        under a spent cap. Sets `run.cap_stop`. A question wins."""
+        if run.awaiting:
+            return False
+        if run.cap_stop is None and status == "failed":
+            capped = self._cap_refusal(run.provider.name, run.spec.model or "")
+            if capped and capped["cause"] == spendcap.CAUSE:
+                run.cap_stop = capped
+        return run.cap_stop is not None
+
+    def _cap_stopped_event(self, run: Run) -> None:
+        """The runner's durable acknowledgement of a cap stop (SC-R4a), and
+        the crossings that stopped it, on the node (SC-R4c, r4 #2)."""
+        self._record_stops()
+        ids = (run.cap_stop or {}).get("crossing_ids") or []
+        if ids:
+            with contextlib.suppress(Exception):
+                self.tree.update(run.node_id, spend_cap_crossings=list(ids))
+        verdict = run.cap_stop or {}
+        self.tree.emit(run.node_id, "limited", provider=run.provider.name,
+                       model=run.spec.model, reason=verdict.get("cause", spendcap.CAUSE),
+                       until=verdict.get("until"), caps=verdict.get("caps") or [],
+                       detail=verdict.get("reason", ""))
 
     def _no_output_summary(self, run: Run, code: int) -> str:
         """Why a run that said nothing ended, from the mechanics alone.
@@ -5686,6 +6395,7 @@ class Runner:
         run = Run(node_id=node.id, provider=provider, spec=spec, handle=handle,
                   supervisor=supervisor, turn_start=turn,
                   replay_to=int(follow.get("offset", turn)), adopted=True,
+                  launched_at=float(launched),
                   startup_token=self.startup.token_for(provider.name, node.id),
                   limits=limits if isinstance(limits, dict) else {})
         reader = getattr(executor, "oom_kill_count", None)
@@ -5956,6 +6666,24 @@ class Runner:
             return {"agent_id": agent_id, "steered": False, "reason": message,
                     "error": f"{message} The live run was left untouched."}
 
+        # SC-R3a: a session whose provider or model is capped is never
+        # resumed — refused now, naming every binding cap, its spend and the
+        # latest reset. Nothing is queued: the same steer resumes it once
+        # every cap permits it.
+        capped = self._cap_refusal(provider.name, spec.model or "")
+        if capped:
+            reason = self._with_concurrency(capped["reason"], [provider.name])
+            return {"agent_id": agent_id, "steered": False, "cause": capped["cause"],
+                    "reason": reason, "caps": capped["caps"],
+                    "until": spendcap.iso(capped["until"]),
+                    # PC-R3a (#8): a queued resume refused by a cap keeps its
+                    # place, re-checked when the cap's reset comes.
+                    **({"blocked": True, "retry_after": capped["until"]} if queued else {}),
+                    "error": f"refusing to steer {agent_id}: {capped['reason']}. "
+                             f"Its session, branch and worktree are kept; the "
+                             f"same steer_agent resumes it once the period "
+                             f"resets or the cap is raised."}
+
         # A truncated `writes: false` agent may have had its worktree reclaimed
         # by `_drop_if_empty` once its empty branch made it look worth nothing
         # (bug-97a0c7): `branch` and `worktree` are both written as "", and
@@ -6176,6 +6904,19 @@ class Runner:
                 parent=node.parent, depth=node.depth, session_id=node.session_id,
                 startup_token=startup_token,
             )
+        except SpendCapRefused as exc:
+            # SC-R3a/R3b: a crossing landed since the check above; the
+            # session stays resumable. `_launch` gave back the startup claim
+            # and the supervision lock (#6); a queued resume whose entry
+            # this steer claimed gets it back, in its place (#8).
+            self._mark_cap_refused(agent_id, node.session_id, exc.refusal)
+            blocked = {}
+            if queued_id and not live:
+                self.tree.restore_deferred(queued)
+                blocked = {"blocked": True, "retry_after": exc.refusal["until"]}
+            return {"agent_id": agent_id, "steered": False, "cause": exc.refusal["cause"],
+                    "until": spendcap.iso(exc.refusal["until"]), "error": str(exc),
+                    "reason": str(exc), **blocked}
         except RuntimeError as exc:
             self._mark_launch_failed(agent_id, str(exc))
             return {"agent_id": agent_id, "steered": False, "error": str(exc)}
@@ -6975,6 +7716,11 @@ class Runner:
                 workdir=worktree_path, branch=node.branch, parent=node.parent,
                 depth=node.depth, session_id=session_id, timeout=timeout,
             )
+        except SpendCapRefused as exc:
+            # SC-R3a: a capped session is refused, and stays resumable.
+            self._mark_cap_refused(node_id, session_id, exc.refusal)
+            return self._consult_result(agent_name, node_id, turn, view,
+                                        error=str(exc))
         except RuntimeError as exc:
             self._mark_launch_failed(node_id, str(exc))
             return self._consult_result(agent_name, node_id, turn, view,
@@ -7133,6 +7879,60 @@ class Runner:
             result["full_providers"] = full
         return result
 
+    def spend_status(self) -> dict[str, Any]:
+        """SC-R5: each metered provider's spend this day, week and month from
+        the ledger, and, for each cap, the cap, its period, the spend and
+        what remains, the reset and whether admission is refused. A period
+        that began before the ledger existed is `partial` (SC-R2a)."""
+        at = now()
+        try:
+            self.ledger.refresh()
+        except OSError as exc:
+            self._ledger_failed(exc)
+            return {"note": spendcap.ACCOUNTING_NOTE, "error": f"{exc}"}
+        ledger = self.ledger
+
+        def periods(provider: str, model: str = "") -> dict[str, Any]:
+            return {period: {"spend": round(ledger.spend(provider, model, period, at), 6),
+                             "since": spendcap.iso(spendcap.period_start(at, period)),
+                             "resets_at": spendcap.iso(spendcap.period_end(at, period)),
+                             "partial": ledger.partial(period, at)}
+                    for period in spendcap.PERIODS}
+
+        def cap_view(cap: spendcap.Cap) -> dict[str, Any]:
+            state = ledger.describe(cap, at)
+            return {"usd": cap.usd, "period": cap.period, "spend": state["spend"],
+                    "remaining": state["remaining"],
+                    "resets_at": spendcap.iso(state["resets_at"]),
+                    "admission_refused": state["reached"]}
+
+        seen = ledger.providers_seen()
+        providers: dict[str, Any] = {}
+        for name, provider in self._cap_providers().items():
+            if provider.billing == "plan" or not (
+                    provider.enabled or provider.spend_cap or name in seen):
+                continue
+            cap = provider.spend_cap
+            entry: dict[str, Any] = {"admission_refused": False,
+                                     "periods": periods(name)}
+            if cap is not None and cap.usd is not None:
+                entry["cap"] = cap_view(spendcap.Cap(name, "", cap.usd, cap.period))
+                entry["admission_refused"] = entry["cap"]["admission_refused"]
+            # #14: a model's cap lives under its own provider instance, so two
+            # instances serving the same model id each show their own.
+            models: dict[str, Any] = {}
+            for model in (cap.models if cap is not None else {}):
+                own = [c for c in cap.caps_for(name, model) if c.model]
+                if own:
+                    models[model] = {"cap": cap_view(own[0]),
+                                     "periods": periods(name, model)}
+            if models:
+                entry["models"] = models
+            providers[name] = entry
+        return {"note": spendcap.ACCOUNTING_NOTE,
+                "ledger_since": spendcap.iso(ledger.created),
+                "providers": providers}
+
     def provider_slots(self) -> dict[str, dict[str, Any]]:
         """PC-R4: each limited provider (or one with work still queued): its
         limit, the slots in use and who holds them, and its queue length."""
@@ -7175,6 +7975,9 @@ class Runner:
                 continue
             if procs.alive((entry.get("claim") or {}).get("pid")):
                 continue
+            # SC-R3: a node a cap refused before its spawn gave the identity
+            # up (`_cap_raced_start`); any node still carrying it launched, and
+            # is the restart whatever its terminal status (r4 #1).
             carrier = next((n for n in self.tree.read()["nodes"].values()
                             if n.get("deferred_id") == entry["id"]), None)
             if carrier is not None:
@@ -7387,9 +8190,16 @@ class Runner:
             return "blocked", "the server is stopping for a safe point"
         # Review finding 5: admitted through the gate BEFORE the entry is
         # claimed, so a closed gate never costs the entry.
+        # SC-R3b (#4): a capped retry is blocked and keeps its place — asked
+        # before the entry is claimed, and again at the spawn.
+        capped = self._cap_refusal(provider.name, spec.model or "")
+        if capped:
+            return "blocked", {"reason": self._with_concurrency(capped["reason"],
+                                                                [provider.name]),
+                               "retry_after": capped["until"]}
         with self.gate.enter("the retry"):
             try:
-                self._pc_reserve_resume(spec, node, provider.name, entry["id"])
+                prior = self._pc_reserve_resume(spec, node, provider.name, entry["id"])
             except ProviderFull as full:
                 return ("gone" if full.gone else "full"), str(full)
             except RuntimeError as exc:
@@ -7401,6 +8211,15 @@ class Runner:
                     workdir=Path(node.worktree), branch=node.branch,
                     parent=node.parent, depth=node.depth,
                     session_id=spec_.get("session_id") or None)
+            except SpendCapRefused as exc:
+                # A crossing landed between the check and the spawn: the
+                # node goes back to waiting for its retry, and the entry to
+                # its place in the queue.
+                self._pc_unreserve(node_id, prior)
+                self.tree.restore_deferred(entry)
+                return "blocked", {"reason": self._with_concurrency(
+                    exc.refusal["reason"], [provider.name]),
+                    "retry_after": exc.refusal["until"]}
             except Exception as exc:
                 self._mark_launch_failed(
                     node_id, f"retry launch failed: {type(exc).__name__}: {exc}")
@@ -7597,7 +8416,12 @@ class Runner:
         notices.clear(self.tree, lambda e: e.get("effect") == "deferred"
                       and e.get("scope") == "tree")
 
+        # SC-R4a (#13): crossings whose claimer died before recording them.
+        self._announce_pending()
         due = self.tree.due_deferred()
+        # SC-R3b: a cap raised or removed releases its deferrals now.
+        due += [entry for entry in self._cap_released()
+                if entry["id"] not in {d["id"] for d in due}]
         if not due and not recovered:
             return {"paused": False, "restarted": []}
 

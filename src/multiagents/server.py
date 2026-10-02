@@ -1464,6 +1464,8 @@ def budget_status() -> dict:
         "deferred_tasks": len(data.get("deferred", [])),
         # PC-R4: per-provider concurrency, for the providers that limit it.
         **({"provider_concurrency": slots} if (slots := run.provider_slots()) else {}),
+        # SC-R5: period spend of every metered provider, and the caps.
+        "spend": run.spend_status(),
         "advice": advice or ["all providers have headroom"],
         # The calling session's own window. `known: false` is not room to spare.
         "context": {"known": tokens is not None, "tokens": tokens,
