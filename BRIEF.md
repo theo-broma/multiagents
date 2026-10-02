@@ -3522,3 +3522,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Decision:** a raced fresh start must be deferred, not failed (SC-R3). This overrules the implementer's deferral.
   - **Decision:** when spend and concurrency both refuse, both causes are reported.
   - Robustness tester ag-d84aee is still running on the previous tip; its findings come as round 2.
+- **SC robustness, ag-d84aee:** rejected with 6 defects.
+  - Three overlap the reviewer's findings.
+  - Three are new: a `|` dedup-key collision, `nextafter` period rounding, and an epsilon comparison that refuses spend below the cap.
+  - Its tests, `tests/test_sc_robustness_{ledger,runner}.py`, are on its branch. Its WIP commit also carries the squashed SC implementation.
+  - **Do NOT `merge_agent` it.** `spendcap.py` would land on main. The implementer was told to check out the two test files into its own branch. Discard ag-d84aee once SC merges.
