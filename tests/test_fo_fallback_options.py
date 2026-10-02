@@ -471,20 +471,45 @@ def test_fo_r3_the_same_key_on_another_provider_is_reported_again(tmp_path, cap)
     assert "bogus_e" in text and "claude" in text
 
 
-@pytest.mark.parametrize("key,value", [
-    ("variant", "max"), ("effort", "high"), ("max_budget_usd", 5), ("autocompact", True),
-    ("permission", "full"), ("id", "zai-coding-plan/glm"), ("model", "zai-coding-plan/glm")])
-def test_fo_r3_valid_keys_are_not_reported(tmp_path, cap, key, value):
-    # `variant` is consumed by opencode-zai (shipped); the rest are dataclass
-    # fields, structural, or consumed by the shipped providers.
-    entry = {"model": "zai-coding-plan/glm", key: value}
-    provider = "opencode-zai"
-    config = _load(tmp_path, {f"fo3-ok-{key}": {
+@pytest.mark.parametrize("provider,model,key,value", [
+    # Each key is paired with a destination whose own resolved spawn.optional
+    # consumes it (FO-R3a): validity is the destination provider's alone.
+    ("opencode-zai", "zai-coding-plan/glm", "variant", "max"),
+    ("codex", "gpt-5", "effort", "high"),
+    ("claude", "sonnet", "effort", "high"),
+    ("claude", "sonnet", "max_budget_usd", 5),
+    ("claude", "sonnet", "autocompact", True),
+    ("opencode-zai", "zai-coding-plan/glm", "permission", "full"),
+    ("opencode-zai", "zai-coding-plan/glm", "id", "zai-coding-plan/glm"),
+    ("opencode-zai", "zai-coding-plan/glm", "model", "zai-coding-plan/glm")])
+def test_fo_r3_valid_keys_are_not_reported(tmp_path, cap, provider, model, key, value):
+    entry = {"model": model, key: value}
+    agent = f"fo3-ok-{provider}-{key}"
+    config = _load(tmp_path, {agent: {
         "provider": "opencode", "model": "opencode/x", "models": {provider: entry}}})
 
     text = _all_text(cap, config)
 
-    assert f"fo3-ok-{key}" not in text, f"valid key {key!r} was reported: {text!r}"
+    assert agent not in text, f"valid key {key!r} under {provider} was reported: {text!r}"
+
+
+@pytest.mark.parametrize("provider,model,key,value", [
+    # FO-R3a: consumed by another shipped provider, not by the destination.
+    ("opencode-zai", "zai-coding-plan/glm", "max_budget_usd", 5),
+    ("opencode-zai", "zai-coding-plan/glm", "autocompact", True),
+    ("codex", "gpt-5", "variant", "max"),
+    ("claude", "sonnet", "variant", "max")])
+def test_fo_r3a_a_key_only_another_shipped_provider_consumes_is_reported(
+        tmp_path, cap, provider, model, key, value):
+    agent = "fo3a-agent"
+    config = _load(tmp_path, {agent: {
+        "provider": "opencode", "model": "opencode/x",
+        "models": {provider: {"model": model, key: value}}}})
+
+    text = _all_text(cap, config)
+
+    for needle in (agent, provider, key):
+        assert needle in text, (needle, text)
 
 
 def test_fo_r3_a_key_consumed_by_a_configured_provider_is_not_reported(tmp_path, cap):
