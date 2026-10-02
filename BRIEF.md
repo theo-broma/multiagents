@@ -3657,3 +3657,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - FO: ag-12d4f1 (implementer, high);
   - SF: ag-1827ab (deep, xhigh).
   - FS waits for the FO merge, since both touch `_routed_spec`.
+- **SF implementer ag-1827ab (DeepSeek xhigh)** finished in 28 min for $0.13.
+  - One commit, 818e401: all 10 SF tests green, SC/PC/RC green, and only known reds in the full suite.
+  - It confirmed with a temporary debug test that the queue-restore test does exercise the path.
+- **Loop round 1 on SF:** loop-reviewer ag-7c0db2 (MiMo).
+- **FO implementer ag-12d4f1:** still running after 29 min, 178 steps, $0.11.
