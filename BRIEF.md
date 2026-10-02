@@ -3645,3 +3645,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - SF: ag-effa3f, steered with the revision;
   - FO: ag-f939e4;
   - FS: ag-702ff1.
+- **A claude session limit hit the three testers.** After the user's /login, all three were steered back.
+- **FO tests merged** from ag-f939e4: 35 tests, 19 red (FO-R1, FO-R3) and 16 green.
+- **FS tester ag-702ff1:** 36 tests, 25 green and 11 red (family widening). It was steered to verify each red and to drop an unagreed `deferred_id` assertion.
+- **SF tester ag-effa3f:** 9 tests, all red. It was steered to fix the SF-R3 pre-spawn refusal test, which failed for the wrong reason, and to add the queue-entry and cleanup-hold tests.
