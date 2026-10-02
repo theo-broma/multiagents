@@ -192,3 +192,32 @@ These override any earlier wording they contradict.
 merges, by the same implementer who will later build SC, in a separate
 reviewed pass. PC's shared admission, reservation and typed queue come
 first; SC's ledger and enforcement build on them.
+
+## Decisions during review (2026-10-02)
+
+These override any earlier wording they contradict.
+
+**PC-R3c: the consult deadline, precisely.**
+- The single absolute deadline of PC-R3b is `start + timeout + 60 s`.
+  The 60 s slack is the existing conversation-lock and reply grace
+  (CF-R7). It does not extend that deadline.
+- No phase may launch the agent after the deadline.
+- A robustness test that expects a 1 s consult to give up within 2.5 s
+  while the conversation lock is held contradicts this. It must assert the
+  structure instead: no launch, and an error, once `timeout + slack` has
+  passed. The slack may be monkeypatched to keep the test short.
+
+**PC-R3d: a queued entry keeps its recorded model.**
+- A queued start is dispatched with the provider and model recorded when it
+  was queued, even if the model was not pinned and the roster has since
+  been reloaded with another model.
+- Queuing is a deferral of an admitted routing decision, not a new one.
+- A recorded model that is no longer valid for that provider (removed from
+  the catalog, or excluded) makes the entry blocked and reported. It never
+  silently re-resolves.
+
+**PC-R3e: blocked re-check interval.** Accepted: a head blocked without a
+retry time is reconsidered after 15 s (`PC_BLOCKED_RECHECK_SECONDS`).
+
+**PC-R3f: slot during post-mortem.** A run keeps its slot until its
+post-mortem has finished, including commit-fix turns and the free retry.
