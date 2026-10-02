@@ -3449,3 +3449,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The red tests merged as 3ba0fea (17 red, 9 BA-R2 green).
   - implementer-quick ag-b09f8c (glm) is on BA-R1/R2, `gitops.py` only.
   - BA-R3 (runner) waits until PC merges.
+- **PC robustness tests:** merged as dddd85c, 18 passing and 2 failing on the round-1 fixes.
+  - **R3d (queued entry keeps its model):** a real defect, which goes to the implementer.
+  - **Consult deadline:** that test contradicts PC-R3c, my decision: deadline = timeout + 60 slack. Recorded in the spec (f0a5784) together with R3d, R3e and R3f.
+  - Tester ag-5924ba is rewriting that test and adding an R3d invalid-model test.
+- **In flight:** reviewer round 2 ag-5eb6ce; ag-b09f8c on ba55a9.
+- **Next:** steer ag-03733f with the round 2 findings + R3d (+ R3c if the test shows a launch past the deadline).
