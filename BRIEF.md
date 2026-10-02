@@ -3714,3 +3714,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - It read the exact regions behind the four codex P2s (runner ~6947-6988, ~3915-3928) and argued them correct without reproducing them. In particular, its claim that "the `_held` guard cannot drop the queue restore" was disproved by codex's in-memory repro.
   - Cost: about $0.026 over 36 minutes, against 9 minutes for codex.
   - Verdict: a useful first filter for spec conformance, but weak on concurrency and cleanup invariants, and slow.
+- **FO loop-reviewer ag-d1e0f6: REJECT** (35/35 FO tests; full suite has only the 72 phase2 reds). Two P2s:
+  - `Config.warnings` is never surfaced through the doctor channel;
+  - FO-R3 validates against the union of shipped providers instead of the destination provider.
+  P3: `routed()` applies the `provider` key. Steered ag-12d4f1 for loop round 2 (variant high).
+- **Note on the review itself:** a good one, with a concrete check against the spec beyond the tests.
