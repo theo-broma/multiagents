@@ -3800,3 +3800,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - P2: the in-process cache key omits the profile; it was reproduced.
   - P3: the load-error remedy is wrong, and a script-backed provider should be exempt.
   - ag-ba1672 steered for round 4.
+- **SF loop round 4, ag-20e4d8: REJECT.** The round-3 fixes were verified. Two P2 error-path gaps remain:
+  - a storage error in `_steer_release` leaves an ownerless lock;
+  - `_steer_predecessor` sits outside the protected region, which pins the startup probe.
+  Steered ag-1827ab for round 5. Variant stays xhigh, per the user's no-escalation rule.
