@@ -3559,3 +3559,12 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Accepted residual:** a crash between node creation and spawn follows DQ-R11.
   - Reviewer round 4 is ag-f0cf70.
 - **RC review round 2:** reviewer ag-2d1240 confirmed the round-1 fixes. One P2 remains: a refused original turn still passes the commit-fix gate. It was steered to ag-cfd0bd, round 2 of 3 for glm.
+
+### 2026-10-02 — USER INSTRUCTION: pause when opencode-zai's weekly quota is exhausted
+- The user said: "lorsque opencode-zai a fini son quota de la semaine, fais une pause, je te dirai la prochaine strategie."
+- **When zai's weekly window is exhausted** (it was at 95% on 2026-10-02 ~09:00 UTC, resetting 2026-10-06 22:06 UTC):
+  - start and steer no more glm work;
+  - do not let the router fall back silently to other providers for the implementer tiers;
+  - let running non-zai work finish;
+  - report, and wait for the user's next strategy.
+- **Check before every start or steer** of an implementer tier: `budget_status` → `opencode-zai`.
