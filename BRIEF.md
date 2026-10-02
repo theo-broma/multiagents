@@ -3841,3 +3841,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **Post-handoff results (same session):**
   - **FO loop round 4, ag-948bd9: ACCEPT.** No defects; full suite shows only the 72 phase2 reds. NEXT: codex reviewer round 2 on `agents/implementer/12d4f1` (3dfa7a6), then merge, then FS.
   - **CB ag-ba1672 degenerated** into a "Run. Emitting. OK." text loop and never ran its commit. multiagents auto-committed its worktree as WIP 851e1a0 (diff below). NEXT: have a fresh `implementer-quick`, or a steer if usable, verify that the WIP actually contains both round-4 fixes (profile in the cache identity; script-backed providers exempt) plus the tests, run them, and commit cleanly. Do not trust the WIP blindly.
+  - **SF round 5 done:** ag-1827ab committed b61a350 (storage-safe `_steer_release`; predecessor capture inside the protected region). 925 targeted tests pass; the full suite is at baseline. NEXT: loop-reviewer round 5 on b61a350, then the codex reviewer.
+- **Nothing is running now.** The three NEXT steps above (FO codex round 2, CB WIP verification, SF loop round 5) are ready to start after compaction.
