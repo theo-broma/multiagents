@@ -3878,3 +3878,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **FO loop round 5, ag-35604a:** stuck on its 3600 s wall clock but still working. Deliberately NOT steered, because of the SR bug. Let it finish on its own.
 - **FO loop round 5, ag-35604a: ACCEPT.** No defects. Full suite: 72 phase2 reds only. Its minor notes: the `provider` warning wording, and timestamp/Decimal scalars. The codex final round 3 is ag-0f7514 (`verifies=ag-12d4f1`). On APPROVE: merge FO, then FS ×2.
 - **The SR tester ag-5a55ff** is stuck on its 1500 s wall clock but still working. Not steered (SR bug); let it finish.
+- **FO MERGED, 3f884b0** (codex round 3, ag-0f7514: APPROVE). On main, 58 FO tests pass. Optional follow-ups, not scheduled:
+  - the `provider` warning wording at `config.py:930`;
+  - timestamp/Decimal scalars get an event rather than being rendered.
+- **FS ×2 started:** ag-0441db and ag-5d1bd2 (implementer, variant max). NEXT: one loop-reviewer compares both and proposes cross-borrowings, relayed by steer; then codex; merge the better branch and discard the other; then `resolve_ticket(bug-ac396a, fixed)`.
