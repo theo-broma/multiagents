@@ -284,3 +284,56 @@ The safety now rests on authentication; exposure detection is withdrawn.
 - The tester (ag-e2adb4) noted that only the last two components of the handshake path are opened without following symlinks. A symlinked state root is therefore followed.
 - This is intended. Under CW-R2b, authentication is the guarantee and the no-symlink handling is defence in depth. The state root is the user's own configuration.
 - The guard: records forged under a symlinked state root are rejected. This is tested in `test_cw_attack2.py`.
+
+## CW-R2c — what was built on top of R2b (recorded at merge, 2026-10-02)
+
+These were added during review rounds 7–11 and are part of the contract
+now.
+
+**Ordering.**
+- Requests carry a signed sequence number per driver run. Supersession
+  compares sequence numbers, never wall-clock times.
+- Freshness uses a signed host monotonic reading. A reading from the
+  future is not fresh.
+- Only a cancellation of the current request, or the confirmed death of
+  its driver, reopens admission.
+
+**Verification never raises.**
+- A malformed record is invalid and is ignored.
+- Any exception during the safe-point attempt cancels the attempt. It
+  never stops the CLI.
+
+**Final re-check.**
+- After all acks are in, the driver repeats the fail-closed enumeration of
+  participants, then the deadline, user-message and CLI-liveness checks.
+- It commits only when the participant set is unchanged and every
+  participant has acknowledged. Otherwise it cancels with
+  `safe_point_changed`.
+- The commit write is the last step.
+
+**GRANT.**
+- **Identity.** The supervised driver passes its identity
+  (`MULTIAGENTS_SAFEPOINT_DRIVER`) to its CLI, together with the key. Both
+  are stripped from every agent, container and script environment.
+- **Closed at start.** A root server that starts while that driver is
+  alive admits nothing until it reads a signed grant naming it (pid, start
+  time, session). The driver's confirmed death also releases it.
+- **Re-granting.** The driver re-grants statelessly on its own 0.1 s
+  thread. It rewrites any missing, damaged or misaddressed grant.
+- **Suspension.** Granting stops just before a request is written, under
+  the same lock, and resumes only after that request is cancelled. It never
+  resumes after a commit.
+- **Waiting for a grant.** An admission on an ungranted server waits about
+  30 s for the grant, then refuses. The wait counts sleep iterations, so
+  the bound is approximate.
+- **A wedged live driver.** Newly started servers stay ungranted.
+  - **Recovery:** restart `multiagents run`, which gives a new driver and a
+    new key, then reconnect MCP. Reconnecting MCP alone does not help.
+- **Without supervision.** `--no-supervise` creates no driver identity, so
+  GRANT does not apply.
+
+**Known follow-ups (not defects in the guarantee).**
+- A refusal caused by a missing grant reuses the "stopping/compacted"
+  wording. A distinct "driver grant unavailable" diagnostic is wanted.
+- The ~30 s wait could use a monotonic deadline instead of an iteration
+  count.
