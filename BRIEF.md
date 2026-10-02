@@ -3697,3 +3697,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Approach:** `AgentSpec.routed()` builds a per-run spec, and `Config.warnings` emits FO-R3 warnings.
   - **NEXT:** loop-reviewer on branch `agents/implementer/12d4f1` with `verifies=ag-12d4f1`. It was not started because of the context wind-down.
 - **SF loop-reviewer ag-7c0db2** is still running. Its "stuck" reports are silence during pytest under the old 180 s limit.
+
+**2026-10-02, loop progress.**
+- **SF:** loop-reviewer ag-7c0db2 returned ACCEPT after round 1 (306 tests passed; three P3s: an untried retry of tree evidence, a silent `except` in `_remember_stop`, pre-existing evidence from binding caps). The final codex reviewer ag-904ab8 is running with `verifies=ag-1827ab`.
+- **FO:** loop-reviewer ag-d1e0f6 is running round 1 on `agents/implementer/12d4f1`.
+- **Config:** loop-reviewer `timeout` raised from 1800 to 3600 in agents.yaml, which is not versioned.
