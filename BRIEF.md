@@ -3726,3 +3726,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Loop-reviewer ag-22ac54 (high) is checking round 2.
 - **SF:** loop-reviewer ag-c36577 (high) is checking round 2.
 - **FO-R3a test correction merged** (6e15882; 48/48 on the FO branch). The spec notes that dataclass fields such as `effort` stay valid under every provider.
+- **2026-10-02, user decision.**
+  - `max_concurrent` raised from 4 to 6, and AGENTS.md now says `-n 4`.
+  - **FS runs in double:** after FO merges, two `implementer` runs work on the FS spec and tests. Then one loop-reviewer reviews **both** branches and proposes specific cross-borrowings (A takes part X from B, and vice versa); I relay those by steer.
+  - The loop continues as usual and ends with the codex reviewer. Merge the better branch and discard the other.
