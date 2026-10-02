@@ -45,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .providers import resolved_profile
 from .redact import register_literal, scrub
 
 
@@ -982,6 +983,139 @@ def read_agy(spent: dict[str, int] | None = None) -> Budget:
 # honest answer, and is what a newly added provider gets until it implements it.
 _BUILTIN = {"claude": read_claude, "opencode": read_opencode, "agy": read_agy}
 
+
+def _extends_chain(name: str, provider: Any,
+                   providers: dict[str, Any] | None) -> list[str]:
+    """The provider names an instance reaches through `extends`, nearest first.
+
+    The chain is walked through the loaded provider map because a `Provider`
+    keeps only its immediate `extends`; `resolve_inheritance` has already
+    folded every field the other way. A base that is absent from the map stops
+    the walk at the name it was given, so a reader it names can still be found.
+    """
+    chain: list[str] = []
+    seen = {name}
+    current = getattr(provider, "extends", "") or ""
+    while current and current not in seen:
+        chain.append(current)
+        seen.add(current)
+        ancestor = (providers or {}).get(current)
+        current = (getattr(ancestor, "extends", "") or "") if ancestor else ""
+    return chain
+
+
+def _builtin_for(name: str, provider: Any,
+                 providers: dict[str, Any] | None) -> tuple[str, Any]:
+    """The built-in reader a provider reaches, and the provider that owns it.
+
+    Resolution is through `extends`, never `family`: a family can hold
+    providers on different binaries, and one CLI's quota read as another's is
+    the confusion this avoids. The provider's own name is checked first, so a
+    base provider keeps its reading exactly as it was. The owner is recorded on
+    the Provider at load (`budget_builtin`), so every caller — the watchdog,
+    `refresh-quota`, a runner — resolves a chain of any depth the same way;
+    the caller's map is only a fallback for a directly-built Provider.
+    """
+    if name in _BUILTIN:
+        return name, _BUILTIN[name]
+    owner = getattr(provider, "budget_builtin", "") or ""
+    if owner in _BUILTIN:
+        return owner, _BUILTIN[owner]
+    for ancestor in _extends_chain(name, provider, providers):
+        if ancestor in _BUILTIN:
+            return ancestor, _BUILTIN[ancestor]
+    return "", None
+
+
+def _builtin_budget(owner: str, name: str, reader: Any, provider: Any,
+                    project_config: Path | None, force: bool,
+                    limits: dict | None) -> Budget:
+    """Run a built-in reader for `name`, on the right account.
+
+    A provider reading under its own name gets the plain reader, unchanged. An
+    instance that reaches the reader through `extends` NEVER gets the base
+    account's reading: it is pointed at ITS OWN credentials — the directory its
+    inherited `budget_profile_env` variable holds — and where that cannot be
+    resolved it is reported unknown, naming what is missing.
+    """
+    if reader is None:
+        return Budget(provider=name, known=False, source="none",
+                      note="no budget action and no built-in reader")
+    if owner == name:
+        return _call_reader(reader, project_config=project_config,
+                            force=force, limits=limits)
+    if not reader_takes_profile(reader):
+        # The instance inherits this reader but the reader has no profile to
+        # point at, so there is no way to read the INSTANCE's account. Running
+        # it would read the base account and relabel the result.
+        return Budget(
+            provider=name, known=False, source="none",
+            note=(f"extends {owner}, whose built-in reader cannot read a "
+                  f"per-instance profile; refusing to report the base "
+                  f"account's quota as {name}'s"))
+    profile_env = getattr(provider, "budget_profile_env", "") or ""
+    if not profile_env:
+        return Budget(
+            provider=name, known=False, source="none",
+            note=(f"extends {owner}, whose built-in reader takes an account "
+                  f"profile, but no budget_profile_env is declared; refusing to "
+                  f"report the base account's quota as {name}'s"))
+    credential_env = getattr(provider, "credential_env", None) \
+        or getattr(provider, "env", None) or {}
+    if not credential_env.get(profile_env):
+        return Budget(
+            provider=name, known=False, source="none",
+            note=(f"extends {owner} but sets no {profile_env}; reading the "
+                  f"base account would report the wrong quota"))
+    reading = _call_reader(reader, config_dir=Path(resolved_profile(provider)),
+                           project_config=project_config, force=force,
+                           limits=limits)
+    # The instance's own reading, under the instance's name: the reader hard-
+    # codes the base provider it belongs to, and a dependent of `budget_from`
+    # is relabelled the same way.
+    return replace(reading, provider=name)
+
+
+def reader_takes_profile(reader: Any) -> bool:
+    """Can this built-in reader read an INSTANCE's own profile directory?
+
+    Decided by signature, never by name: a reader that declares `config_dir`
+    (or swallows keyword arguments) can be pointed at a second account, and the
+    ones that take only the caller's spend cannot. The core names no CLI, so a
+    newly registered reader answers this automatically.
+    """
+    import inspect
+
+    parameters = inspect.signature(reader).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return True
+    return "config_dir" in parameters
+
+
+def _call_reader(reader: Any, *, spent: dict[str, int] | None = None,
+                 config_dir: Path | None = None,
+                 project_config: Path | None = None, force: bool = False,
+                 limits: dict | None = None) -> Budget:
+    """Call a registered built-in reader with only what it accepts.
+
+    The registry holds a reader per CLI and their signatures differ — one takes
+    the caller's spend, another a profile directory and the config lookup — and
+    the core must not know which is which. Every argument is offered and the
+    ones the reader does not declare are dropped; a reader taking ``**kwargs``
+    receives them all.
+    """
+    import inspect
+
+    parameters = inspect.signature(reader).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return reader(spent=spent, config_dir=config_dir,
+                      project_config=project_config, force=force, limits=limits)
+    offered = {"spent": spent, "config_dir": config_dir,
+               "project_config": project_config, "force": force, "limits": limits}
+    return reader(**{key: value for key, value in offered.items()
+                     if key in parameters})
+
+
 # Budget is consulted on every spawn for routing. Without a cache that means
 # three subprocesses per agent start, on the event loop.
 _CACHE_TTL = 60.0
@@ -1262,6 +1396,16 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
                                config_dir, project_config, use_cache, force,
                                limits, providers, _pass)
     source = str(config_dir)
+    # The account profile is part of the identity: the MCP server reloads its
+    # config on every call, so the same provider name can mean a different
+    # account within one TTL, and neither the name nor the config dir changes
+    # with it. The RESOLVED profile is used, so two spellings of one directory
+    # are one identity. Only a profile-scoped provider gets the suffix; every
+    # other provider keeps the exact identity it had, so an entry seeded by
+    # name and config dir alone still matches.
+    profile = resolved_profile(provider)
+    if profile:
+        source = f"{source}\x00{profile}"
 
     def take(generation: int | None) -> _SourceReading | None:
         """The cached entry, aged to now, when this caller may use it; None
@@ -1316,12 +1460,9 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
         try:
             budget = _from_script(name, provider, executor, config_dir, project_config)
             if budget is None:
-                builtin = _BUILTIN.get(name)
-                budget = builtin(project_config=project_config, force=force, limits=limits) if builtin is read_claude else (
-                    builtin(spent=None) if builtin else
-                    Budget(provider=name, known=False, source="none",
-                           note="no budget action and no built-in reader")
-                )
+                owner, builtin = _builtin_for(name, provider, providers)
+                budget = _builtin_budget(owner, name, builtin, provider,
+                                         project_config, force, limits)
         except Exception as exc:              # telemetry must never break a run
             budget = Budget(provider=name, known=False,
                             note=f"{type(exc).__name__}: {exc}")

@@ -374,6 +374,11 @@ providers:
   # Claude Code as a full provider: orchestrator AND delegate.
   claude:
     bin: claude
+    # The variable that relocates this CLI's whole state to a second account.
+    # `claude-b` (see the commented block below) inherits it through `extends`;
+    # the built-in quota reader resolves the instance's own value so the two
+    # subscriptions are never conflated.
+    budget_profile_env: CLAUDE_CONFIG_DIR
     auth:
       script: claude.sh
     notes: >
