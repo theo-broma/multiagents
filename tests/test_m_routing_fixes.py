@@ -928,10 +928,12 @@ def test_rm_r6a_agent_without_models_defers_rather_than_using_an_unmodelled_chai
 
     result = _start(runner)
 
-    assert result.get("deferred") or result.get("error"), result
+    # Revised by FS-R1/FS-R4: the unmodelled chain entry is not a candidate, so
+    # it is not skipped (no route_skipped event) and is never named.
+    assert result.get("deferred"), result
     assert not (_ran(probes, "acme") or _ran(probes, "zeta"))
-    skipped = [e for e in _events(runner) if e.get("kind") == "route_skipped"]
-    assert [e.get("provider") for e in skipped] == ["zeta"]
+    assert not [e for e in _events(runner) if e.get("kind") == "route_skipped"]
+    assert "zeta" not in json.dumps(result), result
 
 
 def test_rm_r6a_agent_without_models_does_not_use_an_unlisted_same_family_sibling(
