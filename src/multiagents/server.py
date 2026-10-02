@@ -900,6 +900,11 @@ def list_deferred() -> dict:
             "status": d.get("status", "waiting"),
             "reason": d.get("reason", ""),
             "deferred_by": d.get("deferred_by") or "orchestrator",
+            # PC-R3a: a provider-concurrency entry's queue and place in it,
+            # and why a skipped head is skipped.
+            **({"cause": d["cause"], "provider": spec.get("provider"),
+                "seq": d.get("seq")} if d.get("cause") else {}),
+            **({"blocked": d["blocked"]} if d.get("blocked") else {}),
         })
     return _ok({"deferred": entries})
 
@@ -1457,6 +1462,8 @@ def budget_status() -> dict:
         "tree_usage": run.tree.rollup_usage(),
         "by_model": billed_rows(run.tree.usage_by_model(), run.providers),
         "deferred_tasks": len(data.get("deferred", [])),
+        # PC-R4: per-provider concurrency, for the providers that limit it.
+        **({"provider_concurrency": slots} if (slots := run.provider_slots()) else {}),
         "advice": advice or ["all providers have headroom"],
         # The calling session's own window. `known: false` is not room to spare.
         "context": {"known": tokens is not None, "tokens": tokens,

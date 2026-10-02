@@ -2281,6 +2281,41 @@ sys.exit(rc)
             return None
         return {0: True, 1: False}.get(code)     # 2 and anything else: unknown
 
+    def wrapper_verdict(self, agent_id: str) -> bool | None:
+        """`wrapper_alive`, but False ONLY on an explicit answer: the script
+        itself, run in the container, reporting the wrapper absent (its exit
+        status echoed behind a marker, so a `docker exec` that never reached
+        the container — whose own exit status can be 1 too — is not taken
+        for it), or docker confirming the container stopped or gone.
+        Transport errors and timeouts are None: unknown. Blocking.
+        (PC-R2a: a slot is released only on confirmed exit.)"""
+        if self.paths is None:
+            return None
+        argv = ["sh", "-c", f"( {_ALIVE_SCRIPT} ); echo \"multiagents-alive:$?\"",
+                str(self.paths.run_dir(agent_id) / "wrapper.pid")]
+        if not self.inside():
+            argv = ["docker", "exec", self.container, *argv]
+        try:
+            out = _run(argv, timeout=30).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            out = ""
+        marks = [line.strip() for line in (out or "").splitlines()
+                 if line.strip().startswith("multiagents-alive:")]
+        if marks:
+            return {"multiagents-alive:0": True,
+                    "multiagents-alive:1": False}.get(marks[-1])
+        if self.inside():
+            return None
+        try:
+            state = _run(["docker", "inspect", "-f", "{{.State.Status}}",
+                          self.container], timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if state.returncode == 0:
+            status = state.stdout.strip()
+            return None if status in ("running", "paused", "restarting", "") else False
+        return False if "No such" in (state.stderr or "") else None
+
     def liveness(self, agent_id: str):
         """A `FollowHandle.probe` for a wrapped agent in the container. An
         unanswerable container counts as alive for `UNKNOWN_ALIVE_SECONDS`,

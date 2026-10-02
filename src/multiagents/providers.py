@@ -288,6 +288,11 @@ class Provider:
     # refused — the pair would otherwise be rejected by the CLI at launch,
     # nine seconds into a run that already had a worktree and a branch.
     effort_suffixes: dict[str, str] = field(default_factory=dict)
+    # PC-R1: how many runs may hold a slot on this provider at once, across
+    # the whole project. None (absent or null) is no limit, the default. Set
+    # by `load_providers` from the RAW block, never through `extends`: the
+    # limit belongs to the instance that declares it.
+    max_concurrent: int | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
@@ -721,7 +726,25 @@ def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:
     # there can an explicit `env:` entry be told from an inherited one), then
     # the owners are attached.
     _validate_sharing(providers, raw)
+    for name, provider in providers.items():
+        provider.max_concurrent = _max_concurrent(name, raw.get(name) or {})
     return providers
+
+
+def _max_concurrent(provider_name: str, data: dict) -> int | None:
+    """PC-R1: `max_concurrent` is an integer of at least 1, or null/absent.
+
+    Anything else — zero, a negative, a float (even a whole one), a bool, a
+    string — is a config error at load, naming the key and the provider.
+    """
+    value = data.get("max_concurrent")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"provider {provider_name!r}: max_concurrent: must be "
+                         f"an integer of at least 1, or null for no limit, "
+                         f"not {value!r}")
+    return value
 
 
 def families(providers: dict[str, Provider]) -> dict[str, list[str]]:
