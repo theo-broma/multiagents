@@ -3884,3 +3884,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **FS ×2 started:** ag-0441db and ag-5d1bd2 (implementer, variant max). NEXT: one loop-reviewer compares both and proposes cross-borrowings, relayed by steer; then codex; merge the better branch and discard the other; then `resolve_ticket(bug-ac396a, fixed)`.
 - **SR tests merged, 1c3788e** (tester ag-5a55ff): 23 red, 7 green, 6 skipped. The contract gained SR-R2b, which gates the free retry (7a6419c). The SR implementer-deep starts after the SF merge.
 - `test_c2 ...second_named_claude_account...` is red on main until CB merges. That is expected.
+- **SF codex final, ag-f63a66: REQUEST_CHANGES, 3 P2s.**
+  - A failed capture is treated as absent and releases a live predecessor's lock (`runner.py:7164`).
+  - A failed hold read leaves the lock without an owner (6838).
+  - A suppressed `restore_deferred` failure loses the resume entry, and `_pc_dispatch` then says "launched" (6833).
+  - **Steered ag-1827ab for round 6** with one uniform rule: "unknown is never death, and no failure path leaves state without a retry owner". Tests go in `tests/test_sf_review_r3.py`. NEXT: loop-reviewer, then codex, then merge; then SR.
