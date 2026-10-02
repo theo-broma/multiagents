@@ -3393,3 +3393,15 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - ~00:45 UTC: PC implementer ag-03733f (opus) started. Main full suite running in background (scratchpad/main-suite.txt). BP r5 reviewer ag-675aa5 running.
   - Main suite after CW merge: 254 red = phase2 72 + SC 120 + PC 60 + BP 2 — all expected (features not built/merged). Zero CW/DI reds.
   - ~01:00 UTC: BP APPROVED r5 (ag-675aa5) and MERGED (49b8465); glm branch ag-f120f1 discarded; BP+CW-auth+DI tests on main: 160 passed. Adversary skipped for BP (read cache, no untrusted input). Running: PC implementer ag-03733f. Next: PC review + robustness attack → merge → steer ag-03733f for SC.
+
+### 2026-10-02: PC implemented (ag-03733f, 2 commits, branch agents/implementer-deep/03733f)
+- 79/86 PC tests green. 6 reds are believed wrong under PC-R3a FIFO; 1 is the SC blocked-head test.
+- In flight:
+  - reviewer ag-836960 (codex);
+  - tester ag-25515c, revising the 6 tests plus the `hold("first")` collision;
+  - robustness-tester ag-145a37 (codex; PC squashed into its worktree).
+- Next: fix loop on ag-03733f → merge PC → steer ag-03733f for SC.
+- Implementer decisions to check:
+  - the queuer drains; a root server takes over entries from a dead queuer;
+  - consult deadline = start + timeout + 60;
+  - steer/resume still does not check the tree-wide `max_concurrent` (pre-existing).
