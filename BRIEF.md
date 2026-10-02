@@ -2680,6 +2680,55 @@ Resume in this order:
     - which providers have to be excluded;
     - the fallback when tmux is not installed.
 
+### Ticket-driven agent scheduling (the user, 2026-10-02)
+
+Not scheduled. Noted "pour planification"; for the next phase via `multiagents init-agent`.
+
+- **The user's idea.**
+  - Any delegation goes through a **ticket**. An agent that wants a subagent
+    creates a ticket instead of starting it.
+  - Each ticket lists the tickets it **depends on**. It is launched only when
+    every one of them is closed.
+  - A **script** (not an agent) runs the queue: it launches eligible tickets
+    and marks a ticket closed when its agent returns. Running an agent is just
+    creating a ticket and waiting.
+- **The pattern it must support (the user's example).**
+  - The orchestrator writes four tickets: tester → reviewer1 (of the tests) →
+    implementer → reviewer2 (of the implementation), each depending on the
+    previous one.
+  - If reviewer1 rejects the tests, it **reopens** the tester's ticket and
+    injects its comments. The implementer therefore cannot start yet.
+- **`urgency`.** A ticket field with a default for "not urgent". The script
+  picks urgent tickets first, then in order of arrival.
+- **Time windows.** A ticket may give the hours during which its agent may
+  run. Outside them it is not launched, or, if already running, **paused** by
+  the script. With no window set there is no restriction.
+- **The orchestrator's notes, for whoever designs it:**
+  - **Existing parts.** It overlaps with the PC durable FIFO queue
+    (PC-R3a), deferred tasks and quota pauses, and the parked-question
+    mechanism. It should extend these, not sit beside them.
+  - **Reopening.** A reopen must resume the tester's **session** (steer)
+    rather than start cold, as already learned. Reopening also has to
+    invalidate the dependents' eligibility, and a loop bound is needed (the
+    "round 3 → opus" rule is one).
+  - **What "closed" means.** Either the agent returned, or a verdict was
+    given (approved or rejected). A reviewer's verdict needs a structured
+    form, not prose.
+  - **Pause is not free.** CLIs have no real suspend. A pause means stopping
+    and later resuming the session (as with limits), or SIGSTOP. With
+    SIGSTOP, wall-clock and silence watchdogs and provider-side timeouts
+    still run.
+  - **Who may do what.** Who may create, reopen or raise urgency on a
+    ticket: any agent, or only an ancestor? Starvation of non-urgent work
+    must also be addressed.
+  - **Branches.** A dependent's worktree needs its predecessors' work. Today
+    the orchestrator squashes by hand. The ticket should say what gets merged
+    or squashed in, and when.
+  - **Naming.** These "tickets" are distinct from the existing bug tickets
+    (`list_tickets`). A different name is needed, to avoid the confusion.
+  - **Windows.** Time zone (UTC or local); windows that cross midnight; days
+    of the week.
+
 ### 2026-09-30 ~07:00 UTC — user chose claude opus as adversary; 4 runs in flight
 - ag-bd9c41 adversary (opus) on H7, verifies ag-d06a0b.
 - ag-03602e adversary (opus) on D1 fixes (942df35), verifies ag-d61f60.
