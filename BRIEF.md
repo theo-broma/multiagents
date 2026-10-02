@@ -3459,3 +3459,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Steered ag-03733f with those 7 findings plus the 2 robustness reds (R3a/R3d model kept, R3d invalid model blocked). Test fix 80eddee is merged.
   - Decision: the post-mortem slot (R3f) applies only to a provider with `max_concurrent`. Without one, tree-wide counting stays as on main (PC-R5).
 - **Next:** reviewer round 3.
+- **bug-ba55a9 part 1 (BA-R1/R2, `gitops.py`):** merged as 10ae24f after one review round. ag-d60f42 found one P1: a failed `ls-files` check let the commit through. It is fixed and I read the fix myself.
+- **BA-R3 (runner event and result text):** still to do after PC merges.
