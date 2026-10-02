@@ -75,6 +75,15 @@ These override any earlier wording they contradict.
 - Consult sessions also resume through `_launch` (`runner.py` ~7714), and SR-R1, SR-R2 and SR-R4 apply to them.
 - SR-R3 does not change consult's own call timeout and deadline semantics.
 
+**SR-R2b (2026-10-02, from the tester):** the automatic free retry is gated too.
+- The free retry after a silent death relaunches the original prompt, and that relaunch passes through the same launch gate as a steer.
+- It never starts while a previous turn's wrapper or agent process is alive.
+- **Verified by:** a test written with the implementation, because the tester's suite does not cover it.
+
+**Testing notes (tester ag-5a55ff, tests at 1c3788e):**
+- The consult, docker and unknown-liveness paths have no black-box test yet: there is no harness or public seam. The implementer covers them with unit tests, and the reviewers check them by reading the code.
+- `max_steps` is not reported in `effective_limits` today. SR-R3 requires only that it governs the turn, not that it be reported.
+
 ## Out of scope
 
 - A `variant` or model override on steer (the user has noted it for later).
