@@ -3615,3 +3615,16 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - the ignored-fallback-variant bug;
     - the SC and PC follow-ups;
     - bug-ac396a.
+- **Contracts committed in 0e2e781:**
+  - `fallback-options.md` (FO-R1..R4): the ignored `models.<P>.variant` bug.
+  - `fallback-scope.md` (FS-R1..R6, bug-ac396a): an agent falls back only to providers it names. The project chain and the family no longer widen the set, which also enforces the user's "no silent fallback".
+  - `sc-pc-followups.md` (SF-R1..R3): the SC final-review P2 findings and the PC round-8 P2.
+- **In flight:**
+  - The advisor is reviewing FS/FO/SF.
+  - Tester ag-effa3f is writing the SF tests.
+- **Pipeline from here:**
+  - tests;
+  - an implementer on deepinfra DeepSeek;
+  - the loop-reviewer, repeated until it accepts;
+  - the codex reviewer;
+  - merge.
