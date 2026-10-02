@@ -62,8 +62,9 @@ from .launch_limits import LaunchLimits
 from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
-from .tree import (ACTIVE, DRIVER_ROLES, TERMINAL, Node, Tree,
-                   deferred_malformed, new_id, node_from_raw, now)
+from .tree import (ACTIVE, DRIVER_ROLES, PC_CAUSE, TERMINAL, Node, Tree,
+                   deferred_malformed, find_deferred, new_id, node_from_raw,
+                   now, pc_waiting)
 from .transcripts import session_transcript
 
 MAX_SUMMARY_CHARS = 6000
@@ -327,6 +328,21 @@ def _positively_ended(pid: int | None, pid_start: str, probe_raw: Any) -> bool:
     return not answer                       # the probe's positive "dead"
 
 
+def _owner_alive(owner: dict) -> bool:
+    """Is the server named by a `slot_owner` still running? By pid and its
+    start time, so a reused pid is not mistaken for it."""
+    pid = owner.get("owner_pid")
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        return False
+    return procs.alive(pid, owner.get("owner_start") or "")
+
+
+def _claim_alive(claim: dict) -> bool:
+    """A consult waiter's process, by pid AND start time: a reused pid is
+    not the waiter (review round 2, finding 6)."""
+    return procs.alive(claim.get("pid"), claim.get("start") or "")
+
+
 def _held_refusal(node_id: str) -> str:
     return (f"{node_id}'s previous launch failed and its process is not yet "
             f"confirmed dead, so it cannot be relaunched; its slot is held "
@@ -461,6 +477,48 @@ How this works:
 """
 
 
+class ProviderFull(RuntimeError):
+    """PC-R3: an admission refused because its provider has no free slot —
+    its runs fill `max_concurrent`, or eligible work is queued ahead of it
+    (PC-R3a). Not a failure: the caller queues the work, or waits.
+
+    `gone` is the one other answer for an admission that was draining a
+    queued entry: the entry is no longer there (cancelled), so nothing may
+    launch for it.
+    """
+
+    def __init__(self, provider: str, limit: int | None, holders: list[str],
+                 ahead: int = 0, gone: bool = False):
+        self.provider, self.limit, self.holders = provider, limit, list(holders)
+        self.ahead, self.gone = ahead, gone
+        if gone:
+            text = f"the queued entry on {provider} is gone"
+        else:
+            held = ", ".join(self.holders) or "none"
+            text = (f"{PC_CAUSE}: provider {provider!r} is full "
+                    f"(max_concurrent={limit if limit is not None else 'none'}, "
+                    f"{len(self.holders)} slot(s) held by {held}")
+            text += f", {ahead} queued ahead)" if ahead else ")"
+        super().__init__(text)
+
+
+# PC-R3a: how often a consult waiting for a slot re-reads the shared count —
+# the reconciliation that sees a release in ANOTHER process. A release in
+# this one wakes it at once.
+PC_RECONCILE_SECONDS = 1.0
+# PC-R2a: the least time between two container reconciliations of one server
+# (each may ask `docker exec` about every unconfirmed container run).
+PC_RECONCILE_CONTAINERS_SECONDS = 3.0
+# The bound on one container probe: twice the `docker exec` subprocess
+# timeout `wrapper_verdict` uses. Past it the answer is unknown.
+PC_PROBE_SECONDS = 60.0
+# Round 7: what a launch refused because the server is shutting down says.
+SHUT_TEXT = "the server is shutting down; nothing was launched"
+# PC-R3a: how long a head refused for another reason (with no retry time of
+# its own) is skipped before it is eligible again and re-evaluated first.
+PC_BLOCKED_RECHECK_SECONDS = 15.0
+
+
 class _ConsultLockError(RuntimeError):
     """A conversation's turn lock failed for a reason other than contention."""
 
@@ -546,6 +604,9 @@ class Run:
     # records `fix_verdict` for the loop in the original run's `_finalize`,
     # which owns the result.
     fix_turn: bool = False
+    # PC-R3f: the token of the post-mortem slot claim this run set at launch
+    # ("" when it set none: unlimited provider, or nested in an outer one).
+    slot_token: str = ""
     fix_verdict: dict | None = None
     fix_timed_out: bool = False       # CI-R5: ended at `commit_fix_timeout`
     # LN-C1/LN-C2: the `{value, source, source_detail}` limits this turn was
@@ -711,8 +772,16 @@ class Runner:
             # Dropped only when providers changed: a re-read costs a script run
             # per provider, on every spawn's critical path.
             budget_mod.invalidate_cache()
+        raised = [name for name, here in providers.items()
+                  if name in self.providers
+                  and self.providers[name].max_concurrent is not None
+                  and (here.max_concurrent is None
+                       or here.max_concurrent > self.providers[name].max_concurrent)]
         self.config = config
         self.providers = providers
+        if raised:
+            # PC-R2a: a raised or removed limit wakes the queue.
+            self._pc_kick()
 
     def executor(self, spec: AgentSpec | None = None):
         """The execution backend for an agent, with the context docker needs.
@@ -1071,6 +1140,313 @@ class Runner:
 
     # ------------------------------------------------------------- guardrails --
 
+    def _occupying(self, nodes: dict, exclude: str = ""):
+        """The (key, raw) entries holding a slot — the rule `_occupants`
+        documents, shared with the per-provider count (PC-R2).
+
+        PC-R2a adds two cases. A node's `slot_owner` (a reservation before
+        launch, or a post-mortem after exit) holds its slot while that
+        server lives; a `pending` reservation whose server died holds
+        nothing (reconciliation by owner identity). And a `detached` node
+        — a live agent its server left behind — holds its slot until its
+        process is confirmed gone."""
+        for key, raw in nodes.items():
+            if (key == exclude or not isinstance(raw, dict)
+                    or raw.get("role", "") in DRIVER_ROLES):
+                continue
+            if raw.get("cleanup_hold") or key in self._holds:
+                yield key, raw
+                continue
+            status = raw.get("status")
+            if self._pc_limit(str(raw.get("provider") or "")) is None:
+                # PC-R5: with no provider limit, the count is exactly the
+                # tree-wide rule as it was.
+                if status not in ACTIVE:
+                    continue
+                try:
+                    node = node_from_raw(raw, key)
+                except (TypeError, ValueError):
+                    continue
+                if _occupies_slot(node):
+                    yield key, raw
+                continue
+            try:
+                node = node_from_raw(raw, key)
+            except (TypeError, ValueError):
+                continue
+            if self._pc_holds(node, status, raw.get("slot_owner")):
+                yield key, raw
+
+    def _pc_process_live(self, node: Node) -> bool:
+        """PC-R2a: is the node's recorded run still running — released only
+        on CONFIRMED exit? The local pid first (zombie-aware). A container
+        run whose local pid (the host's `docker exec` client) is gone is NOT
+        asked here: this runs inside the tree transaction. It counts as held
+        unless reconciliation (`_pc_reconcile_containers`, off the loop and
+        outside the lock) has recorded its death for this process identity."""
+        if node.pid and running(node.pid, node.pid_start):
+            return True
+        key = self._pc_container_key(node)
+        if key is None:
+            return False
+        return key not in self.__dict__.get("_pc_confirmed_dead", set())
+
+    @staticmethod
+    def _pc_container_key(node: Node) -> tuple | None:
+        """The process identity of a container run, or None for a local one."""
+        identity = node.exec_identity if isinstance(node.exec_identity, dict) else {}
+        if identity.get("kind") != "docker" or not identity.get("container"):
+            return None
+        return (node.id, node.pid, node.pid_start, str(identity["container"]))
+
+    def _pc_reconcile_soon(self) -> None:
+        """Ask for a run of `_pc_reconcile_containers` in the background: at
+        most one task per server, a pass no more often than every
+        PC_RECONCILE_CONTAINERS_SECONDS, and trailing-edge — a request made
+        inside that window, or while a pass is in flight, sets `rerun`, and
+        one more pass runs at the window's end, so no request is lost.
+        Nothing ever awaits it (a confirmed death kicks the drain itself).
+        Nothing at all when no provider has a limit (PC-R5), during
+        shutdown, or outside a loop."""
+        if self.__dict__.get("_pc_shutting_down"):
+            return
+        if not any(p.max_concurrent is not None for p in self.providers.values()):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        current = self.__dict__.get("_pc_reconcile_task")
+        if current is not None and not current.done() and current.get_loop() is loop:
+            self.__dict__["_pc_reconcile_rerun"] = True
+            return
+        last = self.__dict__.get("_pc_reconciled_at", float("-inf"))
+        delay = max(0.0, last + PC_RECONCILE_CONTAINERS_SECONDS - time.monotonic())
+        self.__dict__["_pc_reconcile_task"] = loop.create_task(
+            self._pc_reconcile_loop(delay))
+
+    async def _pc_reconcile_loop(self, delay: float) -> None:
+        """The background task: a pass after `delay`, then another at the
+        end of each window for as long as requests arrived meanwhile."""
+        while True:
+            if delay:
+                await asyncio.sleep(delay)
+            if self.__dict__.get("_pc_shutting_down"):
+                return
+            self.__dict__["_pc_reconcile_rerun"] = False
+            self.__dict__["_pc_reconciled_at"] = time.monotonic()
+            with contextlib.suppress(Exception):
+                await self._pc_reconcile_containers()
+            if (not self.__dict__.get("_pc_reconcile_rerun")
+                    or self.__dict__.get("_pc_shutting_down")):
+                return
+            delay = max(0.0, self.__dict__["_pc_reconciled_at"]
+                        + PC_RECONCILE_CONTAINERS_SECONDS - time.monotonic())
+
+    async def _pc_reconcile_containers(self) -> int:
+        """PC-R2a reconciliation: ask the container about each container run
+        on a limited provider whose local pid is gone and whose death is not
+        yet recorded — in a thread, outside the tree lock — and record the
+        explicit deaths (`wrapper_verdict`: transport errors and timeouts are
+        unknown, never recorded). A newly confirmed death kicks the drain.
+        Returns how many were newly confirmed."""
+        dead = self.__dict__.setdefault("_pc_confirmed_dead", set())
+        candidates = []
+        for key, raw in self.tree.read()["nodes"].items():
+            if not isinstance(raw, dict) or self._pc_limit(str(raw.get("provider") or "")) is None:
+                continue
+            try:
+                node = node_from_raw(raw, key)
+            except (TypeError, ValueError):
+                continue
+            ident = self._pc_container_key(node)
+            if ident is None or ident in dead:
+                continue
+            if node.pid and running(node.pid, node.pid_start):
+                continue
+            candidates.append((ident, node))
+        if not candidates:
+            return 0
+
+        def ask(node: Node) -> bool | None:
+            executor = self._docker_for(str(node.exec_identity["container"]))
+            verdict = getattr(executor, "wrapper_verdict", None)
+            if verdict is None:
+                return None
+            try:
+                return verdict(node.id)
+            except Exception:
+                return None
+
+        confirmed = 0
+        for ident, node in candidates:
+            # Each probe is bounded: a hung one is unknown, and the pass —
+            # the one reconciliation task — always completes, whatever the
+            # thread it left behind is still doing.
+            try:
+                verdict = await asyncio.wait_for(asyncio.to_thread(ask, node),
+                                                 PC_PROBE_SECONDS)
+            except (asyncio.TimeoutError, TimeoutError):
+                verdict = None
+            if verdict is False:
+                dead.add(ident)
+                confirmed += 1
+        if confirmed and not self.__dict__.get("_pc_shutting_down"):
+            self._pc_kick()
+        return confirmed
+
+    def _pc_holds(self, node: Node, status: Any, owner: Any) -> bool:
+        """PC-R2a: does a node on a LIMITED provider hold its slot?
+
+        A slot is released only on confirmed exit, so a live process holds
+        one whatever its status says — `cancelled` written before a detached
+        kill lands, `pending` under a dead reservation owner, `detached`
+        with no server. A `slot_owner` (a pre-launch reservation, or a run's
+        post-mortem, PC-R3f) holds it while its server lives; a `pending`
+        reservation whose server died, with no live process of its own,
+        holds nothing."""
+        def pid_live() -> bool:
+            return self._pc_process_live(node)
+        if (isinstance(owner, dict) and owner.get("kind") == "finalizing"
+                and _owner_alive(owner)):
+            # PC-R3f (round 3, finding 4): a live post-mortem holds the slot
+            # whatever status it has already written.
+            return True
+        if status not in ACTIVE:
+            # Only with the start time recorded: a bare pid may be reused.
+            return bool(node.pid_start) and pid_live()
+        if isinstance(owner, dict) and _owner_alive(owner):
+            return True
+        if status == "detached":
+            return node.pid is None or pid_live()
+        if status == "pending":
+            return pid_live() if isinstance(owner, dict) else True
+        if status in ("running", "stuck") and node.pid is not None:
+            return pid_live()
+        return _occupies_slot(node)
+
+    def _slot_claim(self, kind: str) -> dict:
+        """A `slot_owner` naming this server (PC-R2a)."""
+        return {"kind": kind, **self._owner_fields()}
+
+    def _launch_slot_owner(self, node_id: str, provider: str) -> str:
+        """PC-R3f: the moment a launched process runs, its pre-launch
+        reservation becomes the run's post-mortem claim — written while the
+        process is alive, so there is no instant at which it can be seen
+        dead with its slot unclaimed. The claim nests: a commit-fix turn
+        launched inside a post-mortem of this server keeps the outer claim
+        and takes none, so only the outer one ends it. Returns the token
+        that ends it ("" for none). With no provider limit, only the
+        reservation is dropped (PC-R5)."""
+        token = ""
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            if entry is None:
+                return ""
+            owner = entry.get("slot_owner")
+            if (isinstance(owner, dict) and owner.get("kind") == "finalizing"
+                    and owner.get("owner") == self._hold_owner):
+                return ""
+            if self._pc_limit(provider) is not None:
+                token = os.urandom(6).hex()
+                entry["slot_owner"] = dict(self._slot_claim("finalizing"), token=token)
+            elif isinstance(owner, dict):
+                entry["slot_owner"] = None
+        return token
+
+    def _end_slot_claim(self, node_id: str, token: str) -> bool:
+        """End the post-mortem claim `token` set, and no other."""
+        if not token:
+            return False
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            owner = (entry or {}).get("slot_owner")
+            if isinstance(owner, dict) and owner.get("token") == token:
+                entry["slot_owner"] = None
+                return True
+        return False
+
+    def _slot_holders(self, nodes: dict, exclude: str = "") -> dict[str, list[str]]:
+        """PC-R2: who holds a slot on each provider — the provider the run
+        actually launched on, as recorded on its node — by exactly the rule
+        the tree-wide count uses, so a dead process (`_occupies_slot`'s pid
+        check) frees its slot in every process's view at once."""
+        out: dict[str, list[str]] = {}
+        for key, raw in self._occupying(nodes, exclude):
+            out.setdefault(str(raw.get("provider") or ""), []).append(key)
+        return out
+
+    def _pc_limit(self, provider: str) -> int | None:
+        """PC-R1: the provider's `max_concurrent` as loaded now (re-read on
+        every config change, so a new value applies at the next admission)."""
+        here = self.providers.get(provider)
+        return here.max_concurrent if here is not None else None
+
+    @staticmethod
+    def _pc_eligible(entry: dict) -> bool:
+        """PC-R3a: does a queued entry stand ahead of later arrivals? Not a
+        head skipped for another reason (`blocked`), and not a consult's
+        waiter whose waiting process has died."""
+        if entry.get("blocked") and float(entry.get("blocked_until") or 0) > now():
+            # PC-R3a: a head skipped for another reason stays skipped only
+            # until its re-check time; then it is eligible again, so a new
+            # arrival cannot overtake it on a stale verdict.
+            return False
+        claim = entry.get("claim")
+        if isinstance(claim, dict) and not _claim_alive(claim):
+            return False
+        return True
+
+    def _pc_admit(self, data: dict, provider: str, exclude: str = "",
+                  queued_id: str = "") -> ProviderFull | None:
+        """PC-R2a/R3a: the provider half of an admission, INSIDE the caller's
+        tree transaction — the same one that takes the tree-wide slot, so
+        the two are reserved together or not at all.
+
+        Refused (returned, the caller raises outside the transaction) when
+        the provider's slots are all held, or when an eligible entry is
+        queued ahead: for a new arrival that is any, for a queued entry
+        being drained (`queued_id`) any with a lower sequence number. On
+        success a drained entry is consumed in this same transaction, so
+        claiming it and reserving its slot are one step.
+        """
+        limit = self._pc_limit(provider)
+        queue = pc_waiting(data["deferred"], provider)
+        if queued_id:
+            mine = find_deferred(queue, queued_id)
+            if mine is None:
+                return ProviderFull(provider, limit, [], gone=True)
+            ahead = [d for d in queue
+                     if float(d.get("seq") or 0) < float(mine.get("seq") or 0)]
+        else:
+            ahead = queue
+        ahead = [d for d in ahead if self._pc_eligible(d)]
+        holders: list[str] = []
+        if limit is not None:
+            holders = self._slot_holders(data["nodes"], exclude).get(provider, [])
+        if ahead or (limit is not None and len(holders) >= limit):
+            return ProviderFull(provider, limit, holders, ahead=len(ahead))
+        if queued_id:
+            data["deferred"] = [d for d in data["deferred"]
+                                if not (isinstance(d, dict) and d.get("id") == queued_id)]
+        return None
+
+    def _pc_full(self, provider: str, queued_id: str = "") -> ProviderFull | None:
+        """PC-R3: would `provider` refuse an admission now? A read, for
+        routing; the admission itself decides again, atomically."""
+        data = self.tree.read()           # a copy: the consumption is not written
+        if self._pc_limit(provider) is None and not pc_waiting(data["deferred"], provider):
+            return None
+        return self._pc_admit(data, provider, queued_id=queued_id)
+
+    def _pc_dequeued(self, entry_id: str, provider: str, agent_id: str,
+                     op: str = "") -> None:
+        """PC-R4: a queued entry left the queue for a slot."""
+        self.tree.emit(agent_id, PC_CAUSE, action="released", provider=provider,
+                       deferred_id=entry_id, op=op)
+        self.tree.emit("system", "deferred_exit", deferred_id=entry_id,
+                       outcome="restarted", agent_id=agent_id)
+
     def _occupants(self, nodes: dict, exclude: str = "") -> int:
         """How many nodes hold a `max_concurrent` slot — the ONE count every
         admission and `capacity()` uses.
@@ -1083,23 +1459,7 @@ class Runner:
         and only while active. Drivers never count; a malformed entry is
         skipped (HA-R12).
         """
-        count = 0
-        for key, raw in nodes.items():
-            if (key == exclude or not isinstance(raw, dict)
-                    or raw.get("role", "") in DRIVER_ROLES):
-                continue
-            if raw.get("cleanup_hold") or key in self._holds:
-                count += 1
-                continue
-            if raw.get("status") not in ACTIVE:
-                continue
-            try:
-                node = node_from_raw(raw, key)
-            except (TypeError, ValueError):
-                continue
-            if _occupies_slot(node):
-                count += 1
-        return count
+        return sum(1 for _ in self._occupying(nodes, exclude))
 
     def _refuse_full(self, spec: AgentSpec, active: int,
                      max_concurrent: int) -> RuntimeError:
@@ -1124,7 +1484,8 @@ class Runner:
         if active >= max_concurrent:
             raise self._refuse_full(spec, active, max_concurrent)
 
-    def _admission_reserved(self, spec: AgentSpec, node: Node) -> None:
+    def _admission_reserved(self, spec: AgentSpec, node: Node,
+                            queued_id: str = "") -> None:
         """RM-R1a: the resumed consult's admission, with the slot reserved.
 
         `_admission` alone checks and returns, and the resuming node only
@@ -1144,14 +1505,24 @@ class Runner:
         """
         self._settle_holds()
         max_concurrent = int(self.config.limits.get("max_concurrent", 4))
+        full = None
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node.id)
             held = bool((entry or {}).get("cleanup_hold")) or node.id in self._holds
             active = self._occupants(data["nodes"], exclude=node.id)
             if not held and active < max_concurrent:
-                if entry is not None:
-                    entry["status"] = "pending"
-                return
+                # PC-R2a: the provider slot in the same transaction.
+                full = self._pc_admit(data, node.provider, node.id, queued_id)
+                if full is None:
+                    if entry is not None:
+                        entry["status"] = "pending"
+                        entry["slot_owner"] = self._slot_claim("reservation")
+        if full is not None:
+            raise full
+        if not held and active < max_concurrent:
+            if queued_id:
+                self._pc_dequeued(queued_id, node.provider, node.id, "consult")
+            return
         # The refusal is recorded OUTSIDE the transaction: `_refused` writes
         # a notice, and holding the tree's flock while it does would ask the
         # same lock of a second file descriptor.
@@ -1159,7 +1530,7 @@ class Runner:
             raise RuntimeError(_held_refusal(node.id))
         raise self._refuse_full(spec, active, max_concurrent)
 
-    def _admission_add(self, spec: AgentSpec, node: Node) -> None:
+    def _admission_add(self, spec: AgentSpec, node: Node, queued_id: str = "") -> None:
         """RM-R1a: start()'s admission, one transaction with the node insert.
 
         `_preflight` checked occupancy long before this point, and the
@@ -1177,17 +1548,28 @@ class Runner:
         self._settle_holds()
         max_concurrent = int(self.config.limits.get("max_concurrent", 4))
         admitted = False
+        full = None
         with self.tree.transaction() as data:
             active = self._occupants(data["nodes"])
+            # PC-R2a: the provider slot is reserved in this same transaction,
+            # so a tree-wide refusal leaves no provider slot held and the
+            # reverse.
             if active < max_concurrent:
-                data["nodes"][node.id] = asdict(node)
+                full = self._pc_admit(data, node.provider, queued_id=queued_id)
+            if active < max_concurrent and full is None:
+                data["nodes"][node.id] = dict(asdict(node),
+                                              slot_owner=self._slot_claim("reservation"))
                 if node.parent and node.parent in data["nodes"]:
                     kids = data["nodes"][node.parent].setdefault("children", [])
                     if node.id not in kids:
                         kids.append(node.id)
                 admitted = True
+        if full is not None:
+            raise full
         if not admitted:
             raise self._refuse_full(spec, active, max_concurrent)
+        if queued_id:
+            self._pc_dequeued(queued_id, node.provider, node.id, "start")
         self.tree.emit(
             node.id, "created",
             agent=node.agent, provider=node.provider, model=node.model,
@@ -1210,6 +1592,7 @@ class Runner:
             entry = data["nodes"].get(node_id)
             if entry is not None and entry.get("status") == "pending":
                 entry["status"] = "idle"
+                entry["slot_owner"] = None
 
     def _preflight(self, spec: AgentSpec, workdir: str | None = None,
                    budget_tag: str = "", *, pinned: bool = False) -> None:
@@ -1887,6 +2270,7 @@ class Runner:
                 entry["pid"] = hold.pid
                 entry["pid_start"] = hold.pid_start
                 entry["cleanup_hold"] = dict(hold.record)
+                entry["exec_identity"] = dict(hold.record.get("executor") or {})
 
     def _retire_hold(self, node_id: str) -> None:
         """The reservation's end when nothing is left to release: supervision
@@ -2016,6 +2400,7 @@ class Runner:
         done = hold.run.done if hold.run is not None else hold.done
         if done is not None:
             done.set()
+        self._pc_kick(hold.provider)          # the hold was a slot (finding 8)
 
     def _lift_hold(self, node_id: str, then: Any, record: dict | None = None
                    ) -> None:
@@ -2188,16 +2573,22 @@ class Runner:
         if kind == "local":
             return None
         if kind == "docker" and identity.get("container"):
-            docker = dict(self.config.project.get("executor", {}).get("docker", {}))
-            docker["container_name"] = str(identity["container"])
-            try:
-                executor = get_executor("docker", docker, paths=self.paths,
-                                        providers=self.providers,
-                                        config_dir=global_config_dir())
-            except Exception:
+            executor = self._docker_for(str(identity["container"]))
+            if executor is None:
                 return _unknown_probe
             return self._raw_alive_probe(executor, node_id) or _unknown_probe
         return _unknown_probe
+
+    def _docker_for(self, container: str) -> Any:
+        """The docker executor for a RECORDED container, or None."""
+        docker = dict(self.config.project.get("executor", {}).get("docker", {}))
+        docker["container_name"] = container
+        try:
+            return get_executor("docker", docker, paths=self.paths,
+                                providers=self.providers,
+                                config_dir=global_config_dir())
+        except Exception:
+            return None
 
     def _raw_alive_probe(self, executor: Any, node_id: str) -> Any:
         """The executor's own three-valued liveness answer, or None when it
@@ -2293,6 +2684,11 @@ class Runner:
         refusal = self._model_refusal(provider.name, spec.model or "")
         if refusal:
             raise RuntimeError(refusal)
+        if self.__dict__.get("_pc_shutting_down"):
+            # Round 7: once shutdown has begun nothing launches — start,
+            # steer, consult, free retry, queued retry or commit-fix turn —
+            # since shutdown has already captured the runs it ends.
+            raise RuntimeError(SHUT_TEXT)
         if self._held(node_id):
             # RM-R1d: a second process on a node whose previous launch is
             # not confirmed dead. Refused before anything is taken, so the
@@ -2487,6 +2883,7 @@ class Runner:
                                      "log": _size(run_dir / "stream.jsonl")},
                              adopted_at=None)
             self.tree.set_status(node_id, "running")
+            run.slot_token = self._launch_slot_owner(node_id, provider.name)
         except BaseException:
             # RM-R1c (review ag-467011): the process is ALIVE here and no
             # consumer follows it yet. ONE cleanup task stops it, confirms
@@ -2502,7 +2899,7 @@ class Runner:
         # Supervised: the node occupies as a live `running` one from here,
         # so the reservation is lifted.
         self._retire_hold(node_id)
-        run.task = asyncio.create_task(self._consume(run))
+        run.task = asyncio.create_task(self._supervise(run))
         # Owned by the Runner, not by the run: asking an agent to wrap up means
         # stopping and relaunching it, which a task belonging to that same run
         # cannot safely do to itself.
@@ -2954,8 +3351,23 @@ class Runner:
         budget_tokens: int = 0,
         deferred_id: str = "",
         recorded_provider: str = "",
+        queued: dict | None = None,
     ) -> dict[str, Any]:
+        """`queued` is a provider-concurrency entry being drained (PC-R3a):
+        it runs on the provider it queued on and nowhere else, claims its
+        entry in the admission transaction, and is never re-queued — a
+        refusal answers `pc_full` (still no slot: the entry keeps its place)
+        or `blocked` (refused for another reason, reported by the drain)."""
         spec = self.config.agent(agent_name)
+        queued_model, queued_pinned = "", False
+        if queued:
+            # PC-R3d: a queued start runs the provider and model recorded
+            # when it was routed and queued, validated as that pair alone
+            # (`_pc_recorded_model_problem`, by the drain) — never against
+            # today's roster for the preferred provider (round 3, finding 3).
+            # A pin stays a pin on the node.
+            queued_pinned = bool((queued.get("spec") or {}).get("pinned"))
+            queued_model, model = model or (queued.get("spec") or {}).get("model") or "", None
         if model:
             # A model id belongs to one provider's namespace. In a real session
             # the orchestrator sent `claude --model opencode-go/kimi-k2.7-code`
@@ -3012,7 +3424,18 @@ class Runner:
             problem = await self._pin_health(spec)
             if problem:
                 return problem
-        self._preflight(spec, workdir, budget_tag, pinned=bool(model))
+        queued_id = (queued or {}).get("id") or ""
+        if queued:
+            # PC-R3a: a queued start launches on the provider it queued on.
+            target = (queued.get("spec") or {}).get("provider") or spec.provider
+            routed = self._usable_spec(spec, target) or spec
+            # Review finding 1: the spec runs AS the queue's provider, so
+            # routing looks for it there and nowhere else, whichever
+            # provider the agent prefers today.
+            spec = routed.replace(provider=target)
+            if queued_model:
+                spec = spec.replace(model=queued_model)
+        self._preflight(spec, workdir, budget_tag, pinned=bool(model) or queued_pinned)
         # LN-C4: every refusal limit this start was checked against let it
         # through, so the notices for them in its scopes have stopped.
         passed = {"tree", self.self_id() or "tree", *([budget_tag] if budget_tag else [])}
@@ -3022,6 +3445,11 @@ class Runner:
 
         parent = self.self_id()
         depth = self.self_depth() + 1
+        if queued and "parent" in (queued.get("spec") or {}):
+            # PC-R3a: whichever process drains it, the run is the one that
+            # was asked for — the queuing agent's child, at its depth.
+            parent = queued["spec"].get("parent")
+            depth = int(queued["spec"].get("depth") or depth)
         node_id = new_id()
 
         # --- budget routing -------------------------------------------------
@@ -3060,6 +3488,10 @@ class Runner:
         # handled: siblings and fallbacks are tried, and deferral applies
         # when none is left. A pinned start still gets the PS-R6 refusal.
         unclaimable: set[str] = set()
+        # PC-R3: providers routing found full, in the order it chose them —
+        # the first is where the start queues when no route has a slot
+        # (PC-R3a), with the model it would have run there.
+        pc_full: dict[str, tuple[ProviderFull, str]] = {}
         configured_spec = spec
         while True:
             spec = configured_spec
@@ -3096,7 +3528,7 @@ class Runner:
             # every provider, enabled or not, and a disabled one has no
             # budget reading to answer the room question with.
             routes: list[str] = []
-            if not model:
+            if not model and not queued:
                 family_of = providers_mod.families(self.providers)
                 for name in (spec.models or spec.extra.get("models") or {}):
                     here = self.providers.get(name)
@@ -3109,19 +3541,20 @@ class Runner:
                         if sibling not in routes and self.providers[sibling].enabled \
                                 and self._runs_allowed_model(spec, sibling):
                             routes.append(sibling)
-            if model:
+            if model or queued:
                 family, chain = [], []
             startup_blocked = {}
             for name, candidate in self.providers.items():
                 problem = self.startup.availability(name)
-                if problem or name in unclaimable:
+                if problem or name in unclaimable or name in pc_full:
                     if problem:
                         startup_blocked[name] = problem
                     entry = budgets.setdefault(name, budget_mod.Budget(name, known=False))
                     entry.cooldown_until = max(
                         entry.cooldown_until or 0, now() + 1,
                         (problem or {}).get("retry_after") or 0)
-                    entry.note = problem["reason"] if problem else "startup_down"
+                    entry.note = (problem["reason"] if problem else
+                                  PC_CAUSE if name in pc_full else "startup_down")
             usable = {name for name in self.providers
                       if self._runs_allowed_model(spec, name)}
             unmodelled = [name for name in dict.fromkeys([*routes, *chain, *family])
@@ -3151,6 +3584,30 @@ class Runner:
                 )
 
             chosen, why = choose(budgets, reserve)
+            if chosen is not None:
+                # PC-R3: a full provider is passed over exactly like an
+                # exhausted one — the next route with a free slot (and an
+                # empty queue, PC-R3a) takes the start.
+                full = self._pc_full(chosen, queued_id)
+                if (full is not None and not queued and full.ahead
+                        and (full.limit is None or len(full.holders) < full.limit)):
+                    # Slots are free and only queued work stands ahead: it
+                    # goes first (PC-R3a), then this start looks again.
+                    await self._drain_queues()
+                    full = self._pc_full(chosen)
+                if full is not None:
+                    if queued:
+                        return {"pc_full": True, "gone": full.gone, "reason": str(full)}
+                    routed = self._usable_spec(configured_spec, chosen)
+                    pc_full[chosen] = (full, routed.model if routed else spec.model)
+                    continue
+            if chosen is None and pc_full:
+                return self._pc_queue_start(next(iter(pc_full.values())), agent_name, task,
+                                            model=model, timeout=timeout, workdir=workdir,
+                                            verifies=verifies, budget_tag=budget_tag)
+            if chosen is None and queued:
+                # PC-R3a: a head refused for another reason keeps its place.
+                return {"blocked": True, "reason": why}
             if chosen is None and model:
                 entry = budgets.get(spec.provider)
                 problem = startup_blocked.get(spec.provider) or {}
@@ -3319,12 +3776,28 @@ class Runner:
                 deferred_id=deferred_id,
                 routed_from=routed_from, routed_why=routed_why,
                 effort=spec.effort or "",
-                limits=limits, session=self.session(), model_pinned=bool(model),
+                limits=limits, session=self.session(),
+                model_pinned=bool(model) or queued_pinned,
             )
             # RM-R1a: admission is one transaction with the insert, so the
             # slot is ours from this moment; every exit below that does not
             # launch gives it back.
-            self._admission_add(spec, node)
+            try:
+                self._admission_add(spec, node, queued_id)
+            except ProviderFull as full:
+                # PC-R2: lost the race for the last slot since routing looked.
+                if queued:
+                    return {"pc_full": True, "gone": full.gone, "reason": str(full)}
+                # Review finding 12: not queued yet — routing runs again,
+                # with this provider now seen full, so a free fallback is
+                # tried first and the queue is the last resort. The claim
+                # taken for this attempt goes back first.
+                self._startup_finish(provider.name, node_id, startup_token)
+                startup_token = ""
+                return await self.start(
+                    agent_name, task, workdir=workdir, timeout=timeout, model=model,
+                    verifies=verifies, budget_tag=budget_tag,
+                    deferred_id=deferred_id, recorded_provider=recorded_provider)
             try:
                 if self.authority:
                     self.authority.add(node)
@@ -3374,7 +3847,49 @@ class Runner:
             if not launched:
                 self._startup_finish(provider.name, node_id, startup_token)
 
+    def _pc_queue_start(self, refused: tuple[ProviderFull, str], agent_name: str,
+                        task: str, *, model: str | None, timeout: int | None,
+                        workdir: str | None, verifies: str,
+                        budget_tag: str) -> dict[str, Any]:
+        """PC-R3/R3a: queue a fresh start behind a full provider. The entry
+        is everything the start needs to happen later exactly as asked — a
+        model pin stays a pin (`pinned`), and `model` is the one it will run
+        — and holds no slot of any kind while it waits (PC-R2a)."""
+        full, routed_model = refused
+        entry = self.tree.enqueue(
+            full.provider,
+            {"op": "start", "agent": agent_name, "task": task, "timeout": timeout,
+             "model": model or routed_model, "pinned": bool(model),
+             "workdir": workdir, "verifies": verifies, "budget_tag": budget_tag,
+             "parent": self.self_id(), "depth": self.self_depth() + 1},
+            str(full), deferred_by=self.self_id(),
+            dispatcher=self._owner_fields())
+        self._pc_kick(full.provider)
+        return {"deferred": True, "reason": str(full), "deferred_id": entry["id"],
+                "provider": full.provider, "queued": True,
+                "note": f"queued on {full.provider} ({PC_CAUSE}); it starts by "
+                        f"itself, in order, when a slot there frees — nothing "
+                        f"to re-issue. cancel_deferred removes it."}
+
     # --------------------------------------------------------------- consume --
+
+    async def _supervise(self, run: Run) -> None:
+        """`_consume`, and — whichever way it exits, its setup failing
+        included — the end of the post-mortem claim the launch set
+        (PC-R3f, round 3 finding 2). The usual end is inside, before the
+        release kick; this one only catches what that never reached."""
+        try:
+            await self._consume(run)
+        except asyncio.CancelledError:
+            # A stop or a server going away: the claim ends, but nothing is
+            # launched from a turn being torn down.
+            with contextlib.suppress(Exception):
+                self._end_slot_claim(run.node_id, run.slot_token)
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                if self._end_slot_claim(run.node_id, run.slot_token):
+                    self._pc_kick(run.provider.name)
 
     async def _consume(self, run: Run) -> None:
         """Read the event stream, log it, supervise it, record the outcome."""
@@ -3603,6 +4118,9 @@ class Runner:
         # was ours. Mistaking our own silence for the other side's is the exact
         # shape of error this project has already been caught by twice.
         relaunched = False
+        # PC-R3f: the run keeps its slot through its post-mortem — commit-fix
+        # turns and the free retry relaunch the same node from it — by the
+        # claim `_launch` set (`run.slot_token`), ended below.
         try:
             remainder = flush.drain()
             if remainder:
@@ -3635,12 +4153,16 @@ class Runner:
             # This run's own claim: its process has ended, and a relaunch's
             # claim is a different token (a held one is kept by the hold).
             self._startup_finish(provider.name, node_id, run.startup_token)
+            with contextlib.suppress(Exception):
+                self._end_slot_claim(node_id, run.slot_token)
             if not relaunched and not self._held(node_id):
                 self._release(node_id)
                 # LN-C4: the node ended, so its own notices have stopped.
                 with contextlib.suppress(Exception):
                     notices.clear_node(self.tree, node_id)
                 run.done.set()
+                # PC-R3a: the process that releases a slot drains the queue.
+                self._pc_kick(provider.name)
             # RM-R1c (review ag-f7ced5): while a launch cleanup holds this
             # node — a relaunch (free retry, commit fix) whose process could
             # not be confirmed dead — the supervision lock and the waiters
@@ -3977,6 +4499,11 @@ class Runner:
                 # so a flag kept there resets on every retry and one free retry
                 # becomes an unbounded loop. Found by running it.
                 self.tree.update(node_id, retries=fresh.retries + 1)
+                # PC-R3: the retry is an admission like any launch. With no
+                # slot on its provider it is queued there, and the node,
+                # whose process has ended, holds none while it waits.
+                if self._pc_retry_admission(run, fresh, session_id) is not None:
+                    return False
                 # Continuity for whoever is waiting on the attempt that
                 # just died: `_launch` starts every relaunch with a fresh
                 # `Run`, but a caller that captured this run (consult(),
@@ -4944,7 +5471,9 @@ class Runner:
         """
         with contextlib.suppress(Exception):
             self._settle_holds()
+        self._pc_reconcile_soon()                       # kicks on a new death
         if self.self_id():
+            self._pc_kick()
             return []
         mine = self._role_of(self.session())
         taken = []
@@ -4963,6 +5492,9 @@ class Runner:
                     taken.append(node.id)
             except Exception as exc:
                 await self._unadoptable(node, exc)
+        # PC-R3a (review finding 8): the liveness reconciliation drains too —
+        # a slot freed by a death nobody announced is found here.
+        self._pc_kick()
         return taken
 
     async def _unadoptable(self, node, exc: Exception) -> None:
@@ -5095,7 +5627,10 @@ class Runner:
             self.tree.update(node.id, adopted_at=now())
             self.tree.set_status(node.id, "running", "adopted")
             self.tree.emit(node.id, "adopted", pid=node.pid)
-        run.task = asyncio.create_task(self._consume(run))
+        # PC-R3f (round 3, finding 5): the adopter's post-mortem holds the
+        # slot, whether the wrapper still runs or has already exited.
+        run.slot_token = self._launch_slot_owner(node.id, provider.name)
+        run.task = asyncio.create_task(self._supervise(run))
         if live:
             asyncio.create_task(self._wrap_up_watch(node.id))
             self._start_credential_watch()
@@ -5117,6 +5652,26 @@ class Runner:
     async def shutdown(self, *, detach: bool) -> None:
         """This server is going. SV-R3: a root server leaves its agents
         running and says so; a nested one ends them, as it always has."""
+        # PC (round 6, finding 3): no drain dispatches and no reconciliation
+        # kicks from here on; the reconciliation task is ended BEFORE the
+        # runs are captured, so nothing it confirms can launch work now.
+        self.__dict__["_pc_shutting_down"] = True
+        for waiter in list(self.__dict__.get("_pc_waiters", ())):
+            # Consults waiting for a slot wake to the flag and end.
+            if not waiter.done():
+                with contextlib.suppress(RuntimeError):
+                    waiter.get_loop().call_soon_threadsafe(
+                        lambda w=waiter: w.done() or w.set_result(None))
+        task = self.__dict__.get("_pc_reconcile_task")
+        if task is not None and not task.done():
+            try:
+                same_loop = task.get_loop() is asyncio.get_running_loop()
+            except RuntimeError:
+                same_loop = False
+            if same_loop:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
         runs = [run for run in self.runs.values() if run.task and not run.task.done()]
         for run in runs:
             run.detaching = detach
@@ -5205,12 +5760,16 @@ class Runner:
             # nothing stopped the process it was about to read.
             if run.handle and run.handle.returncode is None:
                 await run.handle.stop()
+            # Nor ended the post-mortem claim its launch set (PC-R3f).
+            with contextlib.suppress(Exception):
+                self._end_slot_claim(agent_id, run.slot_token)
             if not internal:
                 # Nor does a cancelled run reach the release at the end of
                 # `_consume`, and whoever waits on it (consult, a drain) would
                 # wait forever on a run that has ended. steer's internal stop
                 # is not an end: it relaunches.
                 run.done.set()
+                self._pc_kick(run.provider.name)
         elif run and run.handle:
             await run.handle.stop()
         else:
@@ -5234,13 +5793,19 @@ class Runner:
         return {"agent_id": agent_id, "status": "cancelled"}
 
     @_admitted("the steer")
-    async def steer(self, agent_id: str, message: str) -> dict[str, Any]:
+    async def steer(self, agent_id: str, message: str,
+                    queued: dict | None = None) -> dict[str, Any]:
         """Redirect a running agent.
 
         A subprocess cannot be injected into mid-run, so the honest equivalent
         is to stop the current turn and resume the same session with the
         steering text. The agent keeps its context because both CLIs support
         resuming by session id.
+
+        PC-R3b: a live run keeps its own slot across the handoff; a run that
+        holds none (a resume) is admitted on its own provider, and queued
+        there when it is full — never moved. `queued` is that resume's entry,
+        being drained (PC-R3a).
         """
         node = self.tree.get(agent_id)
         if node is None:
@@ -5448,9 +6013,54 @@ class Runner:
             # happen.
             return {"agent_id": agent_id, "steered": False,
                     "error": _held_refusal(agent_id)}
+        # PC-R3/R3b: the slot, decided before anything is claimed or stopped.
+        queued_id = (queued or {}).get("id") or ""
+        current = self.tree.get(agent_id) or node
+        live = self._holds_slot(agent_id)
+        limited = self._pc_limit(provider.name) is not None
+        reserved_from = None          # the status a resume's reservation replaced
+        if live:
+            if queued_id:
+                # Resumed by other means while it waited: it has its slot.
+                self.tree.exit_deferred(queued_id, "restarted", agent_id=agent_id)
+        else:
+            # PC-R2a: a resume takes a tree-wide and a provider slot, in one
+            # transaction, whether or not the provider is limited.
+            try:
+                reserved_from = self._pc_reserve_resume(spec, current, provider.name,
+                                                        queued_id)
+            except ProviderFull as full:
+                if queued_id:
+                    return {"agent_id": agent_id, "steered": False, "pc_full": True,
+                            "gone": full.gone, "reason": str(full)}
+                entry = self.tree.enqueue(
+                    provider.name,
+                    {"op": "resume", "node_id": agent_id, "agent": node.agent,
+                     "session_id": node.session_id, "model": spec.model,
+                     "pinned": bool(node.model_pinned), "effort": spec.effort or "",
+                     "message": message, "task": message},
+                    str(full), deferred_by=self.self_id(),
+                    dispatcher=self._owner_fields())
+                self._pc_kick(provider.name)
+                return {"agent_id": agent_id, "steered": False, "deferred": True,
+                        "queued": True, "reason": str(full),
+                        "deferred_id": entry["id"], "provider": provider.name,
+                        "note": f"queued on {provider.name}, where this run's "
+                                f"session lives ({PC_CAUSE}); it resumes by itself "
+                                f"when a slot frees there. cancel_deferred removes it."}
+            except RuntimeError as exc:
+                # The tree is full: refused like a start, before anything moves.
+                return {"agent_id": agent_id, "steered": False, "error": str(exc),
+                        **({"blocked": True} if queued_id else {})}
         try:
             startup_token = self.startup.claim(provider.name, agent_id)
         except StartupUnavailable as exc:
+            self._pc_unreserve(agent_id, reserved_from)
+            if queued_id:
+                # Review finding 9: the claimed entry goes back, in its place.
+                self.tree.restore_deferred(queued)
+                return {"agent_id": agent_id, "steered": False, "blocked": True,
+                        "reason": exc.reason, "retry_after": exc.retry_after}
             refusal = {
                 "agent_id": agent_id, "steered": False, "reason": exc.reason,
                 "error": f"provider {provider.name!r} is {exc.reason}, so the "
@@ -5464,11 +6074,19 @@ class Runner:
         # `internal=True`: this ends the turn to respawn the very same run, not
         # a cancellation, and must not report the run as `cancelled` while
         # that is in flight (bug-8195f2) — see `run.internal_stop`.
+        if live and limited:
+            # PC-R3b: the run keeps its slot across the handoff. `pending`
+            # always holds one, so the gap between the old process's death
+            # and the new one's start is not a free slot to anyone else.
+            reserved_from = self._pc_hold_slot(agent_id)
         try:
             await self.stop(agent_id, internal=True)
         except BaseException:
             # Nothing was relaunched, so nothing will release the claim above.
             self._startup_finish(provider.name, agent_id, startup_token)
+            self._pc_unreserve(agent_id, reserved_from)
+            if queued_id and not live:
+                self.tree.restore_deferred(queued)
             raise
         try:
             await self._launch(
@@ -5548,6 +6166,61 @@ class Runner:
                 f"one looks like. Check it again before assuming the steer landed; "
                 f"if it is still silent, stop_agent keeps the branch and worktree.")
         return result
+
+    def _holds_slot(self, node_id: str) -> bool:
+        """Does this node hold a slot now, by the one counting rule?"""
+        raw = self.tree.read()["nodes"].get(node_id)
+        return raw is not None and any(True for _ in self._occupying({node_id: raw}))
+
+    def _pc_reserve_resume(self, spec: AgentSpec, node: Node, provider: str,
+                           queued_id: str) -> str:
+        """PC-R2a/R3: a relaunch's slots — tree-wide and provider — reserved
+        in one transaction with their checks (and with the claim of its queue
+        entry, when drained): the node is written `pending`, owned by this
+        server until its process runs. Returns the status it replaced, for
+        `_pc_unreserve`; raises ProviderFull, or the tree-wide refusal
+        (RuntimeError) exactly as start() would."""
+        self._settle_holds()
+        max_concurrent = int(self.config.limits.get("max_concurrent", 4))
+        prior, full = "", None
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node.id)
+            prior = (entry or {}).get("status", "")
+            active = self._occupants(data["nodes"], exclude=node.id)
+            if active < max_concurrent:
+                full = self._pc_admit(data, provider, node.id, queued_id)
+                if full is None and entry is not None:
+                    entry["status"] = "pending"
+                    entry["slot_owner"] = self._slot_claim("reservation")
+        if active >= max_concurrent:
+            raise self._refuse_full(spec, active, max_concurrent)
+        if full is not None:
+            raise full
+        if queued_id:
+            self._pc_dequeued(queued_id, provider, node.id, "resume")
+        return prior
+
+    def _pc_hold_slot(self, node_id: str) -> str | None:
+        """PC-R3b: pin a live run's slot for the steer handoff."""
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            if entry is None or entry.get("status") not in ACTIVE:
+                return None
+            prior = entry.get("status", "")
+            entry["status"] = "pending"
+            entry["slot_owner"] = self._slot_claim("reservation")
+            return prior
+
+    def _pc_unreserve(self, node_id: str, prior: str | None) -> None:
+        """Give back a reservation the steer did not use: only a node still
+        `pending` is touched (once running, the slot is the run's)."""
+        if prior is None:
+            return
+        with self.tree.transaction() as data:
+            entry = data["nodes"].get(node_id)
+            if entry is not None and entry.get("status") == "pending":
+                entry["status"] = prior
+                entry["slot_owner"] = None
 
     def _missing_session(self, node, spec: AgentSpec, provider: Provider,
                          cwd: Path) -> str:
@@ -5851,13 +6524,18 @@ class Runner:
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
         # Waiting for the other turn is bounded by how long that turn may run.
-        wait = (self.config.effective_limits(spec, timeout)["timeout"]["value"]
-                + self.CONSULT_LOCK_SLACK_SECONDS)
+        # PC-R3b: ONE deadline covers that wait, the wait for a provider slot
+        # and the reply; the slot is waited for no longer than the consult's
+        # own timeout.
+        limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
+        began = time.monotonic()
+        wait = limit + self.CONSULT_LOCK_SLACK_SECONDS
         try:
             async with self._conversation_turn(agent_name, wait) as ours:
                 if ours:
                     return await self._consult_turn(agent_name, spec, message,
-                                                    timeout)
+                                                    timeout, slot_by=began + limit,
+                                                    deadline=began + wait)
                 error = (f"{agent_name!r} was still answering another consult "
                          f"after {wait:.0f}s; this one did not run")
         except _ConsultLockError as exc:
@@ -5868,18 +6546,93 @@ class Runner:
 
     async def _consult_turn(
         self, agent_name: str, spec: AgentSpec, message: str, timeout: int | None,
+        slot_by: float | None = None, deadline: float | None = None,
     ) -> dict[str, Any]:
         """One turn, admitted through the safe-point gate (CW-R2) — counted
         while the worktree is refreshed and the turn launched, not while the
-        reply is awaited."""
-        await self.gate.wait_granted()
-        with self.gate.enter(f"the consult of {agent_name}") as ticket:
-            return await self._consult_turn_admitted(agent_name, spec, message,
-                                                     timeout, ticket)
+        reply is awaited.
+
+        PC-R3/R3b: on a full provider the turn waits for a slot — outside
+        the gate, holding nothing but its place in the provider's queue — up
+        to `slot_by`. A release in this process wakes it; one elsewhere is
+        seen at the next reconciliation. When the time runs out the waiter
+        leaves the queue and the error names the provider, its limit and the
+        slot holders, and says so when the caller is one of them."""
+        waiter = ""
+        refused: ProviderFull | None = None
+        try:
+            while True:
+                await self.gate.wait_granted()
+                if self.__dict__.get("_pc_shutting_down"):
+                    # Round 7: a consult waiting for a slot ends with the server.
+                    node = self._find_conversation(agent_name)
+                    return self._consult_result(
+                        agent_name, node.id if node else None, None,
+                        error=f"{agent_name!r}: {SHUT_TEXT}")
+                if deadline is not None and time.monotonic() >= deadline:
+                    node = self._find_conversation(agent_name)
+                    return self._consult_result(
+                        agent_name, node.id if node else None, None,
+                        error=f"{agent_name!r}: the consult's deadline passed "
+                              f"before its turn could be admitted; nothing was launched")
+                with self.gate.enter(f"the consult of {agent_name}") as ticket:
+                    try:
+                        return await self._consult_turn_admitted(
+                            agent_name, spec, message, timeout, ticket,
+                            waiter=waiter, deadline=deadline)
+                    except ProviderFull as full:
+                        refused = full
+                if refused.gone:
+                    waiter = ""             # cancelled from the queue: rejoin
+                if not waiter:
+                    waiter = self.tree.enqueue(
+                        refused.provider,
+                        {"op": "consult", "agent": agent_name, "task": message[:500]},
+                        str(refused), deferred_by=self.self_id(),
+                        claim={"pid": os.getpid(), "at": now(),
+                               "start": procs.start_time(os.getpid()) or ""})["id"]
+                remaining = (slot_by or 0) - time.monotonic()
+                if remaining <= 0:
+                    node = self._find_conversation(agent_name)
+                    return self._consult_result(
+                        agent_name, node.id if node else None, None,
+                        error=self._pc_consult_error(agent_name, refused))
+                # Round 5, finding 1: a waiting consult reconciles too — a
+                # nested server has no adoption loop to do it for it.
+                self._pc_reconcile_soon()
+                await self._pc_wait(min(remaining, PC_RECONCILE_SECONDS))
+        finally:
+            if waiter and find_deferred(self.tree.read()["deferred"], waiter):
+                self.tree.exit_deferred(waiter, "expired",
+                                        reason="the consult stopped waiting")
+                self.tree.emit("system", PC_CAUSE, action="expired",
+                               provider=refused.provider if refused else "",
+                               deferred_id=waiter)
+
+    def _pc_consult_error(self, agent_name: str, refused: ProviderFull) -> str:
+        """PC-R3b: why a consult never ran — the provider, its limit and who
+        holds its slots now; and, when the caller is one of them, that it is
+        waiting on itself."""
+        provider = refused.provider
+        limit = self._pc_limit(provider)
+        holders = self._slot_holders(self.tree.read()["nodes"]).get(provider, []) \
+            or refused.holders
+        text = (f"consult of {agent_name!r} got no slot on provider {provider!r} "
+                f"before its deadline ({PC_CAUSE}): max_concurrent="
+                f"{limit if limit is not None else refused.limit}, slots held by "
+                f"{', '.join(holders) or 'nobody now (queued work is ahead)'}. "
+                f"Nothing was launched.")
+        me = self.self_id()
+        if me and me in holders:
+            text += (f" The caller ({me}) itself holds one of those slots: it is "
+                     f"waiting for a slot its own run occupies, a deadlock with "
+                     f"this limit. Consult from a run on another provider, or "
+                     f"raise max_concurrent for {provider}.")
+        return text
 
     async def _consult_turn_admitted(
         self, agent_name: str, spec: AgentSpec, message: str, timeout: int | None,
-        ticket,
+        ticket, waiter: str = "", deadline: float | None = None,
     ) -> dict[str, Any]:
         node = self._find_conversation(agent_name)
         turn = 1
@@ -5940,13 +6693,23 @@ class Runner:
                 effort=spec.effort or "",
                 limits=self.config.effective_limits(spec), session=self.session(),
             )
-            if self.authority:
-                self.authority.add(node)
-            gitops.create_worktree(self.paths.root, worktree_path, branch, base,
-                                   unique=False)
-            head = gitops.head_sha(worktree_path)
-            node = replace(node, placed_on=head)
-            self.tree.add(node)
+            # PC-R2a: the first turn's node enters the tree with its slots —
+            # tree-wide and provider — in one transaction, before anything
+            # is cut for it; a full provider raises ProviderFull here, with
+            # nothing to undo.
+            self._admission_add(spec, node, waiter)
+            try:
+                if self.authority:
+                    self.authority.add(node)
+                gitops.create_worktree(self.paths.root, worktree_path, branch, base,
+                                       unique=False)
+                head = gitops.head_sha(worktree_path)
+                node = replace(node, placed_on=head)
+                self.tree.update(node_id, placed_on=head)
+            except BaseException as exc:
+                self._mark_launch_failed(
+                    node_id, f"consult did not launch: {type(exc).__name__}: {exc}")
+                raise
             prompt = self.compose_prompt(spec, message, node, worktree_path)
             session_id = None
             if replaced is not None:
@@ -5967,8 +6730,8 @@ class Runner:
             # frees. A new conversation is already checked, in `_preflight`.
             # RM-R1a: the check and the reservation are one transaction, so
             # the slot is ours from this moment; every exit below that does
-            # not launch gives it back.
-            self._admission_reserved(spec, node)
+            # not launch gives it back. PC-R2a: the provider slot too.
+            self._admission_reserved(spec, node, waiter)
             reserved = node_id
             try:
                 node = self.authoritative(node, "conversation_refresh")
@@ -6106,6 +6869,25 @@ class Runner:
             if reserved:
                 self._release_reserved_slot(node_id)
             raise
+        if self.__dict__.get("_pc_shutting_down"):
+            # Round 7: the server is shutting down — the reservation goes
+            # back and nothing launches.
+            if reserved:
+                self._release_reserved_slot(node_id)
+            else:
+                self._mark_launch_failed(node_id, SHUT_TEXT)
+            return self._consult_result(agent_name, node_id, None, view,
+                                        error=SHUT_TEXT)
+        if deadline is not None and time.monotonic() >= deadline:
+            # PC-R3b (review finding 11): never launch past the one deadline.
+            if reserved:
+                self._release_reserved_slot(node_id)
+            else:
+                self._mark_launch_failed(node_id, "consult deadline passed before launch")
+            return self._consult_result(agent_name, node_id, None, view,
+                                        timed_out=True,
+                                        error="the consult's deadline passed before "
+                                              "its turn launched; nothing was run")
         try:
             run = await self._launch(
                 node_id=node_id, spec=spec, provider=provider, prompt=prompt,
@@ -6133,8 +6915,12 @@ class Runner:
         ticket.end()            # launched: the reply is not a transition
 
         limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
+        bound = limit + 30
+        if deadline is not None:
+            # PC-R3b: the reply shares the consult's one deadline.
+            bound = max(0.0, min(bound, deadline - time.monotonic()))
         try:
-            await asyncio.wait_for(run.done.wait(), timeout=limit + 30)
+            await asyncio.wait_for(run.done.wait(), timeout=bound)
         except (asyncio.TimeoutError, TimeoutError):
             await self.stop(node_id)
             return self._consult_result(agent_name, node_id, turn, view,
@@ -6241,7 +7027,7 @@ class Runner:
         if capacity["free_slots"] and capacity["running"]:
             capacity["note"] = (
                 f"{capacity['free_slots']} of {capacity['max_concurrent']} slots are "
-                f"idle. Waiting is only free when there is nothing else to start — "
+                f"idle. Waiting costs nothing only when there is nothing else to start — "
                 f"if any independent work exists (a different spec, a different set "
                 f"of files), start it before you wait again."
             )
@@ -6258,8 +7044,31 @@ class Runner:
         self._settle_holds()
         running = self._occupants(self.tree.read()["nodes"])
         limit = int(self.config.limits.get("max_concurrent", 4))
-        return {"running": running, "max_concurrent": limit,
-                "free_slots": max(0, limit - running)}
+        result = {"running": running, "max_concurrent": limit,
+                  "free_slots": max(0, limit - running)}
+        # PC-R4: which providers have no free slot, named only when any.
+        full = sorted(name for name, row in self.provider_slots().items() if row["full"])
+        if full:
+            result["full_providers"] = full
+        return result
+
+    def provider_slots(self) -> dict[str, dict[str, Any]]:
+        """PC-R4: each limited provider (or one with work still queued): its
+        limit, the slots in use and who holds them, and its queue length."""
+        data = self.tree.read()
+        holders = self._slot_holders(data["nodes"])
+        out: dict[str, dict[str, Any]] = {}
+        for name, here in self.providers.items():
+            queue = pc_waiting(data["deferred"], name)
+            if here.max_concurrent is None and not queue:
+                continue
+            held = holders.get(name, [])
+            out[name] = {"max_concurrent": here.max_concurrent,
+                         "in_use": len(held), "slot_holders": held,
+                         "queued": len(queue),
+                         "full": here.max_concurrent is not None
+                         and len(held) >= here.max_concurrent}
+        return out
 
     def _recover_stale_restarts(self) -> list[dict[str, Any]]:
         """Settle `restarting` entries whose claimer pid is dead (DQ-R8).
@@ -6331,6 +7140,330 @@ class Runner:
             self.tree.exit_deferred(entry["id"], "restarted", agent_id=carrier["id"])
         else:
             self.tree.requeue_deferred(entry["id"], claim)
+
+    # ------------------------------------------------- provider queue (PC) --
+
+    def _pc_kick(self, provider: str = "") -> None:
+        """PC-R3a: a slot may have freed (or a limit moved): wake the consults
+        waiting in this process, and drain the queue soon — the release-driven
+        half of draining. Never raises; outside an event loop it only wakes.
+        Nothing at all once shutdown has begun (round 7)."""
+        if self.__dict__.get("_pc_shutting_down"):
+            return
+        for waiter in list(self.__dict__.get("_pc_waiters", ())):
+            if not waiter.done():
+                with contextlib.suppress(RuntimeError):
+                    waiter.get_loop().call_soon_threadsafe(
+                        lambda w=waiter: w.done() or w.set_result(None))
+        if self.gate.closed:
+            # Review finding 5: nothing is claimed while the server stops.
+            return
+        # A release or a refused admission is also when a dead container run
+        # may be what holds the slot: reconcile (in the background, bounded).
+        self._pc_reconcile_soon()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            if not pc_waiting(self.tree.read()["deferred"]):
+                return
+        except Exception:
+            return
+        current = self.__dict__.get("_pc_drain_task")
+        if current is not None and not current.done() and current.get_loop() is loop:
+            self.__dict__["_pc_drain_again"] = True
+            return
+        self.__dict__["_pc_drain_task"] = loop.create_task(self._drain_all())
+
+    async def _pc_wait(self, seconds: float) -> None:
+        """Sleep until a release in this process wakes us, or `seconds`
+        (the cross-process reconciliation interval) pass."""
+        waiter = asyncio.get_running_loop().create_future()
+        waiters = self.__dict__.setdefault("_pc_waiters", set())
+        waiters.add(waiter)
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter), max(0.0, seconds))
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+        finally:
+            waiters.discard(waiter)
+
+    def _pc_mine(self, entry: dict) -> bool:
+        """Which server launches a queued entry: a server of the identity
+        that queued it (any root server for the root's), whose permissions
+        and executor context the launch then has. Ownership follows the
+        SERVER (review finding 7): once the server that queued it
+        (`dispatcher`, pid and start time) is gone — even with its agent
+        still running — a root server takes it over, launching it under the
+        recorded parent and depth, never as the root's own child."""
+        owner = entry.get("deferred_by")
+        me = self.self_id()
+        if owner == me:
+            return True
+        if me is not None:
+            return False
+        dispatcher = entry.get("dispatcher")
+        return not (isinstance(dispatcher, dict) and _owner_alive(dispatcher))
+
+    async def _pc_dispatch(self, entry: dict) -> tuple[str, Any]:
+        """Launch one queued entry through the path its operation names: a
+        start through `start`, a resume through `steer` (never as a fresh
+        start, PC-R3a). Answers launched / full / gone / blocked / refused."""
+        spec = entry.get("spec") or {}
+        op = spec.get("op") or "start"
+        agent = spec.get("agent")
+        if op == "retry":
+            return await self._pc_retry_launch(entry)
+        try:
+            if op == "resume":
+                node_id = spec.get("node_id") or ""
+                result = await self.steer(node_id, spec.get("message") or "",
+                                          queued=entry)
+            else:
+                if not agent or agent not in self.config.agents:
+                    return "refused", "agent is no longer in agents.yaml"
+                invalid = self._pc_recorded_model_problem(spec)
+                if invalid:
+                    # PC-R3d: never re-resolved; held, and reported, until
+                    # the model is valid there again or the entry is cancelled.
+                    return "blocked", {"reason": invalid}
+                result = await self.start(
+                    agent, spec.get("task") or "", workdir=spec.get("workdir"),
+                    timeout=spec.get("timeout"),
+                    # PC-R3d: the model recorded at queuing, pinned or not.
+                    model=spec.get("model") or None,
+                    verifies=spec.get("verifies") or "",
+                    budget_tag=spec.get("budget_tag") or "",
+                    deferred_id=entry["id"], queued=entry)
+        except (ValueError, PermissionError, KeyError) as exc:
+            return "refused", f"{agent or spec.get('node_id')}: {exc}"
+        except Exception as exc:
+            return "blocked", f"{type(exc).__name__}: {exc}"[:300]
+        if result.get("pc_full"):
+            return ("gone" if result.get("gone") else "full"), result
+        if result.get("blocked"):
+            return "blocked", {"reason": str(result.get("reason") or result.get("error") or ""),
+                               "retry_after": result.get("retry_after")}
+        if op == "resume":
+            # Claimed in the reservation's transaction: gone from the queue
+            # means it was admitted, whatever the launch then did.
+            if find_deferred(self.tree.read()["deferred"], entry["id"]) is None:
+                return "launched", {"agent": agent, "agent_id": spec.get("node_id")}
+            return "refused", str(result.get("error") or result.get("reason") or result)
+        if result.get("agent_id"):
+            return "launched", {"agent": agent, "agent_id": result["agent_id"]}
+        if result.get("retry_after"):
+            return "blocked", {"reason": str(result.get("reason") or result.get("error") or ""),
+                               "retry_after": result.get("retry_after")}
+        return "refused", str(result.get("error") or result.get("reason") or result)
+
+    def _pc_retry_admission(self, run: Run, node: Node, session_id: str) -> dict | None:
+        """PC-R3: admit a free retry on its own provider, or queue it.
+
+        Admitted, the node is written `pending` in the same transaction as
+        the checks — tree-wide and provider (PC-R2a) — and the slot is the
+        retry's until it runs; None is returned. Refused by the provider, an
+        `op: retry` entry is queued and the node is marked `failed` with the
+        entry named in its reason; the entry is returned. Refused by the
+        tree-wide limit, there is no retry: the node is marked `failed` with
+        that refusal, and a dict saying so is returned."""
+        provider = run.provider.name
+        try:
+            self._pc_reserve_resume(run.spec, node, provider, "")
+            return None
+        except RuntimeError as exc:
+            if not isinstance(exc, ProviderFull):
+                self.tree.set_status(
+                    node.id, "failed",
+                    f"died in {node.elapsed():.0f}s with no output; its free "
+                    f"retry was refused: {exc}")
+                return {"refused": str(exc)}
+            full = exc
+            entry = self.tree.enqueue(
+                provider,
+                {"op": "retry", "node_id": node.id, "agent": node.agent,
+                 "session_id": session_id or "", "model": run.spec.model,
+                 "pinned": bool(node.model_pinned), "task": node.task},
+                str(full), deferred_by=self.self_id(),
+                dispatcher=self._owner_fields())
+            self.tree.set_status(
+                node.id, "failed",
+                f"died in {node.elapsed():.0f}s with no output; its free retry "
+                f"is queued on {provider} ({PC_CAUSE}, {entry['id']})")
+            return entry
+
+    async def _pc_retry_launch(self, entry: dict) -> tuple[str, Any]:
+        """Dispatch a queued free retry: the same node, its original prompt,
+        relaunched once its slot is claimed (PC-R3a)."""
+        spec_ = entry.get("spec") or {}
+        node_id = spec_.get("node_id") or ""
+        node = self.tree.get(node_id)
+        if node is None or node.status != "failed" or entry["id"] not in (node.reason or ""):
+            return "refused", f"{node_id} is no longer waiting for its retry"
+        spec, provider = self._spec_of(node)
+        if self.gate.closed:
+            return "blocked", "the server is stopping for a safe point"
+        # Review finding 5: admitted through the gate BEFORE the entry is
+        # claimed, so a closed gate never costs the entry.
+        with self.gate.enter("the retry"):
+            try:
+                self._pc_reserve_resume(spec, node, provider.name, entry["id"])
+            except ProviderFull as full:
+                return ("gone" if full.gone else "full"), str(full)
+            except RuntimeError as exc:
+                return "blocked", str(exc)
+            try:
+                await self._launch(
+                    node_id=node_id, spec=spec, provider=provider,
+                    prompt=_run_read(self.paths.run_dir(node_id), "prompt.md"),
+                    workdir=Path(node.worktree), branch=node.branch,
+                    parent=node.parent, depth=node.depth,
+                    session_id=spec_.get("session_id") or None)
+            except Exception as exc:
+                self._mark_launch_failed(
+                    node_id, f"retry launch failed: {type(exc).__name__}: {exc}")
+                return "launched", {"agent": node.agent, "agent_id": node_id}
+        self.tree.set_status(node_id, "running",
+                             "retried once after an unexplained early exit")
+        return "launched", {"agent": node.agent, "agent_id": node_id}
+
+    def _pc_recorded_model_problem(self, spec: dict) -> str:
+        """PC-R3d: why the model a queued start recorded no longer runs on
+        its provider (allowlist or catalog), or "" when it still does."""
+        provider, model = spec.get("provider") or "", spec.get("model") or ""
+        if not model:
+            return ""
+        refusal = self._model_refusal(provider, model)
+        known = {m.get("id") for m in (self.config.models.get(provider) or [])
+                 if isinstance(m, dict)}
+        if not refusal and known and model not in known:
+            refusal = f"{provider} no longer lists {model!r} in its catalog"
+        return (f"the recorded model {model!r} is no longer valid on {provider}: "
+                f"{refusal}" if refusal else "")
+
+    def _pc_mark(self, entry_id: str, blocked: str, retry_at: Any = None) -> None:
+        """PC-R3a: record (or clear) why a head is skipped. It keeps its
+        place; reported once per reason, not on every drain. The verdict
+        holds until `blocked_until` — the refusal's own retry time when it
+        gave one, else one re-check interval — and is never trusted past it
+        (review finding 10): admission then counts the head as eligible
+        again, and the next drain re-evaluates it first."""
+        changed = False
+        until = now() + PC_BLOCKED_RECHECK_SECONDS
+        if isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool):
+            until = min(until, max(float(retry_at), now()))
+        with self.tree.transaction() as data:
+            entry = find_deferred(data["deferred"], entry_id)
+            if entry is not None:
+                if blocked:
+                    changed = (entry.get("blocked") or "") != blocked
+                    entry["blocked"] = blocked
+                    entry["blocked_until"] = until
+                else:
+                    entry.pop("blocked", None)
+                    entry.pop("blocked_until", None)
+                provider = (entry.get("spec") or {}).get("provider")
+        if changed and blocked:
+            self.tree.emit("system", PC_CAUSE, action="blocked", provider=provider,
+                           deferred_id=entry_id, reason=blocked)
+
+    async def _drain_provider(self, provider: str) -> list[dict]:
+        """PC-R3a: launch this provider's queue in order while it has slots.
+
+        A head blocked for another reason is skipped without losing its
+        place; a head this process may not launch (another agent's, or a
+        consult that serves itself) stops the walk, since nothing may pass
+        it. Claiming an entry is its admission (`_pc_admit`)."""
+        launched: list[dict] = []
+        while True:
+            data = self.tree.read()
+            queue = pc_waiting(data["deferred"], provider)
+            limit = self._pc_limit(provider)
+            if not queue or (limit is not None and len(
+                    self._slot_holders(data["nodes"]).get(provider, [])) >= limit):
+                return launched
+            progressed = False
+            for entry in queue:
+                if self.gate.closed or self.__dict__.get("_pc_shutting_down"):
+                    return launched                 # review finding 5; round 6, 3
+                claim = entry.get("claim")
+                if isinstance(claim, dict):
+                    if _claim_alive(claim):
+                        continue                    # it takes the slot itself
+                    self.tree.exit_deferred(entry["id"], "expired",
+                                            reason="its waiting consult ended")
+                    progressed = True
+                    break
+                if not self._pc_mine(entry):
+                    # Another live server's: it dispatches it. Not a reason to
+                    # stop here — admission alone decides what may pass it.
+                    continue
+                outcome, info = await self._pc_dispatch(entry)
+                if outcome == "launched":
+                    launched.append(info)
+                    progressed = True
+                    break
+                if outcome == "full":
+                    self._pc_mark(entry["id"], "")
+                    return launched
+                if outcome == "gone":
+                    progressed = True
+                    break
+                if outcome == "blocked":
+                    detail = info if isinstance(info, dict) else {"reason": str(info)}
+                    self._pc_mark(entry["id"],
+                                  detail.get("reason") or "refused for another reason",
+                                  detail.get("retry_after"))
+                    continue
+                reason = str(info)
+                self.tree.exit_deferred(entry["id"], "refused", reason=reason)
+                self.tree.emit("system", PC_CAUSE, action="refused", provider=provider,
+                               deferred_id=entry["id"], reason=reason)
+                progressed = True
+                break
+            if not progressed:
+                return launched
+
+    async def _drain_queues(self) -> list[dict]:
+        """PC-R3a: drain every provider's queue — at a release, at every
+        `wait_for_agents`, and as reconciliation (the count is re-derived from
+        the tree and pid liveness each time, so a death nobody announced
+        frees its slot here).
+
+        One drain at a time per process. A call that arrives during one
+        joins it — a `wait_for_agents` must not return while the queue it
+        drains is still being launched — and makes it look once more. The
+        drain itself is shielded: a caller that gives up does not cut a
+        launch in half."""
+        if self.gate.closed:
+            return []
+        loop = asyncio.get_running_loop()
+        current = self.__dict__.get("_pc_drain_task")
+        if current is not None and not current.done() and current.get_loop() is loop:
+            self.__dict__["_pc_drain_again"] = True
+            return list(await asyncio.shield(current))
+        task = loop.create_task(self._drain_all())
+        self.__dict__["_pc_drain_task"] = task
+        return list(await asyncio.shield(task))
+
+    async def _drain_all(self) -> list[dict]:
+        launched: list[dict] = []
+        # Round 5, finding 2: a drain never waits on container probes; the
+        # reconciliation runs beside it and kicks again on a death it confirms.
+        self._pc_reconcile_soon()
+        while True:
+            self.__dict__["_pc_drain_again"] = False
+            providers = dict.fromkeys(
+                (d.get("spec") or {}).get("provider")
+                for d in pc_waiting(self.tree.read()["deferred"]))
+            progressed = False
+            for provider in providers:
+                got = await self._drain_provider(provider or "")
+                launched += got
+                progressed = progressed or bool(got)
+            if not progressed and not self.__dict__.get("_pc_drain_again"):
+                return launched
 
     async def resume_deferred(self) -> dict[str, Any]:
         """Restart tasks whose quota window has passed. Safe to call often.
@@ -6528,6 +7661,14 @@ class Runner:
         # invisible to active(), so without this an orchestrator polling for
         # work is told there is none while tasks sit ready to restart.
         revived = await self.resume_deferred()
+        # PC-R3a: the provider queues drain here too, whatever the pause.
+        drained = await self._drain_queues()
+        if drained:
+            revived = dict(revived, restarted=list(revived.get("restarted", [])) + drained)
+            revived["still_deferred"] = sum(
+                1 for d in self.tree.read()["deferred"]
+                if isinstance(d, dict) and not deferred_malformed(d)
+                and d.get("status", "waiting") == "waiting")
         result = await self._wait_for_any(agent_ids, timeout, revived)
         # DQ-R2: the drain's outcome rides on every result that followed one —
         # the "no active agents" and timeout returns included, which is where

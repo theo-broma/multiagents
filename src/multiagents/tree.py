@@ -118,6 +118,29 @@ def now() -> float:
     return time.time()
 
 
+# PC-R3: the cause of a deferred entry queued behind a full provider, and the
+# kind of the event recorded when one is queued and when it leaves the queue.
+PC_CAUSE = "provider_concurrency"
+
+
+def pc_waiting(entries: Iterable[Any], provider: str | None = None) -> list[dict]:
+    """The waiting provider-concurrency entries, in FIFO order (PC-R3a),
+    for one provider or all of them. Malformed entries are skipped (DQ-R9)."""
+    out = [d for d in entries
+           if isinstance(d, dict) and not deferred_malformed(d)
+           and d.get("cause") == PC_CAUSE
+           and d.get("status", "waiting") == "waiting"
+           and (provider is None or (d.get("spec") or {}).get("provider") == provider)]
+    return sorted(out, key=lambda d: (d["seq"], _number(d.get("queued_at"))))
+
+
+def _number(value: Any) -> float:
+    """A sort key that never raises on a value another process wrote."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
 def deferred_malformed(entry: Any) -> bool:
     """Whether a deferred queue entry is too broken to act on (DQ-R9).
 
@@ -135,6 +158,12 @@ def deferred_malformed(entry: Any) -> bool:
     retry = entry.get("retry_after")
     if isinstance(retry, bool) or not isinstance(retry, (int, float)):
         return True
+    if entry.get("cause") == PC_CAUSE:
+        # PC-R3a: the FIFO order is `seq`; an entry without a usable one
+        # cannot be placed, so it is malformed (skipped and reported).
+        seq = entry.get("seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+            return True
     claim = entry.get("claim")
     if claim is not None and (not isinstance(claim, dict)
                               or isinstance(claim.get("pid"), bool)
@@ -179,6 +208,18 @@ class Node:
     # counts it in every Runner, whatever the pid's liveness: the hold is
     # tree state, not one process's memory.
     cleanup_hold: dict | None = None
+    # PC-R2a: who holds this node's slot while no process of its own does —
+    # a pre-launch reservation (`kind: reservation`) or the post-mortem of a
+    # run that has exited (`kind: finalizing`): `{"kind", "owner_pid",
+    # "owner_start", "owner"}`. It counts while that server lives, and a
+    # `pending` reservation whose server died counts no more, so a crash
+    # between reserving and launching never strands the slot.
+    slot_owner: dict | None = None
+    # PC-R2a: where the recorded process runs — `{"kind": "local"}` or
+    # `{"kind": "docker", "container": ...}` — written with `pid` at launch,
+    # so a dead local pid (a host `docker exec` client) is never taken for
+    # the end of a run whose wrapper lives on in its container.
+    exec_identity: dict | None = None
     children: list[str] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
     steps: int = 0
@@ -1183,6 +1224,51 @@ class Tree:
         self.emit(spec.get("agent", "?"), "deferred", reason=reason, retry_after=retry_after)
         return record
 
+    def enqueue(self, provider: str, spec: dict, reason: str,
+                deferred_by: str | None = None, claim: dict | None = None,
+                dispatcher: dict | None = None) -> dict:
+        """PC-R3a: queue work behind a full provider, durably.
+
+        An entry of the deferred queue with the cause `provider_concurrency`:
+        it is listed and cancelled like any other, but it has no window —
+        it leaves when a slot frees (`Runner._drain_queues`), never by
+        `due_deferred`. `seq` is per provider, increasing, and written in the
+        transaction that appends the entry, so FIFO order survives a restart
+        and two processes never draw the same number. `claim` marks an entry
+        its own waiting process serves (a consult), with that process's pid.
+        """
+        with self.transaction() as data:
+            counters = data.setdefault("pc_seq", {})
+            seq = int(counters.get(provider) or 0) + 1
+            counters[provider] = seq
+            record = {"id": "df-" + uuid.uuid4().hex[:6],
+                      "spec": dict(spec, provider=provider),
+                      "cause": PC_CAUSE, "seq": seq,
+                      "retry_after": now(), "reason": reason, "queued_at": now(),
+                      "status": "waiting", "deferred_by": deferred_by}
+            if claim is not None:
+                record["claim"] = claim
+            if dispatcher is not None:
+                # The server that queued it, which dispatches it while it
+                # lives; once it is gone a root server takes it over.
+                record["dispatcher"] = dispatcher
+            data["deferred"].append(record)
+        self.emit(spec.get("node_id") or spec.get("agent") or "?", PC_CAUSE,
+                  action="queued", provider=provider, deferred_id=record["id"],
+                  op=spec.get("op"), seq=seq, reason=reason)
+        return record
+
+    def restore_deferred(self, entry: dict | None) -> bool:
+        """Put back a provider-concurrency entry that was claimed but whose
+        launch never happened — same id, same `seq`, so the same place."""
+        if not isinstance(entry, dict) or not entry.get("id"):
+            return False
+        with self.transaction() as data:
+            if find_deferred(data["deferred"], entry["id"]) is not None:
+                return False
+            data["deferred"].append(dict(entry))
+        return True
+
     def due_deferred(self) -> list[dict]:
         """Waiting entries whose window has passed. **Does not remove them.**
 
@@ -1197,6 +1283,7 @@ class Tree:
         return [d for d in self.read()["deferred"]
                 if isinstance(d, dict) and not deferred_malformed(d)
                 and d.get("status", "waiting") == "waiting"
+                and d.get("cause") != PC_CAUSE
                 and d["retry_after"] <= current]
 
     def claim_deferred(self, deferred_id: str) -> dict | None:
@@ -1284,8 +1371,11 @@ class Tree:
                     entry["node_id"] = fields["node_id"]
             else:
                 data["deferred"] = [d for d in data["deferred"] if d is not entry]
+            # PC-R3a: an entry queued behind a full provider set no pause, so
+            # it holds none either.
             holding = any(isinstance(d, dict) and not deferred_malformed(d)
                           and d.get("status", "waiting") in ("waiting", "restarting")
+                          and d.get("cause") != PC_CAUSE
                           for d in data["deferred"])
             if not holding and (data.get("pause") or {}).get("deferral"):
                 data["pause"] = {}
