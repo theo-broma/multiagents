@@ -3547,3 +3547,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Tests:** 275 green.
   - **Flake:** `test_rc_r4_half_open_probe_free_steer_may_take_it_and_resolves_it` flaked once under load.
   - **Review:** reviewer round 3 is ag-1ef2a0.
+- **SC review round 3:** reviewer ag-1ef2a0 rejected with 6 findings (2 P1, 4 P2). They are in the pending-charge path and crash recovery.
+  - P1: a failed pending flush still admits.
+  - P1: the 5 s cache hides another process's pending charge.
+  - P2: recovering a past-period charge stops current runs.
+  - P2: a torn event line counts as delivered.
+  - P2: a failed `record_stop` is never retried.
+  - P2: a reroute duplicates the `deferred_id`.
+  - All six were steered back to ag-8362a3, asking for simplification over patching.
