@@ -255,21 +255,36 @@ def test_claude_builtin_fallback_ignores_the_callers_config_dir(tmp_path, monkey
     assert "credentials are missing or expired" in b.note
 
 
-def test_a_second_named_claude_account_gets_no_builtin_at_all(tmp_path):
-    # Following from the same root cause: budget._BUILTIN is keyed on the
-    # literal name "claude". A second account configured via `extends:
-    # claude` under a different name (the harness's own
-    # test_load_providers_folds_extends_for_a_second_account pattern) never
-    # matches that key, so it gets neither a real reading NOR the home
-    # fallback — just permanent "no built-in reader", forever known=False.
+def test_a_second_named_claude_account_reads_its_own_profile_through_extends(tmp_path, monkeypatch):
+    # CB, 2026-10-02: reader inherited through extends
+    # The built-in reader is resolved through `extends`, and called with the
+    # instance's own profile directory (the variable named by the provider's
+    # `budget_profile_env`, read from the instance's resolved env) -- never the
+    # base account's, and never the home fallback.
     h.invalidate_cache()
-    provider = h.load_providers({
-        "claude": {"bin": "claude", "script": "claude.sh"},
-        "claude-work": {"extends": "claude", "env": {"CLAUDE_CONFIG_DIR": "/work"}},
-    })["claude-work"]
+    own = h.claude_profile_dir(
+        tmp_path / "work", access_token="tok",
+        cached_usage={"limits": [{"percent": 10.0, "resets_at": "2099-01-01T00:00:00+00:00"}]},
+    )
+    other = h.claude_profile_dir(
+        tmp_path / "base", access_token="tok",
+        cached_usage={"limits": [{"percent": 90.0, "resets_at": "2099-01-01T00:00:00+00:00"}]},
+    )
+    decoy = tmp_path / "decoy-home"
+    decoy.mkdir()
+    monkeypatch.setattr(h.budget_mod, "CLAUDE_STATE", decoy / ".claude.json")
+    monkeypatch.setattr(h.budget_mod, "CLAUDE_CREDENTIALS", decoy / ".credentials.json")
+    providers = h.load_providers({
+        "claude": {"bin": "claude", "script": "claude.sh",
+                   "budget_profile_env": "CLAUDE_CONFIG_DIR",
+                   "env": {"CLAUDE_CONFIG_DIR": str(other)}},
+        "claude-work": {"extends": "claude", "env": {"CLAUDE_CONFIG_DIR": str(own)}},
+    })
     h.case_script(tmp_path, "claude.sh", "budget) exit 64 ;;")   # inherited script name
-    b = h.read_provider("claude-work", provider, h.FakeExecutor(), tmp_path, use_cache=False)
-    assert (b.known, b.source, b.note) == (False, "none", "no budget action and no built-in reader")
+    b = h.read_provider("claude-work", providers["claude-work"], h.FakeExecutor(),
+                        tmp_path, use_cache=False, providers=providers)
+    assert b.known is True
+    assert b.headroom == pytest.approx(0.9)   # its 10% used, not the base's 90%
 
 
 # ===========================================================================
