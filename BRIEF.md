@@ -3461,3 +3461,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **Next:** reviewer round 3.
 - **bug-ba55a9 part 1 (BA-R1/R2, `gitops.py`):** merged as 10ae24f after one review round. ag-d60f42 found one P1: a failed `ls-files` check let the commit through. It is fixed and I read the fix myself.
 - **BA-R3 (runner event and result text):** still to do after PC merges.
+- **PC round-2 fixes are done.** Commits a342904 and 1a4a5d5. The PC suite is at 105/107.
+- **Tester ag-c78ca1** is fixing the R3d robustness test. Its config is invalid: `advisor` still names `acme/m1`.
+- **Reviewer round 3** is ag-f2696d.
