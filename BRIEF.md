@@ -3847,3 +3847,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Started:** FO codex reviewer round 2 (ag-55f4e1, `verifies=ag-12d4f1`) and SF loop-reviewer round 5 (ag-d38d1c, `verifies=ag-1827ab`).
   - **Steered ag-ba1672** to verify and complete CB WIP 851e1a0, then commit.
   - **User decision:** all implementer tiers are now at `variant: max` in agents.yaml. ag-ba1672, being a steered run, keeps its old variant.
+  - **FO codex round 2 (ag-55f4e1): REQUEST_CHANGES.** R3b, R1b and R1c are confirmed fixed. Two new defects were reproduced, and both fall under the existing contract:
+    - P2: fractional option values such as `max_budget_usd: 0.5` are dropped by `_launch`, which keeps only str/int extras;
+    - P3: a `provider` key escapes the FO-R3a warning when P's `spawn.optional` declares a `provider` placeholder.
+  - **Steered ag-12d4f1 for FO round 5,** with regression tests in a new file, `tests/test_fo_round5.py`. NEXT: loop-reviewer, then codex round 3, then merge.
+  - Codex could not create a detached worktree (its sandbox mounts the repo's git metadata read-only), so its suite runs rely on the loop-reviewer.
