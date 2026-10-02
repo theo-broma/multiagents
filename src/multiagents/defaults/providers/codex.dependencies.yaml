@@ -599,6 +599,12 @@ dependencies:
   match: exact
   used_by:
   - src/multiagents/defaults/providers/codex.py::_rpc_error_kind
+- id: text_match.this-content-was-flagged-for-possible-risk
+  kind: text_match
+  value: This content was flagged for possible .* risk.*
+  match: exact
+  used_by:
+  - providers.yaml#/codex/refusal_markers/0
 verified: []
 not_dependencies:
 - selector: /spawn

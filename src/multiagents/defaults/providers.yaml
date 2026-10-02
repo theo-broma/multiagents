@@ -675,6 +675,14 @@ providers:
     models_parse: tsv
     # Paid through the ChatGPT subscription, not per-token.
     billing: plan
+    # RC-R1 (bug-1213a0): the content-safety filter. Text the CLI prints when
+    # it declines the PROMPT rather than doing the work — matched against the
+    # final answer (fullmatch) and, for a run that exited non-zero, against
+    # stderr (search), case-insensitively either way. A refusal says the
+    # binary started, authenticated and answered; it is never a startup
+    # failure (RC-R3).
+    refusal_markers:
+      - "This content was flagged for possible .* risk.*"
     # Q5 (doom-loop false positive on codex file_change): codex reports each
     # file edit as a `file_change` item, normalised to a tool event whose args
     # carry only the changed paths and kinds — never the content. Successive

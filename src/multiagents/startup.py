@@ -219,7 +219,8 @@ class StartupHealth:
             return False
 
     def finish(self, provider: str, run_id: str, token: str, failed: bool,
-               error: str, threshold: int, cooldown: float) -> dict | None:
+               error: str, threshold: int, cooldown: float,
+               resolved: bool = False) -> dict | None:
         try:
             with self._lock():
                 records = self._read()
@@ -240,7 +241,16 @@ class StartupHealth:
                                  "error": next(iter(error.splitlines()), "")}
                 if probe:
                     record["probe"] = None
-                    record["until"] = time.time() + max(0, cooldown)
+                    if resolved and not failed and record["down"]:
+                        # RC-R3 (bug-1213a0): a refusal is the provider
+                        # answering — the binary started, authenticated and
+                        # got a verdict. It resolves the outage it probed,
+                        # progress or no progress: what the prompt contained
+                        # says nothing about startup health.
+                        record.update(down=False, until=0, count=0,
+                                      generation=uuid.uuid4().hex, runs={})
+                    else:
+                        record["until"] = time.time() + max(0, cooldown)
                 self._write(records)
                 return event
         except (OSError, ValueError, KeyError, TypeError):
