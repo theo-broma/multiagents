@@ -3583,3 +3583,12 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - (a) `Node.spend_cap_crossings` persists the current-cap crossing id, not the crossing that actually stopped the run, when the cap changes between the crossing and the poll;
     - (b) recovery filters nodes by `status == "limited"`, so a node later cancelled or resumed is dropped from the list.
   - **Merge:** the merge conflicted in runner.py with RC c4580c0. ag-8362a3 was steered to merge main and resolve.
+- **SC merged as 9a2b085** after 5 review rounds plus robustness, with the merge conflict against RC resolved by ag-8362a3 (d928dfb).
+  - **Full suite on main:** 5236 passed, 72 failed (all phase2, known), 15 skipped. PC, SC, RC and BA are all green.
+  - Robustness branch ag-d84aee discarded.
+  - **Open follow-ups:**
+    - SC final-review P2 (a)(b) above;
+    - the PC round-8 P2 (startup claim leak when shutdown hits `steer()`);
+    - bug-ac396a (minor routing);
+    - the older items listed earlier.
+- **zai/glm** is at 99% weekly and `usable: false`, so the router no longer routes to it. Per the user's instruction, I am pausing and reporting; I await the next strategy.
