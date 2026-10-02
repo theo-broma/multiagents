@@ -6,8 +6,8 @@ serially. Use `-n 4`, not `-n auto`: up to six agents run suites at the same
 time on these 16 cores, and `-n auto` from each of them starves the others
 into timeouts.
 
-    scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/<your-agent-id>-pytest
-    rm -rf /var/tmp/<your-agent-id>-pytest
+    scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/pt-<hex-part-of-your-id>
+    rm -rf /var/tmp/pt-<hex-part-of-your-id>
 
 or, without a `.venv`,
 `PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider -n 4 --basetemp=... tests/`.
@@ -20,7 +20,9 @@ A parallel run writes about 1.5 GB of temp dirs, and `/tmp` is a 14 GB tmpfs
 shared by every agent, so put `--basetemp` on real disk. It must be a path of
 your own (pytest empties it at start) and **outside any git repository**: many
 tests use `tmp_path` as a project that is not a repository, and a basetemp
-inside the worktree turns 53 of them red.
+inside the worktree turns 53 of them red. Leave the `ag-` prefix out of the
+path: `test_core.py::test_uninstall_prunes_the_registrations_it_orphans`
+asserts that `ag-1` is absent from a listing that includes the basetemp.
 
 Otherwise run the full suite chunk by chunk with `scripts/test-chunk.sh K N`; chunking
 avoids the slow or timed-out single pytest process that agents otherwise hit.
