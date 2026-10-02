@@ -3455,3 +3455,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tester ag-5924ba is rewriting that test and adding an R3d invalid-model test.
 - **In flight:** reviewer round 2 ag-5eb6ce; ag-b09f8c on ba55a9.
 - **Next:** steer ag-03733f with the round 2 findings + R3d (+ R3c if the test shows a launch past the deadline).
+- **PC round 2** (ag-5eb6ce): rejected, 7 findings.
+  - Steered ag-03733f with those 7 findings plus the 2 robustness reds (R3a/R3d model kept, R3d invalid model blocked). Test fix 80eddee is merged.
+  - Decision: the post-mortem slot (R3f) applies only to a provider with `max_concurrent`. Without one, tree-wide counting stays as on main (PC-R5).
+- **Next:** reviewer round 3.
