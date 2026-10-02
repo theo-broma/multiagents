@@ -157,6 +157,7 @@ def test_r3d_queued_start_with_invalid_recorded_model_is_blocked_not_reresolved(
     # The roster moves on: m1 leaves the catalog and the agent now names m2.
     w.p.providers["acme"]["models_include"] = ["acme/m2"]
     w.p.agents["worker"]["model"] = "acme/m2"
+    w.p.agents["advisor"]["model"] = "acme/m2"
     entry_id = result["deferred_id"]
 
     def settled():
