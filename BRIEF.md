@@ -3470,3 +3470,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **PC round 4** (ag-c689f3): rejected with 2 findings, both on the docker probe. One: a transport error is cached as a confirmed death. Two: blocking probes run inside the tree transaction.
 - **Decision:** probe only during reconciliation, outside the lock and in a thread, and record the verdict per identity. Counting reads only that record: confirmed dead releases the slot, anything else counts as held.
 - ag-03733f has been steered for round 5.
+- **PC round 5** (ag-d40eba): rejected with 2 findings, both about where reconciliation runs. Steered ag-03733f for round 6.
+  - Nested servers and consult waits never reconcile.
+  - A drain awaits every docker probe before dispatching.
