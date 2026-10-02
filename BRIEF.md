@@ -3736,3 +3736,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Unchanged:** the orchestrator and the initializer keep the original account. The agents have no fallback to the original account.
   - **Backup** of agents.yaml: `agents.yaml.bak-claude-b` in the scratchpad.
   - **Blocked on the user:** `multiagents auth login claude-b`.
+- **claude-b verified:** a distinct account and organisation from `claude`.
+- **Bug CB (budget reader not inherited through `extends`):** `budget_status` cannot read claude-b's quota. Cause: `budget.py` ~1317 looks up `_BUILTIN.get(name)` by exact provider name.
+  - Not blocking: agents still run on claude-b; its exhaustion is only detected reactively.
+  - Fixed in-house by implementer-quick ag-ba1672 (budget.py plus `tests/test_budget_extends_reader.py`).
+  - No ticket filed, per the tickets-in-house rule.
+  - NEXT: loop-reviewer, then the codex reviewer, then merge.
