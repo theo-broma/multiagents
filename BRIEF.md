@@ -3895,3 +3895,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The SF loop review ag-6fcded was stopped; the codex final review ag-52701a now runs on f0d428b.
   - Runs still on DeepSeek finish as they are: FS ag-0441db and ag-5d1bd2, and CB round 5 ag-152774. Each then goes straight to codex (for FS, codex compares both branches).
   - SR goes to `implementer-deep`, now Gemini pro high, after the SF merge.
+- **2026-10-03, user changed the roster again.**
+  - **Implementers:** codex `gpt-6.1-sol`, effort low (quick), medium (default) and high (deep), with `models: null`.
+  - **Reviewer:** agy `gemini-3.1-pro-high`, falling back to codex gpt-6.1-sol at effort high.
+  - **No loop-reviewer.**
+- **CB round 5, ag-152774: b1e0212.** A shared `expand_env_value`/`resolved_profile` (providers.py ~907) is used by `build_env`, `_launch` and the reader; a relative profile value becomes absolute against home. The final review is ag-bc1f98 (Gemini). NEXT: merge on APPROVE.
+- SF's final codex review ag-52701a is still running. It was started before the switch, and that is fine.
