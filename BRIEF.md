@@ -3536,3 +3536,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - P1: a refused commit-fix turn is retried and its verdict dropped.
   - P2: the excerpt is truncated before it is scrubbed.
   - P2: `result.json` lacks the refusal evidence.
+- **SC review round 2:** reviewer ag-eb9628 rejected with 9 findings. The earlier fixes mostly hold.
+  - **Spec decisions,** written into `spend-caps.md`:
+    - **SC-R3c:** every admission point reads the current cap.
+    - **SC-R4b:** a crossing binds only within its period, which declines finding #5.
+    - **SC-R4c:** the recovered event is marked `recovered: true` and lists the recorded stops; a crossing counts as announced only after a successful write.
+  - The remaining 8 were steered back to ag-8362a3 (opus).
