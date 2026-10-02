@@ -736,7 +736,13 @@ def test_ab_r4_a_provider_that_does_not_relocate_home_does_not_warn(world):
 
     assert _mentions(config, "agy-c") == []
     assert _mentions(config, "agy-partner") == []
-    assert _mentions(config, "agy") == []
+    # "agy" alone appears legitimately in the text of a warning about another
+    # provider ("uses the primary agy account"), so only warnings that are not
+    # about agy-b can show the base provider itself being warned about.
+    about_the_base = [w for w in config.warnings
+                      if not re.search(r"(?<![\w-])agy-b(?![\w-])", w)
+                      and re.search(r"(?<![\w-])agy(?![\w-])", w)]
+    assert about_the_base == [], config.warnings
 
 
 def test_ab_r4_the_warning_follows_extends_through_more_than_one_hop(world):
