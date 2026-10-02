@@ -3772,3 +3772,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **FO round 3:** ag-12d4f1 committed 26a6afd (R3b, R1b and R1c fixed; adds `tests/test_fo_review_r2.py`; full suite shows 72 phase2 reds plus 1 stale test). Its `readonly_violation` on the FO test file is only a sync of main's copy and is harmless at merge.
   - Tester ag-3ec8fe is rewriting `test_fo_r3_the_warning_is_emitted_once_per_agent_provider_key` for FO-R3b. Merge it before FO.
   - Loop-reviewer ag-c1d8af is on round 3.
+- **SF round 3:** ag-1827ab committed 707c608.
+  - `_steer_release` is now the single decision point, based on `_positively_ended`.
+  - Adds `tests/test_sf_review_r2.py` (3 tests).
+  - 363 targeted tests pass; the full suite is at baseline.
+  - Loop-reviewer ag-d89877 is running.
+- **FO-R3b test rewrite merged** (95a8bda).
