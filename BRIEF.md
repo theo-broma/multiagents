@@ -3532,3 +3532,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Tests:** SC, PC and robustness give 261 passed. The full suite shows 96 reds: 72 phase2 and 24 RC with no implementation yet.
   - **Review:** reviewer round 2 is ag-eb9628.
 - **RC implemented** by ag-cfd0bd (glm), +75 lines. All 45 RC tests and H7 are green, with known reds only. Reviewer ag-997df9 is checking it, including whether `finish(resolved=True)` wrongly clears other runs' failure count.
+- **RC review round 1:** reviewer ag-997df9 rejected with 3 findings, all steered back to ag-cfd0bd (glm, round 1 of 3).
+  - P1: a refused commit-fix turn is retried and its verdict dropped.
+  - P2: the excerpt is truncated before it is scrubbed.
+  - P2: `result.json` lacks the refusal evidence.
