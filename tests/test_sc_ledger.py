@@ -198,8 +198,9 @@ def test_r2_a_capped_provider_still_counts_a_discarded_runs_spend(w):
     aid = asyncio.run(go())
     w.server.discard_agent(aid, force=True)
     acme.costs(0.5)
+    asyncio.run(run_once(w))                                    # 0.5 < 1.0: admitted, spends its 0.5
     r = asyncio.run(w.start("worker"))
-    assert not r.get("agent_id"), "the discarded run's 0.5 was forgotten; 0.5 + 0.5 reaches the cap"
+    assert not r.get("agent_id"), "the discarded run's 0.5 was forgotten; the period spend is 1.0, the cap"
     assert "spend_cap" in str(r)
 
 
