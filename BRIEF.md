@@ -3913,7 +3913,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **User question (agy, 2026-10-03):** can agy have two accounts like claude/claude-b? Researcher ag-b643b9 is investigating; answer the user when it returns.
 - **FS branch B, ag-5d1bd2** (d78017e, 1234386): 36/36 FS pass. It narrows the pool, drops the chain entirely, adds `_bound_spec` and guards the chooser.
   - The tests rewritten for FS (tester ag-272624) are merged.
-  - The comparative review is ag-?, on Gemini. NEXT: merge the winner plus its borrowings, discard the other, then `resolve_ticket(bug-ac396a)`. Two more stale tests touch the chain-skip events: `test_rt_r1_skips_unmodelled...` and `test_rm_r6a_...unmodelled_chain_entry`; send them to the tester per the reviewer's ruling.
+  - The comparative review is ag-c2ee3d, on Gemini. NEXT: merge the winner plus its borrowings, discard the other, then `resolve_ticket(bug-ac396a)`. Two more stale tests touch the chain-skip events: `test_rt_r1_skips_unmodelled...` and `test_rm_r6a_...unmodelled_chain_entry`; send them to the tester per the reviewer's ruling.
 - **AB (agy second account in docker), user request.**
   - Contract: `context/specs/agy-second-account.md` (4cd051b, plus the advisor revision 697943d).
   - Tester ag-f6de5d is writing `tests/test_ab_agy_second_account.py`. NEXT: implementer (codex), then reviewer, then merge. After that, write the `agy-b` provider entry, tell the user to switch to docker, recreate the container and run `multiagents docker login agy-b`.
