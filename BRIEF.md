@@ -3804,3 +3804,37 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - a storage error in `_steer_release` leaves an ownerless lock;
   - `_steer_predecessor` sits outside the protected region, which pins the startup probe.
   Steered ag-1827ab for round 5. Variant stays xhigh, per the user's no-escalation rule.
+
+**HANDOFF, 2026-10-02 (orchestrator context wind-down #3)**
+
+**In flight. Nothing is merged yet for SF, FO or CB; all three are in the loop.**
+
+- **SF** (`context/specs/sc-pc-followups.md`). Branch `agents/implementer-deep/1827ab`, ag-1827ab (DeepSeek, xhigh).
+  - Steered for loop round 5: `_steer_release` must be storage-error robust (best-effort steps, an in-memory hold if the durable write fails, never mask the original exception), and `_steer_predecessor` must move inside the protected region after `startup.claim`.
+  - NEXT: when it is done, run a loop-reviewer round 5. On ACCEPT, run the codex `reviewer` (`verifies=ag-1827ab`), giving it the history of codex rounds 1 and 2 and loop rounds 3 and 4. On APPROVE, merge.
+- **FO** (`context/specs/fallback-options.md`, decisions FO-R3a/R3b/R1b generalised/R1c/R4a). Branch `agents/implementer/12d4f1`, head 3dfa7a6.
+  - Loop-reviewer ag-948bd9 is running round 4: effort attribution by source entry.
+  - NEXT: on ACCEPT, run the codex reviewer round 2 (`verifies=ag-12d4f1`; its round-1 findings were R3b, R1b and R1c, now fixed). On APPROVE, merge. On REJECT, steer ag-12d4f1.
+  - Readonly_violations on `tests/test_fo_fallback_options.py` are syncs of main's copy and are harmless.
+- **CB** (budget reader through `extends`; no spec file, the requirements are in BRIEF above and in the agents' tasks). Branch `agents/implementer-quick/ba1672`, head 70f6d50.
+  - ag-ba1672 is steered for round 4 on the codex review: the cache identity must include the profile dir (in-process, concurrent-fetch and on-disk), and a provider with its own `budget` script action is exempt from the load check.
+  - NEXT: loop-reviewer, then codex reviewer, then merge.
+  - Note: the steered run keeps `timeout` 900, so steer it to finish if that trips.
+- **FS** (`context/specs/fallback-scope.md`, `tests/test_fs_fallback_scope.py`). Not started; it waits for the FO merge (both touch `_routed_spec`).
+  - Then start **two** `implementer` runs (user decision: FS in double).
+  - One loop-reviewer reviews both branches and proposes cross-borrowings; relay those by steer.
+  - Then the codex reviewer, merge the better branch, and discard the other.
+  - On FS merge: `resolve_ticket(bug-ac396a, "fixed")`. Never submit it.
+
+**Config changes this session** (`.multiagents/config/`, not versioned):
+- `max_concurrent` raised to 6.
+- loop-reviewer: `variant: high`, `timeout: 3600`, `silence_timeout: 1200`.
+- implementer-quick: `timeout: 2700`, `max_steps: 200`.
+- New provider `claude-b`; the delegated claude agents were moved to it.
+
+**Observations for the user:**
+- MiMo at `high` finds codex-grade issues; at the default variant it did not.
+- Each MiMo loop review takes 30 to 75 minutes.
+- No user decision is pending.
+
+**When FO, FS, SF and CB are all merged:** report to the user and hand back per the protocol.
