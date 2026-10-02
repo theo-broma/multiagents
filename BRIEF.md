@@ -3568,3 +3568,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - let running non-zai work finish;
   - report, and wait for the user's next strategy.
 - **Check before every start or steer** of an implementer tier: `budget_status` → `opencode-zai`.
+- **Update (user):** "tu peux finir le quota de glm completement ensuite reviens vers moi".
+  - Keep using glm until zai actually refuses: a quota-exhausted run, or a start that is refused.
+  - Then stop and report to the user. Still no silent fallback for the implementer tiers.
