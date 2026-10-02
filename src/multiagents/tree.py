@@ -220,6 +220,8 @@ class Node:
     # so a dead local pid (a host `docker exec` client) is never taken for
     # the end of a run whose wrapper lives on in its container.
     exec_identity: dict | None = None
+    # SC-R4c: the spend-cap crossings that stopped this run, when one did.
+    spend_cap_crossings: list[str] = field(default_factory=list)
     children: list[str] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
     steps: int = 0
@@ -610,16 +612,25 @@ class Tree:
 
     def emit(self, agent_id: str, kind: str, /, **fields: Any) -> None:
         """Append one line to the global event log. Never raises."""
-        entry = scrub({"t": now(), "agent": agent_id, "kind": kind, **fields})
         try:
-            self.events_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = gitops._open_file_beneath(
-                self.events_path.parent, (), self.events_path.name,
-                os.O_WRONLY | os.O_APPEND | os.O_CREAT, replace=True)
-            with os.fdopen(fd, "a") as handle:
-                handle.write(json.dumps(entry) + "\n")
+            self.emit_checked(agent_id, kind, **fields)
         except OSError:
             pass
+
+    def emit_checked(self, agent_id: str, kind: str, /, **fields: Any) -> None:
+        """`emit`, raising OSError when the line could not be written — for
+        an event whose delivery is itself recorded (SC-R4c)."""
+        entry = scrub({"t": now(), "agent": agent_id, "kind": kind, **fields})
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = gitops._open_file_beneath(
+            self.events_path.parent, (), self.events_path.name,
+            os.O_RDWR | os.O_APPEND | os.O_CREAT, replace=True)
+        with os.fdopen(fd, "a") as handle:
+            # A torn last line (a writer that died mid-line) is closed first,
+            # so this event is a line of its own and not glued onto it.
+            size = os.fstat(fd).st_size
+            torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
+            handle.write(("\n" if torn else "") + json.dumps(entry) + "\n")
 
     # ---------------------------------------------------------------- nodes --
 
@@ -1215,10 +1226,14 @@ class Tree:
     # ------------------------------------------------------------- deferred --
 
     def defer(self, spec: dict, retry_after: float, reason: str,
-              deferred_by: str | None = None) -> dict:
+              deferred_by: str | None = None, cause: str | None = None,
+              extra: dict | None = None) -> dict:
+        """`cause` names why when it is not a quota window (`spend_cap`,
+        SC-R3); `extra` is that cause's own fields."""
         record = {"id": "df-" + uuid.uuid4().hex[:6], "spec": spec,
                   "retry_after": retry_after, "reason": reason, "queued_at": now(),
-                  "status": "waiting", "deferred_by": deferred_by}
+                  "status": "waiting", "deferred_by": deferred_by,
+                  **({"cause": cause} if cause else {}), **(extra or {})}
         with self.transaction() as data:
             data["deferred"].append(record)
         self.emit(spec.get("agent", "?"), "deferred", reason=reason, retry_after=retry_after)

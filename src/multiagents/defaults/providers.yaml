@@ -124,6 +124,8 @@ providers:
             tokens: "part.tokens"
             cost: "part.cost"
             state: "part.reason"
+            # SC-R2a: the part's unique id (`prt_…`) dedups the spend ledger.
+            step_id: "part.id"
         - match: {type: "step_start"}
           as: step
           fields: {}
