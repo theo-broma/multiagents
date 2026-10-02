@@ -69,3 +69,26 @@ These override any earlier wording they contradict.
 - **`provider` is not an override.** A `provider` key in an entry is ignored and reported. It never moves the run.
 - **Surfacing.** The warnings are returned by `validate_agent_models()`, which is what `multiagents doctor` prints.
 - **Dataclass fields are always valid.** A field such as `effort` is valid under any provider: FO-R3 reports unknown keys, not fields a provider ignores. Whether a provider honours `effort` is decided by the routing rules (RM-R5b), not by FO-R3. Noted by the tester on 2026-10-02.
+
+## Decisions after the final review, round 1 (2026-10-02)
+
+These override any earlier wording they contradict.
+
+**FO-R3b: deduplicate at display, not at load.**
+- Every `Config` carries all of its FO-R3 warnings. Loading never consumes a dedup token. A reloaded config, as the MCP server reloads on every tool call, therefore still carries its warnings.
+- `validate_agent_models()` returns all of them, and so does `multiagents doctor`.
+- "Once per (agent, provider, key) per process" applies only to emission to a log or stderr channel that would otherwise repeat on every reload. It never applies to what a validation call returns.
+
+**FO-R1b: an `effort` in the primary entry is explicit.**
+- `models.<own provider>: {effort: X}` is an explicitly configured effort, exactly like the same entry under a fallback provider.
+- When it conflicts with the model's implied effort, it is refused (RM-R5a/RM-R5b). It is never silently normalised.
+- A top-level `effort` keeps its current treatment.
+
+**FO-R1c: the entry applies to whatever destination is chosen.**
+- Whichever path selects the destination provider D (primary, fallback, or a family sibling while family routing still exists), `models.D` is applied when present. This includes an options-only entry with no `model`.
+- `_spec_of()` rebuilds with the same rule.
+
+**FO-R4a: a bare-string entry for the primary provider sets the model.**
+- `models: {P: m}`, where P is the agent's own provider, runs on model m. This follows FO-R1 (precise) and FO-R2.
+- FO-R4's "behave exactly as today" is narrowed to configs with no `models:` entry for the destination.
+- No shipped or project agent has a bare entry for its own provider, so nothing changes in practice.
