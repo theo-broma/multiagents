@@ -3602,3 +3602,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - every 5 loops, the implementer goes up one level (default → high → xhigh → max), capped at max.
 - **No spend cap** on deepinfra (user).
 - **Status:** the advisor is checking variant support and mid-loop variant changes before `agents.yaml` is edited.
+- **Roster applied** (`.multiagents/config/agents.yaml`, `project.yaml`), with the advisor's overlay. `list_agents` loads it.
+  - **Implementers:** quick, implementer and deep run on `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash`, with variant `""` (default), `high` and `xhigh`. `effort: ""` and `models: null`, so no fallback.
+  - **`loop-reviewer`** runs on `deepinfra/XiaomiMiMo/MiMo-V2.6-Flash`, read-only, with the `team/reviewer.md` instructions. It is added to the implement roster.
+- **Advisor findings, 2026-10-02:**
+  - **No per-run variant override** on `start_agent` or `steer_agent`. A steer reuses `run.spec`, so editing YAML does not change a running session. Escalating every 5 loops therefore needs either a fresh start at a higher top-level variant, with a branch handoff, or a new steer/start variant override.
+  - **TOOLING BUG:** `models.<provider>.variant` in fallback maps is silently ignored, because `fallback_for()` keeps only dataclass fields (`config.py:603`). The glm `variant: max` and `high` fallbacks may never have applied. bug-reporter is on exhausted opencode, so this is recorded here for now.
+  - **opencode `readonly`** passes `--auto`, so the loop-reviewer's read-only setting is not hard enforcement.
