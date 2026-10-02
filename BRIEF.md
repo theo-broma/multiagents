@@ -3662,3 +3662,34 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - It confirmed with a temporary debug test that the queue-restore test does exercise the path.
 - **Loop round 1 on SF:** loop-reviewer ag-7c0db2 (MiMo).
 - **FO implementer ag-12d4f1:** still running after 29 min, 178 steps, $0.11.
+
+### HANDOFF 2026-10-02 (orchestrator context wind-down)
+
+**Done today**
+- PC merged as be4c905.
+- BA-R3 merged as f9f7ee6; bug-ba55a9 fixed.
+- RC merged as c4580c0; bug-1213a0 fixed.
+- SC merged as 9a2b085.
+- Main was green apart from the 72 phase2 tests at 9a2b085.
+- Roster moved to deepinfra, per the user strategy above.
+- Contracts FO, FS and SF (with SF-R3a) written, and their tests merged:
+  - FO: 91b7fa3;
+  - FS: c94a5ea;
+  - SF: f1c7168.
+
+**In flight**
+- **SF:** ag-1827ab (implementer-deep, DeepSeek xhigh) is done, with one commit, 818e401.
+  - Loop round 1 is loop-reviewer **ag-7c0db2** (MiMo). It was reported `stuck` (silence 189 s), but this is probably pytest and it was not killed. Check with `check_agent`; if it is really wedged, `stop_agent` it and start a new loop-reviewer.
+  - I raised loop-reviewer `silence_timeout` to 600 in agents.yaml.
+- **FO:** implementer **ag-12d4f1** (DeepSeek high) is still running.
+
+**Next, in order**
+1. **SF loop.**
+   - If loop-reviewer rejects: steer ag-1827ab with the findings, then a new loop-reviewer, and repeat.
+   - When it approves: run `reviewer` (codex) with `verifies=ag-1827ab`. If codex approves, merge. If it rejects, back into the loop.
+   - Do **not** raise the variant: the user said stay at the starting levels.
+2. **FO:** when ag-12d4f1 finishes, the same loop. After FO merges, start the FS implementer on `context/specs/fallback-scope.md` with the `implementer` tier. FS waits for FO because both touch `_routed_spec`.
+3. **Close bug-ac396a** as fixed when FS merges. Do not submit it.
+4. **Report to the user** when all three have merged, then hand back.
+   - The "variant override for start/steer" item is noted for later; it is not to be started.
+   - The ignored-`models.P.variant` bug is what FO fixes.
