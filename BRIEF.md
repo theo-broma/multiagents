@@ -3571,3 +3571,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **Update (user):** "tu peux finir le quota de glm completement ensuite reviens vers moi".
   - Keep using glm until zai actually refuses: a quota-exhausted run, or a start that is refused.
   - Then stop and report to the user. Still no silent fallback for the implementer tiers.
+- **SC review round 4:** reviewer ag-f0cf70 found 3 P2, all in crash recovery.
+  - A refused-after-run node is requeued.
+  - Stop-record retries die with the stream.
+  - A newline-less event is duplicated.
+  - All were steered to ag-8362a3, as the **last** round. After the round-5 review, the plan is to merge and record any P2 residual as a follow-up.
