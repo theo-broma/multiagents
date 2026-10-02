@@ -45,6 +45,36 @@ Separately, a steered turn reuses the original `run.spec`. A limit raised in con
 - Steer on a `done` or `failed` run, steer for a NEED_INFO answer, and an unconfirmed-death refusal (SF) all behave as today, apart from SR-R3's limits.
 - **Verified by:** the existing steer, SF and SC suites stay green.
 
+## Revision after the advisor's check (2026-10-02, before tests)
+
+These override any earlier wording they contradict.
+
+**SR-R1 (precise).**
+- **Turn identity.** The identity of a turn (whichever mechanism carries it) survives a server restart and the adopt/follow path (`runner.py` adoption rebuilds a `FollowHandle` from the run dir). An adopted handle accepts only its own turn's exit status.
+- **Docker.** The docker executor unlinks the same shared status file (`executor/docker.py` ~2504), so it is covered the same way.
+- **Verified by (replaces the original line).** A test forces the predecessor's termination and its status write to be delayed. It then checks that either the launch waits for the predecessor to settle (SR-R2), or the later turn ignores the earlier status. Either way, the new turn is never finalized by the old turn's status.
+
+**SR-R2 (precise).**
+- **Launch gate.** Predecessor death is confirmed before `_launch`. Today, a successful `stop` goes straight to `_launch` without confirming it.
+- **On uncertainty.** If the predecessor is not confirmed dead, the steer is refused through SF's existing release/hold path (`_steer_release`, `_steer_predecessor_dead` on the SF branch). There is no second cleanup mechanism.
+- **Docker.** Under the docker executor, death means the container-side wrapper and agent process, not merely the host `docker exec` client.
+- **Unknown liveness means refusal.**
+
+**SR-R3 (precise).**
+- **Resolution.** Fresh resolution uses the same layering as `start_agent` for the run's frozen route, including any limit set in the `models.<route>` entry.
+- **What stays frozen.** Model, provider and options stay frozen, and stay frozen across a server restart. An adopted run must not rebuild them from the current config.
+- **Invalid config.** If the current config is missing or invalid, the steer is refused BEFORE the predecessor is stopped.
+- **Clock.** The wall clock starts when the new turn actually launches. Queueing and cleanup before the launch do not count against it.
+
+**SR-R4 (precise).**
+- **`elapsed_seconds`** in `check_agent`, `collect_agent` and the result text describes the current turn, or the last one if the run has finished.
+- **Node lifetime** is reported as `node_elapsed_seconds`, wherever `elapsed_seconds` previously meant lifetime: status, collect and the server listings (`runner.py` ~6055 and ~6135, `server.py` ~516).
+- **A finished turn's duration is frozen.** Its end time is persisted, so the duration stops growing.
+
+**Consult (new scope line).**
+- Consult sessions also resume through `_launch` (`runner.py` ~7714), and SR-R1, SR-R2 and SR-R4 apply to them.
+- SR-R3 does not change consult's own call timeout and deadline semantics.
+
 ## Out of scope
 
 - A `variant` or model override on steer (the user has noted it for later).
