@@ -54,6 +54,14 @@ async def full(w, g, n=1):
     return ids
 
 
+async def pump(w, pred, rounds=15):
+    for _ in range(rounds):
+        if pred():
+            return True
+        await w.server.wait_for_agents(timeout=2)
+    return pred()
+
+
 async def drain(w, rounds=6):
     for _ in range(rounds):
         await w.server.wait_for_agents(timeout=2)
@@ -69,6 +77,9 @@ def test_r2_a_finished_run_frees_its_slot(w):
         assert pc.deferred_for_pc(await w.start("worker", "blocked"))
         g.open()
         await w.until(a)
+        # FIFO: the queued entry takes the freed slot first. Wait for it to
+        # launch and to end, so nothing is queued or running when "after" comes.
+        assert await pump(w, lambda: g.spawns() == 2), "the queued start never launched"
         await w.settle()
         return await w.start("worker", "after")
     r = asyncio.run(go())
@@ -88,6 +99,9 @@ def test_r2_a_failed_run_frees_its_slot(w):
         assert pc.deferred_for_pc(await w.start("worker", "blocked"))
         g.open()
         await w.until(a)
+        # FIFO: the queued entry takes the freed slot first. Wait for it to
+        # launch and to end, so nothing is queued or running when "after" comes.
+        assert await pump(w, lambda: g.spawns() == 2), "the queued start never launched"
         await w.settle()
         return await w.start("worker", "after")
     r = asyncio.run(go())
@@ -99,7 +113,6 @@ def test_r2_a_stopped_run_frees_its_slot(w):
 
     async def go():
         (a,) = await full(w, g)
-        assert pc.deferred_for_pc(await w.start("worker", "blocked"))
         await w.server.stop_agent(a)
         await w.until(a, timeout=20)
         return await w.start("worker", "after")
@@ -109,24 +122,23 @@ def test_r2_a_stopped_run_frees_its_slot(w):
 
 def test_r2_a_run_killed_with_sigkill_frees_its_slot(w):
     g = world_with(w)
+    g.talk_first()      # it has said something, so no free retry relaunches it
 
     async def go():
         (a,) = await full(w, g)
         pid = g.pids()[0]
-        assert pc.deferred_for_pc(await w.start("worker", "blocked"))
         pc.kill9(pid)
         assert await pc.await_until(lambda: not pc.alive(pid))
         # the existing liveness checks notice the death; no explicit action
-        ok = await pc.await_until(lambda: w.status(a) not in ("running", "starting"), 30)
-        r = None
-        for _ in range(20):
-            r = await w.start("worker", "after")
-            if not r.get("deferred"):
-                break
-            await w.server.wait_for_agents(timeout=2)
-        return ok, r
-    ok, r = asyncio.run(go())
-    assert r.get("agent_id") and not r.get("deferred"), r
+        assert await pc.await_until(lambda: w.status(a) not in ("running", "starting"), 30)
+        # One start only: admitted at once, or queued once and launched by the
+        # release. A retry loop of starts would queue entries ahead of itself.
+        r = await w.start("worker", "after")
+        launched = await pump(w, lambda: g.spawns() == 2)
+        return r, launched
+    r, launched = asyncio.run(go())
+    assert r.get("agent_id") and launched, r
+    assert "after" in g.argv_text(1)
 
 
 def test_r2_a_slot_is_held_for_the_whole_life_of_the_process(w):
@@ -273,14 +285,20 @@ def test_r2a_after_lowering_new_admissions_wait_until_the_count_is_under_the_lim
         await w.until(a)
         await w.server.wait_for_agents(timeout=1)
         still = await w.start("worker", "one run still holds, limit 1")
+        # one run left, limit 1: the count is not under the limit yet
+        for _ in range(3):
+            await w.server.wait_for_agents(timeout=1)
+        early = g.spawns()
         g.release("holder1")
         await w.until(b)
-        await w.settle()
-        ok = await w.start("worker", "now under the limit")
-        return still, ok
-    still, ok = asyncio.run(go())
+        # now under the limit: the queued entry is the one admitted
+        launched = await pump(w, lambda: g.spawns() == 3)
+        return still, early, launched
+    still, early, launched = asyncio.run(go())
     assert pc.deferred_for_pc(still), still
-    assert ok.get("agent_id") and not ok.get("deferred"), ok
+    assert early == 2, "a start launched while the count was at the limit"
+    assert launched, "the queued start was not admitted once under the limit"
+    assert "one run still holds" in g.argv_text(2)
 
 
 @pytest.mark.parametrize("new", [2, None], ids=["raised", "removed"])
@@ -348,9 +366,12 @@ def cp(tmp_path):
         p.cleanup()
 
 
-def hold(p, name):
-    return sv.plan_token([["pidfile", str(p.marker(name + ".pid"))],
-                          ["wait_for", str(p.marker(name + ".go")), 60]])
+def hold(p, name, talk=False):
+    """`talk`: print some text first, so a holder killed while it waits has
+    not "said nothing" and is not given the free retry."""
+    first = [sv.text("sv-" + name, "working")] if talk else []
+    return sv.plan_token(first + [["pidfile", str(p.marker(name + ".pid"))],
+                                  ["wait_for", str(p.marker(name + ".go")), 60]])
 
 
 def nested(p):
@@ -419,12 +440,20 @@ def test_r2_an_agent_killed_with_sigkill_frees_its_slot_across_processes(cp):
     p = cp(1)
     root = p.server()
     other = p.server()
-    root.start("held " + hold(p, "a"))
+    root.start("held " + hold(p, "a", talk=True))
     pid = sv.read_pid(p.marker("a.pid"))
     os.kill(pid, signal.SIGKILL)
     assert sv.wait_until(lambda: not sv.alive(pid), 10)
 
-    def admitted():
-        r = other.call("start_agent", 60, args={"agent": "worker", "task": "after " + hold(p, "b")})
-        return bool(r.get("agent_id")) and not r.get("deferred")
-    assert sv.wait_until(admitted, 60, 2.0), "the dead run's slot was never reclaimed"
+    # One start only: admitted at once, or queued once and launched by the
+    # release. Re-starting in a loop would queue entries ahead of itself.
+    r = other.call("start_agent", 60, args={"agent": "worker", "task": "after " + hold(p, "b")})
+
+    def launched():
+        if len(p.invocations()) >= 2:
+            return True
+        other.call("wait_for_agents", 30, args={"timeout": 2})
+        return len(p.invocations()) >= 2
+    assert r.get("agent_id") and sv.wait_until(launched, 60, 0.5), \
+        ("the dead run's slot was never reclaimed", r)
+    assert len(p.invocations()) == 2

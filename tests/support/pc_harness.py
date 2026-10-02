@@ -46,6 +46,8 @@ emit("step_finish", {{"id": "prt_f%d" % os.getpid(), "type": "step-finish",
                      "reason": "stop", "cost": 0,
                      "tokens": {{"input": 1, "output": 1, "reasoning": 0,
                                 "cache": {{"read": 0, "write": 0}}}}}})
+if ctl.get("talk_first"):
+    emit("text", {{"id": "prt_u%d" % os.getpid(), "type": "text", "text": "working"}})
 gate = ctl.get("gate")
 for tag, path in ctl.get("holds", {{}}).items():
     if tag in text:
@@ -83,17 +85,25 @@ class Gated:
         self.entry = entry
         self._holds: dict[str, str] = {}
         self._gated = False
+        self._talk = False
         self._write()
 
     def _write(self) -> None:
         Path(self.base + ".ctl.json").write_text(json.dumps({
             "gate": str(self.gate) if self._gated else None,
-            "holds": self._holds, "text": "done", "exit": 0}))
+            "holds": self._holds, "text": "done", "exit": 0,
+            "talk_first": self._talk}))
 
     def close(self) -> None:
         """New runs block until `open()`."""
         self.gate.unlink(missing_ok=True)
         self._gated = True
+        self._write()
+
+    def talk_first(self) -> None:
+        """Runs print some text before they block, so one that dies while
+        blocked has not "said nothing" and is not given the free retry."""
+        self._talk = True
         self._write()
 
     def open(self) -> None:
