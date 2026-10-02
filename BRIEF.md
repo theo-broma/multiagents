@@ -3730,3 +3730,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - `max_concurrent` raised from 4 to 6, and AGENTS.md now says `-n 4`.
   - **FS runs in double:** after FO merges, two `implementer` runs work on the FS spec and tests. Then one loop-reviewer reviews **both** branches and proposes specific cross-borrowings (A takes part X from B, and vice versa); I relay those by steer.
   - The loop continues as usual and ends with the codex reviewer. Merge the better branch and discard the other.
+- **2026-10-02: second Claude account `claude-b`** (provider in `.multiagents/config/providers.yaml`, `CLAUDE_CONFIG_DIR=~/.multiagents/profiles/claude-b`).
+  - **Moved to `claude-b` as provider:** tester, adversary, cartographer, harness, characterizer.
+  - **`models: claude` entries renamed `claude-b`:** researcher, adversary, robustness-tester, bug-reporter.
+  - **Unchanged:** the orchestrator and the initializer keep the original account. The agents have no fallback to the original account.
+  - **Backup** of agents.yaml: `agents.yaml.bak-claude-b` in the scratchpad.
+  - **Blocked on the user:** `multiagents auth login claude-b`.
