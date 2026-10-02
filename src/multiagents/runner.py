@@ -3999,7 +3999,9 @@ class Runner:
         if queued:
             # PC-R3a: a queued start launches on the provider it queued on.
             target = (queued.get("spec") or {}).get("provider") or spec.provider
-            routed = self._usable_spec(spec, target) or spec
+            # FS-R2: a queued entry is a recorded destination, so an unlisted
+            # sibling it was queued on still resolves for this restart.
+            routed = self._usable_spec(spec, target, resume=True) or spec
             # Review finding 1: the spec runs AS the queue's provider, so
             # routing looks for it there and nowhere else, whichever
             # provider the agent prefers today.
@@ -4071,11 +4073,20 @@ class Runner:
             spec = configured_spec
             provider = self.providers[spec.provider]
             routed_from, routed_why = "", ""
-            # Other accounts on the same CLI. Interchangeable without a
-            # `models:` entry, because a model id means the same thing on both.
+            # FS-R1/FS-R2: candidates are exactly the agent's own provider
+            # plus the keys of its `models:` map. A family sibling that is
+            # not listed there is not a candidate, so the family pool below
+            # is narrowed to the names the agent actually wrote; the family
+            # still decides which of THOSE shares a model namespace and may
+            # take the work.
+            named = {spec.provider, *(spec.models or spec.extra.get("models") or {})}
+            # Other accounts on the same CLI, among the named ones.
+            # Interchangeable without a `models:` entry, because a model id
+            # means the same thing on both.
             family = providers_mod.families(self.providers).get(
                 self.providers[spec.provider].family
                 if spec.provider in self.providers else "", [])
+            family = [name for name in family if name in named]
             # A disabled sibling is never a candidate (CX-C6): `read_all` omits
             # it, and a provider with no budget would otherwise read as one
             # with room. Neither is a sibling whose allowlist rejects the
@@ -4086,35 +4097,32 @@ class Runner:
                       if name == spec.provider or self.providers[name].enabled]
             family = [name for name in family
                       if self._runs_allowed_model(spec, name, pinned_spec)]
+            # FS-R1: the project `fallback_chain` adds no provider. Its only
+            # surviving role was the terminal `defer`, and deferral after the
+            # agent's own candidates is now unconditional — so it is not
+            # walked at all. Ordering is unchanged: preferred first, then the
+            # agent's `models:` order.
+            chain: list[str] = []
             # RT-R1: a candidate is a provider this agent has a model on — its
-            # own, a `models:` entry naming one, or a sibling of either. A key
-            # with an empty model is not one: routing there ran `--model ""`.
-            chain = list(budget_cfg.get("fallback_chain", []))
-            # RM-R2a: the agent's own `models:` routes are their own tier,
-            # ahead of the project chain (RM-R2), in the order they are
-            # written; a route's family siblings join right after it. They
-            # are candidates always, not only when the preferred provider is
-            # startup-blocked — a budget-exhausted preferred provider is
-            # exactly when its own fallbacks should speak up. A pinned start
-            # has no tiers: it asked for one provider.
-            # RM-R2b: a disabled sibling is never a route — including the
-            # family list's own entry for a listed key. `families` lists
-            # every provider, enabled or not, and a disabled one has no
-            # budget reading to answer the room question with.
+            # own, or a `models:` entry naming one. A key with an empty model
+            # is not one: routing there ran `--model ""`.
+            # RM-R2a: the agent's own `models:` routes are their own tier, in
+            # the order they are written. They are candidates always, not only
+            # when the preferred provider is startup-blocked — a
+            # budget-exhausted preferred provider is exactly when its own
+            # fallbacks should speak up. A pinned start has no tiers: it asked
+            # for one provider.
+            # RM-R2b: a disabled route is never a candidate. `families` lists
+            # every provider, enabled or not, and a disabled one has no budget
+            # reading to answer the room question with.
             routes: list[str] = []
             if not model and not queued:
-                family_of = providers_mod.families(self.providers)
                 for name in (spec.models or spec.extra.get("models") or {}):
                     here = self.providers.get(name)
                     if here is not None and not here.enabled:
                         continue
                     if name not in routes:
                         routes.append(name)
-                    for sibling in (family_of.get(here.family or name, [])
-                                    if here is not None else []):
-                        if sibling not in routes and self.providers[sibling].enabled \
-                                and self._runs_allowed_model(spec, sibling, pinned_spec):
-                            routes.append(sibling)
             if model or queued:
                 family, chain = [], []
             startup_blocked = {}
@@ -6246,7 +6254,9 @@ class Runner:
             spec = spec.routed(node.provider, pinned_model=node.model)
             spec = spec.replace(provider=node.provider)
         else:
-            routed = self._usable_spec(spec, node.provider)
+            # FS-R2: a recorded session is resumed where it lives, even on an
+            # unlisted sibling — it is never moved (legacy clause).
+            routed = self._usable_spec(spec, node.provider, resume=True)
             if routed is None:
                 # Followed as it was launched; only a relaunch needs a model, and
                 # steer refuses that first (RT-R2).
@@ -6673,9 +6683,13 @@ class Runner:
         else:
             # RT-R2: the session lives on the recorded provider, so without a
             # model there the steer is refused, not moved: another provider
-            # cannot resume it, and `--model ""` is not a model.
+            # cannot resume it, and `--model ""` is not a model. FS-R2: a
+            # session bound to an unlisted family sibling is the exception —
+            # it resumes on its recorded provider (`resume=True`), never for
+            # new work.
             configured = self.config.agent(node.agent)
-            if not node.model_pinned and self._usable_spec(configured, node.provider) is None:
+            if not node.model_pinned and self._usable_spec(
+                    configured, node.provider, resume=True) is None:
                 return {
                     "agent_id": agent_id, "steered": False,
                     "error": f"agent {node.agent!r} has no model for provider "
@@ -7132,34 +7146,50 @@ class Runner:
         where the roster said not to, answered as the old model. Whether the
         node's provider is still a route is `_usable_spec`'s answer, the same
         one start and steer get (RT-R3).
+
+        FS-R2: a session already bound to a family sibling the agent never
+        listed is still resumed there (`resume=True`) — the session lives on
+        that provider, and replacing it would strand context the user can no
+        longer reach. It is never chosen for new work.
         """
-        return self._usable_spec(spec, node.provider)
+        return self._usable_spec(spec, node.provider, resume=True)
 
     def _usable_spec(self, spec: AgentSpec, provider: str,
-                     pinned_model: str = "") -> AgentSpec | None:
+                     pinned_model: str = "",
+                     resume: bool = False) -> AgentSpec | None:
         """What `spec` runs as on `provider`, or None when it has no model
         there (RT-R1..R3). Start, steer and consult all ask this, so what
         counts as a usable model cannot drift between them.
 
         A route is exact — the agent's own provider, or a `models:` entry that
-        names a model — or same-family: a sibling instance of a provider with
-        an exact route shares its model ids, so it runs that route's model. An
+        names a model — or same-family, which resolves the model of a route
+        for a listed key (FO-R1c) or, with `resume`, for a session already
+        bound to an unlisted sibling; it never adds a candidate (FS-R2). An
         empty fallback model is not a route: it would run `--model ""`.
         """
-        routed, _ = self._routed_spec(spec, provider, pinned_model=pinned_model)
+        routed, _ = self._routed_spec(spec, provider, pinned_model=pinned_model,
+                                      resume=resume)
         return routed
 
     def _routed_spec(self, spec: AgentSpec, provider: str,
-                     pinned_model: str = "") -> tuple[AgentSpec | None, str]:
+                     pinned_model: str = "",
+                     resume: bool = False) -> tuple[AgentSpec | None, str]:
         """`_usable_spec`, plus the name of the `models:` route that decided
         it — "" when the agent's own configuration is what runs.
 
         RM-R5b needs the route, not just the resolution: whether an effort
         was EXPLICITLY written on this destination is judged against the
         route the model came from, which is not always the provider routing
-        landed on (a family sibling runs the listed route). The walk is
+        landed on (a listed family route runs its own model). The walk is
         `_usable_spec`'s own, kept in one place so the two answers cannot
         drift.
+
+        FS-R1/FS-R2: a destination is a route only when it is the agent's own
+        provider or a key of its `models:` map. An unlisted family sibling is
+        not a route for new work. `resume=True` (steer, a standing
+        conversation, `_spec_of`, a queued restart) also resolves one, because
+        the session is bound to the provider it was recorded on and is never
+        moved (the FS-R2 legacy clause); it is never offered to the chooser.
 
         FO-R1: the agent's OWN provider is a route too. When `models.P` exists
         its options are merged over the top-level values (through
@@ -7174,20 +7204,24 @@ class Runner:
         here = self.providers.get(provider)
         if here is None:
             return None, ""
+        listed = provider in (spec.models or {})
+        if not resume and not listed:
+            return None, ""
         family = here.family or provider
         roster = self.providers.get(spec.provider)
         if roster is not None and (roster.family or spec.provider) == family:
             # FO-R1c: a same-family destination still takes its own entry —
             # options-only included — over the top-level values.
             return spec.routed(provider), ""
-        # A sibling of a listed fallback shares that fallback's model ids.
+        # A listed options-only route shares the model ids of another LISTED
+        # route in its family; an unlisted sibling never contributes (FS-R2).
         for name in (spec.models or {}):
             other = self.providers.get(name)
             if other is not None and (other.family or name) == family:
                 alternative, _ = spec.fallback_for(name)
                 if alternative:
                     routed = spec.routed(name)
-                    if provider != name and provider in (spec.models or {}):
+                    if provider != name and listed:
                         # FO-R1c: the landed sibling's own entry wins over the
                         # route's model and options, options-only included.
                         routed = routed.routed(provider)

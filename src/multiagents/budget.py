@@ -1761,6 +1761,11 @@ def choose_provider(
     reserved = set(budgets) if reserved is None else set(reserved)
     allowed = None if allowed is None else set(allowed)
     siblings = [name for name in (family or []) if name != preferred]
+    # FS-R2: the family pool never widens the candidate set. An instance the
+    # caller did not allow — one the agent never named — is not a sibling for
+    # routing, whatever the roster says shares its family.
+    if allowed is not None:
+        siblings = [name for name in siblings if name in allowed]
     routes = list(dict.fromkeys(routes or []))
 
     # With more than one account on this CLI, the agent's pin chooses the
