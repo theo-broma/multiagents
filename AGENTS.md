@@ -1,13 +1,16 @@
 # Test suite
 
 Fast path: run the whole suite in one process with pytest-xdist, about
-3.5 minutes on the 16-core machine instead of about 45 serially:
+3.5 minutes on the 16-core machine with `-n auto` instead of about 45
+serially. Use `-n 4`, not `-n auto`: up to six agents run suites at the same
+time on these 16 cores, and `-n auto` from each of them starves the others
+into timeouts.
 
-    scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n auto --basetemp=/var/tmp/<your-agent-id>-pytest
+    scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/<your-agent-id>-pytest
     rm -rf /var/tmp/<your-agent-id>-pytest
 
 or, without a `.venv`,
-`PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider -n auto --basetemp=... tests/`.
+`PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider -n 4 --basetemp=... tests/`.
 The per-id outcomes match a serial run (TS-R1; manifests in
 `context/ts/manifests/`). A test that patches a module global must use
 `monkeypatch`, never bare assignment: under xdist the leak lands in an
