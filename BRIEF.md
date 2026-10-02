@@ -3760,3 +3760,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the BaseException path leaves the node `running`.
   Steered ag-1827ab for loop round 3, still at variant xhigh.
 - **Observation:** the MiMo loop-reviewer accepted both SF rounds while codex found P2s each time. On lifecycle code, the loop is not catching what codex catches.
+- **FO codex review ag-310b77: CHANGES_REQUESTED.** Three P2s:
+  - load-time dedup hides warnings after a reload;
+  - a primary entry's effort is silently normalised;
+  - an options-only entry is skipped on the family path.
+  Decided in the spec as FO-R3b, R1b, R1c and R4a (d35dc27). Steered ag-12d4f1 for loop round 3, still at variant high.
