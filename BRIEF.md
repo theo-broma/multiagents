@@ -3765,3 +3765,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - a primary entry's effort is silently normalised;
   - an options-only entry is skipped on the family path.
   Decided in the spec as FO-R3b, R1b, R1c and R4a (d35dc27). Steered ag-12d4f1 for loop round 3, still at variant high.
+- **CB loop-reviewer ag-5fe8b6: REJECT.**
+  - **P2:** an extends instance whose base has no `budget_profile_env` reports the base account's reading.
+  - **P3:** multi-hop `extends` resolution depends on the caller's providers map.
+  - Everything else was reproduced correct. ag-ba1672 is steered for round 2.
