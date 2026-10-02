@@ -3889,3 +3889,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - A failed hold read leaves the lock without an owner (6838).
   - A suppressed `restore_deferred` failure loses the resume entry, and `_pc_dispatch` then says "launched" (6833).
   - **Steered ag-1827ab for round 6** with one uniform rule: "unknown is never death, and no failure path leaves state without a retry owner". Tests go in `tests/test_sf_review_r3.py`. NEXT: loop-reviewer, then codex, then merge; then SR.
+- **CB loop review, ag-45bb04: REJECT, 1 defect.** All 6 requirements were reproduced green. The defect: the profile env is expanded with `expanduser` but not `expandvars` (`budget.py:1077`, `:1360`). **Steered ag-152774 for round 5.** NEXT: loop-reviewer, then codex, then merge.
