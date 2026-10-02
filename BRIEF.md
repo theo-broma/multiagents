@@ -3753,3 +3753,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **Observation:** MiMo loop reviews take more than 60 minutes each and are the bottleneck.
 - **SF round 2:** loop-reviewer ag-c36577 ACCEPTed. Cooldown neutrality was reproduced; the rest was reasoned clean. Note to evaluate: the `BaseException` branch does not call `_mark_launch_failed`. The codex reviewer ag-f5e838 (round 2) is running.
 - **CB:** the c2 test rewrite is merged (b943cb6). It is red on main until CB merges.
+- **FO round 2:** loop-reviewer ag-22ac54 ACCEPTed (all three fixes reproduced; dedup across reloads verified). The codex reviewer ag-310b77 is running.
