@@ -3576,3 +3576,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Stop-record retries die with the stream.
   - A newline-less event is duplicated.
   - All were steered to ag-8362a3, as the **last** round. After the round-5 review, the plan is to merge and record any P2 residual as a follow-up.
+- **RC merged as c4580c0** after 3 review rounds; round 3 (ag-2c4355) approved. bug-1213a0 is resolved as fixed, in-house and not submitted.
+- **SC round 5:** ag-8362a3 fixed the 3 round-4 P2 findings in a95ba97, with tests in `test_sc_review_r4.py`. The final review is ag-e9dd77. Merge after it, then discard robustness branch ag-d84aee.
