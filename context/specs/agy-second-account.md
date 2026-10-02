@@ -52,6 +52,43 @@ agy-b:
 - `agy`, `agy-partner`, `claude`, `claude-b`, codex and opencode login, launch and budget behave as before.
 - **Verified by:** the existing agy/docker/budget/login suites stay green, and `tests/test_budget_extends_reader.py` stays green.
 
+## Revision after the advisor's check (2026-10-03, before tests)
+
+These override any earlier wording they contradict.
+
+The advisor checked the code:
+- `container_private_home` mounts provider-owned, persistent backing at `$HOME/.gemini` (`docker.py` ~1636-1654).
+- Provider `env: HOME` survives a docker launch: the runner overlays provider env (`runner.py` ~3258), and docker sets HOME only when absent (`docker.py` ~2442).
+
+**AB-R1b: one HOME for everything.**
+- Login, the ordinary auth-login path (`scripts.build_env`), the budget action and agent launches all use the same resolved HOME for a provider.
+- **Verified by:** a test asserts the same value on all four paths.
+
+**AB-R2 (precise): which account the budget reads.**
+- Under the docker executor, every agy-family provider's budget reads the account its agents actually run on: inside the container, with that provider's HOME. That includes the base `agy`.
+- If that read fails, the result is unknown. It never falls back silently to host `/usage`.
+- Under the local executor, the budget behaves exactly as today.
+
+**AB-R3b: token persistence.**
+- Login and token refresh, including atomic file replacement, write only into the provider's own persistent profile.
+- The primary profile's token is never touched.
+- The profile survives a container recreate.
+- "Token file present" is not "valid". An expired but refreshable token is not unknown. Unusable authentication is.
+
+**AB-R3c: honest identity.**
+- `doctor` shows, for each provider, its profile path.
+- It shows a verified account label when the CLI exposes one, and otherwise "identity unverified". It never claims a second account is confirmed because a token file exists.
+
+**AB-R4 (precise): generic.**
+- The local-executor limitation is declared as provider METADATA in `defaults/providers.yaml`. One possibility is a key on the `agy` block, inherited through `extends`, saying a HOME-relocated profile is distinct only under docker.
+- The core consumes that key generically. There is no `agy` name in Python (P0-R8).
+
+**AB-R3d: cache identity.**
+- The quota cache identity includes the resolved HOME when a provider relocates it.
+- Reusing CB's `budget_profile_env` mechanism, e.g. `budget_profile_env: HOME` on the agy block (script-backed providers are exempt from its load check), is the expected route. The implementer may choose otherwise, and must explain why.
+
+**Recreate.** Adding the `agy-b` mount needs `multiagents docker rm && multiagents docker up`. That is documentation for the user, not code.
+
 ## Out of scope
 
 - Switching this project to `executor.kind: docker`. That is the user's decision and needs a container recreate.
