@@ -3473,3 +3473,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **PC round 5** (ag-d40eba): rejected with 2 findings, both about where reconciliation runs. Steered ag-03733f for round 6.
   - Nested servers and consult waits never reconcile.
   - A drain awaits every docker probe before dispatching.
+- **PC round 6** (ag-f3b4ec) rejected the change with 4 findings, all in the background reconciliation task:
+  - a hung probe;
+  - a dropped trigger;
+  - the task survives shutdown;
+  - it runs when no limit is configured.
+
+  I steered ag-03733f for round 7 with exact fixes. Then a narrow review; if it is clean, merge.
