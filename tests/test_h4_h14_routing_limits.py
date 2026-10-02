@@ -62,7 +62,10 @@ def _runner(tmp_path, monkeypatch, *, agent=None, project=None, providers=None):
                          project=project or {})
 
 
-def test_rt_r1_skips_unmodelled_cross_family_fallback_and_emits_reason(tmp_path, monkeypatch):
+def test_rt_r1_unmodelled_chain_entry_is_not_a_candidate_and_emits_no_skip(tmp_path, monkeypatch):
+    # Revised by FS-R1/FS-R4: the project chain adds no candidates, so a chain
+    # entry the agent has no model for is not skipped (no route_skipped event)
+    # and is never named. The exhausted agent defers.
     main, main_probe = _fake_cli(tmp_path, "acme")
     other, other_probe = _fake_cli(tmp_path, "zeta")
     _budgets(monkeypatch, acme=0.0, zeta=1.0)
@@ -71,12 +74,10 @@ def test_rt_r1_skips_unmodelled_cross_family_fallback_and_emits_reason(tmp_path,
 
     result = _start(r)
 
-    assert result.get("deferred") or result.get("error"), result
+    assert result.get("deferred"), result
     assert not _calls(main_probe) and not _calls(other_probe)
-    skipped = _events(r, "route_skipped")
-    assert len(skipped) == 1, skipped
-    assert skipped[0].get("provider") == "zeta"
-    assert skipped[0].get("reason") == "no model configured for this agent on zeta"
+    assert not _events(r, "route_skipped")
+    assert "zeta" not in json.dumps(result), result
 
 
 def test_rt_r1_nonempty_fallback_routes_with_its_model(tmp_path, monkeypatch):
