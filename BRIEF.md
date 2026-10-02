@@ -3962,3 +3962,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 
 - 2026-10-03: SF review ag-69ee0a REJECTED 7d4f816 (3 new: second steer clobbers pending cleanup; adopted hold pid=None spins on confirm; restore not idempotent). Steered ag-60dd6f with them. Discard reviewer branch ag-69ee0a (only patch files). AB tester ag-f6de5d, DK tester ag-a83388 still running.
 - 2026-10-03: AB tests merged b37d025 (44 tests, 29 red). Dual AB implementers: ag-7504ef (implementer, medium) and ag-356ddb (implementer-deep, high); next = one reviewer comparing both. DK tester ag-a83388 still running; DK impl after AB if overlap (docker.py/budget).
+- 2026-10-03: AB test defect (\bagy\b matched agy-b) fixed by tester ag-dedb99, merged 15ee595. Both AB implementers at 42/44, steered to fix the missing-login note overwritten by window projection + run full suite. DK tester ag-a83388 stuck on wall clock (1500s) — left running, not steered (SR bug).
