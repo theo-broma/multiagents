@@ -26,3 +26,21 @@
 
 **SF-R4: no regression.**
 - All `test_sc_*`, `test_pc_*` and `test_rc_*` tests stay green.
+
+## Revision after the advisor's check (2026-10-02, before tests)
+
+**SF-R1/R2: cumulative history.**
+- **Accumulate, never overwrite.** A node's crossing evidence is the **union** of every crossing id that actually stopped it. It is preserved across later stops, steers and resumes. Today the field is overwritten (`runner.py` ~5583).
+- **Retry.** A failed evidence write is retried with the same rules as a failed stop record. It is retried at the next poll and at finalization, and recovery also derives evidence from the ledger's stop records.
+
+**SF-R3: precise scope.**
+- **What this covers.** Every way a steer can end before spawn:
+  - cancellation during the predecessor stop;
+  - the shutdown refusal;
+  - every other pre-spawn refusal.
+- **What is released.** Only **this steer's** own resources are released at once:
+  - its probe claim;
+  - its PC reservation;
+  - a queue entry it had claimed, restored to its place.
+- **What is kept.** The predecessor's cleanup hold stays until its death is confirmed.
+- **Verified by.** Once the predecessor is dead, there is **no phantom slot**: the PC count equals the live runs. A slot count restored to its pre-steer value is not required.

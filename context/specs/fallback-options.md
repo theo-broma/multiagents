@@ -33,3 +33,23 @@ models:
 **FO-R4: no regression.**
 - Configs without `models:` dict entries behave exactly as today, and so do agents with dataclass-only overrides (`effort`, `permission`, …).
 - Verified by: the existing config and fallback tests stay green.
+
+## Revision after the advisor's check (2026-10-02, before tests)
+
+**FO-R1 (precise).**
+- **Primary provider.** When the agent runs on its primary provider P and `models.P` is a dict, the options in that dict are merged over the top-level values. This includes `model`, unless the run is pinned to an explicit model.
+  - Today the primary returns before applying its entry (`runner.py` ~7127).
+- **Precedence**, highest first:
+  1. an explicit per-run pin (model);
+  2. the `models.P` entry;
+  3. the agent's top-level values.
+- **Scope.** This applies to start, steer, consult and fallback alike.
+- **No shared mutation.** The merge produces a per-run spec. It never mutates the shared `AgentSpec`.
+
+**FO-R3 (precise).**
+- **Which keys are valid.** A key in `models.P` is valid if it is:
+  - a dataclass field;
+  - structural (`model`, `id`);
+  - an option the **destination provider P** consumes via its resolved `spawn.optional`. Shipped providers consume `variant`, `effort`, `max_budget_usd` and `autocompact`.
+- **Anything else** is reported as a config warning naming the agent, the provider and the key.
+- **"Once".** The warning is emitted once per distinct (agent, provider, key) per process, through the same channel as other config warnings.
