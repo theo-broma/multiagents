@@ -3405,3 +3405,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the queuer drains; a root server takes over entries from a dead queuer;
   - consult deadline = start + timeout + 60;
   - steer/resume still does not check the tree-wide `max_concurrent` (pre-existing).
+- PC test revision merged as 8fdfe68: the PC suite is 85/86 on the implementation, and the only red is the SC blocked-head test.
+- Ticket bug-ba55a9: tester ag-3494f6 is writing red tests in `tests/test_commit_all_unmerged.py` against contract BA-R1..R3:
+  - BA-R1: refuse on unmerged entries;
+  - BA-R2: a clean staged squash still commits;
+  - BA-R3: a visible event when the WIP commit is refused.
+- Next for bug-ba55a9: an implementer on `gitops.py`, holding the runner part until PC merges.
+- bug-1213a0 is waiting for PC to merge, because it touches `runner.py`.
