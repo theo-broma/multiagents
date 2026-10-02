@@ -3751,3 +3751,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tester ag-ded12c, the first run on `claude-b`, is rewriting `test_a_second_named_claude_account_gets_no_builtin_at_all`. Merge it with CB.
 - **SF and FO loop-reviewers round 2** (ag-c36577, ag-22ac54) both hit 3600 s. Both were steered to wrap up.
 - **Observation:** MiMo loop reviews take more than 60 minutes each and are the bottleneck.
+- **SF round 2:** loop-reviewer ag-c36577 ACCEPTed. Cooldown neutrality was reproduced; the rest was reasoned clean. Note to evaluate: the `BaseException` branch does not call `_mark_launch_failed`. The codex reviewer ag-f5e838 (round 2) is running.
+- **CB:** the c2 test rewrite is merged (b943cb6). It is red on main until CB merges.
