@@ -3495,3 +3495,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - each run gets a reviewer, then merge;
   - RC then needs an implementer;
   - resolve bug-ba55a9 and bug-1213a0 when merged.
+- **Full suite on main after be4c905:** 194 reds, exactly the expected ones.
+  - 72 phase2;
+  - 120 SC;
+  - 1 PC/SC;
+  - 1 BA-R3.
+- **BA-R3 merged as f9f7ee6:** reviewer ag-1712d7 approved with no findings. bug-ba55a9 is resolved as fixed, in-house and not submitted.
+- **Claude session limit (09:30 UTC).** It cut off SC ag-8362a3 and tester ag-155fae. Both were steered back after the reset.
