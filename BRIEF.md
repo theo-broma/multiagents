@@ -3527,3 +3527,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Three are new: a `|` dedup-key collision, `nextafter` period rounding, and an epsilon comparison that refuses spend below the cap.
   - Its tests, `tests/test_sc_robustness_{ledger,runner}.py`, are on its branch. Its WIP commit also carries the squashed SC implementation.
   - **Do NOT `merge_agent` it.** `spendcap.py` would land on main. The implementer was told to check out the two test files into its own branch. Discard ag-d84aee once SC merges.
+- **SC round 2:** ag-8362a3 fixed all 17 findings, 14 from the review and 3 new from robustness.
+  - Its robustness tests are committed unchanged, and its regression tests are in `tests/test_sc_review_r1.py`.
+  - **Tests:** SC, PC and robustness give 261 passed. The full suite shows 96 reds: 72 phase2 and 24 RC with no implementation yet.
+  - **Review:** reviewer round 2 is ag-eb9628.
+- **RC implemented** by ag-cfd0bd (glm), +75 lines. All 45 RC tests and H7 are green, with known reds only. Reviewer ag-997df9 is checking it, including whether `finish(resolved=True)` wrongly clears other runs' failure count.
