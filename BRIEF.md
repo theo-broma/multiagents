@@ -3786,3 +3786,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   ag-1827ab is steered for round 4. **MiMo at `high` found codex-grade issues this time**, unlike at the default variant.
 - **FO round 4:** ag-12d4f1 committed 3dfa7a6. Effort is now attributed by source entry; the full suite shows only the 72 phase2 reds. Its readonly flag is again only a sync of main's copy.
 - **CB loop round 2, ag-368f54: REJECT.** P2: a reader without a `config_dir` parameter (opencode, agy) silently drops the instance's profile and reports the base account's reading. Everything else was verified. ag-ba1672 is steered for round 3.
+- **SF round 4:** ag-1827ab committed dd0b8ed.
+  - `_launch(release_lock=False)` on the steer path.
+  - An unconfirmed predecessor now gets a durable hold through the existing machinery.
+  - 923 targeted tests pass; the full suite is at baseline.
+  - Loop-reviewer ag-<next> is running round 4.
