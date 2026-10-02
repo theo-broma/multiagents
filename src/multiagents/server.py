@@ -42,6 +42,7 @@ from . import bugs
 from . import catalog as catalog_mod
 from . import findings as findings_mod
 from . import gitops
+from . import safepoint
 from .config import CONFIG_FILES
 from .config import load as load_config
 from .config import limit_number, seed_project
@@ -132,6 +133,9 @@ def _tool():
     return decorate
 
 _runner: Runner | None = None
+# CW-R2: the safe-point gate, the server's before any Runner exists, so a
+# request seen at startup closes admission for the Runner built later.
+_gate = safepoint.Gate()
 
 # The config in use, as a fingerprint of the files it came from, and the last
 # fingerprint that failed to load. Kept apart so a broken file is parsed once
@@ -296,11 +300,7 @@ def _runner_locked() -> Runner:
         _refresh(_runner)
         return _runner
 
-    # A nested agent is told which project it belongs to; a top-level session
-    # infers it from the working directory.
-    explicit = os.environ.get("MULTIAGENTS_PROJECT")
-    root = Path(explicit).expanduser() if explicit else (find_project_root() or Path.cwd())
-    paths = ProjectPaths(root)
+    paths = _project_paths()
     paths.ensure()
     # Seeding is the orchestrator's, done before any agent exists. A
     # subagent's server only reads: under docker it runs in the container,
@@ -311,6 +311,7 @@ def _runner_locked() -> Runner:
     if seed:
         seed_project(paths)
     _runner = Runner(paths, load_config(paths, seed=seed))
+    _runner.__dict__["_safe_point_gate"] = _gate
     _loaded, _failed, _load_error = _fingerprint(_runner), None, ""
     # The one drift line, at the moment the runner is built and never again
     # (CD-R4). Detection must not be able to take the server down with it.
@@ -319,6 +320,14 @@ def _runner_locked() -> Runner:
     except Exception:
         pass
     return _runner
+
+
+def _project_paths() -> ProjectPaths:
+    # A nested agent is told which project it belongs to; a top-level session
+    # infers it from the working directory.
+    explicit = os.environ.get("MULTIAGENTS_PROJECT")
+    root = Path(explicit).expanduser() if explicit else (find_project_root() or Path.cwd())
+    return ProjectPaths(root)
 
 
 def _context_reading(run: Runner) -> int | None:
@@ -1530,8 +1539,9 @@ def run_resource(agent_id: str) -> str:
 
 
 def _reset() -> None:
-    global _runner, _loaded, _failed, _load_error, _wind_down_given
+    global _runner, _loaded, _failed, _load_error, _wind_down_given, _gate
     _runner = None
+    _gate = safepoint.Gate()
     _loaded, _failed, _load_error = {}, None, ""
     _wind_down_given = False
     _notice.set(None)
@@ -1562,8 +1572,70 @@ async def _adopt_forever() -> None:
         await asyncio.sleep(ADOPT_SECONDS)
 
 
+def _safe_point_limit() -> float:
+    """How long a safe-point latch may hold: the driver's own bound, plus
+    room — past it no genuine request is still waiting (see `safepoint`)."""
+    limits = _runner.config.limits if _runner is not None else {}
+    return limit_number(limits, "compact_safe_point_seconds") + 30
+
+
+def _safe_point_register(paths: ProjectPaths, session: str, reported: set) -> bool:
+    """Register this server; say a failure once on stderr. The driver sees an
+    unregistered server in `/proc` and does not stop it (CW-R2a)."""
+    try:
+        safepoint.register(paths, session)
+    except OSError as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        if error not in reported:
+            reported.add(error)
+            print(f"multiagents: cannot register for the safe point, retrying: "
+                  f"{error}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+async def _safe_point_watch(paths: ProjectPaths, session: str, registered: bool,
+                            acked: list) -> None:
+    """CW-R2: answer the driver's safe-point requests for this session.
+
+    Polls, because the driver has no other way in: it holds the CLI, and the
+    CLI holds this server's stdio. A request closes admission on the Runner;
+    the acknowledgement is written once nothing admitted is still in flight.
+    A loop frozen in a slow launch answers late or not at all, and the driver
+    then cancels — the safe direction.
+    """
+    reported: set = set()
+    while True:
+        if not registered:
+            registered = _safe_point_register(paths, session, reported)
+        with contextlib.suppress(Exception):
+            safepoint.observe(paths, session, _gate, acked, _safe_point_limit())
+        await asyncio.sleep(safepoint.POLL_SECONDS)
+
+
 async def _serve() -> None:
     loop = asyncio.get_running_loop()
+    root = not os.environ.get("MULTIAGENTS_AGENT_ID")
+    session = os.environ.get("MULTIAGENTS_SESSION_ID", "")
+    # CW-R2a: registered, and the request looked for, before anything is
+    # served: the driver writes its request before it lists the servers, so
+    # one that registers after the listing finds the request here and starts
+    # with admission closed.
+    registered = None
+    acked: list = []
+    # CW-R2b: the safe-point key leaves the environment before anything this
+    # process starts could inherit it.
+    safepoint.adopt_key()
+    if root and session:
+        registered = _project_paths()
+        # CW-R2b r9: closed until the driver that launched this CLI grants it.
+        safepoint.await_grant(_gate)
+        ok = _safe_point_register(registered, session, set())
+        try:
+            safepoint.observe(registered, session, _gate, acked, _safe_point_limit())
+        except Exception:
+            # Unverified is closed: the watcher reopens it once it can read.
+            _gate.close("unverified", committed=False)
     serving = asyncio.create_task(mcp.run_stdio_async())
     # SV-R3: stdin EOF, SIGTERM and SIGHUP all end the server the same way —
     # through the shutdown below, never by dying with the agents' fate
@@ -1574,20 +1646,24 @@ async def _serve() -> None:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, signalled.set)
-    root = not os.environ.get("MULTIAGENTS_AGENT_ID")
     adopter = asyncio.create_task(_adopt_forever()) if root else None
+    watcher = (asyncio.create_task(_safe_point_watch(registered, session, ok, acked))
+               if registered is not None else None)
     try:
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.wait({serving, asyncio.create_task(signalled.wait())},
                                return_when=asyncio.FIRST_COMPLETED)
     finally:
-        if adopter is not None:
-            adopter.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await adopter
+        for task in (adopter, watcher):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
         if _runner is not None:
             with contextlib.suppress(Exception):
                 await _runner.shutdown(detach=root)
+        if registered is not None:
+            safepoint.unregister(registered)
         with contextlib.suppress(Exception):
             sys.stdout.flush()
             sys.stderr.flush()

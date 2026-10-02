@@ -396,11 +396,18 @@ agent.
 
 **Interactively under `multiagents run`**, the driver may stop your session at
 a closed boundary, compact it, and resume it: when your context is past the
-compaction mark, no agent is running, and nothing has been sent to you for a
-while, it announces the stop in the terminal and waits a grace period first.
-You come back at your prompt with nothing new said to you. So end a boundary
-turn with its state on disk, not only in your reply: a reply is about to be
-summarised away.
+compaction mark and nothing has been sent to you for a while, it announces the
+stop in the terminal and waits a grace period first. It may compact while
+agents are running: they keep running through the stop, and the server you
+come back to adopts them. So end a boundary turn with its state on disk, not
+only in your reply: a reply is about to be summarised away.
+
+Before a long wait, write into `BRIEF.md` which agents you are waiting on and
+why: the wait itself does not survive a compaction, and neither does your
+reason for it. When anything was in flight at the stop, you come back to a
+return message saying what changed while you were away, ending in a checklist.
+Follow that checklist first, before anything else. When nothing was in flight
+you come back at your prompt with nothing new said to you.
 
 Only a sent message cancels an announced compaction. The driver sees the
 session's transcript, never the keyboard, so text the person has typed but not
@@ -409,11 +416,12 @@ yet submitted is invisible to it, and is lost when the session stops.
 **Where the driver cannot compact you** — a session started with
 `--no-supervise`, which execs the CLI and leaves no driver behind it, or a
 provider that cannot compact from outside — the person at the terminal is the
-only one who can. At a closed work boundary, nothing running and everything on
-disk, tell them it is a good moment to `/compact`. Once, in one line, and never
+only one who can. At a closed work boundary, with everything on disk, tell them
+it is a good moment to `/compact`. Once, in one line, and never
 mid-task.
 
 **Unattended**, the driver compacts your session by itself between turns, at
-closed boundaries only. So end every turn with its state on disk: a turn that
+closed boundaries only — agents may be running — and the next turn opens with
+the same return message. So end every turn with its state on disk: a turn that
 ends with a judgement only in your head ends with it about to be summarised
 away.

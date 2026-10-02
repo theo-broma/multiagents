@@ -51,6 +51,7 @@ from typing import Any
 
 from ..paths import ProjectPaths, server_install_paths, state_root
 from ..providers import credential_owner
+from ..safepoint import strip_key
 from .. import gitops, procs
 from .base import Executor, FollowHandle, Handle, wrapper_argv
 from .local import LocalExecutor, _turn_start
@@ -336,7 +337,7 @@ class ContainerGit(gitops.Git):
         # Every process of this call carries the token, which is how the
         # watchdog finds them in the container (SG-R7).
         token = os.urandom(12).hex()
-        environment = {**self.environ(), **(env or {}), _GIT_CALL_KEY: token}
+        environment = strip_key({**self.environ(), **(env or {}), _GIT_CALL_KEY: token})
         fd, env_file = tempfile.mkstemp(prefix="multiagents-git-", suffix=".env")
         try:
             with os.fdopen(fd, "w") as fh:
@@ -660,7 +661,7 @@ sys.exit(rc)
         # running container retains its configured proxy environment.
         with tempfile.NamedTemporaryFile(mode="w", prefix="multiagents-probe-") as envfile:
             if env is not None:
-                envfile.write("".join(f"{k}={v}\n" for k, v in env.items()
+                envfile.write("".join(f"{k}={v}\n" for k, v in strip_key(dict(env)).items()
                                       if "\n" not in str(v)))
                 envfile.flush()
                 command += ["--env-file", envfile.name]
@@ -2401,7 +2402,8 @@ sys.exit(rc)
         if not state.get("ok"):
             raise RuntimeError(f"docker executor: {state.get('error')}")
         argv = self._versioned_argv(argv)
-        env = self.adapter_env(argv, env, provider)
+        # CW-R2b: neither the env file nor `--env` ever carries the key.
+        env = strip_key(dict(self.adapter_env(argv, env, provider)))
         if "HOME" not in env:
             # What `container_home` promises. Locally the CLI falls back to the
             # passwd entry, which is this; in the image there is none.
@@ -2418,7 +2420,7 @@ sys.exit(rc)
             gitops._write_beneath(
                 self.paths.data, env_file.parent.relative_to(self.paths.data).parts,
                 env_file.name,
-                "".join(f"{k}={v}\n" for k, v in env.items()
+                "".join(f"{k}={v}\n" for k, v in strip_key(dict(env)).items()
                         if "\n" not in str(v)).encode(),
                 mode=0o600, create=True)
 
@@ -2551,7 +2553,8 @@ sys.exit(rc)
             if value is not None:
                 env[key] = value
         argv = self._versioned_argv(argv)
-        env = self.adapter_env(argv, env, provider)
+        # CW-R2b: never the safe-point key, even handed in directly.
+        env = strip_key(dict(self.adapter_env(argv, env, provider)))
         if run_dir is not None:
             # The wrapper records the agent's pid where `kill_detached` reads it.
             return await LocalExecutor().start(argv, cwd, env, run_dir=run_dir,

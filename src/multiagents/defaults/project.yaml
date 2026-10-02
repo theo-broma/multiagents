@@ -422,7 +422,8 @@ limits:
   context_wind_down_tokens: 150000
   # At this many tokens the unattended driver (`run --unattended`, and the
   # headless loop after a lost terminal) compacts the session between turns —
-  # only after a clean turn, with no agent running and nothing deferred.
+  # only after a clean turn. Agents may be running: the next turn is told
+  # what was in flight and what to re-check.
   # Deliberately lower than the wind-down: compacting at a closed boundary is
   # the planned path, and the wind-down is the warning that it did not happen.
   compact_at_tokens: 120000
@@ -439,6 +440,17 @@ limits:
   compact_idle_seconds: 300
   compact_grace_seconds: 30
   compact_bell: true
+  # Before an interactive session is stopped, the orchestrator's server stops
+  # admitting launches and lets the ones in progress settle. If it has not
+  # within this long, the compaction is cancelled and proposed again later.
+  compact_safe_point_seconds: 60
+  # What the compaction is asked to keep, passed to providers that accept it
+  # (at most 1000 characters; "" for none).
+  compact_focus: >-
+    Keep the ids of the agents in flight and what each one is for, decisions
+    made but not yet written down, the next steps, and where the durable state
+    lives (the handoff in BRIEF.md, the specs under context/, the finding
+    ledger). Drop raw tool output, test logs and diffs.
 
   # Circuit breaker. A provider whose last few runs ALL failed is broken
   # whatever the reason, and that is knowable without reading what the agents

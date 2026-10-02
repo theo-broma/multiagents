@@ -52,6 +52,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .safepoint import strip_key
 from .providers import Provider
 
 # Actions that must never take longer than a moment: they run on the hot path.
@@ -145,7 +146,10 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     for key, value in env_map.items():
         env[key] = os.path.expanduser(os.path.expandvars(str(value)))
     env.update(extra or {})
-    return env
+    # CW-R2b: a provider action never gets the safe-point key, whatever this
+    # process, the provider's env or the caller says. The driver adds it to
+    # its own CLI's launch environment itself, after this.
+    return strip_key(env)
 
 
 def resolve(provider_name: str, provider: Any, config_dir: Path,

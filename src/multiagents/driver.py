@@ -29,10 +29,11 @@ import sys
 import time
 from pathlib import Path
 
-from . import gitops, procs, scripts
+from . import compact_return, gitops, procs, safepoint, scripts
 from .budget import read_all, reset_label
-from .config import limit_number
+from .config import limit_number, shipped_limits
 from .executor import executor_for
+from .executor.local import LocalExecutor
 from .paths import global_config_dir
 from .providers import load_providers
 from .transcripts import session_context, session_transcript
@@ -218,7 +219,9 @@ def _run_attached(argv, env, stalled=None) -> int:
     If `stalled` has a `stopping` attribute, it is called just before that
     stop, and only if the child is still running when it comes: a CLI that exited by itself while `stalled` was
     deciding was ended by its user, not by us, and its caller must be able to
-    tell the two apart (P0-R8f.12).
+    tell the two apart (P0-R8f.12). If it has an `attached` attribute, that is
+    called with the child's pid once it exists (the CW-R2 safe point asks the
+    servers beneath that CLI).
     """
     saved = _terminal_state()
     previous = {}
@@ -240,6 +243,9 @@ def _run_attached(argv, env, stalled=None) -> int:
     child = None
     try:
         child = subprocess.Popen(argv, env=env)          # NOT start_new_session
+        attached = getattr(stalled, "attached", None)
+        if attached is not None:
+            attached(child.pid)
         while True:
             try:
                 return child.wait(timeout=STALL_POLL_SECONDS)
@@ -473,6 +479,18 @@ def _launch_agent(paths, config, role: str, resume: bool,
     return 0
 
 
+def _own_transcripts() -> LocalExecutor:
+    """Where this role's own session transcript is read from: the host's.
+
+    The launched CLI runs on the host in every project — a docker project's
+    executor describes its AGENTS, and in a container profile they keep their
+    transcripts somewhere else entirely. Reading the orchestrator's session
+    through that executor finds a file its CLI never writes (CW-R4 review
+    ag-32e67c), so every lookup of it in the driver goes through this.
+    """
+    return LocalExecutor()
+
+
 class _AttachedCompaction:
     """P0-R8f: compacting a session a person is attached to.
 
@@ -491,6 +509,10 @@ class _AttachedCompaction:
 
     The driver sees the transcript, never the keyboard: only a SENT message
     changes the file, so only a sent message can cancel.
+
+    CW: work in flight no longer holds it back (CW-R1). What protects that
+    work instead is the safe point the orchestrator's server reaches before
+    the stop (CW-R2), and the return message the resumed session gets (CW-R4).
     """
 
     def __init__(self, paths, config, spec, provider, executor, context: dict):
@@ -500,6 +522,7 @@ class _AttachedCompaction:
         self.threshold = _limit_number(config, "compact_at_tokens", zero_ok=True)
         self.idle = _limit_number(config, "compact_idle_seconds")
         self.grace = _limit_number(config, "compact_grace_seconds")
+        self.safe_point = _limit_number(config, "compact_safe_point_seconds")
         self.bell = _limit_flag(config, "compact_bell", True)
         self.disabled = False       # a failure or a "cannot": not again this run
         self.spent = False          # compacted in this crossing of the threshold
@@ -507,29 +530,44 @@ class _AttachedCompaction:
         self.scheduled = None       # (state, announced at, tokens)
         self.requested = None       # tokens, once the grace period ran out
         self.since = time.time()    # when the attached CLI was last launched
+        self.unrest_since = self.since  # CW-R6: not at rest since when
+        self.reported = None        # CW-R6: the compact_blocked reason last said
+        self.cli = 0                # the attached CLI's pid (CW-R2)
+        self.snapshot = None        # CW-R4: the state at the stop
+        self.outcome = None         # CW-R4: what the compaction did
+        self.committed = None       # CW-R2: the request the stop went ahead on
 
     def launched(self) -> None:
         """A (re)launch: a fresh prompt is not a quiet one yet."""
         self.since = time.time()
+        self.unrest_since = self.since
         self.scheduled = self.requested = None
+
+    def attached(self, pid: int) -> None:
+        """The CLI this run holds, whose servers the safe point is asked of —
+        and, until it ends, grants them admission while no safe point is in
+        progress (CW-R2b r9)."""
+        self.cli = pid
+        self.detached()
+        self.granter = safepoint.Granter(
+            self.paths, self.context.get("MULTIAGENTS_SESSION_ID", ""), pid).start()
+
+    def detached(self) -> None:
+        """The CLI has ended: nothing beneath it is granted any more."""
+        granter = getattr(self, "granter", None)
+        if granter is not None:
+            granter.stop()
+        self.granter = None
 
     def _who(self) -> str:
         session = self.context.get("MULTIAGENTS_SESSION_ID", "")
         return next((n.id for n in self.tree.drivers() if n.session == session),
                     self.spec.name)
 
-    def _busy(self) -> bool:
-        # SV-R11: an agent still running no longer holds compaction back — the
-        # server detaches it (SV-R3) and the resumed one adopts it (SV-R6).
-        # What does is a result the orchestrator has not been shown yet, which
-        # the compacted conversation would never learn it has to look for.
-        session = self.context.get("MULTIAGENTS_SESSION_ID", "")
-        return bool(self.tree.unseen(session) or self.tree.read().get("deferred"))
-
     def _state(self):
         path = session_transcript(self.provider, self.paths.root,
                                   self.context.get("MULTIAGENTS_SESSION_ID", ""),
-                                  self.executor)
+                                  _own_transcripts())
         if path is None:
             return None
         try:
@@ -538,47 +576,209 @@ class _AttachedCompaction:
             return None
         return (st.st_ino, st.st_mtime_ns, st.st_size)
 
-    def _cancel(self) -> None:
-        # A new episode either way (R8f.14): a cancel for a busy tree leaves
-        # the transcript as the probe saw it, and must not suppress the next
-        # proposal once the tree is quiet again.
+    def _tokens(self):
+        return session_context(self.provider, self.paths.root,
+                               self.context.get("MULTIAGENTS_SESSION_ID", ""),
+                               _own_transcripts())
+
+    def _blocked(self, reason: str, **fields) -> None:
+        """CW-R6: say why it did not fire — once per change of reason. A failed
+        probe is said once per rest episode, which is once per probe."""
+        if reason == self.reported and reason != "probe_failed":
+            return
+        self.reported = reason
+        self.tree.emit(self._who(), "compact_blocked", reason=reason,
+                       path="interactive", **fields)
+
+    def limit_pending(self) -> None:
+        """A usage-limit warning is pending, which wins (R8f.2.4); CW-R6 says
+        so when the reading is over the mark."""
+        if self.threshold <= 0 or not sys.stdin.isatty() or self._state() is None:
+            return
+        tokens = self._tokens()
+        if tokens is not None and tokens >= self.threshold:
+            self._blocked("usage_limit_pending")
+
+    def _cancel(self, why: str = "session_in_use") -> None:
+        # A new episode either way (R8f.14): a cancel leaves the transcript as
+        # the probe saw it, and must not suppress the next proposal.
         self.scheduled = self.probed = None
-        print("\ncompaction cancelled — the session is in use; it will be "
-              "proposed again once it is quiet.")
+        if why == "safe_point_timeout":
+            print(f"\ncompaction cancelled — an agent launch was still in progress "
+                  f"after {self.safe_point:g}s; it will be proposed again.")
+        elif why == "safe_point_changed":
+            print("\ncompaction cancelled — the orchestrator's servers changed while "
+                  "they were being asked; it will be proposed again.")
+        elif why == "safe_point_error":
+            print("\ncompaction cancelled — the orchestrator's server could not be "
+                  "asked to reach a safe point; it will be proposed again once the "
+                  "session has moved on.")
+        else:
+            print("\ncompaction cancelled — the session is in use; it will be "
+                  "proposed again once it is quiet.")
         sys.stdout.flush()
-        self.tree.emit(self._who(), "compact_cancelled")
+        self.tree.emit(self._who(), "compact_cancelled", reason=why)
+
+    def _safe_point_error(self, announced_for) -> bool:
+        """Cancel for a handshake that could not be done. Not proposed again
+        in this rest episode: an error that persists would otherwise be
+        announced every grace period."""
+        self._cancel("safe_point_error")
+        self._blocked("safe_point_error")
+        self.probed = announced_for
+        return False
+
+    def _participants(self, session: str, nonce: str) -> tuple[frozenset, bool]:
+        """The live root servers of the CLI, by pid and start time, and
+        whether every one has an authenticated ack for `nonce` with no
+        unregistered server beside them (unknown is never zero). Raises on
+        anything unexpected: the caller cancels."""
+        servers = safepoint.servers(self.paths, session, self.cli)
+        ready = all([safepoint.acknowledged(self.paths, int(s["pid"]), nonce)
+                     for s in servers])
+        hidden = safepoint.unregistered(session, self.cli, servers)
+        who = frozenset((int(s["pid"]), str(s.get("start"))) for s in servers)
+        return who, ready and hidden == 0
+
+    def _withdrawn(self, session: str, nonce: str, announced_for, deadline: float) -> bool:
+        """Cancel the request if any reason to has come up: the CLI ended by
+        itself (its user's exit wins), a message was sent, or the bound ran
+        out. True when it was cancelled."""
+        if not procs.living(self.cli):
+            safepoint.settle(self.paths, session, nonce, "cancelled")
+            return True
+        if self._state() != announced_for:
+            safepoint.settle(self.paths, session, nonce, "cancelled")
+            self._cancel()
+            return True
+        if time.monotonic() >= deadline:
+            safepoint.settle(self.paths, session, nonce, "cancelled")
+            self._cancel("safe_point_timeout")
+            self._blocked("safe_point_timeout")
+            return True
+        return False
+
+    def _reach_safe_point(self, announced_for) -> bool:
+        """`_safe_point_round`, with this run's granting held for its length:
+        no server is granted admission while a request is out, and a stop
+        that went ahead never resumes granting to the CLI it stopped."""
+        granter = getattr(self, "granter", None)
+        if granter is not None:
+            granter.hold()
+        stopping = False
+        try:
+            stopping = self._safe_point_round(announced_for)
+            return stopping
+        finally:
+            if granter is not None and not stopping:
+                granter.release()
+
+    def _safe_point_round(self, announced_for) -> bool:
+        """CW-R2: ask the CLI's servers to admit no launch and settle the ones
+        in progress, and wait — at most `compact_safe_point_seconds` — until
+        each says it has. False means do not stop the CLI now.
+
+        Fails closed (CW-R2a): any error asking, listing or reading cancels,
+        and no server found is a yes only when `/proc` shows none either. The
+        request is written before the first listing, so a server registering
+        later is either listed or finds the request before it serves.
+        """
+        session = self.context.get("MULTIAGENTS_SESSION_ID", "")
+        if not self.cli:
+            return self._safe_point_error(announced_for)
+        try:
+            nonce = safepoint.request(self.paths, session, self.cli)
+        except OSError:
+            return self._safe_point_error(announced_for)
+        deadline = time.monotonic() + self.safe_point
+        while True:
+            try:
+                # Unknown is not none: only `/proc` can say no unregistered
+                # server runs beneath the CLI, and where it cannot, nothing
+                # stops it.
+                who, ready = self._participants(session, nonce)
+            except Exception:                # any surprise in a record: not a yes
+                safepoint.settle(self.paths, session, nonce, "cancelled")
+                return self._safe_point_error(announced_for)
+            # Every reason to cancel is checked after the answers were read
+            # and before they are accepted: a message sent in the same poll
+            # as the last acknowledgement wins, and so does the deadline.
+            if self._withdrawn(session, nonce, announced_for, deadline):
+                return False
+            if ready:
+                # Review r9: the participants again, immediately before the
+                # commit — a server that appeared since the answers were read,
+                # or one whose ack is gone, and the request is cancelled.
+                try:
+                    again, still = self._participants(session, nonce)
+                except Exception:
+                    again, still = None, False
+                if again != who or not still:
+                    safepoint.settle(self.paths, session, nonce, "cancelled")
+                    self._cancel("safe_point_changed")
+                    self._blocked("safe_point_changed")
+                    return False
+                # Review r10: and every reason to cancel again, after that
+                # listing and with nothing but the commit write after it — a
+                # listing that ran past the deadline, or a message sent while
+                # it ran, still wins.
+                if self._withdrawn(session, nonce, announced_for, deadline):
+                    return False
+                if safepoint.settle(self.paths, session, nonce, "commit"):
+                    self.committed = nonce
+                    return True
+                safepoint.settle(self.paths, session, nonce, "cancelled")
+                return self._safe_point_error(announced_for)
+            time.sleep(safepoint.POLL_SECONDS)
 
     def due(self) -> bool:
         """One poll. True means: stop the child now, for a compaction."""
-        if self.disabled or self.threshold <= 0 or not sys.stdin.isatty():
+        if self.threshold <= 0 or not sys.stdin.isatty():
             return False
         state = self._state()
         if self.scheduled is not None:
             announced_for, at, tokens = self.scheduled
-            if state != announced_for or self._busy():
+            if state != announced_for:
                 self._cancel()
                 return False
             if time.monotonic() - at < self.grace:
                 return False
-            self.scheduled, self.requested = None, tokens
+            self.scheduled = None
+            if not self._reach_safe_point(announced_for):
+                return False
+            self.snapshot = compact_return.snapshot(
+                self.tree, self.context.get("MULTIAGENTS_SESSION_ID", ""), tokens)
+            self.requested = tokens
             return True
         if state is None:
             return False
-        tokens = session_context(self.provider, self.paths.root,
-                                 self.context.get("MULTIAGENTS_SESSION_ID", ""),
-                                 self.executor)
+        tokens = self._tokens()
         if tokens is None:
             return False
         if tokens < self.threshold:
             self.spent = False          # below again: the next crossing counts
+            self.reported = None
             return False
         # At rest since the file last changed, not since we noticed it — but
         # never since before the CLI was launched: somebody who has just been
         # handed a prompt is the person most likely to be typing into it.
         rest = time.time() - max(state[1] / 1e9, self.since)
-        if self.spent or rest < self.idle:
+        if rest < self.idle:
+            # CW-R6: a working session is not news until it has worked for
+            # ten rest periods; until then it hides the reasons below it.
+            if self.unrest_since is None:
+                self.unrest_since = time.time()
+            if time.time() - self.unrest_since > 10 * self.idle:
+                self._blocked("not_at_rest")
             return False
-        if self._busy() or state == self.probed:
+        self.unrest_since = None
+        if self.disabled:
+            self._blocked("disabled")
+            return False
+        if self.spent:
+            self._blocked("already_this_crossing")
+            return False
+        if state == self.probed:
             return False
         # Once per rest episode: a "not now" is not asked again until the
         # session has changed and come back to rest.
@@ -590,29 +790,58 @@ class _AttachedCompaction:
             cwd=self.paths.root)
         if code == scripts.UNIMPLEMENTED:
             self.disabled = True
+            self._blocked("disabled")
             return False
         if code != 0:
+            self._blocked("probe_failed", probe_exit=code)
             return False
         self.scheduled = (state, time.monotonic(), tokens)
+        self.reported = None
+        # CW-R3: what is running, counted rather than required to be nothing.
+        active = len(self.tree.active())
+        running = ("nothing running" if not active else
+                   f"{active} agent{'s' if active != 1 else ''} running")
         bell = "\a" if self.bell else ""
         print(f"\ncompacting this session in {self.grace:g}s ({tokens:,} tokens, "
-              f"nothing running) — send any message (e.g. \"wait\") to "
+              f"{running}) — send any message (e.g. \"wait\") to "
               f"cancel{bell}")
         sys.stdout.flush()
-        self.tree.emit(self._who(), "compact_scheduled", tokens=tokens)
+        self.tree.emit(self._who(), "compact_scheduled", tokens=tokens, active=active)
         return False
 
     def compact(self) -> None:
         """The child has stopped for `due()`: compact, and settle the latches."""
         tokens, self.requested = self.requested, None
+        self.release()
+        outcome: dict = {}
         code = _compact_session(self.paths, self.config, self.spec, self.provider,
-                                self.executor, self.context, self.tree, tokens)
+                                self.executor, self.context, self.tree, tokens,
+                                outcome)
+        self.outcome = outcome
         if code == 0:
             self.spent = True
         else:
             # The session is relaunched either way; what a failure changes is
             # that nobody is stopped again for it in this run.
             self.disabled = True
+
+    def release(self) -> None:
+        """The CLI a committed stop was for has gone, however it went: its
+        servers have nothing left to admit, so the request is cleared."""
+        if self.committed:
+            safepoint.clear(self.paths, self.context.get("MULTIAGENTS_SESSION_ID", ""),
+                            self.committed)
+            self.committed = None
+
+    def return_message(self) -> str:
+        """CW-R4: the relaunch's prompt — "" when nothing was in flight at the
+        stop, which keeps R8f.4.4's "no prompt"."""
+        snap, self.snapshot = self.snapshot, None
+        if not snap or not snap.get("in_flight"):
+            return ""
+        return compact_return.message(
+            self.tree, self.context.get("MULTIAGENTS_SESSION_ID", ""), snap,
+            {**(self.outcome or {}), "unsupported": scripts.UNIMPLEMENTED})
 
 
 def _run_supervised(paths, config, role, spec, provider, executor, context,
@@ -627,6 +856,12 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     from . import watchdog
 
     _start_supervisor(paths, role, os.getpid())
+    # CW-R2a/R2b: the CLI's server finds the safe-point handshake where this
+    # driver does, by being told, and signs it with this run's key — the one
+    # environment the key is put into; every other one strips it.
+    env = {**safepoint.strip_key(dict(env)), safepoint.ENV: str(safepoint.directory(paths)),
+           safepoint.KEY_ENV: safepoint.new_key(),
+           safepoint.DRIVER_ENV: safepoint.driver_identity()}
 
     # A usage limit is the one stop that never reaches the exit code: the CLI
     # prints it into the chat log and sits at the prompt, alive and idle, so
@@ -662,6 +897,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         if _limit_hit():
             return True
         if warned:
+            compaction.limit_pending()
             return False                 # a pending limit wins (R8f.2.4)
         return compaction.due()
 
@@ -674,25 +910,35 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         a deliberate exit, not a restart attempt — so it never reaches them:
         the terminal is already restored when `_run_attached` returns, the
         session is compacted, and the same session is relaunched with resume
-        on and NO prompt, whatever happens to the compaction. The orchestrator
-        was idle at its prompt and comes back idle at its prompt.
+        on, whatever happens to the compaction. The orchestrator was idle at
+        its prompt and comes back at its prompt — with no prompt when nothing
+        was in flight at the stop, and with the CW-R4 return message when
+        something was.
         """
         while True:
             began = time.monotonic()
             compaction.launched()
             stopped: list = []
             _stalled.stopping = lambda: stopped.append(True)
-            code = _run_attached(argv, run_env, stalled=_stalled)
+            _stalled.attached = compaction.attached
+            try:
+                code = _run_attached(argv, run_env, stalled=_stalled)
+            finally:
+                compaction.detached()
             stopped_by_driver[:] = stopped
             if compaction.requested is None or not stopped:
                 # The user's own exit wins over a compaction that was due
                 # (R8f.12): only a CLI we stopped for it is compacted.
                 compaction.requested = None
+                compaction.release()
                 return code, time.monotonic() - began
             compaction.compact()
             run_env = {k: v for k, v in run_env.items()
                        if k != "MULTIAGENTS_RESUME_PROMPT"}
             run_env["MULTIAGENTS_RESUME"] = "1"
+            note = compaction.return_message()
+            if note:
+                run_env["MULTIAGENTS_RESUME_PROMPT"] = note
             sys.stdout.flush()
 
     code, ran_for = _attached(env)
@@ -1022,8 +1268,15 @@ def _supervise(paths, config, role, spec, provider, executor,
                 return 3
 
         before = _activity_fingerprint(tree)
+        # CW-R4: a compaction with work in flight left a message for the
+        # next turn — rendered now, prepended, and dropped only once the turn
+        # is known to have reached the CLI, so it is delivered once and never
+        # lost before that.
+        session = context.get("MULTIAGENTS_SESSION_ID", "")
+        note = _peek_return_message(paths, role, session, tree)
+        mark = _transcript_mark(paths, provider, session) if note else None
         turn_env = {**context, "MULTIAGENTS_UNATTENDED": "1",
-                    "MULTIAGENTS_NUDGE": NUDGE,
+                    "MULTIAGENTS_NUDGE": f"{note}\n\n{NUDGE}" if note else NUDGE,
                     # After the first turn there is certainly a session to
                     # resume, whatever the launch marker said going in.
                     "MULTIAGENTS_RESUME": "1" if turn > 1 else context["MULTIAGENTS_RESUME"]}
@@ -1034,6 +1287,7 @@ def _supervise(paths, config, role, spec, provider, executor,
         print(f"\n─── turn {turn}/{max_turns} "
               f"{time.strftime('%H:%M:%S')} " + "─" * 30)
         sys.stdout.flush()
+        child = None
         try:
             child = subprocess.Popen(argv, env=env)
             _write_pid(paths, f"{role}-turn", child.pid)
@@ -1055,8 +1309,14 @@ def _supervise(paths, config, role, spec, provider, executor,
                         break
             _clear_pid(paths, f"{role}-turn")
         except KeyboardInterrupt:
+            if note and child is not None and _delivered(
+                    mark, _transcript_mark(paths, provider, session), None):
+                _drop_return_message(paths, role)
             print("\nstopped.")
             return 0
+        if note and _delivered(mark, _transcript_mark(paths, provider, session),
+                               code):
+            _drop_return_message(paths, role)
 
         limit = watchdog.limit_reached(provider, paths.root)
         if limit:
@@ -1100,7 +1360,7 @@ def _supervise(paths, config, role, spec, provider, executor,
         # Before deciding whether to stop, so the last turn of a run — the
         # second idle one, or the one at the turn limit — compacts too.
         _compact_if_due(paths, config, spec, provider, executor, context, tree,
-                        compact_unsupported)
+                        compact_unsupported, role)
         if idle:
             idle_turns += 1
             print(f"\n(turn {turn} changed nothing in the tree"
@@ -1127,39 +1387,150 @@ def _limit_flag(config, key: str, default: bool) -> bool:
 
 
 def _compact_if_due(paths, config, spec, provider, executor, context: dict,
-                    tree, unsupported: list) -> None:
+                    tree, unsupported: list, role: str = "") -> None:
     """Compact the session at a closed boundary, if it has grown past the mark.
 
-    Called only after a turn that exited 0 and was not stopped by a limit. A
-    compaction cannot be undone, so it happens only with nothing in flight: no
-    agent active and nothing deferred. A turn that ended with agents running
-    ended with reasoning in the orchestrator's head that is not on disk.
+    Called only after a turn that exited 0 and was not stopped by a limit.
+    Work in flight no longer holds it back (CW-R1): between turns no CLI and
+    no server of the orchestrator is running, so nothing can be interrupted,
+    and what was in flight is said to the next turn instead (CW-R4).
 
     The provider script does the work and answers with its exit code: 0
     compacted, 64 cannot (asked no more this run), anything else failed — which
     is reported and is not a failed turn.
+
+    `unsupported` is the run's memory: set once the provider says it cannot,
+    and, after it, the CW-R6 reason last reported.
     """
     threshold = _limit_number(config, "compact_at_tokens", zero_ok=True)
-    if threshold <= 0 or unsupported:
+    if threshold <= 0:
         return
     session = context.get("MULTIAGENTS_SESSION_ID", "")
-    tokens = session_context(provider, paths.root, session, executor)
+    tokens = session_context(provider, paths.root, session, _own_transcripts())
     if tokens is None or tokens < threshold:
         return
-    if tree.active() or tree.read().get("deferred"):
+    who = next((n.id for n in tree.drivers() if n.session == session), spec.name)
+    if unsupported:
+        if len(unsupported) == 1:       # CW-R6: said once, not once per turn
+            unsupported.append("disabled")
+            tree.emit(who, "compact_blocked", reason="disabled", path="unattended")
         return
+    snap = compact_return.snapshot(tree, session, tokens)
+    outcome: dict = {}
     code = _compact_session(paths, config, spec, provider, executor, context,
-                            tree, tokens)
+                            tree, tokens, outcome)
     if code == scripts.UNIMPLEMENTED:
         unsupported.append(True)
+    if snap["in_flight"]:
+        # CW-R4: for the next turn — which may be in the next invocation, if
+        # this one ends here at its turn limit or on a second idle turn. The
+        # snapshot is kept, not the message: it is compared with the tree as
+        # it is when the message is delivered.
+        _keep_return_message(paths, role or spec.name, session, snapshot=snap,
+                             outcome={**outcome, "unsupported": scripts.UNIMPLEMENTED})
+
+
+def _return_file(role: str) -> str:
+    return f"{role}.compact-return.json"
+
+
+def _keep_return_message(paths, role: str, session: str, note: str = "", *,
+                         snapshot: dict | None = None,
+                         outcome: dict | None = None) -> None:
+    """CW-R4: persist the return message until a turn of this session has it
+    — as the snapshot at the stop and the compaction's outcome, rendered at
+    delivery, or as a message already written (`note`)."""
+    try:
+        _launch_write(paths, _return_file(role), json.dumps(
+            {"session": session, "message": note, "snapshot": snapshot,
+             "outcome": outcome}))
+    except OSError as exc:
+        print(f"\n(could not keep the compaction's return message: {exc})")
+
+
+def _peek_return_message(paths, role: str, session: str, tree=None) -> str:
+    """The kept return message for this session, left in place until the turn
+    that carries it has started (`_drop_return_message`). One kept for
+    another session is dropped."""
+    raw = _launch_read(paths, _return_file(role), 16 * 1024 * 1024)
+    if raw is None:
+        return ""
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        record = None
+    if not isinstance(record, dict) or record.get("session") != session:
+        _drop_return_message(paths, role)
+        return ""
+    snap = record.get("snapshot")
+    if isinstance(snap, dict) and tree is not None:
+        return compact_return.message(tree, session, snap, record.get("outcome") or {})
+    return str(record.get("message") or "")
+
+
+def _drop_return_message(paths, role: str) -> None:
+    with contextlib.suppress(OSError):
+        gitops._unlink_beneath(paths.data, ("launch",), _return_file(role))
+
+
+def _transcript_mark(paths, provider, session: str) -> tuple:
+    """`(declared, state)` of the session's transcript — the host CLI's, where
+    the turn writes it — with `state` `(inode, size)`, `(0, 0)` for a file not
+    written yet, None if unknown."""
+    try:
+        path = session_transcript(provider, paths.root, session, _own_transcripts())
+    except Exception:
+        return True, None
+    if path is None:
+        return False, None
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return True, (0, 0)
+    except OSError:
+        return True, None
+    return True, (st.st_ino, st.st_size)
+
+
+def _delivered(before: tuple | None, after: tuple, code: int | None) -> bool:
+    """Did the turn that carried the return message reach the CLI? Where the
+    provider declares a transcript, only the CLI writing to it says so — a
+    launch script that failed before starting it writes nothing. Where it
+    declares none, a turn that ended cleanly is the only evidence there is."""
+    if before is None:
+        return False
+    if not before[0]:
+        return code == 0
+    return before[1] is not None and after[1] is not None and after[1] != before[1]
+
+
+def _take_return_message(paths, role: str, session: str, tree=None) -> str:
+    """The kept return message for this session, removed as it is taken."""
+    note = _peek_return_message(paths, role, session, tree)
+    _drop_return_message(paths, role)
+    return note
+
+
+FOCUS_MAX = 1_000
+
+
+def _compact_focus(config) -> str:
+    """CW-R8: what the compaction is told to keep. `limits.compact_focus`;
+    unset or not a string is the shipped default, "" is none, and anything
+    longer than the bound is cut, never refused."""
+    value = config.limits.get("compact_focus")
+    if not isinstance(value, str):
+        value = shipped_limits().get("compact_focus")
+    return value[:FOCUS_MAX] if isinstance(value, str) else ""
 
 
 def _compact_session(paths, config, spec, provider, executor, context: dict,
-                     tree, tokens: int) -> int:
+                     tree, tokens: int, outcome: dict | None = None) -> int:
     """Run the provider's `compact` action once, report it, return its code.
 
     Shared by the headless loop (R8c) and the attached stop-and-resume (R8f),
-    which must say the same things about the same outcomes.
+    which must say the same things about the same outcomes. `outcome`, when
+    given, receives the code and the line reported (CW-R4).
     """
     session = context.get("MULTIAGENTS_SESSION_ID", "")
     who = next((n.id for n in tree.drivers() if n.session == session), spec.name)
@@ -1169,7 +1540,10 @@ def _compact_session(paths, config, spec, provider, executor, context: dict,
     code, out, err = scripts.run_action(
         spec.provider, provider, executor, "compact", global_config_dir(),
         paths.config, timeout=timeout,
-        extra_env={**context, "MULTIAGENTS_COMPACT_CHECK": "0"}, cwd=paths.root)
+        extra_env={**context, "MULTIAGENTS_COMPACT_CHECK": "0",
+                   "MULTIAGENTS_COMPACT_FOCUS": _compact_focus(config)},
+        cwd=paths.root)
+    detail = ""
     if code == 0:
         detail = next((line.strip() for line in out.splitlines() if line.strip()), "")
         print(f"\ncompacted    {detail[:500]}")
@@ -1185,6 +1559,9 @@ def _compact_session(paths, config, spec, provider, executor, context: dict,
         tail = tail if len(tail) <= 500 else "…" + tail[-500:]
         print(f"\ncompaction failed (exit {code}): {tail or 'no reason given'}")
         tree.emit(who, "compact_failed", code=code, detail=tail)
+        detail = tail
+    if outcome is not None:
+        outcome.update(code=code, detail=detail)
     sys.stdout.flush()
     return code
 
