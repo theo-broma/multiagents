@@ -3856,3 +3856,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - Its work was auto-committed as 76e761e and handed with `merge_agent(into=worktree)` to a fresh `implementer` run, ag-152774 (variant max, timeout 3600), as af30b03. ag-152774 completes and verifies CB round 4.
     - NEXT: loop-reviewer, then codex, then merge.
   - **Possible tooling bug, to hand to bug-reporter at the next stop:** a steer on a run that is stuck on its wall-clock timeout died at once with -15. Evidence: ag-ba1672, run dir `.multiagents/runs/ag-ba1672`.
+  - **FO round 5, ag-12d4f1: 16216eb.**
+    - Floats are kept and rendered by `providers.option_text`; bools render as `true`/`false`.
+    - An unrenderable option emits an `option_not_renderable` event.
+    - A `provider` key is always reported.
+    - New tests: `tests/test_fo_round5.py`. Full suite: 72 phase2 reds only.
+    - The loop-reviewer is ag-35604a (`verifies=ag-12d4f1`). NEXT: codex round 3, then merge.
+  - **AGENTS.md, 72c7c17:** the basetemp path must not contain `ag-`, because a basetemp containing `ag-1` turns a test_core test red.
