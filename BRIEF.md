@@ -3852,3 +3852,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - P3: a `provider` key escapes the FO-R3a warning when P's `spawn.optional` declares a `provider` placeholder.
   - **Steered ag-12d4f1 for FO round 5,** with regression tests in a new file, `tests/test_fo_round5.py`. NEXT: loop-reviewer, then codex round 3, then merge.
   - Codex could not create a detached worktree (its sandbox mounts the repo's git metadata read-only), so its suite runs rely on the loop-reviewer.
+  - **CB handover.** ag-ba1672 was steered and worked productively, then hit its kept 900 s timeout and was marked stuck. A second steer ended with `failed, exited -15` within 3 s: no events, `elapsed_seconds` 19600.
+    - Its work was auto-committed as 76e761e and handed with `merge_agent(into=worktree)` to a fresh `implementer` run, ag-152774 (variant max, timeout 3600), as af30b03. ag-152774 completes and verifies CB round 4.
+    - NEXT: loop-reviewer, then codex, then merge.
+  - **Possible tooling bug, to hand to bug-reporter at the next stop:** a steer on a run that is stuck on its wall-clock timeout died at once with -15. Evidence: ag-ba1672, run dir `.multiagents/runs/ag-ba1672`.
