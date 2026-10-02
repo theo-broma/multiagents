@@ -3649,3 +3649,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **FO tests merged** from ag-f939e4: 35 tests, 19 red (FO-R1, FO-R3) and 16 green.
 - **FS tester ag-702ff1:** 36 tests, 25 green and 11 red (family widening). It was steered to verify each red and to drop an unagreed `deferred_id` assertion.
 - **SF tester ag-effa3f:** 9 tests, all red. It was steered to fix the SF-R3 pre-spawn refusal test, which failed for the wrong reason, and to add the queue-entry and cleanup-hold tests.
+- **Tests merged:**
+  - FS tests c94a5ea: 36 tests, 10 red, comprising 7 family-widening tests and 3 where the deferral reason names chain-only providers.
+  - SF tests f1c7168: 9 tests, mostly red. `test_sf_r3_a_refused_queued_resume...` is green on main and unproven. The cleanup-hold rule was not testable through the public surface.
+- **Decision SF-R3a:** a steer that ends before spawn releases the probe claim neutrally, with no cooldown re-arm.
+- **Implementers on deepinfra DeepSeek:**
+  - FO: ag-12d4f1 (implementer, high);
+  - SF: ag-1827ab (deep, xhigh).
+  - FS waits for the FO merge, since both touch `_routed_spec`.
