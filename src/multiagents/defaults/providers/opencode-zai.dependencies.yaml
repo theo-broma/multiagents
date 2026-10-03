@@ -19,25 +19,25 @@ dependencies:
   value: -m
   match: exact
   used_by:
-  - providers.yaml#/opencode-zai/spawn/args/2
+  - providers.yaml#/opencode-zai/spawn/args/1
 - id: flag.format
   kind: flag
   value: --format
   match: exact
   used_by:
-  - providers.yaml#/opencode-zai/spawn/args/4
+  - providers.yaml#/opencode-zai/spawn/args/3
 - id: text_match.json
   kind: text_match
   value: json
   match: exact
   used_by:
-  - providers.yaml#/opencode-zai/spawn/args/5
+  - providers.yaml#/opencode-zai/spawn/args/4
 - id: flag.dir
   kind: flag
   value: --dir
   match: exact
   used_by:
-  - providers.yaml#/opencode-zai/spawn/args/6
+  - providers.yaml#/opencode-zai/spawn/args/5
 - id: flag.s
   kind: flag
   value: -s

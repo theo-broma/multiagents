@@ -14,36 +14,50 @@ dependencies:
   match: exact
   used_by:
   - providers.yaml#/agy/spawn/args/0
+- id: text_match.empty-print-prompt
+  kind: text_match
+  value: ''
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/1
+  note: The empty argument selects print mode without adding a message beside stdin.
+- id: flag.input-format
+  kind: flag
+  value: --input-format
+  match: exact
+  used_by:
+  - providers.yaml#/agy/spawn/args/2
 - id: flag.model
   kind: flag
   value: --model
   match: exact
   used_by:
-  - providers.yaml#/agy/spawn/args/2
+  - providers.yaml#/agy/spawn/args/4
 - id: flag.output-format
   kind: flag
   value: --output-format
   match: exact
   used_by:
-  - providers.yaml#/agy/spawn/args/4
+  - providers.yaml#/agy/spawn/args/6
 - id: text_match.stream-json
   kind: text_match
   value: stream-json
   match: exact
   used_by:
-  - providers.yaml#/agy/spawn/args/5
+  - providers.yaml#/agy/spawn/args/3
+  - providers.yaml#/agy/spawn/args/7
 - id: flag.add-dir
   kind: flag
   value: --add-dir
   match: exact
   used_by:
-  - providers.yaml#/agy/spawn/args/6
+  - providers.yaml#/agy/spawn/args/8
 - id: flag.print-timeout
   kind: flag
   value: --print-timeout
   match: exact
   used_by:
-  - providers.yaml#/agy/spawn/args/8
+  - providers.yaml#/agy/spawn/args/10
 - id: flag.conversation
   kind: flag
   value: --conversation
