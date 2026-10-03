@@ -23,6 +23,11 @@ Actions
              windows and a credit pool here, three windows there, nothing at
              all somewhere else — and a provider that has something particular
              to say should say it rather than be flattened into one bar.
+``identity`` non-interactive. Prints only {"identity": "...", "kind":
+             "email|account|org"}, or exits 64 when unknown. Credential files
+             may be read internally, but tokens, keys and their fragments must
+             never appear in stdout or stderr. The monitor caches the scalar
+             in memory and reveals it only on an authenticated request.
 ``prepare``  idempotently register the MCP server for this CLI. (Phase 4)
 ``launch``   exec the CLI interactively as an orchestrator. (Phase 4)
 

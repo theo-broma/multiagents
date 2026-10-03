@@ -60,6 +60,16 @@ read JSON.
                             exit 64 = no extras (quiet)
                             other non-zero = one short diagnostic below windows
 
+    <provider>.sh identity  non-interactive, host-side, read-only
+                            prints ONE JSON object on stdout:
+                              {"identity": "...", "kind": "email|account|org"}
+                            exit 0 = a non-secret scalar claim is available
+                            exit 64 = unknown (quiet)
+                            Never print credentials or fragments, including on
+                            stderr. Select the same profile/account as usage.
+                            The monitor caches claims in memory for 30 seconds;
+                            polls carry only ***** and identity_available.
+
     <provider>.sh prepare   idempotently register the MCP server for this CLI,
                             so it can act as an orchestrator
                             exit 0  = ready (or nothing needed)
@@ -93,6 +103,26 @@ read JSON.
     <provider>.sh models    non-interactive; the provider's models, one per
                             line or as its `models_parse` expects
                             exit 64 = not implemented; nothing is listed
+
+Identity readers trust the selected profile root (HOME or a configured local
+profile, the vault, or the Docker private backing). That root is resolved once
+with `realpath`, allowing symlinks in the root and its ancestors. Below it,
+directory descriptors and `O_NOFOLLOW` refuse symlinks in files and directories,
+including `accounts/<label>` inside a vault.
+A symlinked `~/.claude.json` managed by a dotfile tool therefore shows unknown.
+Identity candidates are compared only with credential-bearing fields: `token`,
+`secret`, `password`, `key`, or names ending in `_token`, `_key` or `_secret`,
+case-insensitively, at any nesting depth. Native Claude spellings such as
+`accessToken`, `refreshToken` and `primaryApiKey` count as their underscored
+equivalents. Both sides have whitespace removed, are casefolded and URL-decoded
+at most three times, stopping early when stable. Credential values over 8 KiB
+are ignored before normalization; secrets shorter than 16 normalized characters
+are also ignored. Candidate identities over 254 characters give unknown. A
+substring match in either direction refuses the identity. Claude also checks
+the selected account's `.credentials.json`.
+Identity jobs have their own two-worker pool. Reveals have a total 12-second
+capacity/completion bound and return `status: "busy"` when it expires. Polls keep
+the last known availability while an expired reading is refreshed.
 
 `models` runs only for a provider with neither a static `models:` list nor a
 `models_cmd`. Before CX-C4 such a provider was skipped by `refresh-models`

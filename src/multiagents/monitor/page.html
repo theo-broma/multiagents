@@ -144,6 +144,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 </header>
 
 <main>
+  <form id="quota-details" action="/quota" method="post" target="_blank" rel="noopener" hidden>
+    <input type="hidden" name="token" value="__TOKEN__">
+  </form>
   <section id="live"></section>
   <section id="config" hidden></section>
   <section id="history" hidden></section>
@@ -463,6 +466,8 @@ function renderLive() {
     ),
   ));
 
+  right.append(el("div", { class: "panel" },
+    el("button", { type: "submit", form: "quota-details" }, "Quota details ↗")));
   right.append(...s.providers.map(providerPanel));
 
   right.append(details("activity",

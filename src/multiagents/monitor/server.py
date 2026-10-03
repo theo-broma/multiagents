@@ -31,9 +31,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..config import load as load_config
-from . import actions, settings, snapshot
+from . import actions, quota, settings, snapshot
 
 PAGE = Path(__file__).parent / "page.html"
+QUOTA_PAGE = Path(__file__).parent / "quota.html"
+QUOTA_ROUTES = ("/quota", "/api/quota", "/api/quota/identity")
+
+
+class MonitorHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 64
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -54,9 +60,14 @@ class Handler(BaseHTTPRequestHandler):
         # sniffed into another type, or fetched cross-origin.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def end_headers(self) -> None:
+        # Include refusals and http.server's method errors, too.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
 
     def _json(self, data, code: int = 200) -> None:
         self._send(code, json.dumps(data, default=str).encode(), "application/json")
@@ -77,6 +88,30 @@ class Handler(BaseHTTPRequestHandler):
         name = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
         return name in ("127.0.0.1", "localhost", "::1", "") or name == self.bound_host
 
+    def _origin_is_ours(self) -> bool:
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        try:
+            parsed = urlparse(origin)
+            return (parsed.scheme == "http" and
+                    parsed.hostname in ("127.0.0.1", "localhost", "::1", self.bound_host) and
+                    (parsed.port or 80) == self.server.server_port and
+                    not parsed.username and not parsed.password and
+                    not parsed.path and not parsed.query and not parsed.fragment)
+        except ValueError:
+            return False
+
+    def _quota_authorised(self) -> bool:
+        given = self.headers.get("X-Monitor-Token", "")
+        return bool(given) and secrets.compare_digest(given.encode(), self.token.encode())
+
+    def _quota_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length < 0 or length > 16384:
+            raise ValueError("invalid body size")
+        return self.rfile.read(length)
+
     # -- routes -----------------------------------------------------------
 
     def do_GET(self) -> None:                 # noqa: N802 - http.server's API
@@ -86,6 +121,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self._host_is_ours():
             return self._send(403, b"bad host", "text/plain")
+        if route in QUOTA_ROUTES:
+            if not self._origin_is_ours():
+                return self._json({"error": "bad origin"}, 403)
+            if route == "/quota":
+                return self._send(200, b"Reopen quota details from the monitor.", "text/plain")
+            if not self._quota_authorised():
+                return self._json({"error": "bad or missing token"}, 403)
+            if route == "/api/quota":
+                try:
+                    return self._json({"providers": quota.view(self.paths, load_config(self.paths))})
+                except Exception:
+                    return self._json({"error": "quota details unavailable"})
+            return self._json({"error": "method not allowed"}, 405)
         if route in ("/", "/index.html"):
             page = PAGE.read_text().replace("__TOKEN__", self.token)
             return self._send(200, page.encode(), "text/html; charset=utf-8")
@@ -120,6 +168,36 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self._host_is_ours():
             return self._send(403, b"bad host", "text/plain")
+        if parsed.path in QUOTA_ROUTES:
+            if not self._origin_is_ours():
+                return self._json({"error": "bad origin"}, 403)
+            if parsed.path == "/quota":
+                try:
+                    form = parse_qs(self._quota_body().decode())
+                    given = (form.get("token") or [""])[0]
+                except (ValueError, OSError):
+                    return self._json({"error": "bad request"}, 400)
+                if not given or not secrets.compare_digest(given.encode(), self.token.encode()):
+                    return self._json({"error": "bad or missing token"}, 403)
+                page = QUOTA_PAGE.read_text().replace("__TOKEN_JSON__", json.dumps(self.token))
+                return self._send(200, page.encode(), "text/html; charset=utf-8")
+            if not self._quota_authorised():
+                return self._json({"error": "bad or missing token"}, 403)
+            if parsed.path != "/api/quota/identity":
+                return self._json({"error": "method not allowed"}, 405)
+            try:
+                payload = json.loads(self._quota_body())
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid request")
+                identity = quota.reveal(self.paths, load_config(self.paths),
+                                        payload.get("provider"), payload.get("account"))
+            except quota.IdentityBusy:
+                return self._json({"identity": None, "status": "busy"})
+            except ValueError:
+                return self._json({"error": "invalid provider/account request"}, 400)
+            except Exception:
+                identity = None
+            return self._json({"identity": identity})
         if parsed.path != "/api/action":
             return self._json({"error": "unknown endpoint"}, 404)
         if not self._authorised(parse_qs(parsed.query)):
@@ -141,7 +219,7 @@ def serve(paths, port: int = 8787, open_browser: bool = True,
     Handler.bound_host = host
 
     try:
-        httpd = ThreadingHTTPServer((host, port), Handler)
+        httpd = MonitorHTTPServer((host, port), Handler)
     except OSError as exc:
         print(f"could not listen on {host}:{port} — {exc}")
         print("another monitor may already be running; --port picks a different one")

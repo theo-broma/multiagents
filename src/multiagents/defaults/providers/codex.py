@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import queue
@@ -17,6 +18,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 # ---------------------------------------------------------------------- CX-C9 --
 
@@ -976,7 +978,106 @@ def _budget_from_rollouts(profile, now, reason):
 
 # ------------------------------------------------------------------------ dispatch --
 
+def _identity_json(root, name):
+    """Trust the resolved profile root; refuse links in everything below it."""
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("invalid profile path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.open(os.path.realpath(root), flags)
+    try:
+        for part in relative.parts[:-1]:
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("invalid profile file")
+            with os.fdopen(fd) as handle:
+                fd = None
+                return json.load(handle)
+        finally:
+            if fd is not None:
+                os.close(fd)
+    finally:
+        os.close(directory)
+
+
+def _identity_normalized(value):
+    value = "".join(value.split()).casefold()
+    for _ in range(3):
+        normalized = "".join(unquote(value).split()).casefold()
+        if normalized == value:
+            break
+        value = normalized
+    return value
+
+
+def _identity_credential_key(key):
+    key = key.casefold()
+    # Claude's native camelCase names denote the same credential fields.
+    return (key in {"token", "secret", "password", "key", "accesstoken",
+                    "refreshtoken", "idtoken", "apikey", "primaryapikey",
+                    "sessionkey", "clientsecret"}
+            or key.endswith(("_token", "_key", "_secret")))
+
+
+def _identity_secrets(value, credential=False):
+    if isinstance(value, str):
+        if (credential and len(value) <= 8192
+                and len(value.encode("utf-8", errors="surrogatepass")) <= 8192):
+            normalized = _identity_normalized(value)
+            if len(normalized) >= 16:
+                yield normalized
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _identity_secrets(item, credential or _identity_credential_key(key))
+    elif isinstance(value, list):
+        for item in value:
+            yield from _identity_secrets(item, credential)
+
+
+def identity_action():
+    """Only the selected account's email claim may leave the auth profile."""
+    try:
+        if os.environ.get("MULTIAGENTS_EXECUTOR", "local") not in ("local", "docker"):
+            return 64
+        # Identity follows the executor even when an ambient host scope is set.
+        if _is_docker():
+            backing = os.environ.get("MULTIAGENTS_PRIVATE_BACKING")
+            if not backing:
+                return 64
+            profile = Path(backing)
+        else:
+            profile = auth_profile()
+        data = _identity_json(profile, "auth.json")
+        token = data["tokens"]["id_token"]
+        parts = token.split(".")
+        if len(parts) != 3 or not parts[1]:
+            return 64
+        raw = base64.b64decode(parts[1] + "=" * (-len(parts[1]) % 4),
+                               altchars=b"-_", validate=True)
+        claims = json.loads(raw)
+        email = claims.get("email") if isinstance(claims, dict) else None
+        if (not isinstance(email, str) or len(email) > 254
+                or not re.fullmatch(r"[^@\s]+@[^@\s]+", email)
+                or any(ord(c) < 32 or ord(c) == 127 for c in email)
+                or re.search(r"(?i)(?:sk-|rt-|bearer\s|eyJ[A-Za-z0-9_-]*\.)", email)):
+            return 64
+        normalized = _identity_normalized(email)
+        if any(secret in normalized or normalized in secret for secret in _identity_secrets(data)):
+            return 64
+    except Exception:
+        return 64
+    emit({"identity": email, "kind": "email"})
+    return 0
+
+
 def action(name):
+    if name == "identity":
+        return identity_action()
     if name in {"check", "login"} and not os.environ.get("MULTIAGENTS_BIN"):
         print(os.environ.get("MULTIAGENTS_BIN_ERROR") or "MULTIAGENTS_BIN is not set",
               file=sys.stderr)

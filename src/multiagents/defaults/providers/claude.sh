@@ -47,6 +47,119 @@ VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
 
 # A pin selects a login in the owner's vault, never a separate host profile.
 PIN="${MULTIAGENTS_CONTAINER_ACCOUNT:-}"
+# Identity is read-only, and failures must never echo profile or credential data.
+if [ "${1:-check}" = "identity" ]; then
+    python3 - <<'PY'
+import json, os, pathlib, re, stat, sys
+from urllib.parse import unquote
+
+def read_profile(root, name):
+    relative = pathlib.Path(name)
+    if relative.is_absolute() or '..' in relative.parts:
+        raise ValueError('invalid profile path')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.dup(root)
+    try:
+        for part in relative.parts[:-1]:
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError('invalid profile file')
+            with os.fdopen(fd) as handle:
+                fd = None
+                return json.load(handle)
+        finally:
+            if fd is not None:
+                os.close(fd)
+    finally:
+        os.close(directory)
+
+def normalized(value):
+    value = ''.join(value.split()).casefold()
+    for _ in range(3):
+        result = ''.join(unquote(value).split()).casefold()
+        if result == value:
+            break
+        value = result
+    return value
+
+def credential_key(key):
+    key = key.casefold()
+    # Include the CLI's native camelCase spellings of credential fields.
+    return (key in {'token', 'secret', 'password', 'key', 'accesstoken',
+                    'refreshtoken', 'idtoken', 'apikey', 'primaryapikey',
+                    'sessionkey', 'clientsecret'}
+            or key.endswith(('_token', '_key', '_secret')))
+
+def secrets(value, credential=False):
+    if isinstance(value, str):
+        if (credential and len(value) <= 8192
+                and len(value.encode('utf-8', errors='surrogatepass')) <= 8192):
+            result = normalized(value)
+            if len(result) >= 16:
+                yield result
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from secrets(item, credential or credential_key(key))
+    elif isinstance(value, list):
+        for item in value:
+            yield from secrets(item, credential)
+
+root_fd = None
+try:
+    if os.environ.get('MULTIAGENTS_EXECUTOR', 'local') == 'docker':
+        vault = os.environ.get('MULTIAGENTS_PRIVATE_VAULT')
+        if not vault:
+            sys.exit(64)
+        root = pathlib.Path(vault)
+        prefix = pathlib.Path()
+        account = os.environ.get('MULTIAGENTS_CONTAINER_ACCOUNT') or 'default'
+        if not re.fullmatch('[a-z0-9_-]+', account):
+            sys.exit(64)
+        if account != 'default':
+            prefix = pathlib.Path('accounts') / account
+        credentials = [prefix / '.credentials.json']
+    elif os.environ.get('MULTIAGENTS_EXECUTOR', 'local') == 'local':
+        configured = os.environ.get('CLAUDE_CONFIG_DIR')
+        root = pathlib.Path(configured or os.environ['HOME'])
+        prefix = pathlib.Path()
+        credentials = [pathlib.Path('.credentials.json')]
+        if not configured:
+            credentials.append(pathlib.Path('.claude/.credentials.json'))
+    else:
+        sys.exit(64)
+    root_fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    data = read_profile(root_fd, prefix / '.claude.json')
+    account = data.get('oauthAccount') if isinstance(data, dict) else None
+    email = account.get('emailAddress') if isinstance(account, dict) else None
+    if (not isinstance(email, str) or len(email) > 254
+            or not re.fullmatch(r'[^@\s]+@[^@\s]+', email)
+            or any(ord(c) < 32 or ord(c) == 127 for c in email)
+            or re.search(r'(?i)(?:sk-|rt-|bearer\s|eyJ[A-Za-z0-9_-]*\.)', email)):
+        sys.exit(64)
+    candidate = normalized(email)
+    if any(secret in candidate or candidate in secret for secret in secrets(data)):
+        sys.exit(64)
+    for credential_path in credentials:
+        try:
+            credential = read_profile(root_fd, credential_path)
+        except FileNotFoundError:
+            continue
+        if any(secret in candidate or candidate in secret for secret in secrets(credential)):
+            sys.exit(64)
+except Exception:
+    sys.exit(64)
+finally:
+    if root_fd is not None:
+        os.close(root_fd)
+print(json.dumps({'identity': email, 'kind': 'email'}))
+PY
+    exit $?
+fi
 if [ -n "$PROFILE" ] && [ -n "$PIN" ]; then
     if [ -n "${MULTIAGENTS_ACCOUNT:-}" ] && [ "$MULTIAGENTS_ACCOUNT" != "$PIN" ]; then
         echo "account '$MULTIAGENTS_ACCOUNT' differs from configured pin '$PIN'" >&2

@@ -246,6 +246,8 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
 
     out = []
     for name, provider in sorted(providers.items()):
+        if not getattr(provider, "enabled", True):
+            continue
         budget = budgets.get(name)
         data = budget.to_dict() if budget else {"provider": name, "known": False}
         lines, source = (_generic_usage(data), "built-in")
@@ -253,7 +255,9 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
         available, install_status = _installation(name, provider, executor, paths)
         if with_scripts:
             extras, source = _usage_lines(name, provider, executor, data, paths)
-            lines += extras
+            note = data.get("note") or ""
+            lines += [line for line in extras if line not in lines
+                      and not (note in lines and note.startswith(line))]
         entry = health.get(name) or {}
         # Below the reserve a provider is still "usable" and still gets skipped
         # by choose_provider, which is the least obvious state it can be in and

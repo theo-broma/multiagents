@@ -36,6 +36,11 @@ case "${1:-check}" in
 esac
 
 case "${1:-check}" in
+identity)
+    # The active login is a keyring/opaque token, not the legacy oauth_creds
+    # profile. No verified account metadata is available for that login.
+    exit 64
+    ;;
 check)
     if [ "$EXECUTOR" = "docker" ] && [ -n "${MULTIAGENTS_PRIVATE_BACKING:-}" ]; then
         # The container's own token is a plain file, so this is a free check.

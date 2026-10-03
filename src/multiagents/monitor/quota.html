@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Quota details — multiagents</title>
+<style>
+  :root { color-scheme: dark; font: 14px system-ui, sans-serif; background: #15191f; color: #e3e8ef; }
+  body { max-width: 1000px; margin: 28px auto; padding: 0 20px; }
+  header, .identity { display: flex; align-items: center; gap: 12px; }
+  header button { margin-left: auto; }
+  section { padding: 18px; margin: 16px 0; border: 1px solid #394351; border-radius: 8px; }
+  h2 { margin: 0 0 10px; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  button { background: #263241; border: 1px solid #56657a; color: inherit; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: #aab6c5; }
+  .identity { margin: 8px 0; overflow-wrap: anywhere; }
+</style>
+<header><h1>Quota details</h1><button id="refresh">Refresh</button></header>
+<p class="muted">Identities are masked again on every refresh.</p>
+<p id="status" role="status">Loading…</p>
+<main id="providers"></main>
+<script>
+const TOKEN = __TOKEN_JSON__;
+const MASK = "*****";
+let generation = 0;
+let polling = false;
+const controls = new Set();
+function node(tag, text, className) {
+  const element = document.createElement(tag);
+  if (text !== undefined) element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options, cache: "no-store",
+    headers: {"X-Monitor-Token": TOKEN, "Content-Type": "application/json"},
+    referrerPolicy: "no-referrer"
+  });
+  if (!response.ok) throw new Error("request failed");
+  return response.json();
+}
+function identityControl(provider, entry, current) {
+  const row = node("div", undefined, "identity");
+  const label = node("span", entry.account === null ? "Account" : `Account ${entry.account}`);
+  const value = node("span", entry.identity_available ? MASK : "unknown");
+  const eye = node("button", "👁");
+  eye.type = "button";
+  eye.disabled = !entry.identity_available;
+  eye.setAttribute("aria-label", "Show account identity");
+  eye.setAttribute("aria-pressed", "false");
+  let requested = false;
+  let sequence = 0;
+  function mask() {
+    requested = false;
+    sequence++;
+    value.textContent = entry.identity_available ? MASK : "unknown";
+    eye.setAttribute("aria-label", "Show account identity");
+    eye.setAttribute("aria-pressed", "false");
+  }
+  controls.add(mask);
+  eye.addEventListener("click", async () => {
+    if (requested) { mask(); return; }
+    requested = true;
+    const request = ++sequence;
+    eye.setAttribute("aria-label", "Mask account identity");
+    eye.setAttribute("aria-pressed", "true");
+    try {
+      const result = await api("/api/quota/identity", {
+        method: "POST", body: JSON.stringify({provider, account: entry.account})
+      });
+      if (requested && sequence === request && generation === current && row.isConnected) {
+        value.textContent = result.status === "busy" ? "busy — try again" : (result.identity || "unknown");
+      }
+    } catch (_) {
+      if (requested && sequence === request && generation === current && row.isConnected) {
+        value.textContent = "unknown";
+      }
+    }
+  });
+  row.append(label, value, eye);
+  return row;
+}
+function render(rows, current) {
+  const container = document.getElementById("providers");
+  container.replaceChildren();
+  controls.clear();
+  for (const provider of rows) {
+    const section = node("section");
+    const budget = provider.budget || {};
+    section.append(node("h2", provider.name),
+      node("p", `${provider.install_status} · ${provider.billing}`, "muted"));
+    const remaining = new Set(provider.lines || []);
+    const windows = budget.windows || {};
+    for (const entry of provider.identities || []) {
+      section.append(identityControl(provider.name, entry, current));
+      if (entry.account !== null) {
+        const names = Object.keys(windows).filter(name => windows[name] && windows[name].account === entry.account);
+        const lines = [...remaining].filter(line => names.some(name => line.trimStart().startsWith(name + " ")));
+        if (lines.length) section.append(node("pre", lines.join("\n")));
+        for (const line of lines) remaining.delete(line);
+      }
+    }
+    if (remaining.size) section.append(node("pre", [...remaining].join("\n")));
+    const source = budget.source || provider.lines_from || "unknown";
+    section.append(node("p", `Source: ${source}`, "muted"));
+    if (budget.note && !(provider.lines || []).includes(budget.note)) {
+      section.append(node("p", budget.note, "muted"));
+    }
+    section.append(node("p", provider.consecutive_failures
+      ? `Health: ${provider.consecutive_failures} consecutive failures · ${provider.last_reason || "unknown"}`
+      : "Health: no consecutive failures", "muted"));
+    container.append(section);
+  }
+}
+async function refresh() {
+  if (polling) return;
+  polling = true;
+  const current = ++generation;
+  // Invalidate pending reveals immediately, even if the new poll fails.
+  for (const mask of controls) mask();
+  try {
+    const data = await api("/api/quota");
+    if (generation === current) render(data.providers || [], current);
+    document.getElementById("status").textContent = "";
+  } catch (_) {
+    document.getElementById("status").textContent = "Quota details unavailable. Reopen from the monitor if it restarted.";
+  } finally { polling = false; }
+}
+document.getElementById("refresh").addEventListener("click", refresh);
+refresh();
+setInterval(refresh, 2000);
+</script>
+</html>

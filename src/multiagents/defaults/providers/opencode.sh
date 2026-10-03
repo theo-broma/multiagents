@@ -199,6 +199,10 @@ PYEOF
 }
 
 case "${1:-check}" in
+identity)
+    # API keys and their fragments are credentials, never account identities.
+    exit 64
+    ;;
 check)
     if zai_plan; then zai_py check; exit $?; fi
     if di_plan; then di_py check; exit $?; fi
