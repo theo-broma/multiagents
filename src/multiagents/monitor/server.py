@@ -63,7 +63,7 @@ class Handler(BaseHTTPRequestHandler):
     def end_headers(self) -> None:
         # Include refusals and http.server's method errors, too.
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         super().end_headers()
 
     def _json(self, data, code: int = 200) -> None:

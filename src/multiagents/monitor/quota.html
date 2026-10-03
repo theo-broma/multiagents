@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <title>Quota details — multiagents</title>
 <style>
   :root { color-scheme: dark; font: 14px system-ui, sans-serif; background: #15191f; color: #e3e8ef; }
@@ -37,7 +37,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options, cache: "no-store",
     headers: {"X-Monitor-Token": TOKEN, "Content-Type": "application/json"},
-    referrerPolicy: "no-referrer"
+    referrerPolicy: "same-origin"
   });
   if (!response.ok) throw new Error("request failed");
   return response.json();
