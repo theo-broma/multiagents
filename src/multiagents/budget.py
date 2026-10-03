@@ -40,6 +40,7 @@ import json
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -1636,32 +1637,41 @@ def read_all(providers: dict[str, Any] | None = None,
     class _NullExecutor:
         kind = "local"
 
-    out: dict[str, Budget] = {}
-    # One pass, one set: a shared source fetched for the first provider is
-    # not fetched again for a dependent of it (PS-R5).
-    _pass: set[str] = set()
-    # BP-R1: one parse per config file for the WHOLE call — every provider's
-    # margin and age bound, and any built-in reader's, judge the same parse.
-    from .config import parse_once
+    # FQ-R1: independent sources run in parallel; dependents stay in the
+    # source's group, so even a forced read fetches it once per call.
+    groups: dict[str, list[tuple[str, Any]]] = {}
+    for name, provider in providers.items():
+        if provider is not None and not getattr(provider, "enabled", True):
+            continue
+        source = getattr(provider, "budget_from", "") or name
+        groups.setdefault(source, []).append((name, provider))
 
-    with parse_once():
-        for name, provider in providers.items():
-            if provider is not None and not getattr(provider, "enabled", True):
-                continue
-            executor = executor_for(name) if callable(executor_for) else _NullExecutor()
-            budget = read_provider(name, provider, executor, config_dir, project_config,
-                                   spend_by_provider.get(name), use_cache, force,
-                                   limits=limits, max_reading_age=max_reading_age,
-                                   # PS-R5: a dependent resolves its budget source
-                                   # through the same map.
-                                   providers=providers, _pass=_pass)
-            entry = cooldowns.get(name)
-            if entry and entry.get("until", 0) > time.time():
-                budget.cooldown_until = entry["until"]
-                budget.severity = "critical"
-                budget.note = (budget.note + " | " if budget.note else "") + entry.get("reason", "cooling down")
-            out[name] = budget
-    return out
+    from .config import parse_once, share_parse_once
+
+    with parse_once() as view:
+        def read_group(items):
+            out = {}
+            seen: set[str] = set()
+            with share_parse_once(view):
+                for name, provider in items:
+                    executor = executor_for(name) if callable(executor_for) else _NullExecutor()
+                    budget = read_provider(
+                        name, provider, executor, config_dir, project_config,
+                        spend_by_provider.get(name), use_cache, force,
+                        limits=limits, max_reading_age=max_reading_age,
+                        providers=providers, _pass=seen)
+                    entry = cooldowns.get(name)
+                    if entry and entry.get("until", 0) > time.time():
+                        budget.cooldown_until = entry["until"]
+                        budget.severity = "critical"
+                        budget.note = (budget.note + " | " if budget.note else "") + entry.get("reason", "cooling down")
+                    out[name] = budget
+            return out
+
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="budget") as pool:
+            results = list(pool.map(read_group, groups.values()))
+    readings = {name: reading for result in results for name, reading in result.items()}
+    return {name: readings[name] for name in providers if name in readings}
 
 
 def reserved_providers(project: dict, providers: Any,

@@ -228,6 +228,63 @@ def _installation(name: str, provider: Any, executor: Any,
         return (cached[1], cached[2]) if cached else (True, "checking…")
 
 
+# Quota refreshes have their own single flight, independent of slow extras
+# and identity probes. No provider I/O runs while this lock is held.
+_QUOTA_LOCK = threading.Lock()
+_QUOTA_CACHE: dict[str, dict] = {}
+
+
+def _quota_readings(paths, config, providers, executor_of):
+    from .. import budget as budget_module
+
+    key = str(paths.config)
+    signature = repr((config.providers, config.project, tuple(providers)))
+    now = time.monotonic()
+    with _QUOTA_LOCK:
+        state = _QUOTA_CACHE.get(key)
+        if state is not None and state["signature"] != signature and state["pending"]:
+            # Finish the old config before starting another flight. Its
+            # account reading must not be shown under the new config.
+            return {}, None, False
+        if state is None or state["signature"] != signature:
+            state = {"signature": signature, "readings": {}, "good": None,
+                     "attempt": None, "pending": False, "failed": False}
+            _QUOTA_CACHE[key] = state
+        due = state["attempt"] is None or now - state["attempt"] >= budget_module._CACHE_TTL
+        start = due and not state["pending"]
+        if start:
+            state["pending"] = True
+            state["attempt"] = now
+
+    def refresh():
+        try:
+            readings = read_all(providers, executor_of, global_config_dir(),
+                                paths.config)
+        except Exception:
+            with _QUOTA_LOCK:
+                state["failed"] = True
+        else:
+            with _QUOTA_LOCK:
+                state["readings"] = readings
+                state["good"] = time.monotonic()
+                state["failed"] = False
+        finally:
+            with _QUOTA_LOCK:
+                state["pending"] = False
+
+    if start:
+        try:
+            threading.Thread(target=refresh, daemon=True,
+                             name="monitor-quota").start()
+        except Exception:
+            with _QUOTA_LOCK:
+                state["pending"] = False
+                state["failed"] = True
+    with _QUOTA_LOCK:
+        age = max(0.0, time.monotonic() - state["good"]) if state["good"] is not None else None
+        return dict(state["readings"]), age, state["failed"]
+
+
 def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
                    with_scripts: bool = True) -> list[dict]:
     """One entry per configured provider: quota, health, and how to show it."""
@@ -241,16 +298,27 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
     reserved = reserved_providers(config.project, providers, orchestrator)
     health = tree.provider_health()
     spend = spend_by_provider(tree)
-    budgets = read_all(providers, executor_of, global_config_dir(),
-                       paths.config, spend, tree.read().get("cooldowns") or {})
+    cooldowns = tree.read().get("cooldowns") or {}
+    budgets, age, failed = _quota_readings(paths, config, providers, executor_of)
 
     out = []
     for name, provider in sorted(providers.items()):
         if not getattr(provider, "enabled", True):
             continue
         budget = budgets.get(name)
-        data = budget.to_dict() if budget else {"provider": name, "known": False}
+        data = budget.to_dict() if budget else {
+            "provider": name, "known": False, "note": "loading…"}
+        # Spend and cooldowns belong to this poll, not the last quota read.
+        if budget:
+            data["spent"] = {**data.get("spent", {}), **spend.get(name, {})}
+        cooldown = cooldowns.get(name)
+        if cooldown and cooldown.get("until", 0) > time.time():
+            data["cooldown_until"] = cooldown["until"]
+            data["severity"] = "critical"
+            data["note"] = (data.get("note", "") + " | " if data.get("note") else "") + cooldown.get("reason", "cooling down")
         lines, source = (_generic_usage(data), "built-in")
+        if failed and age is not None:
+            lines.append(f"stale · last reading {age:.0f}s ago")
         executor = executor_of(name)
         available, install_status = _installation(name, provider, executor, paths)
         if with_scripts:

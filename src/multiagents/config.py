@@ -115,12 +115,13 @@ def _current_owner() -> tuple[int, Any]:
 class _Snapshot:
     """One read's view of the files, valid only while its read is active."""
 
-    __slots__ = ("files", "open", "owner")
+    __slots__ = ("files", "open", "owner", "lock")
 
     def __init__(self) -> None:
         self.files: dict[Path, tuple[dict, yaml.YAMLError | None]] = {}
         self.open = True
         self.owner = _current_owner()
+        self.lock = threading.RLock()
 
 
 # The per-CALL view BP-R1 asks for: inside `parse_once()` every read of a
@@ -136,7 +137,25 @@ class _Snapshot:
 _snapshot: ContextVar[_Snapshot | None] = ContextVar("config_snapshot", default=None)
 
 
+_shared_snapshot: ContextVar[tuple[_Snapshot, tuple[int, Any]] | None] = ContextVar("shared_config_snapshot", default=None)
+
+
+@contextlib.contextmanager
+def share_parse_once(snap: _Snapshot):
+    """Explicitly lend a call view to workers joined before the call exits."""
+    token = _shared_snapshot.set((snap, _current_owner()))
+    snapshot_token = _snapshot.set(snap)
+    try:
+        yield
+    finally:
+        _snapshot.reset(snapshot_token)
+        _shared_snapshot.reset(token)
+
+
 def _active_snapshot() -> _Snapshot | None:
+    shared = _shared_snapshot.get()
+    if shared is not None and shared[0].open and shared[1] == _current_owner():
+        return shared[0]
     snap = _snapshot.get()
     if snap is None or not snap.open or snap.owner != _current_owner():
         return None
@@ -150,13 +169,13 @@ def parse_once():
     Nested uses share the outer view: a `read_provider` inside a `read_all`
     is part of that call.
     """
-    if _active_snapshot() is not None:
-        yield
+    if (active := _active_snapshot()) is not None:
+        yield active
         return
     snap = _Snapshot()
     token = _snapshot.set(snap)
     try:
-        yield
+        yield snap
     finally:
         snap.open = False
         _snapshot.reset(token)
@@ -228,20 +247,21 @@ def read_yaml_cached(path: Path, *, strict: bool = False) -> dict:
     """
     key = path.resolve()
     snap = _active_snapshot()
-    if snap is not None and key in snap.files:
-        parsed, error = snap.files[key]
-    else:
-        try:
-            parsed, error = _parse_versioned(key)
-        except OSError:
-            # Unstattable: a strict read surfaces it; a layer read skips the
-            # layer, as `_read_yaml`'s is_file() did. Not snapshotted, so a
-            # strict read later in the call still sees the error.
-            if strict or _stat_ok(key):
-                raise
-            return {}
-        if snap is not None:
-            snap.files[key] = (parsed, error)
+    with snap.lock if snap is not None else contextlib.nullcontext():
+        if snap is not None and key in snap.files:
+            parsed, error = snap.files[key]
+        else:
+            try:
+                parsed, error = _parse_versioned(key)
+            except OSError:
+                # Unstattable: a strict read surfaces it; a layer read skips the
+                # layer, as `_read_yaml`'s is_file() did. Not snapshotted, so a
+                # strict read later in the call still sees the error.
+                if strict or _stat_ok(key):
+                    raise
+                return {}
+            if snap is not None:
+                snap.files[key] = (parsed, error)
     if error is not None and strict:
         raise copy.copy(error)
     return copy.deepcopy(parsed)
