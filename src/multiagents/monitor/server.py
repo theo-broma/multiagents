@@ -8,15 +8,12 @@ Three locks, and it takes all three, because the API can stop agents and
 rewrite config.
 
 * **The bind.** 127.0.0.1 and nothing else, so the network cannot reach it.
-* **The token.** Minted per run, embedded in the page it serves, required on
-  every call — localhost is reachable by other programs on this machine, a
-  hostile browser tab included.
-* **The Host header.** Which is the one that is easy to miss, and an advisor
-  did not miss it: a site can point `local.evil.com` at 127.0.0.1, so the
-  *browser* believes it is same-origin and sends the request without a
-  preflight. The bind sees a loopback connection and the request looks
-  ordinary — and `GET /` would hand back the page with the token in it. So a
-  request whose Host is not a loopback name we recognise is refused before
+* **The token.** Minted per run and required on every route including `/`,
+  it keeps out local processes that do not have the printed URL and cross-site
+  browser requests. Localhost alone does not keep those callers out.
+* **The Host header.** Defeats DNS rebinding: a site can point
+  `local.evil.com` at 127.0.0.1, so the browser believes it is same-origin.
+  Requests with a missing, empty or unrecognised Host are refused before
   anything is served.
 """
 
@@ -75,18 +72,19 @@ class Handler(BaseHTTPRequestHandler):
     def _authorised(self, query: dict) -> bool:
         header = self.headers.get("X-Monitor-Token", "")
         given = header or (query.get("token") or [""])[0]
-        return secrets.compare_digest(given, self.token)
+        return bool(given) and secrets.compare_digest(given.encode(), self.token.encode())
 
     def _host_is_ours(self) -> bool:
         """Defeat DNS rebinding: only loopback names may ask, by any name.
 
-        Checked on EVERY route including `/`, because `/` is the one that hands
-        out the token — a rebinding attack that only gets the page has already
-        got everything.
+        Checked on EVERY route including `/`, before checking the token or
+        serving the page.
         """
         host = (self.headers.get("Host") or "").strip()
+        if not host:
+            return False
         name = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
-        return name in ("127.0.0.1", "localhost", "::1", "") or name == self.bound_host
+        return name in ("127.0.0.1", "localhost", "::1") or name == self.bound_host
 
     def _origin_is_ours(self) -> bool:
         origin = self.headers.get("Origin")
@@ -135,6 +133,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "quota details unavailable"})
             return self._json({"error": "method not allowed"}, 405)
         if route in ("/", "/index.html"):
+            if not self._authorised(query):
+                return self._send(403, b"Open the URL printed when the monitor started.",
+                                  "text/plain; charset=utf-8")
             page = PAGE.read_text().replace("__TOKEN__", self.token)
             return self._send(200, page.encode(), "text/html; charset=utf-8")
         if not route.startswith("/api/"):
@@ -164,10 +165,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": f"{type(exc).__name__}: {exc}"}, 200)
         return self._json({"error": "unknown endpoint"}, 404)
 
+    def do_HEAD(self) -> None:                # noqa: N802
+        if not self._host_is_ours():
+            self.send_response(403)
+        else:
+            self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self) -> None:                # noqa: N802
         parsed = urlparse(self.path)
         if not self._host_is_ours():
             return self._send(403, b"bad host", "text/plain")
+        if parsed.path in ("/", "/index.html"):
+            return self._send(405, b"method not allowed", "text/plain")
         if parsed.path in QUOTA_ROUTES:
             if not self._origin_is_ours():
                 return self._json({"error": "bad origin"}, 403)
