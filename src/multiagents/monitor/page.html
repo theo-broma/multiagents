@@ -224,7 +224,7 @@ function signature(s) {
   return JSON.stringify([
     s.counts,
     (s.alerts || []).map((a) => a.text),
-    (s.providers || []).map((p) => [p.name, p.budget.used_percent, p.lines]),
+    (s.providers || []).map((p) => [p.name, p.install_status, p.budget.used_percent, p.lines]),
     (s.running || []).map((a) => [a.id, a.status, a.tokens, a.steps]),
     (s.conversations || []).map((c) => [c.id, c.tokens, c.last_spoke]),
     (s.history || []).length,
@@ -347,20 +347,15 @@ function steer(id) {
 
 function providerPanel(p) {
   const b = p.budget || {};
-  const used = b.used_percent;
   return el("div", { class: "panel" },
     el("div", { class: "row" },
       el("strong", {}, p.name),
-      !p.available && el("span", { class: "failed" }, "not installed"),
+      el("span", { class: p.available ? "muted" : "failed" }, p.install_status || (p.available ? "installed" : "not installed")),
       el("span", { class: "right muted" }, b.source || ""),
     ),
-    used !== undefined && el("div", { class: "bar", style: "margin:7px 0" },
-      el("i", { class: b.severity || "", style: `width:${Math.min(100, used)}%` })),
     el("div", { class: "pre muted", style: "margin-top:4px" }, (p.lines || []).join("\n")),
     p.consecutive_failures >= 1 && el("div", { class: "failed", style: "margin-top:5px" },
       `${p.consecutive_failures} run(s) failed in a row`),
-    p.lines_from === "script" && el("div", { class: "muted", style: "font-size:11px;margin-top:5px" },
-      "shown by the provider's own usage script"),
   );
 }
 

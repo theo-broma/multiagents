@@ -148,18 +148,14 @@ class Screen:
         y += 1
         for provider in self.state.get("providers") or []:
             budget = provider.get("budget") or {}
-            used = budget.get("used_percent")
-            bar = ""
-            if used is not None:
-                filled = int(round(used / 10))
-                bar = "█" * filled + "░" * (10 - filled) + f" {used:>3.0f}%"
-            self.put(y, 2, f"{provider['name']:<10} {bar}",
+            status = provider.get("install_status", "")
+            self.put(y, 2, f"{provider['name']:<10} {status}",
                      curses.color_pair(2) if budget.get("severity") == "critical"
                      else curses.color_pair(3) if budget.get("severity") == "warning"
                      else 0)
             y += 1
-            for line in (provider.get("lines") or [])[:4]:
-                self.put(y, 14, line[:80], curses.color_pair(4))
+            for line in (provider.get("lines") or []):
+                self.put(y, 14, line, curses.color_pair(4))
                 y += 1
 
         questions = [q for q in self.state.get("questions") or [] if not q.get("answered_at")]

@@ -126,15 +126,14 @@ if not found:
     unknown("z.ai quota endpoint reported no window")
 
 if mode == "usage":
-    for name, l in found.items():
-        used = float(l["percentage"])
-        n = min(10, max(0, int(round(used / 10))))
-        line = "%-8s %s %3.0f%%  %s" % (name, "#" * n + "." * (10 - n), used,
-                                        ms_iso(l.get("nextResetTime")) or "")
+    lines = []
+    for l in found.values():
         cur, cap = number(l.get("currentValue")), number(l.get("usage"))
         if cur is not None and cap is not None:
-            line += "  %g/%g credits" % (cur, cap)
-        print(line.rstrip())
+            lines.append("%g/%g credits" % (cur, cap))
+    if not lines:
+        raise SystemExit(64)
+    print("\n".join(lines))
     raise SystemExit(0)
 
 detail = {n: {"percent": l["percentage"], "resets_at": ms_iso(l.get("nextResetTime"))}
@@ -314,33 +313,24 @@ print(json.dumps({
     exit 0
     ;;
 usage)
-    if zai_plan; then zai_py usage; exit 0; fi
-    # opencode serves three windows — rolling, weekly, monthly — and which one
-    # is full changes what to do about it: a rolling window clears in hours, a
-    # monthly one does not. So all three are shown rather than only the worst,
-    # which is the number the generic renderer would pick.
-    python3 -c "
-import json, os
+    # Quota windows are rendered by the monitor; this action supplies extras.
+    if zai_plan; then zai_py usage; exit $?; fi
+    python3 - <<'PYEOF'
+import json, os, sys
 b = json.loads(os.environ.get('MULTIAGENTS_BUDGET') or '{}')
-if not b.get('known'):
-    print(b.get('note') or 'free tier: no quota surface, spend-only'); raise SystemExit
-windows = b.get('windows') or {}
-for name, w in windows.items():
-    used = (w or {}).get('used_percent', (w or {}).get('percent'))
-    if used is None: continue
-    bar = '#' * int(round(used / 10)) + '.' * (10 - int(round(used / 10)))
-    # Local clock and countdown from the caller; slicing the ISO string showed
-    # UTC on a local face. The fallback keeps the offset for the same reason:
-    # this script can be newer than the Python feeding it, and a trimmed
-    # timestamp claims a local time nobody converted.
-    resets = (w or {}).get('resets_label') or str((w or {}).get('resets_at') or '')
-    print(f\"{name:<8} {bar} {used:>3.0f}%  {resets}\")
-if not windows:
-    print(f\"{b.get('used_percent', 0):.0f}% used\")
+lines = []
 spent = b.get('spent') or {}
 if spent.get('total'):
-    print(f\"{spent['total'] / 1000:.1f}k tokens spent in this project\")
-" 2>/dev/null || exit 64
+    lines.append(f"{spent['total'] / 1000:.1f}k tokens spent in this project")
+if b.get('account'):
+    lines.append('vault account ' + str(b['account']))
+note = b.get('note') or ''
+if note and 'is the constraint at' not in note:
+    lines.append(note[:120])
+if not lines:
+    raise SystemExit(64)
+print('\n'.join(lines))
+PYEOF
     ;;
 prepare)
     # `opencode mcp add` only takes --url, so a stdio server has to come from a

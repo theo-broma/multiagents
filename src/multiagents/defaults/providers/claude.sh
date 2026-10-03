@@ -529,43 +529,26 @@ budget)
     exit 64
     ;;
 usage)
-    # How this provider's usage is shown in `multiagents monitor`. The budget
-    # is already parsed and arrives in MULTIAGENTS_BUDGET, so this formats and
-    # never re-fetches — one request per five minutes per machine is the whole
-    # budget for asking the account anything.
-    #
-    # Claude's shape is two rolling windows plus a credit pool, and the pool is
-    # worth naming: when it is spent, a full window stops work dead and the CLI
-    # announces that as "you've hit your monthly spend limit". Somebody reading
-    # this panel at that moment should not have to know that story.
-    python3 -c "
+    # Quota windows are rendered by the monitor; this action supplies extras.
+    python3 - <<'PYEOF'
 import json, os, sys
 b = json.loads(os.environ.get('MULTIAGENTS_BUDGET') or '{}')
-if not b.get('known'):
-    print(b.get('note') or 'no usage reading'); raise SystemExit
-used = b.get('used_percent') or 0
-bar = '#' * int(round(used / 10)) + '.' * (10 - int(round(used / 10)))
-print(f\"{bar}  {used:.0f}% of the tightest window\")
-# resets_label is the local clock plus a countdown, computed by the caller so
-# that every provider script shows the same time the user's own clock does.
-# Slicing the ISO string here printed UTC on a local face: two hours out.
-# The fallback keeps the offset rather than trimming to a tidy 16 characters.
-# A script here can be newer than the Python that feeds it — provider scripts
-# sync into the global config dir on their own, a running monitor does not
-# reload — and a fallback that prints \"2026-09-15T00:00\" states a local time
-# it has not computed. Raw and unambiguous is the right way to be out of date.
-if b.get('resets_label') or b.get('resets_at'):
-    print(f\"resets {b.get('resets_label') or b['resets_at']}\")
+lines = []
 spent = b.get('spent') or {}
 u, limit = spent.get('extra_credits_used'), spent.get('extra_credits_limit')
 if u is not None and limit:
-    print(f\"credits {u / 100:.2f} of {limit / 100:.2f} — {'spent' if u >= limit else 'available'}\")
+    lines.append(f"credits {u / 100:.2f} of {limit / 100:.2f} — {'spent' if u >= limit else 'available'}")
     if u >= limit:
-        print('nothing carries a session past a full window')
+        lines.append('nothing carries a session past a full window')
+if b.get('account'):
+    lines.append('vault account ' + str(b['account']))
 note = b.get('note') or ''
 if note and 'credits' not in note:
-    print(note[:120])
-" 2>/dev/null || exit 64
+    lines.append(note[:120])
+if not lines:
+    raise SystemExit(64)
+print('\n'.join(lines))
+PYEOF
     ;;
 prepare)
     # Nothing to register: claude takes its MCP config per invocation, so

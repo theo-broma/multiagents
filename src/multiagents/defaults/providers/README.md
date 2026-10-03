@@ -47,18 +47,18 @@ read JSON.
                             exit 64 = not implemented; multiagents falls back to
                                       a built-in reader if it has one
 
-    <provider>.sh usage     non-interactive, fast. Render THIS provider's quota
-                            for the monitor, as up to 12 plain lines on stdout.
-                            Receives the already-parsed budget as
-                            MULTIAGENTS_BUDGET and formats it; it must not
-                            re-probe the CLI, because a slow action here stalls
-                            every monitor refresh behind a 30s line cache.
-                            The FIRST FOUR lines must each stand alone — the
-                            curses monitor shows only four per provider, while
-                            the web view shows all of them.
-                            exit 0  = the lines are usable
-                            exit 64 = not implemented; multiagents falls back to
-                                      a generic rendering of the same budget
+    <provider>.sh usage     non-interactive, fast. Print extras only: credits,
+                            vault account, notes or project spend (up to 12
+                            plain lines). Never print window bars or percentages:
+                            the monitor renders all structured budget windows.
+                            Receives the parsed budget as MULTIAGENTS_BUDGET.
+                            Runs on the host; do not re-probe a CLI. If an extra
+                            needs a binary absent on the host, exit 64 quietly.
+                            Extras are cached and fetched in the background;
+                            they may lag one refresh, but never delay windows.
+                            exit 0  = extra lines are usable
+                            exit 64 = no extras (quiet)
+                            other non-zero = one short diagnostic below windows
 
     <provider>.sh prepare   idempotently register the MCP server for this CLI,
                             so it can act as an orchestrator

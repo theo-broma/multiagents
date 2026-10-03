@@ -14,10 +14,13 @@ Two rules hold this together:
 from __future__ import annotations
 
 import json
+import math
 import re
+import threading
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..budget import read_all, reset_display, reset_label, reserved_providers
 from ..config import Config
@@ -49,13 +52,44 @@ def _alive(pid: int | None, start: str = "") -> bool:
 # providers
 
 
-# The usage scripts are subprocesses, and the poll runs every two seconds. Left
-# uncached that is a fork per provider per tick for a page nobody may even be
-# looking at — an idle monitor with a fan. The lines only change when the budget
-# under them changes, so the budget IS the cache key, with a ceiling so a
-# provider whose numbers are static still refreshes eventually.
-_LINE_CACHE: dict[str, tuple[float, str, list[str], str]] = {}
+# Extras and install probes share a bounded background pool. A busy pool
+# defers new work until a later poll instead of queuing unbounded jobs.
+_LINE_CACHE: dict[tuple[str, str], tuple[float, str, list[str], str]] = {}
+_PROBE_CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
+_BACKGROUND_PENDING: set[tuple[str, str, str]] = set()
+_BACKGROUND_SLOTS = threading.BoundedSemaphore(4)
+_LINE_LOCK = threading.Lock()
 LINE_TTL = 30.0
+PROBE_TTL = 60.0
+
+
+def _background(kind: str, key: tuple[str, str], refresh: Callable[[], None],
+                fresh: Callable[[], bool]) -> None:
+    job = (kind, *key)
+    with _LINE_LOCK:
+        if fresh() or job in _BACKGROUND_PENDING:
+            return
+        if not _BACKGROUND_SLOTS.acquire(blocking=False):
+            return
+        _BACKGROUND_PENDING.add(job)
+
+    def run() -> None:
+        try:
+            refresh()
+        finally:
+            with _LINE_LOCK:
+                _BACKGROUND_PENDING.discard(job)
+            _BACKGROUND_SLOTS.release()
+
+    try:
+        threading.Thread(target=run, daemon=True,
+                         name=f"monitor-{kind}-{key[1]}").start()
+    except Exception:
+        with _LINE_LOCK:
+            _BACKGROUND_PENDING.discard(job)
+        _BACKGROUND_SLOTS.release()
+        raise
+
 
 # A script's usage line may carry its reset as the raw UTC ISO string the API
 # sent (a provider script's `ms_iso` prints exactly that, and its contract
@@ -75,66 +109,123 @@ def _readable_resets(line: str) -> str:
 
 def _usage_lines(name: str, provider: Any, executor: Any, budget: dict,
                  paths: ProjectPaths) -> tuple[list[str], str]:
-    """How this provider wants its usage shown. ``(lines, source)``.
-
-    The shape of a quota differs per provider and there is no honest common
-    denominator: one provider has rolling windows plus a credit pool, another
-    serves several windows over HTTP, another has windows of its own beside
-    two more for a resold pool it does not spend against.
-    Flattening those into one bar would invent precision for most of them.
-
-    So a provider may implement the ``usage`` action and print whatever its own
-    numbers deserve, receiving the parsed budget as ``MULTIAGENTS_BUDGET`` so it
-    formats rather than re-fetches. Exit 64 — the contract's "not implemented"
-    — falls back to the generic rendering below, which is what every provider
-    got before and is nobody's second choice.
-    """
+    """Return cached extras immediately, refreshing them in the background."""
     from .. import scripts
 
     payload = json.dumps(budget, sort_keys=True, default=str)
-    cached = _LINE_CACHE.get(name)
-    if cached and (time.time() - cached[0] < LINE_TTL and cached[1] == payload):
-        return cached[2], cached[3]
+    key = (str(paths.config), name)
 
-    code, out, _ = scripts.run_action(
-        name, provider, executor, "usage", global_config_dir(), paths.config,
-        timeout=10, extra_env={"MULTIAGENTS_BUDGET": payload})
-    if code == 0 and out.strip():
-        lines = [line.rstrip() for line in out.strip().splitlines()[:12]]
-        lines = [_readable_resets(line) for line in lines]
-        source = "script"
-    else:
-        lines, source = _generic_usage(budget), "built-in"
-    _LINE_CACHE[name] = (time.time(), payload, lines, source)
-    return lines, source
+    def refresh() -> None:
+        try:
+            code, out, err = scripts.run_action(
+                name, provider, executor, "usage", global_config_dir(), paths.config,
+                timeout=10, extra_env={"MULTIAGENTS_BUDGET": payload})
+            if code == 0:
+                lines = [_readable_resets(line.rstrip())
+                         for line in out.strip().splitlines()[:12]]
+            elif code == 64:
+                lines = []
+            else:
+                detail = " ".join((err or out or "").split())
+                lines = [f"usage failed ({code}): {detail}"[:120]]
+        except Exception as exc:
+            lines = [("usage failed: " + " ".join(str(exc).split()))[:120]]
+        finally:
+            with _LINE_LOCK:
+                _LINE_CACHE[key] = (time.time(), payload, lines, "script")
+
+    def fresh() -> bool:
+        cached = _LINE_CACHE.get(key)
+        return bool(cached and time.time() - cached[0] < LINE_TTL and cached[1] == payload)
+
+    _background("usage", key, refresh, fresh)
+    with _LINE_LOCK:
+        cached = _LINE_CACHE.get(key)
+        return (cached[2], cached[3]) if cached else ([], "built-in")
+
+
+def _percent(detail: dict) -> float | None:
+    for field in ("percent", "used_percent", "headroom"):
+        value = detail.get(field)
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value)):
+            return (1 - value) * 100 if field == "headroom" else value
+    return None
+
+
+def _reset_order(stamp: Any) -> float:
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return math.inf
 
 
 def _generic_usage(budget: dict) -> list[str]:
-    """The fallback view: what is known, said plainly, and no more."""
+    """Every structured window in the same layout, followed by local notes."""
+    windows = {name: detail for name, detail in (budget.get("windows") or {}).items()
+               if isinstance(detail, dict)}
+    if not windows and budget.get("known") and budget.get("used_percent") is not None:
+        windows = {"overall": {"percent": budget["used_percent"],
+                               "resets_at": budget.get("resets_at")}}
+    candidates = [name for name, detail in windows.items()
+                  if detail.get("counted", True) and _percent(detail) is not None]
+    tightest = min(candidates, key=lambda name: (
+        -_percent(windows[name]), _reset_order(windows[name].get("resets_at")), name
+    )) if candidates else None
     lines = []
-    if budget.get("known") and budget.get("used_percent") is not None:
-        used = budget["used_percent"]
-        filled = int(round(used / 10))
-        lines.append(f"{'█' * filled}{'░' * (10 - filled)}  {used:.0f}% used")
-        if budget.get("resets_at"):
-            lines.append(f"resets {reset_label(budget['resets_at'])}")
-    else:
+    for name, detail in windows.items():
+        used = _percent(detail)
+        if used is None:
+            usage = "—"
+        else:
+            filled = min(10, max(0, int(round(used / 10))))
+            usage = f"{'█' * filled}{'░' * (10 - filled)}  {used:.0f}% used"
+        marks = " · constraining" if name == tightest else ""
+        if not detail.get("counted", True):
+            marks += " · not counted"
+        if detail.get("account"):
+            marks += f" · account {detail['account']}"
+        reset = reset_label(detail.get("resets_at")) or "—"
+        lines.append(f"{name:<13} {usage}  resets {reset}{marks}")
+    if not windows:
         lines.append(budget.get("note") or "no quota surface; spend-only")
-    for window, detail in (budget.get("windows") or {}).items():
-        if not isinstance(detail, dict):
-            continue
-        # Scripts write `percent`; the built-in readers write `used_percent`.
-        # Both mean the same thing and neither is worth a migration.
-        percent = detail.get("used_percent", detail.get("percent"))
-        if percent is not None:
-            aside = "" if detail.get("counted", True) else "  (other pool)"
-            lines.append(f"{window:<13} {percent:.0f}%{aside}")
     spent = budget.get("spent") or {}
     if spent.get("cost_usd"):
         lines.append(f"spent ${spent['cost_usd']:.2f} here")
     if budget.get("cooldown_remaining"):
         lines.append(f"cooling down {budget['cooldown_remaining'] // 60}m")
     return lines
+
+
+def _installation(name: str, provider: Any, executor: Any,
+                  paths: ProjectPaths) -> tuple[bool, str]:
+    if getattr(executor, "kind", "local") != "docker":
+        available = bool(getattr(provider, "available", lambda: None)())
+        return available, "installed" if available else "not installed"
+    from .. import manifest
+
+    key = (str(paths.config), name)
+
+    def refresh() -> None:
+        try:
+            state = manifest.probe(name, paths, context="docker").state
+        except Exception:
+            state = "probe_failed"
+        label = {"missing": "not installed", "no manifest": "unverified (no manifest)",
+                 "container not running": "container not running",
+                 "verified": "installed", "unverified": "installed",
+                 "overridden": "installed"}.get(state, "probe failed")
+        with _LINE_LOCK:
+            _PROBE_CACHE[key] = (time.monotonic(), state != "missing", label)
+
+    def fresh() -> bool:
+        cached = _PROBE_CACHE.get(key)
+        return bool(cached and time.monotonic() - cached[0] < PROBE_TTL)
+
+    _background("probe", key, refresh, fresh)
+    with _LINE_LOCK:
+        cached = _PROBE_CACHE.get(key)
+        return (cached[1], cached[2]) if cached else (True, "checking…")
 
 
 def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
@@ -157,10 +248,12 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
     for name, provider in sorted(providers.items()):
         budget = budgets.get(name)
         data = budget.to_dict() if budget else {"provider": name, "known": False}
-        lines, source = ([], "")
+        lines, source = (_generic_usage(data), "built-in")
+        executor = executor_of(name)
+        available, install_status = _installation(name, provider, executor, paths)
         if with_scripts:
-            lines, source = _usage_lines(name, provider, executor_of(name),
-                                         data, paths)
+            extras, source = _usage_lines(name, provider, executor, data, paths)
+            lines += extras
         entry = health.get(name) or {}
         # Below the reserve a provider is still "usable" and still gets skipped
         # by choose_provider, which is the least obvious state it can be in and
@@ -174,7 +267,8 @@ def providers_view(paths: ProjectPaths, config: Config, tree: Tree,
             "billing": getattr(provider, "billing", "metered"),
             "below_reserve": below_reserve,
             "reserve": reserve,
-            "available": bool(getattr(provider, "available", lambda: None)()),
+            "available": available,
+            "install_status": install_status,
             "budget": data,
             "lines": lines,
             "lines_from": source,

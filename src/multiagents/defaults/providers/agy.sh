@@ -230,101 +230,29 @@ print(json.dumps({
     exit 0
     ;;
 usage)
-    # How agy's own /usage screen reads, as far as a few lines allow. The
-    # generic view flattens all four buckets into "N% used" rows, which loses
-    # the two things agy's display leads with: that the buckets belong to two
-    # different pools, and how long until each one refreshes.
-    #
-    # Formats MULTIAGENTS_BUDGET rather than re-running the CLI: the budget was
-    # already read, and a 4s probe behind a 30s line cache would make the
-    # monitor pause on every refresh.
-    #
-    # The FIRST FOUR LINES must each stand alone. The curses monitor shows only
-    # four lines per provider, so the group legend below them is a bonus for the
-    # web view, never where the percentages live.
-    #
-    # Phrased as USED, and the bar fills as the quota is spent. agy's own
-    # screen counts remaining, but this panel is not agy's screen: the header
-    # directly above these lines says "20% used", and so does every other
-    # provider in the monitor. Counting the other way round here made a FULL
-    # bar mean untouched on one row and exhausted on the next, which is the
-    # one thing a bar has to get right.
-    [ -n "${MULTIAGENTS_BUDGET:-}" ] || exit 64
-    # Captured rather than streamed, so that the formatter's exit 64 survives.
-    # Ending this block with a bare `exit 0` swallowed it, and the fallback then
-    # happened only because stdout was empty — the right view for the wrong
-    # reason, and one stray print away from showing a blank panel instead.
-    rendered=$(printf '%s' "$MULTIAGENTS_BUDGET" | python3 -c "
-import json, sys
-from datetime import datetime, timezone
-
-try:
-    windows = (json.load(sys.stdin).get('windows') or {})
-except Exception:
-    raise SystemExit(64)
-if not windows:
-    raise SystemExit(64)
-
-def until(stamp):
-    'Computed now, not at probe time: a 5-hour window moves while we look.'
-    try:
-        when = datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
-    except (TypeError, ValueError):
-        return ''
-    left = (when - datetime.now(timezone.utc)).total_seconds()
-    if left <= 0:
-        return 'due'
-    days, rest = divmod(int(left), 86400)
-    hours, rest = divmod(rest, 3600)
-    if days:
-        return '%dd%02dh' % (days, hours)
-    if hours:
-        return '%dh%02dm' % (hours, rest // 60)
-    if rest < 60:
-        return '<1m'        # seconds away; '0m' reads as a broken number
-    return '%dm' % (rest // 60)
-
-rows, legend = [], []
+    # Quota windows are rendered by the monitor; this action supplies extras.
+    python3 - <<'PYEOF'
+import json, os, sys
+b = json.loads(os.environ.get('MULTIAGENTS_BUDGET') or '{}')
+lines = []
 seen = set()
-
-# Ordered here rather than taken as given. The caller serialises the budget with
-# sort_keys, so insertion order is not ours to rely on and relying on it put the
-# 5-hour row above the weekly one only when read through the monitor.
-# Counted pool first, because it is the one that decides whether a run can
-# start; then longest window first, which is how agy's own screen reads.
-SPAN = {'weekly': 0, '5h': 1}
-
-def rank(item):
-    key, w = item
-    span = str(key).partition('-')[2]
-    return (not w.get('counted', True), SPAN.get(span, 2), span, key)
-
-for key, w in sorted(windows.items(), key=rank):
-    if not isinstance(w, dict) or w.get('headroom') is None:
+for key, window in (b.get('windows') or {}).items():
+    if not isinstance(window, dict):
         continue
-    used = 1.0 - float(w['headroom'])
-    pool, _, span = str(key).partition('-')
-    filled = int(round(used * 10))
-    rows.append('%-6s %-6s %s %3.0f%% used%s%s' % (
-        pool, span or '?',
-        '█' * filled + '░' * (10 - filled),
-        used * 100,
-        ' · ' + until(w.get('resets_at')) if w.get('resets_at') else '',
-        '' if w.get('counted', True) else ' · not counted',
-    ))
-    if pool not in seen and w.get('models'):
+    pool = str(key).partition('-')[0]
+    if pool not in seen and window.get('models'):
         seen.add(pool)
-        legend.append('%-6s = %s%s' % (
-            pool, w['models'],
-            '' if w.get('counted', True) else ' (separate pool)'))
-
-if not rows:
+        aside = '' if window.get('counted', True) else ' (separate pool)'
+        lines.append(pool + ' = ' + str(window['models']) + aside)
+if b.get('account'):
+    lines.append('vault account ' + str(b['account']))
+note = b.get('note') or ''
+if note and 'is the constraint at' not in note:
+    lines.append(note[:120])
+if not lines:
     raise SystemExit(64)
-print('\n'.join(rows + legend))
-") || exit 64
-    [ -n "$rendered" ] || exit 64
-    printf '%s\n' "$rendered"
-    exit 0
+print('\n'.join(lines))
+PYEOF
     ;;
 prepare)
     # agy's MCP registry is a GLOBAL profile with no per-invocation scope, so
