@@ -763,6 +763,7 @@ class Runner:
     def __init__(self, paths: ProjectPaths, config: Config):
         self.paths = paths
         self.config = config
+        self.config_error = ""
         self.providers = load_providers(config.providers)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.startup = StartupHealth(paths)
@@ -851,6 +852,7 @@ class Runner:
                        or here.max_concurrent > self.providers[name].max_concurrent)]
         self.config = config
         self.providers = providers
+        self.config_error = ""
         if raised:
             # PC-R2a: a raised or removed limit wakes the queue.
             self._pc_kick()
@@ -2362,7 +2364,8 @@ class Runner:
                            message=notices.message(key, value, source, what, advice))
 
     def _limits_detail(self, agent_name: str,
-                       limits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+                       limits: dict[str, dict[str, Any]],
+                       route: str = "") -> dict[str, dict[str, Any]]:
         """LN-C2: `effective_limits` as reported, each entry `{value, source,
         source_detail}`. `source` stays LM-R2's layer name; `source_detail`
         says which file and line (or which call argument) it came from."""
@@ -2374,8 +2377,19 @@ class Runner:
                 detail = notices.call_source(name, limit_key)
             else:
                 key = f"agents.{agent_name}.{name}" if layer == "agent" else limit_key
+                configured = self.config.agents.get(agent_name)
+                entry_on_route = (configured.models or {}).get(route) if configured else None
+                if (layer == "agent" and isinstance(entry_on_route, dict)
+                        and config_mod._positive(entry_on_route.get(name)) == entry.get("value")):
+                    key = f"agents.{agent_name}.models.{route}.{name}"
                 detail = notices.provenance(self.config, key, entry.get("value"), layer)
-            out[name] = {**entry, "source_detail": detail}
+            # SR-R3: the global project's defaults are the default layer;
+            # a project's own limits remain the project layer.
+            source = layer
+            if layer == "project" and detail.get("file"):
+                if Path(detail["file"]).parent == global_config_dir().resolve():
+                    source = "default"
+            out[name] = {**entry, "source": source, "source_detail": detail}
         return out
 
     def _node_cap(self, node: Node, spec: AgentSpec) -> Any:
@@ -2695,8 +2709,7 @@ class Runner:
         return Supervisor(
             silence_timeout=silence_timeout,
             wall_timeout=wall_timeout,
-            max_steps=spec.max_steps or int(
-                self.config.limits.get("max_steps", 250)),
+            max_steps=int(spec.max_steps or self.config.limits.get("max_steps", 250)),
             loop_repeats=loop_repeats,
             loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
             declares_turn=_declares_turn(provider),
@@ -3316,11 +3329,15 @@ class Runner:
         an unanswerable container as alive for `UNKNOWN_ALIVE_SECONDS` and
         then reports dead — an expired Docker liveness grace period is
         "unknown", and unknown is never death.
+        Docker's explicit verdict also distinguishes a transport exit 1
+        from an answer that the container-side session has ended.
         """
-        wrapper_alive = getattr(executor, "wrapper_alive", None)
-        if wrapper_alive is None:
+        verdict = getattr(executor, "wrapper_verdict", None)
+        if verdict is None:
+            verdict = getattr(executor, "wrapper_alive", None)
+        if verdict is None:
             return None
-        return lambda: wrapper_alive(node_id)
+        return lambda: verdict(node_id)
 
     async def _confirm_ended(self, pid: int | None, pid_start: str,
                              probe_raw: Any = None, bound: float = None) -> bool:
@@ -3422,6 +3439,24 @@ class Runner:
             # claim goes back (SF-R3a).
             self._startup_release(provider.name, node_id, startup_token)
             raise RuntimeError(_held_refusal(node_id))
+        # SR-R1/R2/R2b: all relaunches drain the previous wrapper AND its
+        # session before touching their shared files. This includes consult
+        # and the free retry, whose stream can end before the wrapper exits.
+        previous = self.tree.get(node_id)
+        if (self.runs.get(node_id) is not None
+                or (previous and (previous.pid or previous.turn_started_at))):
+            predecessor = _Predecessor()
+            try:
+                predecessor = self._steer_predecessor(node_id)
+                if not await self._steer_predecessor_dead(predecessor):
+                    reason = "the predecessor's wrapper or agent is not confirmed dead"
+                    raise RuntimeError(f"refusing to relaunch {node_id}: {reason}")
+            except BaseException:
+                if release_lock:
+                    await self._steer_release(
+                        node_id, provider.name, startup_token, None, None, "",
+                        False, predecessor)
+                raise
         try:
             home = None
             if self.config.home_policy == "per-agent":
@@ -3482,12 +3517,10 @@ class Runner:
             # launch — the file and line as they are now, not as they will be when
             # a trip fires.
             limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
-                                                                     timeout))
+                                                                     timeout), provider.name)
             # LN-C2, adversary findings 3/8: written where the container cannot
             # reach, so a later adoption or relaunch reads what THIS launch ran
             # under, not what the node's forgeable record in `tree.json` claims.
-            launched = now()
-            self.launch_limits.record(node_id, limits, launched)
             wall = limits["timeout"]["value"]
             # FO-R1: every scalar option reaches the command line, floats
             # included (`max_budget_usd: 0.5` is a real budget, and the old
@@ -3544,16 +3577,14 @@ class Runner:
             providers_mod.check_argv_limit(provider.name, argv)
             turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
             _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
-            launched = now()
             # Environment KEYS only — values may be secret and this file is on disk.
-            # `launched_at` and `timeout` are what a server adopting this run
-            # restarts its wall clock from (SV-R8).
-            _run_write(run_dir, "command.json", json.dumps(scrub({
+            # Diagnostic info only: adoption's limits and launch clock come
+            # exclusively from the protected host records, never this file.
+            command_record = {
                 "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
                 "provider": provider.name, "model": spec.model,
                 "permission": spec.permission, "resumed": bool(session_id),
-                "launched_at": launched, "timeout": wall,
-            }), indent=2))
+            }
 
             problems = executor.preflight()
             if problems:
@@ -3607,9 +3638,25 @@ class Runner:
             capped = self._cap_refusal(provider.name, spec.model or "")
             if capped:
                 raise SpendCapRefused(capped)
+            # SR-R3/R4: admission and cleanup do not spend the turn's clock.
+            launched_at = now()
+            supervisor.started = time.monotonic()
+            supervisor.last_event = supervisor.started
+            self.launch_limits.record(node_id, limits, launched_at)
+            frozen = asdict(spec)
+            frozen["set_fields"] = sorted(spec.set_fields or ())
+            self.launch_limits.record_spec(node_id, frozen, launched_at)
+            _run_write(run_dir, "command.json",
+                       json.dumps(scrub(command_record), indent=2))
+            env["MULTIAGENTS_TURN_STARTED_AT"] = str(launched_at)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
-                                          deadline=launched + wall if wall else 0,
+                                          deadline=launched_at + wall if wall else 0,
                                           provider=provider.name)
+            launched_at = getattr(handle, "launched_at", 0) or launched_at
+            supervisor.started = time.monotonic() - max(0.0, now() - launched_at)
+            supervisor.last_event = supervisor.started
+            self.launch_limits.record(node_id, limits, launched_at)
+            self.launch_limits.record_spec(node_id, frozen, launched_at)
             self._record_launched(node_id, hold, handle)
             self.startup.bind(provider.name, node_id, startup_token, handle.pid,
                               getattr(handle, "pid_start", "") or "")
@@ -3653,7 +3700,8 @@ class Runner:
             self.tree.update(node_id,
                              follow={"turn": run.turn_start, "offset": run.turn_start,
                                      "log": _size(run_dir / "stream.jsonl")},
-                             adopted_at=None)
+                             adopted_at=None, turn_started_at=launched_at,
+                             turn_ended_at=None)
             self.tree.set_status(node_id, "running")
             run.slot_token = self._launch_slot_owner(node_id, provider.name)
         except BaseException:
@@ -5272,6 +5320,7 @@ class Runner:
         rule a reader had to know.
         """
         node_id = run.node_id
+        self.tree.update(node_id, turn_ended_at=now())
         if run.fix_turn:
             return await self._finalize_fix_turn(run, code, usage)
         # SV-R4: the wrapper ended it at its wall clock. SV-R6: the process is
@@ -5410,6 +5459,10 @@ class Runner:
             "status": status, "exit_code": code, "session_id": session_id,
             "usage": usage, "text": text, "stderr_tail": stderr,
         }
+        finished_node = self.tree.get(node_id)
+        if finished_node:
+            record.update(elapsed_seconds=round(finished_node.turn_elapsed()),
+                          node_elapsed_seconds=round(finished_node.elapsed()))
         if run.refusal:
             # RC-R2 (review ag-997df9 finding 3): the verdict's evidence is in
             # the result artifact too, not only the reason and the events —
@@ -5488,10 +5541,10 @@ class Runner:
             if (status == "failed" and said_nothing
                     and not timed_out and not unrecorded
                     and fresh and not fresh.retries
-                    and fresh.elapsed() < float(self.config.limits.get(
+                    and fresh.turn_elapsed() < float(self.config.limits.get(
                         "retry_silent_failure_under_seconds", 60))):
                 self.tree.emit(node_id, "retrying",
-                               reason=f"died in {fresh.elapsed():.0f}s with no output")
+                               reason=f"died in {fresh.turn_elapsed():.0f}s with no output")
                 # Counted on the NODE, not on the Run: _launch replaces the Run,
                 # so a flag kept there resets on every retry and one free retry
                 # becomes an unbounded loop. Found by running it.
@@ -5914,7 +5967,7 @@ class Runner:
             for e in tail
         )
         node_now = self.tree.get(node_id)
-        elapsed = round(node_now.elapsed()) if node_now else 0
+        elapsed = round(node_now.turn_elapsed()) if node_now else 0
         return (f"[no output] the run ended with exit {code} after {elapsed}s "
                 f"and {run.supervisor.steps if run.supervisor else 0} step(s), "
                 f"having said nothing."
@@ -6363,7 +6416,8 @@ class Runner:
             "agent": node.agent,
             "status": node.status,
             "reason": node.reason,
-            "elapsed_seconds": round(node.elapsed()),
+            "elapsed_seconds": round(node.turn_elapsed()),
+            "node_elapsed_seconds": round(node.elapsed()),
             "steps": node.steps,
             "total_events": len(events),
             "next_since": since + len(window),
@@ -6443,7 +6497,8 @@ class Runner:
             "reason": node.reason,
             "branch": node.branch or None,
             "usage": node.usage,
-            "elapsed_seconds": round(node.elapsed()),
+            "elapsed_seconds": round(node.turn_elapsed()),
+            "node_elapsed_seconds": round(node.elapsed()),
             "log_dir": str(run_dir),
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
@@ -6519,6 +6574,14 @@ class Runner:
         the same way `start()` built them: a run routed to a fallback carries
         the fallback's model and options, not the configured ones."""
         spec = self.config.agent(node.agent)
+        frozen = self.launch_limits.spec(node.id)
+        if frozen:
+            current = spec.routed(node.provider)
+            limits = {"timeout", "silence_timeout", "max_steps"}
+            frozen.update({key: getattr(current, key) for key in limits})
+            frozen["set_fields"] = (frozenset(frozen.get("set_fields") or ()) - limits
+                                    | (frozenset(current.set_fields or ()) & limits))
+            return AgentSpec(**frozen), self.providers[node.provider]
         if node.model_pinned:
             # FO-R1: the pin keeps its model, but the destination's `models:`
             # entry still contributes its options to the relaunch.
@@ -6640,7 +6703,8 @@ class Runner:
     async def _adopt_one(self, node) -> bool:
         run_dir = self.paths.run_dir(node.id)
         output, status_file = run_dir / "output.ndjson", run_dir / "exit_status"
-        executor = self.executor(self.config.agents.get(node.agent))
+        spec, provider = self._spec_of(node)
+        executor = self._predecessor_executor(node, spec)
         stopper = probe = None
         if getattr(executor, "kind", "local") == "docker" and not executor.inside():
             # The pid on the node is the host's `docker exec` client, which
@@ -6657,7 +6721,7 @@ class Runner:
         # wrapper ends it within a second (SV-R4), and the next pass finalises
         # it as the timeout it is; owned, the wrapper would leave it to a
         # watchdog that only reports.
-        if live and self._past_deadline(run_dir, node.id):
+        if live and self._past_deadline(run_dir, node.id, spec):
             return False
         agent_id = node.id
         if not self._claim(agent_id):
@@ -6673,19 +6737,11 @@ class Runner:
             self._release(node.id)
             return False
 
-        spec, provider = self._spec_of(node)
-        command: dict[str, Any] = {}
-        with contextlib.suppress(OSError, ValueError):
-            command = json.loads(_run_read(run_dir, "command.json"))
-        
         limits = self.launch_limits.lookup(node.id)
         launched = self.launch_limits.launch_time(node.id)
         wall = float(limits.get("timeout", {}).get("value") or 0)
-        
-        if not launched:
-            launched = float(command.get("launched_at") or node.started_at or now())
         if not wall:
-            wall = float(command.get("timeout") or self._limits_for(node.id, spec)["timeout"]["value"])
+            wall = float(self._limits_for(node.id, spec)["timeout"]["value"])
         follow = node.follow or {}
         turn = int(follow.get("turn", 0))
         # SV-R7: what the last server logged past the point it recorded, it
@@ -6699,10 +6755,14 @@ class Runner:
         handle = FollowHandle(pid=node.pid or 0, run_dir=run_dir, offset=turn,
                               pid_start=getattr(node, "pid_start", "") or "",
                               stopper=stopper, probe=probe)
-        supervisor = self._supervisor(spec, provider, wall)
+        supervisor = self._supervisor(
+            spec, provider, wall, limits.get("silence_timeout", {}).get("value"))
         # SV-R8: the wall clock runs from the launch, whoever watched it; the
         # silence clock runs from now, because nobody was listening before.
-        supervisor.started = time.monotonic() - max(0.0, now() - launched)
+        # An absent or unreadable host clock grants no fresh budget. Do not
+        # recover it from command.json or the container-writable node times.
+        elapsed = max(0.0, now() - launched) if launched is not None else wall + 1
+        supervisor.started = time.monotonic() - elapsed
         # LN-C2, adversary finding 3: the limits an adopted run trips
         # against come from the host-owned launch record the launching
         # server wrote, never from the node's record in `tree.json`, which
@@ -6711,7 +6771,7 @@ class Runner:
         run = Run(node_id=node.id, provider=provider, spec=spec, handle=handle,
                   supervisor=supervisor, turn_start=turn,
                   replay_to=int(follow.get("offset", turn)), adopted=True,
-                  launched_at=float(launched),
+                  launched_at=float(launched or 0),
                   startup_token=self.startup.token_for(provider.name, node.id),
                   limits=limits if isinstance(limits, dict) else {})
         reader = getattr(executor, "oom_kill_count", None)
@@ -6730,6 +6790,8 @@ class Runner:
             except Exception:
                 pass               # as at launch: supervision is never the cost
         self.runs[node.id] = run
+        if not node.turn_started_at and launched is not None:
+            self.tree.update(node.id, turn_started_at=launched)
         if live:
             self.tree.update(node.id, adopted_at=now())
             self.tree.set_status(node.id, "running", "adopted")
@@ -6743,17 +6805,13 @@ class Runner:
             self._start_credential_watch()
         return True
 
-    def _past_deadline(self, run_dir: Path, node_id: str) -> bool:
+    def _past_deadline(self, run_dir: Path, node_id: str, spec: AgentSpec) -> bool:
         launched = self.launch_limits.launch_time(node_id)
         limits = self.launch_limits.lookup(node_id)
         wall = float(limits.get("timeout", {}).get("value") or 0)
-        
-        if not launched or not wall:
-            with contextlib.suppress(OSError, ValueError, TypeError):
-                command = json.loads(_run_read(run_dir, "command.json"))
-                wall = wall or float(command.get("timeout") or 0)
-                launched = launched or float(command.get("launched_at") or 0)
-                
+        if not wall:
+            wall = float(self._limits_for(node_id, spec)["timeout"]["value"])
+
         return bool(wall) and bool(launched) and now() >= launched + wall
 
     async def shutdown(self, *, detach: bool) -> None:
@@ -7002,6 +7060,23 @@ class Runner:
             result["warning"] = "hold released by operator; predecessor death is unconfirmed"
         return result
 
+    def _predecessor_executor(self, node: Node | None, spec: AgentSpec | None):
+        """SR-R2: ask the execution backend that actually launched the turn."""
+        executor = self.executor(spec)
+        identity = (node.exec_identity or {}) if node else {}
+        if identity.get("kind") == "docker":
+            if (getattr(executor, "kind", "") != "docker"
+                    or getattr(executor, "container", "") != identity.get("container")):
+                recorded = self._docker_for(str(identity.get("container") or ""))
+                if recorded is None:
+                    raise RuntimeError("the predecessor's container cannot be probed")
+                executor = recorded
+        elif identity.get("kind") == "local" and getattr(executor, "kind", "") != "local":
+            executor = get_executor("local", providers=self.providers)
+        elif identity.get("kind") == "unknown":
+            raise RuntimeError("the predecessor's execution backend is unknown")
+        return executor
+
     def _steer_predecessor(self, agent_id: str) -> _Predecessor:
         """The identity of the run a steer is about to stop, captured BEFORE
         the stop so its death can be confirmed after it (SF-R3, review r2).
@@ -7009,10 +7084,11 @@ class Runner:
         lock this Runner holds — then the node's recorded pid, for a run
         this process never launched."""
         run = self.runs.get(agent_id)
+        node = self.tree.get(agent_id)
         if run is not None and run.handle is not None:
             pid = getattr(run.handle, "pid", None)
             if pid:
-                executor = self.executor(run.spec)
+                executor = self._predecessor_executor(node, run.spec)
                 return _Predecessor(
                     captured=True, pid=pid,
                     pid_start=getattr(run.handle, "pid_start", "")
@@ -7021,14 +7097,24 @@ class Runner:
                     provider=run.provider.name,
                     token=getattr(run, "startup_token", "") or "",
                     executor=executor, handle=run.handle, run=run)
-        node = self.tree.get(agent_id)
         if node is not None and node.pid:
-            executor = self.executor(self.config.agents.get(node.agent))
+            executor = self._predecessor_executor(node, self.config.agents.get(node.agent))
             return _Predecessor(
                 captured=True, pid=node.pid, pid_start=node.pid_start or "",
                 probe_raw=self._raw_alive_probe(executor, agent_id),
                 provider=node.provider, executor=executor)
+        if node is not None and node.turn_started_at:
+            return _Predecessor(captured=True, probe_raw=_unknown_probe)
         return _Predecessor(captured=True)
+
+    async def _steer_predecessor_dead(self, predecessor: _Predecessor) -> bool:
+        """SR-R2: use SF's positive-death check, including raw Docker liveness."""
+        if not predecessor.captured:
+            return False
+        if predecessor.absent:
+            return True
+        return await self._confirm_ended(predecessor.pid, predecessor.pid_start,
+                                         predecessor.probe_raw)
 
     def _settle_steer_cleanup(self, node_id: str, hold: _Hold) -> None:
         """SF-R3/R3a: retry ONE owner's remaining steps. Failed reads and
@@ -7351,6 +7437,15 @@ class Runner:
         # from the live node the same way `start()` built it in the first
         # place.
         run = self.runs.get(agent_id)
+        # SR-R3: refuse a stale or missing configuration before stopping the
+        # predecessor. Only limits are fresh; the launch's route stays frozen.
+        try:
+            if getattr(self, "config_error", ""):
+                raise ValueError(self.config_error)
+            current = self.config.agent(node.agent).routed(node.provider)
+        except (KeyError, ValueError) as exc:
+            return {"agent_id": agent_id, "steered": False,
+                    "error": f"refusing to steer: current config is unavailable: {exc}"}
         if run is not None:
             spec, provider = run.spec, run.provider
         else:
@@ -7361,7 +7456,7 @@ class Runner:
             # it resumes on its recorded provider (`resume=True`), never for
             # new work.
             configured = self.config.agent(node.agent)
-            if not node.model_pinned and self._usable_spec(
+            if not self.launch_limits.spec(node.id) and not node.model_pinned and self._usable_spec(
                     configured, node.provider, resume=True) is None:
                 return {
                     "agent_id": agent_id, "steered": False,
@@ -7372,6 +7467,21 @@ class Runner:
                              f"this run, or start a fresh one.",
                 }
             spec, provider = self._spec_of(node)
+
+        fresh_fields = ("timeout", "silence_timeout", "max_steps")
+        spec = replace(spec, **{key: getattr(current, key) for key in fresh_fields},
+                       set_fields=(frozenset(spec.set_fields or ()) - set(fresh_fields))
+                       | (frozenset(current.set_fields or ()) & set(fresh_fields)))
+        try:
+            limits = self._limits_for(agent_id, spec)
+            # Validate configuration before stopping, but construct the
+            # supervisor inside the launch's SF-owned failure region.
+            int(spec.max_steps or self.config.limits.get("max_steps", 250))
+            repeats = int(self.config.limits.get("doom_loop_repeats", 5))
+            int(self.config.limits.get("doom_loop_rearm", repeats))
+        except (ValueError, TypeError, OverflowError) as exc:
+            return {"agent_id": agent_id, "steered": False,
+                    "error": f"refusing to steer: current limits are invalid: {exc}"}
 
         if node.model_pinned:
             refusal = await self._pin_health(spec.replace(provider=provider.name))
@@ -7631,14 +7741,29 @@ class Runner:
             # like every other pre-spawn refusal.
             predecessor = self._steer_predecessor(agent_id)
             await self.stop(agent_id, internal=True)
-        except BaseException:
+            # Preserve a concrete launch error even when death is uncertain.
+            # This is read-only preflight; no replacement or shared-file
+            # cleanup occurs until the gate below has confirmed death.
+            if not predecessor.absent and not provider.adapter:
+                found = provider.resolve_bin()
+                if found.launcher is None:
+                    raise FileNotFoundError(provider.bin_error(found))
+            if not await self._steer_predecessor_dead(predecessor):
+                await self._steer_release(
+                    agent_id, provider.name, startup_token, reserved_from,
+                    queued, queued_id, live, predecessor)
+                return {"agent_id": agent_id, "steered": False,
+                        "error": "refusing to steer: the predecessor's wrapper or "
+                                 "agent is not confirmed dead (liveness may be unknown)",
+                        **({"blocked": True} if queued else {})}
+        except BaseException as exc:
             # Nothing was relaunched. SF-R3, review r2 finding 2: this path
             # applies the same rule as a refusal — a predecessor confirmed
             # dead with no hold frees the inherited lock; a live one keeps
             # it, and the node is left to whatever owns the predecessor.
             await self._steer_release(agent_id, provider.name, startup_token,
                                       reserved_from, queued, queued_id, live,
-                                      predecessor)
+                                      predecessor, failure=str(exc))
             raise
         try:
             await self._launch(
@@ -7690,6 +7815,8 @@ class Runner:
                                       failure=str(exc) or type(exc).__name__)
             raise
         self.tree.set_status(agent_id, "running", "steered")
+        effective_limits = self.runs[agent_id].limits
+        self.tree.emit(agent_id, "steer_limits", effective_limits=effective_limits)
 
         # `_launch` returns when the process has STARTED, which is not the same
         # as it being alive. A run that dies immediately — an unauthenticated
@@ -8746,7 +8873,9 @@ class Runner:
         out: dict[str, dict[str, Any]] = {}
         for name, here in self.providers.items():
             queue = pc_waiting(data["deferred"], name)
-            if here.max_concurrent is None and not queue:
+            cleanup = any(raw.get("provider") == name and raw.get("cleanup_hold")
+                          for raw in data["nodes"].values())
+            if here.max_concurrent is None and not queue and not cleanup:
                 continue
             held = holders.get(name, [])
             out[name] = {"max_concurrent": here.max_concurrent,
