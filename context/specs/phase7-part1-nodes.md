@@ -80,7 +80,8 @@ means accepting an invalid graph.
     round runs;
   - a rejected round relaunches the first child, with the verdict's
     findings injected;
-  - the loop has a counter, a maximum and an `on_max` action (NS-R12).
+  - the loop has a counter and a maximum (NS-R12; `on_max` withdrawn
+    2026-10-04).
 - **On any node:** dependencies, priority, locks and a time window.
 
 **NS-R3 — fields of a node.** The contract fixes the schema. It covers at
@@ -154,7 +155,9 @@ never stored as truth.
   the user's original rule.
 - **Starvation.** A node that has been eligible for longer than a
   configurable threshold without launching is **reported** to the
-  orchestrator. It is not aged automatically.
+  orchestrator, as a `wait_for_nodes` transition. It is not reported to the
+  user, and it is never aged automatically (confirmed by the user,
+  2026-10-04).
 - **Legacy `start_agent`.** It creates a node with ordinary priority,
   unless `urgent` is passed.
 
@@ -224,17 +227,21 @@ never stored as truth.
   - Infrastructure failures do not count: a crash, a quota, a refused
     launch. They are reported.
   - A pause for a window is not a round either (NS-R14).
-- **`on_max`**, chosen by the orchestrator or the template:
-  - `close`: the loop is closed as **exhausted**. Exhausted never means
-    approved, and it never unlocks dependents that require approval;
-  - `ask`: the loop stops and the orchestrator decides;
-  - `escalate`: replace the model of one named child, extend the maximum,
-    and set a new `on_max`. This generalises today's rule "round 3 →
-    opus".
-  - If the escalated child shares a session alias, NS-R9 applies: either a
-    new session explicitly allowed by the template, or the orchestrator
-    decides.
-- **The end of a loop** (exit, exhausted or `ask`) of a top-level
+- ~~`on_max`~~ — **withdrawn 2026-10-04 by the user** (plan
+  `2026-10-04-phase7-part1-nodes.md`). There is no `on_max` setting, and
+  neither `close` nor `escalate` exists.
+- **At its maximum, a loop always calls on the orchestrator.** It stops,
+  notifies the orchestrator, and waits. The orchestrator decides:
+  relaunch (with a higher maximum, a different model, or both), close the
+  loop as **exhausted**, or anything else the node tools allow.
+  - Exhausted never means approved, and it never unlocks dependents that
+    require approval.
+  - "Round 3 → opus" is an orchestrator decision its instructions may
+    describe; the engine does not automate it.
+  - If a relaunch changes the model of a child that shares a session
+    alias, NS-R9 applies: a same-session resume the provider supports, or
+    an explicit new session decided by the orchestrator.
+- **The end of a loop** (exit, maximum reached, or closed as exhausted) of a top-level
   composite always notifies the orchestrator (NS-D2).
 
 **NS-R13 — the template library.**
@@ -260,7 +267,9 @@ never stored as truth.
 **NS-R14 — time windows (NS-D7).**
 - **What a window is.** Days of the week plus hour ranges, in a named time
   zone. Defaults:
-  - the time zone is the host's, Europe/Paris;
+  - the time zone is Europe/Paris by default, set in the general
+    multiagents config (global, overridable per project; the contract
+    names the key). A window may still name its own zone;
   - ranges may cross midnight;
   - intervals are half-open;
   - DST is handled.
@@ -313,7 +322,8 @@ NS-R5's RPC:
   - check that each task launches exactly once, with the right inputs.
 - **The user's example** runs end to end:
   - tests rejected once, then approved;
-  - implementation rejected twice, reaching `escalate`;
+  - implementation rejected until it reaches its maximum; the orchestrator
+    is notified and relaunches it with another model;
   - reviewer-B in the same session across both loops;
   - the orchestrator is notified at the end and merges.
 - **Adversarial tests:**
@@ -333,7 +343,8 @@ feature gate. Part 1 is done only when the whole contract passes.
    locks and session aliases.
 3. Node branches, recorded results, conflict-safe integration, and
    dependencies bound to a generation.
-4. Scoped verdicts, sequences and loops, exhaustion and escalation, and
+4. Scoped verdicts, sequences and loops, the maximum and the
+   orchestrator's relaunch or close, and
    template instantiation.
 5. Window evaluation, stop and resume with recovery, and inherited
    windows.

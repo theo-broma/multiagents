@@ -7,6 +7,9 @@ happens in the next `multiagents init-agent` session, after the closing round
 
 ## Part 1: plan nodes and the scheduler (the user's idea, 2026-10-02)
 
+**Status (2026-10-04): specified in `phase7-part1-nodes.md`** (NS-D*, NS-R*),
+from the plan `context/plans/2026-10-04-phase7-part1-nodes.md`.
+
 The full idea, the user's decisions and the orchestrator's design notes are
 in BRIEF, under "Ticket-driven agent scheduling (the user, 2026-10-02)". In
 short:
@@ -91,6 +94,9 @@ one execution of it. Today's tree "nodes" are runs.
   socket, under any circumstances. A run that delegates creates a node, and
   the host-side scheduler creates its container. This is the link with
   part 1.
+  - **Amended 2026-10-04:** satisfied by NS-R5 (a delegating run creates
+    nodes through the scoped RPC). Part 2 keeps only the docker side: the
+    scheduler creates the container.
 - **PAC-R5 — credentials per container.**
   - claude already goes through the auth proxy.
   - For file-based tokens (codex, agy), decide between a copy per container
@@ -119,6 +125,8 @@ one execution of it. Today's tree "nodes" are runs.
   - Bind the caller's identity and its permitted operations to
     capabilities the host issues. **Never trust a parent or run id that
     the run supplies.**
+  - **Amended 2026-10-04:** moved into part 1 as NS-R5. Part 2 reuses it
+    and adds the per-container transport.
 - **PAC-R10 — network isolation between runs** (advisor).
   - A run must not reach a sibling's MCP endpoint, its services or its
     credentials. Membership of the same internal network does not by itself
@@ -137,6 +145,8 @@ one execution of it. Today's tree "nodes" are runs.
   - Crash recovery and launch retries must be idempotent.
   - Retention after success is defined separately from discard, so that a
     reopened node can resume.
+  - **Amended 2026-10-04:** largely covered by NS-R6's attempt ids. Part 2
+    adds the container id and the repository.
 - **PAC-R13 — the acceptance tests go beyond PAC-R2** (advisor). Also test:
   - siblings' committed blobs are not readable;
   - a shared cache cannot be poisoned;
