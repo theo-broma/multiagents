@@ -362,11 +362,14 @@ def test_ab_r1_login_runs_with_the_providers_own_expanded_home(world):
 
 def test_ab_r1_the_login_home_is_expanded_as_a_launch_expands_it(world, monkeypatch):
     # `providers.expand_env_value`: both `$VAR` and `~`.
-    monkeypatch.setenv("AB_PROFILES", str(world.root / "profiles"))
+    # Beneath HOME, as the real config is: C17 FA-R2a refuses a private-home
+    # entry that normalises outside its root.
+    ab_profiles = world.home / ".multiagents" / "profiles"
+    monkeypatch.setenv("AB_PROFILES", str(ab_profiles))
     blocks = {"agy-b": {**_provider_blocks()["agy-b"],
                         "env": {"HOME": "$AB_PROFILES/agy-b"},
                         "container_private_home": [
-                            os.path.relpath(world.root / "profiles" / "agy-b" / ".gemini",
+                            os.path.relpath(ab_profiles / "agy-b" / ".gemini",
                                             world.home)]}}
     root = _project(world, blocks)
 
@@ -374,7 +377,7 @@ def test_ab_r1_the_login_home_is_expanded_as_a_launch_expands_it(world, monkeypa
 
     assert done.returncode == 0, done.stderr
     assert execs and execs[0]["home"] == expand_env_value("$AB_PROFILES/agy-b")
-    assert execs[0]["home"] == str(world.root / "profiles" / "agy-b")
+    assert execs[0]["home"] == str(ab_profiles / "agy-b")
 
 
 def test_ab_r1_a_provider_without_env_home_logs_in_as_today(world):
