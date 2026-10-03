@@ -87,3 +87,44 @@ These override any earlier wording they contradict.
 **C7-R3a: partial ledger.**
 - If a ledger entry has a timeout but no `max_steps`, the timeout is restored and `max_steps` falls back to the current config.
 - An eviction from the ledger (256 entries) counts as a missing record.
+
+## C11 — a conversation that cannot be resumed is reported, not replaced silently
+
+Root cause: `context/specs/phase6-closing.md`, Progress, C11.
+
+**C11-R1: a lost session is its own outcome.**
+- When a resumed turn (steer or consult) ends because the provider could not find the requested session, the run's status reason says so distinctly, as `session_lost`. Concretely, that is when the adapter's resume check reports that the requested id was not observed and no session was produced.
+- It is visible in `check_agent` and `collect_agent`, and it names the requested session id.
+- It is not a plain `failed` with only the stderr tail.
+- Detection is generic: an adapter or provider config signals it. No provider name goes in core code.
+- **Verified by:** a fake provider whose resume emits no session id. The turn ends with reason `session_lost`, and the requested id is reported.
+
+**C11-R2: the next consult says the conversation was replaced.**
+- When `consult(agent)` finds that the agent's last conversation ended `session_lost` (or is otherwise unresumable), it starts a new conversation.
+- The reply then carries `conversation_replaced`, in the same shape as CX-C28, naming the previous agent id and the reason.
+- A consult that resumes normally carries no such field.
+- **Verified by:** consult, then force a lost session, then consult again. The second reply has `conversation_replaced` with the old id and the reason `session_lost`.
+
+**C11-R3: steer on a lost session says what to do.**
+- `steer_agent` on a run whose last turn ended `session_lost` does not pretend to resume.
+- It either refuses with a message that says the session is lost and that a fresh start should be given the old run dir, or it does what C11-R2 does and says so.
+- The implementer chooses which, and explains why.
+- **Verified by:** steer after a forced lost session. The result names `session_lost`, and no turn is reported as resumed.
+
+**C11-R4: no regression.**
+- **Verified by:** the existing consult, CX-C28, steer and codex adapter suites stay green.
+
+## C12 — transcript usage vocabulary comes from provider config
+
+**C12-R1: provider config declares where a transcript record's usage lives.**
+- Context-size reading for a launched role (`transcripts.py`, `_usage_of`) finds the usage object through a path declared in the provider's config.
+- Claude's shipped config declares today's `message.usage`, so Claude's behaviour is unchanged.
+- No provider vocabulary stays hard-coded in `src/multiagents/*.py` (P0-R8).
+- **Verified by:** a fake provider that declares a different path (e.g. `payload.token_usage`) has its context size read correctly. Claude's transcript fixture still reads the same number as today.
+
+**C12-R2: no declaration means unknown, never a misread.**
+- A provider whose config declares no usage path yields an unknown context size (no reading), never a number parsed with another provider's vocabulary.
+- **Verified by:** a transcript in Claude's shape, read for a provider with no declaration, gives no reading.
+
+**C12-R3: no regression.**
+- **Verified by:** the existing transcript, context and compaction (driver) suites stay green.
