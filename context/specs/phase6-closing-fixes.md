@@ -128,3 +128,47 @@ Root cause: `context/specs/phase6-closing.md`, Progress, C11.
 
 **C12-R3: no regression.**
 - **Verified by:** the existing transcript, context and compaction (driver) suites stay green.
+
+## Revision of C11/C12 after the advisor's check (2026-10-03, ag-894250, before tests)
+
+These override any earlier wording they contradict. Decisions by the orchestrator.
+
+**C11-R1a: status, signal and scope.**
+- **Status and reason.** The status stays `failed`, with a structured reason `session_lost`. That reason appears in `check_agent` and `collect_agent` (field `reason`, and `requested_session`).
+- **What counts as lost.** Only the adapter's (or provider config's) explicit resume-mismatch signal counts: the requested id was not observed, whether the observed id is empty or **a different id**.
+  - An auth error, a crash or a cancellation that simply produced no session id is NOT `session_lost`.
+  - A test asserts that such ordinary failures keep their ordinary reason.
+- **No automatic relaunch.** A `session_lost` turn never triggers the silent-failure free retry (`runner.py` ~5542) or the commit-fix resume (~5397).
+
+**C11-R2a: discovery and shape.**
+- **Discovery.**
+  - Consult considers the **most recent** conversation for that agent name.
+  - If that one ended `session_lost`, consult starts a new conversation.
+  - An older lost conversation never displaces a newer healthy one.
+  - This holds across a server restart, because the reason is persisted in the tree.
+- **"Unresumable" means `session_lost` only.** Model-policy refusals (`runner.py` ~8398) stay refusals, as today.
+- **Shape.** The consult return carries a structured field `conversation_replaced: {"previous_agent_id": ..., "reason": "session_lost", "requested_session": ...}`. The reply text also gets a prefix, like the CX-C28 text prefix (~8701), and an event is emitted as CX-C28 does (~8474).
+  - CX-C28's own replacement may gain the same structured field (with its own reason). That is allowed, not required.
+
+**C11-R3a: steer refuses.**
+- `steer_agent` on a run whose last turn ended `session_lost` is refused.
+- The message says the session is lost, names the run dir, and says to start a fresh run and give it that path.
+- The run's worktree and run dir are preserved.
+
+**C12-R1a: exact vocabulary in config.**
+- The provider config declares two things:
+  - the dot-separated path to the usage object (Claude: `message.usage`);
+  - the list of token fields summed for the context size (Claude: the fields used today in `transcripts.py` ~139).
+- The implementer names the config keys and documents them in `defaults/providers.yaml`.
+- The hard-coded `"usage"` byte prefilter (~382) goes, or is derived from the declaration. A declared path not containing `usage` must still be read.
+
+**C12-R1b: cache identity.**
+- The per-file reading cache (`_readings`, ~479/487) is keyed by the extraction declaration as well as the file.
+- **Tests read through `session_context`:**
+  - the same unchanged file under two different declarations, then under none (C12-R2), each giving its own answer;
+  - records appended after a first reading;
+  - a trailing incomplete line.
+
+**C12-R1c: scope.**
+- This adds NO transcript discovery for agy, opencode or codex. They keep declaring no transcript (`defaults/providers.yaml` ~416, ~649).
+- Callers are unchanged: the MCP context check (`server.py` ~335) and the driver (~582, ~1409).
