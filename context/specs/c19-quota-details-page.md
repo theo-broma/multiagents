@@ -60,3 +60,43 @@
 
 - Editing, switching or logging into accounts from the page.
 - A persistent "always reveal" preference.
+
+## Revision after the advisor's check (2026-10-03, ag-aed397, before tests)
+
+These override any earlier wording they contradict. The decisions are the orchestrator's.
+
+**QD-R1a: the token handoff.**
+- Today the monitor opens `/?token=…`, embeds the token in its HTML, and its fetches send `X-Monitor-Token` (`monitor/server.py` ~65/90/151, `page.html` ~155-176). A plain new-tab link cannot carry that header.
+- **The handoff:**
+  - the button submits a form by `POST`, with `target="_blank"` and the token in the body;
+  - the server answers with the authenticated details page, whose destination URL carries no token;
+  - the page's later requests use the `X-Monitor-Token` header, as the main page does;
+  - responses carry `Referrer-Policy: no-referrer`, and nothing is put in browser storage.
+- **Reloading** the details tab, which re-POSTs or loses the token, gives either the page again after the browser's resubmit prompt or a clear "reopen from the monitor" message, never a token in a URL.
+
+**QD-R3a: identities are per account, revealed by `(provider, account)`.**
+- The unpinned `claude` provider can spend across several eligible vault accounts (`budget.py` ~1047-1075, `executor/docker.py` ~2261). Its windows already carry per-account labels.
+- **Pooled providers:** a provider that draws on several accounts shows one masked identity per eligible account, next to that account's windows. The identity reflects the account each window belongs to.
+- **Pinned providers:** a pinned provider shows only its pinned account. claude-b, pinned to `b`, exposes only `b`.
+- **Reveal requests** name `(provider, account)`, and the server validates that pair against the current configuration.
+
+**QD-R4a: what an identity action may read and print.**
+- The rule is renamed from "never from a secret" to **"never exposes credential material"**.
+- **Reading.** An action may read credential files internally where that is the only source. Codex derives the e-mail from the `id_token` claim of the selected backing (`codex.py` `auth_profile()` ~77). The action decodes only allowlisted scalar claims (`email`, an account id) and prints nothing else.
+- **Sources by provider:**
+  - **claude, claude-b:** `oauthAccount.emailAddress` from the selected profile's `.claude.json` metadata only. Under docker that is the vault account's profile, e.g. `accounts/b/.claude.json` for b, never the shared container placeholder or the host default. When it is missing, the identity is unknown.
+  - **codex, codex-b:** the `email` claim of the selected backing's `id_token`.
+  - **agy, agy-b:** no identity source is established yet. The implementer verifies a non-secret one (stored metadata, or a claim in the selected private `.gemini`). Where none is verified, the identity is unknown, and is never assumed.
+  - **opencode, opencode-zai:** unknown, unless a documented account endpoint exists. Neither the provider name nor any key fragment counts as an identity.
+
+**QD-R7: securing the reveal endpoint, and the identity lifecycle.**
+- **Requests.** Authentication is by header only, never by query string. A request with a foreign `Origin` is rejected. The existing Host checks stay, and no CORS is enabled.
+- **Responses.** All responses are `Cache-Control: no-store`. The page renders identities with `textContent`, never as HTML.
+- **No leaks.** The reveal and state responses never contain raw script stdout, stderr or exception text. A failed identity action gives "unknown", plus at most a fixed, generic diagnostic.
+- **Cache.** Identities are cached in memory, keyed by the credential owner, profile or account, not by provider name, with a TTL. Concurrent fetches are deduplicated.
+- **Availability without blocking.** `identity_available` is filled in by the background fetch, and the poll never waits for it.
+- **Stale reveals.** A reveal response that arrives after the user has masked the identity again, or after a refresh, is discarded.
+- **Verified by:**
+  - a stderr failure, a malformed JSON output and an identity action that prints a token-like string all give "unknown", with nothing from the output in any response;
+  - a request with a foreign `Origin` is rejected;
+  - a reveal request without the header, or with the token in the query string, is rejected.
