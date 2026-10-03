@@ -110,7 +110,7 @@ def tx(tmp_path):
     cwd = (tmp_path / "proj").resolve()
     cwd.mkdir()
     provider = Provider.from_dict("txp", {"bin": "txp",
-                                          "transcript": ch.transcript_block(root)})
+                                          "transcript": ch.claude_transcript_block(root)})
     session_file = root / ch.slug(cwd) / f"{SID}.jsonl"
     return provider, cwd, session_file
 
@@ -226,7 +226,7 @@ class ServerProject:
         self.transcript = self.tx_root / ch.slug(self.root) / f"{SID}.jsonl"
         provider = {"bin": "true", "spawn": {"args": ["x"]}}
         if transcript:
-            provider["transcript"] = ch.transcript_block(self.tx_root)
+            provider["transcript"] = ch.claude_transcript_block(self.tx_root)
         (self.config / "providers.yaml").write_text(
             yaml.safe_dump({"providers": {"txp": provider}}))
         # The shipped launched entries are re-pointed at the test provider, so
@@ -473,7 +473,7 @@ def test_p0_r8a_8_the_provider_is_the_launched_roles_roster_entry(served, tmp_pa
     ch.write_transcript(decoy_root / ch.slug(p.root) / f"{SID}.jsonl", [ch.request(1_000)])
     providers = yaml.safe_load((p.config / "providers.yaml").read_text())
     providers["providers"]["decoy"] = {"bin": "true", "spawn": {"args": ["x"]},
-                                       "transcript": ch.transcript_block(decoy_root)}
+                                       "transcript": ch.claude_transcript_block(decoy_root)}
     (p.config / "providers.yaml").write_text(yaml.safe_dump(providers))
     tree = Tree(p.paths.tree_file, p.paths.events_file)
     with tree.transaction() as data:

@@ -65,7 +65,7 @@ class Loop:
         self.transcript = tmp_path / "tx" / ch.slug(self.root) / f"{SID}.jsonl"
         data: dict = {"bin": "true", "script": self.fake.name, "spawn": {"args": ["x"]}}
         if transcript:
-            block = ch.transcript_block(tmp_path / "tx")
+            block = ch.claude_transcript_block(tmp_path / "tx")
             if limit_markers:
                 block["limit_markers"] = limit_markers
             data["transcript"] = block

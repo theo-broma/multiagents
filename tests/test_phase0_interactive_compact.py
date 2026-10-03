@@ -213,7 +213,7 @@ class Session:
         data: dict = {"bin": "true", "script": self.script.name,
                       "spawn": {"args": ["x"]}}
         if transcript_block:
-            block = ch.transcript_block(tmp_path / "tx")
+            block = ch.claude_transcript_block(tmp_path / "tx")
             if limit_markers:
                 block["limit_markers"] = limit_markers
             data["transcript"] = block

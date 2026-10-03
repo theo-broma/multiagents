@@ -153,6 +153,21 @@ def transcript_block(root: Path) -> dict:
     return {"dir": str(root) + "/{slug}", "glob": "*.jsonl"}
 
 
+# Claude's shipped usage vocabulary (C12-R1a): a provider's transcript block
+# declares where the usage lives and which fields make up the context size;
+# without both, nothing is read.
+CLAUDE_USAGE_DECLARATION = {
+    "usage_path": "message.usage",
+    "context_fields": ["input_tokens", "cache_read_input_tokens",
+                       "cache_creation_input_tokens"],
+}
+
+
+def claude_transcript_block(root: Path) -> dict:
+    """`transcript_block` plus the usage declaration Claude's config ships."""
+    return {**transcript_block(root), **CLAUDE_USAGE_DECLARATION}
+
+
 # ------------------------------------------------- the fake provider script --
 
 FAKE_PROVIDER = r'''#!{python}

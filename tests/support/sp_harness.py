@@ -41,6 +41,12 @@ GIT_ID = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
 # The stub provider's declared transcript location. `~` is the user's HOME as
 # the host tooling sees it (the test points HOME at a temp dir).
 TRANSCRIPT_DIR = "~/.svstub/sessions/{slug}"
+# Claude's shipped usage vocabulary (C12-R1a); the stub's records use it.
+CLAUDE_USAGE_DECLARATION = {
+    "usage_path": "message.usage",
+    "context_fields": ["input_tokens", "cache_read_input_tokens",
+                       "cache_creation_input_tokens"],
+}
 TRANSCRIPT_PREFIX = ".svstub/sessions"
 
 
@@ -167,7 +173,8 @@ class Project(sv.Project):
         providers = yaml.safe_load((cfg / "providers.yaml").read_text())
         if transcript:
             providers["providers"]["svstub"]["transcript"] = {
-                "dir": TRANSCRIPT_DIR, "glob": "*.jsonl"}
+                "dir": TRANSCRIPT_DIR, "glob": "*.jsonl",
+                **CLAUDE_USAGE_DECLARATION}
         (cfg / "providers.yaml").write_text(yaml.safe_dump(providers))
         if executor == "docker":
             project = yaml.safe_load((cfg / "project.yaml").read_text())

@@ -39,7 +39,7 @@ def claude_slug(cwd: Path) -> str:
 @pytest.fixture
 def tx(tmp_path):
     root = tmp_path / "tx"
-    provider = types.SimpleNamespace(transcript=ch.transcript_block(root))
+    provider = types.SimpleNamespace(transcript=ch.claude_transcript_block(root))
     cwd = (tmp_path / "proj").resolve()
     path = root / ch.slug(cwd) / f"{SID}.jsonl"
     return types.SimpleNamespace(provider=provider, cwd=cwd, path=path,
