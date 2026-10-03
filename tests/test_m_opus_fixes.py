@@ -416,7 +416,13 @@ def test_recovery_asks_the_container_the_hold_recorded(tmp_path, monkeypatch):
         asked.append(self.container)
         return answer["alive"]
 
+    def wrapper_verdict(self, agent_id):
+        asked.append(self.container)
+        return answer["alive"]
+
     monkeypatch.setattr(DockerExecutor, "wrapper_alive", wrapper_alive)
+    monkeypatch.setattr(DockerExecutor, "wrapper_verdict", wrapper_verdict,
+                        raising=False)
     pid, start = _dead_pid()
     _orphan_hold(runner, pid=pid, pid_start=start,
                  identity={"kind": "docker", "container": "held-box"})
@@ -456,6 +462,8 @@ def test_a_taken_over_hold_ends_with_the_owners_releases(tmp_path, monkeypatch):
             "kind": "docker", "container": "held-box"}
     monkeypatch.setattr(DockerExecutor, "wrapper_alive",
                         lambda self, agent_id: probe["alive"])
+    monkeypatch.setattr(DockerExecutor, "wrapper_verdict",
+                        lambda self, agent_id: probe["alive"], raising=False)
 
     heir = _make(tmp_path, monkeypatch)
     heir.capacity()                          # takes the hold over; unknown still
@@ -773,6 +781,8 @@ def test_a_takeover_rebinds_the_occupancy_record(tmp_path, monkeypatch):
         runner.occupancy.commit(records)
     monkeypatch.setattr(DockerExecutor, "wrapper_alive",
                         lambda self, agent_id: probe["alive"])
+    monkeypatch.setattr(DockerExecutor, "wrapper_verdict",
+                        lambda self, agent_id: probe["alive"], raising=False)
 
     heir = _make(tmp_path, monkeypatch)
     heir.capacity()                          # taken over; death still unknown
@@ -850,6 +860,8 @@ def _docker_crash(runner, node_id, probe, monkeypatch):
             "kind": "docker", "container": "held-box"}
     monkeypatch.setattr(DockerExecutor, "wrapper_alive",
                         lambda self, agent_id: probe["alive"])
+    monkeypatch.setattr(DockerExecutor, "wrapper_verdict",
+                        lambda self, agent_id: probe["alive"], raising=False)
     dead, dead_start = _dead_pid()
     with runner.occupancy.locked() as records:   # the crashed owner's entry
         entry = (records.get("held-box") or {}).get(node_id)
