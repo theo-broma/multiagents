@@ -69,3 +69,55 @@
 
 - Any lock between the two sessions beyond git's own index lock.
 - Turning notes into tickets automatically.
+
+## Revision after the advisor's check (2026-10-03, ag-894250, before tests)
+
+These override any earlier wording they contradict. Decisions by the orchestrator.
+
+**PN-R1a: commits go through a helper.**
+- The initializer commits with a new CLI command, `multiagents plan commit <path>...`.
+- **What it does:**
+  - it refuses paths outside `context/plans/` and `context/specs/`, and it refuses an existing spec file that is modified;
+  - it refuses while the root is in a merge, rebase or conflict state;
+  - it commits with `git commit --only -- <exact paths>`, so the orchestrator's staged changes are never included;
+  - it retries **only** on index-lock contention, once a second for at most 30 s;
+  - it never deletes a lock, resets, stashes, or retries any other failure.
+- The instructions tell the initializer to use it.
+- **Verified by:** tests on a scratch repo with:
+  - a staged unrelated change that stays out of the commit;
+  - a held `index.lock` released after 2 s, which succeeds;
+  - a held lock never released, which fails after the bound;
+  - a merge in progress, which is refused;
+  - a path outside the allowed roots, which is refused.
+- The helper reduces the risk of concurrent root transactions but does not make them fully safe. That is accepted.
+
+**PN-R2a: exact format.**
+- **Header.** A YAML front-matter block (`---` … `---`) with `status` (`draft`, `ready`, `applied` or `imported`), and optional `title`, `applied_in` and `imported_in`.
+- **Sections.** Level-2 headings, matched exactly: `## Apply now`, `## Next phase`, `## Config changes`, `## Notes considered`. A missing section means empty.
+- **Notes considered.** One line per note: `- <path relative to repo root> sha256:<64 hex> — <what was done>`. The hash is SHA-256 over the note's raw bytes.
+- **Discovery.**
+  - Only direct children `*.md` of `context/plans/` and `context/notes/`, not recursive.
+  - Excluded: `TEMPLATE.md` in plans and `README.md` in notes.
+- **Bounds.** At most 1 MiB per file and 500 files per directory. Anything over a bound is reported, not read.
+- **Symlinks.** A symlinked file, or a symlinked `plans/` or `notes/` directory, is refused and reported.
+- **Malformed plans.** A plan with no front matter, an unknown status or an over-bound size is reported as malformed, with its reason.
+- **Which plans count for notes.** Only `ready`, `applied` and `imported` plans mark notes as processed. A `draft` or malformed plan does not.
+
+**PN-R3a: import in two steps.**
+1. After applying "Apply now", the orchestrator commits the decisions, then marks the plan `status: applied` and `applied_in: <that commit>` in a following commit.
+2. When "Next phase" is imported into `BRIEF.md`, the orchestrator commits the import, then marks the plan `status: imported` and `imported_in: <that commit>` in a following commit.
+
+A plan with an empty "Next phase" goes straight to `imported` at step 1.
+
+**PN-R4a: what is tested.**
+- **Automated:** parsing, discovery, bounds and symlinks; the `list_plans` and doctor output; the commit helper; and scaffolding.
+- **Instructions:** they are tested on the **assembled launch prompt** of the `initializer` and `orchestrator` roles, not on the shipped file alone. Instruction precedence is `team/_initializer.md` resolved project → global → shipped (`config.py` ~865/990), and the orchestrator uses the active team's list (`driver.py` ~65-82).
+- **Agent behaviour** (obeying the write rules, importing plans) cannot be proven by tests. It is checked by review, then by one recorded live exercise that the orchestrator carries out after the merge.
+
+**PN-R5a: scaffolding when `context/` already exists.**
+- `multiagents init` adds `context/plans/TEMPLATE.md` and `context/notes/README.md` when they are missing, even if `context/` exists (`cli.py` ~901-914 guards on its absence today).
+- It never overwrites them, even with `--force`.
+
+**PN-R6a: this project's live copies.**
+- `.multiagents/config/` is not versioned, so the implementer's worktree does not contain it.
+- The orchestrator updates the live project copies after the merge, from the merged shipped text plus this project's existing customisations, and records that in BRIEF.
