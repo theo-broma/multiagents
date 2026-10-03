@@ -4109,3 +4109,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - the failed discards ag-758e30 and fb2359;
     - the phase-3 branches tester/b689bf and cf02a1, kept on purpose.
   - The user should run `/mcp` once, so the server loads C16 and C17.
+- 2026-10-03 ~19:15 CEST: new user request, C18 (monitor quota panel shows every window, uniformly). Contract context/specs/c18-monitor-quota-panel.md (4cd8d88; advisor revision 95dd3a0). Tester ag-9116a1 running; next an implementer (default tier), then the reviewer.
