@@ -10,6 +10,10 @@ health already uses, at every launch, and read back by adoption, by every
 relaunch that must keep a `call`-sourced timeout (LM-R1b), and by any trip
 that fires without a Run of its own.
 
+The step cap is recorded alongside timeout and silence (C7-R1). Adoption
+marks its provenance as restored, or as fallback when that entry is absent,
+without writing a current-config fallback back over the launch record.
+
 When the record for a run is missing — deleted, or written by a server from
 before this record existed — callers resolve the limits from the current
 config instead, and the provenance they report is that resolution's, honestly

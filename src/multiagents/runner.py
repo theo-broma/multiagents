@@ -2372,7 +2372,8 @@ class Runner:
         says which file and line (or which call argument) it came from."""
         out: dict[str, dict[str, Any]] = {}
         for name, entry in limits.items():
-            limit_key = "limits." + config_mod.LIMIT_FIELDS[name][0]
+            limit_key = "limits." + ("max_steps" if name == "max_steps"
+                                      else config_mod.LIMIT_FIELDS[name][0])
             layer = entry.get("source")
             if layer == "call":
                 detail = notices.call_source(name, limit_key)
@@ -2701,8 +2702,16 @@ class Runner:
                     timeout = recorded.get("value")
         return self.config.effective_limits(spec, timeout)
 
+    def _max_steps_limit(self, spec: AgentSpec, route: str = "") -> dict[str, Any]:
+        """C7-R1: capture the step cap and its launch-time provenance."""
+        value = int(spec.max_steps or self.config.limits.get("max_steps", 250))
+        layer = "agent" if spec.max_steps else "project"
+        return self._limits_detail(spec.name, {
+            "max_steps": {"value": value, "source": layer}}, route)["max_steps"]
+
     def _supervisor(self, spec: AgentSpec, provider: Provider,
-                    wall_timeout: float, silence_timeout: float | None = None
+                    wall_timeout: float, silence_timeout: float | None = None,
+                    max_steps: int | None = None
                     ) -> Supervisor:
         loop_repeats = int(self.config.limits.get("doom_loop_repeats", 5))
         if silence_timeout is None:
@@ -2710,7 +2719,8 @@ class Runner:
         return Supervisor(
             silence_timeout=silence_timeout,
             wall_timeout=wall_timeout,
-            max_steps=int(spec.max_steps or self.config.limits.get("max_steps", 250)),
+            max_steps=(self._max_steps_limit(spec, provider.name)["value"]
+                       if max_steps is None else max_steps),
             loop_repeats=loop_repeats,
             loop_rearm=int(self.config.limits.get("doom_loop_rearm", loop_repeats)),
             declares_turn=_declares_turn(provider),
@@ -3519,6 +3529,7 @@ class Runner:
             # a trip fires.
             limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
                                                                      timeout), provider.name)
+            limits["max_steps"] = self._max_steps_limit(spec, provider.name)
             # LN-C2, adversary findings 3/8: written where the container cannot
             # reach, so a later adoption or relaunch reads what THIS launch ran
             # under, not what the node's forgeable record in `tree.json` claims.
@@ -3595,7 +3606,8 @@ class Runner:
             # and can raise on a malformed one; building it here means a
             # failure never has to walk back a held `_claim`.
             supervisor = self._supervisor(spec, provider, wall,
-                                          limits["silence_timeout"]["value"])
+                                          limits["silence_timeout"]["value"],
+                                          limits["max_steps"]["value"])
             # SV-R5: owned before it exists, so no other server's adoption pass
             # can find it running and unowned in between.
             if not self._claim(node_id):
@@ -5279,9 +5291,11 @@ class Runner:
                 source = detail or notices.provenance(self.config, key, value, layer)
         elif trip.reason == "runaway_steps":
             value = run.supervisor.max_steps
-            key = (f"agents.{agent}.max_steps" if run.spec.max_steps
+            entry = limits.get("max_steps") or self._max_steps_limit(
+                run.spec, run.provider.name)
+            key = (f"agents.{agent}.max_steps" if entry.get("source") == "agent"
                    else "limits.max_steps")
-            source = notices.provenance(self.config, key, value)
+            source = entry["source_detail"]
         elif trip.reason == "doom_loop":
             value = run.supervisor.loop_repeats
             key = "limits.doom_loop_repeats"
@@ -6449,6 +6463,9 @@ class Runner:
         if node.reason == "session_lost":
             result["requested_session"] = node.requested_session
         result.update(self._no_commits_note(node))
+        limits = run.limits if run else self.launch_limits.lookup(agent_id)
+        if limits:
+            result["effective_limits"] = limits
         if run and run.supervisor and node.status in {"running", "pending"}:
             # Only meaningful for a live process. A parked agent's Run survives
             # in self.runs, so this would grow forever and read as silence.
@@ -6762,7 +6779,22 @@ class Runner:
             self._release(node.id)
             return False
 
-        limits = self.launch_limits.lookup(node.id)
+        limits = dict(self.launch_limits.lookup(node.id))
+        # C7-R1/R3: restore only from the host ledger. Older or evicted
+        # records resolve this cap afresh, independently of the timeout.
+        steps = limits.get("max_steps")
+        resolution = ("restored" if isinstance(steps, dict) and "value" in steps
+                      else "fallback")
+        if resolution == "fallback":
+            steps = self._max_steps_limit(spec, provider.name)
+        limits["max_steps"] = {**steps, "source_detail": {
+            **steps["source_detail"], "resolution": resolution}}
+        # A partial ledger must still report the timeout and silence values
+        # that supervise this turn, even when only the step cap is recorded.
+        current = self._limits_detail(spec.name, self._limits_for(node.id, spec),
+                                      provider.name)
+        for name, entry in current.items():
+            limits.setdefault(name, entry)
         launched = self.launch_limits.launch_time(node.id)
         wall = float(limits.get("timeout", {}).get("value") or 0)
         if not wall:
@@ -6781,7 +6813,8 @@ class Runner:
                               pid_start=getattr(node, "pid_start", "") or "",
                               stopper=stopper, probe=probe)
         supervisor = self._supervisor(
-            spec, provider, wall, limits.get("silence_timeout", {}).get("value"))
+            spec, provider, wall, limits.get("silence_timeout", {}).get("value"),
+            limits["max_steps"]["value"])
         # SV-R8: the wall clock runs from the launch, whoever watched it; the
         # silence clock runs from now, because nobody was listening before.
         # An absent or unreadable host clock grants no fresh budget. Do not
@@ -6792,7 +6825,6 @@ class Runner:
         # against come from the host-owned launch record the launching
         # server wrote, never from the node's record in `tree.json`, which
         # the running agent can forge between the two servers.
-        limits = self.launch_limits.lookup(node.id)
         run = Run(node_id=node.id, provider=provider, spec=spec, handle=handle,
                   supervisor=supervisor, turn_start=turn,
                   replay_to=int(follow.get("offset", turn)), adopted=True,
