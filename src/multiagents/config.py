@@ -970,6 +970,17 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
     _validate_routes(agents_raw, providers)
     warnings: list[str] = []
     _warn_unknown_entry_keys(agents_raw, providers, warnings)
+    executor = (merged["project.yaml"].get("executor") or {}).get("kind", "local")
+    from .providers import expand_env_value
+    for name, provider in providers.items():
+        required = provider.home_account_executor
+        home = (provider.credential_env or provider.env).get("HOME")
+        if required and executor != required and home \
+                and expand_env_value(home) != str(Path.home()):
+            warnings.append(
+                f"provider {name!r}: under the {executor} executor, relocating "
+                f"HOME still uses the primary account; distinct HOME profiles "
+                f"require the {required} executor")
 
     return Config(
         project=merged["project.yaml"],

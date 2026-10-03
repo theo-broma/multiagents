@@ -21,16 +21,19 @@ require_bin() {
 case "${1:-check}" in
     prepare|launch|budget) require_bin ;;
 esac
-EXECUTOR="${MULTIAGENTS_EXECUTOR:-local}"
+# Direct script invocations historically read the local account. The core
+# always supplies this variable, including an empty value for unknown scope.
+EXECUTOR="${MULTIAGENTS_EXECUTOR-local}"
 TOKEN_REL=".gemini/antigravity-cli/antigravity-oauth-token"
 
-# Asking about the HOST profile means asking about the keyring, which is the
-# non-docker path below — so the cheapest way to answer is to stop being a
-# docker run for the length of this call. The orchestrator runs on the host
-# whatever the executor is, so somebody has to be able to ask.
-if [ "${MULTIAGENTS_PROFILE:-}" = "host" ]; then
-    EXECUTOR="local"
-fi
+# Host auth is an explicit request for the orchestrator's keyring login.
+# Budget always reads the executor's account, regardless of that auth scope.
+case "${1:-check}" in
+    check|login)
+        if [ "${MULTIAGENTS_PROFILE:-}" = "host" ]; then
+            EXECUTOR="local"
+        fi ;;
+esac
 
 case "${1:-check}" in
 check)
@@ -109,17 +112,37 @@ budget)
     # ~/.gemini/antigravity-cli/log on every single invocation, and budget is
     # polled on every spawn. That directory held 2,458 logs / 46MB when this
     # was written; a 60s poll would have added a thousand a day.
-    body=$("$BIN" -p "/usage" --output-format json --log-file /dev/null \
-        --print-timeout 8s 2>/dev/null) || true
+    login_note=""
+    if [ "$EXECUTOR" = "docker" ]; then
+        login_note="; run multiagents docker login ${MULTIAGENTS_PROVIDER:-agy}"
+        # Read through the persistent directory mount, allowing atomic token
+        # refresh. A missing container never selects the host keyring instead.
+        body=$(docker exec \
+            --user "${MULTIAGENTS_UID:-0}:${MULTIAGENTS_GID:-0}" \
+            --env "HOME=$HOME" --env "PATH=$PATH" \
+            "${MULTIAGENTS_CONTAINER:?container name not provided}" "$BIN" \
+            -p "/usage" --output-format json --log-file /dev/null \
+            --print-timeout 8s 2>/dev/null) || body=""
+    elif [ "$EXECUTOR" = "local" ]; then
+        body=$("$BIN" -p "/usage" --output-format json --log-file /dev/null \
+            --print-timeout 8s 2>/dev/null) || true
+    else
+        printf '{"known": false, "note": "budget executor is unknown; no account was read"}\n'
+        exit 0
+    fi
     [ -n "$body" ] || {
-        printf '{"known": false, "note": "agy did not answer /usage; not logged in, or the CLI is unavailable"}\n'
+        MULTIAGENTS_USAGE_LOGIN="$login_note" python3 -c '
+import json, os
+print(json.dumps({"known": False, "note":
+    "agy did not answer /usage; not logged in, or the CLI is unavailable" +
+    os.environ["MULTIAGENTS_USAGE_LOGIN"]}))'
         exit 0; }
 
     # Everything from here to the closing quote is a double-quoted SHELL
     # string, so it carries no backtick and no bare $ — either would be
     # substituted by sh before python ever sees this.
-    printf '%s' "$body" | python3 -c "
-import json, sys
+    printf '%s' "$body" | MULTIAGENTS_USAGE_LOGIN="$login_note" python3 -c "
+import json, os, sys
 
 try:
     groups = ((json.load(sys.stdin).get('command') or {}).get('data') or {}).get('groups')
@@ -127,7 +150,8 @@ except Exception:
     groups = None
 if not isinstance(groups, list) or not groups:
     print(json.dumps({'known': False, 'note':
-        '/usage returned no quota groups; slash expansion may be disabled'}))
+        '/usage returned no quota groups; slash expansion may be disabled' +
+        os.environ.get('MULTIAGENTS_USAGE_LOGIN', '')}))
     raise SystemExit
 
 # agy bills two INDEPENDENT pools and serves both from one binary: the Gemini

@@ -167,6 +167,10 @@ providers:
 
   agy:
     bin: agy
+    budget_profile_env: HOME
+    # The host keyring is shared even when HOME is relocated. In the
+    # container, each HOME instead owns a persistent file token.
+    home_account_executor: docker
     auth:
       script: agy.sh
     notes: >

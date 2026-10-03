@@ -1624,6 +1624,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return _clear_provider(paths, providers, args.clear,
                                getattr(args, "force", False))
     problems = 0
+    for warning in config.warnings:
+        print(f"warning: {warning}")
 
     print("providers")
     for name, provider in sorted(providers.items()):
@@ -1657,6 +1659,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             project_config).items()):
         mark = " " if state.ok else "!"
         print(f"  {mark} {name:10} {state.status:18} {state.detail[:60]}")
+        profile_env = scripts.build_env(name, providers_map[name], executor_of(name))
+        from .providers import resolved_profile
+        profile = resolved_profile(providers_map[name]) or profile_env.get("HOME", str(Path.home()))
+        print(f"    profile {profile} — identity unverified")
         if not state.ok:
             problems += 1
     for name, state in sorted(_driver_host_states(
@@ -3009,7 +3015,7 @@ def cmd_docker(args: argparse.Namespace) -> int:
             "docker", "exec", "-it",
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--workdir", str(paths.root),
-            "--env", f"HOME={Path.home()}",
+            "--env", f"HOME={scripts.build_env(provider_name, provider, ex)['HOME']}",
             "--env", f"PATH={os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
             "--env", "TERM=xterm-256color",
             ex.container, binary,
