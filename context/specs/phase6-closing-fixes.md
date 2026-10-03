@@ -59,3 +59,31 @@
 
 **C7-R4: no regression.**
 - **Verified by:** the existing SR, SF, D1 and internal suites stay green.
+
+## Revision after the advisor's check (2026-10-03, advisor ag-894250, before tests)
+
+These override any earlier wording they contradict.
+
+**C5-R1a: which resolution counts.**
+- The probe uses the native-CLI resolution a docker launch uses for that provider: the direct-launch versioned argv (`executor/docker.py` ~2435) or the adapter's `native_bin` (~2465). This includes `bin_search` and versioned symlinks.
+- With `mount_cli_from_host: false`, it still uses a container PATH lookup.
+- The probe's HOME is the project container's default HOME (not a run HOME). The implementer states which value it is.
+- The probe still never starts or seeds the container.
+- **Tests** exercise real resolution against temporary launchers, and capture the argv and env that reach the container exec (`exec_in_running`). A fake that succeeds whatever the argv is is not acceptable coverage.
+
+**C6-R1a: what counts as usable, and inheritance.**
+- "Usable" means usable or renewable. An expired access token with valid refresh credentials is usable, as today. In C6-R1's test, `b` must be **not renewable**.
+- A provider with `auth_from` (or `extends`) whose owner is pinned, and that has no pin of its own, inherits the owner's pin for status purposes.
+- An explicit pin on the dependent provider wins.
+- Refreshing still renews every account (DK-R3a).
+- **Tests:** a missing pinned account (no `accounts/X` at all) gives `not_authenticated` with X named. The detail for the pool never lists pinned accounts.
+
+**C7-R1a: exact boundaries and where provenance shows.**
+- **Boundaries:** governed by 100 means no trip at step 100 and a trip at step 101.
+- **Which config limit:** the tests cover a `max_steps` set at agent level and one set at global (project) level.
+- **Where provenance shows:** the restored-or-fallback provenance appears in the observable outputs that report limits. These are `check_agent` / `effective_limits` and the runaway-steps notice (`runner.py` ~5278, which today regenerates provenance from the current config).
+- **What provenance keeps:** the original launch source, file and line.
+
+**C7-R3a: partial ledger.**
+- If a ledger entry has a timeout but no `max_steps`, the timeout is restored and `max_steps` falls back to the current config.
+- An eviction from the ledger (256 entries) counts as a missing record.
