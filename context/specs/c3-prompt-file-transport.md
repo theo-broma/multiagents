@@ -59,3 +59,44 @@ The interim fix (21c5816) gives a clear error past the limit. This contract remo
 
 - Changing any native CLI.
 - Compression or deduplication of prompts.
+
+## Revision after the advisor's check (2026-10-03, ag-894250, before tests)
+
+These override any earlier wording they contradict.
+
+**PF-R1a: which transport, and how faithfully.**
+- **Stdin is preferred.** The prompt is delivered as the user message's text. It is never turned into a system prompt or a file attachment.
+- **Per provider:**
+  - claude: print mode reads the prompt from stdin.
+  - agy: stdin with `--input-format stream-json`. The decoded message content must equal the prompt byte for byte.
+  - opencode: its `run` command reads stdin as the message text. Its `--file` is an attachment and must NOT be used.
+  - codex: the adapter already feeds the native CLI through stdin. It now takes the prompt from the run file instead of its own argv.
+- **Exception.** If an installed CLI version supports only argv, that provider gets a documented PF-R2 exception and keeps PF-R4's bounded refusal.
+  - Reading the file and expanding it into argv does not count as converted.
+- **PF-R1 and PF-R4.** "The prompt never appears in argv" applies to non-argv transports. The legacy argv transport (PF-R4) is exempt.
+
+**PF-R3a: owner-only, safe on both ends, bounded in bytes.**
+- **Writing.** The run-file write uses mode 0600. The helper's default is 0644 (`runner.py` ~183), so the mode is passed explicitly.
+- **Consumer side.** The adapter, wrapper or core that opens the file for the native CLI also opens it safely: no-follow, a regular file only, and bounded.
+  - A plain `open(path)` after a safe write is not acceptable.
+- **The bound.**
+  - It is measured in UTF-8 bytes.
+  - It detects limit+1 bytes.
+  - A file that grows while being read is caught.
+
+**PF-R2a: the stdin plumbing is part of the work.**
+- Today `agentwrap` gives children `/dev/null` as stdin (`agentwrap.py` ~126), and both executors discard stdin (`executor/local.py` ~63, `executor/docker.py` ~2575). Configuring stdin in provider config alone therefore cannot work, and the plumbing is in scope.
+- **Tests run the real path:** `_launch`, the adapter, `agentwrap`, then a fake native binary that captures `sys.stdin.buffer.read()` or the file it was given.
+  - The docker path uses the executing fake-docker harness (`tests/support/sp_harness.py` ~90-126).
+  - The codex path follows the native stdin capture in `tests/support/codex_harness.py` ~73.
+- **Content cases:** trailing newlines, leading whitespace and shell metacharacters must all survive. Shell command substitution would lose trailing newlines.
+
+**PF-R7: each launch attempt has its own durable input, and retries replay it.** This is a defect found during review, now in scope.
+- Today the immediate and the queued retry both reread the initial `prompt.md` (`runner.py` ~5575, ~9144). A failed steer or consult turn can therefore replay the original task instead of the steer's text.
+- **The requirement.** Each launch attempt is durably associated with its own prompt file, and the association is keyed by SR's launch identity (`runner.py` ~3651), not by counting `prompt*.md` files (~3578).
+- **Retries.** A retry replays that attempt's input, through a fresh immutable file.
+- **`prompt.md`** stays as the initial diagnostics.
+- **Verified by:**
+  - a steer with different text, whose turn fails silently, is retried with the steer's text, not the original;
+  - a failed launch followed by another launch uses the right input;
+  - a draining predecessor's prompt file is not overwritten.
