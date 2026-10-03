@@ -493,14 +493,18 @@ class ContainerGit(gitops.Git):
             with os.fdopen(fd, "w") as fh:
                 fh.write("".join(f"{k}={v}\n" for k, v in environment.items()
                                  if "\n" not in v))
-            proc = subprocess.Popen(
-                ["docker", "exec", "--workdir", str(repo),
-                 "--user", f"{os.getuid()}:{os.getgid()}", "--env-file", env_file,
-                 self.executor.container, "sh", "-c", _GIT_ENTRY, "git",
-                 str(max(1, int(timeout))), _GIT_WATCHDOG, "-C", str(repo), *args],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                stdin=subprocess.DEVNULL,
-            )
+            try:
+                proc = subprocess.Popen(
+                    ["docker", "exec", "--workdir", str(repo),
+                     "--user", f"{os.getuid()}:{os.getgid()}", "--env-file", env_file,
+                     self.executor.container, "sh", "-c", _GIT_ENTRY, "git",
+                     str(max(1, int(timeout))), _GIT_WATCHDOG, "-C", str(repo), *args],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    stdin=subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                return gitops.GitResult(False, "",
+                                        f"could not launch docker client: {exc}", 1)
             try:
                 # The watchdog ends it first; this is for a container that
                 # does not answer at all.
