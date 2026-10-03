@@ -94,7 +94,13 @@ def check(provider_name: str, provider: Any, executor: Any,
     owner_name = str(getattr(provider, "auth_from", "") or "")
     owner = getattr(provider, "auth_owner", None)
     if owner is not None and owner_name:
-        provider = owner
+        pin = getattr(provider, "container_account", "")
+        if pin and getattr(executor, "kind", "") == "docker" and profile != HOST:
+            import copy
+            provider = copy.copy(owner)
+            provider.container_account = pin
+        else:
+            provider = owner
     script = _scripts.resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return AuthState(provider_name, "no_script",
@@ -112,7 +118,10 @@ def check(provider_name: str, provider: Any, executor: Any,
     # The host profile is not repaired by the same command: under docker
     # `auth login <p>` signs into the CONTAINER, which is the whole confusion
     # this is here to end, so the fix has to name the other one.
-    fix = (f"multiagents auth login {owner_name or provider_name}"
+    pinned = (getattr(provider, "container_account", "") and
+              getattr(executor, "kind", "") == "docker" and profile != HOST)
+    login_name = provider_name if pinned else owner_name or provider_name
+    fix = (f"multiagents auth login {login_name}"
            + (" --host" if profile == HOST else ""))
     if code == AUTHENTICATED:
         return AuthState(provider_name, "authenticated", line, str(script),
@@ -145,6 +154,10 @@ def check_all(providers: dict[str, Any], executor_for: Any,
         owner_name = str(getattr(provider, "auth_from", "") or "")
         if not owner_name:
             continue
+        executor = executor_for(name)
+        if getattr(provider, "container_account", "") and getattr(executor, "kind", "") == "docker":
+            states[name] = check(name, provider, executor, config_dir, project_config)
+            continue
         owner_state = states.get(owner_name)
         if owner_state is None:
             states[name] = AuthState(
@@ -168,6 +181,13 @@ def login_command(provider_name: str, provider: Any, executor: Any,
     caller should hand it over with execvpe rather than capture it.
     """
     env = dict(extra_env or {})
+    owner = getattr(provider, "auth_owner", None)
+    if (owner is not None and getattr(provider, "container_account", "")
+            and getattr(executor, "kind", "") == "docker" and profile != HOST):
+        import copy
+        selected = copy.copy(owner)
+        selected.container_account = getattr(provider, "container_account", "")
+        provider = selected
     if profile:
         env["MULTIAGENTS_PROFILE"] = profile
     return _scripts.exec_action(provider_name, provider, executor, "login",

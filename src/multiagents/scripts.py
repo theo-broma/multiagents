@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import json
 import os
 import signal
 import subprocess
@@ -161,6 +162,15 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     # or an action overlay, cannot turn a container read into a host read.
     # Missing executor information remains unknown rather than implying local.
     env["MULTIAGENTS_EXECUTOR"] = getattr(executor, "kind", "") or ""
+    if env["MULTIAGENTS_EXECUTOR"] == "docker":
+        # Checks and login select the same signed-routing account as launches.
+        # Pins from config outrank ambient, provider and action variables.
+        env.pop("MULTIAGENTS_CONTAINER_ACCOUNT", None)
+        pin = getattr(provider, "container_account", "")
+        if pin:
+            env["MULTIAGENTS_CONTAINER_ACCOUNT"] = pin
+        pins = getattr(executor, "account_pins", lambda: {})()
+        env["MULTIAGENTS_RESERVED_ACCOUNTS"] = json.dumps(sorted(set(pins.values())))
     # CW-R2b: a provider action never gets the safe-point key, whatever this
     # process, the provider's env or the caller says. The driver adds it to
     # its own CLI's launch environment itself, after this.

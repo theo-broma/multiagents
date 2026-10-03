@@ -268,6 +268,9 @@ class Provider:
     # A relocated HOME separates accounts only under this executor; other
     # executors still use the primary account's shared credential store.
     home_account_executor: str = ""
+    # Container requests may be restricted to one account in the credential
+    # owner's vault. Local profiles continue to be selected by `env`.
+    container_account: str = ""
     # Attached by `load_providers`, not parsed from yaml: the owner's Provider
     # object (so a lone dependent can still reach its owner's script), and the
     # effective credential environment — the owner's `env` overlaid with this
@@ -376,6 +379,7 @@ class Provider:
             budget_windows=_budget_windows(name, data),
             budget_profile_env=_profile_env_key(name, data),
             home_account_executor=str(data.get("home_account_executor") or ""),
+            container_account=_container_account(data),
             opaque_tools=list(data.get("opaque_tools", []) or []),
             opaque_tool_args=list(data.get("opaque_tool_args", []) or []),
             mcp=dict(data.get("mcp") or {}),
@@ -699,6 +703,14 @@ def _versions_depth(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return value if value >= 1 else 0
+
+
+def _container_account(data: dict) -> str:
+    value = data.get("container_account", "")
+    if value == "":
+        return ""
+    from .authproxy import validate_label
+    return validate_label(value)
 
 
 def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:

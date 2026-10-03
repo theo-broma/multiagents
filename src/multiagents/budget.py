@@ -773,7 +773,7 @@ def _shared_usage(config_dir: Path | None = None, *, force: bool = False,
 
 def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
                 project_config: Path | None = None, force: bool = False,
-                limits: dict | None = None) -> Budget:
+                limits: dict | None = None, vault_profile: bool = False) -> Budget:
     """What is left on the claude account — WHICH account depends on where.
 
     `config_dir` is the instance's CLAUDE_CONFIG_DIR. With two subscriptions on
@@ -795,6 +795,8 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
     """
     budget = Budget(provider="claude", known=False, source="cachedUsageUtilization")
     profile = Path(config_dir).expanduser() if config_dir else None
+    if vault_profile and (profile is None or _claude_token(profile) is None):
+        return replace(budget, note="vault account credentials are missing or expired")
     # With CLAUDE_CONFIG_DIR set the CLI keeps both files inside it; without,
     # the config sits beside the home directory and the credential inside
     # ~/.claude. Measured, not assumed — an empty profile dir grew a
@@ -1029,7 +1031,8 @@ def _builtin_for(name: str, provider: Any,
 
 def _builtin_budget(owner: str, name: str, reader: Any, provider: Any,
                     project_config: Path | None, force: bool,
-                    limits: dict | None) -> Budget:
+                    limits: dict | None,
+                    account_profiles: dict[str, Path] | None = None) -> Budget:
     """Run a built-in reader for `name`, on the right account.
 
     A provider reading under its own name gets the plain reader, unchanged. An
@@ -1041,6 +1044,34 @@ def _builtin_budget(owner: str, name: str, reader: Any, provider: Any,
     if reader is None:
         return Budget(provider=name, known=False, source="none",
                       note="no budget action and no built-in reader")
+    if account_profiles is not None:
+        if not reader_takes_profile(reader):
+            return Budget(provider=name, known=False, source="vault",
+                          note="built-in reader cannot read vault account profiles")
+        readings = {label: _call_reader(
+            reader, config_dir=path, project_config=project_config,
+            force=force, limits=limits, vault_profile=True)
+            for label, path in account_profiles.items()}
+        usable = {label: reading for label, reading in readings.items()
+                  if reading.known and not reading.stale and reading.headroom is not None}
+        if not usable:
+            return Budget(provider=name, known=False, source="vault",
+                          note="no readable vault account" +
+                          (": " + "; ".join(f"{label}: {b.note}" for label, b in readings.items())
+                           if readings else ""))
+        best = max(usable, key=lambda label: usable[label].headroom)
+        windows = {}
+        for label, reading in usable.items():
+            detail = reading.windows or {"quota": {
+                "percent": (1 - reading.headroom) * 100,
+                "resets_at": reading.resets_at}}
+            for key, window in detail.items():
+                if isinstance(window, dict):
+                    windows[f"{label}/{key}"] = {
+                        **window, "account": label,
+                        "counted": label == best and window.get("counted", True)}
+        return replace(usable[best], provider=name, windows=windows,
+                       note=f"vault account {best}")
     if owner == name:
         return _call_reader(reader, project_config=project_config,
                             force=force, limits=limits)
@@ -1095,7 +1126,7 @@ def reader_takes_profile(reader: Any) -> bool:
 def _call_reader(reader: Any, *, spent: dict[str, int] | None = None,
                  config_dir: Path | None = None,
                  project_config: Path | None = None, force: bool = False,
-                 limits: dict | None = None) -> Budget:
+                 limits: dict | None = None, vault_profile: bool = False) -> Budget:
     """Call a registered built-in reader with only what it accepts.
 
     The registry holds a reader per CLI and their signatures differ — one takes
@@ -1107,11 +1138,12 @@ def _call_reader(reader: Any, *, spent: dict[str, int] | None = None,
     import inspect
 
     parameters = inspect.signature(reader).parameters
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
-        return reader(spent=spent, config_dir=config_dir,
-                      project_config=project_config, force=force, limits=limits)
     offered = {"spent": spent, "config_dir": config_dir,
                "project_config": project_config, "force": force, "limits": limits}
+    if vault_profile:
+        offered["vault_profile"] = True
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return reader(**offered)
     return reader(**{key: value for key, value in offered.items()
                      if key in parameters})
 
@@ -1415,6 +1447,17 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
     # HOME. Reloading the executor must not reuse the other account's quota.
     kind = getattr(executor, "kind", "") or ""
     context = (kind, getattr(executor, "container", "") or "")
+    account_profiles = None
+    if kind == "docker":
+        try:
+            account_profiles = getattr(executor, "budget_accounts", lambda _name: None)(name)
+            if account_profiles is not None:
+                source += "\x00vault:" + json.dumps(
+                    {label: str(path) for label, path in account_profiles.items()}, sort_keys=True)
+        except (OSError, ValueError) as exc:
+            moment = time.time()
+            return _SourceReading(Budget(provider=name, known=False,
+                                          note=f"invalid vault accounts: {exc}"), moment, 0.0, moment)
 
     def take(generation: int | None) -> _SourceReading | None:
         """The cached entry, aged to now, when this caller may use it; None
@@ -1478,8 +1521,13 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
             budget = _from_script(name, provider, executor, config_dir, project_config)
             if budget is None:
                 owner, builtin = _builtin_for(name, provider, providers)
+                if account_profiles is not None and builtin is None:
+                    credential_provider = getattr(provider, "auth_owner", None)
+                    if credential_provider is not None:
+                        owner, builtin = _builtin_for(
+                            credential_provider.name, credential_provider, providers)
                 budget = _builtin_budget(owner, name, builtin, provider,
-                                         project_config, force, limits)
+                                         project_config, force, limits, account_profiles)
         except Exception as exc:              # telemetry must never break a run
             budget = Budget(provider=name, known=False,
                             note=f"{type(exc).__name__}: {exc}")

@@ -793,12 +793,13 @@ providers:
   #
   # claude-b:
   #   extends: claude
+  #   container_account: b
   #   env:
   #     CLAUDE_CONFIG_DIR: "~/.multiagents/profiles/claude-b"
-  #   # Under docker, an instance needs its OWN container profile path, or two
-  #   # instances would be two mounts at one destination and both would
-  #   # authenticate as whichever won. Checked at load time, not left to chance.
-  #   container_private_home: [".claude-b"]
+  #   # Local uses this relocated profile. Docker uses account b in claude's
+  #   # host-only vault, drops CLAUDE_CONFIG_DIR at launch, and gives the CLI
+  #   # the canonical writable profile with a sidecar placeholder. Log in with
+  #   # `multiagents docker login claude-b`; the unpinned pool excludes b.
   #
   # opencode-b:
   #   extends: opencode
