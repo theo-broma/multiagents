@@ -825,6 +825,14 @@ providers:
   #     XDG_DATA_HOME: "~/.multiagents/profiles/opencode-b/share"
   #     XDG_CONFIG_HOME: "~/.multiagents/profiles/opencode-b/config"
   #
+  # codex-b:
+  #   extends: codex
+  #   family: codex
+  #   container_private_home: [".codex-b"]
+  #   # Docker login, runs and budget use this account's own private home.
+  #   # Sign in with `multiagents docker login codex-b`. The executable stays
+  #   # in codex's read-only versions root; .codex-b remains writable.
+  #
   # `family` is what makes the two INTERCHANGEABLE, and that is a choice. Two
   # accounts you keep apart on purpose — work and personal, two clients, two
   # billing lines — should not be interchangeable, and saying so is one line:

@@ -1665,6 +1665,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"  {name:12} NOT FOUND ({provider.bin_error(resolved)})")
             problems += 1
 
+    # FA-R4: inspect ownership without constructing mounts or running actions.
+    # Invalid mount ownership also makes auth/budget reads ambiguous, so report
+    # it before those sections attempt to select a private profile.
+    if paths and config.executor == "docker":
+        conflicts = _docker_executor(paths).configuration_problems()
+        if conflicts:
+            print("\ncontainer private state")
+            for conflict in conflicts:
+                print(f"  !! {conflict}")
+            problems += len(conflicts)
+            print(f"\n{problems} problem(s)")
+            return 1
+
     from .manifest import cli_dependencies_section
 
     print("\ncli dependencies")
@@ -2982,9 +2995,11 @@ def cmd_docker(args: argparse.Namespace) -> int:
 
     if args.action == "up":
         result = ex.ensure_running()
-        print(result if not result.get("ok") else
-              f"{result['container']} running ({ex.network_mode} networking)")
-        return 0 if result.get("ok") else 1
+        if not result.get("ok"):
+            print(result.get("error") or result, file=sys.stderr)
+            return 1
+        print(f"{result['container']} running ({ex.network_mode} networking)")
+        return 0
 
     if args.action == "rm" and not getattr(args, "force", False):
         # SP-R5: removing the container ends every agent in it, and a session
@@ -3004,6 +3019,10 @@ def cmd_docker(args: argparse.Namespace) -> int:
         return 0
 
     if args.action == "login":
+        problems = ex.configuration_problems()
+        if problems:
+            print("; ".join(problems), file=sys.stderr)
+            return 1
         provider_name = args.provider
         config = load_config(paths)
         providers = load_providers(config.providers)
@@ -3065,15 +3084,39 @@ def cmd_docker(args: argparse.Namespace) -> int:
             binary = ex.native_bin(provider_name, provider, dict(os.environ))
         else:
             binary = provider.bin
-        os.execvp("docker", [
+        # Use the declared action, including project/plugin overrides. Actions
+        # normally run on the host, where BACKING names the host store. Here
+        # the same store is visible at PRIVATE_HOME inside the container.
+        container_home = str(next(iter(private)))
+        built = auth_mod.login_command(
+            provider_name, provider, ex, global_config_dir(), paths.config,
+            extra_env={"MULTIAGENTS_BIN": binary,
+                       "MULTIAGENTS_PRIVATE_HOME": container_home,
+                       "MULTIAGENTS_PRIVATE_BACKING": container_home})
+        if built is None:
+            print(f"no auth script for {provider_name!r}", file=sys.stderr)
+            return 2
+        argv, env = built
+        # Forward the action contract and declared provider environment, rather
+        # than every host variable that scripts.build_env makes available.
+        keys = {"HOME", "PATH", "TERM"}
+        keys.update(key for key in env if key.startswith("MULTIAGENTS_"))
+        keys.update(getattr(provider, "credential_env", None) or provider.env)
+        keys.discard("MULTIAGENTS_PRIVATE_VAULT")
+        keys.discard("MULTIAGENTS_CONTAINER_ACTION")
+        command = [
             "docker", "exec", "-it",
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--workdir", str(paths.root),
-            "--env", f"HOME={scripts.build_env(provider_name, provider, ex)['HOME']}",
-            "--env", f"PATH={os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
-            "--env", "TERM=xterm-256color",
-            ex.container, binary,
-        ])
+        ]
+        env["PATH"] = env.get("PATH") or "/usr/local/bin:/usr/bin:/bin"
+        env["TERM"] = env.get("TERM") or "xterm-256color"
+        for key in sorted(keys):
+            if key in env:
+                command += ["--env", f"{key}={env[key]}"]
+        # This trusted marker exists only on the exec that enters the container.
+        command += ["--env", "MULTIAGENTS_CONTAINER_ACTION=1"]
+        os.execvp("docker", [*command, ex.container, *argv])
 
     if args.action == "shell":
         # HOME and PATH as an AGENT gets them, or the shell is not the thing you
@@ -3100,8 +3143,12 @@ def cmd_docker(args: argparse.Namespace) -> int:
         print(f"resources    cpus={ex.config.get('cpus','-')} "
               f"memory={ex.config.get('memory','-')} pids={ex.config.get('pids_limit','-')}")
         print("mounts:")
-        for path, read_only in ex.mounts():
-            print(f"  {'ro' if read_only else 'rw'}  {path}")
+        try:
+            for path, read_only in ex.mounts():
+                print(f"  {'ro' if read_only else 'rw'}  {path}")
+        except ValueError as exc:
+            print(f"\n{exc}")
+            return 1
         problems = ex.preflight()
         print("\n" + ("ready" if not problems else "\n".join(problems)))
         return 1 if problems else 0

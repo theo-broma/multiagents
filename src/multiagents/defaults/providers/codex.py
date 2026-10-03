@@ -945,14 +945,19 @@ def budget_action():
 
 
 def _budget_from_rollouts(profile, now, reason):
-    try:
-        host = _host_profile()
-    except ValueError:
-        host = None
-    homes = [host] if host is not None else []
-    if profile is not None and profile != host:
-        homes.append(profile)
-    homes += _extra_quota_homes()
+    # A docker instance is a separate account. CX-C11's host/extra history
+    # fallback belongs to plain codex, never to a second provider's reading.
+    if _is_docker() and os.environ.get("MULTIAGENTS_PROVIDER", "codex") != "codex":
+        homes = [profile] if profile is not None else []
+    else:
+        try:
+            host = _host_profile()
+        except ValueError:
+            host = None
+        homes = [host] if host is not None else []
+        if profile is not None and profile != host:
+            homes.append(profile)
+        homes += _extra_quota_homes()
     best = _scan_homes(homes)
     if best is None:
         print(json.dumps({"known": False,

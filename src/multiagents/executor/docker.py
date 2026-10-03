@@ -761,6 +761,7 @@ class DockerExecutor(Executor):
         self.paths = paths
         self.providers = providers or {}
         self.config_dir = config_dir
+        self._private_state_cache = None
 
     def exec_in_running(self, argv: list[str], timeout: float, *,
                         env: dict[str, str] | None = None) -> tuple[int, str, str] | NotRunning:
@@ -771,6 +772,9 @@ class DockerExecutor(Executor):
         leaves its container process alive. Inspection and cleanup share the
         overall timeout + 5 second deadline.
         """
+        problems = self.configuration_problems()
+        if problems:
+            return 64, "", "; ".join(problems)
         started = time.monotonic()
         deadline = started + timeout
         cleanup_deadline = deadline + 5
@@ -1092,6 +1096,9 @@ sys.exit(rc)
         """
         if self.paths is None:
             return []
+        problems = self.configuration_problems()
+        if problems:
+            raise ValueError("; ".join(problems))
         # Listed whether or not they exist yet: `protect_project` creates the
         # missing ones before a container is created, and a protection that
         # vanished from the list because its path was absent would be a
@@ -1155,6 +1162,17 @@ sys.exit(rc)
             deepest = max(covering, key=lambda pair: len(pair[0].parts), default=None)
             if deepest is None or not deepest[1]:
                 out.append((adapter, True))
+
+        # FA-R3a: a login action runs here too. Shipped scripts are reached
+        # through the server installation; project overrides through the
+        # project mount. A global/plugin script outside both needs its own
+        # read-only bind, just as an adapter does.
+        executable_mounts = [*out, *((path, True) for path in self.server_mounts(out))]
+        for script in self._action_script_paths()[0]:
+            if not any(
+                    script == path or path in script.parents for path, _ in executable_mounts):
+                out.append((script, True))
+                executable_mounts.append((script, True))
 
         required = {path for path, _ in project}
         seen: dict[Path, bool] = {}
@@ -1700,6 +1718,9 @@ sys.exit(rc)
         shipped, tested, believed in, and not actually in effect. `down` and
         `up` do not do it; `rm` and `up` do.
         """
+        problems = self.configuration_problems()
+        if problems:
+            return problems
         if self.container_state(self.container) != "running":
             return []
         result = _run(["docker", "inspect", "-f",
@@ -1708,18 +1729,22 @@ sys.exit(rc)
         if result.returncode != 0:
             return []
         private = self.backing()
+        try:
+            mounts = self.mounts()
+        except ValueError as exc:
+            return [str(exc)]
         # The server's own install paths differ by entry point, so they are
         # neither owed nor surplus: left out on both sides. Only those
         # `run_args` adds, though — one the configuration mounts itself is
         # owed like any other, and dropping it from `have` alone would report
         # it missing for ever.
-        optional = {str(p) for p in self.server_mounts(self.mounts())}
+        optional = {str(p) for p in self.server_mounts(mounts)}
         have = {line.strip() for line in result.stdout.splitlines()
                 if line.strip() and line.strip().split(">")[-1] not in optional}
-        want = {f"{private.get(path, path)}>{path}" for path, _ in self.mounts()}
+        want = {f"{private.get(path, path)}>{path}" for path, _ in mounts}
         missing = sorted(want - have)
         extra = sorted(h for h in have - want if h.split(">")[1] in
-                       {str(p) for p, _ in self.mounts()} | {str(p) for p in private})
+                       {str(p) for p, _ in mounts} | {str(p) for p in private})
         out = [f"missing: {m}" for m in missing]
         out += [f"stale:   {e}" for e in extra]
         return out
@@ -1773,6 +1798,123 @@ sys.exit(rc)
                             "container_inode": seen})
         return out
 
+    def _private_state_entries(self):
+        """One validated layout shared by admission, doctor and state lookups."""
+        if self._private_state_cache is not None:
+            return self._private_state_cache
+        base = state_root() / "container-state"
+        root = base / (self.slug if self.config.get("credential_scope") == "project"
+                       else "shared")
+        self._private_state_root = root
+        home = Path.home()
+        entries = []
+        claimed: dict[Path, tuple[str, str]] = {}
+        problems = []
+        for name, entry in self.providers.items():
+            owner = self.container_credential_owner(name)
+            owner_entry = self.providers.get(owner) or entry
+            owner_root = Path(os.path.normpath(root / owner))
+            declarations = [(relative, True) for relative in
+                            getattr(owner_entry, "container_private_home", []) or []]
+            if owner != name:
+                declarations += [(relative, False) for relative in
+                                 getattr(entry, "container_private_home", []) or []]
+            for relative, effective in declarations:
+                if not isinstance(relative, str) or Path(relative).is_absolute():
+                    problems.append(f"provider {name!r}: container_private_home entry "
+                                    f"{relative!r} must be a relative path beneath {home}")
+                    continue
+                path = Path(os.path.normpath(home / relative))
+                backing = Path(os.path.normpath(owner_root / relative))
+                try:
+                    contained = (home in path.parents and owner_root in backing.parents
+                                 and root in owner_root.parents
+                                 and root.resolve() in owner_root.resolve().parents
+                                 and owner_root.resolve() in backing.resolve().parents)
+                except (OSError, ValueError, RuntimeError):
+                    contained = False
+                if not contained:
+                    problems.append(f"provider {name!r}: container_private_home entry "
+                                    f"{relative!r} escapes its container or host backing root "
+                                    f"({home}, {owner_root}); refusing {path} -> {backing}")
+                    continue
+                if not effective:
+                    continue              # only the owner's paths are mounted
+                entries.append((name, owner, path, backing))
+                previous = claimed.get(path)
+                if previous is not None and previous[1] != owner:
+                    problems.append(
+                        f"{previous[0]!r} and {name!r} both claim {path} with "
+                        f"different container credential owners; give one a distinct "
+                        f"container_private_home path, or share credentials with auth_from")
+                else:
+                    claimed[path] = (name, owner)
+        self._private_state_cache = entries, problems
+        return self._private_state_cache
+
+    def private_state_conflicts(self) -> list[str]:
+        """FA-R1a: unsafe paths and different owners sharing a private mount."""
+        return list(self._private_state_entries()[1])
+
+    def _action_script_paths(self) -> tuple[list[Path], list[str]]:
+        """Only individual, non-credential action files may get new binds."""
+        from .. import scripts
+        from ..paths import global_config_dir
+        config_dir = self.config_dir or global_config_dir()
+        project_config = self.paths.config if self.paths is not None else None
+        roots = [path.absolute() for path in scripts.script_dirs(config_dir, project_config)]
+        protected = [*self.vault_state().values()]
+        paths, problems = [], []
+        for name, provider in self.providers.items():
+            if not getattr(provider, "container_private_home", None):
+                continue
+            script = scripts.resolve(name, provider, config_dir, project_config)
+            if script is None:
+                continue
+            script = script.absolute()
+            try:
+                resolved = script.resolve()
+                info = script.stat()
+                allowed = any(root in script.parents and root.resolve() in resolved.parents
+                              for root in roots)
+                credential = (any(part in {".ssh", ".aws", ".gnupg", "vault"}
+                                  for part in resolved.parts)
+                              or resolved.name.lower() in {"auth.json", ".credentials.json"}
+                              or any(path.resolve() == resolved or path.resolve() in resolved.parents
+                                     for path in protected))
+                if (not allowed or not stat.S_ISREG(info.st_mode)
+                        or info.st_nlink != 1 or credential):
+                    problems.append(f"provider {name!r}: refusing action script bind {script}; "
+                                    "it must be an individual regular file inside a provider-script "
+                                    "directory, outside credential stores, without hard links")
+                    continue
+            except (OSError, RuntimeError) as exc:
+                problems.append(f"provider {name!r}: cannot validate action script bind {script}: {exc}")
+                continue
+            paths.append(script)
+        return paths, problems
+
+    def configuration_problems(self) -> list[str]:
+        problems = self.private_state_conflicts()
+        if problems:
+            return problems
+        # Ownership is fixed for this executor, but filesystem links can change
+        # between a status lookup and admission. Recheck sources before use.
+        root = self._private_state_root
+        for name, owner, _, backing in self._private_state_entries()[0]:
+            owner_root = root / owner
+            try:
+                contained = (root.resolve() in owner_root.resolve().parents
+                             and owner_root.resolve() in backing.resolve().parents)
+            except (OSError, ValueError, RuntimeError):
+                contained = False
+            if not contained:
+                problems.append(f"provider {name!r}: private backing {backing} escapes "
+                                f"its host backing root {owner_root}")
+        if problems:
+            return problems
+        return self._action_script_paths()[1]
+
     def private_state(self, provider: str = "") -> dict[Path, Path]:
         """{path as seen in the container: backing directory on the host}.
 
@@ -1794,23 +1936,16 @@ sys.exit(rc)
         """
         if self.paths is None:
             return {}
-        base = state_root() / "container-state"
-        root = base / (self.slug if self.config.get("credential_scope") == "project"
-                       else "shared")
+        entries, _ = self._private_state_entries()
+        if self.configuration_problems():
+            return {}
         out: dict[Path, Path] = {}
-        for name, entry in self.providers.items():
+        for name, owner, path, backing in entries:
             if provider and name != provider:
                 continue
-            owner = self.container_credential_owner(name)
             if owner != name and not provider:
                 continue          # allocated once, under the owner
-            # PS-R2 (review finding 8): WHICH paths are privatised is the
-            # OWNER's declaration — the credential store being mounted is
-            # the owner's, so a dependent that declares no private home of
-            # its own still resolves to the owner's paths, never to nothing.
-            owner_entry = self.providers.get(owner) or entry
-            for relative in getattr(owner_entry, "container_private_home", []) or []:
-                out[Path.home() / relative] = root / owner / relative
+            out[path] = backing
         return out
 
     def transcript_state(self, provider: str = "") -> dict[Path, Path]:
@@ -2115,7 +2250,7 @@ sys.exit(rc)
     def container_credential_owner(self, name: str) -> str:
         # An inherited private profile selects state on the host; under the
         # sidecar its credentials belong to the protocol owner's vault.
-        if self.proxy_provider(name):
+        if self.config.get("auth_proxy") and self.proxy_provider(name):
             return self.AUTH_PROVIDER
         return credential_owner(name, self.providers)
 
@@ -2313,6 +2448,9 @@ sys.exit(rc)
         return argv + [self.image, "sleep", "infinity"]
 
     def ensure_running(self) -> dict:
+        problems = self.configuration_problems()
+        if problems:
+            return {"ok": False, "error": "; ".join(problems)}
         if self.inside():
             # Called from here, we ARE the container: it is by definition
             # running, on the image it was built from, with no `docker` to
@@ -2394,7 +2532,11 @@ sys.exit(rc)
                 return {"ok": True, "container": self.container, "started": True}
             _run(["docker", "rm", "-f", self.container])
 
-        result = _run(self.run_args(), timeout=300)
+        try:
+            argv = self.run_args()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        result = _run(argv, timeout=300)
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:600]}
         return {"ok": True, "container": self.container, "created": True}
@@ -2439,6 +2581,9 @@ sys.exit(rc)
         exists — this is about a config edit that cannot take effect, not about
         drift in general.
         """
+        problems = self.configuration_problems()
+        if problems:
+            return problems
         if self.container_state(self.container) == "absent":
             return []
         result = _run(["docker", "inspect", "-f",
@@ -2451,8 +2596,12 @@ sys.exit(rc)
             if ":" in line:
                 dest, _, rw = line.rpartition(":")
                 have[dest] = rw.strip() == "true"
+        try:
+            mounts = self.mounts()
+        except ValueError as exc:
+            return [str(exc)]
         missing = []
-        for path, read_only in self.mounts():
+        for path, read_only in mounts:
             # `path` IS the destination. `private_state` maps that destination
             # to the host directory mounted there, which is the SOURCE — look
             # it up here and every container-private mount reads as missing,
@@ -2584,6 +2733,9 @@ sys.exit(rc)
     # -------------------------------------------------------------- execute --
 
     def preflight(self) -> list[str]:
+        problems = self.configuration_problems()
+        if problems:
+            return problems
         if self.inside():
             # Every check below asks whether the container exists, is built
             # from the right image, and is safe to start — all moot from in
@@ -2668,6 +2820,9 @@ sys.exit(rc)
         provider has a private home in the container, as actions get it."""
         found = self.adapter_provider(argv, provider)
         env = super().adapter_env(argv, env, provider)
+        problems = self.configuration_problems()
+        if problems:
+            return {**env, "MULTIAGENTS_CONFIG_ERROR": "; ".join(problems)}
         if found is not None:
             private = self.private_state(found[0])
             if private:
@@ -2868,6 +3023,9 @@ sys.exit(rc)
           it. Mount paths match the host exactly (module docstring), so the
           same resolution is safe to do from in here too.
         """
+        problems = self.configuration_problems()
+        if problems:
+            raise RuntimeError(f"docker executor: {'; '.join(problems)}")
         env = dict(env)
         for key in NETWORK_ENV_KEYS:
             if key in env:

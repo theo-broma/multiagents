@@ -1559,6 +1559,9 @@ def read_provider(name: str, provider: Any, executor: Any, config_dir: Path,
     """
     from .config import parse_once
 
+    problems = getattr(executor, "configuration_problems", lambda: [])()
+    if problems:
+        return Budget(provider=name, known=False, note="; ".join(problems))
     with parse_once():
         return _read_provider(name, provider, executor, config_dir, project_config,
                               spent, use_cache, force, limits, max_reading_age,

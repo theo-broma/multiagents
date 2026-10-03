@@ -76,6 +76,11 @@ login)
         echo "  3. Paste the code back here and press Enter."
         echo "  4. When the CLI is up and shows your account, quit with ctrl-c."
         echo
+        # docker login runs the action inside the container already. Host-side
+        # auth login still needs the docker exec below to reach the same home.
+        if [ "${MULTIAGENTS_CONTAINER_ACTION:-}" = "1" ]; then
+            exec "$BIN"
+        fi
         exec docker exec -it \
             --user "${MULTIAGENTS_UID:-0}:${MULTIAGENTS_GID:-0}" \
             --env "HOME=$HOME" \

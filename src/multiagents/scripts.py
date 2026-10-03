@@ -50,6 +50,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +173,18 @@ def build_env(provider_name: str, provider: Any, executor: Any,
             env["MULTIAGENTS_CONTAINER_ACCOUNT"] = pin
         pins = getattr(executor, "account_pins", lambda: {})()
         env["MULTIAGENTS_RESERVED_ACCOUNTS"] = json.dumps(sorted(set(pins.values())))
+    # A rejected docker layout is status, not an exception from a read-only
+    # environment lookup. Action boundaries below refuse before running code.
+    env.pop("MULTIAGENTS_CONFIG_ERROR", None)
+    problems = getattr(executor, "configuration_problems", lambda: [])()
+    if problems:
+        for key in ("MULTIAGENTS_PRIVATE_HOME", "MULTIAGENTS_PRIVATE_BACKING",
+                    "MULTIAGENTS_PRIVATE_VAULT"):
+            env.pop(key, None)
+        env["MULTIAGENTS_CONFIG_ERROR"] = "; ".join(problems)
+    # Only docker login's exec argv may mark an action as already inside the
+    # container. Ambient, provider and caller values cannot bypass that hop.
+    env.pop("MULTIAGENTS_CONTAINER_ACTION", None)
     # CW-R2b: a provider action never gets the safe-point key, whatever this
     # process, the provider's env or the caller says. The driver adds it to
     # its own CLI's launch environment itself, after this.
@@ -252,12 +265,15 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
     script = resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return 127, "", f"no script for provider {provider_name!r}"
+    env = build_env(provider_name, provider, executor, extra_env)
+    if env.get("MULTIAGENTS_CONFIG_ERROR"):
+        return 64, "", env["MULTIAGENTS_CONFIG_ERROR"]
     try:
         child = subprocess.Popen(
             [*script_argv(script), action],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, start_new_session=True,
-            env=build_env(provider_name, provider, executor, extra_env),
+            env=env,
             cwd=cwd,
         )
     except OSError as exc:
@@ -310,5 +326,9 @@ def exec_action(provider_name: str, provider: Any, executor: Any, action: str,
     script = resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return None
-    return ([*script_argv(script), action],
-            build_env(provider_name, provider, executor, extra_env))
+    env = build_env(provider_name, provider, executor, extra_env)
+    if env.get("MULTIAGENTS_CONFIG_ERROR"):
+        return ([sys.executable, "-c",
+                 "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(64)",
+                 env["MULTIAGENTS_CONFIG_ERROR"]], env)
+    return ([*script_argv(script), action], env)
