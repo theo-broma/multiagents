@@ -107,6 +107,17 @@ never submitted.
     deferred task that vanished) and T2 (several tickets in one run). Note
     the commits.
 
+- **C9 — DONE 2026-10-03 by the initializer, on the user's answers.**
+  `.multiagents/config/agents.yaml` (not versioned; a backup is in the
+  initializer session's scratchpad as `agents.yaml.bak-pre-c9`):
+  - `models.agy: {model: gemini-3.1-pro-high, variant: ""}` became
+    `agy: gemini-3.1-pro-high` for advisor, dev-advisor and adversary. The
+    user: "supprime la clé, elle ne sert à rien".
+  - bug-reporter moved from `opencode/opencode-go/kimi-k2.6` to
+    `codex/gpt-5.6-terra`, keeping its `claude-b: sonnet` fallback.
+  - `doctor` shows no warnings afterwards.
+
+  The original item follows.
 - **C9 — config warnings.** This one is the user's decision, with defaults.
   `.multiagents/config/agents.yaml` is gitignored, so a change is proposed,
   never made silently.
