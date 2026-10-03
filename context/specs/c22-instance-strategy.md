@@ -66,3 +66,56 @@ Several selection rules, configurable globally and per provider. The default is 
 
 - Strategies across different families or vendors (the fallback chain).
 - Mixing several strategies in one rule.
+
+## Revision after the advisor's check (2026-10-04, ag-aed397, before tests)
+
+These override any earlier wording they contradict. The decisions are the orchestrator's.
+
+**IS-R1a: a tolerance around the best score, against herding.**
+- **The problem.** A strict ranking on a reading shared by every spawn sends each successive launch to the same winner (the `pick_instance` docstring, ~1755). `soonest_reset` concentrates work by design, and the user wants that.
+- **The rule.** Instances whose score is within a tolerance of the **best** score form the winning group. Compare each one against the best, never pairwise. Inside that group, the order is today's: load, which counts recent claims plus starting and running agents (`runner.py` ~1190-1207), then last use, then name.
+- **Default tolerances:**
+
+  | Strategies | Tolerance |
+  |---|---|
+  | `soonest_reset` | 15 minutes |
+  | remaining-quota strategies | 5 percentage points |
+
+- **Configuration:** `budget.instance_tolerance_minutes` and `budget.instance_tolerance_points`, layered like `instance_strategy`.
+- **Out of scope:** a cap that spreads load across larger gaps.
+
+**IS-R1b: window semantics.**
+- **Which windows count.** A strategy uses only counted windows (`counted: false` is excluded) that have a finite percent between 0 and 100 inclusive.
+- **Reset times.** For `soonest_reset`, a reset counts only if it is timezone-aware and in the future.
+- **Stale readings.** A stale reading contributes no score, even when every candidate is stale. Those instances rank as "missing data".
+- **No windows.** When `windows` is empty, the remaining-quota strategies use the top-level `used_percent` as a single window of unknown span. That window serves only as both the "shortest" and the "longest" when no instance has spans.
+- **Equal spans.** When several windows share the shortest (or longest) span, the instance is represented by its most-used window at that span.
+- **"Remaining"** compares percentages, not absolute capacity.
+
+**IS-R1c: window spans.**
+- **Codex.** It already receives `window_minutes` but drops it when it builds its output windows (`codex.py` ~545-554, ~712). It must keep that value, e.g. as `span_minutes`, on each window.
+- **Name inference.** Where a reading carries no span, the span is inferred from the window name through an explicit table:
+
+  | Window names | Span |
+  |---|---|
+  | `5h`, `five_hour`, `gemini-5h`, `3p-5h`, `codex-5h`, `session`, `*/session` | 5 h |
+  | `daily`, `day` | 1 day |
+  | `weekly`, `seven_day`, `weekly_all`, `*/weekly_all`, `gemini-weekly`, `3p-weekly`, `codex-weekly` | 7 days |
+  | `monthly` | about 30 days |
+
+- **The prefix.** A vault account prefix such as `default/` or `b/` is stripped before matching.
+- **Unknown names.** `rolling` and any unknown name have an unknown span: they are never guessed, and never derived from the time left until the reset.
+- **Excluded.** Windows of unknown span are left out of the shortest and longest choice.
+
+**IS-R2a: precedence.**
+- One strategy is resolved for the whole pool: the preferred provider's effective setting. An inherited setting counts.
+- Explicit `null` on a provider clears an inherited value, so the global setting applies.
+- A sibling's own setting applies only when that sibling is itself the preferred provider.
+
+**IS-R3a: the reason is honest.** It names what actually decided:
+- the strategy metric, but only when it separated the winner from the preferred provider beyond the tolerance;
+- otherwise whichever of these decided instead: reservation, an unknown reading, missing data, the tolerance group followed by load or last use, or the name.
+
+It never states a reset or quota comparison that did not decide.
+
+**IS-R5: scope note.** C22 chooses among provider **instances**, such as claude versus claude-b. It does not choose the account inside the claude sidecar vault: that vault picks its own budget representative (`budget.py` ~1047-1075), and nothing there changes.
