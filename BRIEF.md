@@ -4110,3 +4110,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - the phase-3 branches tester/b689bf and cf02a1, kept on purpose.
   - The user should run `/mcp` once, so the server loads C16 and C17.
 - 2026-10-03 ~19:15 CEST: new user request, C18 (monitor quota panel shows every window, uniformly). Contract context/specs/c18-monitor-quota-panel.md (4cd8d88; advisor revision 95dd3a0). Tester ag-9116a1 running; next an implementer (default tier), then the reviewer.
+- 2026-10-03 ~19:50 CEST: C18 round 1 rejected by ag-c0506f: manifest.probe is synchronous and uncached on every poll. The zai spend-note finding is judged non-blocking because it was pre-existing. ag-7b5fbf steered for round 2. Old-layout tests rewritten (7c7b072). New user request C19, the quota details page with masked account identity: contract a4fa606, advisor revision 4e6b4c6. It starts after C18 merges (same files).
