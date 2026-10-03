@@ -1662,7 +1662,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         profile_env = scripts.build_env(name, providers_map[name], executor_of(name))
         from .providers import resolved_profile
         profile = resolved_profile(providers_map[name]) or profile_env.get("HOME", str(Path.home()))
-        print(f"    profile {profile} — identity unverified")
+        # The check contract exposes identity only in its free-text detail.
+        # A successful check or a token's presence alone identifies no account.
+        identity = "identity unverified"
+        if state.ok and state.detail.startswith("logged in as "):
+            if state.detail.removeprefix("logged in as ").strip():
+                identity = state.detail
+        print(f"    profile {profile} — {identity}")
         if not state.ok:
             problems += 1
     for name, state in sorted(_driver_host_states(
