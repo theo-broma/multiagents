@@ -83,20 +83,29 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").strip()
         if not host:
             return False
-        name = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
+        if host.startswith("[") and host.endswith("]"):
+            name = host[1:-1]
+        else:
+            name = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
         return name in ("127.0.0.1", "localhost", "::1") or name == self.bound_host
 
     def _origin_is_ours(self) -> bool:
         origin = self.headers.get("Origin")
         if origin is None:
             return True
+        if not self._host_is_ours():
+            return False
         try:
             parsed = urlparse(origin)
+            host = urlparse("//" + self.headers.get("Host", "").strip())
             return (parsed.scheme == "http" and
-                    parsed.hostname in ("127.0.0.1", "localhost", "::1", self.bound_host) and
-                    (parsed.port or 80) == self.server.server_port and
-                    not parsed.username and not parsed.password and
-                    not parsed.path and not parsed.query and not parsed.fragment)
+                    parsed.hostname is not None and
+                    (parsed.hostname, parsed.port if parsed.port is not None else 80) ==
+                    (host.hostname, host.port if host.port is not None else 80) and
+                    parsed.username is None and parsed.password is None and
+                    not parsed.path and not parsed.query and not parsed.fragment and
+                    host.username is None and host.password is None and
+                    not host.path and not host.query and not host.fragment)
         except ValueError:
             return False
 
