@@ -178,7 +178,7 @@ def test_r3a_a_queued_resume_is_dispatched_as_a_resume_with_the_same_node_and_se
     assert ok, "the queued resume never launched"
     argv = g.calls()[-1]["argv"]
     assert session and session in argv, (session, argv)
-    assert "continue with the resume text" in " ".join(argv)
+    assert "continue with the resume text" in g.prompt(-1)
     assert w.node(a).session_id == session
     assert not [n for n in w.tree().read()["nodes"].values()
                 if "continue with the resume text" in str(n.get("task", ""))], \

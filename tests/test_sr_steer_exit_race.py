@@ -47,6 +47,7 @@ _SCRIPT = r'''#!{python}
 import json, os, sys, time
 base, name = {base!r}, {name!r}
 argv = sys.argv[1:]
+prompt = sys.stdin.read()    # C3: the shipped transport delivers the prompt on stdin
 def _alive(pid):
     try:
         os.kill(pid, 0)
@@ -58,10 +59,10 @@ try:
 except OSError:
     earlier = []
 with open(base + ".calls", "a") as f:
-    f.write(json.dumps({{"argv": argv, "pid": os.getpid(), "t": time.time(),
+    f.write(json.dumps({{"argv": argv, "prompt": prompt, "pid": os.getpid(), "t": time.time(),
                         "pred_alive": [p for p in earlier if _alive(p)]}}) + "\n")
 ctl = json.load(open(base + ".ctl.json"))
-text = " ".join(argv)
+text = " ".join(argv) + " " + prompt
 for key, variant in ctl.get("variants", {{}}).items():
     if key in text:
         ctl = dict(ctl, **variant)
@@ -753,7 +754,7 @@ def test_sr_r5_steering_a_done_run_resumes_it(w):
         return aid, (await w.until(aid, timeout=30, states={"done"}))[aid]
     aid, state = asyncio.run(go())
     assert state == "done"
-    assert "next: again" in " ".join(w.g.calls()[1]["argv"])
+    assert "next: again" in w.g.calls()[1]["prompt"]
 
 
 def test_sr_r5_steering_a_failed_run_resumes_it(w):
@@ -786,7 +787,7 @@ def test_sr_r5_a_need_info_answer_resumes_the_run_with_the_answer(w):
         return aid, (await w.until(aid, timeout=30, states={"done"}))[aid]
     aid, state = asyncio.run(go())
     assert state == "done"
-    assert "next: postgres" in " ".join(w.g.calls()[1]["argv"])
+    assert "next: postgres" in w.g.calls()[1]["prompt"]
 
 
 def test_sr_r5_steering_a_live_run_still_ends_its_predecessor_and_resumes_the_session(w):

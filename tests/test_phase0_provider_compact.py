@@ -43,9 +43,12 @@ FAKE_CLI = r'''#!{python}
 """A stand-in provider CLI. Logs what it was asked, then does FAKE_MODE."""
 import json, os, pathlib, sys
 log = os.environ.get("FAKE_LOG") or "{log}"
+# C3: a spawned run gets its prompt on stdin; the compact launcher passes it in argv.
+prompt = "" if "/compact" in sys.argv[1:] else sys.stdin.read()
 if log:
     with open(log, "a") as fh:
-        fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
+        fh.write(json.dumps({"argv": sys.argv[1:], "prompt": prompt,
+                             "cwd": os.getcwd()}) + "\n")
 mode = os.environ.get("FAKE_MODE", "manual")
 argv = sys.argv[1:]
 sid = argv[argv.index("--resume") + 1] if "--resume" in argv else ""
@@ -332,7 +335,7 @@ def test_p0_r8e_1_the_key_reaches_argv_from_agents_yaml(tmp_path, monkeypatch):
     by_task = {}
     for call in sc.calls():
         argv = call["argv"]
-        by_task["withkey" if any("t withkey" in a for a in argv) else "nokey"] = argv
+        by_task["withkey" if "t withkey" in call["prompt"] else "nokey"] = argv
     assert set(by_task) == {"withkey", "nokey"}, sc.calls()
     assert "--autocompact" in by_task["withkey"]
     assert by_task["withkey"][by_task["withkey"].index("--autocompact") + 1] == "400000"

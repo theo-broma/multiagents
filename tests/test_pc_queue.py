@@ -194,7 +194,7 @@ def test_r3a_a_new_arrival_never_overtakes_an_eligible_queued_entry(w):
         await w.settle()
         return late
     asyncio.run(go())
-    texts = [" ".join(c["argv"]) for c in g.calls()]
+    texts = [" ".join(c["argv"]) + " " + c.get("prompt", "") for c in g.calls()]
     assert "early" in texts[1], texts
     assert len(texts) < 3 or "late" in texts[2], texts
 

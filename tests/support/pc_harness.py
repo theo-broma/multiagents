@@ -10,7 +10,7 @@ hold open and then end deliberately.
 `{"argv": [...], "pid": N}` to `<name>.calls`, prints a step, then waits until
 its gate exists before printing its final text and exiting 0. The gate is per
 provider (`open()` / `close()`), or per task via `hold(substring)`: a run whose
-argv contains the substring waits for that tag's own file (`release(tag)`).
+argv or prompt contains the substring waits for that tag's own file (`release(tag)`).
 No gate set means the run does not block.
 """
 from __future__ import annotations
@@ -33,10 +33,12 @@ _SCRIPT = r'''#!{python}
 import json, os, sys, time
 base, name = {base!r}, {name!r}
 argv = sys.argv[1:]
+prompt = sys.stdin.read()    # C3: the shipped transport delivers the prompt on stdin
 with open(base + ".calls", "a") as f:
-    f.write(json.dumps({{"argv": argv, "pid": os.getpid(), "t": time.time()}}) + "\n")
+    f.write(json.dumps({{"argv": argv, "prompt": prompt, "pid": os.getpid(),
+                        "t": time.time()}}) + "\n")
 ctl = json.load(open(base + ".ctl.json"))
-text = " ".join(argv)
+text = " ".join(argv) + " " + prompt
 session = argv[argv.index("-s") + 1] if "-s" in argv else "ses_%s_%d" % (name, os.getpid())
 def emit(kind, part):
     ev = {{"type": kind, "sessionID": session, "part": dict(part, sessionID=session)}}
@@ -110,7 +112,7 @@ class Gated:
         self.gate.write_text("open")
 
     def hold(self, tag: str) -> None:
-        """Runs whose argv contains `tag` block until `release(tag)`."""
+        """Runs whose argv or prompt contains `tag` block until `release(tag)`."""
         path = self.tmp / f"{self.name}.hold.{tag}"
         path.unlink(missing_ok=True)
         self._holds[tag] = str(path)
@@ -133,7 +135,14 @@ class Gated:
         return len(p.read_text().splitlines()) if p.is_file() else 0
 
     def argv_text(self, k: int = -1) -> str:
-        return " ".join(self.calls()[k]["argv"])
+        """Everything the k-th run was told: its argv and, under the C3 stdin
+        transport, its prompt. Tests match on task text, wherever it travels."""
+        c = self.calls()[k]
+        return " ".join(c["argv"]) + " " + c.get("prompt", "")
+
+    def prompt(self, k: int = -1) -> str:
+        """The prompt the k-th run received (stdin, under the shipped transport)."""
+        return self.calls()[k]["prompt"]
 
 
 def gated(w: World, name: str, *, max_concurrent: Any = 1, **extra: Any) -> Gated:
