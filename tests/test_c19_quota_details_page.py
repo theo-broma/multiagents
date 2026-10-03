@@ -986,11 +986,22 @@ def test_qd_r7_a_foreign_origin_is_rejected_on_every_quota_route(make, origin):
 
 def test_qd_r7_the_monitors_own_origin_and_a_missing_origin_are_accepted(make):
     fx, name, _ = one_provider(make, identity="carol@example.invalid")
-    own = f"http://127.0.0.1:{fx.port}"
-    for origin in (None, own, f"http://localhost:{fx.port}"):
-        resp = fx.reveal(name, None, origin=origin)
-        assert resp.status == 200, (origin, resp.status)
-        assert fx.open_details(origin=origin).status == 200
+    # A browser's same-origin request always has Origin == Host.
+    for origin, host in ((None, None),
+                         (f"http://127.0.0.1:{fx.port}", f"127.0.0.1:{fx.port}"),
+                         (f"http://localhost:{fx.port}", f"localhost:{fx.port}")):
+        resp = fx.reveal(name, None, origin=origin, host=host)
+        assert resp.status == 200, (origin, host, resp.status)
+        assert fx.open_details(origin=origin, host=host).status == 200, (origin, host)
+
+
+def test_qd_r7_an_origin_that_differs_from_the_host_is_refused(make):
+    fx, name, _ = one_provider(make, identity="carol@example.invalid")
+    origin, host = f"http://localhost:{fx.port}", f"127.0.0.1:{fx.port}"
+    resp = fx.reveal(name, None, origin=origin, host=host)
+    assert resp.status == 403, resp.status
+    assert "carol" not in resp.text
+    assert fx.open_details(origin=origin, host=host).status == 403
 
 
 def test_qd_r7_the_host_check_still_applies_to_the_reveal(make):
