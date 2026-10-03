@@ -119,3 +119,11 @@ These override any earlier wording they contradict. The decisions are the orches
 It never states a reset or quota comparison that did not decide.
 
 **IS-R5: scope note.** C22 chooses among provider **instances**, such as claude versus claude-b. It does not choose the account inside the claude sidecar vault: that vault picks its own budget representative (`budget.py` ~1047-1075), and nothing there changes.
+
+## Decisions after the tester's read (2026-10-04, ag-830f8c)
+
+- **Interface.** `pick_instance` and `choose_provider` take the keyword arguments `strategy=`, `tolerance_minutes=` and `tolerance_points=`. An unknown strategy passed directly raises `ValueError`.
+- **Config errors.** An unknown strategy in config raises a `ValueError` naming the value, the file and its line. `doctor` reports it as one problem, with exit code 1.
+- **Tolerance.** The boundary is inclusive: a score within 15 minutes, or within 5 points, of the best is tied.
+- **Window names** are matched case-insensitively.
+- **Windowless readings under `soonest_reset`.** A reading with no windows contributes no reset, so it counts as missing data. A top-level `resets_at` is not used.
