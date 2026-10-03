@@ -51,3 +51,12 @@ A related gap: `_host_is_ours()` (~68-77) also accepts an empty or missing `Host
   - `tests/test_core.py::test_the_api_refuses_a_caller_without_the_token`;
   - `tests/test_core.py::test_the_page_is_not_served_to_a_rebound_hostname`, which uses the header token and so passes under MT-R1a;
   - the `auth=False` fetches of `/` in `tests/test_c19_quota_details_page.py` at ~316, ~326 and ~1126.
+
+## Amendment after the user's live test (2026-10-03)
+
+- **What the user saw.** Firefox sent `Origin: null` on the `POST /quota` handoff, so C19's QD-R7 Origin check refused it with "bad origin".
+- **Why.** Under `Referrer-Policy: no-referrer`, browsers send `Origin: null` on POST navigations, and the `/` page carried that policy.
+- **MT-R2b (replaces the `no-referrer` part of MT-R2 and QD-R1a for the HTML pages).**
+  - `/` and the quota details page carry `Referrer-Policy: same-origin`. The browser then sends its real origin to the monitor itself, and nothing to other sites.
+  - JSON and API responses may keep `no-referrer`.
+  - `Origin: null` stays refused.
