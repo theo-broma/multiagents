@@ -265,6 +265,9 @@ class Provider:
     # the reader resolves the instance's own value so two accounts are not
     # conflated. Empty means the reader has no profile to point at.
     budget_profile_env: str = ""
+    # A relocated HOME separates accounts only under this executor; other
+    # executors still use the primary account's shared credential store.
+    home_account_executor: str = ""
     # Attached by `load_providers`, not parsed from yaml: the owner's Provider
     # object (so a lone dependent can still reach its owner's script), and the
     # effective credential environment — the owner's `env` overlaid with this
@@ -372,6 +375,7 @@ class Provider:
             budget_from=_owner_key(name, "budget_from", data),
             budget_windows=_budget_windows(name, data),
             budget_profile_env=_profile_env_key(name, data),
+            home_account_executor=str(data.get("home_account_executor") or ""),
             opaque_tools=list(data.get("opaque_tools", []) or []),
             opaque_tool_args=list(data.get("opaque_tool_args", []) or []),
             mcp=dict(data.get("mcp") or {}),
@@ -785,13 +789,21 @@ def _validate_budget_profile(name: str, provider: "Provider",
     A provider that declares its OWN script (`script:` or `auth.script:`) is
     exempt: that script may implement the `budget` action and read its own
     state, in which case the built-in reader is never reached and its
-    signature says nothing. Inheritance is judged on the RAW block, so a script
-    merely folded in from a base does not exempt the instance.
+    signature says nothing. An inherited declaration is also exempt when the
+    base that declares it owns a script: that script declares profile support
+    for its instances. Merely inheriting a script does not exempt a NEW profile
+    variable declared by the instance.
     """
     field = provider.budget_profile_env
     if not field:
         return
-    block = raw.get(name) or {}
+    current = name
+    block = raw.get(current) or {}
+    while "budget_profile_env" not in block and block.get("extends"):
+        if block.get("script") or (block.get("auth") or {}).get("script"):
+            return
+        current = block["extends"]
+        block = raw.get(current) or {}
     if block.get("script") or (block.get("auth") or {}).get("script"):
         return
     from .budget import _BUILTIN, reader_takes_profile

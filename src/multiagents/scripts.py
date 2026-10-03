@@ -153,7 +153,14 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     profile = resolved_profile(provider)
     if profile_field and profile:
         env[profile_field] = profile
+    # A host auth request belongs to one action, never to this process's
+    # later budget reads. Only an explicit caller may select that profile.
+    env.pop("MULTIAGENTS_PROFILE", None)
     env.update(extra or {})
+    # The executor object is authoritative. An ambient or provider variable,
+    # or an action overlay, cannot turn a container read into a host read.
+    # Missing executor information remains unknown rather than implying local.
+    env["MULTIAGENTS_EXECUTOR"] = getattr(executor, "kind", "") or ""
     # CW-R2b: a provider action never gets the safe-point key, whatever this
     # process, the provider's env or the caller says. The driver adds it to
     # its own CLI's launch environment itself, after this.

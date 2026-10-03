@@ -1154,13 +1154,15 @@ class _CacheEntry:
     expired and dropped.
     """
 
-    __slots__ = ("wall", "budget", "elapsed", "seen")
+    __slots__ = ("wall", "budget", "elapsed", "seen", "executor")
 
-    def __init__(self, wall: float, budget: Budget) -> None:
+    def __init__(self, wall: float, budget: Budget,
+                 executor: tuple[str, str] | None = None) -> None:
         self.wall = wall                # the wall stamp the entry was cached under
         self.budget = budget            # the reader's own RAW budget (R17)
         self.elapsed = 0.0              # cache time, forward wall movement only
         self.seen = wall                # last wall time a hit was judged at
+        self.executor = executor       # None for legacy, unscoped entries
 
     def __iter__(self):
         """Unpack as the `(wall, budget)` pair the entry replaced."""
@@ -1314,11 +1316,14 @@ def _project_reading(name: str, base: Budget, provider: Any) -> Budget:
     projected = replace(base, provider=name, windows=marked,
                         spent={} if owner_name else dict(base.spent))
     if not selected:
+        # A failed source read has no windows to select. Keep its diagnostic
+        # (including the login instruction) instead of blaming the selector.
+        note = base.note if not base.known and base.note else (
+            "no window in the shared budget reading matches "
+            "this provider's budget_windows "
+            f"({', '.join(selector)})")
         return replace(projected, known=False, headroom=None,
-                       severity="unknown", resets_at=None, note=(
-                           "no window in the shared budget reading matches "
-                           "this provider's budget_windows "
-                           f"({', '.join(selector)})"))
+                       severity="unknown", resets_at=None, note=note)
     worst = max(selected, key=lambda key: _window_used(selected[key]) or 0.0)
     used = _window_used(selected[worst]) or 0.0
     return replace(
@@ -1406,6 +1411,10 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
     profile = resolved_profile(provider)
     if profile:
         source = f"{source}\x00{profile}"
+    # A container's account differs from the host keyring even with the same
+    # HOME. Reloading the executor must not reuse the other account's quota.
+    kind = getattr(executor, "kind", "") or ""
+    context = (kind, getattr(executor, "container", "") or "")
 
     def take(generation: int | None) -> _SourceReading | None:
         """The cached entry, aged to now, when this caller may use it; None
@@ -1424,6 +1433,14 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
         else:
             entry = stored
         if entry is None or _cache_source.get(name) != source:
+            return None
+        if entry.executor is None:
+            # Older entries had no executor tag. Preserve their local or
+            # unscoped reader behavior, but never reuse them for a container
+            # or an explicitly unresolved executor.
+            if executor is not None and kind != "local":
+                return None
+        elif entry.executor != context:
             return None
         if not (name in _pass
                 or (use_cache and not force and moment - entry.wall < _CACHE_TTL)
@@ -1470,7 +1487,7 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
         # caller's spent, all of which are per-read overlays (R17, QF-R1).
         # RM-R4f: it publishes with its source identity, under the lock.
         with _cache_lock:
-            _cache[name] = _CacheEntry(moment, budget)
+            _cache[name] = _CacheEntry(moment, budget, context)
             _cache_source[name] = source
             _fetch_generation[name] = generation + 1
     _pass.add(name)
