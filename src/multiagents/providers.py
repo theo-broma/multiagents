@@ -364,6 +364,9 @@ class Provider:
     # Like `max_concurrent`, read from the RAW block, never through `extends`.
     spend_cap: SpendCap | None = None
 
+    # TG-R1: attached from configuration provenance, including inherited keys.
+    spawn_sources: dict[str, str] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
         # PS-R1a: a relative explicit `bin` (one containing "/") is refused at
@@ -496,6 +499,26 @@ class Provider:
             raise ValueError(f"provider {self.name!r}: invalid spawn.prompt_transport {transport!r}")
         return transport
 
+    def transport_error(self) -> str | None:
+        """TG-R1/R2: one admission check shared by launches and doctor."""
+        transport = self.prompt_transport
+        if transport == "argv":
+            return None
+        conflicts = []
+        for key in ("args", "resume"):
+            if "{prompt}" in (self.spawn.get(key) or []):
+                conflicts.append((key, "contains {prompt}"))
+        if transport == "file" and "{prompt_file}" not in (self.spawn.get("args") or []):
+            conflicts.append(("args", "lacks {prompt_file}"))
+        if not conflicts:
+            return None
+        detail = "; ".join(
+            f"spawn.{key} {reason} (set by {self.spawn_sources.get(key, self.spawn_sources.get('prompt_transport', 'in-memory config'))})"
+            for key, reason in conflicts)
+        return (f"provider {self.name!r}: spawn.prompt_transport: {transport} conflicts "
+                f"with {detail}. Drop the stale args/resume override, or explicitly "
+                "set spawn.prompt_transport: argv.")
+
     def build_command(
         self,
         *,
@@ -517,10 +540,14 @@ class Provider:
         Stdin callers hand input to their executor separately; argv remains
         the default for providers that have not declared a transport.
         """
+        # TG-R3: standalone build_command callers bypass Runner admission.
+        error = self.transport_error()
+        if error:
+            raise ValueError(error)
         if self.prompt_transport == "file" and prompt_file is None:
             prompt_file = _standalone_prompt_file(prompt)
         values = {
-            "prompt": prompt if self.prompt_transport == "argv" else "",
+            "prompt": prompt,
             "prompt_file": prompt_file or "",
             "model": model,
             "workdir": workdir,
@@ -537,6 +564,10 @@ class Provider:
         def render(tokens: Iterable[str]) -> list[str]:
             out = []
             for token in tokens:
+                if token == "{prompt}" and self.prompt_transport != "argv":
+                    raise ValueError(
+                        f"provider {self.name!r}: {{prompt}} requires "
+                        "spawn.prompt_transport: argv; drop the stale args override")
                 if token.startswith("{") and token.endswith("}") and token[1:-1] in values:
                     out.append(str(values[token[1:-1]]))
                 else:
@@ -815,10 +846,22 @@ def billed_rows(rows: list[dict[str, Any]],
             for row in rows]
 
 
-def load_providers(raw: dict[str, Any]) -> dict[str, Provider]:
+def resolve_spawn_sources(raw: dict[str, Any],
+                          sources: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """Follow the same inheritance as spawn values for their file provenance."""
+    blocks = {name: {"extends": (data or {}).get("extends"),
+                     "spawn": sources.get(name, {})}
+              for name, data in raw.items()}
+    return {name: data["spawn"] for name, data in resolve_inheritance(blocks).items()}
+
+
+def load_providers(raw: dict[str, Any],
+                   sources: dict[str, dict[str, str]] | None = None) -> dict[str, Provider]:
     resolved = resolve_inheritance(raw)
     providers = {name: Provider.from_dict(name, data or {})
                  for name, data in resolved.items()}
+    for name, spawn_sources in resolve_spawn_sources(raw, sources or {}).items():
+        providers[name].spawn_sources = spawn_sources
     # PS-R1/R5: the sharing keys are validated against the RAW blocks (only
     # there can an explicit `env:` entry be told from an inherited one), then
     # the owners are attached.

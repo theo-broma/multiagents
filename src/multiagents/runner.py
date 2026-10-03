@@ -507,6 +507,10 @@ How this works:
 """
 
 
+class TransportRefused(RuntimeError):
+    """TG-R1: a transport mismatch discovered at the final launch gate."""
+
+
 class ProviderFull(RuntimeError):
     """PC-R3: an admission refused because its provider has no free slot —
     its runs fill `max_concurrent`, or eligible work is queued ahead of it
@@ -766,7 +770,7 @@ class Runner:
         self.paths = paths
         self.config = config
         self.config_error = ""
-        self.providers = load_providers(config.providers)
+        self.providers = load_providers(config.providers, config.provider_sources)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.startup = StartupHealth(paths)
         self.runs: dict[str, Run] = {}
@@ -841,7 +845,7 @@ class Runner:
         Providers are built before anything is assigned, so a config that
         fails validation here leaves the previous one wholly in force.
         """
-        providers = load_providers(config.providers)
+        providers = load_providers(config.providers, config.provider_sources)
         if config.providers != self.config.providers:
             # A cached reading was taken through the old provider definition.
             # Dropped only when providers changed: a re-read costs a script run
@@ -3422,6 +3426,10 @@ class Runner:
         reading `self.runs[node_id]` during that window would otherwise get a
         fresh event nobody will ever set.
         """
+        transport_error = self._transport_refusal(provider)
+        if transport_error:
+            self._startup_release(provider.name, node_id, startup_token)
+            raise TransportRefused(transport_error)
         # PS-R6: no launch — first, free retry, commit-fix turn, steer's
         # respawn, a conversation's next turn — runs a model the destination
         # provider does not allow. Admission refuses earlier and more kindly;
@@ -4077,6 +4085,28 @@ class Runner:
             result["retry_after"] = retry_after
         return result
 
+    def _transport_refusal(self, provider: Provider | str) -> str | None:
+        """TG-R1: validate admission before lifecycle changes, including reloads.
+
+        A resumed run keeps its original provider definition. Validate today's
+        config as well, so a stale override cannot kill its healthy predecessor
+        or claim a queued task before the mismatch is reported.
+        """
+        name = provider if isinstance(provider, str) else provider.name
+        current = self.providers.get(name)
+        candidates = [current]
+        if not isinstance(provider, str) and provider is not current:
+            candidates.append(provider)
+        for candidate in candidates:
+            if candidate is not None:
+                try:
+                    error = candidate.transport_error()
+                except ValueError as exc:
+                    error = str(exc)
+                if error:
+                    return error
+        return None
+
     def _model_refusal(self, provider_name: str, model: str) -> str | None:
         """PS-R6: why `provider_name` may not run `model`, or None when it may.
 
@@ -4332,6 +4362,11 @@ class Runner:
             if refusal:
                 message = f"refusing to start {agent_name!r}: {refusal}"
                 return {"reason": message, "error": message, "message": message}
+        destination = ((queued.get("spec") or {}).get("provider") if queued else None) \
+            or spec.provider
+        transport_error = self._transport_refusal(destination)
+        if transport_error:
+            return {"error": transport_error}
         if budget_tag and budget_tokens:
             # First value wins, so a re-declaration cannot lift a spent ceiling.
             self.tree.set_budget(budget_tag, budget_tokens,
@@ -4360,6 +4395,9 @@ class Runner:
         notices.clear(self.tree, lambda e: e.get("effect") == "refused"
                       and e.get("scope") in passed)
         provider = self.providers[spec.provider]
+        transport_error = self._transport_refusal(provider)
+        if transport_error:
+            return {"error": transport_error}
 
         parent = self.self_id()
         depth = self.self_depth() + 1
@@ -4693,6 +4731,9 @@ class Runner:
             # the model (roster routes are checked at load), so this refuses
             # only a spec that reached here some other way — before the node
             # exists, rather than as a failed run.
+            transport_error = self._transport_refusal(provider)
+            if transport_error:
+                return {"error": transport_error}
             refusal = self._model_refusal(provider.name, spec.model)
             if refusal:
                 message = f"refusing to start {agent_name!r}: {refusal}"
@@ -5444,6 +5485,7 @@ class Runner:
         # the provider answered and declined the prompt. Its commit failure
         # is still reported below, as CI-R2 would.
         fix_attempts = 0
+        fix_error = ""
         if (commit_result is not None and not commit_result.ok and commit_result.hook
                 and not stopped_elsewhere and not session_lost
                 and status not in ("limited", "quota", "unauthenticated", "refused")
@@ -5464,6 +5506,7 @@ class Runner:
                 # run ends as the cut would end any run, and a `limited` one
                 # stays resumable.
                 status, limited = fix_cut["status"], fix_cut["limited"]
+                fix_error = fix_cut.get("error") or ""
                 if fix_cut.get("requested_session"):
                     session_lost = True
                     run.requested_session = fix_cut["requested_session"]
@@ -5501,11 +5544,15 @@ class Runner:
             text = (f"{text}\n\ncommit: a git hook refused the end-of-run commit; "
                     f"it succeeded after {fix_attempts} fix attempt(s).").strip()
 
+        if fix_error:
+            text = f"{text}\n\ncommit-fix resume refused: {fix_error}".strip()
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
         record = {
             "status": status, "exit_code": code, "session_id": session_id,
             "usage": usage, "text": text, "stderr_tail": stderr,
         }
+        if fix_error:
+            record["reason"] = fix_error
         if session_lost:
             record.update(reason="session_lost", requested_session=run.requested_session)
         finished_node = self.tree.get(node_id)
@@ -5539,6 +5586,7 @@ class Runner:
             run.tickets = [{k: t[k] for k in ("id", "severity", "title", "status")}
                            for t in filed]
             run.ticket = run.tickets[-1]
+        retry_error = ""
         if stopped_elsewhere:
             pass                          # its reason is the stopper's to give
         elif run.awaiting:
@@ -5595,59 +5643,67 @@ class Runner:
                     and fresh and not fresh.retries
                     and fresh.turn_elapsed() < float(self.config.limits.get(
                         "retry_silent_failure_under_seconds", 60))):
-                self.tree.emit(node_id, "retrying",
-                               reason=f"died in {fresh.turn_elapsed():.0f}s with no output")
-                # Counted on the NODE, not on the Run: _launch replaces the Run,
-                # so a flag kept there resets on every retry and one free retry
-                # becomes an unbounded loop. Found by running it.
-                self.tree.update(node_id, retries=fresh.retries + 1)
-                # PC-R3: the retry is an admission like any launch. With no
-                # slot on its provider it is queued there, and the node,
-                # whose process has ended, holds none while it waits.
-                if self._pc_retry_admission(run, fresh, session_id) is not None:
-                    return False
-                # Continuity for whoever is waiting on the attempt that
-                # just died: `_launch` starts every relaunch with a fresh
-                # `Run`, but a caller that captured this run (consult(),
-                # or a test driving the agent directly) before the retry
-                # must still be woken when the SECOND attempt finishes,
-                # not left waiting on an event nothing will ever set. Handed
-                # in at construction, not assigned after the fact: `_launch`
-                # publishes the new Run to `self.runs[node_id]` before it
-                # returns, and a post-hoc `retried.done = run.done` would
-                # leave a window where a concurrent reader gets a Run whose
-                # `done` nobody but this line will ever fix up.
-                try:
-                    # CW-R2: a retry is not a new admission; past the safe
-                    # point it waits, and a server that exits meanwhile
-                    # leaves the node to the next one's adoption.
-                    with await self.gate.enter_when_open():
-                        retried = await self._launch(
-                            node_id=node_id, spec=run.spec, provider=run.provider,
-                            prompt=self._retry_prompt(node_id, run.prompt_file),
-                            workdir=Path(fresh.worktree), branch=fresh.branch,
-                            parent=fresh.parent, depth=fresh.depth,
-                            session_id=session_id or None,
-                            done=run.done,
-                        )
-                except Exception as exc:
-                    # A retry that cannot even start must not propagate out of
-                    # `_finalize` — `_consume` would read that as the
-                    # post-mortem itself crashing — but neither may it be
-                    # silent: the `retrying` event above already promised a
-                    # relaunch, and a swallowed failure here used to leave the
-                    # node ending with the FIRST death's reason (`exited 1`)
-                    # as if no retry had ever been attempted. Recorded like a
-                    # failed launch anywhere else: `failed`, with the cause.
-                    detail = f"{type(exc).__name__}: {exc}"[:300]
-                    self.tree.emit(node_id, "retry_failed", detail=detail)
-                    self._mark_launch_failed(
-                        node_id, f"retry launch failed: {detail}")
-                    return False
-                retried.startup_progress = retried.startup_progress or run.startup_progress
-                self.tree.set_status(node_id, "running", "retried once after "
-                                     "an unexplained early exit")
-                return True
+                transport_error = self._transport_refusal(run.provider)
+                if transport_error:
+                    retry_error = f"free retry refused: {transport_error}"
+                    self.tree.emit(node_id, "retry_failed", detail=transport_error)
+                else:
+                    self.tree.emit(node_id, "retrying",
+                                   reason=f"died in {fresh.turn_elapsed():.0f}s with no output")
+                    # Counted on the NODE, not on the Run: _launch replaces the Run,
+                    # so a flag kept there resets on every retry and one free retry
+                    # becomes an unbounded loop. Found by running it.
+                    self.tree.update(node_id, retries=fresh.retries + 1)
+                    # PC-R3: the retry is an admission like any launch. With no
+                    # slot on its provider it is queued there, and the node,
+                    # whose process has ended, holds none while it waits.
+                    # Continuity for whoever is waiting on the attempt that
+                    # just died: `_launch` starts every relaunch with a fresh
+                    # `Run`, but a caller that captured this run (consult(),
+                    # or a test driving the agent directly) before the retry
+                    # must still be woken when the SECOND attempt finishes,
+                    # not left waiting on an event nothing will ever set. Handed
+                    # in at construction, not assigned after the fact: `_launch`
+                    # publishes the new Run to `self.runs[node_id]` before it
+                    # returns, and a post-hoc `retried.done = run.done` would
+                    # leave a window where a concurrent reader gets a Run whose
+                    # `done` nobody but this line will ever fix up.
+                    try:
+                        admission = self._pc_retry_admission(run, fresh, session_id)
+                        if admission is not None:
+                            if admission.get("refused"):
+                                raise TransportRefused(admission["refused"])
+                            return False
+                        # CW-R2: a retry is not a new admission; past the safe
+                        # point it waits, and a server that exits meanwhile
+                        # leaves the node to the next one's adoption.
+                        with await self.gate.enter_when_open():
+                            retried = await self._launch(
+                                node_id=node_id, spec=run.spec, provider=run.provider,
+                                prompt=self._retry_prompt(node_id, run.prompt_file),
+                                workdir=Path(fresh.worktree), branch=fresh.branch,
+                                parent=fresh.parent, depth=fresh.depth,
+                                session_id=session_id or None,
+                                done=run.done,
+                            )
+                    except Exception as exc:
+                        # A retry that cannot even start must not propagate out of
+                        # `_finalize` — `_consume` would read that as the
+                        # post-mortem itself crashing — but neither may it be
+                        # silent: the `retrying` event above already promised a
+                        # relaunch, and a swallowed failure here used to leave the
+                        # node ending with the FIRST death's reason (`exited 1`)
+                        # as if no retry had ever been attempted. Recorded like a
+                        # failed launch anywhere else: `failed`, with the cause.
+                        detail = (str(exc) if isinstance(exc, TransportRefused)
+                                  else f"{type(exc).__name__}: {exc}"[:300])
+                        self.tree.emit(node_id, "retry_failed", detail=detail)
+                        retry_error = f"retry launch failed: {detail}"
+                    else:
+                        retried.startup_progress = retried.startup_progress or run.startup_progress
+                        self.tree.set_status(node_id, "running", "retried once after "
+                                             "an unexplained early exit")
+                        return True
 
             # Say why, when the provider told us. Three real failures ended with
             # agy emitting {"kind": "result", "status": "ERROR"} — a structured
@@ -5692,7 +5748,11 @@ class Runner:
                 reason = ("process ended without an exit status, before the "
                           "provider reported a result")
             elif status == "failed":
-                if run.final_status and run.final_status.upper() not in {
+                if retry_error:
+                    reason = retry_error
+                elif fix_error:
+                    reason = f"commit-fix resume refused: {fix_error}"
+                elif run.final_status and run.final_status.upper() not in {
                         "SUCCESS", "OK", "COMPLETED"}:
                     reason = f"{run.provider.name} reported {run.final_status}"
                 elif code != 0:
@@ -5706,17 +5766,19 @@ class Runner:
         # it held, rather than re-arming the outage for another cooldown.
         self._startup_finish(run.provider.name, node_id, run.startup_token,
                              failed=status == "failed" and not run.startup_progress
-                             and not run.stop_requested and not timed_out,
-                             resolved=status == "refused",
+                             and not run.stop_requested and not timed_out
+                             and not retry_error,
+                             resolved=status == "refused" or bool(retry_error),
                              error=(stderr or text).splitlines()[0] if (stderr or text) else status)
 
         # Auto-merge this agent's own children upward: their work is still
         # quarantined on this agent's branch, so nothing real has changed yet.
-        if status == "done":
+        if status == "done" or retry_error:
             # Children first: this agent's branch should carry their work when
             # it is itself merged upward, rather than stranding it.
             await self._merge_pending_children(node_id)
-            await self._maybe_merge_into_parent(node_id)
+            if status == "done":
+                await self._maybe_merge_into_parent(node_id)
 
         if (not run.awaiting and not stopped_elsewhere and run.cap_stop is None
                 and not session_lost):
@@ -5748,6 +5810,11 @@ class Runner:
         wall = int(limit_number(limits, "commit_fix_timeout"))
         result, attempt, usage = failed, 0, {}
         while not result.ok and result.hook and attempt < allowed:
+            transport_error = self._transport_refusal(run.provider)
+            if transport_error:
+                self.tree.emit(node_id, "commit_fix_failed", detail=transport_error)
+                return result, attempt, "", usage, {
+                    "status": "failed", "limited": None, "error": transport_error}
             attempt += 1
             output = result.err or result.out
             self.tree.emit(node_id, "commit_fix_attempt", attempt=attempt,
@@ -5771,6 +5838,10 @@ class Runner:
                                detail=f"refused at spawn: {exc}"[:400])
                 return result, attempt, "", usage, {
                     "status": "limited", "limited": exc.refusal, "cap_stop": exc.refusal}
+            except TransportRefused as exc:
+                self.tree.emit(node_id, "commit_fix_failed", detail=str(exc))
+                return result, attempt, "", usage, {
+                    "status": "failed", "limited": None, "error": str(exc)}
             except Exception as exc:
                 self.tree.emit(node_id, "commit_fix_failed",
                                detail=f"could not resume: {type(exc).__name__}: {exc}"[:400])
@@ -7577,6 +7648,10 @@ class Runner:
                 }
             spec, provider = self._spec_of(node)
 
+        transport_error = self._transport_refusal(provider)
+        if transport_error:
+            return {"agent_id": agent_id, "steered": False, "error": transport_error}
+
         fresh_fields = ("timeout", "silence_timeout", "max_steps")
         spec = replace(spec, **{key: getattr(current, key) for key in fresh_fields},
                        set_fields=(frozenset(spec.set_fields or ()) - set(fresh_fields))
@@ -8500,6 +8575,15 @@ class Runner:
         ticket, waiter: str = "", deadline: float | None = None,
     ) -> dict[str, Any]:
         node = self._find_conversation(agent_name)
+        destination = spec.provider
+        if node is not None and node.reason != "session_lost" \
+                and self._conversation_route(spec, node) is not None:
+            run = self.runs.get(node.id)
+            destination = run.provider if run is not None else node.provider
+        transport_error = self._transport_refusal(destination)
+        if transport_error:
+            return self._consult_result(agent_name, node.id if node else None, None,
+                                        error=transport_error)
         turn = 1
         # Base is resolved once per turn and reused by the refresh, the result
         # and the recorded start point alike.
@@ -8887,6 +8971,12 @@ class Runner:
                              f"answered. Discard it and start a fresh agent with the "
                              f"decision included in the task."}
 
+        run = self.runs.get(agent_id)
+        transport_error = self._transport_refusal(run.provider if run else node.provider)
+        if transport_error:
+            return {"question_id": question_id, "agent_id": agent_id,
+                    "resumed": False, "error": transport_error}
+
         claimed = self.tree.answer_question(question_id, answer, answered_by)
         if claimed is None or claimed.get("already_answered"):
             return {"error": f"{question_id} was answered by someone else first"}
@@ -9225,6 +9315,10 @@ class Runner:
         tree-wide limit, there is no retry: the node is marked `failed` with
         that refusal, and a dict saying so is returned."""
         provider = run.provider.name
+        transport_error = self._transport_refusal(run.provider)
+        if transport_error:
+            self.tree.set_status(node.id, "failed", f"free retry refused: {transport_error}")
+            return {"refused": transport_error}
         try:
             self._pc_reserve_resume(run.spec, node, provider, "")
             return None
@@ -9259,6 +9353,9 @@ class Runner:
         if node is None or node.status != "failed" or entry["id"] not in (node.reason or ""):
             return "refused", f"{node_id} is no longer waiting for its retry"
         spec, provider = self._spec_of(node)
+        transport_error = self._transport_refusal(provider)
+        if transport_error:
+            return "refused", transport_error
         if self.gate.closed:
             return "blocked", "the server is stopping for a safe point"
         # Review finding 5: admitted through the gate BEFORE the entry is
@@ -9293,6 +9390,11 @@ class Runner:
                 return "blocked", {"reason": self._with_concurrency(
                     exc.refusal["reason"], [provider.name]),
                     "retry_after": exc.refusal["until"]}
+            except TransportRefused as exc:
+                self._mark_launch_failed(node_id, str(exc))
+                self.tree.restore_deferred(entry)
+                self.tree.exit_deferred(entry["id"], "refused", reason=str(exc))
+                return "refused", str(exc)
             except Exception as exc:
                 self._mark_launch_failed(
                     node_id, f"retry launch failed: {type(exc).__name__}: {exc}")

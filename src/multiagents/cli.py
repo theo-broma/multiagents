@@ -1623,7 +1623,9 @@ def cmd_prompt(args) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     paths = _resolve_if_project(args.path)
     config = load_config(paths)
-    providers = load_providers(config.providers)
+    providers = (load_providers(config.providers, config.provider_sources)
+                 if hasattr(config, "provider_sources")
+                 else load_providers(config.providers))
     if getattr(args, "clear", None):
         return _clear_provider(paths, providers, args.clear,
                                getattr(args, "force", False))
@@ -1641,6 +1643,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print("providers")
     for name, provider in sorted(providers.items()):
+        transport_error = None
+        if name in config.providers:
+            try:
+                transport_error = provider.transport_error()
+            except ValueError as exc:
+                transport_error = str(exc)
+        if transport_error:
+            print(f"  ! {transport_error}")
+            problems += 1
         resolved = provider.resolve_bin()
         path = resolved.path
         state = "" if provider.enabled else "  [disabled in providers.yaml]"

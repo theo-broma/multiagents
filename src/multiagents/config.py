@@ -687,6 +687,9 @@ class Config:
     # than failing the load; dedup, if any, is at display (FO-R3b).
     warnings: list[str] = field(default_factory=list)
 
+    # TG-R1: the layer/file that supplied each provider spawn key.
+    provider_sources: dict[str, dict[str, str]] = field(default_factory=dict)
+
     # --- convenience accessors, all with defaults so a sparse config works ---
 
     @property
@@ -945,6 +948,8 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         layers.append(paths.config)
 
     merged: dict[str, dict] = {name: {} for name in CONFIG_FILES}
+    provider_sources: dict[str, dict[str, str]] = {}
+    from .notices import _node_at
     # BP-R1: through the shared parse cache and, inside a budget read, that
     # read's snapshot — so the read's helpers and this load see one version
     # of each file and parse it once between them (BP review rounds 2, 3).
@@ -953,8 +958,18 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
     with parse_once():
         for layer in layers:
             for name in CONFIG_FILES:
-                merged[name] = deep_merge(merged[name],
-                                          read_yaml_cached(layer / name, strict=True))
+                data = read_yaml_cached(layer / name, strict=True)
+                merged[name] = deep_merge(merged[name], data)
+                if name == "providers.yaml":
+                    scope = ("shipped" if layer == layers[0] else
+                             "global" if layer == layers[1] else "project")
+                    for provider_name, block in (data.get("providers") or {}).items():
+                        for key in ((block or {}).get("spawn") or {}):
+                            location = _node_at(
+                                layer / name, ["providers", provider_name, "spawn", key])
+                            line = f":{location[0]}" if location else ""
+                            provider_sources.setdefault(provider_name, {})[key] = (
+                                f"{scope} layer {layer / name}{line}")
 
     providers_raw = merged["providers.yaml"].get("providers", {}) or {}
     # PS-R1/R5/R6: the providers (and their sharing keys) are built and
@@ -990,6 +1005,7 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         instruction_dirs=[layer / "agents" for layer in reversed(layers)],
         layers=layers,
         warnings=warnings,
+        provider_sources=provider_sources,
     )
 
 
