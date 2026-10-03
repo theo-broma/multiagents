@@ -338,18 +338,19 @@ def _context_reading(run: Runner) -> int | None:
     Only a launched role (depth 0, with a session id) reads anything: a
     subagent's context is not the orchestrator's to sense. The provider is the
     role's roster entry and the directory the project root — not the process
-    cwd, which the agent can change.
+    cwd, which the agent can change. The launched CLI always runs on the host,
+    including when the project's agents run in Docker.
     """
     session = run.session()
     if run.self_depth() != 0 or not session:
         return None
-    from .driver import _launched_spec
+    from .driver import _launched_spec, _own_transcripts
 
     spec = _launched_spec(run.config, os.environ.get("MULTIAGENTS_ROLE") or "orchestrator")
     provider = run.providers.get(spec.provider) if spec is not None else None
     if provider is None:
         return None
-    return session_context(provider, run.paths.root, session, run.executor(spec))
+    return session_context(provider, run.paths.root, session, _own_transcripts())
 
 
 def _limit(run: Runner, key: str) -> int:

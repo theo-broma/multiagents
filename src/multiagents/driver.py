@@ -507,7 +507,7 @@ def _own_transcripts() -> LocalExecutor:
     executor describes its AGENTS, and in a container profile they keep their
     transcripts somewhere else entirely. Reading the orchestrator's session
     through that executor finds a file its CLI never writes (CW-R4 review
-    ag-32e67c), so every lookup of it in the driver goes through this.
+    ag-32e67c), so the driver and MCP server share this for root-session lookups.
     """
     return LocalExecutor()
 
@@ -893,7 +893,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     warned: list = []
 
     def _limit_hit() -> bool:
-        found = watchdog.limit_reached(provider, paths.root)
+        found = watchdog.limit_reached(provider, paths.root, _own_transcripts())
         if found is None:
             warned.clear()
             return False
@@ -1103,7 +1103,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     # A headless turn supplies the user message the TUI waits for you to type.
     # If nobody ever typed one, there is no work to continue and the nudge would
     # have it invent some from BRIEF.md, unsupervised.
-    spoke = watchdog.has_human_turn(provider, paths.root)
+    spoke = watchdog.has_human_turn(provider, paths.root, _own_transcripts())
     if spoke is False:
         print(f"\n{role} ended unexpectedly: {why}. Not continuing: nothing was "
               f"asked of it\nbefore the session ended, so there is no work to "
@@ -1320,7 +1320,7 @@ def _supervise(paths, config, role, spec, provider, executor,
                     code = child.wait(timeout=STALL_POLL_SECONDS)
                     break
                 except subprocess.TimeoutExpired:
-                    if watchdog.limit_reached(provider, paths.root):
+                    if watchdog.limit_reached(provider, paths.root, _own_transcripts()):
                         child.terminate()
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             child.wait(timeout=20)
@@ -1339,7 +1339,7 @@ def _supervise(paths, config, role, spec, provider, executor,
                                code):
             _drop_return_message(paths, role)
 
-        limit = watchdog.limit_reached(provider, paths.root)
+        limit = watchdog.limit_reached(provider, paths.root, _own_transcripts())
         if limit:
             limit_waits += 1
             if limit_waits > int(_limit_number(config, "limit_max_waits", zero_ok=True)):
