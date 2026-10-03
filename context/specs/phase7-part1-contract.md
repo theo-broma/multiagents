@@ -555,3 +555,180 @@ and recorded (no double launch); lock released before confirmed termination;
 window closing mid-loop.
 
 **NC-R48 — no regression (NS-R19).** Gate off: full suite = known reds only.
+
+## Revision after the advisor's check (2026-10-04, ag-aed397 turn 8, before tests)
+
+These override any earlier wording they contradict. The decisions are the
+orchestrator's. Milestone tags added: NC-R11 [M1], R13 [M1 ops of M1; each
+other op in the milestone of its requirement], R23 [M2], R25 [M2], R36/R37
+[M4], R39 [M3], R49 [M4].
+
+**NC-R50 — milestone 1 serves.** M1 ships a minimal scheduler process
+(start, lock, socket, store, RPC, notification log, `scheduler_status`) able to
+serve NC-R4..R15 with no launching. Lifecycle completeness (stop semantics,
+supervision by the driver, reconciliation) is M2. M1 validates session aliases
+against **declared** pins (provider family of the node's `pins.provider`, or of
+the agent's configured provider), not routing.
+
+**NC-R51 — M2 ships minimal `start_agent`.** M2 includes the gate-on
+`start_agent` path of NC-R21 (node + bounded admission + ids), so gate-on
+launches are exercisable; the remaining compatibility (wait on node ids,
+node-id errors in run tools, monitor, doctor) stays M6.
+
+**NC-R52 — the eligibility split, by owner.** `ready` = structural conditions:
+state `open`, dependencies, inputs, ancestors, effective window, not held.
+`eligible` = `ready` and lock, session and admission free. NC-R22's codes are
+tested in the milestone that owns them: `dependency`/`input` M3,
+`ancestor`/composites M4, `window`/`empty_window` M5, `lock`/`session_*`/
+`admission:*`/`held` M2. `get_node` adds `ready`, `ready_since`.
+
+**NC-R53 — starvation measures readiness (replaces NC-R24's second sentence).**
+A node `ready` but not launched for longer than `starvation_after_seconds`
+(waiting on admission, a lock or a session) produces one `starving`
+transition per readiness episode. `ready_since` is persisted; an episode ends
+at launch or when the node stops being ready.
+
+**NC-R54 — gate turned on with existing work (extends NC-R19).** Runs that
+exist when the gate turns on (live, parked, quota-paused, finished but not
+collected or merged) stay **legacy runs**: they are not adopted into nodes,
+keep today's tools and lifecycle, and count against slots. Their resumes
+(steer, question answers, commit-fix resumes) take the scheduler's admission
+(NC-R56). Queue entries migrate per NC-R19, keeping their recorded run parent
+and depth (plan parent root). No run has two lifecycle owners.
+
+**NC-R55 — gate turned off with pending nodes (undo).** If the gate is off and
+the plan store holds non-terminal nodes, the scheduler does not start and
+launches nothing for them; node tools return
+`{"error": "scheduler_disabled", "pending_nodes": n}`; `doctor` reports a
+problem naming them. New `start_agent` calls behave as today. Plans,
+notifications, cursors and bindings are retained and resume when the gate is
+turned back on. Turning the gate off never restores direct launch for a node.
+
+**NC-R56 — every launch or resume takes the scheduler's admission (replaces
+NC-R20's steer exception).** With the gate on: `start_agent`, `consult`,
+`answer_question`, `steer_agent`, commit-fix resumes, deferred restarts, PC
+drains and quota-reset resumes all obtain admission from the scheduler. A
+blocked one returns `{"blocked": [reasons], "retry_after"?}` and writes no
+queue entry. Steering a managed run (one launched for a node) is allowed and
+counts as an activation of the same run (same alias lock); it is refused
+`node_suspended` while the node is suspended.
+- **Verified by (replaces the spy):** saturate admission, submit work through
+  `start_agent`, then call `wait_for_agents`, release slots and reconcile; the
+  scheduler's attempt journal and the tree show exactly one launch per node and
+  `tree.json["deferred"]` stays empty.
+
+**NC-R57 — supervision and scheduler death.** Stopping or killing the
+scheduler changes no run's status and frees no slot or lock; runs stay
+supervised by today's run supervision. At start the scheduler reconciles every
+attempt and every live run before admitting anything.
+
+**NC-R58 — capabilities for every node run (amends NC-R9/R10).** Every run the
+scheduler launches gets a run capability with permissions from its role:
+`read` (own subtree, always), `delegate` (agent may spawn), `verdict` (the run
+is the current activation of a loop's verdict child). Such a run gets an MCP
+server exposing only the tools of its permissions, even if it may not spawn.
+
+**NC-R59 — editable fields (amends NC-R13).** `update_node` may change, for
+root: `task`, `pins`, `depends_on`, `inputs`, `urgent`, `locks`, `window`,
+`children` (only on a composite with no launched child among those changed),
+`loop.max_rounds` (greater than the counter), `session` (before the alias's
+first launch). A run may change the same fields only on nodes it created that
+are `open` and never launched; it may cancel nodes it created; it may never
+edit or cancel its own node. `state`, `hold`, `outcome`, `revision`,
+`generations`, `runs`, bindings, `created_*`, attempts and `template` are
+never client-writable; only scheduler transitions write them. A `done` node is
+reopened only through `relaunch_node` (resolves the NC-R6/NC-R33 conflict).
+
+**NC-R60 — idempotency for every mutating op (amends NC-R8).** Every mutating
+op (create, update, cancel, instantiate, register, verdict, relaunch, close,
+merge, ack) is deduplicated by `(subject, request_id)` atomically with its
+effect. An identical retry returns the original reply; the same id with a
+different payload is refused `request_id_reused`. Deduplication survives
+scheduler restart and capability renewal for the same subject (`root`, or the
+run id).
+
+**NC-R61 — attempts and retries (amends NC-R17).** Each readiness-to-launch
+transition has a durable `activation_id`; each launch try under it a distinct
+`attempt_id`; the retry count persists across restarts. Before abandoning a
+`claimed` attempt, reconciliation checks Runner's launch evidence (recorded
+pid/start identity, session id, run dir), not only tree presence. A run's
+result is captured (NC-R33) before its activation is released for a retry.
+Crash points tested: after claim, after tree write, after process start,
+after run end before result capture, after capture before integration.
+
+**NC-R62 — alias worktree ownership (amends NC-R31).** The alias owns the
+stable checkout; each run owns only its immutable result record (commit,
+transcript, run dir). Before re-seating: if the checkout has uncommitted
+tracked or untracked changes left by the previous activation, the activation
+is held (`dirty_worktree`) with the diff path retained, and nothing is
+deleted; a failed capture or re-seat holds likewise. A **window resumption**
+never re-seats or cleans: it resumes the interrupted work in place.
+
+**NC-R63 — legacy tools on managed runs.** `merge_agent` and `discard_agent`
+on a managed run return `{"error": "managed_run", "hint": "use node ops"}`.
+Runner's automatic cleanup never removes an alias checkout, a `nodes/*`
+branch, or a commit referenced by a generation. Generation commits stay
+reachable (host-written refs) until their node is disposed.
+
+**NC-R64 — retention, publication, disposal (amends NC-R39).** `merge_node`
+marks the top-level node `published: <merge commit>` and keeps its branch,
+worktrees and sessions. `relaunch_node` on a published node is refused
+`published` (deposit a new node). `cancel_node` keeps results. Destruction is a
+separate root op `dispose_node {id, revision}`: refused while any descendant
+is active, any other node's input or alias refers to it; it removes the
+branch, alias checkouts and generation refs, and records `disposed`.
+
+**NC-R65 — inputs and write restrictions (amends NC-R33).** `nodes/*` refs
+are host-writable only. Several inputs are combined by host git, in listed
+order, into one recorded input commit before launch; a conflict holds the node
+(`input_conflict`) and launches nothing. The run's `readonly_paths` are
+restored from its input commit in the result before integration; the reverted
+paths are recorded on the generation.
+
+**NC-R66 — what a verdict reviews (amends NC-R34/R35).** The verdict child of
+a loop must be its **last** child (validated, NC-R6). The generation under
+review is the loop branch tip after the round's other children were
+integrated; it is recorded in the reviewer's activation as `(node_id,
+generation_seq, commit)`, and `give_verdict` must name all three. Commits made
+by a verdict child are not integrated (`reviewer_commits_ignored`
+transition). The loop's approved output is the reviewed generation.
+
+**NC-R67 — rounds and relaunch (amends NC-R35/R36).** A rejected round resets
+every child's per-round state, keeps prior generations and aliases, and
+delivers the findings once, to the first child's next activation.
+`relaunch_node` on `unresolved_round` takes `retry: verdict_child` (default:
+re-activate the verdict child on the same generation) or `retry: round`.
+`max_rounds` applies to loops only; relaunching a simple node needs none.
+
+**NC-R68 — composite locks (amends NC-R26).** A lock on a composite is held
+from its first descendant launch until the composite is `done` or
+`cancelled`; it excludes nodes outside the composite and never blocks its own
+descendants. A node's whole lock set (own and inherited) is acquired
+atomically or not at all.
+
+**NC-R69 — window races (amends NC-R40).** A verdict given before the
+reviewer's termination is confirmed is recorded, but the loop does not advance
+until the activation settles. An unconfirmed termination holds the node
+(`termination_unconfirmed`) instead of marking it suspended. The tolerance
+bounds when stopping **starts**, not termination or re-admission. At scheduler
+start, windows are evaluated first: active runs outside their window are
+suspended, suspended nodes inside an open window are resumed.
+
+**NC-R70 — the fixture agent (test infrastructure, all milestones).** The
+tester provides a deterministic fixture provider under `tests/` (never
+shipped) whose behaviour is scripted by its task: emit a session id, commit
+given files and exit `done`, give a verdict through the RPC, crash, hang until
+signalled, ignore SIGTERM (unconfirmed termination), resume a session. Crash
+and window tests use it with an injectable clock; no test sleeps on wall time
+for windows.
+
+**On NC-R11.** The advisor's point stands: the residual must be accepted
+explicitly, not inferred from H1. The orchestrator accepts it for part 1 and
+has put it to the user for confirmation; if the user refuses, M1 is unchanged
+(scope against forgery is still required) and part 1 gains a mitigation item
+before it is called done.
+
+**On NC-R32.** Codex `session_model_change: true` is provisional: the adapter
+passes `--model` on resume, but session preservation across a model change is
+unverified. M4's tester verifies it against the real CLI once, or the default
+becomes false.
