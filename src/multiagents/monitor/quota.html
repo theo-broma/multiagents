@@ -6,19 +6,23 @@
 <title>Quota details — multiagents</title>
 <style>
   :root { color-scheme: dark; font: 14px system-ui, sans-serif; background: #15191f; color: #e3e8ef; }
-  body { max-width: 1000px; margin: 28px auto; padding: 0 20px; }
+  body { max-width: 1600px; margin: 28px auto; padding: 0 20px; }
   header, .identity { display: flex; align-items: center; gap: 12px; }
   header button { margin-left: auto; }
-  section { padding: 18px; margin: 16px 0; border: 1px solid #394351; border-radius: 8px; }
+  #providers { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 16px; }
+  section { min-width: 0; padding: 18px; border: 1px solid #394351; border-radius: 8px; }
   h2 { margin: 0 0 10px; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   button { background: #263241; border: 1px solid #56657a; color: inherit; padding: 5px 10px; border-radius: 5px; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
   .muted { color: #aab6c5; }
   .identity { margin: 8px 0; overflow-wrap: anywhere; }
+  .identity > span:first-child { flex: 0 0 auto; }
+  .identity button { width: 36px; flex: 0 0 36px; padding: 5px 0; }
+  .identity-value { min-width: 0; flex: 1; }
 </style>
 <header><h1>Quota details</h1><button id="refresh">Refresh</button></header>
-<p class="muted">Identities are masked again on every refresh.</p>
+<p class="muted">Click an eye to reveal an identity, and click again to mask it.</p>
 <p id="status" role="status">Loading…</p>
 <main id="providers"></main>
 <script>
@@ -27,6 +31,7 @@ const MASK = "*****";
 let generation = 0;
 let polling = false;
 const controls = new Set();
+const revealed = new Map();
 function node(tag, text, className) {
   const element = document.createElement(tag);
   if (text !== undefined) element.textContent = text;
@@ -45,42 +50,65 @@ async function api(path, options = {}) {
 function identityControl(provider, entry, current) {
   const row = node("div", undefined, "identity");
   const label = node("span", entry.account === null ? "Account" : `Account ${entry.account}`);
-  const value = node("span", entry.identity_available ? MASK : "unknown");
+  const key = JSON.stringify([provider, entry.account]);
+  const value = node("span", revealed.has(key) ? revealed.get(key) : (entry.identity_available ? MASK : "unknown"), "identity-value");
   const eye = node("button", "👁");
   eye.type = "button";
-  eye.disabled = !entry.identity_available;
-  eye.setAttribute("aria-label", "Show account identity");
-  eye.setAttribute("aria-pressed", "false");
-  let requested = false;
+  eye.disabled = !entry.identity_available && !revealed.has(key);
+  let pending = false;
   let sequence = 0;
-  function mask() {
-    requested = false;
-    sequence++;
-    value.textContent = entry.identity_available ? MASK : "unknown";
-    eye.setAttribute("aria-label", "Show account identity");
-    eye.setAttribute("aria-pressed", "false");
+  function sync(fallback = entry.identity_available ? MASK : "unknown") {
+    const shown = revealed.has(key);
+    value.textContent = shown ? revealed.get(key) : fallback;
+    eye.setAttribute("aria-label", shown ? "Mask account identity" : "Show account identity");
+    eye.setAttribute("aria-pressed", String(shown));
   }
-  controls.add(mask);
+  sync();
+  function mask() {
+    pending = false;
+    sequence++;
+    revealed.delete(key);
+    sync();
+  }
+  controls.add(() => {
+    sequence++;
+    pending = false;
+    current = generation;
+    sync();
+  });
   eye.addEventListener("click", async () => {
-    if (requested) { mask(); return; }
-    requested = true;
+    if (revealed.has(key) || pending) { mask(); return; }
+    pending = true;
     const request = ++sequence;
-    eye.setAttribute("aria-label", "Mask account identity");
-    eye.setAttribute("aria-pressed", "true");
+    const started = generation;
     try {
       const result = await api("/api/quota/identity", {
         method: "POST", body: JSON.stringify({provider, account: entry.account})
       });
-      if (requested && sequence === request && generation === current && row.isConnected) {
-        value.textContent = result.status === "busy" ? "busy — try again" : (result.identity || "unknown");
+      if (sequence !== request || generation !== started || current !== started || !row.isConnected) {
+        sync();
+        return;
+      }
+      pending = false;
+      if (result.status === "busy") {
+        sync("busy — try again");
+      } else if (result.identity) {
+        value.textContent = result.identity;
+        revealed.set(key, value.textContent);
+        sync();
+      } else {
+        sync("unknown");
       }
     } catch (_) {
-      if (requested && sequence === request && generation === current && row.isConnected) {
-        value.textContent = "unknown";
+      if (sequence === request && generation === started && row.isConnected) {
+        pending = false;
+        sync("unknown");
+      } else {
+        sync();
       }
     }
   });
-  row.append(label, value, eye);
+  row.append(label, eye, value);
   return row;
 }
 function render(rows, current) {
@@ -120,7 +148,7 @@ async function refresh() {
   polling = true;
   const current = ++generation;
   // Invalidate pending reveals immediately, even if the new poll fails.
-  for (const mask of controls) mask();
+  for (const invalidate of controls) invalidate();
   try {
     const data = await api("/api/quota");
     if (generation === current) render(data.providers || [], current);
