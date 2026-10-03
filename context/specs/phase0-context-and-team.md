@@ -748,6 +748,17 @@ recorded in BRIEF under "Awaiting the user".
   reading in its `context` block. The notice goes on the next *other* tool
   response.
 
+### P0-R8 live check (C1, 2026-10-03)
+
+The user ran an interactive `/compact` of the root orchestrator (claude, host) at a closed boundary: nothing running, C16 paused on the codex quota. The check covered the user-initiated path, not the driver's unattended P0-R8c compaction.
+
+- **Task remembered:** yes. The orchestrator resumed with the pending work intact: resume C16 ag-77e8fe after the codex reset at 15:04Z, then its reviewer, the C10 full suite, and the user actions owed.
+- **Session identity kept:** yes. Same transcript (`2d371941-…jsonl`), and the tree still shows the same orchestrator session node (`03 Oct 10:30 · running`).
+- **MCP works:** yes. `budget_status`, `agent_tree`, `list_questions`, `list_plans` and `list_tickets` all answered, and their state matched the pre-compaction record.
+- **Observation, not a failure:** `budget_status.context` reported `known: false` after the compaction, so the wind-down reading (P0-R8a) gave no figure at that moment.
+
+Verdict: passed.
+
 ## Silences, answered
 
 - **Existing data.** A project.yaml without a `team:` line is R7.7; a project

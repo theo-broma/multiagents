@@ -196,3 +196,4 @@ never submitted.
   - **Hotfix.** The project `providers.yaml` restores the shipped args for all four, with a comment. The user should drop the `args` keys from the global file.
   - **Product fix.** Config load, or launch admission, must refuse a provider whose prompt transport is `stdin`/`file` while its resolved args still contain `{prompt}`, or whose `file` transport has no `{prompt_file}`. The error names the layer (file:line) that set the args. `doctor` reports it as a problem.
   - **Pipeline:** contract, tester, implementer, reviewer.
+- **C1 — done 2026-10-03.** An interactive `/compact` of the root orchestrator passed all three checks: the task was remembered, the session identity was kept, and MCP still worked. Recorded in `phase0-context-and-team.md` § "P0-R8 live check". The driver's unattended path was not exercised.
