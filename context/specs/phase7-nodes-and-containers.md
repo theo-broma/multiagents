@@ -71,8 +71,19 @@ one execution of it. Today's tree "nodes" are runs.
     `readonly` a real boundary for the first time.
 - **PAC-R3 — Git without shared write access.** Mounting the shared `.git`
   into every container would recreate today's sharing.
-  - Evaluate a per-run clone or worktree that reads the base objects through
-    a read-only alternate, and whose result the **host** fetches.
+  - **First candidate (advisor, 2026-10-03):** an independent repository for
+    each run.
+    - It is seeded from a **bundle that the host produces**, holding the
+      approved base and dependency commits only.
+    - The host imports the run's designated result into a staging ref,
+      under H3's protections.
+  - **Rejected as the first design:** read-only alternates into today's
+    shared object store. They prevent writes, but they expose every other
+    run's committed content, and they depend on how the host prunes.
+    Alternates may come later, as an optimisation against an immutable,
+    authorised snapshot.
+  - A plain linked worktree keeps Git's administration shared, so it is not
+    an option either.
   - The design must keep the H1 invariant: container-written state never
     authorises a host mutation outside its domain. The domain is now the
     run, not the project container.
@@ -99,6 +110,43 @@ one execution of it. Today's tree "nodes" are runs.
 
   Config changes then apply to the next run, and **no longer require
   killing every run**.
+- **PAC-R9 — MCP authority goes through the host** (advisor).
+  - Today a run that may spawn starts an MCP server inside the container,
+    with access to the shared state (`executor/docker.py` ~906,
+    `runner.py` ~3840).
+  - Replace that with a scoped RPC endpoint on the host, optionally behind
+    a stdio shim inside the container.
+  - Bind the caller's identity and its permitted operations to
+    capabilities the host issues. **Never trust a parent or run id that
+    the run supplies.**
+- **PAC-R10 — network isolation between runs** (advisor).
+  - A run must not reach a sibling's MCP endpoint, its services or its
+    credentials. Membership of the same internal network does not by itself
+    isolate peers.
+  - Shared auth and egress proxies are acceptable, with scoped
+    authentication and routing. One proxy per run is optional.
+- **PAC-R11 — the host owns credential refresh** (advisor).
+  - Beyond PAC-R5's choice between copies and a shared mount, consider a
+    host-side refresh broker that distributes access credentials into each
+    run's private HOME. agy's renewal is already centralised
+    (`executor/docker.py` ~1358).
+  - Specify ongoing renewal and revocation.
+- **PAC-R12 — durable identity for each run** (advisor).
+  - Before launch, record the node, the execution attempt, the container
+    id, the repository, the session and the capabilities.
+  - Crash recovery and launch retries must be idempotent.
+  - Retention after success is defined separately from discard, so that a
+    reopened node can resume.
+- **PAC-R13 — the acceptance tests go beyond PAC-R2** (advisor). Also test:
+  - siblings' committed blobs are not readable;
+  - a shared cache cannot be poisoned;
+  - a `readonly` run cannot touch Git metadata;
+  - an RPC identity cannot be forged;
+  - a dependency's work is handed over when approved.
+
+  Isolation must still allow a **deliberate** handover of work, without
+  exposing work that is unrelated.
+
 - **PAC-R8 — cleanup.** Discard removes the container and the worktree. An
   orphaned container from a crashed host is found and reported. It is never
   deleted blindly.
