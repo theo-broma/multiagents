@@ -1863,8 +1863,17 @@ def choose_provider(
         if chosen == preferred:
             return preferred, "preferred provider has headroom"
         if chosen:
-            spare = "held for the orchestrator" if preferred in reserved else "constrained"
-            return chosen, f"{preferred} is {spare}; using {chosen}"
+            if not _has_room(budgets.get(preferred), reserve, preferred in reserved):
+                return chosen, f"{preferred} is constrained; using {chosen}"
+            if preferred in reserved and chosen not in reserved:
+                return chosen, f"{preferred} is held for the orchestrator; using {chosen}"
+            if not _known_reading(budgets.get(preferred)) and _known_reading(budgets.get(chosen)):
+                return chosen, f"{preferred} has no quota reading; using {chosen}"
+            if (load or {}).get(chosen, 0) < (load or {}).get(preferred, 0):
+                return chosen, f"sharing accounts: {chosen} has fewer running agents"
+            if (last_used or {}).get(chosen, 0.0) < (last_used or {}).get(preferred, 0.0):
+                return chosen, f"sharing accounts: {chosen} was used less recently"
+            return chosen, f"sharing accounts: {chosen} wins the account name tie-break"
         # Nothing in the family can take it. If one of them is merely waiting
         # out a short window, waiting is cheaper than moving the work to
         # another vendor's model — and far cheaper than spending the
