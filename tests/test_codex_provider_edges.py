@@ -167,7 +167,10 @@ def assert_whitelisted(data):
         h.parse_instant(data["resets_at"])
         for name, win in data["windows"].items():
             assert WINDOW_NAME.match(name), f"window name {name!r}"
-            assert set(win) <= {"percent", "resets_at"}, win
+            assert set(win) <= {"percent", "resets_at", "span_minutes"}, win
+            if "span_minutes" in win:  # C22 IS-R1c
+                span = win["span_minutes"]
+                assert isinstance(span, int) and not isinstance(span, bool) and span > 0, (name, win)
             assert 0.0 <= win["percent"] <= 100.0, (name, win)
             if "resets_at" in win:
                 h.parse_instant(win["resets_at"])
