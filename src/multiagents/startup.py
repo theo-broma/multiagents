@@ -218,6 +218,30 @@ class StartupHealth:
         except (OSError, ValueError, KeyError, TypeError):
             return False
 
+    def release(self, provider: str, run_id: str, token: str) -> bool:
+        """SF-R3a: give back a claim taken for a launch that never happened.
+
+        Neutral: the run record goes and a probe this token holds is freed,
+        but `down`, `until` and `count` are left exactly as they were —
+        nothing was launched and nothing was learnt about the provider, so a
+        half-open provider goes back to half-open with its probe free and no
+        cooldown re-armed. True when the claim is gone (or was already no
+        longer current); False when the state could not be written, leaving
+        the claim for whoever reads it next."""
+        try:
+            with self._lock():
+                records = self._read()
+                record = records.get(provider)
+                if not record or not self._current(record, run_id, token):
+                    return True
+                del record["runs"][run_id]
+                if record["probe"] == token:
+                    record["probe"] = None
+                self._write(records)
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
     def finish(self, provider: str, run_id: str, token: str, failed: bool,
                error: str, threshold: int, cooldown: float,
                resolved: bool = False) -> dict | None:

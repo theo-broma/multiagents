@@ -367,6 +367,32 @@ def _recorded_wrapper(run_dir: Path) -> int | None:
 
 
 @dataclass
+class _Predecessor:
+    """SF-R3 (review r2): the identity of the run a steer is about to stop,
+    captured BEFORE the stop so its death can be confirmed after it. The
+    in-process Run first — the only predecessor whose supervision lock this
+    Runner holds — then the node's recorded pid, for a run this process
+    never launched. An absent one (no pid, no probe) is nothing to keep a
+    lock for."""
+    # False until `_steer_predecessor` has looked: the default a caller holds
+    # when the capture itself failed is NOT "there was no predecessor"
+    # (review r5 finding 1) — that is unknown, never death.
+    captured: bool = False
+    pid: int | None = None
+    pid_start: str = ""
+    probe_raw: Any = None
+    provider: str = ""
+    token: str = ""
+    executor: Any = None
+    handle: Any = None
+    run: Any = None
+
+    @property
+    def absent(self) -> bool:
+        return self.pid is None and self.probe_raw is None
+
+
+@dataclass
 class _Hold:
     """RM-R1c/R1d: the owning Runner's side of one launch hold.
 
@@ -408,6 +434,8 @@ class _Hold:
     # reservation should a later hold write not reach the tree.
     then: tuple[str, str] | None = None
     task: Any = None
+    # SF-R3: the steps a refused steer still owes, mirrored in record.
+    steer: dict | None = None
 
 
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
@@ -1794,6 +1822,7 @@ class Runner:
         its event is announced by the first process to see it, once its
         claimer has had ANNOUNCE_GRACE_SECONDS to do it itself."""
         self._record_stops()
+        self._retry_startup_releases()
         try:
             self.ledger.poll()
             pending = self.ledger.unannounced(now() - self.ANNOUNCE_GRACE_SECONDS)
@@ -1802,12 +1831,15 @@ class Runner:
             return
         for crossing in pending:
             # SC-R4c: the recovered event names the runs recorded as stopped
-            # by this crossing — in the ledger, or durably `limited` by it on
-            # their node (a stop whose ledger record never landed, r4 #2) —
-            # never whoever happens to be active now.
+            # by this crossing — in the ledger, or durably on their node (a
+            # stop whose ledger record never landed, r4 #2) — never whoever
+            # happens to be active now. SF-R2: that evidence is historical:
+            # a node the crossing stopped is named whatever its status now,
+            # since it may have been cancelled, steered, resumed or finished
+            # in between.
             agents = sorted(set(self.ledger.stops.get(crossing["id"], [])) | {
                 node_id for node_id, raw in self.tree.read()["nodes"].items()
-                if isinstance(raw, dict) and raw.get("status") == "limited"
+                if isinstance(raw, dict)
                 and crossing["id"] in (raw.get("spend_cap_crossings") or [])})
             self._announce(crossing, agents, recovering=True)
 
@@ -1849,6 +1881,11 @@ class Runner:
         run.cap_stop = self._cap_verdict(binding)
         ident = crossing.get("id") or spendcap.crossing_id(
             crossing["scope"], crossing["period_start"], crossing["cap"])
+        # SF-R1: the crossing that actually stopped the run is evidence even
+        # when the caps configured now (`binding`) name a different crossing,
+        # e.g. crossed at $1 and lowered to $0.50 before this poll.
+        if ident not in run.cap_stop["crossing_ids"]:
+            run.cap_stop["crossing_ids"].append(ident)
         # SC-R4c: the stop is recorded against the crossing that caused it —
         # retried until it lands (r3 #5).
         self._unrecorded_stops.add((ident, run.node_id))
@@ -1859,14 +1896,38 @@ class Runner:
 
     def _record_stops(self) -> None:
         """r3 #5: write the stop records not yet in the ledger. Retried at
-        every watcher poll, at every finalization and before a recovery."""
+        every watcher poll, at every finalization and before a recovery.
+        SF-R1/R2 (revision): the node's cumulative crossing evidence is
+        written under the same retry — so a stop whose ledger record never
+        landed still recovers from the tree. Review r1 finding 5: the pair is
+        kept until BOTH writes have succeeded, so a failed evidence write is
+        not discarded by a ledger write that landed."""
         for ident, node_id in sorted(self._unrecorded_stops):
+            remembered = self._remember_stop(node_id, ident)
             try:
                 self.ledger.record_stop(ident, node_id)
             except OSError as exc:
                 self._ledger_failed(exc)
                 return
-            self._unrecorded_stops.discard((ident, node_id))
+            if remembered:
+                self._unrecorded_stops.discard((ident, node_id))
+
+    def _remember_stop(self, node_id: str, ident: str) -> bool:
+        """SF-R1/R2: add `ident` to the node's crossing evidence, never
+        replacing what is there — the union survives later stops, steers and
+        resumes. True when the node holds it (or no longer exists); False
+        when the write failed, reported like a failed ledger write so the
+        pair is retried rather than silently dropped (review r1 finding 5)."""
+        try:
+            node = self.tree.get(node_id)
+            if node is None or ident in node.spend_cap_crossings:
+                return True
+            self.tree.update(node_id,
+                             spend_cap_crossings=[*node.spend_cap_crossings, ident])
+            return True
+        except Exception as exc:                            # noqa: BLE001
+            self._ledger_failed(exc)
+            return False
 
     async def _watch_spend_caps(self, run: Run) -> None:
         """SC-R4a: the stop requests other processes' crossings wrote. Every
@@ -2742,6 +2803,22 @@ class Runner:
         return {"owner_pid": owner, "owner_start": procs.start_time(owner) or "",
                 "owner": self._hold_owner}
 
+    def _new_hold(self, node_id: str, provider_name: str,
+                  startup_token: str, executor: Any) -> _Hold:
+        """The in-memory half of a launch hold, before anything is written.
+        `_reserve_launch` requires the durable write before spawning."""
+        kind = str(getattr(executor, "kind", "local") or "local")
+        identity = {"kind": kind,
+                    "container": str(getattr(executor, "container", "") or "")
+                    if kind == "docker" else ""}
+        return _Hold(
+            record={"since": now(), **self._owner_fields(),
+                    "pid": None, "pid_start": "", "executor": identity,
+                    "occupancy": "", "then": None},
+            pid=None, pid_start="",
+            probe_raw=self._raw_alive_probe(executor, node_id),
+            provider=provider_name, token=startup_token)
+
     def _reserve_launch(self, node_id: str, provider_name: str,
                         startup_token: str, executor: Any) -> _Hold:
         """RM-R1d: the durable reservation, taken BEFORE the process starts.
@@ -2754,17 +2831,7 @@ class Runner:
         happen (review ag-43f57f). It records the execution identity, which
         recovery uses instead of whatever the config says later.
         """
-        kind = str(getattr(executor, "kind", "local") or "local")
-        identity = {"kind": kind,
-                    "container": str(getattr(executor, "container", "") or "")
-                    if kind == "docker" else ""}
-        hold = _Hold(
-            record={"since": now(), **self._owner_fields(),
-                    "pid": None, "pid_start": "", "executor": identity,
-                    "occupancy": "", "then": None},
-            pid=None, pid_start="",
-            probe_raw=self._raw_alive_probe(executor, node_id),
-            provider=provider_name, token=startup_token)
+        hold = self._new_hold(node_id, provider_name, startup_token, executor)
         self.tree.update(node_id, cleanup_hold=dict(hold.record))
         hold.durable = True
         self._holds[node_id] = hold
@@ -2863,8 +2930,27 @@ class Runner:
         its occupancy), best effort — retried by `_settle_holds`. The hold
         itself is durable already: this only keeps it current."""
         try:
-            self.tree.update(node_id, cleanup_hold=dict(
-                hold.record, then=list(hold.then) if hold.then else None))
+            if hold.steer is not None and "inspect" in hold.steer["steps"]:
+                # A failed get must not overwrite an unreadable predecessor
+                # hold. If transactional storage still works, mirror our
+                # obligations alongside that hold without deciding liveness.
+                with self.tree.transaction() as data:
+                    raw = data["nodes"].get(node_id)
+                    if raw is None:
+                        return
+                    current = raw.get("cleanup_hold")
+                    if current and not _same_hold(current, hold.record):
+                        hold.record = dict(current)
+                        hold.steer["foreign"] = True
+                        hold.steer["steps"] = [s for s in hold.steer["steps"]
+                                               if s != "confirm"]
+                    hold.record = dict(hold.record, steer_cleanup=dict(hold.steer))
+                    raw["cleanup_hold"] = dict(hold.record)
+            else:
+                hold.record = dict(
+                    hold.record, then=list(hold.then) if hold.then else None,
+                    **({"steer_cleanup": dict(hold.steer)} if hold.steer else {}))
+                self.tree.update(node_id, cleanup_hold=dict(hold.record))
             hold.durable = True
         except Exception:
             hold.durable = False
@@ -2889,6 +2975,10 @@ class Runner:
         if hold is None:
             return
         hold.confirmed = True
+        if hold.steer is not None:
+            self._settle_steer_cleanup(node_id, hold)
+            if hold.steer is not None or self._holds.get(node_id) is not hold:
+                return
         if "lock" not in hold.done_releases:
             self._release(node_id)
             hold.done_releases.add("lock")
@@ -2937,6 +3027,19 @@ class Runner:
                 return
             if record is not None and not _same_hold(entry["cleanup_hold"], record):
                 return
+            held = entry["cleanup_hold"]
+            cleanup = held.get("steer_cleanup")
+            if (isinstance(cleanup, dict) and cleanup.get("steps")
+                    and cleanup.get("owner") != held.get("owner")):
+                # A different steer still owes releases. The predecessor
+                # owner is finished; transfer the mirror instead of erasing
+                # that steer's only durable retry owner.
+                cleanup = dict(cleanup, foreign=False, launch_owned=False)
+                entry["cleanup_hold"] = dict(
+                    held, **{k: cleanup[k] for k in
+                             ("owner", "owner_pid", "owner_start")},
+                    occupancy="", then=None, steer_cleanup=cleanup)
+                return
             entry["cleanup_hold"] = None
 
     def _defer_while_held(self, node_id: str, status: str, reason: str) -> bool:
@@ -2975,6 +3078,7 @@ class Runner:
 
         A live owner's hold is that owner's to end.
         """
+        self._retry_startup_releases()
         try:
             nodes = self.tree.read()["nodes"]
         except Exception:
@@ -2985,10 +3089,22 @@ class Runner:
                 continue
             if held.get("owner") != self._hold_owner and procs.alive(
                     held.get("owner_pid"), held.get("owner_start") or ""):
+                cleanup = held.get("steer_cleanup")
+                if (isinstance(cleanup, dict) and cleanup.get("foreign")
+                        and not procs.alive(cleanup.get("owner_pid"),
+                                            cleanup.get("owner_start") or "")):
+                    # The predecessor's owner still lives, but the refused
+                    # steer's owner died. Recover its independent releases
+                    # without taking the predecessor's supervision lock.
+                    with contextlib.suppress(Exception):
+                        self._take_over_steer_cleanup(node_id, held, cleanup)
                 continue                  # a live owner ends its own
             with contextlib.suppress(Exception):
                 self._take_over_hold(node_id, raw, held)
         for node_id, hold in list(self._holds.items()):
+            if hold.steer is not None:
+                self._settle_steer_cleanup(node_id, hold)
+                continue
             if hold.phase == "launching":
                 continue                  # its launch is still deciding
             if hold.phase == "lifting":
@@ -3001,6 +3117,74 @@ class Runner:
             if hold.confirmed or _positively_ended(hold.pid, hold.pid_start,
                                                   hold.probe_raw):
                 self._end_hold(node_id)
+
+    def _take_over_steer_cleanup(self, node_id: str, held: dict,
+                                 cleanup: dict) -> None:
+        taken = dict(cleanup, **self._owner_fields(), launch_owned=False)
+        with self.tree.transaction() as data:
+            raw = data["nodes"].get(node_id) or {}
+            current = raw.get("cleanup_hold")
+            if (not _same_hold(current, held)
+                    or current.get("steer_cleanup") != cleanup):
+                return
+            current["steer_cleanup"] = taken
+        self._holds[node_id] = _Hold(
+            record=dict(held, steer_cleanup=taken), pid=None, pid_start="",
+            probe_raw=None, provider=taken["provider"], token="",
+            phase="cleanup", durable=True, steer=taken)
+        self._recover_steer_predecessor(node_id, self._holds[node_id])
+
+    def _recover_steer_predecessor(self, node_id: str, hold: _Hold) -> None:
+        """SF-R3: recover what an adopted confirm step needs, once. When no
+        process or probe identity can be recovered, record a terminal held
+        decision; absence of identity is never evidence of death."""
+        cleanup = hold.steer
+        if cleanup.get("blocked_reason"):
+            instruction = f"run stop_agent {node_id} to release this hold"
+            if instruction not in cleanup["blocked_reason"]:
+                cleanup["blocked_reason"] += f"; {instruction}"
+                hold.durable = False
+            return
+        if "confirm" not in cleanup["steps"] or cleanup.get("absent"):
+            return
+        saved = cleanup.get("predecessor") or hold.record
+        pid, start = saved.get("pid"), saved.get("pid_start") or ""
+        identity = saved.get("executor")
+        try:
+            probe = self._identity_probe(identity, node_id)
+            if not pid and isinstance(identity, dict) and identity.get("kind") == "local":
+                pid = _recorded_wrapper(self.paths.run_dir(node_id))
+            if not pid or not start or probe is _unknown_probe:
+                node = self.tree.get(node_id)
+                if node is not None and (not pid or (
+                        node.pid == pid and (not start or node.pid_start == start))):
+                    pid, start = pid or node.pid, start or node.pid_start
+                    if (not isinstance(identity, dict)
+                            or identity.get("kind") not in {"local", "docker"}):
+                        # Historical launch identity, never today's executor
+                        # config: a dead docker client is not a dead agent.
+                        identity = node.exec_identity
+                    probe = self._identity_probe(identity, node_id)
+            if (pid and start and probe is not _unknown_probe) or probe not in (None, _unknown_probe):
+                if not start:
+                    # A container probe can identify the run independently;
+                    # a bare host pid cannot identify its historical client.
+                    pid = None
+                hold.pid, hold.pid_start, hold.probe_raw = pid, start, probe
+                cleanup["captured"] = True
+                cleanup["predecessor"] = {"pid": pid, "pid_start": start,
+                                           "executor": identity}
+                return
+        except Exception:
+            pass
+        self._block_steer_predecessor(node_id, hold)
+
+    def _block_steer_predecessor(self, node_id: str, hold: _Hold) -> None:
+        hold.steer["blocked_reason"] = (
+            "predecessor liveness is unknown: no process or probe identity "
+            "with a recorded start time could be recovered; the node remains "
+            f"held and refuses steers; run stop_agent {node_id} to release this hold")
+        hold.durable = False
 
     def _take_over_hold(self, node_id: str, raw: dict, held: dict) -> None:
         """RM-R1d (review ag-43f57f): a crashed owner's hold becomes this
@@ -3024,7 +3208,8 @@ class Runner:
         try:
             # RM-R1e: a claim read that failed is unknown, never "no claim".
             token = (self.startup.token_for(provider, node_id, strict=True)
-                     if provider else "")
+                     if provider and (not held.get("steer_cleanup")
+                                      or held["steer_cleanup"].get("foreign")) else "")
         except Exception:
             self._release(node_id)
             return
@@ -3044,6 +3229,12 @@ class Runner:
                 self._release(node_id)
                 return
         taken = dict(held, **self._owner_fields())
+        if taken.get("steer_cleanup"):
+            taken["steer_cleanup"] = dict(taken["steer_cleanup"], **self._owner_fields())
+            # Taking over acquired a NEW flock, even if the old owner had
+            # released its own and was only retrying the durable lift.
+            cleanup = taken["steer_cleanup"]
+            cleanup["steps"] = sorted(set(cleanup["steps"]) | {"lock"})
         try:
             with self.tree.transaction() as data:
                 entry = data["nodes"].get(node_id)
@@ -3072,10 +3263,19 @@ class Runner:
             provider=provider,
             token=token,
             phase="cleanup", container=str(taken.get("occupancy") or ""),
-            durable=True,
+            confirmed=bool(taken.get("operator_release")),
+            durable=True, steer=dict(taken["steer_cleanup"])
+            if taken.get("steer_cleanup") else None,
             then=tuple(then) if then else (
                 "failed", "its launch failed and its server exited before the "
                           "process was confirmed dead"))
+        if taken.get("steer_cleanup"):
+            cleanup = self._holds[node_id].steer
+            if cleanup["foreign"]:
+                cleanup["launch_owned"] = True
+            elif not then:
+                self._holds[node_id].then = None
+            self._recover_steer_predecessor(node_id, self._holds[node_id])
         self.tree.emit(node_id, "launch_hold_taken_over",
                        previous_owner=held.get("owner_pid"))
 
@@ -3177,6 +3377,7 @@ class Runner:
         timeout: int | None = None,
         done: asyncio.Event | None = None,
         startup_token: str = "",
+        release_lock: bool = True,
     ) -> Run:
         """Build the environment and command for one turn and start the process.
 
@@ -3200,6 +3401,9 @@ class Runner:
         # before anything is taken, like the hold check below.
         refusal = self._model_refusal(provider.name, spec.model or "")
         if refusal:
+            # SF-R3a: no launch, so the caller's startup claim goes back
+            # neutrally, on every path that refuses before the spawn.
+            self._startup_release(provider.name, node_id, startup_token)
             raise RuntimeError(refusal)
         # SC-R3b: and none spawns a metered CLI under a cap that binds — the
         # free retry, a wrap-up or commit-fix turn, a fallback, a deferred
@@ -3209,11 +3413,14 @@ class Runner:
             # Round 7: once shutdown has begun nothing launches — start,
             # steer, consult, free retry, queued retry or commit-fix turn —
             # since shutdown has already captured the runs it ends.
+            self._startup_release(provider.name, node_id, startup_token)
             raise RuntimeError(SHUT_TEXT)
         if self._held(node_id):
             # RM-R1d: a second process on a node whose previous launch is
             # not confirmed dead. Refused before anything is taken, so the
-            # hold keeps everything it owns.
+            # hold keeps everything it owns — only the caller's own startup
+            # claim goes back (SF-R3a).
+            self._startup_release(provider.name, node_id, startup_token)
             raise RuntimeError(_held_refusal(node_id))
         try:
             home = None
@@ -3371,9 +3578,14 @@ class Runner:
             # the relaunch): with no process started, nothing is supervised
             # any more, and a lock kept would make the node unadoptable for
             # this server's whole lifetime (review ag-f27608). The caller's
-            # own handler settles the node's status.
-            self._release(node_id)
-            self._startup_finish(provider.name, node_id, startup_token)
+            # own handler settles the node's status. SF-R3a: the startup
+            # claim goes back neutrally — nothing launched, nothing learnt.
+            # SF-R3 (review r2 finding 1): a steer passes `release_lock=False`
+            # because it may still have a live predecessor under that lock;
+            # `_steer_release` owns the decision then.
+            if release_lock:
+                self._release(node_id)
+                self._startup_release(provider.name, node_id, startup_token)
             raise
 
         # SV-R1/R4: under the launch wrapper, which writes the output and the
@@ -3406,9 +3618,14 @@ class Runner:
                 # Nothing started, so nothing is followed: a lock kept here
                 # would make the node unadoptable for this server's whole
                 # lifetime, and the reservation has nothing left to hold.
+                # SF-R3a: the startup claim goes back neutrally too. SF-R3
+                # (review r2 finding 1): a steer's inherited lock is
+                # `_steer_release`'s to keep or release — a live predecessor
+                # may still be under it.
                 self._retire_hold(node_id)
-                self._release(node_id)
-                self._startup_finish(provider.name, node_id, startup_token)
+                if release_lock:
+                    self._release(node_id)
+                    self._startup_release(provider.name, node_id, startup_token)
                 raise
             # RM-R1c: the process did start, so the one cleanup task stops
             # it and confirms its death before anything goes; nothing is
@@ -3901,6 +4118,51 @@ class Runner:
             cooldown=float(self.config.limits.get("provider_down_cooldown_seconds", 1800)))
         if event:
             self.tree.emit(node_id, "startup_down", **event)
+
+    def _startup_release(self, provider: str, node_id: str, token: str) -> None:
+        """SF-R3a: give back the startup claim of a launch that never
+        happened, neutrally — a half-open probe free, no cooldown re-armed,
+        because nothing was launched and nothing was learnt about the
+        provider. A claim a launch cleanup still owns is left to it, exactly
+        as `_startup_finish` leaves it (RM-R1c)."""
+        if not token:
+            return
+        hold = self._holds.get(node_id)
+        if (hold is not None and hold.phase == "cleanup" and not hold.confirmed
+                and hold.token == token):
+            return
+        self._retry_startup_release(provider, node_id, token)
+
+    @property
+    def _startup_release_pending(self) -> set[tuple[str, str, str]]:
+        """Review r1 finding 4: neutral releases whose write failed, kept
+        until the reconciliation retries them. In memory on purpose: a
+        restart drops the owner too, and `StartupHealth._reconcile` then
+        clears the dead owner's claim by itself."""
+        return self.__dict__.setdefault("_startup_release_pending", set())
+
+    def _retry_startup_release(self, provider: str, node_id: str,
+                               token: str) -> bool:
+        """One attempt at a neutral release. True when the claim is gone;
+        False leaves it on the pending set for `_retry_startup_releases`."""
+        try:
+            if self.startup.release(provider, node_id, token):
+                self._startup_release_pending.discard((provider, node_id, token))
+                return True
+        except Exception as exc:                            # noqa: BLE001
+            self._ledger_failed(exc)
+        self._startup_release_pending.add((provider, node_id, token))
+        return False
+
+    def _retry_startup_releases(self) -> None:
+        """Review r1 finding 4: retry the neutral releases whose write
+        failed, on the reconciliation path (`_settle_holds`) and before a
+        recovery (`_announce_pending`). Neutral throughout (SF-R3a): a probe
+        goes back free and half-open, never re-armed or cleared, so once
+        storage recovers the claim cannot stay stuck while this server
+        lives."""
+        for provider, node_id, token in sorted(self._startup_release_pending):
+            self._retry_startup_release(provider, node_id, token)
 
     # ----------------------------------------------------------------- start --
 
@@ -4795,8 +5057,11 @@ class Runner:
                 # before it ends them — both with time, a live loop, and enough
                 # information to label the commit as an interruption rather than a
                 # result.
-                self.tree.set_status(node_id, "cancelled", reason)
-                self._release(node_id)
+                if node_id in self._holds:
+                    self._defer_while_held(node_id, "cancelled", reason)
+                else:
+                    self.tree.set_status(node_id, "cancelled", reason)
+                    self._release(node_id)
                 with contextlib.suppress(Exception):
                     notices.clear_node(self.tree, node_id)        # LN-C4
             raise
@@ -5619,8 +5884,14 @@ class Runner:
         self._record_stops()
         ids = (run.cap_stop or {}).get("crossing_ids") or []
         if ids:
+            # SF-R1/R2: cumulative, never an overwrite — the union survives
+            # later stops, steers and resumes, so every crossing that stopped
+            # this node stays named.
             with contextlib.suppress(Exception):
-                self.tree.update(run.node_id, spend_cap_crossings=list(ids))
+                node = self.tree.get(run.node_id)
+                prior = list(node.spend_cap_crossings) if node is not None else []
+                self.tree.update(run.node_id,
+                                 spend_cap_crossings=list(dict.fromkeys([*prior, *ids])))
         verdict = run.cap_stop or {}
         self.tree.emit(run.node_id, "limited", provider=run.provider.name,
                        model=run.spec.model, reason=verdict.get("cause", spendcap.CAUSE),
@@ -6540,11 +6811,20 @@ class Runner:
         SV-R10: a wrapped agent is ended through its wrapper and its recorded
         process group, escalating to KILL, so an agent that ignores TERM goes.
         """
-        executor = self.executor(self.config.agents.get(node.agent))
-        if getattr(executor, "kind", "local") == "docker":
+        identity = getattr(node, "exec_identity", None) or {}
+        kind = identity.get("kind")
+        if kind == "docker":
+            executor = self._docker_for(str(identity.get("container") or ""))
+        elif kind in {"local", "unknown"}:
+            executor = None
+        else:
+            executor = self.executor(self.config.agents.get(node.agent))
+            kind = getattr(executor, "kind", "local")
+        if kind in {"docker", "unknown"}:
+            killed = False
             with contextlib.suppress(Exception):
-                if executor.kill_detached(node.id):
-                    return True
+                if kind == "docker" and executor is not None:
+                    killed = executor.kill_detached(node.id)
             inside = getattr(executor, "inside", None)
             if not (inside and inside()):
                 # Every pid in the run dir but `node.pid` was recorded in the
@@ -6553,10 +6833,12 @@ class Runner:
                 # All the host owns is the `docker exec` client, and ending
                 # that alone is the one safe thing left to do.
                 start = getattr(node, "pid_start", "")
-                if not running(node.pid, start):
-                    return False
+                if not start or not running(node.pid, start):
+                    return killed
                 with contextlib.suppress(OSError):
                     os.kill(node.pid, signal.SIGTERM)
+                return True
+            if killed:
                 return True
         run_dir = self.paths.run_dir(node.id)
         if (run_dir / "wrapper.pid").is_file():
@@ -6573,7 +6855,8 @@ class Runner:
             return True
         return False
 
-    async def stop(self, agent_id: str, *, internal: bool = False) -> dict[str, Any]:
+    async def stop(self, agent_id: str, *, internal: bool = False,
+                   release_terminal_hold: bool = True) -> dict[str, Any]:
         """End this run's current turn.
 
         `internal=True` is steer()'s own use: it ends the turn so the same run
@@ -6581,7 +6864,12 @@ class Runner:
         cancelled while that is happening — see `run.internal_stop` in
         `_consume`. A genuine parent-initiated stop (the default, and the only
         thing `stop_agent` ever asks for) still writes `cancelled` here.
+        Automatic timeouts leave terminal unknown-liveness holds intact.
         """
+        if not internal and release_terminal_hold:
+            released = await self._stop_blocked_steer(agent_id)
+            if released is not None:
+                return released
         run = self.runs.get(agent_id)
         if run is not None:
             run.stop_requested = True     # recorded before the cancel lands
@@ -6628,9 +6916,394 @@ class Runner:
         self.tree.set_status(agent_id, "cancelled", "stopped by parent")
         return {"agent_id": agent_id, "status": "cancelled"}
 
+    async def _stop_blocked_steer(self, agent_id: str) -> dict[str, Any] | None:
+        """SF-R3: stop every known identity before an explicit hold release.
+        Independent releases still belong to the same retryable owner."""
+        hold = self._holds.get(agent_id)
+        if hold is None:
+            node = self.tree.get(agent_id)
+            record = node.cleanup_hold if node else None
+            cleanup = record.get("steer_cleanup") if isinstance(record, dict) else None
+            cleanup = cleanup if isinstance(cleanup, dict) else {}
+            if not cleanup.get("blocked_reason"):
+                return None
+            self._settle_holds()
+            hold = self._holds.get(agent_id)
+            if hold is None:
+                return {"agent_id": agent_id, "status": "held",
+                        "error": "the hold could not be adopted; retry stop_agent "
+                                 "when its owner or storage is available"}
+        cleanup = hold.steer
+        if cleanup is None or not cleanup.get("blocked_reason"):
+            return None
+        reason = cleanup["blocked_reason"]
+        saved = cleanup.get("predecessor") or hold.record
+        pid, start = saved.get("pid"), saved.get("pid_start") or ""
+        identity = saved.get("executor") or {"kind": "unknown"}
+        node = self.tree.get(agent_id)
+        if not pid:
+            pid, start = hold.pid, hold.pid_start
+        elif not start and hold.pid == pid:
+            start = hold.pid_start
+        if node is not None:
+            if not pid:
+                pid, start = node.pid, node.pid_start or ""
+            elif not start and node.pid == pid:
+                start = node.pid_start or ""
+        for candidate in (hold.record.get("executor"), node.exec_identity if node else None):
+            if identity.get("kind") == "local" or (
+                    identity.get("kind") == "docker" and identity.get("container")):
+                break
+            if isinstance(candidate, dict):
+                identity = candidate
+        if identity.get("kind") != "local" and not (
+                identity.get("kind") == "docker" and identity.get("container")):
+            identity = {"kind": "unknown"}
+        # A bare pid may have been reused. Docker's container-side records
+        # identify its wrapper and agent independently of the host client.
+        pid = pid if start else None
+        has_container = identity.get("kind") == "docker" and identity.get("container")
+        confirmed = False
+        if node is not None and (pid or has_container):
+            predecessor = replace(node, pid=pid, pid_start=start, exec_identity=identity)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self.stop_detached, predecessor)
+            probe = _unknown_probe
+            with contextlib.suppress(Exception):
+                probe = self._identity_probe(identity, agent_id)
+                if has_container:
+                    executor = self._docker_for(str(identity["container"]))
+                    verdict = getattr(executor, "wrapper_verdict", None)
+                    if verdict is not None:
+                        # A daemon/transport failure's exit code is not a
+                        # positive answer from the container-side session.
+                        probe = lambda: verdict(agent_id)
+                confirmed = await self._confirm_ended(pid, start, probe, bound=1.0)
+        self.tree.set_status(agent_id, "cancelled", "terminal steer hold released by stop_agent")
+        cleanup["operator_release"] = now()
+        cleanup["predecessor_death_confirmed"] = confirmed
+        hold.record = dict(hold.record, operator_release=cleanup["operator_release"],
+                           predecessor_death_confirmed=confirmed)
+        cleanup.pop("blocked_reason")
+        cleanup["steps"] = [s for s in cleanup["steps"] if s not in {"confirm", "inspect"}]
+        if not cleanup.get("launch_owned"):
+            cleanup["foreign"] = False
+        hold.confirmed = True
+        hold.then = ("cancelled", "terminal steer hold released by stop_agent")
+        self._persist_hold(agent_id, hold)
+        self.tree.emit(agent_id, "steer_hold_released", reason=reason, action="stop_agent",
+                       predecessor_death_confirmed=confirmed)
+        self._settle_holds()
+        self._settle_holds()
+        result = {"agent_id": agent_id, "status": "cancelled", "released_steer_hold": True,
+                  "cleanup_pending": agent_id in self._holds,
+                  "predecessor_death_confirmed": confirmed}
+        if not confirmed:
+            result["warning"] = "hold released by operator; predecessor death is unconfirmed"
+        return result
+
+    def _steer_predecessor(self, agent_id: str) -> _Predecessor:
+        """The identity of the run a steer is about to stop, captured BEFORE
+        the stop so its death can be confirmed after it (SF-R3, review r2).
+        The in-process Run first — the only predecessor whose supervision
+        lock this Runner holds — then the node's recorded pid, for a run
+        this process never launched."""
+        run = self.runs.get(agent_id)
+        if run is not None and run.handle is not None:
+            pid = getattr(run.handle, "pid", None)
+            if pid:
+                executor = self.executor(run.spec)
+                return _Predecessor(
+                    captured=True, pid=pid,
+                    pid_start=getattr(run.handle, "pid_start", "")
+                    or procs.start_time(pid),
+                    probe_raw=self._raw_alive_probe(executor, agent_id),
+                    provider=run.provider.name,
+                    token=getattr(run, "startup_token", "") or "",
+                    executor=executor, handle=run.handle, run=run)
+        node = self.tree.get(agent_id)
+        if node is not None and node.pid:
+            executor = self.executor(self.config.agents.get(node.agent))
+            return _Predecessor(
+                captured=True, pid=node.pid, pid_start=node.pid_start or "",
+                probe_raw=self._raw_alive_probe(executor, agent_id),
+                provider=node.provider, executor=executor)
+        return _Predecessor(captured=True)
+
+    def _settle_steer_cleanup(self, node_id: str, hold: _Hold) -> None:
+        """SF-R3/R3a: retry ONE owner's remaining steps. Failed reads and
+        writes leave their step owed; only positive death permits release.
+        The steer's own resources are independent of predecessor liveness.
+        """
+        cleanup = hold.steer
+        if cleanup.get("operator_release"):
+            hold.confirmed = True
+        if cleanup.get("blocked_reason") and not (
+                set(cleanup["steps"]) & {"claim", "unreserve", "restore"}):
+            if not hold.durable:
+                self._persist_hold(node_id, hold)
+            return
+        if cleanup["foreign"] and not cleanup.get("launch_owned"):
+            try:
+                node = self.tree.get(node_id)
+                record = node.cleanup_hold if node is not None else None
+                mirrored = (record or {}).get("steer_cleanup")
+                if (isinstance(mirrored, dict)
+                        and mirrored.get("owner") == cleanup.get("owner")
+                        and not mirrored.get("foreign")):
+                    # The predecessor owner completed its hold and handed
+                    # our mirror over. This cleanup now owns the final lift.
+                    hold.record = dict(record)
+                    cleanup["foreign"] = False
+            except Exception:
+                # Independent own releases may proceed, but an unknown
+                # predecessor hold cannot be cleared on this pass.
+                return
+        steps = set(cleanup["steps"])
+
+        def complete(step: str) -> None:
+            steps.discard(step)
+            cleanup["steps"] = sorted(steps)
+
+        for step in ("claim", "unreserve", "restore"):
+            if step not in steps:
+                continue
+            try:
+                if step == "claim":
+                    if cleanup["token"] and not self.startup.release(
+                            cleanup["provider"], node_id, cleanup["token"]):
+                        continue
+                elif step == "unreserve":
+                    self._pc_unreserve(node_id, cleanup["prior"])
+                else:
+                    if not hold.durable:
+                        self._persist_hold(node_id, hold)
+                        if not hold.durable:
+                            continue
+                    self.tree.restore_deferred(cleanup["queued"])
+                complete(step)
+            except Exception:
+                pass
+        if "inspect" in steps:
+            try:
+                node = self.tree.get(node_id)
+                record = node.cleanup_hold if node is not None else None
+                if record and not _same_hold(record, hold.record):
+                    hold.record = dict(record)
+                    then = record.get("then")
+                    hold.then = tuple(then) if then else hold.then
+                    cleanup["foreign"] = True
+                    complete("confirm")
+                complete("inspect")
+            except Exception:
+                pass
+        if "confirm" in steps and not cleanup.get("blocked_reason"):
+            try:
+                if (not cleanup["captured"] and hold.pid
+                        and (hold.record.get("executor") or {}).get("kind")
+                        in {"local", "docker"}):
+                    # Adoption recovered the historical identity, possibly
+                    # from wrapper.pid after the owner died before writing it.
+                    hold.probe_raw = self._identity_probe(
+                        hold.record["executor"], node_id)
+                    cleanup["captured"] = True
+                    cleanup["absent"] = False
+                if not cleanup["captured"]:
+                    predecessor = self._steer_predecessor(node_id)
+                    hold.pid, hold.pid_start = predecessor.pid, predecessor.pid_start
+                    hold.probe_raw = predecessor.probe_raw
+                    hold.run = predecessor.run
+                    executor = predecessor.executor
+                    identity = {"kind": str(getattr(executor, "kind", "local")),
+                                "container": str(getattr(executor, "container", ""))}
+                    hold.record = dict(hold.record, pid=hold.pid,
+                                       pid_start=hold.pid_start, executor=identity)
+                    cleanup["captured"] = True
+                    cleanup["absent"] = predecessor.absent
+                    cleanup["predecessor"] = {
+                        "pid": hold.pid, "pid_start": hold.pid_start,
+                        "executor": identity}
+                if hold.pid and not hold.pid_start:
+                    if hold.probe_raw in (None, _unknown_probe):
+                        self._block_steer_predecessor(node_id, hold)
+                    else:
+                        hold.pid = None
+                if not cleanup.get("blocked_reason") and (cleanup["absent"] or _positively_ended(
+                        hold.pid, hold.pid_start, hold.probe_raw)):
+                    hold.confirmed = True
+                    complete("confirm")
+            except Exception:
+                pass
+        # A foreign predecessor's hold remains its owner's. Our own steps
+        # can finish, but neither its status nor its lock is ours to release.
+        if not (steps & {"inspect", "confirm", "claim", "unreserve", "restore"}):
+            try:
+                if "status" in steps:
+                    if cleanup["failure"]:
+                        hold.then = ("failed", cleanup["failure"])
+                    if cleanup["foreign"]:
+                        if hold.then:
+                            with self.tree.transaction() as data:
+                                raw = data["nodes"].get(node_id) or {}
+                                record = raw.get("cleanup_hold")
+                                if _same_hold(record, hold.record):
+                                    record["then"] = list(hold.then)
+                    elif hold.then:
+                        current = self.tree.get(node_id)
+                        if current is not None and current.status in ACTIVE:
+                            self.tree.set_status(node_id, *hold.then)
+                    complete("status")
+                if "lock" in steps:
+                    if not cleanup["foreign"]:
+                        self._release(node_id)
+                    complete("lock")
+                if "lift" in steps:
+                    if not cleanup["foreign"]:
+                        self._lift_hold(node_id, None, record=hold.record)
+                    complete("lift")
+            except Exception:
+                pass
+        if not steps:
+            if cleanup.get("launch_owned"):
+                hold.steer = None
+                hold.record.pop("steer_cleanup", None)
+                self._persist_hold(node_id, hold)
+                return
+            if cleanup["foreign"]:
+                # Remove just our mirror, keeping the predecessor hold.
+                try:
+                    with self.tree.transaction() as data:
+                        raw = data["nodes"].get(node_id) or {}
+                        record = raw.get("cleanup_hold")
+                        if _same_hold(record, hold.record):
+                            record.pop("steer_cleanup", None)
+                except Exception:
+                    return
+            self._holds.pop(node_id, None)
+            if not cleanup["foreign"] and hold.run is not None:
+                if self.runs.get(node_id) is hold.run:
+                    self.runs.pop(node_id, None)
+                hold.run.done.set()
+            self._pc_kick(cleanup["provider"])
+            return
+        self._persist_hold(node_id, hold)
+
+    async def _steer_release(self, agent_id: str, provider: str, startup_token: str,
+                             reserved_from: str | None, queued: dict | None,
+                             queued_id: str, live: bool,
+                             predecessor: _Predecessor,
+                             failure: str = "") -> bool:
+        """SF-R3: every refused steer hands its unfinished work to one hold
+        BEFORE attempting any cleanup. Settlement and adoption retry the
+        same record; no suppressed exception discards a release obligation.
+        """
+        # Before stopping a live run, startup refusal took no new slot or
+        # claim. Its active supervisor still owns the predecessor's lock.
+        if live and reserved_from is None and not startup_token:
+            return False
+        existing = self._holds.get(agent_id)
+        mine = (bool(startup_token) and existing is not None
+                and existing.phase != "lifting" and existing.token == startup_token)
+        if mine:
+            # A process actually started: the launch hold already owns all
+            # releases, including its claim, until its death is confirmed.
+            if failure:
+                self._defer_while_held(agent_id, "failed", failure)
+            return False
+        restore = bool(queued_id and not live and isinstance(queued, dict))
+        steps = {"claim", "unreserve", "confirm", "status", "lock", "lift"}
+        if restore:
+            steps.add("restore")
+        cleanup = {"steps": sorted(steps), "provider": provider,
+                   "token": startup_token, "prior": reserved_from,
+                   "queued": dict(queued) if restore else None,
+                   "captured": predecessor.captured,
+                   "absent": predecessor.captured and predecessor.absent,
+                   "failure": failure, "foreign": False,
+                   "launch_owned": False, **self._owner_fields()}
+        # Construct without executor/probe calls: a capture that failed must
+        # still leave an owner capable of re-capturing when storage recovers.
+        executor = predecessor.executor
+        identity = {"kind": str(getattr(executor, "kind", "unknown")),
+                    "container": str(getattr(executor, "container", ""))}
+        cleanup["predecessor"] = {"pid": predecessor.pid,
+                                  "pid_start": predecessor.pid_start,
+                                  "executor": identity}
+        if restore:
+            # One receipt per failed admission; a later admission that fails
+            # gets a fresh token, while every retry of this cleanup shares it.
+            cleanup["queued"]["restore_token"] = os.urandom(16).hex()
+            cleanup["queued"].pop("restore_done", None)
+        hold = _Hold(
+            record={"since": now(), **self._owner_fields(),
+                    "pid": predecessor.pid, "pid_start": predecessor.pid_start,
+                    "executor": identity, "occupancy": "", "then": None},
+            pid=predecessor.pid, pid_start=predecessor.pid_start,
+            probe_raw=predecessor.probe_raw, provider=provider, token="",
+            phase="cleanup", run=predecessor.run, steer=cleanup)
+        if existing is not None and existing.phase != "lifting":
+            # The predecessor already has an in-process cleanup owner. Add
+            # our obligations to that owner, preserving its task and releases.
+            cleanup["foreign"] = True
+            cleanup["launch_owned"] = True
+            cleanup["steps"] = sorted(steps - {"confirm", "status", "lock", "lift"})
+            existing.steer = cleanup
+            if failure:
+                existing.then = ("failed", failure)
+            self._settle_steer_cleanup(agent_id, existing)
+            return restore
+        try:
+            node = self.tree.get(agent_id)
+            record = node.cleanup_hold if node is not None else None
+            if record and (existing is None or existing.phase != "lifting"):
+                # Preserve another launch's durable owner and identity.
+                hold.record = dict(record)
+                then = record.get("then")
+                hold.then = tuple(then) if then else None
+                cleanup["foreign"] = True
+                remaining = set(cleanup["steps"]) - {"confirm"}
+                cleanup["steps"] = sorted(remaining)
+        except Exception:
+            # Do not replace an unreadable predecessor's durable hold or
+            # free its lock. Reading it remains an explicit owed step.
+            cleanup["steps"].append("inspect")
+        self._holds[agent_id] = hold
+        self._settle_steer_cleanup(agent_id, hold)
+        return restore
+
+    @property
+    def _steer_restores(self) -> dict[str, dict]:
+        """Compatibility view; the cleanup holds are the only retry owner."""
+        return {h.steer["queued"]["id"]: h.steer["queued"]
+                for h in self._holds.values() if h.steer is not None
+                and "restore" in h.steer["steps"]}
+
     @_admitted("the steer")
     async def steer(self, agent_id: str, message: str,
                     queued: dict | None = None) -> dict[str, Any]:
+        """SF-R3: refuse another steer until this node's handoff and any
+        pending cleanup finish. Nothing new is claimed on that refusal."""
+        active = self.__dict__.setdefault("_steering_nodes", set())
+        hold = self._holds.get(agent_id)
+        cleanup = hold.steer if hold is not None else None
+        if cleanup is None:
+            node = self.tree.get(agent_id)
+            record = node.cleanup_hold if node else None
+            cleanup = record.get("steer_cleanup") if isinstance(record, dict) else None
+        if agent_id in active or cleanup is not None:
+            reason = (cleanup or {}).get("blocked_reason") or (
+                "its previous steer or previous steer cleanup is still pending")
+            return {"agent_id": agent_id, "steered": False,
+                    "error": f"{agent_id} cannot be steered: {reason}",
+                    **({"blocked": True} if queued else {})}
+        active.add(agent_id)
+        try:
+            return await self._steer(agent_id, message, queued)
+        finally:
+            active.discard(agent_id)
+
+    async def _steer(self, agent_id: str, message: str,
+                     queued: dict | None = None) -> dict[str, Any]:
         """Redirect a running agent.
 
         A subprocess cannot be injected into mid-run, so the honest equivalent
@@ -6870,7 +7543,8 @@ class Runner:
             # is taken and nothing live is ended for a relaunch that cannot
             # happen.
             return {"agent_id": agent_id, "steered": False,
-                    "error": _held_refusal(agent_id)}
+                    "error": _held_refusal(agent_id),
+                    **({"blocked": True} if queued else {})}
         # PC-R3/R3b: the slot, decided before anything is claimed or stopped.
         queued_id = (queued or {}).get("id") or ""
         current = self.tree.get(agent_id) or node
@@ -6907,16 +7581,23 @@ class Runner:
                                 f"session lives ({PC_CAUSE}); it resumes by itself "
                                 f"when a slot frees there. cancel_deferred removes it."}
             except RuntimeError as exc:
-                # The tree is full: refused like a start, before anything moves.
+                await self._steer_release(
+                    agent_id, provider.name, "", current.status, queued,
+                    queued_id, False, _Predecessor())
                 return {"agent_id": agent_id, "steered": False, "error": str(exc),
                         **({"blocked": True} if queued_id else {})}
+            except BaseException:
+                await self._steer_release(
+                    agent_id, provider.name, "", current.status, queued,
+                    queued_id, False, _Predecessor())
+                raise
         try:
             startup_token = self.startup.claim(provider.name, agent_id)
         except StartupUnavailable as exc:
-            self._pc_unreserve(agent_id, reserved_from)
+            await self._steer_release(
+                agent_id, provider.name, "", reserved_from, queued, queued_id,
+                live, _Predecessor())
             if queued_id:
-                # Review finding 9: the claimed entry goes back, in its place.
-                self.tree.restore_deferred(queued)
                 return {"agent_id": agent_id, "steered": False, "blocked": True,
                         "reason": exc.reason, "retry_after": exc.retry_after}
             refusal = {
@@ -6929,22 +7610,35 @@ class Runner:
             if exc.retry_after:
                 refusal["retry_after"] = exc.retry_after
             return refusal
+        except BaseException:
+            await self._steer_release(
+                agent_id, provider.name, "", reserved_from, queued, queued_id,
+                live, _Predecessor())
+            raise
         # `internal=True`: this ends the turn to respawn the very same run, not
         # a cancellation, and must not report the run as `cancelled` while
         # that is in flight (bug-8195f2) — see `run.internal_stop`.
-        if live and limited:
-            # PC-R3b: the run keeps its slot across the handoff. `pending`
-            # always holds one, so the gap between the old process's death
-            # and the new one's start is not a free slot to anyone else.
-            reserved_from = self._pc_hold_slot(agent_id)
+        predecessor = _Predecessor()
         try:
+            if live and limited:
+                # PC-R3b: the run keeps its slot across the handoff. `pending`
+                # always holds one, so the gap between the old process's death
+                # and the new one's start is not a free slot to anyone else.
+                reserved_from = self._pc_hold_slot(agent_id)
+            # SF-R3 (review r3 finding 2): the capture runs inside this
+            # region too — an executor or storage failure here must still
+            # give back the claim, the reservation and a claimed queue entry,
+            # like every other pre-spawn refusal.
+            predecessor = self._steer_predecessor(agent_id)
             await self.stop(agent_id, internal=True)
         except BaseException:
-            # Nothing was relaunched, so nothing will release the claim above.
-            self._startup_finish(provider.name, agent_id, startup_token)
-            self._pc_unreserve(agent_id, reserved_from)
-            if queued_id and not live:
-                self.tree.restore_deferred(queued)
+            # Nothing was relaunched. SF-R3, review r2 finding 2: this path
+            # applies the same rule as a refusal — a predecessor confirmed
+            # dead with no hold frees the inherited lock; a live one keeps
+            # it, and the node is left to whatever owns the predecessor.
+            await self._steer_release(agent_id, provider.name, startup_token,
+                                      reserved_from, queued, queued_id, live,
+                                      predecessor)
             raise
         try:
             await self._launch(
@@ -6952,23 +7646,49 @@ class Runner:
                 workdir=workdir, branch=branch,
                 parent=node.parent, depth=node.depth, session_id=node.session_id,
                 startup_token=startup_token,
+                # SF-R3 (review r2 finding 1): a steer's inherited lock may
+                # still have a live predecessor under it; `_steer_release`
+                # decides its fate.
+                release_lock=False,
             )
         except SpendCapRefused as exc:
             # SC-R3a/R3b: a crossing landed since the check above; the
-            # session stays resumable. `_launch` gave back the startup claim
-            # and the supervision lock (#6); a queued resume whose entry
-            # this steer claimed gets it back, in its place (#8).
+            # session stays resumable. The one release path gives back the
+            # startup claim, this steer's own reservation and a queued
+            # resume's entry in its place (#8), then the cap verdict settles
+            # the node.
+            restored = await self._steer_release(
+                agent_id, provider.name, startup_token, reserved_from, queued,
+                queued_id, live, predecessor)
             self._mark_cap_refused(agent_id, node.session_id, exc.refusal)
-            blocked = {}
-            if queued_id and not live:
-                self.tree.restore_deferred(queued)
-                blocked = {"blocked": True, "retry_after": exc.refusal["until"]}
+            blocked = ({"blocked": True, "retry_after": exc.refusal["until"]}
+                       if restored else {})
             return {"agent_id": agent_id, "steered": False, "cause": exc.refusal["cause"],
                     "until": spendcap.iso(exc.refusal["until"]), "error": str(exc),
                     "reason": str(exc), **blocked}
         except RuntimeError as exc:
-            self._mark_launch_failed(agent_id, str(exc))
-            return {"agent_id": agent_id, "steered": False, "error": str(exc)}
+            # SF-R3: a refusal before the spawn — the shutdown one, a roster
+            # or hold refusal — leaves this steer's own resources behind it.
+            # The one release path gives them back and settles the node from
+            # the predecessor's confirmed liveness (review r2 finding 1): a
+            # live predecessor keeps its lock and is never marked failed.
+            restored = await self._steer_release(
+                agent_id, provider.name, startup_token, reserved_from, queued,
+                queued_id, live, predecessor, failure=str(exc))
+            return {"agent_id": agent_id, "steered": False, "error": str(exc),
+                    **({"blocked": True} if restored else {})}
+        except BaseException as exc:
+            # Review r1 finding 1: every other pre-spawn failure — an
+            # executor that could not start the process, a storage error —
+            # releases the same own resources before it propagates. Review
+            # r2 finding 3: it settles the node exactly as the RuntimeError
+            # branch does, so a dead predecessor is not left reported as an
+            # active run.
+            await self._steer_release(agent_id, provider.name, startup_token,
+                                      reserved_from, queued, queued_id, live,
+                                      predecessor,
+                                      failure=str(exc) or type(exc).__name__)
+            raise
         self.tree.set_status(agent_id, "running", "steered")
 
         # `_launch` returns when the process has STARTED, which is not the same
@@ -7834,7 +8554,7 @@ class Runner:
         try:
             await asyncio.wait_for(run.done.wait(), timeout=bound)
         except (asyncio.TimeoutError, TimeoutError):
-            await self.stop(node_id)
+            await self.stop(node_id, release_terminal_hold=False)
             return self._consult_result(agent_name, node_id, turn, view,
                                         timed_out=True,
                                         error=f"no reply within {limit}s")
