@@ -30,6 +30,31 @@ requirements NS-R1 to NS-R19.
   - one implementer per item;
   - escalation to opus at round 3;
   - tickets are fixed in-house.
+- **The user's corrections to `phase7-part1-nodes.md` (2026-10-04).** They
+  override the spec wherever it says otherwise. Apply them to the spec
+  before writing the contract.
+  - **NS-R7, starvation.** A node waiting too long is reported to the
+    **orchestrator**, as a `wait_for_nodes` transition. It is not reported
+    to the user, and it is never aged automatically. The spec's wording
+    already says this; the change confirms it.
+  - **NS-R12, a loop at its maximum always calls on the orchestrator.**
+    - There is **no `on_max` setting**: the loop stops, notifies the
+      orchestrator, and waits.
+    - The orchestrator then decides: relaunch, with a higher maximum or a
+      different model or both; close the loop as exhausted; or anything
+      else the node tools allow.
+    - Withdraw `on_max: close` and `on_max: escalate`. The rule "round 3 →
+      opus" becomes one of the orchestrator's decisions, which its
+      instructions can describe; the engine does not automate it.
+    - What stays: exhausted never means approved, the counter rules, and
+      NS-R9 for a child that shares a session when its model changes.
+    - In NS-R17, the user's example reaches its maximum, the orchestrator
+      is notified, and it relaunches with another model. This replaces
+      "reaching `escalate`".
+  - **NS-R14, time zone.** The default is Europe/Paris. It is a setting
+    in the general multiagents config: the global config, overridable per
+    project. The contract names the key. A window may still name its own
+    zone.
 - **Amendments to `phase7-nodes-and-containers.md`, for the orchestrator to
   apply.** The initializer does not edit existing specs.
   - **PAC-R9** (the scoped host RPC) moves into part 1 as NS-R5. Part 2
