@@ -198,3 +198,13 @@ never submitted.
   - **Pipeline:** contract, tester, implementer, reviewer.
 - **C1 — done 2026-10-03.** An interactive `/compact` of the root orchestrator passed all three checks: the task was remembered, the session identity was kept, and MCP still worked. Recorded in `phase0-context-and-team.md` § "P0-R8 live check". The driver's unattended path was not exercised.
 - **C16 hotfix removed, 2026-10-03.** At the user's request, the orchestrator dropped the stale `spawn.args` of agy, claude, codex and opencode from the global `~/.config/multiagents/providers.yaml`. The `resume` keys were kept; the backup is in the session scratchpad. It then removed the project-level hotfix. The resolved config for all seven providers, the `-b` variants included, now uses the shipped C3 args, with no `{prompt}`.
+- **C14 reopened, and C17 is new (2026-10-03, researcher ag-e83d9b).**
+  - **The problem.** `codex-b` (`extends: codex`, with no `container_private_home` of its own) privatises the same `~/.codex` as `codex`. `private_state()` keys mounts by container path (`executor/docker.py` ~1800-1813), so the last provider wins. After the user's recreate, the container mounted `shared/codex-b/.codex` as `~/.codex`, so plain codex agents would have run without their login.
+  - **The login also failed.** `multiagents docker login codex-b` failed with EACCES, inferred to come from codex writing under the nested read-only `packages/standalone/releases` mount.
+  - **Mitigation.** The orchestrator commented out the `codex-b` block in the project `providers.yaml`. The container must be recreated, by the user with nothing running, to get the `codex` mount back.
+  - **C17, the product fix.** Two providers of one family with independent credentials must coexist under docker:
+    - each gets a distinct private container path;
+    - the codex adapter honours it (`CODEX_HOME` from `MULTIAGENTS_PRIVATE_HOME`);
+    - `docker login` sets it (`cli.py` ~3057);
+    - `private_state()` refuses two owners resolving to the same container path, loudly, rather than letting the last one win.
+  - **Pipeline:** contract, tester, implementer, reviewer, after C16.
