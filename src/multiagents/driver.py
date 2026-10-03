@@ -349,22 +349,21 @@ def _start_supervisor(paths, role: str, pid: int) -> None:
 DRIVER_CLASH = (
     "{other} is already running here (pid {pid}).\n"
     "\n"
-    "They are not meant to overlap. The initializer shapes BRIEF.md and\n"
-    "context/ in the project itself, while the orchestrator builds against\n"
-    "them and branches agents from that same tree — so running both means\n"
-    "building against a moving target, in one worktree, with one tree.json.\n"
+    "Two sessions of the same role on one tree are not meant to overlap.\n"
     "\n"
     "Finish or stop that one first (`multiagents stop`), or pass --force if\n"
     "you know why you want both."
 )
 
 
-def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
-    """Is the project's OTHER driver alive? `(role, pid)`."""
+def _driver_running(paths, role: str, same_family: bool) -> tuple[str, int] | None:
+    """Find a live driver in the same or other role family, including turns."""
     from . import watchdog
 
-    for other in watchdog.DRIVERS:
-        if other == role:
+    family = role.removesuffix("-turn")
+    for other in (variant for base in watchdog.DRIVERS
+                  for variant in (base, f"{base}-turn")):
+        if (other.removesuffix("-turn") == family) != same_family:
             continue
         recorded = _read_pid(paths, other)
         if recorded is None:
@@ -372,6 +371,11 @@ def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
         if procs.alive(*recorded):
             return other, recorded[0]
     return None
+
+
+def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
+    """Is the project's OTHER driver family alive? `(role, pid)`."""
+    return _driver_running(paths, role, same_family=False)
 
 
 def _launch_agent(paths, config, role: str, resume: bool,
@@ -391,10 +395,27 @@ def _launch_agent(paths, config, role: str, resume: bool,
         print(f"No agent in agents.yaml is marked `launch: true, role: {role}`.",
               file=sys.stderr)
         return 2
-    clash = None if force else _other_driver_running(paths, role)
-    if clash:
-        print(DRIVER_CLASH.format(other=clash[0], pid=clash[1]), file=sys.stderr)
-        return 2
+    if not force:
+        clash = _driver_running(paths, role, same_family=True)
+        if clash:
+            print(DRIVER_CLASH.format(other=clash[0], pid=clash[1]), file=sys.stderr)
+            return 2
+        other = _other_driver_running(paths, role)
+        if other:
+            if role.removesuffix("-turn") == "initializer" and not (paths.root / "BRIEF.md").exists():
+                print(
+                    f"{other[0]} is already running here (pid {other[1]}). "
+                    "The initializer must create BRIEF.md during bootstrap; "
+                    "finish or stop the orchestrator first (`multiagents stop`), "
+                    "or pass --force.", file=sys.stderr,
+                )
+                return 2
+            print(
+                f"an {other[0]} is running (pid {other[1]}); "
+                "the initializer will write plans to context/plans/ only "
+                "and may create new specs in context/specs/",
+                file=sys.stderr,
+            )
     providers = load_providers(config.providers)
     provider = providers.get(spec.provider)
     if provider is None or not provider.available():
