@@ -36,6 +36,7 @@ Under docker, both providers inherit `container_private_home: [".codex"]`. `Dock
 **FA-R3: `docker login` logs the right provider in.**
 - `multiagents docker login <p>` gives the native CLI the same profile location that `<p>`'s runs will use, so a login for `codex-b` lands where `codex-b`'s runs read, and never in `codex`'s home.
 - If the provider's private home cannot be written by the login, for example because a read-only nested mount blocks a write the CLI needs, the command fails with a message that says which path, not a bare EACCES.
+- **Added 2026-10-03.** `docker login codex` fails the same way for plain `codex`. The command execs the bare `codex` binary, which is the TUI: it starts the app-server daemon and dies with EACCES. In the container, `codex login --device-auth` is the working form, and the container has no browser. `docker login` must run the provider's declared non-interactive login argv, for codex `login --device-auth`, rather than the bare binary.
 - **Verified by:** the argv and environment built for `docker exec` for `codex-b` name `codex-b`'s profile location; for `codex` they name `codex`'s. This is tested at the argv-building seam, without a real docker.
 
 **FA-R4: `doctor` reports it.**
