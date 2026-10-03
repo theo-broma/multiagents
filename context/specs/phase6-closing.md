@@ -185,3 +185,4 @@ never submitted.
   - `transcripts.py` ~381-392 hard-codes Claude's `message.usage` vocabulary in `_usage_of`.
   - Provider-specific transcript keys belong in provider config (P0-R8).
   - Small fix: tester, implementer, reviewer.
+- **C13 — new (the user, 2026-10-03).** The initializer writes plans to `context/plans/` and never writes `BRIEF.md`; the orchestrator imports them. The user gets a notes directory, `context/notes/`, that the initializer reads. The contract is `context/specs/c13-plans-and-notes.md` (PN-R1..R7). Pipeline: tester, implementer, reviewer.
