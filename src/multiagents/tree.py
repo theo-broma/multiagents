@@ -601,8 +601,40 @@ class Tree:
         """Exclusive read-modify-write. Mutate the yielded dict in place."""
         with self._locked():
             data = self._read_unlocked()
+            # SF-R3: an owner's stale in-memory mirror must not erase an
+            # acknowledgement transferred when its restored entry left.
+            acknowledged = [dict(queued) for queued in self._steer_queues(data)
+                            if queued.get("restore_done")]
             yield data
+            queued_owners = self._steer_queues(data)
+            for queued in queued_owners:
+                if any(old.get("id") == queued.get("id") and old["restore_done"]
+                       == queued.get("restore_token") for old in acknowledged):
+                    queued["restore_done"] = queued["restore_token"]
+            receipts = data.get("deferred_restores", {})
+            waiting = {d.get("id") for d in data["deferred"] if isinstance(d, dict)}
+            for entry_id in list(receipts):
+                if entry_id in waiting:
+                    continue
+                # The acknowledgement now belongs only to an unfinished
+                # cleanup, and disappears when that owner finishes.
+                for queued in queued_owners:
+                    if (queued.get("id") == entry_id
+                            and queued.get("restore_token") in receipts[entry_id]):
+                        queued["restore_done"] = queued["restore_token"]
+                receipts.pop(entry_id)
             self._write_unlocked(data)
+
+    @staticmethod
+    def _steer_queues(data: dict) -> list[dict]:
+        queued = []
+        for node in data["nodes"].values():
+            held = node.get("cleanup_hold") if isinstance(node, dict) else None
+            cleanup = held.get("steer_cleanup") if isinstance(held, dict) else None
+            entry = cleanup.get("queued") if isinstance(cleanup, dict) else None
+            if isinstance(entry, dict):
+                queued.append(entry)
+        return queued
 
     def read(self) -> dict:
         with self._locked():
@@ -1278,11 +1310,28 @@ class Tree:
         launch never happened — same id, same `seq`, so the same place."""
         if not isinstance(entry, dict) or not entry.get("id"):
             return False
+        token = entry.get("restore_token")
+        if token and entry.get("restore_done") == token:
+            return False
+        wrote = False
         with self.transaction() as data:
-            if find_deferred(data["deferred"], entry["id"]) is not None:
-                return False
-            data["deferred"].append(dict(entry))
-        return True
+            done = False
+            if token:
+                # SF-R3: a write may commit and then raise. This receipt is
+                # committed WITH the entry. On removal its pending cleanup
+                # retains the acknowledgement, while this receipt is pruned.
+                receipts = data.setdefault("deferred_restores", {})
+                done = token in receipts.get(entry["id"], []) or any(
+                    q.get("id") == entry["id"] and q.get("restore_done") == token
+                    for q in self._steer_queues(data))
+                if not done:
+                    receipts.setdefault(entry["id"], []).append(token)
+            if not done and find_deferred(data["deferred"], entry["id"]) is None:
+                data["deferred"].append(dict(entry))
+                wrote = True
+        if token:
+            entry["restore_done"] = token
+        return wrote
 
     def due_deferred(self) -> list[dict]:
         """Waiting entries whose window has passed. **Does not remove them.**
