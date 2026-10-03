@@ -161,3 +161,27 @@ never submitted.
 - **C1** whenever nothing else is running. It is a live check.
 - **C9** as soon as the user answers.
 - **C10** last.
+
+## Progress (orchestrator)
+
+- **C2 — done 2026-10-03** (inventory: researcher ag-3fb52a).
+  - **Discarded:**
+    - adversary/18bf9a: its T1 amendments are all on main (`tree.py` ~1362/1380/1441, `tests/test_t1_amendments.py`);
+    - reviewer/37f81c, e6b702, ea1d60 and fdbf30: their findings or diffs were already acted on or on main;
+    - robustness-tester/6e70df: its tests landed as `tests/test_m_robustness.py` (14f06b1).
+  - **Not discarded:** reviewer/98e037, e4919f and e8565d. Their "seeded worktree is quarantined", which is left to the user. All three are acted on except one finding of e8565d, which is now C12.
+  - **Kept for phase 3:** tester/b689bf (R16–R18, `tests/test_phase3_cache_aliasing.py`) and cf02a1 (R19–R20, `tests/test_phase3_build_env.py`).
+- **C4 — H5 closed 2026-10-03, with evidence** (researcher ag-97ccd0).
+  - The sidecar and the budget both use `Accounts.eligible()` and the same pin map (`authproxy.py` ~199/277, `executor/docker.py` ~1954-1966, `budget.py` ~1051/1223). claude-b reads `b`; claude reads the pool minus pins, i.e. `default`.
+  - **Residual, not a defect today:**
+    - with several unpinned accounts, budget reports the best headroom, while the sidecar assigns the least-loaded account;
+    - the cache identity does not fingerprint credential contents, so a token rotation at the same path can be stale until the TTL.
+- **C8 — done 2026-10-03** (researcher ag-ab3337): no longer true. The tickets file was trimmed, citing T1 180e483 and T2 a624f9d.
+- **C11 — root cause** (researcher ag-448789).
+  - ag-d20e1e's codex rollout lived in the local-era profile. Under docker, `CODEX_HOME` is the provider's private container state (`codex.py` ~65-100, ~402), where the rollout does not exist, so `codex exec resume` returned "no rollout found" and an empty session.
+  - `_find_conversation` (`runner.py` ~7971) then skipped the failed node, and the next consult started cold with no notice (~8423-8477).
+  - The fix is the surfacing, not a migration of the sessions.
+- **C12 — new, from reviewer e8565d (unacted).**
+  - `transcripts.py` ~381-392 hard-codes Claude's `message.usage` vocabulary in `_usage_of`.
+  - Provider-specific transcript keys belong in provider config (P0-R8).
+  - Small fix: tester, implementer, reviewer.
