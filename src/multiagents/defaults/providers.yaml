@@ -416,6 +416,10 @@ providers:
     transcript:
       dir: "~/.claude/projects/{slug}"
       glob: "*.jsonl"
+      # Context reading: dot-separated usage object path and token fields summed.
+      # Both are required; no declaration leaves context size unknown.
+      usage_path: "message.usage"
+      context_fields: [input_tokens, cache_read_input_tokens, cache_creation_input_tokens]
       # Strings this CLI's own error handler writes into the chat log when it
       # stops being able to work. Matching these is not classifying model
       # prose: they are hardcoded by the CLI, in a known position, and the only

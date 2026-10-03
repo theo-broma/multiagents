@@ -370,35 +370,54 @@ def analyse(window_hours: float = 24.0, root: Path | None = None,
 # One session's context size, for a launched role watching its own window
 # --------------------------------------------------------------------------
 
-# path -> (inode, mtime_ns, size, offset, check, reading). `offset` is where the
-# last complete line ended; `check` is the bytes just before it, so a file
-# rewritten in place to something longer is not mistaken for one that grew.
-_readings: dict[str, tuple[int, int, int, int, bytes, int | None]] = {}
+# (path, usage path, fields) -> (inode, mtime_ns, size, offset, check, reading).
+# `offset` is where the last complete line ended; `check` is the bytes just
+# before it, so a file rewritten in place to something longer is not mistaken
+# for one that grew.
+_readings: dict[tuple[str, tuple[str, ...], tuple[str, ...]],
+                tuple[int, int, int, int, bytes, int | None]] = {}
 _CHUNK = 1 << 16
 _CHECK = 64
 
 
-def _usage_of(line: bytes) -> int | None:
-    if b'"usage"' not in line:
-        return None                          # cheap reject before parsing
+def _usage_declaration(provider: Any) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """A complete extraction declaration, or None for unknown context size."""
+    block = getattr(provider, "transcript", None)
+    if not isinstance(block, dict):
+        return None
+    path = block.get("usage_path")
+    fields = block.get("context_fields")
+    if not isinstance(path, str) or not path:
+        return None
+    parts = tuple(path.split("."))
+    if not all(parts) or not isinstance(fields, list) or not fields:
+        return None
+    if not all(isinstance(name, str) and name for name in fields):
+        return None
+    return parts, tuple(fields)
+
+
+def _usage_of(line: bytes, path: tuple[str, ...], fields: tuple[str, ...]) -> int | None:
     try:
-        record = json.loads(line)
+        usage = json.loads(line)
     except ValueError:
         return None
-    message = record.get("message") if isinstance(record, dict) else None
-    usage = message.get("usage") if isinstance(message, dict) else None
+    for part in path:
+        if not isinstance(usage, dict):
+            return None
+        usage = usage.get(part)
     if not isinstance(usage, dict) or not usage:
         return None
     try:
-        return int(context_tokens(usage))
+        return int(sum(_figure(usage.get(name, 0)) for name in fields))
     except (TypeError, ValueError, OverflowError):
-        # `int(float("inf"))` raises OverflowError, not caught above; `Infinity`
-        # is valid to Python's json, and a raising read here is never cached,
-        # so every later tool call would re-read and raise again.
+        # Non-numeric and non-finite figures are unknown, never a raising read
+        # that would be retried on every later tool call.
         return None
 
 
-def _last_reading(handle, start: int, end: int) -> int | None:
+def _last_reading(handle, start: int, end: int,
+                  path: tuple[str, ...], fields: tuple[str, ...]) -> int | None:
     """The last line in [start, end) that carried usage, read from the end.
 
     Reads backward in fixed-size chunks. A block that carries no boundary is
@@ -419,16 +438,16 @@ def _last_reading(handle, start: int, end: int) -> int | None:
         open_line.append(parts[-1])
         if len(parts) == 1:
             continue                          # no boundary in this block yet
-        found = _usage_of(b"".join(reversed(open_line)))
+        found = _usage_of(b"".join(reversed(open_line)), path, fields)
         if found is not None:
             return found
         for piece in reversed(parts[1:-1]):
-            found = _usage_of(piece)
+            found = _usage_of(piece, path, fields)
             if found is not None:
                 return found
         open_line = [parts[0]]                # continues into the next block
     if open_line:
-        found = _usage_of(b"".join(reversed(open_line)))
+        found = _usage_of(b"".join(reversed(open_line)), path, fields)
         if found is not None:
             return found
     return None
@@ -472,13 +491,21 @@ def session_context(provider: Any, cwd: Path, session_id: str,
     Read where the executor keeps it, as `session_transcript` finds it
     (SP-R2): a docker agent's transcript is not in the host's own profile.
 
+    Both `transcript.usage_path` and `transcript.context_fields` must be
+    declared; a partial declaration leaves context size unknown. Readings and
+    append offsets are cached separately for each extraction declaration.
+
     Cheap to call on every tool call: an unchanged file is not opened, and one
     that grew has only its new tail read.
     """
+    declaration = _usage_declaration(provider)
+    if declaration is None:
+        return None
+    usage_path, fields = declaration
     path = session_transcript(provider, cwd, session_id, executor)
     if path is None:
         return None
-    key = str(path)
+    key = (str(path), usage_path, fields)
     try:
         st = path.stat()
     except OSError:
@@ -502,7 +529,8 @@ def session_context(provider: Any, cwd: Path, session_id: str,
                 handle.seek(max(start, end - 1))
                 if handle.read(1) != b"\n":
                     end = _line_start(handle, start, end)
-            found = _last_reading(handle, start, end) if end > start else None
+            found = (_last_reading(handle, start, end, usage_path, fields)
+                     if end > start else None)
             reading = found if found is not None else previous
             handle.seek(max(0, end - _CHECK))
             check = handle.read(end - max(0, end - _CHECK))
