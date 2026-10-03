@@ -8511,8 +8511,8 @@ def test_the_api_refuses_a_caller_without_the_token(tmp_path):
         code, body = get("/api/state", "right-token")
         assert code == 200 and "project" in json.loads(body)
 
-        # The page carries the token, so opening the URL is enough to use it.
-        code, page = get("/")
+        # The page carries the token, and (C20 MT-R1a) needs it to be served.
+        code, page = get("/", "right-token")
         assert code == 200 and "right-token" in page
     finally:
         httpd.shutdown()

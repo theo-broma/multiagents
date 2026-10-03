@@ -313,7 +313,7 @@ def pooled(make):
 
 def test_qd_r1_the_monitor_page_has_a_button_that_posts_a_form_into_a_new_tab(make):
     fx, *_ = one_provider(make)
-    page = fx.get("/", auth=False)
+    page = fx.get("/")
     assert page.status == 200
     forms = re.findall(r"<form\b[^>]*>", page.text, re.I)
     ours = [f for f in forms if re.search(r'target\s*=\s*["\']_blank["\']', f, re.I)]
@@ -323,7 +323,7 @@ def test_qd_r1_the_monitor_page_has_a_button_that_posts_a_form_into_a_new_tab(ma
 
 def test_qd_r1a_the_form_action_carries_no_token_and_the_token_goes_in_the_body(make):
     fx, *_ = one_provider(make)
-    page = fx.get("/", auth=False).text
+    page = fx.get("/").text
     form = [f for f in re.findall(r"<form\b[^>]*>", page, re.I)
             if re.search(r'target\s*=\s*["\']_blank["\']', f, re.I)][0]
     action = re.search(r'action\s*=\s*["\']([^"\']*)["\']', form, re.I)
@@ -1123,9 +1123,9 @@ def test_qd_r6_api_state_keeps_its_token_checks_and_shape(make):
 
 def test_qd_r6_the_main_page_and_its_routes_are_unchanged(make):
     fx, *_ = one_provider(make)
-    page = fx.get("/", auth=False)
+    page = fx.get("/")
     assert page.status == 200 and fx.token in page.text
-    assert fx.get("/", auth=False, host="local.evil.example").status == 403
+    assert fx.get("/", host="local.evil.example").status == 403
     assert fx.get("/api/nope").status == 404
     assert fx.get("/nope", auth=False).status == 404
     assert fx.get("/api/settings").status == 200
