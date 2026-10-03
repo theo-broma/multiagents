@@ -52,6 +52,13 @@ them. Review the tracked defaults; that is where a new provider starts from.
 - `specs/phase6-hardening.md` — H1–H13 and D2, in the order to work them.
 - `specs/limit-notices.md` — D1, the limit-hit notices the user asked for.
 
+## Phase 6 closing and Phase 7 (from 2026-10-03)
+
+- `specs/phase6-closing.md` — C1–C10, the last items of phase 6.
+- `specs/phase7-nodes-and-containers.md` — the seed for phase 7: plan nodes,
+  the scheduler script, and one container per run (PAC-R1..R8). To be
+  specified with the user before any code is written.
+
 ## What is NOT here, and where it lives instead
 
 - **Requirements and specs.** This project does not specify before it builds.
