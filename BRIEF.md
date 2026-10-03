@@ -21,7 +21,7 @@ SR, AB and DK. Since 2026-10-03 ~09:00 UTC the executor is
 `executor.kind: docker`. The dated log of all this is further down.
 
 **Now: the closing round.** It is in `context/specs/phase6-closing.md`
-(C1–C10):
+(C1–C11):
 - branch triage;
 - closing H5 with evidence;
 - reset times shown in UTC;
@@ -31,6 +31,8 @@ SR, AB and DK. Since 2026-10-03 ~09:00 UTC the executor is
 - the prompt run-file transport (the rest of H8);
 - a live compaction check (H10);
 - the config warnings, which are the user's decision with defaults;
+- an advisor session that could not be resumed and was replaced silently
+  (C11);
 - wt-main and a full suite.
 
 The user's standing rules apply:
