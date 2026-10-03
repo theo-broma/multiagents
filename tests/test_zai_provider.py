@@ -727,12 +727,17 @@ def test_za_r3_prints_a_single_json_object_and_is_repeatable(env, zai):
 
 
 # ===========================================================================
-# ZA-R4: usage shows both windows
+# ZA-R4: usage prints the credits, and only the credits
+#
+# C18 MQ-R2a: a usage action prints extras, never window bars. The monitor core
+# draws both windows (percent, bar, reset) from the budget reading, which
+# ZA-R3 holds; what survives here is the `used/limit credits` figure, which
+# exists only in this script's live fetch.
 # ===========================================================================
 
 def usage(env, server, **kw):
     cp = env.run("usage", origin=server.origin, **kw)
-    assert cp.returncode == 0, (cp.returncode, cp.stdout, cp.stderr)
+    assert cp.returncode in (0, 64), (cp.returncode, cp.stdout, cp.stderr)
     return cp
 
 
@@ -742,46 +747,30 @@ def _line(cp, needle):
     return hits[0]
 
 
-def test_za_r4_usage_shows_both_windows_with_percent_and_reset(env, zai):
-    env.zai_store()
-    cp = usage(env, zai((200, HIGH, {})))
-    five, week = _line(cp, " 5%"), _line(cp, "80%")
-    assert "2026-09-30" in five and "2026-10-06" in week, cp.stdout
-    assert five != week
-    assert_no_key(cp)
-
-
 def test_za_r4_usage_shows_credits_when_present(env, zai):
     env.zai_store()
     cp = usage(env, zai((200, HIGH, {})))
-    assert re.search(r"\b100\b.*\b2000\b", _line(cp, " 5%")), cp.stdout
-    assert re.search(r"\b8000\b.*\b10000\b", _line(cp, "80%")), cp.stdout
+    assert cp.returncode == 0, cp.stderr
+    assert "100/2000 credits" in _line(cp, "2000"), cp.stdout
+    assert "8000/10000 credits" in _line(cp, "10000"), cp.stdout
+    assert_no_key(cp)
 
 
-def test_za_r4_usage_follows_the_opencode_bar_format(env, zai):
+def test_za_r4_usage_prints_no_window_lines(env, zai):
     env.zai_store()
     cp = usage(env, zai((200, HIGH, {})))
-    assert "########.." in _line(cp, "80%")
-    cp = usage(env, zai())      # the live sample: 1% -> empty bar
-    # both windows are at 1%, so key each line on its reset date, not the percent
-    for reset in ("2026-09-30", "2026-10-06"):
-        line = _line(cp, reset)
-        assert ".........." in line and "1%" in line, cp.stdout
+    assert not re.search(r"[#.]{5,}|[\u2588\u2591]|\d\s*%", cp.stdout), cp.stdout
+    assert "2026-09-30" not in cp.stdout and "2026-10-06" not in cp.stdout, (
+        "reset times are drawn by the monitor core", cp.stdout)
+    assert "five_hour" not in cp.stdout and "weekly" not in cp.stdout, cp.stdout
 
 
-def test_za_r4_usage_without_credit_fields_still_shows_the_window(env, zai):
+def test_za_r4_usage_with_one_window_shows_only_that_ones_credits(env, zai):
     env.zai_store()
-    body = envelope([limit(3, 5, 42, FIVE_MS), limit(6, 1, 7, WEEK_MS)])
+    body = envelope([limit(6, 1, 33, WEEK_MS, usage=10000, current=8000)])
     cp = usage(env, zai((200, body, {})))
-    assert "42%" in cp.stdout and "7%" in cp.stdout
-    assert "None" not in cp.stdout and "null" not in cp.stdout.lower()
-    assert "Traceback" not in cp.stderr
-
-
-def test_za_r4_usage_with_one_window_shows_only_that_one(env, zai):
-    env.zai_store()
-    cp = usage(env, zai((200, envelope([limit(6, 1, 33, WEEK_MS)]), {})))
-    assert "33%" in cp.stdout and len(cp.stdout.strip().splitlines()) == 1, cp.stdout
+    assert cp.stdout.strip().splitlines() == [cp.stdout.strip()], cp.stdout
+    assert "8000/10000 credits" in cp.stdout and "33" not in cp.stdout, cp.stdout
 
 
 @pytest.mark.parametrize("reply", [
@@ -790,22 +779,22 @@ def test_za_r4_usage_with_one_window_shows_only_that_one(env, zai):
     (200, envelope([]), {}),
     (302, "", {"Location": "/redirected"}),
 ])
-def test_za_r4_usage_when_unknown_says_so_and_exits_0(env, zai, reply):
+def test_za_r4_usage_when_unknown_prints_no_extras_and_leaks_nothing(env, zai, reply):
     env.zai_store()
     s = zai(reply)
     cp = usage(env, s)
     assert s.quota_hits, "the request was never made"
-    assert cp.stdout.strip(), "must say why there is nothing to show"
+    assert cp.returncode in (0, 64)      # no extras; the core shows the reading's note
     assert "Traceback" not in cp.stdout + cp.stderr
     assert not any(r["path"].startswith("/redirected") for r in s.requests)
     assert_no_key(cp)
 
 
-def test_za_r4_usage_without_a_key_says_so_and_sends_nothing(env, zai):
+def test_za_r4_usage_without_a_key_sends_nothing(env, zai):
     env.store({"opencode-go": {"key": GO_KEY}})
     s = zai()
     cp = usage(env, s)
-    assert "key" in cp.stdout.lower() and s.requests == []
+    assert s.requests == []
     assert_no_key(cp, GO_KEY)
 
 
@@ -859,14 +848,15 @@ def test_za_r5_budget_without_plan_and_no_store_is_unchanged(env):
         "known": False, "note": "no opencode auth store; run `opencode auth login`"}
 
 
-def test_za_r5_usage_without_plan_prints_the_existing_rendering(env, zai):
+def test_za_r5_usage_without_plan_prints_no_window_lines_and_never_contacts_zai(env, zai):
+    """C18 MQ-R2a: the opencode rendering is extras-only too. A reading with a
+    window and nothing else to say is "no extras": exit 64, quietly."""
     s = zai()
     b = {"known": True, "headroom": 0.5, "windows": {
         "rolling": {"percent": 50.0, "resets_at": "2026-10-01T00:00:00+00:00"}}}
     cp = env.run("usage", plan=None, origin=s.origin,
                  extra={"MULTIAGENTS_BUDGET": json.dumps(b)})
-    assert cp.returncode == 0
-    assert cp.stdout == "rolling  #####.....  50%  2026-10-01T00:00:00+00:00\n"
+    assert (cp.returncode, cp.stdout) == (64, "")
     assert s.requests == []
 
 

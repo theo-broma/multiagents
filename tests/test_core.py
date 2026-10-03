@@ -5073,15 +5073,21 @@ def _agy_usage_lines(budget, tmp_path=None):
     return out.returncode, out.stdout.strip().splitlines()
 
 
-def _agy_window(headroom, resets_at, counted, models="Some, Models"):
+def _agy_window(headroom, resets_at, counted):
     return {"headroom": headroom, "percent": round((1 - headroom) * 100, 1),
-            "resets_at": resets_at, "counted": counted, "models": models}
+            "resets_at": resets_at, "counted": counted}
 
 
-def test_the_agy_usage_view_orders_pools_and_windows_for_itself(tmp_path):
-    """The monitor hands the budget over with sort_keys, so insertion order is
-    not the script's to rely on — relying on it put the 5-hour row above the
-    weekly one only when read through the monitor and not standalone."""
+# C18 MQ-R2a: the window bars, their order, the "not counted" mark and the
+# countdown moved out of agy.sh into the monitor core. The tests that pinned
+# them here (pool/window ordering, the four-line limit, bar direction, "not
+# counted", the countdown from now) are retired; the bar direction and the
+# uncounted mark are pinned at the panel model in test_c18_monitor_quota_panel.py.
+
+
+def test_the_agy_usage_action_prints_no_window_lines(tmp_path):
+    """agy.sh gives extras only. Four windows and nothing else to say is "no
+    extras": exit 64, quietly, and not a bar, a percentage or a window name."""
     budget = {"known": True, "windows": {
         "3p-5h": _agy_window(0.0, None, False),
         "3p-weekly": _agy_window(0.33, None, False),
@@ -5089,78 +5095,18 @@ def test_the_agy_usage_view_orders_pools_and_windows_for_itself(tmp_path):
         "gemini-weekly": _agy_window(0.80, None, True),
     }}
     code, lines = _agy_usage_lines(budget)
-    assert code == 0
-    assert [l.split()[0] + " " + l.split()[1] for l in lines[:4]] == [
-        "gemini weekly", "gemini 5h", "3p weekly", "3p 5h"
-    ], "counted pool first, longest window first"
-
-
-def test_the_agy_usage_view_keeps_the_numbers_in_its_first_four_lines(tmp_path):
-    """The curses monitor shows four lines per provider. The group legend is a
-    bonus for the web view, so it must never displace a percentage."""
-    budget = {"known": True, "windows": {
-        "gemini-weekly": _agy_window(0.80, None, True, "Gemini Flash"),
-        "gemini-5h": _agy_window(0.92, None, True, "Gemini Flash"),
-        "3p-weekly": _agy_window(0.33, None, False, "Claude Opus"),
-        "3p-5h": _agy_window(0.0, None, False, "Claude Opus"),
-    }}
-    code, lines = _agy_usage_lines(budget)
-    assert code == 0
-    assert all("% used" in line for line in lines[:4]), (
-        "every one of the four lines the TUI shows must carry its own number")
-    assert any("=" in line for line in lines[4:]), "legend follows, not leads"
-
-
-def test_the_agy_usage_bar_fills_as_the_quota_is_spent(tmp_path):
-    """Same direction as the header above it and every other provider. Counting
-    remaining here made a full bar mean untouched on one row and exhausted on
-    the next, which is the one thing a bar has to get right."""
-    budget = {"known": True, "windows": {
-        "gemini-weekly": _agy_window(1.0, None, True),   # untouched
-        "gemini-5h": _agy_window(0.0, None, True),       # exhausted
-    }}
-    code, lines = _agy_usage_lines(budget)
-    untouched = next(l for l in lines if l.startswith("gemini weekly"))
-    spent = next(l for l in lines if l.startswith("gemini 5h"))
-    assert "0% used" in untouched and "\u2588" not in untouched, (
-        "an untouched bucket is an empty bar")
-    assert "100% used" in spent and "\u2591" not in spent, (
-        "an exhausted bucket is a full bar")
-
-
-def test_the_agy_usage_view_marks_the_pool_it_does_not_spend_against(tmp_path):
-    budget = {"known": True, "windows": {
-        "gemini-weekly": _agy_window(0.80, None, True),
-        "3p-5h": _agy_window(0.0, None, False),
-    }}
-    code, lines = _agy_usage_lines(budget)
-    gemini = next(l for l in lines if l.startswith("gemini"))
-    third = next(l for l in lines if l.startswith("3p"))
-    assert "not counted" not in gemini
-    assert "not counted" in third, "an empty bucket must not read as agy's own"
-
-
-def test_the_agy_usage_view_counts_down_from_now_not_from_the_probe(tmp_path):
-    """A five-hour window moves while the monitor looks at it, so the remaining
-    time is computed at render rather than baked in when the quota was read."""
-    import datetime
-    soon = (datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(hours=2, minutes=30))
-    budget = {"known": True, "windows": {
-        "gemini-5h": _agy_window(0.5, soon.isoformat().replace("+00:00", "Z"), True),
-    }}
-    code, lines = _agy_usage_lines(budget)
-    assert code == 0
-    assert "2h29m" in lines[0] or "2h30m" in lines[0], lines
+    assert code == 64, (code, lines)
+    assert lines == []
 
 
 def test_the_agy_usage_view_defers_when_it_has_nothing_to_format(tmp_path):
-    """Exit 64 is the contract's "not implemented", and it is what makes the
-    monitor fall back to the generic rendering instead of showing a blank."""
+    """Exit 64 means "no extras" (C18 MQ-R2a) and is quiet: the monitor shows
+    the windows from the reading and nothing under them."""
     for budget in ({}, {"known": False}, {"known": False, "windows": {}}):
         code, lines = _agy_usage_lines(budget)
         assert code == 64, budget
         assert lines == []
+
 
 
 @pytest.fixture
@@ -5250,27 +5196,11 @@ def test_a_usage_script_never_invents_a_local_time_it_did_not_compute(script):
         env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
              "MULTIAGENTS_BUDGET": json.dumps(budget)},
     )
-    assert out.returncode == 0, out.stderr
+    assert out.returncode in (0, 64), out.stderr     # 64: no extras (C18 MQ-R2a)
     printed = out.stdout
-    assert stamp[:16] not in printed or "+00:00" in printed, (
-        "a timestamp shown without its offset reads as local and is not")
-
-
-def test_a_usage_script_prefers_the_label_when_it_is_given_one():
-    import json
-    import subprocess
-    path = (Path(__file__).resolve().parents[1] / "src" / "multiagents"
-            / "defaults" / "providers" / "claude.sh")
-    budget = {"known": True, "used_percent": 32,
-              "resets_at": "2026-09-15T00:00:00.965787+00:00",
-              "resets_label": "Sep 15 02:00 CEST \u00b7 in 33m"}
-    out = subprocess.run(
-        ["sh", str(path), "usage"], capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
-             "MULTIAGENTS_BUDGET": json.dumps(budget)},
-    )
-    assert "Sep 15 02:00 CEST" in out.stdout
-    assert "2026-09-15T00:00" not in out.stdout, "the raw stamp is the fallback only"
+    assert stamp[:16] not in printed, (
+        "window reset times are drawn by the monitor core (C18 MQ-R2); a usage "
+        "script that prints one invents a local time it did not compute")
 
 
 # --------------------------------------------------------------------------
@@ -8336,41 +8266,31 @@ def test_totals_answer_the_three_questions_separately(tmp_path):
     assert len(totals["by_day"]) == 1
 
 
-def test_a_provider_may_render_its_own_usage(tmp_path, monkeypatch):
-    """Quotas have genuinely different shapes — two rolling windows and a credit
-    pool here, three windows there, nothing at all somewhere else. Flattening
-    them into one bar invents precision for two of the three."""
-    from multiagents.monitor import snapshot as snap
-
-    import multiagents.scripts as scripts_mod
+@pytest.mark.real_providers
+def test_a_provider_usage_action_is_handed_the_reading_and_does_not_refetch(
+        tmp_path, monkeypatch):
+    """C18 MQ-R2a: a provider's `usage` action adds extras below the windows the
+    core draws. It is handed the structured reading to format, so it never goes
+    back to the provider's API for the numbers."""
+    from test_c18_monitor_quota_panel import Panel, reading, uniq
 
     seen = {}
 
     def fake_action(name, provider, executor, action, *a, **k):
         seen["action"] = action
         seen["budget"] = json.loads(k["extra_env"]["MULTIAGENTS_BUDGET"])
-        return 0, "weekly   86%\nrolling   0%\n", ""
+        return 0, "spend note: 12 credits\n", ""
 
-    monkeypatch.setattr(scripts_mod, "run_action", fake_action)
-
-    lines, source = snap._usage_lines("opencode", None, None,
-                                      {"known": True, "used_percent": 86.0},
-                                      _paths(tmp_path))
-    assert source == "script" and lines == ["weekly   86%", "rolling   0%"]
+    name = uniq("own")
+    windows = {"weekly": {"percent": 86.0}, "rolling": {"percent": 0.0}}
+    p = Panel(tmp_path, monkeypatch,
+              {name: reading(name, windows, headroom=0.14)}, run_action=fake_action)
+    row = p.settle(name, lambda r: "spend note: 12 credits" in r["lines"])
+    assert "spend note: 12 credits" in row["lines"], row["lines"]
     assert seen["action"] == "usage"
     assert seen["budget"]["used_percent"] == 86.0, "it formats, it does not re-fetch"
+    assert set(seen["budget"]["windows"]) == {"weekly", "rolling"}
 
-
-def test_a_provider_that_says_nothing_gets_the_generic_view(tmp_path, monkeypatch):
-    from multiagents.monitor import snapshot as snap
-    import multiagents.scripts as scripts_mod
-
-    monkeypatch.setattr(scripts_mod, "run_action",
-                        lambda *a, **k: (64, "", ""))       # unimplemented
-    lines, source = snap._usage_lines("agy", None, None,
-                                      {"known": False, "note": "no quota surface"},
-                                      _paths(tmp_path))
-    assert source == "built-in" and lines == ["no quota surface"]
 
 
 def test_a_script_that_reports_headroom_but_no_severity_still_warns():
@@ -8733,27 +8653,32 @@ def test_a_long_setting_gets_a_box_you_can_drag(tmp_path):
     assert "textarea.grow { resize: both;" in page
 
 
+@pytest.mark.real_providers
 def test_the_poll_does_not_fork_a_subprocess_per_tick(tmp_path, monkeypatch):
     """The snapshot is polled every two seconds by both front ends. A usage
-    script per provider per tick is an idle monitor with a fan."""
-    from multiagents.monitor import snapshot as snap
-    import multiagents.scripts as scripts_mod
+    script per provider per tick is an idle monitor with a fan. C18 MQ-R4a:
+    the extras come from a cache or a background fetch, so a burst of polls on
+    an unchanged reading runs the usage action once."""
+    from test_c18_monitor_quota_panel import Panel, reading, uniq
 
     calls = []
-    monkeypatch.setattr(scripts_mod, "run_action",
-                        lambda *a, **k: (calls.append(1), (0, "50%\n", ""))[1])
-    monkeypatch.setattr(snap, "_LINE_CACHE", {})
-    paths = _paths(tmp_path)
-    budget = {"known": True, "used_percent": 50.0}
+
+    def action(*a, **k):
+        calls.append(1)
+        return 0, "credits 1.00 of 85.00\n", ""
+
+    name = uniq("tick")
+    windows = {"weekly": {"percent": 50.0}}
+    p = Panel(tmp_path, monkeypatch, {name: reading(name, windows)},
+              run_action=action)
+    row = p.settle(name, lambda r: any("credits 1.00" in l for l in r["lines"]))
+    assert any("credits 1.00 of 85.00" in l for l in row["lines"]), row["lines"]
 
     for _ in range(5):
-        lines, source = snap._usage_lines("p", None, None, budget, paths)
-    assert calls == [1], "four of the five ticks were served from the cache"
-    assert source == "script" and lines == ["50%"]
-
-    # A changed budget is a changed answer, so that one does ask again.
-    snap._usage_lines("p", None, None, {"known": True, "used_percent": 91.0}, paths)
-    assert len(calls) == 2
+        p.view(with_scripts=True)
+        time.sleep(0.05)
+    time.sleep(0.3)             # a background refetch would have landed by now
+    assert calls == [1], f"{len(calls)} usage actions for one unchanged reading"
 
 
 def test_the_page_is_not_served_to_a_rebound_hostname(tmp_path):

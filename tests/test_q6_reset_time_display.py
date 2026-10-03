@@ -22,14 +22,10 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
 
 from multiagents.budget import reset_display
-from multiagents.monitor import snapshot
-
-PATHS = SimpleNamespace(config=None)
 
 
 @pytest.fixture
@@ -93,46 +89,51 @@ def test_q6_naive_stamp_is_not_passed_off_as_local(tz):
 
 
 # ---------------------------------------------------------------------------
-# the monitor display layer: script usage lines go through reset_display
+# the monitor display layer: the extras a usage script prints go through
+# reset_display. C18 MQ-R2a: the scripts no longer print window lines (the core
+# draws those, with the Q6 label, and test_c18_monitor_quota_panel.py pins
+# them), but an extra that still carries an ISO stamp is rewritten the same way.
 # ---------------------------------------------------------------------------
 
-def _script_usage(monkeypatch, out: str):
-    from multiagents import scripts
+def _extras(monkeypatch, tmp_path, out: str) -> list[str]:
+    """The lines under the windows for a provider whose usage script prints out."""
+    from test_c18_monitor_quota_panel import Panel, reading, uniq
 
-    def fake_run_action(name, provider, executor, action, *args, **kwargs):
-        assert action == "usage"
-        return 0, out, ""
+    name = uniq("q6")
+    p = Panel(tmp_path, monkeypatch, {name: reading(name, None, known=False,
+                                                    headroom=None)},
+              run_action=lambda *a, **k: (0, out, ""))
+    first = out.split()[0]
+    row = p.settle(name, lambda r: any(first in l or "resets in" in l
+                                       or "reset due" in l for l in r["lines"]))
+    return row["lines"]
 
-    monkeypatch.setattr(scripts, "run_action", fake_run_action)
-    monkeypatch.setattr(snapshot, "_LINE_CACHE", {})
-    return snapshot._usage_lines("q6-fake", object(), object(), {}, PATHS)
 
-
-def test_q6_usage_lines_rewrite_iso_tokens(monkeypatch, tz):
+@pytest.mark.real_providers
+def test_q6_extras_rewrite_iso_tokens(monkeypatch, tmp_path, tz):
     tz("Europe/Paris")
     soon = (datetime.now(timezone.utc) + timedelta(hours=1, minutes=5)
             ).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    raw = f"five_hour ########## 100%  {soon}  2013/2000 credits"
-    lines, source = _script_usage(monkeypatch, raw + "\n")
-    assert source == "script"
-    assert len(lines) == 1
-    shown = lines[0]
-    assert soon not in shown, shown              # no raw UTC wall clock left
-    assert "resets in 1h" in shown, shown        # countdown leads
+    lines = _extras(monkeypatch, tmp_path, f"quota ok until {soon}  2013/2000 credits\n")
+    shown = [l for l in lines if "credits" in l]
+    assert len(shown) == 1, lines
+    assert soon not in shown[0], shown[0]           # no raw UTC wall clock left
+    assert "resets in 1h" in shown[0], shown[0]     # countdown leads
     local = datetime.fromisoformat(soon).astimezone().strftime("%H:%M")
-    assert f"({local} " in shown, shown          # viewer's clock, with zone
-    assert "2013/2000 credits" in shown, shown   # everything else survives
+    assert f"({local} " in shown[0], shown[0]       # viewer's clock, with zone
+    assert "2013/2000 credits" in shown[0], shown[0]  # everything else survives
 
 
-def test_q6_usage_lines_with_no_timestamp_pass_through_unchanged(monkeypatch):
-    raw = "weekly   ####......  35%  plenty of window left"
-    lines, source = _script_usage(monkeypatch, raw + "\n")
-    assert (lines, source) == ([raw], "script")
+@pytest.mark.real_providers
+def test_q6_extras_with_no_timestamp_pass_through_unchanged(monkeypatch, tmp_path):
+    raw = "credits 0.00 of 85.00 \u2014 available"
+    assert raw in _extras(monkeypatch, tmp_path, raw + "\n")
 
 
-def test_q6_usage_line_shows_a_past_reset_as_due(monkeypatch, tz):
+@pytest.mark.real_providers
+def test_q6_extras_show_a_past_reset_as_due(monkeypatch, tmp_path, tz):
     tz("Europe/Paris")
     past = "2026-09-30T10:57:33+00:00"
-    lines, _ = _script_usage(
-        monkeypatch, f"five_hour ########## 100%  {past}\n")
-    assert "reset due" in lines[0], lines
+    lines = _extras(monkeypatch, tmp_path, f"credits back at {past}\n")
+    assert any("reset due" in l for l in lines), lines
+    assert not any(past in l for l in lines), lines
