@@ -732,3 +732,13 @@ before it is called done.
 passes `--model` on resume, but session preservation across a model change is
 unverified. M4's tester verifies it against the real CLI once, or the default
 becomes false.
+
+**NC-R71 — host-side seams (M1).** So that M1 is testable before launching
+exists, the host-only module `multiagents.scheduler` exposes
+`issue_run_capability(project_root, run_id: str, node_id: str,
+permissions: set[str]) -> str` (returns the token; M2's launch path uses the
+same function) and `revoke_run_capability(project_root, run_id) -> None`. They
+are never reachable over the RPC. The scheduler process is started in tests by
+`multiagents scheduler start` (or `python -m multiagents scheduler start`)
+with `MULTIAGENTS_STATE_DIR` pointing at a temp state root; the root token is
+read by host code through `multiagents.scheduler.root_capability(project_root)`.
