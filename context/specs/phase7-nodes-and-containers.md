@@ -150,3 +150,9 @@ one execution of it. Today's tree "nodes" are runs.
 - **PAC-R8 — cleanup.** Discard removes the container and the worktree. An
   orphaned container from a crashed host is found and reported. It is never
   deleted blindly.
+
+## Inputs from phase 6 (orchestrator, 2026-10-03)
+
+**C15 residuals.** Advisor ag-b08808 verified them on C15's branch; they predate C15. The H1 isolation decision accepts both until one container per run exists.
+- **Signals follow agent-writable pid files.** `kill_detached` and the liveness verdict trust `wrapper.pid` and `container.pid`, which the agent can write (`executor/docker.py` ~2476 and `_KILL_SCRIPT` ~154/160). A forged pid can make `stop_agent` signal another same-uid process, and a long-lived forged pid makes a verdict permanently "alive". Phase 7 must authorize signals and verdicts from a trusted, host-side launch anchor for both recorded pids.
+- **Escaping descendants.** A descendant that calls `setsid()` leaves the wrapper's session and is not tracked. A per-run pid namespace or cgroup contains it.

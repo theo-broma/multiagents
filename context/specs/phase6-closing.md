@@ -187,3 +187,12 @@ never submitted.
   - Small fix: tester, implementer, reviewer.
 - **C13 — new (the user, 2026-10-03).** The initializer writes plans to `context/plans/` and never writes `BRIEF.md`; the orchestrator imports them. The user gets a notes directory, `context/notes/`, that the initializer reads. The contract is `context/specs/c13-plans-and-notes.md` (PN-R1..R7). Pipeline: tester, implementer, reviewer.
 - **C15 — new (ticket bug-d1731b, blocking).** Under load the docker liveness probe gives unknown, and a steer hold survives `stop_agent`. The contract is `context/specs/c15-docker-liveness-steer-hold.md` (LV-R1..R5). It is implemented before C3.
+- **C16 — new (2026-10-03, found by the C3 live smoke runs).**
+  - **What happened.** The user's GLOBAL `~/.config/multiagents/providers.yaml` holds stale `spawn.args` for agy, claude, codex and opencode, which carry `{prompt}` in argv. Lists replace wholesale, so after C3 the shipped `prompt_transport: stdin/file` combined with the stale args:
+    - agy got an empty prompt;
+    - codex got `--prompt ''`, which broke every codex launch, and the advisor's session was lost;
+    - opencode would have been broken the same way;
+    - claude worked only by accident.
+  - **Hotfix.** The project `providers.yaml` restores the shipped args for all four, with a comment. The user should drop the `args` keys from the global file.
+  - **Product fix.** Config load, or launch admission, must refuse a provider whose prompt transport is `stdin`/`file` while its resolved args still contain `{prompt}`, or whose `file` transport has no `{prompt_file}`. The error names the layer (file:line) that set the args. `doctor` reports it as a problem.
+  - **Pipeline:** contract, tester, implementer, reviewer.
