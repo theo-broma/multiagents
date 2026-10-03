@@ -74,6 +74,14 @@ META = "$(touch /tmp/pf-pwn) `id` ; | & > < 'q' \"dq\" \\ * ? ! #x {prompt} {pro
 UNIT = "plain ascii é à ü ñ 日本語 😀🎉 " + META
 
 
+CODEX_SESSION_ID = "0199c5a4-7e3b-7c10-8a52-3f6d2b9e41aa"
+
+
+def session_id_for(kind: str) -> str:
+    """The session id the fake native of `kind` emits."""
+    return CODEX_SESSION_ID if kind == "codex" else "S-" + kind
+
+
 def big_text(minimum_bytes: int = 200 * 1024) -> str:
     out, n = [], 0
     while n < minimum_bytes:
@@ -125,6 +133,8 @@ rec = {{"argv": argv, "stdin": base64.b64encode(stdin).decode(), "files": files,
 with open(os.path.join(HERE, "calls.jsonl"), "a") as fh:
     fh.write(json.dumps(rec) + "\n")
 sid = "S-" + KIND
+if KIND == "codex":
+    sid = {codex_sid!r}   # the adapter accepts only UUID session ids
 def emit(o):
     sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
 if behaviour.get("hold_first") and n == 0 and paths:
@@ -196,7 +206,7 @@ class Native:
         bindir.mkdir(parents=True, exist_ok=True)
         self.path = bindir / "native"
         self.dir = bindir
-        self.path.write_text(FAKE_NATIVE.format(python=sys.executable, kind=kind))
+        self.path.write_text(FAKE_NATIVE.format(python=sys.executable, kind=kind, codex_sid=CODEX_SESSION_ID))
         self.path.chmod(self.path.stat().st_mode | stat.S_IEXEC)
         self.behave()
 

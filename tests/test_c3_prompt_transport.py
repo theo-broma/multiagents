@@ -171,7 +171,7 @@ def test_pf_r2_resume_over_128kib_reaches_the_native_byte_for_byte(
     calls = rig.natives[provider].calls()
     assert len(calls) == 2, f"{len(calls)} native invocations; steer result {steered}"
     # it is a RESUME of the first turn's session, not a fresh start
-    assert any("S-" + provider in a for a in calls[1]["argv"]), calls[1]["argv"][:12]
+    assert any(pf.session_id_for(provider) in a for a in calls[1]["argv"]), calls[1]["argv"][:12]
     assert len(message.encode()) > 128 * KIB
     # verbatim: the message's own leading whitespace and trailing newlines
     assert_on_stdin(calls[1], provider, message.encode())
@@ -189,7 +189,7 @@ def test_pf_r2_consult_resume_reaches_the_native_whole(tmp_path, monkeypatch, pr
     assert not second.get("error"), second
     calls = rig.natives[provider].calls()
     assert len(calls) == 2, len(calls)
-    assert any("S-" + provider in a for a in calls[1]["argv"]), "not a resume"
+    assert any(pf.session_id_for(provider) in a for a in calls[1]["argv"]), "not a resume"
     cands = pf.delivered_by_stdin(calls[1], provider)
     assert any(message.encode() in c for c in cands), (
         "the consult text did not arrive whole on stdin "
@@ -323,13 +323,13 @@ def test_pf_r6_session_id_prompt_md_and_resume_still_work(tmp_path, monkeypatch,
     rig = pf.Rig(tmp_path, monkeypatch, names=(provider,))
     agent_id = _ok(rig, rig.start(provider, "small task"))
     node = rig.node(agent_id)
-    assert node.session_id == "S-" + provider              # stream parsing
+    assert node.session_id == pf.session_id_for(provider)              # stream parsing
     md = rig.prompt_md(agent_id).decode()
     assert md.endswith("## Task\n\nsmall task\n")           # diagnostics intact
     steered = rig.steer(agent_id, "next step")
     assert_steered(steered)
     assert rig.node(agent_id).status == "done"
-    assert rig.node(agent_id).session_id == "S-" + provider
+    assert rig.node(agent_id).session_id == pf.session_id_for(provider)
     assert len(rig.natives[provider].calls()) == 2
 
 
