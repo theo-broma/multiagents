@@ -4050,3 +4050,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - doctor "cli dependencies … binary not found in the container" is a false positive: the probe runs the bare binary name on the container's system PATH, while CLIs are mounted at host paths (`manifest.py` ~998).
   - DK-R3a deviation: `auth_status` for pinned claude-b lists every account (`b`, `default`) instead of only `b`.
   - agy-b not yet exercised by any roster agent; `variant` warnings on advisor/dev-advisor/adversary; bug-reporter model `kimi-k2.6` no longer listed.
+- 2026-10-03 closing round started. Contract C5/C6/C7: `context/specs/phase6-closing-fixes.md` (c973968, advisor-revised). In flight: researchers ag-3fb52a (C2 triage), ag-97ccd0 (C4), ag-ab3337 (C8), ag-448789 (C11 root cause); testers ag-c62aa9 (C5), ag-cbc146 (C6), ag-1bdc17 (C7). Next: merge testers → one implementer each (codex) → reviewer; C11 contract after its researcher; then C3, C1, C10.
