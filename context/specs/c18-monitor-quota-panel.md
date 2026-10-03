@@ -56,3 +56,38 @@ Under the docker executor, that gives three results:
 
 - Changing how budgets are read (`budget.read_all`).
 - A history or graph of usage.
+
+## Revision after the advisor's check (2026-10-03, ag-aed397, before tests)
+
+These override any earlier wording they contradict. The decisions are the orchestrator's.
+
+**MQ-R1a: reading the windows.**
+- The window name is its key in `Budget.to_dict()` windows.
+- The percent is `percent`, else the legacy `used_percent`, else `100 × (1 − headroom)`. If none of these is present, the line shows "—" with no bar.
+- A missing `counted` means counted. `account`, when present, is shown with the window.
+- **The constraining window** is the counted window with the largest used percent, the same rule as `budget._window_used()` (`budget.py` ~292/1296/1359). Ties go to the earliest reset, then to the name. Windows with no percent are never constraining.
+- **No windows.** A known reading without windows but with a top-level `used_percent` shows one line named `overall`.
+- **No truncation.** The TUI's four-line limit (`tui.py` ~161) goes, so every window line is shown.
+- **`with_scripts=False`.** The window lines are still produced, because they come from the reading, not from scripts.
+
+**MQ-R2a: the extras-only script contract.**
+- A provider's `usage` action now prints extras only: credits, account, notes, spend. It never prints window bars. The shipped `claude.sh`, `agy.sh`, `opencode.sh` (including opencode-zai's `used/limit credits`, which exists only there) and any other shipped usage formatters are converted to this.
+- `defaults/providers/README.md` documents the contract.
+- **Exit codes.** Exit 64 means "no extras", and is quiet. Any other non-zero exit becomes one short diagnostic line under the windows.
+- **Credits survive.** ZAI's `9963/10000 credits` and claude's `credits 0.00 of 85.00` must still appear, as extras.
+
+**MQ-R3a: installation is judged by the C5 probe.**
+- Under docker, the status comes from `manifest.probe(name, paths, context="docker")` (`manifest.py` ~1106-1129, ~1194). That probe never starts a container.
+- The panel distinguishes these states:
+  - `installed`;
+  - `not installed` (the probe ran and the binary is absent);
+  - `container not running`;
+  - `probe failed` or timed out;
+  - `unverified (no manifest)`.
+- Only a real absence is shown as "not installed".
+
+**MQ-R4a: usage actions stay on the host, and the windows never wait.**
+- `usage` actions keep running on the host (`scripts.run_action`). They are not moved into the container, because they may read host backing and vault paths.
+- A binary-dependent extra whose binary is not on the host exits 64 and is skipped quietly.
+- **Nothing blocks the window lines.** A cold refresh must not hold the window lines behind usage actions, which today run serially with a 10 s timeout and a 30 s cache (`snapshot.py` ~76-110, ~162). Extras come from the cache, or are fetched in the background, and may lag by one refresh.
+- **Verified by:** a usage action that sleeps past its timeout does not delay the window lines of any provider in that refresh.
