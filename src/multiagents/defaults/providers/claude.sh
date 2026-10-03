@@ -174,8 +174,7 @@ reserved = json.loads(sys.argv[3])
 labels = sys.argv[4].splitlines()
 if not labels and not pin:
     labels = ['default']
-if pin and pin not in labels:
-    labels.append(pin)
+labels = [pin] if pin else [label for label in labels if label not in reserved]
 statuses, usable = {}, []
 for label in labels:
     path = root if label == 'default' else root / 'accounts' / label
@@ -195,7 +194,7 @@ for label in labels:
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     statuses[label] = status
-    if status == 'ok' and (label == pin if pin else label not in reserved):
+    if status == 'ok':
         usable.append(label)
 print('accounts: ' + json.dumps(statuses, sort_keys=True) +
       ('; authenticated' if usable else '; no usable account; run `multiagents auth login ' +

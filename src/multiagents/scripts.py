@@ -166,7 +166,8 @@ def build_env(provider_name: str, provider: Any, executor: Any,
         # Checks and login select the same signed-routing account as launches.
         # Pins from config outrank ambient, provider and action variables.
         env.pop("MULTIAGENTS_CONTAINER_ACCOUNT", None)
-        pin = getattr(provider, "container_account", "")
+        pin = (getattr(provider, "container_account", "") or
+               getattr(getattr(provider, "auth_owner", None), "container_account", ""))
         if pin:
             env["MULTIAGENTS_CONTAINER_ACCOUNT"] = pin
         pins = getattr(executor, "account_pins", lambda: {})()

@@ -87,21 +87,27 @@ def check(provider_name: str, provider: Any, executor: Any,
 
     PS-R2/R3: a provider that borrows its credentials is checked through the
     OWNER's script and environment — that is where its login actually lives.
-    The fix still names this provider unless the load attached the owner
-    (`auth_from`), in which case it names the owner: logging in as the
-    dependent would fix nothing.
+    The fix names the owner for borrowed credentials, including an inherited
+    container pin. A dependent with its own container pin names itself, so
+    its login action selects that account rather than the owner's pin.
     """
     owner_name = str(getattr(provider, "auth_from", "") or "")
     owner = getattr(provider, "auth_owner", None)
+    own_pin = getattr(provider, "container_account", "")
     if owner is not None and owner_name:
-        pin = getattr(provider, "container_account", "")
+        pin = own_pin
         if pin and getattr(executor, "kind", "") == "docker" and profile != HOST:
             import copy
             provider = copy.copy(owner)
             provider.container_account = pin
         else:
             provider = owner
-    script = _scripts.resolve(provider_name, provider, config_dir, project_config)
+    # The script's suggested login and the structured fix name the same
+    # owner, unless this instance selects its own container account.
+    pinned = (own_pin and
+              getattr(executor, "kind", "") == "docker" and profile != HOST)
+    login_name = provider_name if pinned else owner_name or provider_name
+    script = _scripts.resolve(login_name, provider, config_dir, project_config)
     if script is None:
         return AuthState(provider_name, "no_script",
                          detail=f"no script for provider {provider_name!r}",
@@ -109,7 +115,7 @@ def check(provider_name: str, provider: Any, executor: Any,
                          profile=profile)
 
     code, out, err = _scripts.run_action(
-        provider_name, provider, executor, "check", config_dir, project_config,
+        login_name, provider, executor, "check", config_dir, project_config,
         timeout=CHECK_TIMEOUT,
         extra_env={"MULTIAGENTS_PROFILE": profile} if profile else None,
     )
@@ -118,9 +124,6 @@ def check(provider_name: str, provider: Any, executor: Any,
     # The host profile is not repaired by the same command: under docker
     # `auth login <p>` signs into the CONTAINER, which is the whole confusion
     # this is here to end, so the fix has to name the other one.
-    pinned = (getattr(provider, "container_account", "") and
-              getattr(executor, "kind", "") == "docker" and profile != HOST)
-    login_name = provider_name if pinned else owner_name or provider_name
     fix = (f"multiagents auth login {login_name}"
            + (" --host" if profile == HOST else ""))
     if code == AUTHENTICATED:
