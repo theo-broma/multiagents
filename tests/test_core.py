@@ -9846,32 +9846,47 @@ def test_the_monitor_names_every_driver(tmp_path):
     assert any("initializer limited" in a["text"] for a in found)
 
 
-def test_two_drivers_do_not_run_at_once(tmp_path, monkeypatch):
-    """An advisor's point, and a good one: the initializer shapes BRIEF.md and
-    context/ in the project itself while the orchestrator builds against them
-    and branches agents from that same tree. Both at once is building against a
-    moving target, in one worktree, with one tree.json. Reporting them nicely
-    was painting over a synchronisation failure."""
+def test_two_drivers_do_not_run_at_once(tmp_path, monkeypatch, capsys):
+    """Two sessions of the same role on one tree are refused, and the refusal
+    comes from the clash guard: it names the running session. The exit code
+    alone proves nothing here, since a missing provider also returns 2, so the
+    provider is made available and anything past the guard fails loudly."""
     import multiagents.cli as cli
+
+    class _Available:
+        def available(self):
+            return True
+
+    class _PastTheGuard(Exception):
+        pass
+
+    def _executor_for(*args, **kwargs):
+        raise _PastTheGuard
 
     paths = _paths(tmp_path)
     (paths.data / "launch").mkdir(parents=True, exist_ok=True)
-    cli.driver._write_pid(paths, "initializer", os.getpid())      # alive, certainly
-
-    assert cli.driver._other_driver_running(paths, "orchestrator") == ("initializer", os.getpid())
-    assert cli.driver._other_driver_running(paths, "initializer") is None, "not itself"
-
     config = _config()
     monkeypatch.setattr(cli.driver, "_launched_spec",
                         lambda c, r, team="": AgentSpec("o", "p", "m"))
-    assert cli.driver._launch_agent(paths, config, "orchestrator", resume=True) == 2
-    # …and the escape hatch works, failing later for want of a provider rather
-    # than being refused up front.
-    assert cli.driver._launch_agent(paths, config, "orchestrator", resume=True,
-                             force=True) != 2 or True
+    monkeypatch.setattr(cli.driver, "load_providers", lambda *a, **k: {"p": _Available()})
+    monkeypatch.setattr(cli.driver, "executor_for", _executor_for)
 
-    cli.driver._write_pid(paths, "initializer", 4_000_000)         # dead
-    assert cli.driver._other_driver_running(paths, "orchestrator") is None
+    cli.driver._write_pid(paths, "orchestrator", os.getpid())     # alive, certainly
+    assert cli.driver._launch_agent(paths, config, "orchestrator", resume=True) == 2
+    err = capsys.readouterr().err
+    assert "already running" in err
+    assert str(os.getpid()) in err
+    assert "orchestrator" in err
+    assert "unavailable" not in err
+
+    # The escape hatch gets past the guard, to where the stub stops it.
+    with pytest.raises(_PastTheGuard):
+        cli.driver._launch_agent(paths, config, "orchestrator", resume=True, force=True)
+
+    # A record whose process is gone is not a running session.
+    cli.driver._write_pid(paths, "orchestrator", 4_000_000)
+    with pytest.raises(_PastTheGuard):
+        cli.driver._launch_agent(paths, config, "orchestrator", resume=True)
 
 
 def test_a_status_record_whose_process_is_gone_is_not_running(tmp_path):
