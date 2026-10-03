@@ -306,6 +306,8 @@ class Node:
     created_at: float = field(default_factory=now)
     started_at: float | None = None
     ended_at: float | None = None
+    turn_started_at: float | None = None
+    turn_ended_at: float | None = None
     last_event_at: float | None = None
     summary: str = ""
     # SV-R7: how far into `runs/<id>/output.ndjson` the usage, steps and
@@ -330,6 +332,11 @@ class Node:
     def elapsed(self) -> float:
         start = self.started_at or self.created_at
         return (self.ended_at or now()) - start
+
+    def turn_elapsed(self) -> float:
+        start = self.turn_started_at or self.started_at or self.created_at
+        end = self.turn_ended_at or self.ended_at or now()
+        return max(0.0, end - start)
 
 
 _NODE_FIELDS = {f.name for f in fields(Node)}
@@ -704,6 +711,8 @@ class Tree:
             if node.get("status") == status and node.get("reason") == reason:
                 return
             previous = node.get("status")
+            if status in TERMINAL or status in ("idle", "awaiting_user"):
+                node["turn_ended_at"] = node.get("turn_ended_at") or now()
             node["status"] = status
             # Always written, including "": a clear (stuck -> running) or a
             # clean finish (-> done) passes reason="" meaning "no reason

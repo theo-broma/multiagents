@@ -53,7 +53,7 @@ from ..paths import ProjectPaths, server_install_paths, state_root
 from ..providers import credential_owner
 from ..safepoint import strip_key
 from .. import gitops, procs
-from .base import Executor, FollowHandle, Handle, wrapper_argv
+from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
 from .local import LocalExecutor, _turn_start
 
 
@@ -2606,6 +2606,8 @@ sys.exit(rc)
         # `python3` found first on it may be a host interpreter mounted in
         # along with a home directory. The wrapper needs only the stdlib, so
         # the image's own interpreter is preferred; PATH is the fallback.
+        launched_at = time.time()
+        deadline = turn_deadline(env, deadline, launched_at)
         _, flag, source, *rest = wrapper_argv("python3", run_dir, deadline, pid_file,
                                               argv, inline=True)
         command = command + ["sh", "-c", _WRAPPER_ENTRY.format(flag=flag), source, *rest]
@@ -2615,6 +2617,7 @@ sys.exit(rc)
         agent_id = env.get("MULTIAGENTS_AGENT_ID", "run")
         return FollowHandle(pid=proc.pid, run_dir=run_dir, offset=offset,
                             pid_start=procs.start_time(proc.pid), _proc=proc,
+                            launched_at=launched_at,
                             stopper=lambda grace: self.kill_detached(agent_id, grace),
                             probe=self.liveness(agent_id))
 

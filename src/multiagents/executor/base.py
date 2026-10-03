@@ -302,6 +302,7 @@ class FollowHandle:
     run_dir: Path
     offset: int = 0
     pid_start: str = ""
+    launched_at: float = 0.0
     _proc: Any = None
     timed_out: bool = False
     stopper: Any = None               # executor-specific stop, if any
@@ -436,6 +437,18 @@ def wrapper_argv(python: str, run_dir: Path, deadline: float, pid_file: Path,
     source = Path(agentwrap.__file__)
     head = [python, "-c", source.read_text()] if inline else [python, str(source)]
     return [*head, str(run_dir), f"{deadline:.3f}", str(pid_file), "--", *argv]
+
+
+def turn_deadline(env: dict[str, str], deadline: float,
+                  launched_at: float) -> float:
+    """SR-R3: preparation inside an executor does not spend the wall clock.
+
+    An explicit absolute deadline from a caller other than Runner is kept.
+    Runner supplies its pre-spawn clock, so the wrapper's deadline can move
+    by exactly the preparation time, preserving the resolved timeout.
+    """
+    began = env.get("MULTIAGENTS_TURN_STARTED_AT")
+    return launched_at + (deadline - float(began)) if deadline and began else deadline
 
 
 class Executor(ABC):

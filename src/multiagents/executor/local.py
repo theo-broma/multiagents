@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from .. import procs
-from .base import Executor, FollowHandle, Handle, wrapper_argv
+from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
 
 
 # One stdout line can carry a whole file: a CLI reports a tool result as a single
@@ -85,8 +86,10 @@ class LocalExecutor(Executor):
         # A plain Popen, not asyncio's: an asyncio subprocess transport kills
         # its process when it is closed or collected, which is at the latest
         # when this server exits — exactly what must not happen (SV-R3).
+        launched_at = time.time()
         proc = subprocess.Popen(
-            wrapper_argv(sys.executable, run_dir, deadline, pid_file, argv),
+            wrapper_argv(sys.executable, run_dir,
+                         turn_deadline(env, deadline, launched_at), pid_file, argv),
             cwd=str(cwd),
             env=env,
             stdout=subprocess.DEVNULL,
@@ -97,7 +100,8 @@ class LocalExecutor(Executor):
             start_new_session=True,
         )
         return FollowHandle(pid=proc.pid, run_dir=run_dir, offset=offset,
-                            pid_start=procs.start_time(proc.pid), _proc=proc)
+                            pid_start=procs.start_time(proc.pid), _proc=proc,
+                            launched_at=launched_at)
 
 
 def _turn_start(path: Path) -> int:

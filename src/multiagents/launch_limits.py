@@ -21,9 +21,12 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
+import hashlib
 import tempfile
 from typing import Iterator
+from pathlib import Path
 
 from .authority import HostAuthority
 from .paths import ProjectPaths
@@ -116,9 +119,51 @@ class LaunchLimits:
         return limits if isinstance(limits, dict) else {}
 
     def launch_time(self, node_id: str) -> float | None:
-        """The clock captured with the latest launch, when one was recorded."""
+        """The conservative launch clock vouched for by host-owned records.
+
+        The per-node route record retains this clock if the bounded limits
+        ledger evicts the node. It never retains any limit values.
+        """
         found = self.read().get(node_id)
-        if not isinstance(found, dict):
-            return None
-        value = found.get("launched_at")
-        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        records = [found, self._spec_record(node_id)]
+        clocks = []
+        for record in records:
+            value = record.get("launched_at") if isinstance(record, dict) else None
+            if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and value > 0):
+                clocks.append(float(value))
+        return min(clocks) if clocks else None
+
+    def _spec_path(self, node_id: str) -> Path:
+        return self.directory / ("spec-" + hashlib.sha256(node_id.encode()).hexdigest() + ".json")
+
+    def record_spec(self, node_id: str, spec: dict, launched_at: float) -> None:
+        """SR-R3/R4: retain route and clock, never another limit authority."""
+        path = self._spec_path(node_id)
+        spec = dict(spec)
+        limits = {"timeout", "silence_timeout", "max_steps"}
+        for key in limits:
+            spec.pop(key, None)
+        spec["set_fields"] = sorted(set(spec.get("set_fields") or ()) - limits)
+        record = {"spec": spec, "launched_at": launched_at}
+        fd, name = tempfile.mkstemp(dir=self.directory, prefix=".spec-")
+        try:
+            with os.fdopen(fd, "w") as out:
+                json.dump(record, out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(name, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name)
+
+    def _spec_record(self, node_id: str) -> dict:
+        path = self._spec_path(node_id)
+        try:
+            found = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    def spec(self, node_id: str) -> dict:
+        return self._spec_record(node_id).get("spec", {})

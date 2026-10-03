@@ -241,6 +241,7 @@ def _refresh(run: Runner) -> None:
         # Back to the files the config in force came from: any remembered
         # failure is over, so the same breakage later is news again.
         _failed, _load_error = None, ""
+        run.config_error = ""
         return
     if current == _failed:
         _notice.set({"load_error": _load_error})
@@ -263,6 +264,7 @@ def _refresh(run: Runner) -> None:
             f"config failed to load after a change to {', '.join(changed)}; the "
             f"previous config stays in force until it is fixed: "
             f"{type(exc).__name__}: {exc}")
+        run.config_error = _load_error
         run.tree.emit(run.self_id() or "", "config_reload", files=changed,
                       outcome="load_error", error=_load_error)
         _notice.set({"load_error": _load_error})
@@ -513,7 +515,8 @@ def agent_tree() -> dict:
         "nodes": len(data.get("nodes", {})),
         "active": [
             {"agent_id": n.id, "agent": n.agent, "status": n.status,
-             "elapsed_seconds": round(n.elapsed()), "reason": n.reason,
+             "elapsed_seconds": round(n.turn_elapsed()),
+             "node_elapsed_seconds": round(n.elapsed()), "reason": n.reason,
              # SV-R10: followed by this server across a restart of the last.
              **({"adopted": True} if n.adopted_at else {})}
             for n in run.tree.active()
