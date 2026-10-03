@@ -1104,13 +1104,31 @@ def _probe(name: str, paths: ProjectPaths | None, context: str,
 
     version: str | None = None
     if context == "docker":
+        from .executor.base import build_env
+        from .providers import expand_env_value
+
         executor = _docker_executor(paths, cfg)
-        probed = executor.exec_in_running([provider.bin, *command], timeout)
+        provider = executor.providers.get(name, provider)
+        env = build_env(passthrough=cfg.env_passthrough, blocked=cfg.env_block,
+                        home=None, identity={})
+        for key, value in (provider.credential_env or provider.env or {}).items():
+            env[key] = expand_env_value(value)
+        # C5-R1a: no run HOME and no container setup. This is the default
+        # HOME start() supplies, the host's Path.home() mounted in place.
+        env["HOME"] = str(executor.container_home())
+        if provider.adapter:
+            program = executor.native_bin(name, provider, env) or provider.bin
+            argv = [program, *command]
+        else:
+            argv = executor._versioned_argv([provider.bin, *command])
+        probed = executor.exec_in_running(argv, timeout, env=env)
         if not isinstance(probed, tuple):
             return state("container not running",
                          detail=f"{probed!r}")
         rc, out, err = probed
         outcome, version, detail = _evaluate_probe(rc, out, err, binary, context)
+        if outcome == "missing":
+            detail = f"{detail}; tried {argv[0]}"
         if outcome != "ok":
             return state(outcome, detail=detail)
     else:
