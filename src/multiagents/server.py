@@ -1228,6 +1228,17 @@ async def answer_question(question_id: str, answer: str) -> dict:
 
 
 @_tool()
+def list_plans() -> dict:
+    """Read plans and the count of user notes not yet considered by a plan.
+
+    Reports malformed or refused files. This tool never writes or imports plans.
+    """
+    from .plans import list_plans as read_plans
+
+    return _ok(read_plans(_project_paths().root))
+
+
+@_tool()
 def list_tickets(status: str = "open") -> dict:
     """Bug tickets the bug-reporter has filed against multiagents itself.
 

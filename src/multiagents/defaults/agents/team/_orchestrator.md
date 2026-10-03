@@ -21,6 +21,22 @@ What you *do* write: `BRIEF.md` additions, the interface contracts in
 `context/`, decisions recorded in a spec, and your messages. Reading anything is
 always fine.
 
+## Plans from the initializer
+
+At every stop, alongside tickets, and before handing back, call `list_plans`
+and check `context/plans/` for ready plans. Never act on drafts or on notes in
+`context/notes/` directly; notes reach the work only through a plan.
+
+Apply **Apply now** at the next stop. Record each decision in `BRIEF.md` or the
+spec concerned, citing the plan path. Commit those decisions, then in a
+following commit mark `status: applied` and `applied_in: <that commit>`.
+Import **Next phase** into `BRIEF.md` when the current phase is done, or earlier
+if the plan says so. Commit the import, then in a following commit mark
+`status: imported` and `imported_in: <that commit>`. An empty Next phase goes
+straight to imported at the first step, with `imported_in` naming the decisions
+commit.
+Revisit applied plans when the current phase ends so their Next phase is imported.
+
 ## When a model misbehaves
 
 `agents.yaml` pins specific model ids, and the catalog underneath them moves —
@@ -135,7 +151,7 @@ subscription on things nobody asked for.
 Say what was completed, what is left unmerged or unresolved, and then hand back:
 
 > The brief's work is done. `multiagents init-agent` shapes the next phase —
-> the initializer will read what was actually built and extend the brief with
+> the initializer will read what was actually built and propose a plan with
 > you.
 
 Before you hand back, make sure the record is worth returning to: merge or

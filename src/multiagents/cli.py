@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import dataclasses
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ from . import procs
 from .executor import executor_for
 from . import scripts
 from . import gitops
+from . import plans
 from .budget import read_all, reset_label
 from .config import load as load_config
 from .config import seed_global, seed_project, sync_layer
@@ -913,6 +915,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
         print(f"context      {context_dir}  (created)")
 
+    plans.scaffold(root)
+
     if _gitignore_add(root, [GITIGNORE_LINE], "# multiagents runtime state"):
         print(f"gitignore    added {GITIGNORE_LINE}")
 
@@ -1623,6 +1627,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if getattr(args, "clear", None):
         return _clear_provider(paths, providers, args.clear,
                                getattr(args, "force", False))
+    if paths:
+        summary = plans.list_plans(paths.root)
+        for plan in summary["plans"]:
+            if plan["status"] == "ready" and not plan["imported_in"]:
+                print(f"ready plan   {plan['path']}")
+        notes_dir = paths.root / "context" / "notes"
+        if notes_dir.exists() or notes_dir.is_symlink():
+            print(f"notes        {summary['notes']['unprocessed']} unprocessed")
     problems = 0
     for warning in config.warnings:
         print(f"warning: {warning}")
@@ -3141,6 +3153,22 @@ def cmd_tmux(args) -> int:
         cmd_tmux_kill(paths)
     return 0
 
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    paths = _resolve(args.path)
+    try:
+        wait = float(os.environ.get("MULTIAGENTS_PLAN_COMMIT_LOCK_WAIT", "30"))
+        if not math.isfinite(wait) or wait < 0:
+            raise ValueError("plan commit lock wait must be a finite nonnegative number of seconds")
+        result = plans.commit(paths.root, args.plan_paths, wait)
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="multiagents",
@@ -3148,6 +3176,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--path", help="project directory (default: search upward from cwd)")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("plan", help="commit plans and new specifications")
+    p.set_defaults(func=cmd_plan)
+    plan_sub = p.add_subparsers(dest="plan_command", required=True)
+    pc = plan_sub.add_parser("commit", help="commit only the named paths")
+    pc.add_argument("plan_paths", nargs="*", metavar="path")
+    pc.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("init", help="set up a project")
     # Its own dest: sharing `path` with the global `--path` let the absent
