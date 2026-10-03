@@ -100,6 +100,7 @@ def capture(value, walk_dirs=True):
                             files[full] = {{"real": os.path.realpath(full), "text": text}}
 
 argv = sys.argv[1:]
+prompt = sys.stdin.read()    # C3: the shipped transport delivers the prompt on stdin
 for token in argv:
     capture(token)
 for key, value in os.environ.items():
@@ -108,7 +109,7 @@ for key, value in os.environ.items():
     capture(value, walk_dirs=not key.startswith("MULTIAGENTS_") and key != "PATH")
 
 with open(LOG, "a") as fh:
-    fh.write(json.dumps({{"argv": argv, "cwd": os.getcwd(),
+    fh.write(json.dumps({{"argv": argv, "prompt": prompt, "cwd": os.getcwd(),
                          "env": dict(os.environ), "files": files}}) + "\n")
 
 def emit(obj):
@@ -307,7 +308,8 @@ class Project:
             # The fixture's own guard: the run really went through `docker exec`.
             execs = (self.docker_log.read_text() if self.docker_log.is_file() else "")
             assert agent_id in execs, f"no docker exec for {agent_id}: {self.status(agent_id)}"
-        mine = [c for c in self.calls() if any(task in a for a in c["argv"])]
+        mine = [c for c in self.calls() if task in c.get("prompt", "")
+                or any(task in a for a in c["argv"])]
         assert mine, (f"the {self.provider} CLI was never run with the task under "
                       f"{self.executor}; calls seen: {[c['argv'][:3] for c in self.calls()]}; "
                       f"node: {self.status(agent_id)}")

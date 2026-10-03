@@ -56,7 +56,8 @@ import base64, json, os, re, signal, subprocess, sys, time
 LOG = {log!r}
 argv = sys.argv[1:]
 plan = None
-for a in argv:
+prompt = sys.stdin.read()    # C3: the shipped transport delivers the prompt on stdin
+for a in argv + [prompt]:
     m = re.search(r"SVPLAN:([A-Za-z0-9_=-]+)", a)
     if m:
         plan = json.loads(base64.urlsafe_b64decode(m.group(1)))

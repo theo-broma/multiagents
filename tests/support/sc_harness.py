@@ -99,11 +99,12 @@ _SCRIPT = r'''#!{python}
 import json, os, sys, time
 ctl_path, calls_path, name = {ctl!r}, {calls!r}, {name!r}
 argv = sys.argv[1:]
+prompt = sys.stdin.read()    # C3: the shipped transport delivers the prompt on stdin
 with open(calls_path, "a") as f:
-    f.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\n")
+    f.write(json.dumps({{"argv": argv, "prompt": prompt, "cwd": os.getcwd()}}) + "\n")
 n = sum(1 for _ in open(calls_path))
 ctl = json.load(open(ctl_path))
-_text = " ".join(argv)
+_text = " ".join(argv) + " " + prompt
 for _key, _variant in ctl.get("variants", {{}}).items():
     if _key in _text:
         ctl = dict(ctl, **_variant)
@@ -199,6 +200,12 @@ class FakeProvider:
 
     def argv_of_spawn(self, k: int = -1) -> list[str]:
         return json.loads(self.calls.read_text().splitlines()[k])["argv"]
+
+    def text_of_spawn(self, k: int = -1) -> str:
+        """Everything the k-th spawn was told: its argv and, under the C3 stdin
+        transport, its prompt. Tests match on task text, wherever it travels."""
+        call = json.loads(self.calls.read_text().splitlines()[k])
+        return " ".join(call["argv"]) + " " + call.get("prompt", "")
 
 
 # ------------------------------------------------------------------- project

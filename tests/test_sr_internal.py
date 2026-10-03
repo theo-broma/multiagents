@@ -115,7 +115,9 @@ def test_sr_r2b_free_retry_waits_then_relaunches_the_original_prompt(w):
         await w.until(aid, timeout=20, states={"failed"})
         assert w.g.spawns() == 2
         assert all(call["pred_alive"] == [] for call in w.g.calls())
-        assert "original prompt" in " ".join(w.g.calls()[1]["argv"])
+        retry = w.g.calls()[1]
+        assert "original prompt" in retry["prompt"]   # C3: it arrives on stdin
+        assert "original prompt" not in " ".join(retry["argv"])
         assert w.node(aid).retries == 1
     asyncio.run(go())
 
@@ -435,7 +437,10 @@ class MountedDocker(DockerExecutor):
         return stop_wrapped(self.paths.run_dir(agent_id), pid, grace=grace)
 
     async def start(self, argv, cwd, env, *, run_dir=None, deadline=0, provider=""):
-        return self._start_wrapped([], argv, run_dir, deadline,
+        # `docker exec --env-file` carries the prompt-transport variables to the
+        # wrapper (C3); with no daemon here, `env` does the same on the host.
+        carried = [f"{k}={v}" for k, v in env.items() if k.startswith("MULTIAGENTS_PROMPT_")]
+        return self._start_wrapped(["env", *carried], argv, run_dir, deadline,
                                    run_dir / "container.pid", env)
 
 

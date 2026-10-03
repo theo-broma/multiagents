@@ -502,7 +502,7 @@ def test_r3b_a_run_that_dies_alongside_a_crossing_is_not_respawned(w):
         return states[cross]
     cross_state = asyncio.run(go())
     assert cross_state == "limited", f"the crossing run was not stopped: {cross_state}"
-    launches = [k for k in range(acme.spawns()) if "DIES" in " ".join(acme.argv_of_spawn(k))]
+    launches = [k for k in range(acme.spawns()) if "DIES" in acme.text_of_spawn(k)]
     assert len(launches) == 1, f"DIES was launched {len(launches)} times"
 
 
@@ -524,4 +524,4 @@ def test_r3_a_start_after_an_observed_crossing_is_deferred_and_never_spawned(w):
         return a, b
     a, b = asyncio.run(go())
     assert is_deferred_for_cap(b), f"admitted under a spent cap: {b}"
-    assert not any("SECOND" in " ".join(acme.argv_of_spawn(k)) for k in range(acme.spawns()))
+    assert not any("SECOND" in acme.text_of_spawn(k) for k in range(acme.spawns()))
