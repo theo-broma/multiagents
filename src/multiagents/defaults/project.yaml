@@ -484,6 +484,20 @@ limits:
 # one with headroom, and to park tasks until a bucket resets.
 # --------------------------------------------------------------------------
 budget:
+  # Choose among eligible provider instances in one family. Values:
+  # soonest_reset, shortest_window_least_remaining,
+  # shortest_window_most_remaining, longest_window_least_remaining,
+  # longest_window_most_remaining, least_loaded.
+  # Project overrides global overrides shipped. The preferred provider's
+  # instance_strategy, including an inherited setting, overrides this for the
+  # whole pool. This does not change the claude sidecar vault's account choice.
+  instance_strategy: soonest_reset
+  # Scores within this distance of the best (inclusive) share a group, then
+  # load, last use and name decide. Zero makes scoring strict. These keys use
+  # the same project/global/shipped layering; minutes is for soonest_reset,
+  # points for the four remaining-quota strategies.
+  instance_tolerance_minutes: 15
+  instance_tolerance_points: 5
   # Keep this much of a provider's window unspent, so that a run does not end
   # with an orchestrator that cannot answer for the agents it started.
   reserve_headroom: 0.15

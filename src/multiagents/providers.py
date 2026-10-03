@@ -26,6 +26,7 @@ from typing import Any, Iterable
 
 from . import spendcap
 from .spendcap import SpendCap
+from .instance_strategy import validate_strategy
 
 # Normalised event kinds the rest of the system understands.
 TEXT, TOOL, STEP, RESULT, RAW, ERROR = "text", "tool", "step", "result", "raw", "error"
@@ -275,6 +276,7 @@ class Provider:
     # no second instance at all.
     extends: str = ""
     family: str = ""
+    instance_strategy: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     # PS-R1/R5: providers that share tooling but keep their own models and
     # quota. `auth_from` names the credential OWNER — this provider logs in
@@ -369,6 +371,8 @@ class Provider:
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> Provider:
+        validate_strategy(data.get("instance_strategy"), nullable=True,
+                          source=f"provider {name!r}")
         # PS-R1a: a relative explicit `bin` (one containing "/") is refused at
         # config load, exactly as a relative `bin_search` entry is — never
         # later, as a ValueError raised from `resolve_bin` mid-operation.
@@ -405,6 +409,7 @@ class Provider:
             # An instance with no family stated belongs to the one it extends,
             # and a provider that extends nothing is its own family of one.
             family=data.get("family") or data.get("extends") or name,
+            instance_strategy=data.get("instance_strategy"),
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             auth_from=_owner_key(name, "auth_from", data),
             budget_from=_owner_key(name, "budget_from", data),

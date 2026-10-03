@@ -1622,7 +1622,12 @@ def cmd_prompt(args) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     paths = _resolve_if_project(args.path)
-    config = load_config(paths)
+    from .instance_strategy import InstanceStrategyError
+    strategy_errors: list[str] = []
+    try:
+        config = load_config(paths)
+    except InstanceStrategyError:
+        config = load_config(paths, instance_strategy_errors=strategy_errors)
     providers = (load_providers(config.providers, config.provider_sources)
                  if hasattr(config, "provider_sources")
                  else load_providers(config.providers))
@@ -1637,7 +1642,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         notes_dir = paths.root / "context" / "notes"
         if notes_dir.exists() or notes_dir.is_symlink():
             print(f"notes        {summary['notes']['unprocessed']} unprocessed")
-    problems = 0
+    problems = len(strategy_errors)
+    for error in strategy_errors:
+        print(f"  ! {error}")
     for warning in config.warnings:
         print(f"warning: {warning}")
 

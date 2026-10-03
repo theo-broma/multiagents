@@ -52,6 +52,15 @@
 # does not name these keys keeps them from the defaults (provider blocks
 # deep-merge), and one that replaces `models_include:` replaces it outright.
 
+# instance_strategy: optional family instance selection override, inherited
+# through extends. Explicit null clears an inherited value and uses
+# budget.instance_strategy. The preferred provider's effective setting governs
+# the whole pool; siblings' settings apply when they themselves are preferred.
+# Values: soonest_reset (default), shortest_window_least_remaining,
+# shortest_window_most_remaining, longest_window_least_remaining,
+# longest_window_most_remaining, least_loaded. Global defaults and tolerances
+# live in project.yaml's budget block, layered project over global over shipped.
+# This selects provider instances, not accounts inside the claude sidecar vault.
 providers:
 
   opencode:

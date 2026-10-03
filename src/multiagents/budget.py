@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from .providers import resolved_profile
+from .instance_strategy import validate_strategy
 from .redact import register_literal, scrub
 
 
@@ -1757,20 +1758,121 @@ def _known_reading(budget: Budget | None) -> bool:
     return budget is not None and budget.known and not budget.stale
 
 
+_WINDOW_SPANS = {
+    **dict.fromkeys(("5h", "five_hour", "gemini-5h", "3p-5h", "codex-5h", "session"), 300),
+    **dict.fromkeys(("daily", "day"), 1440),
+    **dict.fromkeys(("weekly", "seven_day", "weekly_all", "gemini-weekly",
+                     "3p-weekly", "codex-weekly"), 10080),
+    "monthly": 43200,
+}
+
+
+class _InstanceScore(NamedTuple):
+    # Every metric is normalised so that the smallest value is best.
+    value: float
+    window: str
+    fact: float
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _instance_scores(names: list[str], budgets: dict[str, Budget],
+                     strategy: str) -> dict[str, _InstanceScore]:
+    """IS-R1b/c: score counted, fresh windows without changing the readings."""
+    scores, windowless = {}, {}
+    now = time.time()
+    for name in names:
+        reading = budgets.get(name)
+        if reading is None or reading.stale or not reading.known:
+            continue
+        if strategy == "least_loaded":
+            continue
+        if not reading.windows:
+            if strategy != "soonest_reset" and reading.headroom is not None:
+                used = _finite_number((1 - reading.headroom) * 100)
+                if used is not None and 0 <= used <= 100:
+                    remaining = 100 - used
+                    value = -remaining if strategy.endswith("most_remaining") else remaining
+                    windowless[name] = _InstanceScore(value, "quota", remaining)
+            continue
+        windows = []
+        for window_name, window in reading.windows.items():
+            if not isinstance(window, dict) or window.get("counted") is False:
+                continue
+            used = _finite_number(window.get("percent"))
+            if used is None or not 0 <= used <= 100:
+                continue
+            if strategy == "soonest_reset":
+                try:
+                    reset = datetime.fromisoformat(str(window.get("resets_at")))
+                    if reset.tzinfo is None or reset.utcoffset() is None:
+                        continue
+                    stamp = reset.timestamp()
+                except (ValueError, TypeError, OverflowError, OSError):
+                    continue
+                if stamp > now:
+                    windows.append((stamp, str(window_name)))
+            else:
+                span = _finite_number(window.get("span_minutes"))
+                if span is None or span <= 0:
+                    span = _WINDOW_SPANS.get(str(window_name).rsplit("/", 1)[-1].lower())
+                if span is not None:
+                    windows.append((span, used, str(window_name)))
+        if not windows:
+            continue
+        if strategy == "soonest_reset":
+            stamp, window_name = min(windows)
+            scores[name] = _InstanceScore(stamp, window_name, stamp)
+        else:
+            span = (min if strategy.startswith("shortest_") else max)(w[0] for w in windows)
+            # Equal spans use their most-used window; names make exact ties stable.
+            _, used, window_name = min((w for w in windows if w[0] == span),
+                                      key=lambda w: (-w[1], w[2]))
+            remaining = 100 - used
+            value = -remaining if strategy.endswith("most_remaining") else remaining
+            scores[name] = _InstanceScore(value, window_name, remaining)
+    # The unknown-span top-level reading is only comparable when no eligible
+    # instance has a scored window with a span (IS-R1b).
+    return scores or windowless
+
+
+def _instance_group(names: list[str], budgets: dict[str, Budget], reserve: float,
+                    reserved: set[str], strategy: str, tolerance_minutes: float,
+                    tolerance_points: float) -> tuple[list[str], dict[str, _InstanceScore]]:
+    validate_strategy(strategy)
+    free = [name for name in names
+            if _has_room(budgets.get(name), reserve, name in reserved)]
+    workers = [name for name in free if name not in reserved]
+    pool = workers or free
+    known = [name for name in pool if _known_reading(budgets.get(name))]
+    pool = known or pool
+    scores = _instance_scores(pool, budgets, strategy)
+    if not scores:
+        return pool, scores
+    best = min(score.value for score in scores.values())
+    tolerance = tolerance_minutes * 60 if strategy == "soonest_reset" else tolerance_points
+    return [name for name in pool if name in scores
+            and scores[name].value - best <= tolerance], scores
+
+
 def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
                   reserved: set[str], load: dict[str, int] | None = None,
-                  last_used: dict[str, float] | None = None) -> str | None:
+                  last_used: dict[str, float] | None = None, *,
+                  strategy: str = "soonest_reset", tolerance_minutes: float = 15,
+                  tolerance_points: float = 5) -> str | None:
     """Which of several interchangeable accounts should take this work.
 
-    NOT the one with the most headroom. Headroom is a percentage refreshed at
-    most every few minutes and shared by every concurrent agent, so sorting on
-    it pins ten spawns to whichever instance was ahead at the last reading and
-    annihilates it before the next — an advisor's objection, and correct.
-    Headroom is a filter here, never a ranking.
-
-    The ranking is load: fewest agents running on it, then longest since it was
-    last used. Both are read from the tree, so every MCP server process on the
-    machine ranks them the same way.
+    IS-R1: apply the strategy only after eligibility, reservation and knownness.
+    Scores within tolerance of the best share a winning group; load, last use
+    and name choose within it, or when the strategy has no usable data.
 
     RM-R3b: an instance whose reading is KNOWN and roomy is preferred to one
     whose headroom is unknown BEFORE load and last use are compared — an
@@ -1780,16 +1882,11 @@ def pick_instance(names: list[str], budgets: dict[str, Budget], reserve: float,
     """
     load = load or {}
     last_used = last_used or {}
-    free = [name for name in names
-            if _has_room(budgets.get(name), reserve, name in reserved)]
-    if not free:
+    group, _ = _instance_group(names, budgets, reserve, reserved, strategy,
+                               tolerance_minutes, tolerance_points)
+    if not group:
         return None
-    # Prefer instances not held for the orchestrator; fall back to those only
-    # when nothing else can take it, and even then only above the reserve.
-    workers = [name for name in free if name not in reserved]
-    pool = workers or free
-    known = [name for name in pool if _known_reading(budgets.get(name))]
-    return min(known or pool,
+    return min(group,
                key=lambda name: (load.get(name, 0), last_used.get(name, 0.0), name))
 
 
@@ -1805,6 +1902,10 @@ def choose_provider(
     last_used: dict[str, float] | None = None,
     wait_for_reset_within: float = 0.0,
     routes: list[str] | None = None,
+    *,
+    strategy: str = "soonest_reset",
+    tolerance_minutes: float = 15,
+    tolerance_points: float = 5,
 ) -> tuple[str | None, str]:
     """Pick a provider to run on. Returns ``(provider, reason)``.
 
@@ -1836,6 +1937,7 @@ def choose_provider(
     already listed, with ``defer`` still ending the walk after both. Without
     ``routes`` (older callers) the chain is walked as the one tier it was.
     """
+    validate_strategy(strategy)
     reserved = set(budgets) if reserved is None else set(reserved)
     allowed = None if allowed is None else set(allowed)
     siblings = [name for name in (family or []) if name != preferred]
@@ -1859,7 +1961,9 @@ def choose_provider(
     # preference tiers.
     if siblings:
         chosen = pick_instance([preferred, *siblings], budgets, reserve,
-                               reserved, load, last_used)
+                               reserved, load, last_used, strategy=strategy,
+                               tolerance_minutes=tolerance_minutes,
+                               tolerance_points=tolerance_points)
         if chosen == preferred:
             return preferred, "preferred provider has headroom"
         if chosen:
@@ -1869,6 +1973,21 @@ def choose_provider(
                 return chosen, f"{preferred} is held for the orchestrator; using {chosen}"
             if not _known_reading(budgets.get(preferred)) and _known_reading(budgets.get(chosen)):
                 return chosen, f"{preferred} has no quota reading; using {chosen}"
+            group, scores = _instance_group([preferred, *siblings], budgets, reserve,
+                                            reserved, strategy, tolerance_minutes,
+                                            tolerance_points)
+            if chosen in scores and preferred not in scores:
+                return chosen, f"{preferred} has missing data for {strategy}; using {chosen}"
+            if preferred in scores and preferred not in group:
+                best = min(scores, key=lambda name: (scores[name].value, name))
+                winner, previous = scores[best], scores[preferred]
+                if strategy == "soonest_reset":
+                    return chosen, (f"{strategy}: {best}'s {winner.window} "
+                                    f"{reset_label(datetime.fromtimestamp(winner.fact).astimezone().isoformat())}, "
+                                    f"before {preferred}'s {previous.window}; using {chosen}")
+                return chosen, (f"{strategy}: {best} has {winner.fact:g}% of "
+                                f"{winner.window} left vs {previous.fact:g}% for "
+                                f"{preferred}; using {chosen}")
             if (load or {}).get(chosen, 0) < (load or {}).get(preferred, 0):
                 return chosen, f"sharing accounts: {chosen} has fewer running agents"
             if (last_used or {}).get(chosen, 0.0) < (last_used or {}).get(preferred, 0.0):

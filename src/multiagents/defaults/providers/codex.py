@@ -550,8 +550,8 @@ def _named_windows(entries):
     names = [_window_name(minutes) for _, minutes, _, _ in entries]
     if len(set(names)) < len(names):
         names = [f"{name}-{side}" for name, (side, _, _, _) in zip(names, entries)]
-    return {name: {"percent": percent, "resets_at": resets}
-            for name, (_, _, percent, resets) in zip(names, entries)}
+    return {name: {"percent": percent, "resets_at": resets, "span_minutes": minutes}
+            for name, (_, minutes, percent, resets) in zip(names, entries)}
 
 
 def _iso(epoch):
@@ -700,7 +700,8 @@ def _build_result(raw_windows, *, source, stale_seconds, note=None, force_zero=F
             continue
         if w["resets_at"] < now - EXPIRY_MARGIN:
             continue
-        kept[name] = {"percent": w["percent"], "resets_at": w["resets_at"], "iso": iso}
+        kept[name] = {"percent": w["percent"], "resets_at": w["resets_at"], "iso": iso,
+                      "span_minutes": w.get("span_minutes")}
     if not kept:
         return {"known": False, "note": note or "Codex quota: no rate-limit reading available."}
     worst_name = max(kept, key=lambda n: kept[n]["percent"])
@@ -709,7 +710,8 @@ def _build_result(raw_windows, *, source, stale_seconds, note=None, force_zero=F
     result = {
         "known": True,
         "source": source,
-        "windows": {n: {"percent": w["percent"], "resets_at": w["iso"]}
+        "windows": {n: {"percent": w["percent"], "resets_at": w["iso"],
+                        "span_minutes": w["span_minutes"]}
                     for n, w in kept.items()},
         "headroom": headroom,
         "resets_at": worst["iso"],

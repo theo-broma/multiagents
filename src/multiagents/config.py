@@ -35,6 +35,7 @@ import yaml
 
 from .paths import ProjectPaths, global_config_dir, shipped_defaults_dir
 from .providers import load_providers
+from .instance_strategy import InstanceStrategyError, validate_strategy
 
 # The heading that marks the half of a brief addressed to whoever CALLS the
 # agent, rather than to the agent itself. It is authored in the agent's own file
@@ -955,7 +956,8 @@ def _warn_unknown_entry_keys(agents_raw: dict, providers: dict,
                     f"{provider!r} consumes; it will be ignored")
 
 
-def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
+def load(paths: ProjectPaths | None, seed: bool = True, *,
+         instance_strategy_errors: list[str] | None = None) -> Config:
     """Load the merged configuration for a project (or the global one alone).
 
     `seed=False` only reads: a missing layer is an empty one. That is how a
@@ -979,6 +981,29 @@ def load(paths: ProjectPaths | None, seed: bool = True) -> Config:
         for layer in layers:
             for name in CONFIG_FILES:
                 data = read_yaml_cached(layer / name, strict=True)
+                # IS-R2: validate the value at its source, before layering or
+                # inheritance can hide it. Doctor alone collects problems and
+                # omits invalid keys so it can complete its other checks.
+                strategy_blocks = []
+                if name == "project.yaml":
+                    strategy_blocks = [(data.get("budget") or {}, ["budget"], False)]
+                elif name == "providers.yaml":
+                    strategy_blocks = [(block or {}, ["providers", provider_name], True)
+                                       for provider_name, block in
+                                       (data.get("providers") or {}).items()]
+                for block, parts, nullable in strategy_blocks:
+                    if "instance_strategy" not in block:
+                        continue
+                    location = _node_at(layer / name, [*parts, "instance_strategy"])
+                    line = location[0] if location else 1
+                    try:
+                        validate_strategy(block["instance_strategy"], nullable=nullable,
+                                          source=f"{layer / name}:{line} {'.'.join(parts)}")
+                    except InstanceStrategyError as exc:
+                        if instance_strategy_errors is None:
+                            raise
+                        instance_strategy_errors.append(str(exc))
+                        del block["instance_strategy"]
                 merged[name] = deep_merge(merged[name], data)
                 if name == "providers.yaml":
                     scope = ("shipped" if layer == layers[0] else

@@ -4178,12 +4178,23 @@ class Runner:
             spec.provider, budgets, [], float(cfg.get("reserve_headroom", 0.15)),
             reserved=budget_mod.reserved_providers(
                 self.config.project, self.providers, self._orchestrator_provider()),
-            allowed={spec.provider})
+            allowed={spec.provider}, **self._instance_strategy(spec.provider))
         if chosen is None:
             entry = budgets.get(spec.provider)
             return self._pin_refusal(spec.provider, why,
                                      entry.cooldown_until if entry else None)
         return None
+
+    def _instance_strategy(self, preferred: str) -> dict[str, Any]:
+        """IS-R2a: the preferred instance's effective strategy for the pool."""
+        cfg = self.config.project.get("budget", {})
+        provider = self.providers.get(preferred)
+        return {
+            "strategy": (getattr(provider, "instance_strategy", None)
+                         or cfg.get("instance_strategy", "soonest_reset")),
+            "tolerance_minutes": budget_number(cfg, "instance_tolerance_minutes", zero_ok=True),
+            "tolerance_points": budget_number(cfg, "instance_tolerance_points", zero_ok=True),
+        }
 
     def _held(self, node_id: str) -> bool:
         """RM-R1d: whether a launch hold stands between this node and a new
@@ -4567,6 +4578,7 @@ class Runner:
                     routes=routes,
                     load=dict(load), last_used=dict(last_used),
                     wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
+                    **self._instance_strategy(spec.provider),
                 )
 
             chosen, why = choose(budgets, reserve)
