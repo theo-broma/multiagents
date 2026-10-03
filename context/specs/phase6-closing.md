@@ -219,3 +219,8 @@ never submitted.
   - **The provider.** `codex-b` is re-enabled in the project `providers.yaml` with `container_private_home: [".codex-b"]`. The user recreated the container and logged it in. The mounts are distinct: `shared/codex/.codex` goes to `~/.codex`, and `shared/codex-b/.codex-b` to `~/.codex-b`.
   - **Proof of a different account**, from the quota readings alone: `codex` showed 5h 49%, weekly 55%, resetting 10-09 21:17Z, while `codex-b` showed 5h 0%, weekly 16%, resetting 10-10 10:04Z. That is the account `codex` used this morning, before the user switched it.
   - **Routing.** `codex-b: <same model>` was added to `agents.yaml`. It is the first fallback for every codex-primary agent (advisor, researcher, the three implementers, dev-advisor, robustness-tester, bug-reporter), and comes right after `codex` where codex is itself a fallback (tester, gemini-advisor, reviewer).
+- **C10 — done 2026-10-03.** Final host full suite at ee277f2: 72 failed, 6066 passed, 21 skipped, 7 xfailed. All 72 failures are the by-design `test_phase2_*` reds. The wt-main step is obsolete, because the MCP server now runs from the project root's `.venv`. One `/mcp` reconnect loads C16 and C17 into the server.
+- **Still open at hand-back:**
+  - the C13 live exercise (PN-R4a): the initializer writes a plan, and the orchestrator imports it. This needs the user's `init-agent`;
+  - ticket bug-93a3e4 (minor; agy 503 after a complete answer);
+  - the C15 round-2 notes (forged `wrapper.pid`, `setsid` escape), already in the phase-7 seed.

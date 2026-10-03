@@ -4098,3 +4098,14 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - 2026-10-03: C10 host full suite at 9086d5b: 92 failed / 6012 passed. That is 72 phase2 (by design), 17 C17 (red until C17 merges) and 3 C16 regressions (rf_r3_r1 opencode filter, ps_r5 x2), which pass at a75b83e. Fix: implementer ag-d56785. C17 review ag-0a7301 running.
 - 2026-10-03: C16 regressions fixed. RF-R3 fixture: 3431a40 (tester ag-27dc71). PS-R5 _finalize: 29ee20a (implementer ag-d56785, approved by reviewer ag-6547e1). C17 round 2 running on ag-47dd74 (review ag-0a7301 rejected it: ValueError crashes in ensure_running/private_state; host-path escape via ../ made blocking). Bug-reporter on agy runs ending 'reported ERROR' after a complete verdict.
 - 2026-10-03: C17 merged (ee277f2; 3 review rounds, round 3 approved by ag-26fb0d). AB fixture fixed (64f77a7). Final C10 host suite running (/var/tmp/orch-full/c10-ee277f2.log). Then re-enable codex-b with container_private_home [.codex-b] (C14), and the user recreates the container and logs it in.
+- 2026-10-03 ~18:50 CEST: **phase-6 closing round finished.**
+  - **Done:** C1 to C17, except the C13 live exercise. C10's final host suite at ee277f2 gives exactly the 72 phase2 reds.
+  - **codex-b:** live (C14), proven by its distinct quota, and routed as the first codex fallback in `agents.yaml`.
+  - **Open for the next phase:**
+    - the C13 live exercise, run with init-agent;
+    - bug-93a3e4 (minor);
+    - the C15 phase-7 notes;
+    - the quarantined worktrees ag-98e037, e4919f and e8565d, left to the user;
+    - the failed discards ag-758e30 and fb2359;
+    - the phase-3 branches tester/b689bf and cf02a1, kept on purpose.
+  - The user should run `/mcp` once, so the server loads C16 and C17.
