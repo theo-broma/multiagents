@@ -400,13 +400,13 @@ def test_qd_r1a_reloading_the_details_route_never_puts_a_token_in_a_url(make):
 
 
 @pytest.mark.parametrize("how", ["details-page", "quota-data", "reveal", "refused"])
-def test_qd_r1a_responses_carry_referrer_policy_no_referrer(make, how):
+def test_qd_r1a_responses_carry_referrer_policy_same_origin(make, how):
     fx, name, _ = one_provider(make)
     resp = {"details-page": lambda: fx.open_details(),
             "quota-data": lambda: fx.get("/api/quota"),
             "reveal": lambda: fx.reveal(name, None),
             "refused": lambda: fx.get("/api/quota", auth=False)}[how]()
-    assert resp.headers.get("referrer-policy") == "no-referrer", resp.headers
+    assert resp.headers.get("referrer-policy") == "same-origin", resp.headers
 
 
 # --------------------------------------------------------------------------

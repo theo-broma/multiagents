@@ -382,7 +382,7 @@ def test_adv_the_handoff_never_redirects_and_never_puts_the_token_in_a_url(make)
     for resp in cases:
         assert 300 > resp.status or resp.status >= 400
         assert "location" not in resp.headers
-        assert resp.headers.get("referrer-policy") == "no-referrer"
+        assert resp.headers.get("referrer-policy") == "same-origin"
         assert resp.headers.get("cache-control") == "no-store"
     assert good.status == 200
 

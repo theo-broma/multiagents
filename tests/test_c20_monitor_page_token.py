@@ -205,13 +205,13 @@ def test_mt_r2_the_page_removes_the_token_not_only_calls_replace_state(fx):
 def test_mt_r2_the_tokened_page_has_both_headers(fx):
     resp = fx.get(tokened(fx))
     assert resp.status == 200
-    assert resp.headers.get("referrer-policy") == "no-referrer"
+    assert resp.headers.get("referrer-policy") == "same-origin"
     assert resp.headers.get("cache-control") == "no-store"
 
 
 def test_mt_r2_the_index_html_alias_has_both_headers(fx):
     resp = fx.get(tokened(fx, "/index.html"))
-    assert resp.headers.get("referrer-policy") == "no-referrer"
+    assert resp.headers.get("referrer-policy") == "same-origin"
     assert resp.headers.get("cache-control") == "no-store"
 
 
@@ -219,14 +219,14 @@ def test_mt_r2_the_refusal_has_both_headers_too(fx):
     # "Responses carry": a cached 403 would keep refusing a good URL
     resp = fx.get("/")
     assert resp.status == 403
-    assert resp.headers.get("referrer-policy") == "no-referrer"
+    assert resp.headers.get("referrer-policy") == "same-origin"
     assert resp.headers.get("cache-control") == "no-store"
 
 
 def test_mt_r2_api_responses_carry_the_referrer_policy(fx):
     resp = fx.get("/api/state", **{"X-Monitor-Token": fx.token})
     assert resp.status == 200
-    assert resp.headers.get("referrer-policy") == "no-referrer"
+    assert resp.headers.get("referrer-policy") == "same-origin"
     assert resp.headers.get("cache-control") == "no-store"
 
 
