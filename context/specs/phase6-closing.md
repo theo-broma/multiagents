@@ -208,3 +208,10 @@ never submitted.
     - `docker login` sets it (`cli.py` ~3057);
     - `private_state()` refuses two owners resolving to the same container path, loudly, rather than letting the last one win.
   - **Pipeline:** contract, tester, implementer, reviewer, after C16.
+- **bug-93a3e4, minor, open; corrected by the orchestrator, 2026-10-03.**
+  - The ticket guesses that a trailing ERROR follows a SUCCESS. That is wrong. In `ag-6547e1/output.ndjson` the only `result` event is `status: ERROR`, carrying the complete response together with `error: "API error (attempt 1): UNAVAILABLE (code 503)"`. The final `agent_response` step was `DONE`, and the wrapper exited 0.
+  - So agy itself labels the turn ERROR after a 503 that arrived once the answer was complete.
+  - **Fix shape:**
+    1. surface agy's `result.error` in the node reason instead of the bare "reported ERROR";
+    2. consider `done` with a warning when the final `agent_response` step is `DONE` and the response is non-empty.
+  - Not blocking; a candidate for phase 7.
