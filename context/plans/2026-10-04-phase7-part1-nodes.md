@@ -1,5 +1,6 @@
 ---
-status: ready
+status: applied
+applied_in: 611a93a
 ---
 # Phase 7, part 1: plan nodes, composite nodes and the scheduler
 
