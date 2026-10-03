@@ -8602,7 +8602,10 @@ def test_the_page_renders_every_view_against_real_data(tmp_path, monkeypatch):
          str(root / "src/multiagents/monitor/page.html"), str(fixture)],
         capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-2000:]
-    painted = json.loads(result.stdout.split("rendered:", 1)[1])
+    painted = json.loads(result.stdout.split("rendered:", 1)[1].split("\n", 1)[0])
+    # C20 MT-R2: the token is gone from the address bar once the page loads.
+    replaced = json.loads(result.stdout.split("replaced:", 1)[1])
+    assert replaced == ["/monitor?tab=live"], "the token stayed in the URL"
     for view in ("live", "config", "history", "costs", "transcript", "expanded"):
         assert painted[view] > 100, f"the {view} view rendered almost nothing"
 

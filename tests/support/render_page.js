@@ -56,7 +56,19 @@ global.document = {
   querySelectorAll: () => [],
   hidden: false,
 };
-global.window = { scrollY: 0, scrollTo(_x, y) { this.scrollY = y; } };
+// The page strips ?token= from the address bar on load (C20 MT-R2), through
+// window.location and history.replaceState. Both are recorded, not simulated.
+const loc = new URL("http://127.0.0.1:8765/monitor?token=secret-token&tab=live");
+const location = {
+  href: loc.href, search: loc.search, pathname: loc.pathname, hash: loc.hash,
+};
+const replaced = [];
+const history = { replaceState(state, title, url) { replaced.push(url); } };
+global.location = location;
+global.history = history;
+global.window = {
+  scrollY: 0, scrollTo(_x, y) { this.scrollY = y; }, location, history,
+};
 global.setInterval = () => 0;
 global.setTimeout = () => 0;
 global.clearTimeout = () => { };
@@ -89,6 +101,7 @@ if (mode !== "--scroll") {
     return painted;
   `);
   console.log("rendered:", JSON.stringify(run(fixture.state, fixture.settings)));
+  console.log("replaced:", JSON.stringify(replaced));
 } else {
   // Two polls of identical state, then one that differs, with the activity log
   // open and scrolled. Reports what the reader would have experienced.
