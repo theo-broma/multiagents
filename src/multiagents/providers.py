@@ -457,6 +457,10 @@ class Provider:
             found = check(Path(directory).expanduser() / self.bin, "bin_search")
             if found:
                 return found
+        # Non-interactive shells often omit the standard per-user CLI directory.
+        found = check(Path("~/.local/bin").expanduser() / self.bin, "bin_search")
+        if found:
+            return found
         return ResolvedBin(None, None, "bin_search" if self.bin_search else "PATH", searched)
 
     def bin_error(self, resolved: ResolvedBin | None = None) -> str:

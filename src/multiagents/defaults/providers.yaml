@@ -35,6 +35,8 @@
 #                            its refresh, and its `env:` (overlaid with this
 #                            block's own). One level only: the owner may
 #                            not itself declare `auth_from`.
+#   bin_search: [dirs]      extra CLI directories, searched after PATH;
+#                            core then falls back to ~/.local/bin for all providers.
 #   budget_from: <provider>  read this provider's quota from that provider's
 #                            budget source — the payload is fetched once per
 #                            cache period and shared. One level only, too.
