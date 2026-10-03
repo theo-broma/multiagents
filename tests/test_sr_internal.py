@@ -242,9 +242,14 @@ def test_sr_r3_r4_adoption_never_extends_budget_from_forged_future_times(w, cloc
                 assert elapsed < run.supervisor.wall_timeout
             else:
                 assert elapsed > run.supervisor.wall_timeout
-                assert await h.pc.await_until(lambda: w.status(aid) == "stuck", 30), (
+                # An expired turn is reported stuck and then ended as failed
+                # ("timeout: ended at its ... wall clock"); stuck is only a
+                # transient, so a poll can miss it under load. Either report,
+                # carrying the timeout reason, is the expiry.
+                assert await h.pc.await_until(
+                    lambda: w.status(aid) in ("stuck", "failed")
+                    and "timeout" in w.node(aid).reason, 30), (
                     w.node(aid), w.runner.paths.events_file.read_text())
-                assert "timeout" in w.node(aid).reason
         assert w.g.spawns() == 1
     asyncio.run(go())
 
