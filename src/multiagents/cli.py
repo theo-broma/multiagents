@@ -2285,10 +2285,16 @@ def cmd_auth(args: argparse.Namespace) -> int:
             return 2
         # PS-R3: a dependent borrows the owner's login action — and says so,
         # because the browser session that follows is the owner's account.
-        owner, provider = _credential_owner(name, providers)
+        pinned = (getattr(provider, "container_account", "") and
+                  getattr(executor_of(name), "kind", "") == "docker" and
+                  not getattr(args, "host", False))
+        owner, selected_provider = _credential_owner(name, providers)
+        if not pinned:
+            provider = selected_provider
         if owner != name:
             print(f"{name} uses {owner}'s login")
-            name = owner
+            if not pinned:
+                name = owner
         extra = {}
         if getattr(args, "account", ""):
             # Passed to the script rather than resolved here: only it knows
@@ -2982,6 +2988,25 @@ def cmd_docker(args: argparse.Namespace) -> int:
         if provider is None:
             print(f"unknown provider {provider_name!r}; known: {sorted(providers)}", file=sys.stderr)
             return 2
+        pin = getattr(provider, "container_account", "")
+        account = getattr(args, "account", "")
+        if pin and account and pin != account:
+            print(f"account {account!r} differs from configured pin {pin!r}", file=sys.stderr)
+            return 2
+        if ex.proxy_provider(provider_name):
+            # This login belongs to a host-only vault, never to the writable
+            # container placeholder. Use the same browser flow as auth login.
+            built = auth_mod.login_command(
+                provider_name, provider, ex, global_config_dir(), paths.config,
+                extra_env={"MULTIAGENTS_ACCOUNT": account} if account else None)
+            if built is None:
+                print(f"no auth script for {provider_name!r}", file=sys.stderr)
+                return 2
+            argv, env = built
+            sys.stdout.flush()
+            return driver._hand_over(argv, env, scripts.resolve(
+                provider_name, provider.auth_owner or provider,
+                global_config_dir(), paths.config))
         state = ex.ensure_running()
         if not state.get("ok"):
             print(state.get("error"), file=sys.stderr)
@@ -3324,6 +3349,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="with `status`: every project's containers on this machine")
     p.add_argument("--force", action="store_true",
                    help="with `rm`: remove it even with agents still inside")
+    p.add_argument("--account", default="", help="vault account label for login")
     p.set_defaults(func=cmd_docker)
 
     p = sub.add_parser("catalog", help="compare the local model catalog against the live one")

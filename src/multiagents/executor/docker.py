@@ -1378,7 +1378,7 @@ sys.exit(rc)
             # would either renew the same token repeatedly or — worse, if the
             # provider rotates refresh tokens — race two renewals against
             # one token.
-            if credential_owner(name, self.providers) != name:
+            if self.container_credential_owner(name) != name:
                 continue
             backing = self.private_state(name)
             if not backing:
@@ -1398,7 +1398,12 @@ sys.exit(rc)
             vault = self.vault_state(name).get(name)
             clock = vault / ".credentials.json" if vault and \
                 (vault / ".credentials.json").is_file() else root / ".credentials.json"
-            if not self._expiring_soon(clock):
+            clocks = [clock]
+            if name == self.AUTH_PROVIDER and vault:
+                from ..authproxy import Accounts
+                accounts = Accounts(vault)
+                clocks = [accounts.path(label) for label in accounts.labels()] or clocks
+            if not any(self._expiring_soon(path) for path in clocks):
                 continue
             with self._refresh_lock(name) as held:
                 # Somebody else got there first. Not worth waiting for: the
@@ -1412,7 +1417,7 @@ sys.exit(rc)
                 # would be a wasted call at best — and at worst, if this
                 # provider rotates refresh tokens, two renewals racing on one
                 # token is how a provider decides it has been stolen.
-                if not self._expiring_soon(clock):
+                if not any(self._expiring_soon(path) for path in clocks):
                     continue
                 code, out, err = scripts.run_action(
                     name, provider, self, "refresh", global_config_dir(),
@@ -1642,7 +1647,7 @@ sys.exit(rc)
         for name, entry in self.providers.items():
             if provider and name != provider:
                 continue
-            owner = credential_owner(name, self.providers)
+            owner = self.container_credential_owner(name)
             if owner != name and not provider:
                 continue          # allocated once, under the owner
             # PS-R2 (review finding 8): WHICH paths are privatised is the
@@ -1755,7 +1760,7 @@ sys.exit(rc)
         for name, entry in self.providers.items():
             if provider and name != provider:
                 continue
-            owner = credential_owner(name, self.providers)
+            owner = self.container_credential_owner(name)
             if owner != name and not provider:
                 continue          # PS-R2: one vault, held by the owner
             owner_entry = self.providers.get(owner) or entry
@@ -1927,6 +1932,40 @@ sys.exit(rc)
     # profile. A second provider needs its own upstream, not a share of this.
     AUTH_PROVIDER = "claude"
 
+    def proxy_provider(self, name: str) -> bool:
+        """Whether this provider inherits the sidecar's credential protocol."""
+        seen = set()
+        while name and name not in seen:
+            if name == self.AUTH_PROVIDER:
+                return True
+            seen.add(name)
+            entry = self.providers.get(name)
+            name = (getattr(entry, "auth_from", "") or
+                    getattr(entry, "extends", ""))
+        return False
+
+    def container_credential_owner(self, name: str) -> str:
+        # An inherited private profile selects state on the host; under the
+        # sidecar its credentials belong to the protocol owner's vault.
+        if self.proxy_provider(name):
+            return self.AUTH_PROVIDER
+        return credential_owner(name, self.providers)
+
+    def account_pins(self) -> dict[str, str]:
+        return {name: entry.container_account for name, entry in self.providers.items()
+                if self.proxy_provider(name) and getattr(entry, "container_account", "")}
+
+    def budget_accounts(self, name: str) -> dict[str, Path] | None:
+        """Explicit vault profiles; None means this is another protocol."""
+        if not self.proxy_provider(name):
+            return None
+        from ..authproxy import Accounts
+        vault = self.vault_state(name).get(self.AUTH_PROVIDER)
+        if vault is None:
+            return {}
+        accounts = Accounts(vault, self.account_pins())
+        return {label: accounts.path(label).parent for label in accounts.eligible(name)}
+
     def auth_proxy_enabled(self) -> bool:
         """Off unless asked for, and only where there is a vault to hold.
 
@@ -1954,9 +1993,25 @@ sys.exit(rc)
         # mints agents' tags from the same file.
         from ..authproxy import PORT, load_secret
         load_secret(vault)
+        # Mount a directory so atomic replacement is visible on reload. This
+        # is project-scoped even when the credential vault is machine-shared.
+        proxy_config = state_root() / "container-state" / self.slug / "auth-proxy"
+        proxy_config.mkdir(parents=True, exist_ok=True)
+        pins_file = proxy_config / "pins.json"
+        temporary = pins_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.account_pins()))
+        os.replace(temporary, pins_file)
+        from ..authproxy import Accounts
+        Accounts(vault, self.account_pins())
 
         if self.container_state(self.auth_container) == "running":
-            return {"ok": True, "existed": True}
+            # Old sidecars have no config mount. Refuse to serve a new pin
+            # through one; recreate it before the workspace admits a launch.
+            mounted = _run(["docker", "inspect", "--format",
+                            '{{range .Mounts}}{{println .Destination}}{{end}}',
+                            self.auth_container])
+            if "/proxy-config" in mounted.stdout.splitlines():
+                return {"ok": True, "existed": True}
         _run(["docker", "rm", "-f", self.auth_container])
         # Neutral paths inside, unlike everywhere else here. The identical-path
         # rule exists so git can resolve a worktree; this container has no
@@ -1970,10 +2025,12 @@ sys.exit(rc)
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--restart", "unless-stopped",
             "-v", f"{vault}:/vault:ro",
+            "-v", f"{proxy_config}:/proxy-config:ro",
             "-v", f"{source}:/opt/ma/multiagents:ro",
             "--env", "PYTHONPATH=/opt/ma",
             self.image,
             "python3", "-m", "multiagents.authproxy", "/vault", "0.0.0.0", str(PORT),
+            "/proxy-config/pins.json",
         ])
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:400]}
@@ -1997,7 +2054,10 @@ sys.exit(rc)
             return
         from ..authproxy import load_secret, mint_token
         vault = self.vault_state(self.AUTH_PROVIDER)[self.AUTH_PROVIDER]
-        tag = mint_token(self.slug, load_secret(vault))
+        secret = load_secret(vault)
+        tag = mint_token(self.slug, secret)
+        claims = {name: mint_token(self.slug, secret, provider=name)
+                  for name in self.providers if self.proxy_provider(name)}
         # Only the provider the proxy actually serves. Writing this shape into
         # another provider's profile would be junk at best.
         for host_path, backing in self.private_state(self.AUTH_PROVIDER).items():
@@ -2017,6 +2077,15 @@ sys.exit(rc)
             tmp.write_text(json.dumps(payload))
             tmp.chmod(0o600)
             os.replace(tmp, target)
+            # Nested launches cannot read the host signing key. They select a
+            # host-signed provider claim projected alongside the placeholder.
+            # Routing identity is enforced; agents in one container are not
+            # isolated from one another's claims.
+            claim_file = backing / ".proxy-claims.json"
+            temporary = claim_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps(claims))
+            temporary.chmod(0o600)
+            os.replace(temporary, claim_file)
             del host_path
 
     # --- workspace container ----------------------------------------------
@@ -2083,6 +2152,9 @@ sys.exit(rc)
             # the `_start_inside` branch first) — this guard is for any other
             # caller that assumes `ensure_running` is always safe to call.
             return {"ok": True, "container": self.container, "existed": True}
+        if self.account_pins() and not self.auth_proxy_enabled():
+            return {"ok": False, "error": "container_account requires "
+                    "executor.docker.auth_proxy: true and a private credential vault"}
         # CX-C17: a versions root that would widen the mount is a config
         # error, refused before any container is created or used.
         errors = self._depth_errors()
@@ -2425,6 +2497,27 @@ sys.exit(rc)
             private = self.private_state(found[0])
             if private:
                 env["MULTIAGENTS_PRIVATE_HOME"] = str(next(iter(private)))
+        name = provider or env.get("MULTIAGENTS_PROVIDER", "") or (found[0] if found else "")
+        entry = self.providers.get(name)
+        if entry is not None:
+            if self.auth_proxy_enabled() and self.proxy_provider(name):
+                # Drop the relocated host profile under docker. The canonical
+                # writable private mount contains only the sidecar placeholder;
+                # the per-launch signed claim supplies the routing identity.
+                field = getattr(entry, "budget_profile_env", "")
+                if field:
+                    env.pop(field, None)
+                from ..authproxy import load_secret, mint_token, PORT
+                if self.inside():
+                    profile = next(iter(self.private_state(name)))
+                    env["ANTHROPIC_AUTH_TOKEN"] = json.loads(
+                        (profile / ".proxy-claims.json").read_text())[name]
+                else:
+                    vault = self.vault_state(name)[self.AUTH_PROVIDER]
+                    env["ANTHROPIC_AUTH_TOKEN"] = mint_token(
+                        env.get("MULTIAGENTS_AGENT_ID") or self.slug,
+                        load_secret(vault), provider=name)
+                env["ANTHROPIC_BASE_URL"] = f"http://{self.auth_container}:{PORT}"
         return env
 
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,

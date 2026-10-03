@@ -45,6 +45,37 @@ fi
 # own instead of twenty-eight days of account access.
 VAULT="${MULTIAGENTS_PRIVATE_VAULT:-}"
 
+# A pin selects a login in the owner's vault, never a separate host profile.
+PIN="${MULTIAGENTS_CONTAINER_ACCOUNT:-}"
+if [ -n "$PROFILE" ] && [ -n "$PIN" ]; then
+    if [ -n "${MULTIAGENTS_ACCOUNT:-}" ] && [ "$MULTIAGENTS_ACCOUNT" != "$PIN" ]; then
+        echo "account '$MULTIAGENTS_ACCOUNT' differs from configured pin '$PIN'" >&2
+        exit 64
+    fi
+    MULTIAGENTS_ACCOUNT="$PIN"
+    export MULTIAGENTS_ACCOUNT
+fi
+
+# Labels are data, not paths supplied by a caller. Default lives at the top.
+vault_labels() {
+    python3 - "$VAULT" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+labels = ['default'] if (root / '.credentials.json').is_file() else []
+accounts = root / 'accounts'
+if (accounts / 'default').exists():
+    sys.exit('accounts/default is reserved; rename it to another account label')
+if accounts.is_dir():
+    for path in accounts.iterdir():
+        if not path.is_dir():
+            continue
+        if not re.fullmatch('[a-z0-9_-]+', path.name):
+            sys.exit('account labels require lowercase letters, digits, - or _')
+        labels.append(path.name)
+print('\n'.join(sorted(labels)))
+PY
+}
+
 # Where the CLI in THIS environment keeps its sessions: CLAUDE_CONFIG_DIR when
 # it is set, as `transcripts.default_root()` reads it, and ~/.claude otherwise.
 # Read, never exported: `compact` must find the transcript the running CLI
@@ -108,7 +139,21 @@ os.replace(tmp, dst)
 migrate_to_vault() {
     [ -n "$VAULT" ] && [ -n "$PROFILE" ] || return 0
     [ -s "$VAULT/.credentials.json" ] && return 0      # already done
+    [ -d "$VAULT/accounts" ] && return 0              # multi-account vault
     [ -s "$PROFILE/.credentials.json" ] || return 0    # nothing to move
+    # A sidecar name-tag is not an OAuth login. Never migrate it back into
+    # the host vault and let a far-future placeholder clock invent a login.
+    python3 - "$PROFILE/.credentials.json" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    placeholder = any(isinstance(b, dict) and isinstance(b.get('accessToken'), str)
+                      and b['accessToken'].startswith(('mxa_', 'mxa2_')) for b in data.values())
+except (OSError, ValueError, AttributeError):
+    sys.exit(1)
+sys.exit(1 if placeholder else 0)
+PY
+    [ "$?" = "0" ] || return 0
     mkdir -p "$VAULT"
     chmod 700 "$VAULT" 2>/dev/null
     cp "$PROFILE/.credentials.json" "$VAULT/.credentials.json" || return 1
@@ -119,6 +164,46 @@ migrate_to_vault() {
 case "${1:-check}" in
 check)
     if [ -n "$PROFILE" ]; then
+        migrate_to_vault >/dev/null 2>&1
+        if [ -n "$VAULT" ] && { [ -s "$VAULT/.credentials.json" ] || [ -d "$VAULT/accounts" ] || [ -n "$PIN" ] || [ "${MULTIAGENTS_AUTH_PROXY:-0}" = "1" ]; }; then
+            labels=$(vault_labels) || exit 20
+            python3 - "$VAULT" "$PIN" "${MULTIAGENTS_RESERVED_ACCOUNTS:-[]}" "$labels" <<'PY'
+import json, pathlib, sys, time
+root, pin = pathlib.Path(sys.argv[1]), sys.argv[2]
+reserved = json.loads(sys.argv[3])
+labels = sys.argv[4].splitlines()
+if not labels and not pin:
+    labels = ['default']
+if pin and pin not in labels:
+    labels.append(pin)
+statuses, usable = {}, []
+for label in labels:
+    path = root if label == 'default' else root / 'accounts' / label
+    status = 'missing'
+    try:
+        data = json.loads((path / '.credentials.json').read_text())
+        for block in data.values():
+            if not isinstance(block, dict) or not block.get('accessToken'):
+                continue
+            access = float(block.get('expiresAt', 0)) / 1000
+            refresh = float(block.get('refreshTokenExpiresAt', 0)) / 1000
+            renewable = bool(block.get('refreshToken')) and (not refresh or refresh > time.time())
+            status = 'ok' if access > time.time() or renewable else 'expired'
+            if refresh and refresh <= time.time():
+                status = 'expired'
+            break
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    statuses[label] = status
+    if status == 'ok' and (label == pin if pin else label not in reserved):
+        usable.append(label)
+print('accounts: ' + json.dumps(statuses, sort_keys=True) +
+      ('; authenticated' if usable else '; no usable account; run `multiagents auth login ' +
+       __import__('os').environ.get('MULTIAGENTS_PROVIDER', 'claude') + '`'))
+sys.exit(0 if usable else 10)
+PY
+            exit $?
+        fi
         # Read the file rather than asking the CLI: `auth status` would start a
         # background daemon on the HOST rooted in the container's profile, and
         # the container would then find a lock naming a pid it cannot signal.
@@ -155,7 +240,6 @@ check)
         # file cannot know that; only a request can. The runner's failure
         # classifier is what covers it, and this says so rather than implying
         # a completeness it does not have.
-        migrate_to_vault >/dev/null 2>&1
         # Read the VAULT, not the projection. The projection lives in a
         # directory the container writes to, so an agent can put any expiry it
         # likes in there — 1970 to make the host refresh in a loop until the
@@ -277,7 +361,12 @@ login)
                 echo "without it there is nowhere to hold more than one credential."
                 exit 64
             fi
-            TARGET="$VAULT/accounts/$MULTIAGENTS_ACCOUNT"
+            case "$MULTIAGENTS_ACCOUNT" in
+                *[!a-z0-9_-]*) echo "invalid account label" >&2; exit 64 ;;
+            esac
+            if [ "$MULTIAGENTS_ACCOUNT" != "default" ]; then
+                TARGET="$VAULT/accounts/$MULTIAGENTS_ACCOUNT"
+            fi
             echo "signing in as account '$MULTIAGENTS_ACCOUNT'."
             echo
         fi
@@ -334,6 +423,38 @@ refresh)
     # call there is. At most once per token lifetime, on the cheapest model.
     [ -z "$PROFILE" ] && exit 64          # no container profile; nothing to do
     migrate_to_vault
+    if [ -n "$VAULT" ] && [ -z "${MULTIAGENTS_REFRESH_ACCOUNT:-}" ]; then
+        labels=$(vault_labels) || exit 20
+        failed=0
+        for label in $labels; do
+            account="$VAULT"
+            [ "$label" = "default" ] || account="$VAULT/accounts/$label"
+            if python3 - "$account/.credentials.json" <<'PY'
+import json, sys, time
+try:
+    data = json.load(open(sys.argv[1]))
+    due = any(isinstance(b, dict) and b.get('expiresAt') and
+              float(b['expiresAt']) / 1000 <= time.time() + 1800 for b in data.values())
+except (OSError, ValueError, TypeError, AttributeError):
+    due = False
+sys.exit(0 if due else 1)
+PY
+            then
+                echo "renewing account '$label'"
+                # The child's vault is this account. It must never project a
+                # labelled credential into the common container profile.
+                MULTIAGENTS_PRIVATE_VAULT="$account" MULTIAGENTS_REFRESH_ACCOUNT="$label" \
+                    MULTIAGENTS_AUTH_PROXY=1 sh "$0" refresh || failed=1
+            fi
+        done
+        # Repair the access-only projection even when no renewal was due.
+        # With a sidecar this is a no-op: only name-tags may enter that mount.
+        if [ -s "$VAULT/.credentials.json" ]; then
+            project_token || failed=1
+        fi
+        [ "$failed" = "0" ] && echo "vault accounts checked"
+        exit "$failed"
+    fi
     RENEW="${VAULT:-$PROFILE}"
     [ -n "$VAULT" ] && [ -s "$VAULT/.credentials.json" ] || RENEW="$PROFILE"
     if [ ! -s "$RENEW/.credentials.json" ]; then
