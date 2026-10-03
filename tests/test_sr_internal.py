@@ -9,6 +9,7 @@ import time
 import pytest
 
 import test_sr_steer_exit_race as h
+from multiagents import gitops
 from multiagents.executor.base import running, session_alive, stop_wrapped
 from multiagents.executor.docker import DockerExecutor
 from multiagents.runner import _Predecessor
@@ -410,6 +411,11 @@ class MountedDocker(DockerExecutor):
 
     def preflight(self):
         return []
+
+    def git(self, agent_id):
+        # `inside()` is False for the liveness path; git stays local, so no
+        # `docker exec` (and no docker executable) is needed.
+        return gitops.HOST
 
     def wrapper_alive(self, agent_id):
         try:
