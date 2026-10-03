@@ -215,3 +215,7 @@ never submitted.
     1. surface agy's `result.error` in the node reason instead of the bare "reported ERROR";
     2. consider `done` with a warning when the final `agent_response` step is `DONE` and the response is non-empty.
   - Not blocking; a candidate for phase 7.
+- **C14 — done 2026-10-03, after C17 (ee277f2).**
+  - **The provider.** `codex-b` is re-enabled in the project `providers.yaml` with `container_private_home: [".codex-b"]`. The user recreated the container and logged it in. The mounts are distinct: `shared/codex/.codex` goes to `~/.codex`, and `shared/codex-b/.codex-b` to `~/.codex-b`.
+  - **Proof of a different account**, from the quota readings alone: `codex` showed 5h 49%, weekly 55%, resetting 10-09 21:17Z, while `codex-b` showed 5h 0%, weekly 16%, resetting 10-10 10:04Z. That is the account `codex` used this morning, before the user switched it.
+  - **Routing.** `codex-b: <same model>` was added to `agents.yaml`. It is the first fallback for every codex-primary agent (advisor, researcher, the three implementers, dev-advisor, robustness-tester, bug-reporter), and comes right after `codex` where codex is itself a fallback (tester, gemini-advisor, reviewer).
