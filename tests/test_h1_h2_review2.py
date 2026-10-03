@@ -88,6 +88,7 @@ def test_rf_r3_r1_adopted_opencode_filter_without_exit_status_is_refused(
     opencode = dict(config["providers"].pop("svstub"))
     opencode["stream"] = shipped["stream"]
     opencode["usage_mode"] = shipped["usage_mode"]
+    opencode["spawn"] = {**opencode["spawn"], "prompt_transport": "argv"}  # C16 TG-R4 opt-in
     config["providers"]["opencode"] = opencode
     config_path.write_text(yaml.safe_dump(config))
     agents_path = p.root / ".multiagents" / "config" / "agents.yaml"
