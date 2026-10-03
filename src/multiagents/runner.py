@@ -7008,6 +7008,10 @@ class Runner:
             released = await self._stop_blocked_steer(agent_id)
             if released is not None:
                 return released
+        predecessor = None
+        if not internal:
+            with contextlib.suppress(Exception):
+                predecessor = self._steer_predecessor(agent_id)
         run = self.runs.get(agent_id)
         if run is not None:
             run.stop_requested = True     # recorded before the cancel lands
@@ -7052,29 +7056,37 @@ class Runner:
         if internal:
             return {"agent_id": agent_id, "status": "stopping"}
         self.tree.set_status(agent_id, "cancelled", "stopped by parent")
-        return {"agent_id": agent_id, "status": "cancelled"}
+        confirmed = False
+        if predecessor is not None:
+            with contextlib.suppress(Exception):
+                confirmed = await self._steer_predecessor_dead(predecessor)
+        return {"agent_id": agent_id, "status": "cancelled",
+                "predecessor_death_confirmed": confirmed}
 
     async def _stop_blocked_steer(self, agent_id: str) -> dict[str, Any] | None:
-        """SF-R3: stop every known identity before an explicit hold release.
+        """LV-R3/SF-R3: stop every known identity before a steer hold release.
         Independent releases still belong to the same retryable owner."""
         hold = self._holds.get(agent_id)
         if hold is None:
             node = self.tree.get(agent_id)
             record = node.cleanup_hold if node else None
             cleanup = record.get("steer_cleanup") if isinstance(record, dict) else None
-            cleanup = cleanup if isinstance(cleanup, dict) else {}
-            if not cleanup.get("blocked_reason"):
+            if not isinstance(cleanup, dict):
                 return None
             self._settle_holds()
             hold = self._holds.get(agent_id)
             if hold is None:
+                node = self.tree.get(agent_id)
+                if node is not None and not node.cleanup_hold:
+                    return None          # adoption settled the cleanup
                 return {"agent_id": agent_id, "status": "held",
+                        "predecessor_death_confirmed": False,
                         "error": "the hold could not be adopted; retry stop_agent "
                                  "when its owner or storage is available"}
         cleanup = hold.steer
-        if cleanup is None or not cleanup.get("blocked_reason"):
+        if cleanup is None:
             return None
-        reason = cleanup["blocked_reason"]
+        reason = cleanup.get("blocked_reason") or "predecessor death is not confirmed"
         saved = cleanup.get("predecessor") or hold.record
         pid, start = saved.get("pid"), saved.get("pid_start") or ""
         identity = saved.get("executor") or {"kind": "unknown"}
@@ -7122,7 +7134,7 @@ class Runner:
         cleanup["predecessor_death_confirmed"] = confirmed
         hold.record = dict(hold.record, operator_release=cleanup["operator_release"],
                            predecessor_death_confirmed=confirmed)
-        cleanup.pop("blocked_reason")
+        cleanup.pop("blocked_reason", None)
         cleanup["steps"] = [s for s in cleanup["steps"] if s not in {"confirm", "inspect"}]
         if not cleanup.get("launch_owned"):
             cleanup["foreign"] = False
@@ -7456,6 +7468,10 @@ class Runner:
                              f"Start a fresh run and give it the old run dir: "
                              f"{self.paths.run_dir(agent_id)}"}
         active = self.__dict__.setdefault("_steering_nodes", set())
+        # LV-R4: retry the previous cleanup's death check before refusing a
+        # new handoff. A transient unknown is not a permanent steer hold.
+        if agent_id not in active:
+            self._settle_holds()
         hold = self._holds.get(agent_id)
         cleanup = hold.steer if hold is not None else None
         if cleanup is None:
@@ -7465,6 +7481,13 @@ class Runner:
         if agent_id in active or cleanup is not None:
             reason = (cleanup or {}).get("blocked_reason") or (
                 "its previous steer or previous steer cleanup is still pending")
+            if (agent_id not in active and cleanup is not None
+                    and not cleanup.get("blocked_reason") and (
+                        "confirm" in cleanup.get("steps", []) or (
+                            cleanup.get("operator_release") and not
+                            cleanup.get("predecessor_death_confirmed")))):
+                reason = ("the predecessor's wrapper or agent is not confirmed dead "
+                          "(liveness may be unknown)")
             return {"agent_id": agent_id, "steered": False,
                     "error": f"{agent_id} cannot be steered: {reason}",
                     **({"blocked": True} if queued else {})}

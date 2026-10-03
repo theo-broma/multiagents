@@ -163,18 +163,8 @@ exit 0
 """
 
 
-# SV-R1/R6: is the run whose wrapper pid `$0` holds still alive, in the pid
-# namespace it was recorded in? 0 yes, 1 no, 2 unknown.
-# RM-R1c (review ag-43f57f): "no" must be positive. A missing or malformed
-# `wrapper.pid` is unknown — the wrapper may not have written it yet, and it
-# is removed before every launch, so it never names a predecessor. And a
-# dead wrapper is not a dead run: the agent it started only `setpgrp`s, so
-# it stays in the wrapper's session (the wrapper leads one: `docker exec`
-# makes it so, and the wrapper makes sure). The run is dead only when no
-# live process is left in that session. A /proc that cannot be read, or a
-# process entry that still exists but cannot be read (review ag-598c45), is
-# unknown, never an empty session. "Empty" takes two scans a short gap apart
-# (RM-R1e): a member forking during one scan is a narrowed, accepted limit.
+# Legacy standalone shell probe, retained for callers embedding its script.
+# DockerExecutor uses the single-process kernel check below (LV-R1).
 _ALIVE_SCRIPT = r"""
 w=$(cat "$0" 2>/dev/null); case "$w" in ''|*[!0-9]*) exit 2 ;; esac
 [ -r /proc/self/stat ] || exit 2
@@ -195,6 +185,165 @@ scan; r=$?; [ "$r" -ne 1 ] && exit "$r"
 sleep 0.05 2>/dev/null || sleep 1
 scan
 """
+# LV-R1/SR-R2: agent-writable start records cannot establish death. Ask the
+# kernel about the recorded pids; when neither is alive, check the wrapper's
+# whole session, including descendants that changed process groups. Reading
+# /proc in one process keeps the two empty-session checks cheap under load.
+_ALIVE_CHECK = r"""
+import os, stat, sys, time
+
+def pid_file(path, required=False):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        if required:
+            raise
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('not a regular pid file')
+        text = os.read(fd, 257)
+    finally:
+        os.close(fd)
+    tokens = text.split()
+    if (len(text) > 256 or not tokens or not tokens[0].isdigit()
+            or int(tokens[0]) <= 0 or len(tokens) > (1 if required else 2)):
+        raise ValueError('invalid pid file')
+    return int(tokens[0])
+
+def fields(pid):
+    path = '/proc/%d' % pid
+    try:
+        with open(path + '/stat') as stream:
+            text = stream.read(8192)
+    except (FileNotFoundError, ProcessLookupError):
+        if os.path.exists(path):
+            raise OSError('unreadable process entry')
+        return ()
+    result = text.rpartition(')')[2].split()
+    if len(result) < 4 or len(text) >= 8192:
+        raise ValueError('invalid process stat')
+    return result
+
+def verdict():
+    wrapper_file = sys.argv[1]
+    wrapper = pid_file(wrapper_file, required=True)
+    if not fields(os.getpid()):
+        return 2
+    uncertain = False
+    try:
+        own = fields(wrapper)
+        if own and own[0] not in ('Z', 'X'):
+            return 0
+    except (OSError, ValueError):
+        uncertain = True
+    agent = pid_file(os.path.join(os.path.dirname(wrapper_file), 'container.pid'))
+    if agent is not None:
+        try:
+            own = fields(agent)
+            if own and own[0] not in ('Z', 'X'):
+                return 0
+        except (OSError, ValueError):
+            uncertain = True
+
+    def scan():
+        unreadable = False
+        with os.scandir('/proc') as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    own = fields(int(entry.name))
+                    if own and int(own[3]) == wrapper and own[0] not in ('Z', 'X'):
+                        return 0
+                except (OSError, ValueError):
+                    unreadable = True
+        return 2 if unreadable else 1
+
+    for attempt in range(2):
+        code = scan()
+        if code != 1:
+            return code
+        if attempt == 0:
+            time.sleep(0.05)
+    return 2 if uncertain else 1
+
+try:
+    code = verdict()
+except Exception:
+    code = 2
+print('multiagents-probe:%d' % code)
+sys.exit(code)
+"""
+
+# LV-R2: the timeout lives INSIDE the container, independent of the docker
+# client. The supervisor adopts orphaned descendants so a timed-out shell's
+# whole process group is killed and reaped before it reports unknown.
+_ALIVE_PROBE = r"""
+import os, signal, subprocess, sys
+child = None
+recorded = False
+code = 2
+try:
+    import ctypes
+    path, bound = sys.argv[1], float(sys.argv[2])
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:
+        raise OSError('could not adopt probe descendants')
+    child = subprocess.Popen(sys.argv[3:], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL)
+    with open('/proc/%d/stat' % child.pid) as stream:
+        start = stream.read().rpartition(')')[2].split()[19]
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    recorded = True
+    with os.fdopen(fd, 'w') as stream:
+        stream.write('%d %s' % (child.pid, start))
+    try:
+        output, _ = child.communicate(timeout=bound)
+        marks = output.decode().splitlines()
+        if child.returncode in (0, 1) and marks == ['multiagents-probe:%d' % child.returncode]:
+            code = child.returncode
+    except subprocess.TimeoutExpired:
+        code = 2
+except Exception:
+    code = 2
+finally:
+    try:
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate()
+            while True:
+                try:
+                    os.waitpid(-1, 0)
+                except ChildProcessError:
+                    break
+        if recorded:
+            os.unlink(path)
+    except Exception:
+        code = 2
+print('multiagents-alive:%d' % code)
+sys.exit(code)
+"""
+
+# A transport timeout can hide the supervisor's own reply. Reach the recorded
+# probe group through another exec, checking its identity before signalling.
+_ALIVE_PROBE_KILL = r"""
+import os, signal, sys
+try:
+    with open(sys.argv[1]) as stream:
+        pid, start = stream.read().split()
+    with open('/proc/%s/stat' % pid) as stream:
+        current = stream.read().rpartition(')')[2].split()[19]
+    if current == start:
+        os.killpg(int(pid), signal.SIGKILL)
+except (OSError, ValueError, IndexError):
+    pass
+"""
+ALIVE_PROBE_SECONDS = 3.0
 # How long the container may go unanswerable before a wrapper nobody can
 # see is taken for dead: a daemon restart is seconds, a removed container
 # is forever.
@@ -2351,6 +2500,21 @@ sys.exit(rc)
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    def _wrapper_probe(self, agent_id: str) -> subprocess.CompletedProcess:
+        pidfile = f"/tmp/multiagents-alive-{uuid.uuid4().hex}.pid"
+        argv = ["/usr/bin/python3", "-c", _ALIVE_PROBE, pidfile,
+                str(ALIVE_PROBE_SECONDS), "sh", "-c",
+                _WRAPPER_ENTRY.format(flag="-c"), _ALIVE_CHECK,
+                str(self.paths.run_dir(agent_id) / "wrapper.pid")]
+        prefix = [] if self.inside() else ["docker", "exec", self.container]
+        try:
+            return _run([*prefix, *argv], timeout=ALIVE_PROBE_SECONDS + 7)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                _run([*prefix, "/usr/bin/python3", "-c", _ALIVE_PROBE_KILL,
+                      pidfile], timeout=5)
+            raise
+
     def wrapper_alive(self, agent_id: str) -> bool | None:
         """Whether an agent's wrapper is alive in the container, asked from
         there — the host cannot tell: the `docker exec` client it holds can
@@ -2358,19 +2522,15 @@ sys.exit(rc)
         asked. Blocking."""
         if self.paths is None:
             return None
-        argv = ["sh", "-c", _ALIVE_SCRIPT,
-                str(self.paths.run_dir(agent_id) / "wrapper.pid")]
-        if not self.inside():
-            argv = ["docker", "exec", self.container, *argv]
         try:
-            code = _run(argv, timeout=30).returncode
+            code = self._wrapper_probe(agent_id).returncode
         except (OSError, subprocess.TimeoutExpired):
             return None
         return {0: True, 1: False}.get(code)     # 2 and anything else: unknown
 
     def wrapper_verdict(self, agent_id: str) -> bool | None:
         """`wrapper_alive`, but False ONLY on an explicit answer: the script
-        itself, run in the container, reporting the wrapper absent (its exit
+        itself, run in the container, reporting the run ended (its exit
         status echoed behind a marker, so a `docker exec` that never reached
         the container — whose own exit status can be 1 too — is not taken
         for it), or docker confirming the container stopped or gone.
@@ -2378,12 +2538,8 @@ sys.exit(rc)
         (PC-R2a: a slot is released only on confirmed exit.)"""
         if self.paths is None:
             return None
-        argv = ["sh", "-c", f"( {_ALIVE_SCRIPT} ); echo \"multiagents-alive:$?\"",
-                str(self.paths.run_dir(agent_id) / "wrapper.pid")]
-        if not self.inside():
-            argv = ["docker", "exec", self.container, *argv]
         try:
-            out = _run(argv, timeout=30).stdout
+            out = self._wrapper_probe(agent_id).stdout
         except (OSError, subprocess.TimeoutExpired):
             out = ""
         marks = [line.strip() for line in (out or "").splitlines()
