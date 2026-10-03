@@ -904,7 +904,11 @@ def test_is_r2_default_is_soonest_reset(tmp_path, monkeypatch):
 
 
 def test_is_r2_the_global_setting_replaces_the_default(tmp_path, monkeypatch):
-    result = run_route(tmp_path, monkeypatch, CLASSIC,
+    # bravo is preferred. The default (soonest_reset) keeps bravo; the global
+    # setting must move the choice to acme, whose 80% of the week is left.
+    result = run_route(tmp_path, monkeypatch, CLASSIC, preferred="bravo")
+    assert result["provider"] == "bravo"
+    result = run_route(tmp_path / "global", monkeypatch, CLASSIC, preferred="bravo",
                        project_budget={"instance_strategy": L_MOST})
     assert result["provider"] == "acme"
     assert L_MOST in result["routing"]
@@ -922,12 +926,13 @@ def test_is_r2_the_provider_setting_wins_over_the_global_one(tmp_path, monkeypat
 
 
 def test_is_r2_the_provider_setting_wins_over_the_default(tmp_path, monkeypatch):
-    # Reversed readings: here the default (soonest_reset) and today's name
-    # tie-break both say acme; only the provider's own setting says bravo.
-    reversed_ = dict(acme=reading(50, 30, 20), bravo=reading(50, 120, 80))
-    result = run_route(tmp_path, monkeypatch, reversed_,
-                       extras={"acme": {"instance_strategy": L_MOST}})
+    # bravo is preferred. The default keeps bravo; bravo's own setting must
+    # move the choice to acme, whose 80% of the week is left against 20%.
+    result = run_route(tmp_path, monkeypatch, CLASSIC, preferred="bravo")
     assert result["provider"] == "bravo"
+    result = run_route(tmp_path / "own", monkeypatch, CLASSIC, preferred="bravo",
+                       extras={"bravo": {"instance_strategy": L_MOST}})
+    assert result["provider"] == "acme"
     assert L_MOST in result["routing"]
 
 
