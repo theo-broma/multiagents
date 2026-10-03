@@ -51,3 +51,31 @@ Under docker, both providers inherit `container_private_home: [".codex"]`. `Dock
 
 - Migrating any existing login. The `shared/codex-b/.codex` left by the failed attempt may be reused or ignored.
 - Local (non-docker) execution, where `MULTIAGENTS_CODEX_PROFILE` already separates the accounts.
+
+## Revision after the advisor's check (2026-10-03, ag-aed397, before tests)
+
+These override any earlier wording they contradict. The decisions are the orchestrator's.
+
+**FA-R1a: ownership is the executor's credential owner.**
+- A collision means two providers that resolve to **different container credential owners** (`DockerExecutor.container_credential_owner`, sidecar instances included) and claim the same container path.
+- These configurations are supported and must be accepted:
+  - `claude-b` inherits `.claude` without `auth_from`, and both map to the sidecar owner `claude`;
+  - `agy-partner` shares `.gemini` through `auth_from`.
+- `_instance_conflicts()` (`providers.py` ~786) compares raw strings and ignores owners, so it is not reused unchanged.
+- **Verified by:**
+  - the claude/claude-b and agy/agy-partner shapes are accepted;
+  - codex with an old-shape codex-b is refused.
+
+**FA-R2a: the mechanism is a distinct private path.**
+- The second codex account gets its own `container_private_home` entry, e.g. `.codex-b`. A vault account is out of scope: it would extend the Claude-only sidecar.
+- Runs already turn `MULTIAGENTS_PRIVATE_HOME` into `CODEX_HOME` (`codex.py` ~459-463), so a run of `codex-b` uses `CODEX_HOME=<codex-b's path>`.
+- **The executable stays reachable.** The versions root `~/.codex/packages/standalone/releases` stays mounted read-only at its host path (`executor/docker.py` ~1178-1187, `native_bin` ~2640), whatever profile is selected. Login and runs of `codex-b` reach that executable while their own profile stays writable.
+- **Budget is isolated.** The `check` and `budget` actions of `codex-b` read only its own backing (`scripts.build_env` ~110-117, `codex.py` ~77/828/905), including the rollout fallback.
+- **Verified by:** distinct auth fixtures for codex and codex-b, each provider's check and budget reading only its own fixture, and the executable path resolving for both.
+
+**FA-R3a: docker login uses the provider's login action. This replaces the earlier FA-R3 addition.**
+- No new login declaration. `multiagents docker login <p>` runs the provider-defined `login` action (`auth.login_command()`, `auth.py` ~178-204) inside the container, with container-correct binary and profile paths. For codex that action is already `login --device-auth` with `CODEX_HOME` (`codex.py` ~486-497).
+- The native login process receives `CODEX_HOME=<the selected container-private path>`.
+- Plugin and user overrides of the login action keep working.
+- The path-specific EACCES message of FA-R3 is dropped as a test requirement: its cause is only inferred, and an argv-level test cannot prove it.
+- **Verified by:** the `docker exec` argv and environment built for `codex` and for `codex-b` run the login action, with each provider's own `CODEX_HOME`. This is tested at the argv-building seam.
