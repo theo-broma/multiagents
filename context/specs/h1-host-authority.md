@@ -378,6 +378,10 @@ It never raises out of them.
 - Inter-agent isolation inside the container: the threat-model section
   above. **Known limitation**; per-agent containers are future work. It is
   recorded in `sandbox-git.md` and in BRIEF.
+  - **The user decided on 2026-10-03:** accept the limitation for now, and
+    remove it in phase 7 with one container per run.
+  - The intermediate step of one Unix uid per agent was rejected.
+  - See `phase7-nodes-and-containers.md`, part 2 (PAC-R1..R8).
 - Git executing configured programs on the host (hooks, filters, drivers,
   fsmonitor) is **H3**, not H1. H3's audit covers two paths:
   - the merges that HA-R6 still performs;

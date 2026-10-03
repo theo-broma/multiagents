@@ -12,7 +12,63 @@ The review phase's brief is kept at
 
 ---
 
-## Current work (from 2026-09-28, evening): Phase 6 — hardening, then two features
+## Current work (from 2026-10-03): Phase 6 closing round, then Phase 7
+
+**Phase 6 is done apart from a closing round.** H1–H4, H6, H7, H9, H11,
+H13, H14, D1, D2 and D3 are merged. Added on the way, also merged:
+opencode-zai, opencode-deepinfra, claude-b, agy-b, PS, PC, T1, T2, FS, SF,
+SR, AB and DK. Since 2026-10-03 ~09:00 UTC the executor is
+`executor.kind: docker`. The dated log of all this is further down.
+
+**Now: the closing round.** It is in `context/specs/phase6-closing.md`
+(C1–C10):
+- branch triage;
+- closing H5 with evidence;
+- reset times shown in UTC;
+- `doctor`'s false "binary not found in the container";
+- DK-R3a, `auth_status` for a pinned account;
+- the SR `max_steps`-on-adoption leftover;
+- the prompt run-file transport (the rest of H8);
+- a live compaction check (H10);
+- the config warnings, which are the user's decision with defaults;
+- wt-main and a full suite.
+
+The user's standing rules apply:
+- the reviewer runs after every implementer;
+- one implementer per item;
+- work still rejected at review round 3 moves to opus;
+- tickets are fixed in-house and never submitted.
+
+**Then Phase 7, to be specified with the user BEFORE any code** (via
+`multiagents init-agent`). The seed is
+`context/specs/phase7-nodes-and-containers.md`. It covers:
+- plan nodes and a scheduler script, the user's idea of 2026-10-02 (see
+  "Ticket-driven agent scheduling" below);
+- **one container per run**.
+
+**Decision, from the user on 2026-10-03: inter-agent isolation.**
+- Inside the single project container, agents can modify each other's
+  worktrees, HOMEs and refs. This is the known limitation from H1.
+- The user **accepts it for now**. It is removed in phase 7 by one
+  container per run, created by the host-side scheduler.
+- The intermediate step of one Unix uid per agent was considered and
+  **rejected**. Agents run as the host uid, so that the host can manage
+  the files they write on bind mounts. Per-agent uids would need ACLs
+  everywhere and a migration, they would reopen sandbox-git, and all of it
+  would be thrown away in phase 7.
+- The write map and the isolation tests are written straight into phase
+  7's spec (PAC-R1, PAC-R2).
+
+**tmux step 2** (tmux as the process supervisor) belongs naturally with phase
+7's run lifecycle. Consider it there.
+
+**Still deferred:** phases 2 and 3 of the review. The 72 by-design reds in
+`test_phase2_*` stay red. Branches `agents/tester/b689bf` (R18) and `cf02a1`
+(R20) hold phase 3 tests and are kept for it.
+
+---
+
+## Phase 6 — hardening, then two features (history)
 
 **Complete:** everything up to and including Phase 5 (Codex), merged on `main`
 at `e12e605`. New work branches from `main`.
