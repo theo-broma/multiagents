@@ -5587,6 +5587,7 @@ class Runner:
                            for t in filed]
             run.ticket = run.tickets[-1]
         retry_error = ""
+        retry_transport_refused = False
         if stopped_elsewhere:
             pass                          # its reason is the stopper's to give
         elif run.awaiting:
@@ -5646,6 +5647,7 @@ class Runner:
                 transport_error = self._transport_refusal(run.provider)
                 if transport_error:
                     retry_error = f"free retry refused: {transport_error}"
+                    retry_transport_refused = True
                     self.tree.emit(node_id, "retry_failed", detail=transport_error)
                 else:
                     self.tree.emit(node_id, "retrying",
@@ -5672,7 +5674,7 @@ class Runner:
                         admission = self._pc_retry_admission(run, fresh, session_id)
                         if admission is not None:
                             if admission.get("refused"):
-                                raise TransportRefused(admission["refused"])
+                                raise RuntimeError(admission["refused"])
                             return False
                         # CW-R2: a retry is not a new admission; past the safe
                         # point it waits, and a server that exits meanwhile
@@ -5695,7 +5697,8 @@ class Runner:
                         # node ending with the FIRST death's reason (`exited 1`)
                         # as if no retry had ever been attempted. Recorded like a
                         # failed launch anywhere else: `failed`, with the cause.
-                        detail = (str(exc) if isinstance(exc, TransportRefused)
+                        retry_transport_refused = isinstance(exc, TransportRefused)
+                        detail = (str(exc) if retry_transport_refused
                                   else f"{type(exc).__name__}: {exc}"[:300])
                         self.tree.emit(node_id, "retry_failed", detail=detail)
                         retry_error = f"retry launch failed: {detail}"
@@ -5767,13 +5770,13 @@ class Runner:
         self._startup_finish(run.provider.name, node_id, run.startup_token,
                              failed=status == "failed" and not run.startup_progress
                              and not run.stop_requested and not timed_out
-                             and not retry_error,
-                             resolved=status == "refused" or bool(retry_error),
+                             and not retry_transport_refused,
+                             resolved=status == "refused" or retry_transport_refused,
                              error=(stderr or text).splitlines()[0] if (stderr or text) else status)
 
         # Auto-merge this agent's own children upward: their work is still
         # quarantined on this agent's branch, so nothing real has changed yet.
-        if status == "done" or retry_error:
+        if status == "done" or retry_transport_refused:
             # Children first: this agent's branch should carry their work when
             # it is itself merged upward, rather than stranding it.
             await self._merge_pending_children(node_id)
@@ -9313,12 +9316,14 @@ class Runner:
         `op: retry` entry is queued and the node is marked `failed` with the
         entry named in its reason; the entry is returned. Refused by the
         tree-wide limit, there is no retry: the node is marked `failed` with
-        that refusal, and a dict saying so is returned."""
+        that refusal, and a dict saying so is returned. A transport mismatch
+        raises TransportRefused so finalization can distinguish it from a
+        failed retry admission."""
         provider = run.provider.name
         transport_error = self._transport_refusal(run.provider)
         if transport_error:
             self.tree.set_status(node.id, "failed", f"free retry refused: {transport_error}")
-            return {"refused": transport_error}
+            raise TransportRefused(transport_error)
         try:
             self._pc_reserve_resume(run.spec, node, provider, "")
             return None
