@@ -3975,3 +3975,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - 2026-10-03: AB B head 7c33f06 (executor rule + cache compat; full suite clean). Final reviewer ag-962536 running. On approve: merge ag-356ddb, discard ag-7504ef, then DK implementer-deep (single).
 - 2026-10-03: AB APPROVED (ag-962536, 0 blocking) → MERGED 53aca60 (77 AB/budget tests green on main). Discarded ag-7504ef, ag-962536. Follow-ups running: ag-f447cb (implementer-quick, doctor shows verified identity, AB-R3c non-blocking) and DK ag-c95ca6 (implementer-deep, single). SF ag-60dd6f still on r7 blocking fix.
 - 2026-10-03: AB-R3c doctor follow-up approved (ag-fad3e4) and MERGED 8f96695. AB fully done. Running: SF ag-60dd6f (r7 blocking fix), DK ag-c95ca6.
+- 2026-10-03: SF ag-60dd6f r7 fix done → head ad8fd68 (SF 58/58, full suite baseline). Reviewer ag-83d17a round 8 running. DK ag-c95ca6 running.
