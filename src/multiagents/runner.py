@@ -618,6 +618,7 @@ class Run:
     # {"source", "pattern", "excerpt"} — so result.json can carry it verbatim.
     refusal: dict | None = None
     final_status: str = ""
+    requested_session: str = ""     # adapter explicitly reported a resume mismatch
     startup_token: str = ""
     startup_progress: bool = False
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
@@ -4982,6 +4983,8 @@ class Runner:
                 if captured_session:
                     session_id = event.session_id
                 if event.status:
+                    if event.status.upper() == "SESSION_LOST":
+                        run.requested_session = str(event.raw.get("requested_session") or "")
                     if run.final_status.upper() not in {"REFUSED", "TRUNCATED"}:
                         run.final_status = event.status
                         if event.status.upper() in {"REFUSED", "TRUNCATED"}:
@@ -5378,6 +5381,10 @@ class Runner:
         else:
             limited = None
 
+        session_lost = (status == "failed" and bool(run.requested_session))
+        if session_lost:
+            session_id = ""
+
         # Commit anything the agent left uncommitted so no work is stranded on
         # an unreferenced worktree. Skipped while parked on a question: the
         # agent is mid-thought and will resume in the same worktree, and a
@@ -5402,7 +5409,7 @@ class Runner:
         # is still reported below, as CI-R2 would.
         fix_attempts = 0
         if (commit_result is not None and not commit_result.ok and commit_result.hook
-                and not stopped_elsewhere
+                and not stopped_elsewhere and not session_lost
                 and status not in ("limited", "quota", "unauthenticated", "refused")
                 and session_id and run.provider.spawn.get("resume")):
             commit_result, fix_attempts, ended_by, fix_usage, fix_cut = \
@@ -5421,6 +5428,10 @@ class Runner:
                 # run ends as the cut would end any run, and a `limited` one
                 # stays resumable.
                 status, limited = fix_cut["status"], fix_cut["limited"]
+                if fix_cut.get("requested_session"):
+                    session_lost = True
+                    run.requested_session = fix_cut["requested_session"]
+                    session_id = ""
                 if fix_cut.get("cap_stop") is not None:
                     # SC-R4a (#5): a fix turn a cap stopped ends the run as a
                     # cap stop, with the same verdict.
@@ -5459,6 +5470,8 @@ class Runner:
             "status": status, "exit_code": code, "session_id": session_id,
             "usage": usage, "text": text, "stderr_tail": stderr,
         }
+        if session_lost:
+            record.update(reason="session_lost", requested_session=run.requested_session)
         finished_node = self.tree.get(node_id)
         if finished_node:
             record.update(elapsed_seconds=round(finished_node.turn_elapsed()),
@@ -5470,7 +5483,8 @@ class Runner:
             record["refusal"] = run.refusal
         _run_write(run_dir, "result.json", json.dumps(scrub(record), indent=2))
 
-        self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000])
+        self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000],
+                         requested_session=run.requested_session if session_lost else "")
         # Filed even when the run failed: a partial write-up of a real defect is
         # worth more than a lost one, and the orchestrator can see the status.
         # The last verdict wins, for the same reason the last TICKET does: a
@@ -5516,6 +5530,8 @@ class Runner:
             self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run",
                                    cause="quota")
             self.tree.set_status(node_id, "failed", self._with_trip(prior_stuck, "quota exhausted"))
+        elif session_lost:
+            self.tree.set_status(node_id, "failed", "session_lost")
         elif run.spec.conversational and status == "done":
             # A conversation is not finished just because a turn is. Park it as
             # idle so the session stays resumable for the next question.
@@ -5666,7 +5682,8 @@ class Runner:
             await self._merge_pending_children(node_id)
             await self._maybe_merge_into_parent(node_id)
 
-        if not run.awaiting and not stopped_elsewhere and run.cap_stop is None:
+        if (not run.awaiting and not stopped_elsewhere and run.cap_stop is None
+                and not session_lost):
             # A parked agent still owns its worktree and will resume in it, and
             # a stopped one is left as a stop leaves it: resumable — a cap
             # stop included, whose branch and worktree are kept (SC-R4, #11).
@@ -5752,6 +5769,8 @@ class Runner:
             if fresh is not None and fresh.status == "cancelled":
                 # SV-R10: stopped from another process.
                 return result, attempt, "stopped", usage, None
+            if verdict.get("requested_session"):
+                return result, attempt, "", usage, verdict
             if verdict["status"] in ("limited", "quota", "unauthenticated"):
                 return result, attempt, "", usage, verdict   # cannot be resumed again
             if verdict["status"] == "refused":
@@ -5832,6 +5851,8 @@ class Runner:
 
         run.fix_verdict = {"status": status, "limited": limited, "usage": usage,
                            "cap_stop": run.cap_stop if status == "limited" else None}
+        if status == "failed" and run.requested_session:
+            run.fix_verdict["requested_session"] = run.requested_session
         return True
 
     async def _provider_health_after(self, run: Run, status: str, text: str,
@@ -6425,6 +6446,8 @@ class Runner:
             "branch": node.branch or None,
             "events": [_compact(e) for e in window],
         }
+        if node.reason == "session_lost":
+            result["requested_session"] = node.requested_session
         result.update(self._no_commits_note(node))
         if run and run.supervisor and node.status in {"running", "pending"}:
             # Only meaningful for a live process. A parked agent's Run survives
@@ -6502,6 +6525,8 @@ class Runner:
             "log_dir": str(run_dir),
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
+        if node.reason == "session_lost":
+            payload["requested_session"] = node.requested_session
         payload.update(self._no_commits_note(node, text))
         filed = [{k: t[k] for k in ("id", "severity", "title", "status")}
                  for t in self.tree.read()["tickets"] if t.get("agent") == agent_id]
@@ -7369,6 +7394,12 @@ class Runner:
                     queued: dict | None = None) -> dict[str, Any]:
         """SF-R3: refuse another steer until this node's handoff and any
         pending cleanup finish. Nothing new is claimed on that refusal."""
+        node = self.tree.get(agent_id)
+        if node and node.reason == "session_lost":
+            return {"agent_id": agent_id, "steered": False,
+                    "error": f"{agent_id}: session_lost — the session is lost. "
+                             f"Start a fresh run and give it the old run dir: "
+                             f"{self.paths.run_dir(agent_id)}"}
         active = self.__dict__.setdefault("_steering_nodes", set())
         hold = self._holds.get(agent_id)
         cleanup = hold.steer if hold is not None else None
@@ -7978,11 +8009,16 @@ class Runner:
         for key, raw in self.tree.read()["nodes"].items():
             if raw.get("agent") != agent_name or not raw.get("conversation"):
                 continue
-            if raw.get("status") in {"idle", "running", "stuck", "refused"} and raw.get("session_id"):
-                node = node_from_raw(raw, key)
-                if best is None or node.created_at > best.created_at:
-                    best = node
-        return best
+            node = node_from_raw(raw, key)
+            if best is None or node.created_at > best.created_at:
+                best = node
+        # Only the newest conversation may be resumed or announced as lost;
+        # an older eligible one must not displace a newer failed/cancelled one.
+        if best and (best.reason == "session_lost" or
+                     (best.status in {"idle", "running", "stuck", "refused"}
+                      and best.session_id)):
+            return best
+        return None
 
     def _conversation_route(self, spec: AgentSpec, node: Node) -> AgentSpec | None:
         """The spec a standing conversation resumes as, or None if the roster
@@ -8408,7 +8444,7 @@ class Runner:
                     f"{node.id}: {refusal} Nothing was launched and nothing "
                     f"was changed. To start a new conversation, stop this one "
                     f"(stop_agent {node.id}) and consult again.")
-            if self._conversation_route(spec, node) is None:
+            if node.reason == "session_lost" or self._conversation_route(spec, node) is None:
                 # Not resumed anywhere: not on the provider the roster dropped,
                 # and its session means nothing to any other. A new
                 # conversation on the current roster takes its place.
@@ -8474,7 +8510,10 @@ class Runner:
                 self.tree.emit(node_id, "conversation_replaced",
                                old_agent_id=replaced.id,
                                old_provider=replaced.provider,
-                               provider=provider.name)
+                               provider=provider.name,
+                               **({"reason": "session_lost",
+                                   "requested_session": replaced.requested_session}
+                                  if replaced.reason == "session_lost" else {}))
         else:
             node_id = node.id
             # RM-R1: a resumed turn occupies a slot like any other start, and
@@ -8702,6 +8741,15 @@ class Runner:
             f"[system] {agent_name} was moved off {replaced.provider}, so this "
             f"is a new conversation ({node_id}, replacing {replaced.id}); "
             f"nothing said earlier was carried over.\n")
+        replacement = {}
+        if replaced is not None and replaced.reason == "session_lost":
+            replacement = {"conversation_replaced": {
+                "previous_agent_id": replaced.id, "reason": "session_lost",
+                "requested_session": replaced.requested_session}}
+            notice = (f"[system] {agent_name} lost its session (session_lost, "
+                      f"requested {replaced.requested_session}); this is a new "
+                      f"conversation ({node_id}, replacing {replaced.id}). "
+                      f"Nothing said earlier was carried over.\n")
         if run.awaiting:
             # The advisor stopped to ask, not to answer. Returning its partial
             # text would read as a considered reply.
@@ -8712,6 +8760,7 @@ class Runner:
                 "topic": run.awaiting["topic"],
                 "proposed_default": run.awaiting["proposed"],
                 "partial_reply": notice + reply[-2000:],
+                **replacement,
                 "note": "this agent asked a question instead of answering; "
                         "resolve it with answer_question before relying on this",
                 **view,
@@ -8719,13 +8768,15 @@ class Runner:
         if final and final.status == "refused":
             return self._consult_result(agent_name, node_id, turn, view,
                                         status="refused", reason=final.reason,
-                                        reply="", note="Rephrase the request or consult again.")
+                                        reply=notice, note="Rephrase the request or consult again.",
+                                        **replacement)
         return {
             "agent_id": node_id,
             "agent": agent_name,
             "turn": turn,
             "status": final.status if final else "unknown",
             "reply": notice + reply[-MAX_SUMMARY_CHARS:],
+            **replacement,
             "usage": final.usage if final else {},
             "note": "advisory only — you decide whether to act on this",
             **view,

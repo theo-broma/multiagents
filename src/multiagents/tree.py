@@ -196,6 +196,7 @@ class Node:
     branch: str = ""
     worktree: str = ""
     session_id: str = ""
+    requested_session: str = ""     # explicit resume mismatch, retained after session loss
     model_pinned: bool = False
     pid: int | None = None
     # What makes `pid` an identity rather than a number: see

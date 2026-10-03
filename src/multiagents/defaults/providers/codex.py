@@ -389,7 +389,8 @@ def run(opts, env):
     if mismatch:
         detail = f"{RESUME_FAILED} requested {opts.session!r}, observed {normalizer.session!r}"
         print(detail, file=sys.stderr, flush=True)
-        emit({"kind": "result", "status": "failed", "session_id": normalizer.session,
+        emit({"kind": "result", "status": "session_lost",
+              "requested_session": opts.session, "session_id": normalizer.session,
               "text": detail, "turn": f"{normalizer.prefix}:{normalizer.turn}"})
         normalizer.failed = True
     if code > 0:

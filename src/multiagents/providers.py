@@ -151,7 +151,12 @@ def _render_value(obj: Any, values: dict[str, Any]) -> Any:
 
 @dataclass
 class Event:
-    """One normalised stream event."""
+    """One normalised stream event.
+
+    Adapters can explicitly signal a resume mismatch with result status
+    ``session_lost`` and a top-level ``requested_session`` in the raw event.
+    Auth/quota classification takes precedence over this signal.
+    """
 
     kind: str
     name: str = ""                       # tool name
