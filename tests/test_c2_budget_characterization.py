@@ -715,6 +715,17 @@ def test_choose_provider_family_moves_to_a_sibling_when_preferred_is_reserved():
                                   [], reserve=0.15, reserved={"claude"},
                                   family=["claude", "claude-2"])
     assert name == "claude-2"
+    # no room comes first in the order pick_instance decides: exhausted AND reserved is "constrained"
+    assert why == "claude is constrained; using claude-2"
+
+
+def test_choose_provider_family_says_held_when_reserved_preferred_still_has_room():
+    roomy = mkbudget(headroom=0.5)    # above the 15% reserve, so it has room
+    fam_ok = mkbudget(headroom=0.9)
+    name, why = h.choose_provider("claude", {"claude": roomy, "claude-2": fam_ok},
+                                  [], reserve=0.15, reserved={"claude"},
+                                  family=["claude", "claude-2"])
+    assert name == "claude-2"
     assert why == "claude is held for the orchestrator; using claude-2"
 
 
