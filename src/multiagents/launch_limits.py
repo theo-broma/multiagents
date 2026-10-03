@@ -141,7 +141,8 @@ class LaunchLimits:
     def _spec_path(self, node_id: str) -> Path:
         return self.directory / ("spec-" + hashlib.sha256(node_id.encode()).hexdigest() + ".json")
 
-    def record_spec(self, node_id: str, spec: dict, launched_at: float) -> None:
+    def record_spec(self, node_id: str, spec: dict, launched_at: float,
+                    prompt_file: str = "") -> None:
         """SR-R3/R4: retain route and clock, never another limit authority."""
         path = self._spec_path(node_id)
         spec = dict(spec)
@@ -149,7 +150,7 @@ class LaunchLimits:
         for key in limits:
             spec.pop(key, None)
         spec["set_fields"] = sorted(set(spec.get("set_fields") or ()) - limits)
-        record = {"spec": spec, "launched_at": launched_at}
+        record = {"spec": spec, "launched_at": launched_at, "prompt_file": prompt_file}
         fd, name = tempfile.mkstemp(dir=self.directory, prefix=".spec-")
         try:
             with os.fdopen(fd, "w") as out:
@@ -171,3 +172,7 @@ class LaunchLimits:
 
     def spec(self, node_id: str) -> dict:
         return self._spec_record(node_id).get("spec", {})
+
+    def prompt_file(self, node_id: str) -> str:
+        """PF-R7: input associated with the recorded launch clock."""
+        return self._spec_record(node_id).get("prompt_file", "")

@@ -14,10 +14,12 @@ lines a new provider's rules are failing to classify.
 
 from __future__ import annotations
 
+import atexit
 import fnmatch
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -38,9 +40,7 @@ MAX_ARG_STRLEN = 131072
 def check_argv_limit(provider_name: str, argv: list[str]) -> None:
     """Refuse an argv element the kernel would reject (H8).
 
-    Counted in UTF-8 bytes plus the NUL, the way execve counts. No run-file
-    prompt transport exists yet, so the only remedy is a shorter task —
-    which is what the error says rather than suggesting one silently.
+    Counted in UTF-8 bytes plus the NUL, the way execve counts.
     """
     for element in argv:
         size = len(element.encode("utf-8")) + 1
@@ -50,8 +50,32 @@ def check_argv_limit(provider_name: str, argv: list[str]) -> None:
                 f"element is {size} bytes, over the kernel's 128 KiB "
                 f"({MAX_ARG_STRLEN}-byte) per-argument limit (MAX_ARG_STRLEN); "
                 "the process would fail to start with E2BIG. Give the agent "
-                "a shorter task — no prompt-file transport exists yet."
+                "a shorter task, or configure spawn.prompt_transport as stdin or file "
+                "and remove {prompt} from spawn.args."
             )
+
+
+def _standalone_prompt_file(prompt: str) -> str:
+    """Compatibility for a command built without a runner-owned input file.
+
+    The caller owns the command's lifetime. Keep this private snapshot until
+    that process exits; runners instead provide a durable per-launch file.
+    """
+    from .config import limit_number
+    limit = int(limit_number({}, "prompt_file_max_bytes"))
+    data = prompt.encode("utf-8")
+    if len(data) > limit:
+        raise ValueError(f"prompt exceeds prompt_file_max_bytes ({limit} bytes)")
+    fd, name = tempfile.mkstemp(prefix="multiagents-prompt-", suffix=".md")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            os.fchmod(out.fileno(), 0o600)
+            out.write(data)
+    except BaseException:
+        os.unlink(name)
+        raise
+    atexit.register(Path(name).unlink, missing_ok=True)
+    return name
 
 
 _SELECTOR = re.compile(r"^([A-Za-z0-9_-]+)\[([A-Za-z0-9_-]+)=([^\]]+)\]$")
@@ -465,10 +489,18 @@ class Provider:
                 return effort
         return None
 
+    @property
+    def prompt_transport(self) -> str:
+        transport = self.spawn.get("prompt_transport", "argv")
+        if transport not in {"argv", "stdin", "file"}:
+            raise ValueError(f"provider {self.name!r}: invalid spawn.prompt_transport {transport!r}")
+        return transport
+
     def build_command(
         self,
         *,
         prompt: str,
+        prompt_file: str | None = None,
         model: str,
         workdir: str,
         permission: str = "full",
@@ -480,9 +512,16 @@ class Provider:
 
         Placeholders are substituted whole-token, never string-formatted into
         arbitrary text, so a prompt containing braces cannot corrupt the command.
+        A standalone file-transport caller may omit `prompt_file`: its input
+        gets a private temporary snapshot, retained until the caller exits.
+        Stdin callers hand input to their executor separately; argv remains
+        the default for providers that have not declared a transport.
         """
+        if self.prompt_transport == "file" and prompt_file is None:
+            prompt_file = _standalone_prompt_file(prompt)
         values = {
-            "prompt": prompt,
+            "prompt": prompt if self.prompt_transport == "argv" else "",
+            "prompt_file": prompt_file or "",
             "model": model,
             "workdir": workdir,
             "session_id": session_id or "",

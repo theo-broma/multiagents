@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import procs
+from ..agentwrap import prompt_stdin
 from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
 
 
@@ -53,18 +54,24 @@ class LocalExecutor(Executor):
         if run_dir is not None:
             return await self._start_wrapped(argv, cwd, env, run_dir, deadline,
                                              pid_file or run_dir / "agent.pid")
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            limit=STREAM_LIMIT,
-            cwd=str(cwd),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL,
-            # Own process group, so stopping a run also stops the shells and
-            # test runners the agent started underneath itself.
-            start_new_session=True,
-        )
+        source = prompt_stdin(env)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                limit=STREAM_LIMIT,
+                cwd=str(cwd),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=source,
+                # Own process group, so stopping a run also stops the shells and
+                # test runners the agent started underneath itself.
+                start_new_session=True,
+            )
+        finally:
+            if hasattr(source, "close"):
+                source.close()
+
         return Handle(pid=proc.pid, _proc=proc)
 
     async def _start_wrapped(self, argv: list[str], cwd: Path, env: dict[str, str],

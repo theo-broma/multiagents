@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -324,6 +325,55 @@ class Normalizer:
         return {**out, "session_id": self.session, "turn": f"{self.prefix}:{self.turn}"}
 
 
+
+def read_prompt(path, limit, run_dir=None):
+    """Snapshot regular UTF-8 input, without following links, including growth.
+
+    Used by the executors too: a tempfile keeps large input out of pipes and
+    survives the server's departure without depending on an asynchronous feed.
+    """
+    if limit <= 0:
+        raise ValueError("prompt_file_max_bytes must be positive")
+    path = os.path.abspath(path)
+    root = os.path.abspath(run_dir or os.path.dirname(path))
+    parts = os.path.relpath(path, root).split(os.sep)
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("prompt file must be inside its run directory")
+    # Workspace ancestors may be symlinks (/tmp on macOS, for example).
+    # Resolve that trusted boundary once; no link below it is followed.
+    dfd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=dfd)
+            os.close(dfd)
+            dfd = child
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                     dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("prompt file must be a regular file")
+        if st.st_size > limit:
+            raise ValueError("prompt file exceeds prompt_file_max_bytes (%d bytes)" % limit)
+        chunks, size = [], 0
+        while size <= limit:
+            chunk = os.read(fd, min(1024 * 1024, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
+            raise ValueError("prompt file exceeds prompt_file_max_bytes (%d bytes)" % limit)
+        data = b"".join(chunks)
+        data.decode("utf-8")
+        return data
+    finally:
+        os.close(fd)
+
+
 def run(opts, env):
     if os.environ.get("MULTIAGENTS_CAN_SPAWN") == "1" and not opts.mcp_config:
         raise ValueError("spawn-enabled agent has no multiagents MCP configuration")
@@ -331,7 +381,13 @@ def run(opts, env):
     auth_printed = False
     # A regular temporary file avoids pipe deadlock for very large prompts.
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as prompt:
-        prompt.write(opts.prompt)
+        if getattr(opts, "prompt_file", None):
+            data = read_prompt(opts.prompt_file, int(env.get(
+                "MULTIAGENTS_PROMPT_MAX_BYTES", 16 * 1024 * 1024)),
+                               env.get("MULTIAGENTS_PROMPT_RUN_DIR"))
+            prompt.write(data.decode("utf-8"))
+        else:
+            prompt.write(opts.prompt)
         prompt.seek(0)
         child = None
         previous = {}
@@ -941,7 +997,9 @@ def main():
         return action(sys.argv[1])
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=["run"])
-    parser.add_argument("--prompt", required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--prompt-file")
+    inputs.add_argument("--prompt")
     parser.add_argument("--model", default="")
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--session", default="")

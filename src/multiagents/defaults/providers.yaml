@@ -1,3 +1,10 @@
+# Prompt transport: spawn.prompt_transport is argv (legacy default), stdin,
+# or file. stdin sends the run file as message text; stdin_format: stream-json
+# frames one user message for a CLI requiring NDJSON. file renders the whole
+# {prompt_file} token in spawn.args. Non-argv args must omit {prompt}.
+# Each launch keeps a distinct 0600 prompt file until the run directory is
+# removed; prompt.md remains the initial diagnostic copy. The byte bound is
+# limits.prompt_file_max_bytes (default 16 MiB), on writing and consumption.
 # How to drive each agent CLI. Adding an integration means adding a block here
 # — no Python in the package — provided the CLI can stream line-delimited JSON.
 # The script the block names may be written in any language: a `.sh` runs under
@@ -56,7 +63,8 @@ providers:
       what doom-loop detection hashes. Has no sandbox mode, so the `sandbox`
       profile is the same as `full` — noted here rather than silently implied.
     spawn:
-      args: ["run", "{prompt}", "-m", "{model}", "--format", "json", "--dir", "{workdir}"]
+      prompt_transport: stdin
+      args: ["run", "-m", "{model}", "--format", "json", "--dir", "{workdir}"]
       resume: ["-s", "{session_id}"]
       permission:
         full: ["--auto"]
@@ -204,7 +212,11 @@ providers:
       # exits 0 — so a truncated run parses perfectly and reads as a finished
       # one. Measured 2026-09-14: every agy run in a real project that day
       # lasted 5.0-5.1 minutes and two of them merged half a turn into main.
-      args: ["-p", "{prompt}", "--model", "{model}", "--output-format", "stream-json",
+      prompt_transport: stdin
+      stdin_format: stream-json
+      # Print takes a string argument. An empty value selects print mode
+      # without supplying a second user message beside the stdin stream.
+      args: ["-p", "", "--input-format", "stream-json", "--model", "{model}", "--output-format", "stream-json",
              "--add-dir", "{workdir}", "--print-timeout", "{timeout_s}"]
       resume: ["--conversation", "{session_id}"]
       permission:
@@ -452,7 +464,8 @@ providers:
           resets: true
           detail: "session limit; it resets on its own"
     spawn:
-      args: ["-p", "{prompt}", "--model", "{model}",
+      prompt_transport: stdin
+      args: ["-p", "--model", "{model}",
              "--output-format", "stream-json", "--verbose",
              "--strict-mcp-config"]
       resume: ["--resume", "{session_id}"]
@@ -662,7 +675,8 @@ providers:
       command to finish before ending your turn, and never report a result
       you have not actually seen.
     spawn:
-      args: ["run", "--prompt", "{prompt}", "--model", "{model}", "--workdir", "{workdir}"]
+      prompt_transport: file
+      args: ["run", "--prompt-file", "{prompt_file}", "--model", "{model}", "--workdir", "{workdir}"]
       resume: ["--session", "{session_id}"]
       permission:
         full: ["--permission", "full"]

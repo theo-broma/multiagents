@@ -675,6 +675,7 @@ class Run:
     # SC-R4a (#1): when this turn passed its spawn-time cap check; a crossing
     # recorded after it stops the run, one recorded before does not.
     launched_at: float = 0.0
+    prompt_file: str = ""
     # SC-R2a (#3): charges not yet committed, retried first with the next
     # one, and the stream offset the replay checkpoint may not pass meanwhile.
     pending_charges: list = field(default_factory=list)
@@ -3550,8 +3551,28 @@ class Runner:
                     self.tree.emit(node_id, "option_not_renderable",
                                    provider=provider.name, option=str(key),
                                    value_type=type(value).__name__)
+            # PF-R1/R3/R5/R7: allocate input by launch identity before argv
+            # exists. Retain every attempt, including a failed launch; never
+            # infer identity from the run directory's agent-writable listing.
+            run_dir = self.paths.run_dir(node_id)
+            prompt_limit = int(config_mod.limit_number(
+                self.config.limits, "prompt_file_max_bytes"))
+            if len(prompt.encode("utf-8")) > prompt_limit:
+                raise ValueError(f"prompt exceeds prompt_file_max_bytes ({prompt_limit} bytes)")
+            prompt_identity = f"{now():.9f}-{os.urandom(8).hex()}"
+            prompt_name = f"prompt.{prompt_identity}.md"
+            _run_write(run_dir, prompt_name, prompt, mode=0o600)
+            transport = provider.prompt_transport
+            if transport != "argv":
+                # Consumer safety is checked again when the wrapper/adapter
+                # opens the input; this catches errors before spawning too.
+                from .agentwrap import read_prompt
+                read_prompt(str(run_dir / prompt_name), prompt_limit, str(run_dir))
+            if not (run_dir / "prompt.md").exists():
+                _run_write(run_dir, "prompt.md", prompt, mode=0o600)
             argv = provider.build_command(
-                prompt=prompt, model=spec.model, workdir=str(workdir),
+                prompt=prompt, prompt_file=str(run_dir / prompt_name),
+                model=spec.model, workdir=str(workdir),
                 permission=spec.permission, session_id=session_id, options=options,
                 timeout=int(wall),
             )
@@ -3567,12 +3588,6 @@ class Runner:
                         f"script directories (project, global, shipped)")
                 argv[0] = str(adapter)
 
-            run_dir = self.paths.run_dir(node_id)
-            dfd = _run_dir_fd(run_dir)
-            try:
-                existing = os.listdir(dfd)
-            finally:
-                os.close(dfd)
             # SM-R1/R2: the server goes to an agent that may spawn, and only to one.
             if spec.can_spawn:
                 server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
@@ -3587,8 +3602,13 @@ class Runner:
             # limit (checked over the fully assembled argv, adapter and server
             # arguments included).
             providers_mod.check_argv_limit(provider.name, argv)
-            turn = len([n for n in existing if n.startswith("prompt") and n.endswith(".md")])
-            _run_write(run_dir, f"prompt.{turn}.md" if turn else "prompt.md", prompt)
+            env.update({
+                "MULTIAGENTS_PROMPT_FILE": str(run_dir / prompt_name),
+                "MULTIAGENTS_PROMPT_RUN_DIR": str(run_dir),
+                "MULTIAGENTS_PROMPT_TRANSPORT": transport,
+                "MULTIAGENTS_PROMPT_MAX_BYTES": str(prompt_limit),
+                "MULTIAGENTS_PROMPT_STDIN_FORMAT": str(provider.spawn.get("stdin_format", "text")),
+            })
             # Environment KEYS only — values may be secret and this file is on disk.
             # Diagnostic info only: adoption's limits and launch clock come
             # exclusively from the protected host records, never this file.
@@ -3596,6 +3616,7 @@ class Runner:
                 "argv": argv, "cwd": str(workdir), "env_keys": sorted(env),
                 "provider": provider.name, "model": spec.model,
                 "permission": spec.permission, "resumed": bool(session_id),
+                "prompt_file": prompt_name, "launch_identity": prompt_identity,
             }
 
             problems = executor.preflight()
@@ -3658,7 +3679,7 @@ class Runner:
             self.launch_limits.record(node_id, limits, launched_at)
             frozen = asdict(spec)
             frozen["set_fields"] = sorted(spec.set_fields or ())
-            self.launch_limits.record_spec(node_id, frozen, launched_at)
+            self.launch_limits.record_spec(node_id, frozen, launched_at, prompt_name)
             _run_write(run_dir, "command.json",
                        json.dumps(scrub(command_record), indent=2))
             env["MULTIAGENTS_TURN_STARTED_AT"] = str(launched_at)
@@ -3669,7 +3690,7 @@ class Runner:
             supervisor.started = time.monotonic() - max(0.0, now() - launched_at)
             supervisor.last_event = supervisor.started
             self.launch_limits.record(node_id, limits, launched_at)
-            self.launch_limits.record_spec(node_id, frozen, launched_at)
+            self.launch_limits.record_spec(node_id, frozen, launched_at, prompt_name)
             self._record_launched(node_id, hold, handle)
             self.startup.bind(provider.name, node_id, startup_token, handle.pid,
                               getattr(handle, "pid_start", "") or "")
@@ -3702,6 +3723,7 @@ class Runner:
             supervisor=supervisor,
             turn_start=getattr(handle, "offset", 0), limits=limits,
             startup_token=startup_token, launched_at=launched_at,
+            prompt_file=prompt_name,
             # #2: charges an earlier turn of this node could not commit
             # anywhere stay with the node's next turn, never dropped.
             pending_charges=list(getattr(self.runs.get(node_id), "pending_charges", None) or []),
@@ -5602,7 +5624,7 @@ class Runner:
                     with await self.gate.enter_when_open():
                         retried = await self._launch(
                             node_id=node_id, spec=run.spec, provider=run.provider,
-                            prompt=_run_read(run_dir, "prompt.md"),
+                            prompt=self._retry_prompt(node_id, run.prompt_file),
                             workdir=Path(fresh.worktree), branch=fresh.branch,
                             parent=fresh.parent, depth=fresh.depth,
                             session_id=session_id or None,
@@ -6829,6 +6851,7 @@ class Runner:
                   supervisor=supervisor, turn_start=turn,
                   replay_to=int(follow.get("offset", turn)), adopted=True,
                   launched_at=float(launched or 0),
+                  prompt_file=self.launch_limits.prompt_file(node.id),
                   startup_token=self.startup.token_for(provider.name, node.id),
                   limits=limits if isinstance(limits, dict) else {})
         reader = getattr(executor, "oom_kill_count", None)
@@ -9159,6 +9182,15 @@ class Runner:
                                "retry_after": result.get("retry_after")}
         return "refused", str(result.get("error") or result.get("reason") or result)
 
+    def _retry_prompt(self, node_id: str, prompt_file: str) -> str:
+        # PF-R7: missing durable input is an error, never a different turn.
+        if not prompt_file:
+            prompt_file = self.launch_limits.prompt_file(node_id)
+        if not prompt_file or Path(prompt_file).name != prompt_file:
+            raise ValueError("failed launch has no recorded prompt file")
+        limit = int(config_mod.limit_number(self.config.limits, "prompt_file_max_bytes"))
+        return _run_read(self.paths.run_dir(node_id), prompt_file, limit)
+
     def _pc_retry_admission(self, run: Run, node: Node, session_id: str) -> dict | None:
         """PC-R3: admit a free retry on its own provider, or queue it.
 
@@ -9185,6 +9217,7 @@ class Runner:
                 provider,
                 {"op": "retry", "node_id": node.id, "agent": node.agent,
                  "session_id": session_id or "", "model": run.spec.model,
+                 "prompt_file": run.prompt_file,
                  "pinned": bool(node.model_pinned), "task": node.task},
                 str(full), deferred_by=self.self_id(),
                 dispatcher=self._owner_fields())
@@ -9195,7 +9228,7 @@ class Runner:
             return entry
 
     async def _pc_retry_launch(self, entry: dict) -> tuple[str, Any]:
-        """Dispatch a queued free retry: the same node, its original prompt,
+        """Dispatch a queued free retry: the same node, the failed turn's input,
         relaunched once its slot is claimed (PC-R3a)."""
         spec_ = entry.get("spec") or {}
         node_id = spec_.get("node_id") or ""
@@ -9224,7 +9257,7 @@ class Runner:
             try:
                 await self._launch(
                     node_id=node_id, spec=spec, provider=provider,
-                    prompt=_run_read(self.paths.run_dir(node_id), "prompt.md"),
+                    prompt=self._retry_prompt(node_id, spec_.get("prompt_file") or ""),
                     workdir=Path(node.worktree), branch=node.branch,
                     parent=node.parent, depth=node.depth,
                     session_id=spec_.get("session_id") or None)

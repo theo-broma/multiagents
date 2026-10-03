@@ -53,6 +53,7 @@ from ..paths import ProjectPaths, server_install_paths, state_root
 from ..providers import credential_owner
 from ..safepoint import strip_key
 from .. import gitops, procs
+from ..agentwrap import prompt_stdin
 from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
 from .local import LocalExecutor, _turn_start
 
@@ -1737,6 +1738,20 @@ sys.exit(rc)
             return path
         return best[1] / path.relative_to(best[0])
 
+    def container_path(self, path: Path) -> Path:
+        """A host path as the container sees it, through the deepest bind."""
+        if self.paths is None or self.inside():
+            return path
+        path = Path(os.path.normpath(path))
+        best = None
+        for destination, source in self.backing().items():
+            if path == source or source in path.parents:
+                if best is None or len(source.parts) > len(best[0].parts):
+                    best = (source, destination)
+        if best is None:
+            return path
+        return best[1] / path.relative_to(best[0])
+
     def vault_state(self, provider: str = "") -> dict[str, Path]:
         """{provider: the host-only profile holding its REAL credential}.
 
@@ -2537,6 +2552,17 @@ sys.exit(rc)
             # passwd entry, which is this; in the image there is none.
             env = {**env, "HOME": str(self.container_home())}
 
+        # PF-R2: the wrapper opens this input inside the container. Its
+        # host-side source may be bound at a different destination there.
+        prompt_env = dict(env)
+        prompt_file = env.get("MULTIAGENTS_PROMPT_FILE")
+        for key in ("MULTIAGENTS_PROMPT_FILE", "MULTIAGENTS_PROMPT_RUN_DIR"):
+            if env.get(key):
+                env[key] = str(self.container_path(Path(env[key])))
+        if prompt_file:
+            argv = [env["MULTIAGENTS_PROMPT_FILE"] if token == prompt_file else token
+                    for token in argv]
+
         # Environment goes through a file rather than --env flags so that values
         # never appear in the host process list.
         env_file = None
@@ -2567,14 +2593,20 @@ sys.exit(rc)
         # Record the agent's container-side pid so it can actually be stopped.
         command += _recording_pid(pid_file, argv)
 
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            limit=STREAM_LIMIT,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        source = prompt_stdin(prompt_env)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                limit=STREAM_LIMIT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=source,
+                start_new_session=True,
+            )
+        finally:
+            if hasattr(source, "close"):
+                source.close()
+
         return DockerHandle(proc.pid, proc, self.container, pid_file)
 
     def _start_wrapped(self, command: list[str], argv: list[str], run_dir: Path,
@@ -2608,8 +2640,8 @@ sys.exit(rc)
         # the image's own interpreter is preferred; PATH is the fallback.
         launched_at = time.time()
         deadline = turn_deadline(env, deadline, launched_at)
-        _, flag, source, *rest = wrapper_argv("python3", run_dir, deadline, pid_file,
-                                              argv, inline=True)
+        _, flag, source, *rest = wrapper_argv("python3", self.container_path(run_dir), deadline,
+                                              self.container_path(pid_file), argv, inline=True)
         command = command + ["sh", "-c", _WRAPPER_ENTRY.format(flag=flag), source, *rest]
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,

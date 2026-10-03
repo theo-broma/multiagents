@@ -33,11 +33,14 @@ rather than by a path the container may not have mounted.
 """
 
 import fcntl
+import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
+import tempfile
 
 GRACE = 2.0          # TERM, then KILL this long after
 POLL = 0.1
@@ -99,6 +102,78 @@ def _pid_namespace():
         return "unknown"
 
 
+def read_prompt(path, limit, run_dir=None):
+    """Snapshot regular UTF-8 input, without following links, including growth.
+
+    Used by the executors too: a tempfile keeps large input out of pipes and
+    survives the server's departure without depending on an asynchronous feed.
+    """
+    if limit <= 0:
+        raise ValueError("prompt_file_max_bytes must be positive")
+    path = os.path.abspath(path)
+    root = os.path.abspath(run_dir or os.path.dirname(path))
+    parts = os.path.relpath(path, root).split(os.sep)
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("prompt file must be inside its run directory")
+    # Workspace ancestors may be symlinks (/tmp on macOS, for example).
+    # Resolve that trusted boundary once; no link below it is followed.
+    dfd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=dfd)
+            os.close(dfd)
+            dfd = child
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                     dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("prompt file must be a regular file")
+        if st.st_size > limit:
+            raise ValueError("prompt file exceeds prompt_file_max_bytes (%d bytes)" % limit)
+        chunks, size = [], 0
+        while size <= limit:
+            chunk = os.read(fd, min(1024 * 1024, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
+            raise ValueError("prompt file exceeds prompt_file_max_bytes (%d bytes)" % limit)
+        data = b"".join(chunks)
+        data.decode("utf-8")
+        return data
+    finally:
+        os.close(fd)
+
+
+def prompt_stdin(env):
+    """Return a bounded input snapshot, or DEVNULL for legacy argv input."""
+    if env.get("MULTIAGENTS_PROMPT_TRANSPORT") != "stdin":
+        return subprocess.DEVNULL
+    data = read_prompt(env["MULTIAGENTS_PROMPT_FILE"],
+                       int(env.get("MULTIAGENTS_PROMPT_MAX_BYTES", 16 * 1024 * 1024)),
+                       env.get("MULTIAGENTS_PROMPT_RUN_DIR"))
+    framing = env.get("MULTIAGENTS_PROMPT_STDIN_FORMAT", "text")
+    if framing == "stream-json":
+        data = (json.dumps({"event": "user", "message": {
+            "role": "user", "content": data.decode("utf-8")}},
+            ensure_ascii=False) + "\n").encode("utf-8")
+    elif framing != "text":
+        raise ValueError("unknown prompt stdin_format: %s" % framing)
+    source = tempfile.TemporaryFile()
+    try:
+        source.write(data)
+        source.seek(0)
+        return source
+    except BaseException:
+        source.close()
+        raise
+
+
 def main(argv):
     if len(argv) < 5 or argv[3] != "--":
         sys.stderr.write("usage: agentwrap RUN_DIR DEADLINE PID_FILE -- ARGV...\n")
@@ -122,15 +197,20 @@ def main(argv):
 
     out = open(os.path.join(run_dir, OUTPUT), "ab")
     err = open(os.path.join(run_dir, STDERR), "wb")
+    source = subprocess.DEVNULL
     try:
-        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out,
+        source = prompt_stdin(os.environ)
+        proc = subprocess.Popen(command, stdin=source, stdout=out,
                                 stderr=err, preexec_fn=os.setpgrp)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         out.close()
         err.write(("agentwrap: could not start %s: %s\n" % (command[0], exc)).encode())
         err.close()
         _write_atomic(status_path, "127\n")
         return 0
+    finally:
+        if hasattr(source, "close"):
+            source.close()
     out.close()
     err.close()
     # The pid namespace goes with the pid: the file sits on a mount a host

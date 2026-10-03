@@ -247,6 +247,8 @@ teams:
       - bug-reporter
 
 limits:
+  # Per-launch prompt input, counted and bounded in UTF-8 bytes.
+  prompt_file_max_bytes: 16777216
   max_depth: 3              # root orchestrator is depth 0
   max_children: 2           # per node, unless the agent overrides it
   max_concurrent: 4         # running agents across the whole tree
