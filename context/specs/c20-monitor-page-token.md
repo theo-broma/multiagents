@@ -43,3 +43,11 @@ A related gap: `_host_is_ours()` (~68-77) also accepts an empty or missing `Host
 - C19's `POST /quota` handoff and its routes keep working.
 - The TUI monitor (`--tui`), which does not use HTTP, is unaffected.
 - The existing monitor-server tests stay green, or are updated deliberately by the tester where they assumed a tokenless `/`.
+
+## Decisions after the tester's read (2026-10-03, ag-f1004a)
+
+- **MT-R1a.** `/` accepts the token either in the `?token=` query or in the `X-Monitor-Token` header. The header is just as secret, and existing callers use it. HEAD and POST on `/` are treated like GET: token required, or 405.
+- **MT-R5a. Tests updated deliberately, by a tester, once C19 is merged.** Five existing tests assume a tokenless `GET /`, and they get the token added:
+  - `tests/test_core.py::test_the_api_refuses_a_caller_without_the_token`;
+  - `tests/test_core.py::test_the_page_is_not_served_to_a_rebound_hostname`, which uses the header token and so passes under MT-R1a;
+  - the `auth=False` fetches of `/` in `tests/test_c19_quota_details_page.py` at ~316, ~326 and ~1126.
