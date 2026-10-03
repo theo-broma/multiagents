@@ -224,3 +224,4 @@ never submitted.
   - the C13 live exercise (PN-R4a): the initializer writes a plan, and the orchestrator imports it. This needs the user's `init-agent`;
   - ticket bug-93a3e4 (minor; agy 503 after a complete answer);
   - the C15 round-2 notes (forged `wrapper.pid`, `setsid` escape), already in the phase-7 seed.
+- **agy-b-partner — added 2026-10-03 (user).** This is agy-b's Claude/GPT pool, the twin of the shipped agy-partner. It is in the project `providers.yaml` with `extends: agy-b`, `family: agy-partner`, `auth_from`/`budget_from: agy-b` and `budget_windows: [3p-*]`. Doctor reports it authenticated, with its 3p window at 0%. It is not routed: no agent names it.
