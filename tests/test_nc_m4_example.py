@@ -22,6 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nc_fixture.m4_world import M4World, commit_entry, finding, verdict_entry  # noqa: E402
 
 
+# Bounds on every wait: red tests fail on their own assertion within seconds.
+WAIT = 8            # one launch / one transition
+WAIT_ROUNDS = 30    # several activations in a row (loops, sessions)
+
+
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = M4World(tmp_path, monkeypatch)
@@ -53,7 +58,7 @@ def test_nc_r46_the_user_example(w):
     reviewers = w.by_agent(top, "reviewer")
     assert len(reviewers) == 2
 
-    held = w.wait_held(impl_loop, "loop_max", timeout=180)
+    held = w.wait_held(impl_loop, "loop_max", timeout=WAIT_ROUNDS)
     assert held["loop"]["rounds_rejected"] == 3
     assert w.get(tests_loop)["state"] == "done" and w.get(tests_loop)["outcome"] == "approved"
     assert w.get(tests_loop)["loop"]["rounds_rejected"] == 1
@@ -72,7 +77,7 @@ def test_nc_r46_the_user_example(w):
     reply = w.root_op("relaunch_node", impl_loop, max_rounds=5,
                       pins={impl_node: {"model": "fxi/m2"}})
     assert reply.get("ok") is True, reply
-    final = w.wait_state(top, "done", timeout=180)
+    final = w.wait_state(top, "done", timeout=WAIT_ROUNDS)
     assert final["outcome"] == "approved"
     assert w.get(impl_loop)["outcome"] == "approved" and w.get(impl_loop)["loop"]["rounds_rejected"] == 3
     assert [c["model"] for c in w.fxi.calls()] == ["fxi/m1"] * 3 + ["fxi/m2"]

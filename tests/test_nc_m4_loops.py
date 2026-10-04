@@ -28,6 +28,11 @@ from nc_fixture.m4_world import (M4World, blocked_codes, commit_entry, err_code,
                                  finding, verdict_entry)
 
 
+# Bounds on every wait: red tests fail on their own assertion within seconds.
+WAIT = 8            # one launch / one transition
+WAIT_ROUNDS = 20    # several activations in a row (loops, sessions)
+
+
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = M4World(tmp_path, monkeypatch)
@@ -50,7 +55,7 @@ def test_nc_r35_an_approving_verdict_ends_the_loop_approved(w):
     w.fxr.queue(verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    done = w.wait_state(loop, "done")
+    done = w.wait_state(loop, "done", timeout=WAIT)
     assert done["outcome"] == "approved"
     assert done["loop"]["rounds_rejected"] == 0
     assert w.fxw.spawns() == 1 and w.fxr.spawns() == 1
@@ -67,7 +72,7 @@ def test_nc_r35_r67_a_rejection_relaunches_the_first_child_with_the_findings_onc
     w.fxr.queue(verdict_entry("rejected", [finding("FINDING-ALPHA-7")]), verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    done = w.wait_state(loop, "done")
+    done = w.wait_state(loop, "done", timeout=WAIT)
     assert done["outcome"] == "approved" and done["loop"]["rounds_rejected"] == 1
     first, second = w.fxw.calls()
     assert "FINDING-ALPHA-7" not in first["prompt"]
@@ -83,7 +88,7 @@ def test_nc_r67_findings_are_delivered_once_not_repeated_in_later_rounds(w):
                 verdict_entry("rejected", [finding("FINDING-ONCE-2")]), verdict_entry("approved"))
     w.start_scheduler()
     loop, _, _ = w.mkloop(5)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
     c1, c2, c3 = w.fxw.calls()
     assert "FINDING-ONCE-1" in c2["prompt"] and "FINDING-ONCE-1" not in c3["prompt"]
     assert "FINDING-ONCE-2" in c3["prompt"]
@@ -94,7 +99,7 @@ def test_nc_r35_at_the_maximum_the_loop_holds_and_launches_nothing_more(w):
     w.fxr.queue(verdict_entry("rejected", [finding("one")]), verdict_entry("rejected", [finding("two")]))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(2)
-    held = w.wait_held(loop, "loop_max")
+    held = w.wait_held(loop, "loop_max", timeout=WAIT)
     assert held["loop"]["rounds_rejected"] == 2
     w.quiet(3)
     assert w.fxw.spawns() == 2 and w.fxr.spawns() == 2, "a third round was launched"
@@ -108,7 +113,7 @@ def test_nc_r35_max_rounds_one_holds_after_the_first_rejection(w):
     w.fxr.queue(verdict_entry("rejected"))
     w.start_scheduler()
     loop, _, _ = w.mkloop(1)
-    held = w.wait_held(loop, "loop_max")
+    held = w.wait_held(loop, "loop_max", timeout=WAIT)
     assert held["loop"]["rounds_rejected"] == 1
     w.quiet(2)
     assert w.fxw.spawns() == 1
@@ -119,7 +124,7 @@ def test_nc_r35_a_crashed_reviewer_is_not_a_rejected_round(w):
     w.fxr.queue({"crash": True}, verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(2)
-    done = w.wait_state(loop, "done", timeout=90)
+    done = w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved"
     assert done["loop"]["rounds_rejected"] == 0
     assert w.fxr.spawns() == 2, "the failed reviewer was not retried as a new attempt"
@@ -131,7 +136,7 @@ def test_nc_r35_a_verdict_child_that_ends_without_a_verdict_holds_the_round_unre
     w.fxr.queue({"text": "looks fine to me"})
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    held = w.wait_held(loop, "unresolved_round")
+    held = w.wait_held(loop, "unresolved_round", timeout=WAIT)
     assert held["loop"]["rounds_rejected"] == 0
     kinds = w.transitions(loop)
     assert "unresolved_round" in kinds
@@ -146,12 +151,12 @@ def test_nc_r34_root_cannot_give_a_verdict(w):
     w.fxr.queue({"gate": "gr", **verdict_entry("approved")})
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    w.wait_running(rv)
+    w.wait_running(rv, timeout=WAIT)
     reply = w.rpc("give_verdict", {"generation_seq": 1, "verdict": "approved", "findings": []})
     assert err_code(reply) == "forbidden", reply
     assert w.get(loop)["state"] == "running"
     w.gate("gr", w.fxr)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
 
 
 def test_nc_r34_only_the_current_activation_of_the_verdict_child_may_give_it(w):
@@ -159,13 +164,13 @@ def test_nc_r34_only_the_current_activation_of_the_verdict_child_may_give_it(w):
     w.fxr.queue({"gate": "gr", **verdict_entry("approved")})
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    w.wait_running(wk)
+    w.wait_running(wk, timeout=WAIT)
     worker_token = w.token_of(w.fxw, "W")
     reply = w.rpc("give_verdict", {"generation_seq": 1, "verdict": "approved", "findings": []},
                   token=worker_token)
     assert err_code(reply) == "forbidden", "a sibling (the worker) gave a verdict"
     w.gate("gw", w.fxw)
-    w.wait_running(rv)
+    w.wait_running(rv, timeout=WAIT)
     from multiagents.scheduler import issue_run_capability
     stranger = issue_run_capability(w.root, "run-not-the-activation", rv, {"read", "verdict"})
     reply = w.rpc("give_verdict", {"generation_seq": 1, "verdict": "approved", "findings": []},
@@ -173,7 +178,7 @@ def test_nc_r34_only_the_current_activation_of_the_verdict_child_may_give_it(w):
     assert err_code(reply) == "forbidden", "a run that is not the current activation gave a verdict"
     assert w.get(loop)["state"] == "running"
     w.gate("gr", w.fxr)
-    assert w.wait_state(loop, "done")["outcome"] == "approved"
+    assert w.wait_state(loop, "done", timeout=WAIT)["outcome"] == "approved"
 
 
 def test_nc_r34_a_verdict_about_another_generation_is_refused_and_leaves_the_round_unresolved(w):
@@ -181,7 +186,7 @@ def test_nc_r34_a_verdict_about_another_generation_is_refused_and_leaves_the_rou
     w.fxr.queue(verdict_entry("approved", v={"seq_offset": 5}))
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    held = w.wait_held(loop, "unresolved_round")
+    held = w.wait_held(loop, "unresolved_round", timeout=WAIT)
     reply = w.fxr.first_reply("R")
     assert reply.get("ok") is False, reply
     assert held["generations"][-1]["verdict"] in (None, ""), "a wrong-generation verdict was recorded"
@@ -194,7 +199,7 @@ def test_nc_r34_a_second_verdict_of_one_activation_is_refused_and_the_first_stan
     w.fxw.queue(work(2))
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
     replies = w.fxr.verdicts()[0]["replies"]
     assert replies[0]["ok"] is True and replies[-1]["ok"] is False
     assert w.get(loop)["loop"]["rounds_rejected"] == 1
@@ -206,7 +211,7 @@ def test_nc_r34_the_verdict_is_recorded_on_the_generation_and_never_touches_main
     main_before = w.git("rev-parse", "HEAD").stdout
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    done = w.wait_state(loop, "done")
+    done = w.wait_state(loop, "done", timeout=WAIT)
     assert done["generations"][-1]["verdict"] == "approved"
     assert w.git("rev-parse", "HEAD").stdout == main_before
 
@@ -216,14 +221,14 @@ def test_nc_r58_a_verdict_childs_run_has_read_and_verdict_but_not_delegate(w):
     w.fxr.queue({"gate": "gr", **verdict_entry("approved")})
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    w.wait_running(rv)
+    w.wait_running(rv, timeout=WAIT)
     token = w.token_of(w.fxr, "R")
     assert w.rpc("get_node", {"id": rv}, token=token).get("ok") is True      # read: own subtree
     reply = w.rpc("create_node", {"kind": "simple", "agent": "wk", "task": "x", "parent": rv,
                                   "plan_revision": w.plan_revision()}, token=token)
     assert err_code(reply) == "forbidden", reply                              # no delegate
     w.gate("gr", w.fxr)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
     after = w.rpc("get_node", {"id": rv}, token=token)
     assert err_code(after) == "unauthenticated", "the run capability survived the run"
 
@@ -233,14 +238,14 @@ def test_nc_r58_a_non_verdict_run_has_no_verdict_permission_even_for_its_own_loo
     w.fxr.queue(verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    w.wait_running(wk)
+    w.wait_running(wk, timeout=WAIT)
     token = w.token_of(w.fxw, "W")
     for seq in (0, 1):
         reply = w.rpc("give_verdict", {"generation_seq": seq, "verdict": "approved",
                                        "findings": []}, token=token)
         assert err_code(reply) == "forbidden"
     w.gate("gw", w.fxw)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
 
 
 # ----------------------------------------------------------------- NC-R66
@@ -259,7 +264,7 @@ def test_nc_r66_commits_made_by_the_verdict_child_are_not_integrated(w):
                              **verdict_entry("approved")))
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
     assert "reviewer_commits_ignored" in w.transitions(loop)
     assert w.show(f"nodes/{loop}:f1.txt") == "v1\n", "the reviewed generation is the approved output"
     assert w.show(f"nodes/{loop}:review-notes.txt") is None
@@ -270,7 +275,7 @@ def test_nc_r66_the_reviewed_generation_is_the_branch_tip_after_the_workers_roun
     w.fxr.queue(verdict_entry("approved"))
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    done = w.wait_state(loop, "done")
+    done = w.wait_state(loop, "done", timeout=WAIT)
     call = w.fxr.calls()[0]
     tip = w.git("rev-parse", f"nodes/{loop}").stdout.strip()
     assert tip in call["prompt"], "the activation does not state the commit under review"
@@ -285,7 +290,7 @@ def held_at_max(w, max_rounds=2):
     w.fxr.queue(*[verdict_entry("rejected", [finding(f"r{i}")]) for i in range(max_rounds)])
     w.start_scheduler()
     loop, wk, rv = w.mkloop(max_rounds)
-    w.wait_held(loop, "loop_max")
+    w.wait_held(loop, "loop_max", timeout=WAIT)
     return loop, wk, rv
 
 
@@ -295,7 +300,7 @@ def test_nc_r36_relaunch_raises_the_maximum_keeps_the_counter_and_applies_pins(w
     w.fxr.queue(verdict_entry("approved"))
     reply = w.root_op("relaunch_node", loop, max_rounds=4, pins={wk: {"model": "fxw/m2"}})
     assert reply.get("ok") is True, reply
-    done = w.wait_state(loop, "done", timeout=90)
+    done = w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved"
     assert done["loop"]["rounds_rejected"] == 2 and done["loop"]["max_rounds"] == 4
     models = [c["model"] for c in w.fxw.calls()]
@@ -331,7 +336,7 @@ def test_nc_r36_relaunch_of_a_loop_that_is_running_is_refused(w):
     w.fxw.queue({"gate": "gw", **work(1)})
     w.start_scheduler()
     loop, _, _ = w.mkloop(2)
-    w.wait_state(loop, "running")
+    w.wait_state(loop, "running", timeout=WAIT)
     reply = w.root_op("relaunch_node", loop, max_rounds=5)
     assert reply.get("ok") is False
     assert w.get(loop)["state"] == "running"
@@ -343,10 +348,10 @@ def test_nc_r67_relaunch_on_unresolved_round_retries_the_verdict_child_on_the_sa
     w.fxr.queue({"text": "no verdict"}, verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    w.wait_held(loop, "unresolved_round")
+    w.wait_held(loop, "unresolved_round", timeout=WAIT)
     reply = w.root_op("relaunch_node", loop, retry="verdict_child")
     assert reply.get("ok") is True, reply
-    assert w.wait_state(loop, "done", timeout=60)["outcome"] == "approved"
+    assert w.wait_state(loop, "done", timeout=WAIT_ROUNDS)["outcome"] == "approved"
     assert w.fxw.spawns() == 1 and w.fxr.spawns() == 2
     first, second = w.fxr.calls()
     assert first["head"] == second["head"], "the retry reviewed another generation"
@@ -357,9 +362,9 @@ def test_nc_r67_relaunch_with_retry_round_runs_the_whole_round_again(w):
     w.fxr.queue({"text": "no verdict"}, verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    w.wait_held(loop, "unresolved_round")
+    w.wait_held(loop, "unresolved_round", timeout=WAIT)
     assert w.root_op("relaunch_node", loop, retry="round").get("ok") is True
-    done = w.wait_state(loop, "done", timeout=60)
+    done = w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved" and done["loop"]["rounds_rejected"] == 0
     assert w.fxw.spawns() == 2 and w.fxr.spawns() == 2
 
@@ -380,7 +385,7 @@ def test_nc_r37_close_exhausted_ends_the_loop_without_satisfying_success(w):
     assert reply.get("ok") is True, reply
     done = w.get(loop)
     assert done["state"] == "done" and done["outcome"] == "exhausted"
-    w.wait_state(fin, "done")
+    w.wait_state(fin, "done", timeout=WAIT)
     w.quiet(2)
     assert w.get(after)["state"] == "open", "exhausted satisfied `success`"
     assert w.fxw.by_tag("AFTER") == []
@@ -392,7 +397,7 @@ def test_nc_r37_close_approved_is_recorded_as_the_orchestrators_decision(w):
     assert w.root_op("close_node", loop, outcome="approved").get("ok") is True
     done = w.get(loop)
     assert done["outcome"] == "approved" and done.get("closed_by") == "root"
-    w.wait_state(after, "done")
+    w.wait_state(after, "done", timeout=WAIT)
 
 
 def test_nc_r37_close_failed(w):
@@ -424,18 +429,18 @@ def test_nc_r37_close_is_root_only_and_checks_the_revision(w):
 def test_nc_r37_close_refuses_a_node_with_a_running_run_and_cancels_nothing(w):
     w.start_scheduler()
     a = w.simple("A", "wk", fx={"gate": "ga"})
-    w.wait_running(a)
+    w.wait_running(a, timeout=WAIT)
     reply = w.root_op("close_node", a, outcome="exhausted")
     assert reply.get("ok") is False
     assert w.get(a)["state"] == "running"
     w.gate("ga", w.fxw)
-    assert w.wait_state(a, "done")["outcome"] == "completed"
+    assert w.wait_state(a, "done", timeout=WAIT)["outcome"] == "completed"
 
 
 def test_nc_r37_close_an_open_node(w):
     w.start_scheduler()
     p = w.simple("P", "wk", fx={"gate": "gp"})
-    w.wait_running(p)
+    w.wait_running(p, timeout=WAIT)
     b = w.simple("B", "wk", depends_on=[{"node": p, "require": "success"}])
     assert w.root_op("close_node", b, outcome="exhausted").get("ok") is True
     assert w.get(b)["outcome"] == "exhausted"
@@ -451,7 +456,7 @@ def test_nc_r49_a_top_level_composite_reaching_done_notifies_root(w):
     w.fxr.queue(verdict_entry("approved"))
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    w.wait_state(loop, "done")
+    w.wait_state(loop, "done", timeout=WAIT)
     seen = [t for t in w.ok("wait_for_nodes", {"cursor": 0, "timeout": 0.5})["transitions"]
             if t.get("node_id") == loop and t.get("kind") in ("done", "node.done")]
     assert len(seen) == 1, seen
@@ -470,8 +475,8 @@ def test_nc_r5_a_loop_held_inside_a_sequence_holds_the_sequence_with_child_held(
     loop, _, _ = w.mkloop(1)
     after = w.simple("AFTER", "wk")
     seq = w.comp("sequence", [loop, after])
-    w.wait_held(loop, "loop_max")
-    held = w.wait_held(seq, "child_held")
+    w.wait_held(loop, "loop_max", timeout=WAIT)
+    held = w.wait_held(seq, "child_held", timeout=WAIT)
     assert held["state"] == "held"
     w.quiet(2)
     assert w.fxw.by_tag("AFTER") == []

@@ -57,6 +57,11 @@ def make(tmp_path, monkeypatch, **reviewer_provider):
     return w
 
 
+# Bounds on every wait: red tests fail on their own assertion within seconds.
+WAIT = 8            # one launch / one transition
+WAIT_ROUNDS = 20    # several activations in a row (loops, sessions)
+
+
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = make(tmp_path, monkeypatch)
@@ -86,7 +91,7 @@ def test_nc_r31_the_second_activation_resumes_the_session_at_the_same_path_at_th
                 {"write": {"b.txt": "two\n"}, "delete": ["a.txt"], "commit": "r2"})
     w.fxr.queue(verdict_entry("rejected", [finding("redo")]), verdict_entry("approved"))
     top, wk, rv = start(w)
-    done = w.wait_state(top, "done", timeout=90)
+    done = w.wait_state(top, "done", timeout=WAIT_ROUNDS)
     first, second = w.fxr.calls()
     assert second["resume"] == first["session"], "a new provider session was started"
     assert second["cwd"] == first["cwd"], "the alias did not keep one stable path"
@@ -103,7 +108,7 @@ def test_nc_r31_the_activation_prompt_carries_the_nodes_task(w):
     w.fxw.queue(commit_entry("a.txt", "one\n"))
     w.fxr.queue(verdict_entry("approved"))
     top, wk, rv = start(w)
-    w.wait_state(top, "done", timeout=60)
+    w.wait_state(top, "done", timeout=WAIT_ROUNDS)
     assert "review the thing" in w.fxr.calls()[0]["prompt"]
 
 
@@ -114,7 +119,7 @@ def test_nc_r62_a_dirty_alias_checkout_holds_the_next_activation_and_deletes_not
     w.fxr.queue(verdict_entry("rejected", [finding("redo")], leave={"scratch.txt": "left behind\n"}),
                 verdict_entry("approved"))
     top, wk, rv = start(w)
-    held = w.wait_held(rv, "dirty_worktree", timeout=90)
+    held = w.wait_held(rv, "dirty_worktree", timeout=WAIT_ROUNDS)
     assert w.fxr.spawns() == 1, "the reviewer was activated on a dirty checkout"
     leftover = Path(w.fxr.calls()[0]["cwd"]) / "scratch.txt"
     assert leftover.read_text() == "left behind\n", "the leftover file was deleted"
@@ -129,7 +134,7 @@ def reject_to_max(w):
     w.fxw.queue(commit_entry("a.txt", "one\n"), commit_entry("b.txt", "two\n"))
     w.fxr.queue(verdict_entry("rejected", [finding("x")]), verdict_entry("approved"))
     top, wk, rv = start(w, rounds=1)
-    w.wait_held(top, "loop_max", timeout=90)
+    w.wait_held(top, "loop_max", timeout=WAIT_ROUNDS)
     return top, wk, rv
 
 
@@ -149,7 +154,7 @@ def test_nc_r32_with_new_session_a_new_provider_session_is_bound_on_the_new_mode
     reply = w.root_op("relaunch_node", top, max_rounds=3, pins={rv: {"model": "fxr/m2"}},
                       new_session=[rv])
     assert reply.get("ok") is True, reply
-    assert w.wait_state(top, "done", timeout=90)["outcome"] == "approved"
+    assert w.wait_state(top, "done", timeout=WAIT_ROUNDS)["outcome"] == "approved"
     first, second = w.fxr.calls()
     assert second["resume"] is None and second["session"] != first["session"]
     assert second["model"] == "fxr/m2" and first["model"] == "fxr/m1"
@@ -160,7 +165,7 @@ def test_nc_r32_a_provider_declaring_session_model_change_resumes_the_session(wc
     top, wk, rv = reject_to_max(w)
     reply = w.root_op("relaunch_node", top, max_rounds=3, pins={rv: {"model": "fxr/m2"}})
     assert reply.get("ok") is True, reply
-    assert w.wait_state(top, "done", timeout=90)["outcome"] == "approved"
+    assert w.wait_state(top, "done", timeout=WAIT_ROUNDS)["outcome"] == "approved"
     first, second = w.fxr.calls()
     assert second["resume"] == first["session"] and second["model"] == "fxr/m2"
 
@@ -168,7 +173,7 @@ def test_nc_r32_a_provider_declaring_session_model_change_resumes_the_session(wc
 def test_nc_r32_a_non_aliased_child_changes_model_freely_and_the_alias_is_untouched(w):
     top, wk, rv = reject_to_max(w)
     assert w.root_op("relaunch_node", top, max_rounds=3, pins={wk: {"model": "fxw/m2"}}).get("ok") is True
-    w.wait_state(top, "done", timeout=90)
+    w.wait_state(top, "done", timeout=WAIT_ROUNDS)
     first, second = w.fxr.calls()
     assert second["resume"] == first["session"] and second["model"] == first["model"]
     assert [c["model"] for c in w.fxw.calls()] == ["fxw/m1", "fxw/m2"]

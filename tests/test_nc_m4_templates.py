@@ -45,6 +45,11 @@ root:
 """
 
 
+# Bounds on every wait: red tests fail on their own assertion within seconds.
+WAIT = 8            # one launch / one transition
+WAIT_ROUNDS = 20    # several activations in a row (loops, sessions)
+
+
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = M4World(tmp_path, monkeypatch)
@@ -184,7 +189,7 @@ def test_nc_r41_registration_is_root_only(w):
     w.start_scheduler()
     from multiagents.scheduler import issue_run_capability
     anchor = w.simple("A", fx={"hang": True})
-    w.wait_running(anchor)
+    w.wait_running(anchor, timeout=WAIT)
     token = issue_run_capability(w.root, "some-run", anchor, {"read", "delegate"})
     reply = w.rpc("register_template", {"yaml": TPL.format(version=1, a="a", b="b")}, token=token)
     assert err_code(reply) == "forbidden"
@@ -230,13 +235,13 @@ def test_nc_r42_editing_the_registry_after_instantiation_changes_nothing_of_the_
     w.register_ok(TPL.format(version=1, a="x", b="V1-SECOND"))
     top = w.instantiate_ok("seq2", {"first": task("F", gate="gF")})
     one_id, two_id = w.children(top)
-    w.wait_running(one_id)
+    w.wait_running(one_id, timeout=WAIT)
     recorded = w.get(top)["template"]
     w.register_ok(TPL.format(version=2, a="x", b="V2-SECOND"))
     now = w.get(top)["template"]
     assert now["version"] == recorded["version"] == 1 and now["sha256"] == recorded["sha256"]
     w.gate("gF")
-    call = w.wait_spawn("F")  # noqa: F841
+    call = w.wait_spawn("F", timeout=WAIT)  # noqa: F841
     w.until(lambda: any("V1-SECOND" in c["prompt"] or "V2-SECOND" in c["prompt"] for c in w.fx.calls()
                         if c["tag"] != "F"), what="the second child to launch")
     prompts = " ".join(c["prompt"] for c in w.fx.calls() if c["tag"] != "F")
