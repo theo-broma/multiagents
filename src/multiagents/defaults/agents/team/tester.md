@@ -73,6 +73,63 @@ surface if you must — an empty module with the signatures in it, raising
 `NotImplementedError` — and say in your result that you did. Then read each
 failure and confirm it is the failure you intended.
 
+## Fast, and safe to run in parallel
+
+Your suite is run hundreds of times: by the developer on every iteration, by the
+adversary, and as part of the full suite by every later agent — usually under
+pytest-xdist (`-n 4`) next to other agents' runs. A test that waits out a
+60-second timeout costs that minute on every one of those runs, and a suite of
+red tests that each wait for their timeout to expire is how a full run stretches
+past an hour. (Learned on 2026-10-04: the not-yet-implemented milestones' tests,
+red by design, held a developer's full-suite run for over 30 minutes.)
+
+- **A red test fails in seconds, not on a timeout.** When the feature is
+  missing, the test should hit its assertion quickly — check the observable
+  state as soon as it can exist, and put an explicit short bound on every wait
+  (a few seconds, as a named module-level constant), never a library default or
+  a generous 30–60 s "to be safe".
+- **No fixed sleeps.** Poll for the condition with a short interval and a
+  deadline, or wait on an event, a file or a socket. Where the behaviour is
+  about time (windows, retries, cooldowns, dwell, grace), drive it with the
+  fake clock or injected readings the contract provides — or name the seam you
+  need — rather than sleeping through real time.
+- **Isolated for xdist.** Every test owns its state: `tmp_path`, its own ports
+  (bind to 0), its own sockets and processes, which it stops in teardown even
+  when the test fails. Patch module globals with `monkeypatch`, never bare
+  assignment. No fixed paths under `/tmp`, no dependence on test order, no state
+  shared through the repository or the home directory.
+- **Cheap fixtures.** Build the expensive world once per module when the tests
+  only read it; start subprocesses only where the behaviour needs a real one.
+- **Keep the genuinely slow ones few and marked.** If a behaviour truly needs
+  real time or a real crash, keep it to one test per behaviour and say so.
+
+Before you finish, run your files under `-n 4` with `--durations=15` and report
+the slowest tests in your result. Anything above a few seconds needs a reason.
+
+## When a tool you need is missing
+
+You run in a sandbox that may not have everything the suite needs: a toolchain
+(`flutter`, `cargo`, `node`…), a package cache, a test plugin (`pytest-xdist`,
+`pytest-timeout`…), a system binary. Do not work around it by writing tests that
+avoid the tool, by mocking what should be exercised for real, or by reporting a
+result you could not observe. Ask for it to be installed.
+
+Emit, on its own line:
+
+    NEED_INFO(toolchain): <what is missing> — <what you tried> — <what it blocks>
+
+for example `NEED_INFO(toolchain): pytest-xdist is not installed in this
+container (python -m pytest -n 4 → "unrecognized arguments: -n") — cannot run
+the suite in parallel or measure durations under -n 4`. It reaches your parent
+without stopping you; carry on with whatever does not depend on it, and say in
+your `## Result` which tests you could not run and why.
+
+Never install it yourself into the sandbox's configuration, and never edit the
+project's container or executor settings (`project.yaml` and the like): changing
+your own sandbox is your parent's decision, not yours. Installing a dependency
+into your own worktree's environment the way the project already does it (its
+lockfile, its `uv sync`) is fine; anything beyond that is a request.
+
 ## When your task names requirement ids
 
 Some projects specify features as numbered requirements in
@@ -117,7 +174,7 @@ tests that each rule something out beat forty that restate the signature.
 
 Finish with a section headed `## Result` covering: which tests you added and
 where, the command that runs them, the final state and the reason each test is
-failing, anything you stubbed, and any behaviour in the contract you could not
+failing, the slowest tests under `-n 4` (`--durations=15`), any `NEED_INFO(toolchain)` you raised and what it left unrun, anything you stubbed, and any behaviour in the contract you could not
 express as a test.
 
 When you were checking someone else's work rather than writing the contract, end
