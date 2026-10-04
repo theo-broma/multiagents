@@ -1170,6 +1170,12 @@ def cmd_resume(args: argparse.Namespace) -> int:
     from . import watchdog          # local, as everywhere else here: cycle
 
     paths = _resolve(args.path)
+    from . import scheduler
+    if scheduler.enabled(paths.root):
+        result = scheduler.start(paths.root)
+        if result.get("error"):
+            print(json.dumps(result), file=sys.stderr)
+            return 1
     tree = Tree(paths.tree_file, paths.events_file)
     authority = HostAuthority(paths, tree)
 
@@ -1623,11 +1629,14 @@ def cmd_prompt(args) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     paths = _resolve_if_project(args.path)
     from .instance_strategy import InstanceStrategyError
+    from .scheduler_config import SchedulerConfigError
     strategy_errors: list[str] = []
+    scheduler_errors: list[str] = []
     try:
         config = load_config(paths)
-    except InstanceStrategyError:
-        config = load_config(paths, instance_strategy_errors=strategy_errors)
+    except (InstanceStrategyError, SchedulerConfigError):
+        config = load_config(paths, instance_strategy_errors=strategy_errors,
+                             scheduler_errors=scheduler_errors)
     providers = (load_providers(config.providers, config.provider_sources)
                  if hasattr(config, "provider_sources")
                  else load_providers(config.providers))
@@ -1642,11 +1651,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         notes_dir = paths.root / "context" / "notes"
         if notes_dir.exists() or notes_dir.is_symlink():
             print(f"notes        {summary['notes']['unprocessed']} unprocessed")
-    problems = len(strategy_errors)
-    for error in strategy_errors:
+    problems = len(strategy_errors) + len(scheduler_errors)
+    for error in [*strategy_errors, *scheduler_errors]:
         print(f"  ! {error}")
     for warning in config.warnings:
         print(f"warning: {warning}")
+
+    if paths and not config.project.get("scheduler", {}).get("enabled", False):
+        from .scheduler import pending_nodes
+        pending = pending_nodes(paths.root)
+        if pending:
+            print(f"  ! scheduler disabled with pending nodes: {', '.join(pending)}")
+            problems += 1
 
     print("providers")
     for name, provider in sorted(providers.items()):
@@ -3234,6 +3250,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def cmd_scheduler(args: argparse.Namespace) -> int:
+    from . import scheduler
+    paths = _resolve(args.path)
+    if args.scheduler_command == "start":
+        result = scheduler.start(paths.root, foreground=args.foreground)
+    elif args.scheduler_command == "stop":
+        result = scheduler.stop(paths.root)
+    else:
+        result = scheduler.status(paths.root)
+    print(json.dumps(result))
+    return 1 if result.get("error") == "scheduler_unavailable" and args.scheduler_command == "start" else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="multiagents",
@@ -3241,6 +3270,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--path", help="project directory (default: search upward from cwd)")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("scheduler", help="manage the host plan scheduler")
+    p.set_defaults(func=cmd_scheduler)
+    scheduler_sub = p.add_subparsers(dest="scheduler_command", required=True)
+    for action in ("start", "status", "stop"):
+        command = scheduler_sub.add_parser(action)
+        command.set_defaults(func=cmd_scheduler, foreground=False)
+        if action == "start":
+            command.add_argument("--foreground", action="store_true")
 
     p = sub.add_parser("plan", help="commit plans and new specifications")
     p.set_defaults(func=cmd_plan)

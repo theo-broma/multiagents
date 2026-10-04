@@ -566,3 +566,17 @@ bug_reporting:
   # Empty means tickets are written and kept local.
   repo: "theo-broma/multiagents"
   labels: []
+
+# Host plan scheduler (Phase 7). Leave disabled until all milestones ship.
+scheduler:
+  enabled: false
+  # Default IANA zone for node windows.
+  timezone: Europe/Paris
+  # Report a ready node that has waited this long; never change its priority.
+  starvation_after_seconds: 7200
+  # Maximum delay before starting a stop when a window closes.
+  window_tolerance_seconds: 60
+  # start_agent waits this long for its first admission attempt.
+  admission_timeout_seconds: 10
+  # Maximum idle delay between evaluations.
+  tick_seconds: 5

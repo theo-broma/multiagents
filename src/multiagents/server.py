@@ -22,17 +22,21 @@ import stat
 import sys
 import threading
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import Field
+import yaml
+
 # The SDK renamed FastMCP to MCPServer in 2.x. The decorator API is identical,
 # so support both rather than pinning to one line of the SDK.
 try:
-    from mcp.server.mcpserver import MCPServer as _Server
+    from mcp.server.mcpserver import Context as _ToolContext, MCPServer as _Server
     from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # pragma: no cover - mcp 1.x
-    from mcp.server.fastmcp import FastMCP as _Server
+    from mcp.server.fastmcp import Context as _ToolContext, FastMCP as _Server
     from mcp.server.fastmcp.exceptions import ToolError
 
 from . import __version__
@@ -599,7 +603,24 @@ async def start_agent(
             start_agent refuses: decide what that slice does NOT get, say what
             you covered and what you did not, and move on.
     """
-    run = runner()
+    from . import scheduler
+    paths = _project_paths()
+    # An established runner retains its last valid configuration when a reload
+    # fails. Preserve that behaviour and its limits with the gate off.
+    run = runner() if _runner is not None else None
+    try:
+        gate = scheduler.enabled(paths.root)
+    except (yaml.YAMLError, OSError):
+        if run is None:
+            raise
+        # A broken project YAML retains the known configuration, as before.
+        # A valid gate still takes effect if a separate provider reload fails.
+        gate = run.config.project.get("scheduler", {}).get("enabled", False)
+    if gate:
+        # M1 has no launch implementation and must never fall back to Runner.
+        status = _node_rpc("scheduler_status", {})
+        return status if status.get("error") else {"error": "not_implemented"}
+    run = run or runner()
     try:
         result = await run.start(
             agent, task,
@@ -1560,6 +1581,182 @@ def run_resource(agent_id: str) -> str:
     if result.get("stderr_tail"):
         lines += ["", f"## stderr\n{result['stderr_tail']}"]
     return "\n".join(lines)
+
+
+_node_rpc_namespace = uuid.uuid4().hex
+
+
+def _node_rpc(op: str, args: dict, ctx=None) -> dict:
+    """Gate and credentials for nodes, independent of legacy run authority."""
+    from . import scheduler
+    paths = _project_paths()
+    try:
+        gate = scheduler.enabled(paths.root)
+    except (yaml.YAMLError, OSError):
+        if _runner is None:
+            return {"error": "scheduler_unavailable"}
+        gate = _runner.config.project.get("scheduler", {}).get("enabled", False)
+    if not gate:
+        pending = scheduler.pending_nodes(paths.root)
+        return {"error": "scheduler_disabled", **({"pending_nodes": len(pending)} if pending else {})}
+    if "MULTIAGENTS_AGENT_ID" in os.environ:
+        token = os.environ.get("MULTIAGENTS_RPC_TOKEN")
+        if not token:
+            return {"error": "unauthenticated"}
+    else:
+        try:
+            token = scheduler.root_capability(paths.root)
+        except OSError:
+            return {"error": "scheduler_unavailable"}
+    request_id = None
+    if ctx is not None:
+        try:
+            request_id = f"mcp:{_node_rpc_namespace}:{ctx.request_id}"
+        except (ValueError, RuntimeError):
+            pass  # SDK calls made outside a request have an empty context.
+    try:
+        reply = scheduler.call(paths.root, op, args, token, request_id=request_id)
+        return reply["result"] if reply.get("ok") else reply["error"]
+    except (OSError, ValueError):
+        return {"error": "scheduler_unavailable"}
+
+
+@_tool()
+def create_node(kind: str, plan_revision: int, agent: str | None = None,
+                task: str | None = None, parent: str | None = None,
+                pins: dict | None = None, session: str | None = None,
+                children: list[str] | None = None, loop: dict | None = None,
+                depends_on: list[dict] | None = None, inputs: list[dict] | None = None,
+                urgent: bool = False, locks: list[str] | None = None,
+                window: dict | None = None, ctx: _ToolContext = None) -> dict:
+    """Deposit a planned node, using the current list_nodes plan_revision."""
+    fields = dict(kind=kind, plan_revision=plan_revision, parent=parent, urgent=urgent)
+    fields.update({k: v for k, v in dict(agent=agent, task=task, pins=pins, session=session,
+                  children=children, loop=loop, depends_on=depends_on, inputs=inputs,
+                  locks=locks, window=window).items() if v is not None})
+    return _node_rpc("create_node", fields, ctx)
+
+
+# Field's factory preserves omission through MCP argument validation as well
+# as direct calls. Explicit null remains distinct, and the wire schema exposes
+# only the contract's types.
+_NODE_UNSET = Field(default_factory=lambda: _NODE_UNSET)
+
+
+@_tool()
+def update_node(id: str, revision: int, task: str = _NODE_UNSET,
+                pins: dict = _NODE_UNSET, depends_on: list[dict] = _NODE_UNSET,
+                inputs: list[dict] = _NODE_UNSET, urgent: bool = _NODE_UNSET,
+                locks: list[str] = _NODE_UNSET, children: list[str] = _NODE_UNSET,
+                loop: dict = _NODE_UNSET, session: str | None = _NODE_UNSET,
+                window: dict | None = _NODE_UNSET, ctx: _ToolContext = None) -> dict:
+    """Edit a node using its current revision. Null window/session clears it."""
+    fields = {k: v for k, v in dict(task=task, pins=pins, depends_on=depends_on,
+              inputs=inputs, urgent=urgent, locks=locks, children=children,
+              loop=loop, session=session, window=window).items() if v is not _NODE_UNSET}
+    return _node_rpc("update_node", {"id": id, "revision": revision, **fields}, ctx)
+
+
+@_tool()
+def cancel_node(id: str, revision: int, ctx: _ToolContext = None) -> dict:
+    """Cancel a node and its non-terminal descendants, retaining results."""
+    return _node_rpc("cancel_node", {"id": id, "revision": revision}, ctx)
+
+
+@_tool()
+def get_node(id: str) -> dict:
+    """Read a planned node within the caller's scope."""
+    return _node_rpc("get_node", {"id": id})
+
+
+@_tool()
+def list_nodes(state: str | None = None, parent: str | None = None,
+               eligible: bool | None = None) -> dict:
+    """List visible nodes and the plan revision for the next deposit."""
+    return _node_rpc("list_nodes", {k: v for k, v in dict(state=state, parent=parent,
+                     eligible=eligible).items() if v is not None})
+
+
+@_tool()
+def register_template(yaml: str, ctx: _ToolContext = None) -> dict:
+    """Register a host-owned declarative template (available in M4)."""
+    return _node_rpc("register_template", {"yaml": yaml}, ctx)
+
+
+@_tool()
+def list_templates() -> dict:
+    """List templates available to the host scheduler."""
+    return _node_rpc("list_templates", {})
+
+
+@_tool()
+def instantiate_template(name: str, params: dict, plan_revision: int,
+                         parent: str | None = None, urgent: bool = False,
+                         window: dict | None = None, ctx: _ToolContext = None) -> dict:
+    """Deposit an expanded template instance (available in M4)."""
+    return _node_rpc("instantiate_template", dict(name=name, params=params,
+                     plan_revision=plan_revision, parent=parent, urgent=urgent, window=window), ctx)
+
+
+@_tool()
+def wait_for_nodes(cursor: int | None = None, node_ids: list[str] | None = None,
+                   timeout: float = 0) -> dict:
+    """Read durable transitions, using the acknowledged cursor by default."""
+    args = {"timeout": timeout}
+    if cursor is not None:
+        args["cursor"] = cursor
+    if node_ids is not None:
+        args["node_ids"] = node_ids
+    return _node_rpc("wait_for_nodes", args)
+
+
+@_tool()
+def ack_nodes(cursor: int, ctx: _ToolContext = None) -> dict:
+    """Acknowledge transitions durably for the root orchestrator."""
+    return _node_rpc("ack_nodes", {"cursor": cursor}, ctx)
+
+
+@_tool()
+def scheduler_status() -> dict:
+    """Read the scheduler pid, startup time, gate and node counts."""
+    return _node_rpc("scheduler_status", {})
+
+
+@_tool()
+def give_verdict(node_id: str, generation_seq: int, commit: str, verdict: str,
+                 findings: list[dict], ctx: _ToolContext = None) -> dict:
+    """Give a verdict as a designated node run (available in M4)."""
+    return _node_rpc("give_verdict", dict(node_id=node_id, generation_seq=generation_seq,
+                     commit=commit, verdict=verdict, findings=findings), ctx)
+
+
+@_tool()
+def relaunch_node(id: str, revision: int, max_rounds: int | None = None,
+                  pins: dict | None = None, new_session: list[str] | None = None,
+                  retry: str = "verdict_child", ctx: _ToolContext = None) -> dict:
+    """Reopen a held or finished node (available in M4)."""
+    args = dict(id=id, revision=revision, retry=retry)
+    args.update({k: v for k, v in dict(max_rounds=max_rounds, pins=pins,
+                 new_session=new_session).items() if v is not None})
+    return _node_rpc("relaunch_node", args, ctx)
+
+
+@_tool()
+def close_node(id: str, revision: int, outcome: str, ctx: _ToolContext = None) -> dict:
+    """Record the root's decision on a node (available in M4)."""
+    return _node_rpc("close_node", dict(id=id, revision=revision, outcome=outcome), ctx)
+
+
+@_tool()
+def merge_node(id: str, force: bool = False, ctx: _ToolContext = None) -> dict:
+    """Publish a top-level node through protected host git (available in M3)."""
+    return _node_rpc("merge_node", {"id": id, "force": force}, ctx)
+
+
+@_tool()
+def dispose_node(id: str, revision: int, ctx: _ToolContext = None) -> dict:
+    """Dispose retained node results (available in M3)."""
+    return _node_rpc("dispose_node", {"id": id, "revision": revision}, ctx)
 
 
 def _reset() -> None:

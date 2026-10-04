@@ -176,6 +176,14 @@ class ProjectPaths:
         return self.data / "events.jsonl"
 
     @property
+    def scheduler(self) -> Path:
+        return state_root() / "scheduler" / self.slug
+
+    @property
+    def scheduler_rpc(self) -> Path:
+        return state_root() / "scheduler-rpc" / self.slug
+
+    @property
     def runs(self) -> Path:
         return self.data / "runs"
 

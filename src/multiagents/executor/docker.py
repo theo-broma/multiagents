@@ -1110,6 +1110,14 @@ sys.exit(rc)
             (self.paths.homes, False),
         ]
 
+        from ..scheduler import enabled, transport_directory
+        scheduler_enabled = enabled(self.paths.root)
+        if scheduler_enabled:
+            transport = transport_directory(self.paths.root)
+            transport.mkdir(parents=True, exist_ok=True, mode=0o700)
+            transport.chmod(0o700)
+            out.append((transport, True))
+
         for entry in self.config.get("extra_mounts", []) or []:
             if isinstance(entry, str):
                 out.append((Path(entry).expanduser(), False))
@@ -1208,6 +1216,20 @@ sys.exit(rc)
             if (mounted == authority or mounted in authority.parents
                     or authority in mounted.parents):
                 raise ValueError(f"mount {source} would expose host authority records")
+        scheduler_state = (state_root() / "scheduler").resolve()
+        if scheduler_enabled or scheduler_state.exists():
+            for source, _ in mounts:
+                mounted = source.resolve()
+                if (mounted == scheduler_state or mounted in scheduler_state.parents
+                        or scheduler_state in mounted.parents):
+                    raise ValueError(f"mount {source} would expose scheduler state")
+        if scheduler_enabled:
+            rpc = transport.resolve()
+            for source, read_only in mounts:
+                mounted = source.resolve()
+                if (mounted == rpc or mounted in rpc.parents or rpc in mounted.parents):
+                    if mounted != rpc or not read_only:
+                        raise ValueError(f"mount {source} would expose writable scheduler transport")
         return mounts
 
     def _adapter_paths(self) -> list[Path]:

@@ -956,8 +956,75 @@ def _warn_unknown_entry_keys(agents_raw: dict, providers: dict,
                     f"{provider!r} consumes; it will be ignored")
 
 
+def layer_dirs(paths: ProjectPaths | None) -> list[Path]:
+    layers = [shipped_defaults_dir(), global_config_dir()]
+    if paths is not None and paths.config.is_dir():
+        layers.append(paths.config)
+    return layers
+
+
+def source_version(paths: ProjectPaths | None) -> tuple:
+    """Cheap staleness check for consumers retaining a validated Config."""
+    versions = []
+    for layer in layer_dirs(paths):
+        for name in CONFIG_FILES:
+            path = layer / name
+            try:
+                stat = path.stat()
+                stamp = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            except FileNotFoundError:
+                stamp = None
+            versions.append((path, stamp))
+    return tuple(versions)
+
+
+def read_project_layer(layer: Path, scheduler_errors: list[str] | None = None) -> dict:
+    """Validate scheduler policy at its source; doctor may collect bad keys."""
+    data = read_yaml_cached(layer / "project.yaml", strict=True)
+    if "scheduler" not in data:
+        return data
+    from .notices import _node_at
+    from .scheduler_config import SchedulerConfigError, validate_setting
+    block = data["scheduler"]
+    if not isinstance(block, dict):
+        location = _node_at(layer / "project.yaml", ["scheduler"])
+        error = SchedulerConfigError(
+            f"{layer / 'project.yaml'}:{location[0] if location else 1} scheduler: expected mapping")
+        if scheduler_errors is None:
+            raise error
+        scheduler_errors.append(str(error))
+        del data["scheduler"]
+    else:
+        for key, value in list(block.items()):
+            try:
+                validate_setting(key, value)
+            except SchedulerConfigError as exc:
+                location = _node_at(layer / "project.yaml", ["scheduler", key])
+                line = location[0] if location else 1
+                error = SchedulerConfigError(f"{exc} ({layer / 'project.yaml'}:{line})")
+                if scheduler_errors is None:
+                    raise error from exc
+                scheduler_errors.append(str(error))
+                del block[key]
+    return data
+
+
+def load_project_section(paths: ProjectPaths | None, section: str) -> dict:
+    """Load a project section through the same layers and validation as load.
+
+    Gate checks must not construct providers or validate unrelated settings:
+    legacy mount and launch callers did not do that before Phase 7.
+    """
+    result = {}
+    with parse_once():
+        for layer in layer_dirs(paths):
+            result = deep_merge(result, read_project_layer(layer).get(section, {}))
+    return result
+
+
 def load(paths: ProjectPaths | None, seed: bool = True, *,
-         instance_strategy_errors: list[str] | None = None) -> Config:
+         instance_strategy_errors: list[str] | None = None,
+         scheduler_errors: list[str] | None = None) -> Config:
     """Load the merged configuration for a project (or the global one alone).
 
     `seed=False` only reads: a missing layer is an empty one. That is how a
@@ -965,9 +1032,7 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
     """
     if seed:
         seed_global()
-    layers: list[Path] = [shipped_defaults_dir(), global_config_dir()]
-    if paths is not None and paths.config.is_dir():
-        layers.append(paths.config)
+    layers = layer_dirs(paths)
 
     merged: dict[str, dict] = {name: {} for name in CONFIG_FILES}
     provider_sources: dict[str, dict[str, str]] = {}
@@ -980,10 +1045,8 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
     with parse_once():
         for layer in layers:
             for name in CONFIG_FILES:
-                data = read_yaml_cached(layer / name, strict=True)
-                # IS-R2: validate the value at its source, before layering or
-                # inheritance can hide it. Doctor alone collects problems and
-                # omits invalid keys so it can complete its other checks.
+                data = (read_project_layer(layer, scheduler_errors) if name == "project.yaml"
+                        else read_yaml_cached(layer / name, strict=True))
                 strategy_blocks = []
                 if name == "project.yaml":
                     strategy_blocks = [(data.get("budget") or {}, ["budget"], False)]
