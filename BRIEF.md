@@ -4214,3 +4214,15 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - (5) `spawn` releases the lock before the worker boots: on a slow boot, reconcile marks the attempt abandoned.
 
   **Next:** wait for the M2 adversary ag-3ee7b6, then send everything to ag-eb2369 in one steer.
+- 2026-10-04: **M2 adversary (ag-3ee7b6): rejected.** Its tests are merged (e777399).
+  - (1) A steer resurrects cancelled, held or done nodes.
+  - (2) A cancel between claim and launch still launches.
+  - (3) A run in awaiting_user is treated as finished: its lock is released and its token revoked.
+  - (4/5) migrate ignores `op`: a resume or a consult becomes a fresh task run.
+  - Surviving mutants are listed in its result.json.
+
+  Everything from the reviewer and the adversary was sent to ag-eb2369 (round 2), with verification limited to M1+M2 and core.
+
+  **Tooling bug:** the decision marker was detected mid-line (inside backticks) in the adversary's report, which parked it twice and truncated its message. bug-reporter ag-0b451c is in flight (fix in-house).
+
+  **M4 speed rework merged** (c0159e9): 612 s → 137 s. The bounds WAIT=8 and WAIT_ROUNDS=20 were not timed on a green run: raise them if M4 is flaky.
