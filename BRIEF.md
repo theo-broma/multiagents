@@ -4232,3 +4232,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - Reviewer replies: R3 declined (claim after enqueue, with a `finally` release); R4 kept the 0.5 s poll.
     - Re-review ag-cee330 and adversary round 2 ag-0a5e9b are in flight.
   - **Budget tag `tickets` is spent** (6.48M of 6M). bug-93a3e4 (minor, agy trailing ERROR) is not started: raising the tag is the user's call.
+- 2026-10-04: **M2 round 3 sent to ag-eb2369.** The reviewer ag-cee330 accepted its round-2 replies. New defects:
+  - from the reviewer: (1) cancel_sync TOCTOU during runner.start; (2) shutdown leaves workers launching with revoked tokens; (3) the first tick is delayed by tick_seconds;
+  - from adversary round 2 (ag-0a5e9b, tests merged 35786c4): capability leak when a worker dies before the tree records the run, and a lock leak when reconcile leaves the attempt `claimed` after a mid-launch crash. Its 5 round-1 mutants are now killed.
+
+  ag-0a5e9b was marked failed with "agy-b reported ERROR" although its work was complete: this is bug-93a3e4 recurring. That fix is blocked by the spent `tickets` budget.
