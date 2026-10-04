@@ -5173,6 +5173,7 @@ class Runner:
         usage: dict[str, Any] = {}
         cost_total = 0.0
         session_id = ""
+        successful_result_response = False
         flush = _FlushGate()
         # Only worth sampling where the agent has a worktree of its own; with
         # no repository the state is always "" and the detector falls back to
@@ -5267,6 +5268,15 @@ class Runner:
                 unhappy_result = (
                     event.kind == "result" and event.status
                     and event.status.upper() not in {"SUCCESS", "OK", "COMPLETED"})
+                trailing_result_error = (
+                    unhappy_result and not event.text
+                    and event.status.upper() not in {"SESSION_LOST", "REFUSED", "TRUNCATED"}
+                    and successful_result_response
+                    and run.final_status.upper() in {"SUCCESS", "OK", "COMPLETED"})
+                if trailing_result_error:
+                    record["warning"] = (
+                        f"{provider.name} reported {event.status} without a replacement "
+                        "response; retaining the successful result")
                 if (event.kind == "raw" or unhappy_result) and event.raw:
                     # The whole point of a `raw` event is to show what did not
                     # parse, and the payload was being dropped on the way to
@@ -5284,6 +5294,9 @@ class Runner:
                     stream_log.flush()
                 run.events.append(record)
 
+                if (event.kind == "result" and event.text
+                        and event.status.upper() in {"SUCCESS", "OK", "COMPLETED"}):
+                    successful_result_response = True
                 if event.text:
                     run.text_parts.append(event.text)
                     if event.kind == "text" or (event.kind == "result" and not run.final_assistant_message):
@@ -5311,7 +5324,8 @@ class Runner:
                 if event.status:
                     if event.status.upper() == "SESSION_LOST":
                         run.requested_session = str(event.raw.get("requested_session") or "")
-                    if run.final_status.upper() not in {"REFUSED", "TRUNCATED"}:
+                    if (not trailing_result_error
+                            and run.final_status.upper() not in {"REFUSED", "TRUNCATED"}):
                         run.final_status = event.status
                         if event.status.upper() in {"REFUSED", "TRUNCATED"}:
                             signal = next((f"{path}={get_path(event.raw, path)}"
@@ -5805,6 +5819,9 @@ class Runner:
             "status": status, "exit_code": code, "session_id": session_id,
             "usage": usage, "text": text, "stderr_tail": stderr,
         }
+        warnings = [event["warning"] for event in run.events if event.get("warning")]
+        if warnings:
+            record["warnings"] = warnings
         if fix_error:
             record["reason"] = fix_error
         if session_lost:
@@ -5821,7 +5838,8 @@ class Runner:
         _run_write(run_dir, "result.json", json.dumps(scrub(record), indent=2))
 
         self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000],
-                         requested_session=run.requested_session if session_lost else "")
+                         requested_session=run.requested_session if session_lost else "",
+                         warnings=warnings)
         # Filed even when the run failed: a partial write-up of a real defect is
         # worth more than a lost one, and the orchestrator can see the status.
         # The last verdict wins, for the same reason the last TICKET does: a
@@ -6892,6 +6910,8 @@ class Runner:
             "log_dir": str(run_dir),
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
+        if data.get("warnings") or node.warnings:
+            payload["warnings"] = data.get("warnings") or node.warnings
         if node.reason == "session_lost":
             payload["requested_session"] = node.requested_session
         payload.update(self._no_commits_note(node, text))

@@ -193,6 +193,7 @@ class Node:
     task: str = ""
     status: str = "pending"
     reason: str = ""
+    warnings: list[str] = field(default_factory=list)
     branch: str = ""
     worktree: str = ""
     session_id: str = ""
