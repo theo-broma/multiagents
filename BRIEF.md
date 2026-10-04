@@ -4255,3 +4255,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The harness fails fast: a node that is terminal and can never reach its target, a dead scheduler, a permanent refusal, or 8 s of an unblocked open node with nothing ever run. Overall cap: `max_wait` 120 s, overridable with NC_MAX_WAIT.
   - **If green M2..M6 tests flake under load, suspect that 8 s heuristic first.**
   - The 4 test fixes (3 M2 lifecycle gates, 1 M1 revocation) are included; the gate tests go green once M2 merges.
+- 2026-10-04: **the user approved raising the `tickets` budget to 8M.** Tags cannot be raised by design (tree.set_budget: the first value wins; "give it a new name"), so the extra goes under a new tag **`tickets-2`, ceiling 2,000,000**, for 8M in total.
+  - bug-93a3e4 will run under tickets-2 **after M2 merges**: it touches Runner._consume, which ag-543098 is editing right now.
