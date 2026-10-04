@@ -879,3 +879,23 @@ later instances; an equal or lower version is refused `conflict`. The shipped
 never launch. `close_node` on a node with active runs is refused
 `active_runs`. A crashed child inside a loop is retried as a new attempt at
 most once per round, then the loop holds `run_failed`.
+
+## Decisions after the M6 tester's read (2026-10-04, ag-0417c0)
+
+**NC-R93 — monitor payload.** With the gate on, `/api/state` gains a top-level
+`scheduler` object: `{running: bool, pid, since, last_tick, nodes: [ {node_id,
+kind, state, hold?, blocked: [{code, detail}], ...} ] (held first, then
+running, open, suspended, done), locks: [{name, holder_run, holder_node}],
+aliases: [{alias, instance, provider, account, model, session_id}],
+windows: [{node_id, open: bool, next_open, next_close}] (ISO-8601),
+starving: [node_id]}`. With the gate off the key is absent. The page renders
+these sections; `doctor` prints one line per held, starving or blocked node
+naming its id and reason, and one problem if the gate is on and the scheduler
+is not running.
+
+**NC-R94 — `start_agent` retry key reused with different arguments** →
+`request_id_reused` (as NC-R60).
+
+**NC-R95 — NC-R46 is tested twice** (`tests/test_nc_m4_example.py` and
+`tests/test_nc_m6_acceptance.py`), deliberately, as two independent readings of
+the user's example; both must pass.
