@@ -4251,3 +4251,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - missing-tree recovery sets held(termination_unconfirmed) even when death is confirmed.
 
   **Escalated to opus per the round-3 rule:** implementer-deep ag-543098 (claude opus), which cherry-picks ag-eb2369's commits and fixes both. **Merge ag-543098, not ag-eb2369; discard eb2369 after.** Next: a reviewer on ag-543098, then merge.
+- 2026-10-04: **harness speed rework merged** (8a6e645, ag-cbeaa2). All of tests/test_nc_m*.py now runs in 595 s (about 47 min summed before), with an identical set of failures.
+  - The harness fails fast: a node that is terminal and can never reach its target, a dead scheduler, a permanent refusal, or 8 s of an unblocked open node with nothing ever run. Overall cap: `max_wait` 120 s, overridable with NC_MAX_WAIT.
+  - **If green M2..M6 tests flake under load, suspect that 8 s heuristic first.**
+  - The 4 test fixes (3 M2 lifecycle gates, 1 M1 revocation) are included; the gate tests go green once M2 merges.
