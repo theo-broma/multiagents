@@ -463,6 +463,10 @@ def has_human_turn(provider: Any, cwd: Path, executor: Any = None) -> bool | Non
     result is a `user` record whose content is a list of tool_result blocks.
     Structure again, not content: this reads the shape and never the words.
     """
+    # Root CLIs run on the host; agent callers supply their executor explicitly.
+    if executor is None:
+        from .executor import LocalExecutor
+        executor = LocalExecutor()
     path = newest_transcript(provider, cwd, executor)
     if path is None:
         return None
@@ -517,6 +521,10 @@ def limit_reached(provider: Any, cwd: Path, executor: Any = None) -> dict | None
     markers = (getattr(provider, "transcript", None) or {}).get("limit_markers") or []
     if not markers:
         return None
+    # Root CLIs run on the host; agent callers supply their executor explicitly.
+    if executor is None:
+        from .executor import LocalExecutor
+        executor = LocalExecutor()
     path = newest_transcript(provider, cwd, executor)
     if path is None:
         return None

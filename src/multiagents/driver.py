@@ -893,7 +893,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     warned: list = []
 
     def _limit_hit() -> bool:
-        found = watchdog.limit_reached(provider, paths.root, _own_transcripts())
+        found = watchdog.limit_reached(provider, paths.root)
         if found is None:
             warned.clear()
             return False
@@ -1103,7 +1103,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     # A headless turn supplies the user message the TUI waits for you to type.
     # If nobody ever typed one, there is no work to continue and the nudge would
     # have it invent some from BRIEF.md, unsupervised.
-    spoke = watchdog.has_human_turn(provider, paths.root, _own_transcripts())
+    spoke = watchdog.has_human_turn(provider, paths.root)
     if spoke is False:
         print(f"\n{role} ended unexpectedly: {why}. Not continuing: nothing was "
               f"asked of it\nbefore the session ended, so there is no work to "
@@ -1320,7 +1320,7 @@ def _supervise(paths, config, role, spec, provider, executor,
                     code = child.wait(timeout=STALL_POLL_SECONDS)
                     break
                 except subprocess.TimeoutExpired:
-                    if watchdog.limit_reached(provider, paths.root, _own_transcripts()):
+                    if watchdog.limit_reached(provider, paths.root):
                         child.terminate()
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             child.wait(timeout=20)
@@ -1339,7 +1339,7 @@ def _supervise(paths, config, role, spec, provider, executor,
                                code):
             _drop_return_message(paths, role)
 
-        limit = watchdog.limit_reached(provider, paths.root, _own_transcripts())
+        limit = watchdog.limit_reached(provider, paths.root)
         if limit:
             limit_waits += 1
             if limit_waits > int(_limit_number(config, "limit_max_waits", zero_ok=True)):
