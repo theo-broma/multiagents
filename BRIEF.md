@@ -4206,3 +4206,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - ag-e196e5: M6 tests.
   - **Merge order:** harness first, then milestones (separate files).
   - **M2 implementer ag-eb2369:** resumed after the 5400 s wall-clock timeout. It reported 86 M2 passed, with 7 failures: 4 M4 alias tests and the 3 wrong-gate tests above.
+- 2026-10-04: **M2 review (ag-cee330, agy-b): rejected, 5 findings.** The first reviewer, ag-c6b6bd, was cut by agy quota. The findings' line numbers don't match the files (engine.py:1104 and worker.py:1511 are beyond the files' lengths), so the implementer must verify each one.
+  - (1) Reconcile after a crash mid-launch: the capability is never revoked, and the operator's cancel is reset to held.
+  - (2) The `_scheduled_start` decorator forwards internal kwargs such as `wait_for_slot` to RPC `submit`, and the string error crashes the caller.
+  - (3) The slot leaks if `tree.enqueue` raises between `startup.claim` and the try around `_launch`.
+  - (4) The worker cannot notify `service.changed` across processes, so waits fall back to a 1 s poll.
+  - (5) `spawn` releases the lock before the worker boots: on a slow boot, reconcile marks the attempt abandoned.
+
+  **Next:** wait for the M2 adversary ag-3ee7b6, then send everything to ag-eb2369 in one steer.
