@@ -899,3 +899,6 @@ is not running.
 **NC-R95 — NC-R46 is tested twice** (`tests/test_nc_m4_example.py` and
 `tests/test_nc_m6_acceptance.py`), deliberately, as two independent readings of
 the user's example; both must pass.
+
+**On NC-R11 (2026-10-04):** confirmed by the user. Part 2's one container per
+agent closes it; part 1 does not need a mitigation item.
