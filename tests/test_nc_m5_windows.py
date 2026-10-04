@@ -37,6 +37,10 @@ from nc_fixture.world import err_code, unwrap  # noqa: E402
 
 NEUTRAL = local(2026, 10, 5, 12, 0)          # Monday noon, Paris
 
+# Every wait is bounded explicitly: a red test must fail in seconds, not on the
+# harness's 30 s default. WAIT covers one scheduler reaction (tick_seconds is 1).
+WAIT = 8
+
 
 @pytest.fixture
 def w(tmp_path, monkeypatch):
@@ -45,6 +49,13 @@ def w(tmp_path, monkeypatch):
     world.start_scheduler()
     yield world
     world.close()
+
+
+def hold_lock(w: ClockWorld, lock: str = "L") -> str:
+    """`ClockWorld.hold_lock` with a bounded wait for the holder to run."""
+    holder = w.simple("HOLDER", locks=[lock], fx={"gate": "holder"})
+    w.wait_running(holder, timeout=WAIT)
+    return holder
 
 
 def win(days, *ranges, tz=None):
@@ -56,7 +67,7 @@ def win(days, *ranges, tz=None):
 
 def table(w: ClockWorld, spec: dict, rows: list[tuple]) -> None:
     """Check every `(instant, expected_open)` against one node's window."""
-    w.hold_lock("L")
+    hold_lock(w, "L")
     node = w.simple("T", locks=["L"], window=spec)
     for instant, expected in rows:
         w.set_clock(instant)
@@ -188,7 +199,7 @@ def test_nc_r38_the_default_zone_is_europe_paris(w):
 
 
 def test_nc_r38_a_node_without_a_window_is_never_blocked_by_one(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     node = w.simple("T", locks=["L"])
     for instant in (local(2026, 10, 5, 3), local(2026, 10, 10, 23), local(2026, 10, 11, 12)):
         w.set_clock(instant)
@@ -313,7 +324,7 @@ def test_nc_r38_an_invalid_window_is_refused_on_create_and_changes_nothing(w, na
 
 @pytest.mark.parametrize("name", ["unknown_zone", "start_equals_end", "empty_days"])
 def test_nc_r38_an_invalid_window_is_refused_on_update_and_leaves_the_node_alone(w, name):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     node = w.simple("T", locks=["L"], window=win(ALL_DAYS, "09:00-17:00"))
     before = w.get(node)
     reply = w.rpc("update_node", {"id": node, "revision": before["revision"],
@@ -325,7 +336,7 @@ def test_nc_r38_an_invalid_window_is_refused_on_update_and_leaves_the_node_alone
 
 
 def test_nc_r38_a_window_can_be_removed_with_update_and_the_node_is_then_always_open(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     node = w.simple("T", locks=["L"], window=win(["sat"], "09:00-10:00"))
     w.set_clock(local(2026, 10, 5, 12))
     assert not w.is_open(node)
@@ -336,7 +347,7 @@ def test_nc_r38_a_window_can_be_removed_with_update_and_the_node_is_then_always_
 
 
 def test_nc_r38_updating_a_window_takes_effect_on_the_next_evaluation(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     node = w.simple("T", locks=["L"], window=win(["mon"], "09:00-10:00"))
     w.set_clock(local(2026, 10, 5, 12))
     assert not w.is_open(node)
@@ -360,7 +371,7 @@ def group_with(w: ClockWorld, children: list[str], window: dict | None = None,
 
 
 def test_nc_r38_the_effective_window_is_the_intersection_with_the_parents(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     child = w.simple("C", locks=["L"], window=win(ALL_DAYS, "12:00-20:00"))
     group_with(w, [child], win(["mon", "tue", "wed", "thu", "fri"], "09:00-17:00"))
     # Effective: Mon-Fri 12:00-17:00
@@ -377,7 +388,7 @@ def test_nc_r38_the_effective_window_is_the_intersection_with_the_parents(w):
 
 
 def test_nc_r38_a_child_without_a_window_inherits_the_parents(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     child = w.simple("C", locks=["L"])
     group_with(w, [child], win(["mon"], "09:00-10:00"))
     for instant, expected in [(local(2026, 10, 5, 9, 30), True),
@@ -388,7 +399,7 @@ def test_nc_r38_a_child_without_a_window_inherits_the_parents(w):
 
 
 def test_nc_r38_the_intersection_runs_through_every_ancestor(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     leaf = w.simple("C", locks=["L"], window=win(ALL_DAYS, "08:00-18:00"))
     mid = group_with(w, [leaf], win(ALL_DAYS, "10:00-20:00"))
     group_with(w, [mid], win(ALL_DAYS, "06:00-14:00"))
@@ -405,7 +416,7 @@ def test_nc_r38_intersection_is_of_instants_not_of_day_labels(w):
     # Parent: Friday 22:00 -> Saturday 02:00. Child: Saturday 00:00-01:00.
     # Saturday 00:00-01:00 is in both (the parent's tail), so the window is
     # not empty and it is open exactly there.
-    w.hold_lock("L")
+    hold_lock(w, "L")
     child = w.simple("C", locks=["L"], window=win(["sat"], "00:00-01:00"))
     group_with(w, [child], win(["fri"], "22:00-02:00"))
     for instant, expected in [(local(2026, 10, 9, 23, 30), False),
@@ -418,7 +429,7 @@ def test_nc_r38_intersection_is_of_instants_not_of_day_labels(w):
 
 
 def test_nc_r38_a_narrow_nonempty_intersection_is_window_not_empty_window(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     child = w.simple("C", locks=["L"], window=win(["mon"], "09:30-09:45"))
     group_with(w, [child], win(["mon"], "09:00-10:00"))
     w.set_clock(local(2026, 10, 5, 12))
@@ -432,7 +443,7 @@ def test_nc_r38_a_narrow_nonempty_intersection_is_window_not_empty_window(w):
 # ---------------------------------------------------------- empty_window
 
 def empty_pair(w: ClockWorld, parent_win: dict, child_win: dict) -> str:
-    w.hold_lock("L")
+    hold_lock(w, "L")
     child = w.simple("C", locks=["L"], window=child_win)
     group_with(w, [child], parent_win)
     return child
@@ -472,7 +483,7 @@ def test_nc_r38_an_empty_window_node_never_launches_even_when_everything_else_is
 
 def test_nc_r38_a_far_but_nonempty_window_is_window_not_empty_window(w):
     # Opens once a week, on Sunday: 6 days away is inside the 14-day horizon.
-    w.hold_lock("L")
+    hold_lock(w, "L")
     node = w.simple("C", locks=["L"], window=win(["sun"], "03:00-03:30"))
     w.set_clock(local(2026, 10, 5, 12))      # Monday
     codes = w.codes(node)
@@ -509,7 +520,7 @@ def test_nc_r38_a_node_outside_its_window_does_not_launch_and_launches_when_it_o
     assert w.get(node)["state"] == "open"
     assert "window" in w.codes(node)
     w.set_clock(local(2026, 10, 5, 13, 0, 5))
-    done = w.wait_state(node, "done")
+    done = w.wait_state(node, "done", timeout=WAIT)
     assert done["outcome"] == "completed"
     assert len(w.fx.by_tag("W1")) == 1
 
@@ -522,4 +533,4 @@ def test_nc_r69_a_node_deposited_while_the_scheduler_is_down_with_a_closed_windo
     w.quiet(2.5)
     assert w.fx.by_tag("W3") == []
     w.set_clock(local(2026, 10, 5, 9, 0, 1))
-    assert w.wait_state(node, "done")["outcome"] == "completed"
+    assert w.wait_state(node, "done", timeout=WAIT)["outcome"] == "completed"

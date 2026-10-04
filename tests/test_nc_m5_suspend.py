@@ -50,6 +50,12 @@ NOON = local(2026, 10, 5, 12, 0)
 CLOSE = local(2026, 10, 5, 17, 0)          # Monday 17:00
 REOPEN = local(2026, 10, 6, 9, 0)          # Tuesday 09:00
 
+# Every wait is bounded explicitly: a red test must fail in seconds, not on the
+# harness's 30 s default. WAIT covers one scheduler reaction (tick_seconds is 1);
+# LONG_WAIT covers a chain of them (stop, confirm death, release a lock, relaunch).
+WAIT = 8
+LONG_WAIT = 15
+
 
 @pytest.fixture
 def w(tmp_path, monkeypatch):
@@ -60,17 +66,24 @@ def w(tmp_path, monkeypatch):
     world.close()
 
 
+def hold_lock(w: ClockWorld, lock: str = "L") -> str:
+    """`ClockWorld.hold_lock` with a bounded wait for the holder to run."""
+    holder = w.simple("HOLDER", locks=[lock], fx={"gate": "holder"})
+    w.wait_running(holder, timeout=WAIT)
+    return holder
+
+
 def running(w: ClockWorld, tag: str = "A", **fields):
     """A windowed node, running at noon. Returns (node id, pid, session)."""
     fields.setdefault("window", WIN)
     fields.setdefault("fx", {"gate": "ga"})
     node = w.simple(tag, **fields)
-    w.wait_running(node)
-    call = w.wait_spawn(tag)
+    w.wait_running(node, timeout=WAIT)
+    call = w.wait_spawn(tag, timeout=WAIT)
     return node, call["pid"], call["session"]
 
 
-def until_suspended(w: ClockWorld, node: str, timeout: float = 30) -> dict:
+def until_suspended(w: ClockWorld, node: str, timeout: float = WAIT) -> dict:
     return w.wait_state(node, "suspended", timeout)
 
 
@@ -143,13 +156,13 @@ def test_nc_r40_a_suspended_node_resumes_the_same_session_within_the_tolerance_o
     node, _, session = running(w)
     suspend(w, node)
     w.set_clock(REOPEN + timedelta(seconds=after))
-    w.until(lambda: resumes(w), what="the resumed invocation")
+    w.until(lambda: resumes(w), timeout=WAIT, what="the resumed invocation")
     call = resumes(w)[0]
     assert call["resume"] == session, "resume must use the interrupted run's provider session"
     assert "resume" in call["prompt"].lower()
     assert w.transitions(node).count("resumed") == 1
     w.gate("ga")
-    done = w.wait_state(node, "done")
+    done = w.wait_state(node, "done", timeout=WAIT)
     assert done["outcome"] == "completed"
     assert w.transitions(node).index("resumed") > w.transitions(node).index("suspended")
 
@@ -161,15 +174,15 @@ def test_nc_r62_a_window_resumption_runs_in_place_without_cleaning_the_checkout(
     # the file is written after the gate; open it, then re-gate by suspending
     # a second activation instead: use a run that wrote first, then hangs.
     w.gate("ga")
-    w.wait_state(node, "done")
+    w.wait_state(node, "done", timeout=WAIT)
     node2, _, session = running(w, "B", fx={"write": {"wip.txt": "half done\n"}, "hang": True})
-    first_cwd = w.wait_spawn("B")["cwd"]
+    first_cwd = w.wait_spawn("B", timeout=WAIT)["cwd"]
     wip = Path(first_cwd) / "wip.txt"
-    w.until(lambda: wip.exists(), what="the interrupted run's file")
+    w.until(lambda: wip.exists(), timeout=WAIT, what="the interrupted run's file")
     suspend(w, node2)
     assert wip.read_text() == "half done\n", "suspension must not clean the checkout"
     w.set_clock(REOPEN + timedelta(seconds=5))
-    w.until(lambda: resumes(w, "B"), what="the resumed invocation")
+    w.until(lambda: resumes(w, "B"), timeout=WAIT, what="the resumed invocation")
     call = resumes(w, "B")[0]
     assert call["cwd"] == first_cwd, "resumption must run in the same working directory"
     assert wip.exists() and wip.read_text() == "half done\n"
@@ -183,8 +196,8 @@ def test_nc_r40_a_node_can_be_suspended_and_resumed_repeatedly_on_one_session(w)
         w.set_clock(close + timedelta(seconds=10))
         until_suspended(w, node)
         w.set_clock(close + timedelta(hours=16, seconds=10))      # next 09:00
-        w.until(lambda d=day: len(resumes(w)) == d + 1, what=f"resume #{day + 1}")
-        w.wait_running(node)
+        w.until(lambda d=day: len(resumes(w)) == d + 1, timeout=WAIT, what=f"resume #{day + 1}")
+        w.wait_running(node, timeout=WAIT)
     assert {c["resume"] for c in resumes(w)} == {session}
     kinds = w.transitions(node)
     assert kinds.count("suspended") == 3 and kinds.count("resumed") == 3
@@ -203,16 +216,16 @@ def test_nc_r40_two_runs_in_the_same_window_are_both_suspended_once(w):
 
 
 def test_nc_r40_the_window_of_an_ancestor_suspends_its_descendants_too(w):
-    w.hold_lock("L")
+    hold_lock(w, "L")
     child = w.simple("A", locks=["L"], fx={"hang": True})
     group = w.create({"kind": "group", "children": [child], "window": WIN})
     assert group.get("ok"), group
     w.gate("holder")
-    w.wait_running(child)
+    w.wait_running(child, timeout=WAIT)
     suspend(w, child)
     assert w.transitions(child).count("suspended") == 1
     w.set_clock(REOPEN + timedelta(seconds=5))
-    w.until(lambda: resumes(w), what="the resumed invocation")
+    w.until(lambda: resumes(w), timeout=WAIT, what="the resumed invocation")
 
 
 # ------------------------------------------------ slots, locks, admission
@@ -220,9 +233,9 @@ def test_nc_r40_the_window_of_an_ancestor_suspends_its_descendants_too(w):
 def test_nc_r40_the_lock_is_released_only_once_the_stopped_run_is_really_dead(w):
     a, pid_a, _ = running(w, locks=["L"], fx={"hang": True})
     x = w.simple("X", locks=["L"], fx={"watch_pid": pid_a})
-    w.until(lambda: "lock" in w.codes(x), what="X blocked by A's lock")
+    w.until(lambda: "lock" in w.codes(x), timeout=WAIT, what="X blocked by A's lock")
     suspend(w, a)
-    w.wait_state(x, "done", timeout=60)
+    w.wait_state(x, "done", timeout=LONG_WAIT)
     assert w.fx.by_tag("X")[0]["watch_alive"] is False
 
 
@@ -231,9 +244,9 @@ def test_nc_r40_a_suspended_node_frees_its_provider_slot(w):
     w.agent("pcworker", "pcfx")
     a, _, _ = running(w, "A", agent="pcworker", fx={"hang": True})
     b = w.simple("B", "pcworker", fx={"gate": "gb"})
-    w.until(lambda: "admission:provider_concurrency" in w.codes(b), what="B blocked")
+    w.until(lambda: "admission:provider_concurrency" in w.codes(b), timeout=WAIT, what="B blocked")
     suspend(w, a)
-    w.wait_running(b)
+    w.wait_running(b, timeout=WAIT)
     assert len(pc.by_tag("B")) == 1
 
 
@@ -243,7 +256,7 @@ def test_nc_r40_a_resume_blocked_by_admission_leaves_the_node_suspended_with_the
     a, _, session = running(w, "A", agent="pcworker", fx={"hang": True})
     b = w.simple("B", "pcworker", fx={"gate": "gb"})
     suspend(w, a)
-    w.wait_running(b)
+    w.wait_running(b, timeout=WAIT)
     w.set_clock(REOPEN + timedelta(seconds=30))
     w.quiet(1.5)
     got = w.get(a)
@@ -255,7 +268,7 @@ def test_nc_r40_a_resume_blocked_by_admission_leaves_the_node_suspended_with_the
     # slot frees (well past the tolerance) the node still resumes.
     w.set_clock(REOPEN + timedelta(minutes=30))
     w.gate("gb") if False else pc.open_gate("gb")
-    w.until(lambda: [c for c in pc.by_tag("A") if c["resume"]], timeout=45,
+    w.until(lambda: [c for c in pc.by_tag("A") if c["resume"]], timeout=LONG_WAIT,
             what="the resumed invocation after admission freed")
     assert [c for c in pc.by_tag("A") if c["resume"]][0]["resume"] == session
     assert w.transitions(a).count("resumed") == 1
@@ -279,7 +292,7 @@ def test_nc_r40_a_scheduler_restart_while_suspended_preserves_the_suspension(w, 
     assert w.transitions(node).count("suspended") == 1
     assert w.transitions(node).count("resumed") == 0
     w.set_clock(REOPEN + timedelta(seconds=10))
-    w.until(lambda: resumes(w), what="the resumed invocation after the restart")
+    w.until(lambda: resumes(w), timeout=WAIT, what="the resumed invocation after the restart")
     assert resumes(w)[0]["resume"] == session
     assert w.transitions(node).count("resumed") == 1
 
@@ -302,7 +315,7 @@ def test_nc_r69_at_start_a_suspended_node_inside_an_open_window_is_resumed(w):
     w.stop_scheduler()
     w.write_clock(REOPEN + timedelta(hours=1))
     w.start_scheduler()
-    w.until(lambda: resumes(w), what="the resumption at start")
+    w.until(lambda: resumes(w), timeout=WAIT, what="the resumption at start")
     assert resumes(w)[0]["resume"] == session
     assert w.transitions(node).count("resumed") == 1
     assert len([c for c in w.fx.by_tag("A") if c["resume"]]) == 1
@@ -323,7 +336,7 @@ def test_nc_r69_windows_are_evaluated_before_anything_is_admitted_at_start(w):
 def test_nc_r40_a_run_that_ends_by_itself_in_the_tolerance_is_not_suspended(w):
     node, pid, _ = running(w, fx={"gate": "ga"})
     w.gate("ga")
-    w.wait_state(node, "done")
+    w.wait_state(node, "done", timeout=WAIT)
     w.set_clock(CLOSE + timedelta(seconds=20))
     w.quiet(1.5)
     got = w.get(node)
@@ -336,9 +349,9 @@ def test_nc_r40_a_run_that_ends_by_itself_in_the_tolerance_is_not_suspended(w):
 def test_nc_r69_a_run_that_ignores_sigterm_is_never_marked_suspended_while_alive(w):
     node, pid, _ = running(w, locks=["L"], fx={"hang": True, "ignore_term": True})
     x = w.simple("X", locks=["L"], fx={"watch_pid": pid})
-    w.until(lambda: "lock" in w.codes(x), what="X blocked by the lock")
+    w.until(lambda: "lock" in w.codes(x), timeout=WAIT, what="X blocked by the lock")
     w.set_clock(CLOSE + timedelta(seconds=15))
-    deadline = time.monotonic() + 45
+    deadline = time.monotonic() + LONG_WAIT
     while time.monotonic() < deadline and alive(pid):
         got = w.get(node)
         assert got["state"] != "suspended", "suspended while the process lives"
@@ -346,7 +359,7 @@ def test_nc_r69_a_run_that_ignores_sigterm_is_never_marked_suspended_while_alive
             "the lock was released while the holder lives"
         time.sleep(0.3)
     if not alive(pid):
-        until_suspended(w, node, timeout=30)
+        until_suspended(w, node, timeout=WAIT)
         if w.fx.by_tag("X"):
             assert w.fx.by_tag("X")[0]["watch_alive"] is False
 
@@ -378,7 +391,7 @@ def test_nc_r20_stopping_a_suspended_nodes_run_holds_it_stopped_by_orchestrator(
     run_id = run_id_of(w.get(node)["active_run"])
     suspend(w, node)
     call_tool(w, "stop_agent", run_id)
-    got = w.until(lambda: (n := w.get(node))["state"] == "held" and n, what="held")
+    got = w.until(lambda: (n := w.get(node))["state"] == "held" and n, timeout=WAIT, what="held")
     assert got["hold"]["reason"] == "stopped_by_orchestrator"
     w.set_clock(REOPEN + timedelta(seconds=10))
     w.quiet(2)
@@ -403,7 +416,7 @@ def test_nc_r40_widening_the_window_of_a_suspended_node_resumes_it(w):
     rev = w.get(node)["revision"]
     w.ok("update_node", {"id": node, "revision": rev,
                          "window": {"days": ALL_DAYS, "ranges": ["00:00-24:00"]}})
-    w.until(lambda: resumes(w), what="the resumption after widening")
+    w.until(lambda: resumes(w), timeout=WAIT, what="the resumption after widening")
     assert resumes(w)[0]["resume"] == session
 
 
@@ -431,18 +444,18 @@ def test_nc_r47_nc_r40_window_closing_mid_loop_suspends_the_reviewer_and_resumes
     assert reply.get("ok"), reply
     loop = unwrap(reply["result"])["id"]
     w.set_clock(NOON)
-    w.wait_running(rv, timeout=45)
-    call = w.wait_spawn("REVIEWER")
+    w.wait_running(rv, timeout=LONG_WAIT)
+    call = w.wait_spawn("REVIEWER", timeout=WAIT)
     pid, session = call["pid"], call["session"]
     assert len(w.fx.by_tag("WRITER")) == 1
     x = w.simple("X", locks=["L"], fx={"watch_pid": pid})
-    w.until(lambda: "lock" in w.codes(x), what="X blocked by the reviewer's lock")
+    w.until(lambda: "lock" in w.codes(x), timeout=WAIT, what="X blocked by the reviewer's lock")
     counter = w.get(loop)["loop"]["rounds_rejected"]
 
     w.set_clock(CLOSE + timedelta(seconds=15))
     until_suspended(w, rv)
     assert not alive(pid)
-    w.wait_state(x, "done", timeout=60)
+    w.wait_state(x, "done", timeout=LONG_WAIT)
     assert w.fx.by_tag("X")[0]["watch_alive"] is False
     assert w.get(loop)["loop"]["rounds_rejected"] == counter
     assert len(w.fx.by_tag("WRITER")) == 1
@@ -455,7 +468,7 @@ def test_nc_r47_nc_r40_window_closing_mid_loop_suspends_the_reviewer_and_resumes
     assert len(w.fx.by_tag("REVIEWER")) == 1
 
     w.set_clock(REOPEN + timedelta(seconds=10))
-    w.until(lambda: resumes(w, "REVIEWER"), timeout=45, what="the reviewer's resumption")
+    w.until(lambda: resumes(w, "REVIEWER"), timeout=LONG_WAIT, what="the reviewer's resumption")
     assert resumes(w, "REVIEWER")[0]["resume"] == session
     assert len(w.fx.by_tag("WRITER")) == 1, "the loop advanced before the resumption"
     order = w.transitions(loop) + w.transitions(rv)
