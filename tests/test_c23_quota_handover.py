@@ -694,6 +694,10 @@ def test_qh_r5_disabled_sibling_is_not_candidate(world):
 
 def test_qh_r5_unknown_quota_counts_as_usable(world):
     w=world()
+    # C22 prefers a known reading within a tier, so make `reserve` (a plain
+    # sibling here: no reservation is configured) unusable; beta is then the
+    # only candidate in its tier and an unknown reading must still qualify.
+    w.unusable('reserve')
     w.readings['beta']=Budget('beta',known=False,headroom=None)
     asyncio.run(w.start())
     switched(w,'beta')
