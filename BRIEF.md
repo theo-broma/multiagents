@@ -4167,3 +4167,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - **agy:** history is an opaque "brain" (`~/.gemini/antigravity{,-cli}`), and resume is only `--continue` (no id). agy-b has its own HOME. The whole state would have to be copied; unverified.
     - **Today:** `steer_agent` refuses to move a session to another provider (`runner.py:7646`, `:7970`). Fallback to a sibling only applies to new work (`runner.py:8240`).
     - **Next:** contract, starting with claude under docker (the cheapest case, no copy), then codex. Leave agy for last, or exclude it if a probe shows it cannot work.
+  - **C23 contract validated by the user (2026-10-04):** `context/specs/c23-quota-handover.md` (QH-R1..R22).
+    - The policy is generic: it names no provider.
+    - Order of succession: unreserved siblings (session kept), then the reserved instance above the 25% floor, then other providers in the agent's list (continuation run), then the floor (only while the orchestrator is idle; one task at a time; veto with a 120 s window).
+    - Next steps: tester, then implementer-deep, then reviewer, then adversary (it decides resource access). Schedule after M2, because it touches runner/executor.
