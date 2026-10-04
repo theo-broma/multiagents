@@ -742,3 +742,57 @@ are never reachable over the RPC. The scheduler process is started in tests by
 `multiagents scheduler start` (or `python -m multiagents scheduler start`)
 with `MULTIAGENTS_STATE_DIR` pointing at a temp state root; the root token is
 read by host code through `multiagents.scheduler.root_capability(project_root)`.
+
+## Decisions after the M1 tester's read (2026-10-04, ag-4d4984)
+
+These settle what the contract left open; they override earlier wording.
+
+**NC-R72 — `plan_revision`.** Returned by `list_nodes` (`{"nodes": [...],
+"plan_revision": n}`, runs included) and by every write reply. It increments
+on each accepted write that creates or removes nodes (`create_node`,
+`instantiate_template`); edits change only node revisions.
+
+**NC-R73 — composite creation.** Both forms are accepted and keep `parent` and
+`children` consistent: a composite created with `children: [ids]` adopts
+those parentless nodes; a node created with `parent: <composite>` is
+appended. A loop must use the first form (its `verdict_child` must exist).
+The same child listed twice is `invalid`. A whitespace-only `task` is
+`invalid`. A `require` outside the three values is `invalid`.
+
+**NC-R74 — process and status.** `scheduler start` detaches by default
+(`--foreground` keeps it attached) and exits 0 once the socket answers.
+`scheduler_status` returns at least `pid`, `since`, `gate` and `counts` by
+state.
+
+**NC-R75 — authentication, then authorisation, then dispatch.** Every op,
+including ops whose behaviour lands in a later milestone, authenticates and
+authorises before dispatch: `unauthenticated`, then `forbidden`, then
+(if not yet implemented) `{"error": "not_implemented"}`.
+
+**NC-R76 — MCP tools.** Keyword arguments named after the contract's fields
+(`kind`, `agent`, `task`, `plan_revision`, `id`, `revision`, `cursor`,
+`timeout`, …); `update_node`/`cancel_node` take `(id, revision, ...)`;
+`register_template` takes the YAML text first. A tool returns the RPC
+`result` on success and `{"error": ..., ...}` otherwise. A server with
+`MULTIAGENTS_AGENT_ID` set uses only `MULTIAGENTS_RPC_TOKEN`; without it,
+every node tool returns `unauthenticated` and never reads the root
+capability.
+
+**NC-R77 — wire names.** A transition is `{seq, kind, node_id, at, detail}`;
+`wait_for_nodes(cursor=k)` returns `seq > k`. `ack_nodes` with a cursor
+beyond the latest seq is refused `invalid_cursor`.
+
+**NC-R78 — writes to scheduler-owned fields** (NC-R59 list, plus `eligible`,
+`blocked`, `ready`) are refused `invalid`, the problem naming the field.
+Supplied `run_id`/`caller` in args are ignored; a supplied `parent` is
+checked against scope (NC-R9).
+
+**NC-R79 — run scope details.** NC-R59 prevails over NC-R10 for cancel (only
+nodes the run created, never its own). A run reading outside its subtree gets
+`forbidden`. A run creating a node without `parent` gets it under its own
+node. A run's `depends_on`/`inputs` may reference only nodes it can read;
+otherwise `forbidden`.
+
+**NC-R80 — cancelling.** Cancelling a composite cancels its non-terminal
+descendants (active runs stopped, confirmed per NC-R26). Cancelling an
+already-cancelled node is an idempotent no-op returning the node.
