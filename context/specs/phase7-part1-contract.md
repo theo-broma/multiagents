@@ -902,3 +902,12 @@ the user's example; both must pass.
 
 **On NC-R11 (2026-10-04):** confirmed by the user. Part 2's one container per
 agent closes it; part 1 does not need a mitigation item.
+
+## Decision after the M3 adversary (2026-10-04, ag-cdf09b; user-approved)
+
+**NC-R96 — a rejected generation is rejected under every id.** NC-R47's
+"rejected generation as input → `input` block" applies to the generation, not
+to the id used to name it. An input naming a loop's work child — unpinned, or
+pinned to the rejected `generation` — blocks with `input` exactly as an input
+naming the loop does. Verified by:
+`tests/test_nc_m3_adv_inputs.py::test_adv_the_rejected_generation_is_not_usable_through_the_work_childs_id`.
