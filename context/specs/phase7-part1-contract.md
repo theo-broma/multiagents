@@ -796,3 +796,27 @@ otherwise `forbidden`.
 **NC-R80 — cancelling.** Cancelling a composite cancels its non-terminal
 descendants (active runs stopped, confirmed per NC-R26). Cancelling an
 already-cancelled node is an idempotent no-op returning the node.
+
+## Decisions after the M2 tester's read (2026-10-04, ag-361bba)
+
+**NC-R81 — alias tests belong to M4.** Session aliases exist only inside a
+template instance, and templates are M4. The NC-R30 tests in
+`tests/test_nc_m2_sessions.py` that need `register_template` /
+`instantiate_template` are M4 acceptance: the M2 implementation is not
+required to make them green; M4's is.
+
+**NC-R82 — clock seam.** `multiagents scheduler start --clock-file <path>`
+(hidden from `--help`) makes the scheduler read "now" from that file (one
+ISO-8601 timezone-aware timestamp, re-read at every evaluation) instead of
+the system clock. Used by window and starvation tests; never set in shipped
+config.
+
+**NC-R83 — `start_agent` retry key.** `start_agent` takes an optional
+`request_id`; a retry with the same id returns the original reply and creates
+no second node (NC-R60).
+
+**NC-R84 — small semantics.** `get_node` on a running node: `eligible: false`,
+`blocked: []`, `active_run` set. A simple node whose run fails outside a loop
+ends `done` with outcome `failed` (no automatic retry; the orchestrator may
+`relaunch_node`). `scheduler start` while one runs prints the live pid and
+exits 0. `start_agent` accepts `urgent=`.
