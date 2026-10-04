@@ -4171,3 +4171,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - The policy is generic: it names no provider.
     - Order of succession: unreserved siblings (session kept), then the reserved instance above the 25% floor, then other providers in the agent's list (continuation run), then the floor (only while the orchestrator is idle; one task at a time; veto with a 120 s window).
     - Next steps: tester, then implementer-deep, then reviewer, then adversary (it decides resource access). Schedule after M2, because it touches runner/executor.
+  - **C23 tests merged (2d546dd, tester ag-dbaced):** `tests/test_c23_quota_handover.py`, 64 tests (60 red, 4 green: the off-switch and opt-out cases).
+    - Seams to document: clock and headroom.
+    - Gaps the implementer must cover with seams, then the tester completes: a mid-transfer I/O fault, a crash before transfer, scheduler exclusion, vault-account attribution, and carry-over of limits, budget tag and readonly paths.
