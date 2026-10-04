@@ -231,7 +231,7 @@ def test_nc_r47_a_rejected_generation_passed_as_input_is_an_input_block(w):
                        fx={"verdict_rpc": {"verdict": "rejected",
                                            "findings": [{"summary": "no", "severity": "high"}]}})
     reply = w.create({"kind": "loop", "children": [writer, reviewer],
-                      "loop": {"verdict_child": reviewer, "max_rounds": 1, "rounds_rejected": 0}})
+                      "loop": {"verdict_child": reviewer, "max_rounds": 1}})
     assert reply.get("ok"), reply
     from nc_fixture.world import unwrap
     loop = unwrap(reply["result"])["id"]
