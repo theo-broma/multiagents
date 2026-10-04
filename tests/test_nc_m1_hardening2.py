@@ -73,7 +73,9 @@ def test_nc_r75_root_cannot_give_a_verdict_even_before_verdicts_exist(live):
     assert code(live.rpc("give_verdict", {"node_id": node["id"], "generation_seq": 1,
                                          "commit": "0" * 40, "verdict": "approved"})) == "forbidden"
     token = live.issue("review", node["id"], {"verdict"})
-    assert code(live.rpc("give_verdict", {"node_id": node["id"]}, token)) == "not_implemented"
+    # NC-R34 (M4): a run that is not the current activation of a loop's verdict
+    # child is `forbidden`, whatever permission it holds; no longer `not_implemented`.
+    assert code(live.rpc("give_verdict", {"node_id": node["id"]}, token)) == "forbidden"
 
 
 @pytest.mark.parametrize("cancel_parent", [False, True])

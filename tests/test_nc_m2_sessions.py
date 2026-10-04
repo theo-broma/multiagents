@@ -159,6 +159,8 @@ def test_nc_r30_an_unusable_bound_provider_blocks_instead_of_rerouting(w):
     w.stop_scheduler()
     w.providers["fx"].entry["enabled"] = True
     w.start_scheduler()
+    # the resumed activation carries its own gate; open it so the node can finish
+    w.gate("gf" if tag_of(second) == "F" else "gg")
     w.wait_state(second["id"], "done", timeout=60)
     assert w.fx.by_tag(tag_of(second))[0]["resume"] == w.fx.by_tag(tag_of(first))[0]["session"]
     assert w.fx2.spawns() == 0

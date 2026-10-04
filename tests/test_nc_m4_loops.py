@@ -251,6 +251,7 @@ def test_nc_r58_a_non_verdict_run_has_no_verdict_permission_even_for_its_own_loo
 # ----------------------------------------------------------------- NC-R66
 
 def test_nc_r66_the_verdict_child_must_be_the_last_child(w):
+    w.start_scheduler()     # the store exists only once the scheduler has run
     wk = w.simple("W", "wk")
     rv = w.simple("R", "rv")
     reply = w.create({"kind": "loop", "children": [rv, wk],
