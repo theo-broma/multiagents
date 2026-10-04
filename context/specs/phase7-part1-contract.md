@@ -820,3 +820,35 @@ no second node (NC-R60).
 ends `done` with outcome `failed` (no automatic retry; the orchestrator may
 `relaunch_node`). `scheduler start` while one runs prints the live pid and
 exits 0. `start_agent` accepts `urgent=`.
+
+## Decisions after the M3 and M5 testers' read (2026-10-04, ag-58928f, ag-0e27e3)
+
+**NC-R85 — git names and records.** The node branch is `refs/heads/nodes/<id>`.
+Generation `seq` starts at 1 per node. `published` is a node field holding
+the merge commit; `merge_node` squashes by default (one single-parent commit,
+as `merge_agent`). The combined input commit of NC-R65 is recorded on the run
+entry as `input_commit` (`runs: [{run_id, attempt_id, input_commit,
+generation?}]`). `dispose_node` leaves the node readable with
+`state: cancelled|done` unchanged and `disposed: <time>` set.
+
+**NC-R86 — refusal codes not named before.** `merge_node`: `not_done` (node not
+`done`), `not_top_level`, `merge_conflict` (main unchanged, node unchanged,
+retry allowed after the orchestrator resolves). Any op on an unknown id:
+`not_found` (for a run, outside its subtree stays `forbidden`). `dispose_node`
+on a node with active descendants: `active`; referenced by another node:
+`referenced`.
+
+**NC-R87 — run environment for node ops.** A node run's MCP server receives
+`MULTIAGENTS_RPC_TOKEN` and `MULTIAGENTS_RPC_SOCKET` (path of `rpc.sock` as
+seen inside the run). `give_verdict` arguments are `node_id`,
+`generation_seq`, `commit`, `verdict`, `findings` (NC-R34/R66). The verdict
+child's prompt states those three values.
+
+**NC-R88 — windows, small semantics.** `get_node` evaluates windows at the
+scheduler's current instant (clock seam NC-R82 included). An empty `ranges`
+list and `24:00` as a start time are `invalid`. If the scheduler first
+evaluates a closed window later than the tolerance (it was busy or asleep),
+it stops the runs at that evaluation; the tolerance is a bound for a healthy
+scheduler, not a reason to skip. `empty_window` is the transition
+`node.empty_window` naming the node. The resumption activation's prompt
+contains the word "resume" and the interrupted task.
