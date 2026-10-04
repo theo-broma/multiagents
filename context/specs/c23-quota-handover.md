@@ -134,3 +134,45 @@ An instance whose quota is exhausted hands its work to the next available one. T
   - It does not cover nodes managed by the scheduler (Phase 7 part 1). NC-R56 freezes an alias's binding, so covering them requires an amendment to NC-R56 and launcher integration. That is follow-up work.
   - It does not switch the orchestrator's own session.
 - **QH-R22.** With C23 off, or with no candidate in any tier, a quota stop behaves exactly as before C23. The existing quota and defer tests stay green unmodified. *Verified by:* the existing suite.
+
+## Amendment v3 — priority list and migration back up (validated by the user 2026-10-04)
+
+Source: the user, 2026-10-04: an instance that gets its quota back takes back the work meant for it. That work is paused on the lower instances and migrated up. The agents' provider lists are therefore ordered, so work can go down and come back up the priorities as quota is lost and regained.
+
+Once validated, this amendment changes the following, and its requirements replace those cited where they conflict:
+- **QH-R11 and QH-R12 are withdrawn and replaced by QH-R24 to R27.** Return home only at a resume boundary is no longer enough: going back up becomes active.
+- **The *Agent list* term is replaced by *Priority list* (QH-R23).**
+- **QH-R5 now derives its order from the priority list.** The cross-family step is the next entry in the list, no longer "the agent's other instances".
+
+- **QH-R23. Priority list.** An agent declares `priorities:` in `agents.yaml`: an ordered list of entries, highest first. Each entry is a family or a single instance, with an optional `model` (otherwise the agent's model for that provider).
+  - **Expansion:** an entry naming a family expands, in place, into its non-reserved instances in C22 strategy order, followed by the reserved instance (usable only above the floor; QH-R13).
+  - **No `priorities:`:** the list is `provider` followed by the `models:` keys in file order, which keeps today's configs valid.
+  - **Validation:** an entry naming an unknown family or instance, or the same instance twice after expansion, is refused at config load.
+  - *Verified by:* config-load tests and expansion tests.
+- **QH-R24. Rank.** A run's rank is the position of its current instance in its expanded priority list. A run is **demoted** when its rank is below that of the best instance that was usable at the moment of its last switch or launch.
+  - *Verified by:* a unit test on rank computation.
+- **QH-R25. Promotion trigger.** At every budget refresh (and at least every `quota_handover.promote_check_seconds`, default 60), the runner checks each demoted run. If an instance of better rank has become usable, it promotes the run to the best of them.
+  - **Hysteresis:** the target must have at least `quota_handover.promote_min_headroom` headroom (default `0.10`) on its most constrained short window.
+  - **Minimum dwell:** the run must have spent at least `quota_handover.promote_min_dwell_seconds` (default 300) on its current instance.
+  - Both conditions prevent flapping.
+  - *Verified by:* fixture tests with a fake clock and budget: a quota reset triggers promotion; insufficient headroom or too short a dwell does not.
+- **QH-R26. Pause and migration.** A promotion runs in two steps.
+  1. **Pause:** the run's current turn is stopped, as `steer_agent` already stops it. It is stopped at the first safe point, meaning the end of the tool call in progress, and at most `quota_handover.promote_grace_seconds` (default 120) after the trigger, after which the stop is forced.
+  2. **Migration:**
+     - towards a sibling, a session resume (QH-R8);
+     - towards another family, either a resume of the session that family already holds for this run when it is still resumable and unchanged (`shared` or `copy`), or otherwise a continuation run (QH-R9).
+
+  The migration prompt states that the run was moved for priority, not because of an error.
+  - If the target refuses, the run resumes on its previous instance, with no further change and with a `promote_failed` event. That target is not retried until its next budget refresh.
+  - Throughout, the agent_id, branch and worktree stay the same.
+  - *Verified by:* fixture tests for the safe point, the forced grace, a refusal with fallback, and a cross-family migration back to a session that is still resumable.
+- **QH-R27. Exceptions.** No promotion while the run is awaiting the user (`awaiting_user`), being merged, or has been explicitly pinned by the orchestrator (`steer_agent(..., provider=X)` pins it to X until the run ends or until a `steer_agent(..., provider="auto")`). New runs are not affected: they always launch on the best usable instance (QH-R6).
+  - *Verified by:* tests for each exception.
+- **QH-R28. Events.** The QH-R18 kinds gain `promote_started`, `promote_completed` and `promote_failed`, carrying `from_rank` and `to_rank`. QH-R19 shows `rank` and `pinned`.
+  - *Verified by:* event and output assertions.
+- **QH-R29. Configurable settings.** The anti-flapping settings (`promote_min_headroom`, `promote_min_dwell_seconds`) and the pause setting (`promote_grace_seconds`), together with `promote_check_seconds`, are read from `quota_handover` in `project.yaml`, with the defaults given above. An agent may override them under `quota_handover:` in its `agents.yaml` entry.
+  - Validation, enforced at config load, refusing with an error that names the key:
+    - the headroom must be in [0, 1);
+    - the durations must be integers ≥ 0, except `promote_check_seconds`, which must be ≥ 1.
+  - A value of 0 for the dwell or the grace means immediate.
+  - *Verified by:* config-load tests (valid, invalid, per-agent override), plus one promotion test per non-default value.

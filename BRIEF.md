@@ -4186,3 +4186,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - (3) `scheduler_unavailable` hides the YAML parse error when no runner is loaded. A cosmetic diagnostic gap, not a contract issue.
 
   **M2 in flight:** implementer-deep ag-eb2369 (codex-b), budget tag phase7-p1-m2. Then: reviewer, then merge, then C23 implementation (runner/executor, after M2), alongside M3.
+- 2026-10-04: **C23 amendment v3 validated by the user:**
+  - ordered priority list `priorities:` (QH-R23);
+  - active migration back up when a higher instance regains quota: pause at a safe point, then migrate (QH-R24..R28);
+  - configurable settings (QH-R29).
+
+  QH-R11/R12 are withdrawn. The v3 tests are to be added by a tester on top of tests/test_c23_quota_handover.py, in a separate file.
