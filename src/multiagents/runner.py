@@ -4986,6 +4986,47 @@ class Runner:
         progress_dir = (Path(node.worktree) if node and node.worktree
                         and gitops.is_repo(Path(node.worktree)) else None)
         last_progress = 0.0
+        decision_text = ""
+        pending_decision: dict[str, str] | None = None
+
+        def decision_pending(*, ended: bool = False) -> bool:
+            nonlocal decision_text, pending_decision
+            # Event boundaries are not line boundaries. After a marker,
+            # wait for the following line too: its default may still be
+            # streaming, and an incomplete default must not be recorded.
+            end = len(decision_text) if ended else decision_text.rfind("\n") + 1
+            complete, decision_text = decision_text[:end], decision_text[end:]
+            lines = complete.split("\n")
+            if complete.endswith("\n") or not complete:
+                lines.pop()
+            for line in lines:
+                if pending_decision is not None:
+                    default = PROPOSED_DEFAULT.search(line)
+                    if default:
+                        pending_decision["proposed"] = default.group(1).strip()
+                    run.awaiting = pending_decision
+                    return True
+                match = NEED_DECISION.search(line)
+                if match:
+                    pending_decision = {
+                        "topic": match.group(1).strip(),
+                        "question": match.group(2).strip(),
+                        "proposed": "",
+                    }
+            if pending_decision is not None:
+                prefix = decision_text.lstrip().lower()
+                after_default = prefix[len("default"):].lstrip()
+                possible_default = (
+                    "default".startswith(prefix)
+                    or (prefix.startswith("default")
+                        and (not after_default or after_default.startswith(":")))
+                )
+                # Stop at the first incompatible character instead of waiting
+                # for a paragraph's newline. Valid prefixes still need a full
+                # line before their proposed default can be recorded.
+                if ended or not possible_default:
+                    run.awaiting = pending_decision
+            return run.awaiting is not None
 
         def follow() -> dict[str, int]:
             # SV-R7: written in the same transaction as the counts it stands
@@ -5118,19 +5159,13 @@ class Runner:
                     await handle.stop()
                     break
 
-                # A decision only a human can make: stop now rather than let
-                # the agent spend another token building on a guess.
-                if event.kind == "text" and event.text:
-                    match = NEED_DECISION.search(event.text)
-                    if match and run.awaiting is None:
-                        default = PROPOSED_DEFAULT.search(event.text)
-                        run.awaiting = {
-                            "topic": match.group(1).strip(),
-                            "question": match.group(2).strip(),
-                            "proposed": default.group(1).strip() if default else "",
-                        }
-                        await handle.stop()
-                        break
+                # A decision only a human can make: stop once its following
+                # default line is complete, or the message ends.
+                if event.kind == "text":
+                    decision_text += event.text or ""
+                if decision_pending(ended=event.kind != "text"):
+                    await handle.stop()
+                    break
 
                 # Sampled before observe(), so the signature this event adds is
                 # paired with the state of the tree as it stands now. Threaded:
@@ -5156,6 +5191,8 @@ class Runner:
                 elif run.trip_kind:
                     self._maybe_clear_stuck(run, node_id)
 
+            if run.awaiting is None and decision_pending(ended=True):
+                await handle.stop()
             code = await handle.wait()
         except asyncio.CancelledError:
             if run.detaching:
