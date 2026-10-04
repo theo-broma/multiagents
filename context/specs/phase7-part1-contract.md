@@ -852,3 +852,30 @@ it stops the runs at that evaluation; the tolerance is a bound for a healthy
 scheduler, not a reason to skip. `empty_window` is the transition
 `node.empty_window` naming the node. The resumption activation's prompt
 contains the word "resume" and the interrupted task.
+
+## Decisions after the M4 tester's read (2026-10-04, ag-d5f9ac)
+
+**NC-R89 — activation prompt.** Every node activation's prompt states, each on
+its own line: `working directory: <abs path>`, `node: <nd-id>` (the node
+being run) and, for a verdict child, `review: node_id=<loop nd-id>
+generation_seq=<n> commit=<40-hex>`. Findings injected after a rejection
+follow under `findings:`.
+
+**NC-R90 — R31 vs R62.** NC-R62 prevails: untracked or uncommitted leftovers
+from the previous activation hold the aliased node (`dirty_worktree`), nothing
+is removed, no new activation starts.
+
+**NC-R91 — template locations and params.** Shipped:
+`defaults/node-templates/`; global override: the global config dir's
+`node-templates/` (host-only, never mounted). There is **no project template
+directory**: project templates exist only through `register_template` (host
+registry). Registering a name again with a higher `version` replaces it for
+later instances; an equal or lower version is refused `conflict`. The shipped
+`review-loop` params are `task` (text), `worker` (agent), `reviewer`
+(agent), `rounds` (int, default 3).
+
+**NC-R92 — small semantics.** A sequence whose child ends `failed`,
+`exhausted` or `rejected` ends `done` with outcome `failed`; later children
+never launch. `close_node` on a node with active runs is refused
+`active_runs`. A crashed child inside a loop is retried as a new attempt at
+most once per round, then the loop holds `run_failed`.
