@@ -4272,3 +4272,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     3. M3 implementation (implementer-deep), then reviewer and adversary (mandatory).
 
     C23 and M3 both touch runner/scheduler, so run them sequentially or split by files. Advisor: decide.
+- 2026-10-04 (post-compact): running ag-2861d3 (implementer-quick, bug-93a3e4, tag tickets-2) and ag-8e0128 (implementer-deep, M3). Advisor ag-aed397 t10: C23 overlaps M3 behaviourally (run-completion / result-capture boundary, scheduler/worker.py) → DECISION: C23 starts only after M3 merges. Each gets a reviewer; M3 also the adversary.
