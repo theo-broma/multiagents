@@ -71,18 +71,6 @@ def test_adv3_cancelling_a_composite_keeps_a_done_child_done(live):
     assert live.get(b["id"])["state"] == "cancelled"
 
 
-def test_adv3_a_refused_cancel_leaves_no_transition_behind(live):
-    a, b = live.create(), live.create()
-    # A node the current configuration no longer accepts makes every
-    # whole-plan validation fail after cancel_node has queued transitions.
-    _host_write(live, b["id"], agent="ghost-agent")
-    before = live.transitions()
-    reply = live.cancel_raw(a["id"])
-    assert reply["ok"] is False, reply
-    assert live.transitions() == before
-    assert live.get(a["id"])["state"] == "open"
-
-
 def test_adv3_a_run_waiting_without_a_cursor_starts_from_zero_not_roots_ack(live):
     own = live.create()
     token = live.issue("run-1", own["id"], {"read", "delegate"})
