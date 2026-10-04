@@ -133,6 +133,34 @@ def instants(value) -> list[datetime]:
     return out
 
 
+
+# A red test must fail in seconds: the fixture's default waits (30 s, 45 s) are
+# capped here; waits that pass an explicit timeout keep it.
+WAIT_BOUND = 10
+
+
+def bounded_waits(world):
+    """Give the world's default-timeout waits a short bound; returns the world."""
+    real_until, real_state, real_spawn = world.until, world.wait_state, world.wait_spawn
+
+    def until(pred, timeout=WAIT_BOUND, step=0.1, what="the condition"):
+        return real_until(pred, timeout, step, what)
+
+    def wait_state(node_id, state, timeout=WAIT_BOUND):
+        return real_state(node_id, state, timeout)
+
+    def wait_running(node_id, timeout=WAIT_BOUND):
+        return real_state(node_id, "running", timeout)
+
+    def wait_spawn(tag, fx=None, timeout=WAIT_BOUND):
+        return real_spawn(tag, fx, timeout)
+
+    world.until, world.wait_state, world.wait_running = until, wait_state, wait_running
+    world.wait_spawn = wait_spawn
+    if hasattr(world, "done"):
+        world.done = lambda node_id, timeout=WAIT_BOUND: real_state(node_id, "done", timeout)
+    return world
+
 # ------------------------------------------------------------------ monitor
 
 class Monitor:
@@ -174,7 +202,7 @@ class Monitor:
 
 @pytest.fixture
 def w(tmp_path, monkeypatch):
-    world = GitWorld(tmp_path, monkeypatch)
+    world = bounded_waits(GitWorld(tmp_path, monkeypatch))
     mon = Monitor(world, monkeypatch)
     world.mon = mon
     yield world
@@ -184,7 +212,7 @@ def w(tmp_path, monkeypatch):
 
 @pytest.fixture
 def cw(tmp_path, monkeypatch):
-    world = ClockWorld(tmp_path, monkeypatch, now=local(2026, 10, 10, 12, 0))   # a Saturday
+    world = bounded_waits(ClockWorld(tmp_path, monkeypatch, now=local(2026, 10, 10, 12, 0)))   # a Saturday
     mon = Monitor(world, monkeypatch)
     world.mon = mon
     yield world
