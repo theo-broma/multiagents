@@ -198,6 +198,13 @@ class Node:
     worktree: str = ""
     session_id: str = ""
     requested_session: str = ""     # explicit resume mismatch, retained after session loss
+    home_provider: str = ""
+    segments: list[dict[str, Any]] = field(default_factory=list)
+    segment_usage_base: dict[str, Any] = field(default_factory=dict)
+    handover_attempt: dict | None = None
+    quota_stops: dict[str, float] = field(default_factory=dict)
+    reserve_request: str = ""
+    on_reserve_floor: bool = False
     model_pinned: bool = False
     pid: int | None = None
     # What makes `pid` an identity rather than a number: see
@@ -701,6 +708,12 @@ class Tree:
         return isinstance(raw, dict) and raw.get("id") != agent_id
 
     def update(self, agent_id: str, **fields: Any) -> None:
+        """Replace node fields verbatim; usage here is the whole-node total.
+
+        Turn-local usage belongs to note_event (base plus current turn in
+        the last segment). Finalizers pass the sum of closed segments here;
+        adding that total to a segment would count earlier providers twice.
+        """
         with self.transaction() as data:
             node = data["nodes"].get(agent_id)
             if node is None:
@@ -802,11 +815,20 @@ class Tree:
                 node["steps"] = steps
             if usage:
                 node["usage"] = usage
+                segments = node.get("segments") or []
+                if segments:
+                    base = node.get("segment_usage_base") or {}
+                    segments[-1]["usage"] = (sum_usage([{"usage": base}, {"usage": usage}])
+                                              if base else usage)
+                    node["usage"] = (sum_usage(segments) if len(segments) > 1
+                                     else segments[-1]["usage"])
             if follow is not None:
                 node["follow"] = follow
             if session_id and not node.get("session_id"):
                 node["session_id"] = session_id
                 learned = session_id
+            if session_id and node.get("segments"):
+                node["segments"][-1]["session_id"] = session_id
         if learned:
             # The one field that cannot be reconstructed from anywhere else. A
             # tree lost to a corrupt write takes every session with it unless
@@ -876,7 +898,14 @@ class Tree:
         because it is joined to the agent that spent it.
         """
         rows: dict[tuple[str, str], dict[str, Any]] = {}
+        entries = []
         for node in self.read()["nodes"].values():
+            segments = node.get("segments") or []
+            if len(segments) > 1:
+                entries.extend({**segment, "agent": node.get("agent")} for segment in segments)
+            else:
+                entries.append(node)
+        for node in entries:
             usage = node.get("usage") or {}
             if not usage:
                 continue

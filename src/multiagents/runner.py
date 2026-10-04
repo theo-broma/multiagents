@@ -69,6 +69,7 @@ from .tree import (ACTIVE, DRIVER_ROLES, PC_CAUSE, TERMINAL, Node, Tree,
                    deferred_malformed, find_deferred, new_id, node_from_raw,
                    now, pc_waiting)
 from .transcripts import session_transcript
+from .quota_handover import QuotaHandover
 
 MAX_SUMMARY_CHARS = 6000
 _HOST_HOOK_NOTIFIED: set[Path] = set()
@@ -798,8 +799,8 @@ def _scheduled_start(fn):
             if self.scheduler_enabled() and context is None:
                 from .scheduler import submit
                 internal = {key: kwargs.pop(key, None) for key in
-                            ("deferred_id", "recorded_provider", "queued", "_cap_raced")}
-                if any(internal.get(key) for key in ("deferred_id", "recorded_provider", "queued")):
+                            ("deferred_id", "recorded_provider", "queued", "_cap_raced", "_qh_floor_grant")}
+                if any(internal.get(key) for key in ("deferred_id", "recorded_provider", "queued", "_qh_floor_grant")):
                     return admission_block("legacy queue start requires scheduler migration")
                 return await asyncio.to_thread(submit, self.paths.root, agent_name, task,
                                                caller=self.self_id(), **kwargs)
@@ -819,7 +820,7 @@ def _scheduled_start(fn):
     return scheduled
 
 
-class Runner:
+class Runner(QuotaHandover):
     # How often `_watch_timers` looks at a run's silence and wall clock, and
     # how much longer than the other turn's own limit a consult waits for that
     # turn to end (CF-R7). Class attributes so a test can shorten them for one
@@ -1761,6 +1762,9 @@ class Runner:
             key = json.dumps(["pos", run.node_id, run.turn_start, position])
         entry = {"key": key, "usd": event.cost, "at": now(), "provider": provider,
                  "model": model, "agent": run.spec.name, "node": run.node_id}
+        account = self._qh_account(run.provider, run.spec)
+        if account is not None:
+            entry["account"] = account
         queue = [*run.pending_charges, entry]
         run.pending_charges = []
         flushed = self._flush_pending(provider=provider)
@@ -1793,7 +1797,8 @@ class Runner:
         return self.ledger.charge(
             key=entry["key"], provider=entry["provider"], model=entry["model"],
             agent=entry["agent"], node=entry["node"], usd=entry["usd"],
-            at=entry["at"], caps=self._caps(entry["provider"], entry["model"]))
+            at=entry["at"], caps=self._caps(entry["provider"], entry["model"]),
+            account=entry.get("account"))
 
     def _hold_charges(self, entries: list[dict]) -> bool:
         """#2: keep charges the ledger refused in the tree, which survives
@@ -2956,7 +2961,14 @@ class Runner:
         """
         hold = self._new_hold(node_id, provider_name, startup_token, executor)
         self._record_node_launch_evidence(node_id, hold.record)
-        self.tree.update(node_id, cleanup_hold=dict(hold.record))
+        node = self.tree.get(node_id)
+        attempt = node.handover_attempt if node else None
+        fields = {"cleanup_hold": dict(hold.record)}
+        if attempt and attempt.get("state") == "launching":
+            # Write the actual destination execution identity BEFORE spawn;
+            # recovery cannot infer it from the predecessor or current config.
+            fields["handover_attempt"] = dict(attempt, target_exec_identity=hold.record["executor"])
+        self.tree.update(node_id, **fields)
         hold.durable = True
         self._holds[node_id] = hold
         return hold
@@ -3540,6 +3552,8 @@ class Runner:
         done: asyncio.Event | None = None,
         startup_token: str = "",
         release_lock: bool = True,
+        preserved_limits: dict | None = None,
+        handover_attempt: int | None = None,
     ) -> Run:
         """Build the environment and command for one turn and start the process.
 
@@ -3681,6 +3695,10 @@ class Runner:
             limits = self._limits_detail(spec.name, self._limits_for(node_id, spec,
                                                                      timeout), provider.name)
             limits["max_steps"] = self._max_steps_limit(spec, provider.name)
+            if preserved_limits:
+                # QH-R8: a switch carries every original limit and its
+                # provenance, rather than resolving against a new route.
+                limits = copy.deepcopy(preserved_limits)
             # LN-C2, adversary findings 3/8: written where the container cannot
             # reach, so a later adoption or relaunch reads what THIS launch ran
             # under, not what the node's forgeable record in `tree.json` claims.
@@ -3850,6 +3868,8 @@ class Runner:
                        json.dumps(scrub(command_record), indent=2))
             env["MULTIAGENTS_TURN_STARTED_AT"] = str(launched_at)
             self._check_node_launch(node_id)
+            if handover_attempt is not None:
+                self._qh_check_switch(node_id, handover_attempt)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
                                           deadline=launched_at + wall if wall else 0,
                                           provider=provider.name)
@@ -3859,6 +3879,8 @@ class Runner:
             self.launch_limits.record(node_id, limits, launched_at)
             self.launch_limits.record_spec(node_id, frozen, launched_at, prompt_name)
             self._record_launched(node_id, hold, handle)
+            if handover_attempt is not None:
+                self._qh_check_switch(node_id, handover_attempt)
             self.startup.bind(provider.name, node_id, startup_token, handle.pid,
                               getattr(handle, "pid_start", "") or "")
         except BaseException:
@@ -3876,7 +3898,8 @@ class Runner:
                     self._startup_release(provider.name, node_id, startup_token)
                 raise
             # RM-R1c: the process did start, so the one cleanup task stops
-            # it and confirms its death before anything goes; nothing is
+            # it and confirms its death before anything goes, including a
+            # handover stop detected after executor.start; nothing is
             # released merely because stop returned.
             await self._await_cleanup(
                 self._launch_cleanup_task(handle, node_id, done=done))
@@ -3900,7 +3923,12 @@ class Runner:
             run.capability_hash = hashlib.sha256(env["MULTIAGENTS_RPC_TOKEN"].encode()).hexdigest()
         self.runs[node_id] = run
         try:
+            self._qh_launched(node_id, spec, provider, session_id)
             await self._track_container_run(run, executor)
+            if handover_attempt is not None:
+                self._qh_check_switch(node_id, handover_attempt)
+                if run.stop_requested:
+                    raise RuntimeError("handover was stopped")
             self.tree.update(node_id,
                              follow={"turn": run.turn_start, "offset": run.turn_start,
                                      "log": _size(run_dir / "stream.jsonl")},
@@ -4484,13 +4512,18 @@ class Runner:
         recorded_provider: str = "",
         queued: dict | None = None,
         _cap_raced: bool = False,
+        _qh_floor_grant: str = "",
     ) -> dict[str, Any]:
         """`queued` is a provider-concurrency entry being drained (PC-R3a):
         it runs on the provider it queued on and nowhere else, claims its
         entry in the admission transaction, and is never re-queued — a
         refusal answers `pc_full` (still no slot: the entry keeps its place)
         or `blocked` (refused for another reason, reported by the drain)."""
+        floor_id, floor_request = (self._qh_take_floor_grant(_qh_floor_grant)
+                                   if _qh_floor_grant else ("", ""))
         context = _launch_context.get()
+        if context and context.node_id and floor_request:
+            return admission_block("scheduler-managed runs cannot use legacy floor admission")
         if context and context.node_id:
             # Managed activations always work on their recorded input checkout.
             workdir = None
@@ -4606,7 +4639,7 @@ class Runner:
             depth = int(queued["spec"].get("depth") or depth)
         if context:
             parent, depth = context.run_parent, context.depth
-        node_id = context.run_id if context and context.run_id else new_id()
+        node_id = floor_id or (context.run_id if context and context.run_id else new_id())
 
         # --- budget routing -------------------------------------------------
         # Budget now shells out to provider scripts, so it must not run on the
@@ -4750,25 +4783,28 @@ class Runner:
             reserve = float(budget_cfg.get("reserve_headroom", 0.15))
 
             def choose(budgets: dict, reserve: float) -> tuple[str | None, str]:
-                return budget_mod.choose_provider(
-                    spec.provider, budgets, chain, reserve,
-                    reserved=budget_mod.reserved_providers(
-                        self.config.project, self.providers, self._orchestrator_provider()),
-                    # Only the providers this agent has a model to run on. A
-                    # candidate it cannot use is not a candidate, and discovering
-                    # that afterwards is how a run ended up back on the provider
-                    # just ruled out. (The `models:` keys are named explicitly,
-                    # even though `routes` supersedes them, so the guard below
-                    # — the chooser is never offered a provider the agent did
-                    # not name a model for — reads on its own.)
-                    allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
-                             *routes, *family, *chain} & usable,
-                    family=family,
-                    routes=routes,
-                    load=dict(load), last_used=dict(last_used),
-                    wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
-                    **self._instance_strategy(spec.provider),
-                )
+                def legacy(readings):
+                    return budget_mod.choose_provider(
+                        spec.provider, readings, chain, reserve,
+                        reserved=budget_mod.reserved_providers(
+                            self.config.project, self.providers, self._orchestrator_provider()),
+                        # Only the providers this agent has a model to run on. A
+                        # candidate it cannot use is not a candidate, and discovering
+                        # that afterwards is how a run ended up back on the provider
+                        # just ruled out. (The `models:` keys are named explicitly,
+                        # even though `routes` supersedes them, so the guard below
+                        # — the chooser is never offered a provider the agent did
+                        # not name a model for — reads on its own.)
+                        allowed={spec.provider, *(spec.models or spec.extra.get("models") or {}),
+                                 *routes, *family, *chain} & usable,
+                        family=family,
+                        routes=routes,
+                        load=dict(load), last_used=dict(last_used),
+                        wait_for_reset_within=float(budget_cfg.get("wait_for_reset_seconds", 1800)),
+                        **self._instance_strategy(spec.provider),
+                    )
+                return self._qh_choose_new(spec, budgets, legacy, managed=bool(context and context.node_id),
+                                           floor=bool(floor_request))
 
             chosen, why = choose(budgets, reserve)
             if chosen is not None:
@@ -4833,6 +4869,14 @@ class Runner:
                     self.tree.emit(node_id, "route_skipped", provider=name,
                                    reason=f"no model configured for this agent on {name}")
             if chosen is None:
+                reserved = self._qh_reserved()
+                reserve_spec = self._usable_spec(spec, reserved) if reserved else None
+                if (not context and not queued and reserve_spec
+                        and not self._qh_above_floor(budgets.get(reserved))
+                        and await self._qh_usable(reserved, reserve_spec, budgets, floor=True)):
+                    return self._qh_request(agent_name, task, kwargs={
+                        "workdir": workdir, "timeout": timeout, "model": model,
+                        "verifies": verifies, "budget_tag": budget_tag})
                 # Prefer a real reset time over the blind cooldown: a provider that
                 # told us when it comes back should not be waited on for longer.
                 # Only from providers THIS agent could use — waking for one it
@@ -5022,6 +5066,8 @@ class Runner:
                 effort=spec.effort or "",
                 limits=limits, session=self.session(),
                 model_pinned=bool(model) or queued_pinned,
+                on_reserve_floor=bool(floor_request),
+                reserve_request=floor_request,
             )
             # RM-R1a: admission is one transaction with the insert, so the
             # slot is ours from this moment; every exit below that does not
@@ -5030,7 +5076,9 @@ class Runner:
                 self._admission_add(spec, node, queued_id)
             except ProviderFull as full:
                 # PC-R2: lost the race for the last slot since routing looked.
-                if queued:
+                # QH-R16: the reserve queue owns an approved floor retry;
+                # recursive admission would lose its consumed grant.
+                if queued or floor_request:
                     return {"pc_full": True, "gone": full.gone, "reason": str(full)}
                 # Review finding 12: not queued yet — routing runs again,
                 # with this provider now seen full, so a free fallback is
@@ -5090,6 +5138,11 @@ class Runner:
                         workdir=workdir, queued=queued if queued_id else None)
                     if refused is not None:
                         return refused
+                    if floor_request:
+                        # QH-R16: retain this approval in the reserve queue,
+                        # which rechecks the cap before granting another run.
+                        return {"blocked": True, "reason": exc.refusal["reason"],
+                                "retry_after": exc.refusal["until"], "refused_node": node_id}
                     self._startup_finish(provider.name, node_id, startup_token)
                     startup_token = ""
                     if _cap_raced:
@@ -5319,16 +5372,31 @@ class Runner:
                     run.text_parts.append(event.text)
                     if event.kind == "text" or (event.kind == "result" and not run.final_assistant_message):
                         run.final_assistant_message = event.text
+                reported_cost = event.cost
                 if event.tokens:
                     usage = _merge_usage(usage, event.tokens, provider.usage_mode)
+                    # QH-R20: a declared usage payload can carry its own cost.
+                    # Explicit stream.cost remains per-event; an embedded
+                    # cost follows the same delta/cumulative mode as usage.
+                    embedded_cost = event.tokens.get("cost_usd")
+                    if (not event.cost and isinstance(embedded_cost, (int, float))
+                            and not isinstance(embedded_cost, bool) and embedded_cost >= 0):
+                        previous_cost = cost_total
+                        if provider.usage_mode == "delta":
+                            cost_total += embedded_cost
+                        else:
+                            cost_total = max(cost_total, embedded_cost)
+                        reported_cost = cost_total - previous_cost
+                        usage["cost_usd"] = round(cost_total, 6)
                 if event.cost:
                     # Cost is always a per-step amount, whichever way a provider
                     # reports its token counts. This is the same number the
                     # opencode web console shows on its usage page.
                     cost_total += event.cost
                     usage["cost_usd"] = round(cost_total, 6)
+                if reported_cost:
                     if provider.billing != "plan" and not self._charge(
-                            run, event, event.session_id or session_id,
+                            run, replace(event, cost=reported_cost), event.session_id or session_id,
                             getattr(handle, "offset", 0), replayed, line_start):
                         # SC-R2a: the charge is not in the ledger, so the
                         # checkpoint below holds before this line. Under a
@@ -5339,6 +5407,8 @@ class Runner:
                 captured_session = bool(event.session_id and not session_id)
                 if captured_session:
                     session_id = event.session_id
+                if event.session_id and event.status.upper() != "SESSION_LOST":
+                    self._qh_confirm(run, event.session_id)
                 if event.status:
                     if event.status.upper() == "SESSION_LOST":
                         run.requested_session = str(event.raw.get("requested_session") or "")
@@ -5748,6 +5818,19 @@ class Runner:
         if session_lost:
             session_id = ""
 
+        # QH-R8/R9: transfer before the generic final commit so dirty work
+        # reaches a continuation unchanged. The old wrapper is already dead.
+        if not stopped_elsewhere and not run.awaiting:
+            handover = await self._qh_after(run, status, usage, session_id, limited)
+            if handover is True:
+                return True
+            if isinstance(handover, dict):
+                # All targets rejected the resume. Keep the source's session,
+                # quota verdict and worktree instead of filing session loss.
+                status, limited = "limited", handover["limited"]
+                session_id, usage = handover["session_id"], handover["usage"]
+                session_lost = False
+
         # Commit anything the agent left uncommitted so no work is stranded on
         # an unreferenced worktree. Skipped while parked on a question: the
         # agent is mid-thought and will resume in the same worktree, and a
@@ -5855,7 +5938,7 @@ class Runner:
             record["refusal"] = run.refusal
         _run_write(run_dir, "result.json", json.dumps(scrub(record), indent=2))
 
-        self.tree.update(node_id, usage=usage, session_id=session_id, summary=summary[:2000],
+        self.tree.update(node_id, usage=self._qh_total_usage(node_id, usage), session_id=session_id, summary=summary[:2000],
                          requested_session=run.requested_session if session_lost else "",
                          warnings=warnings)
         # Filed even when the run failed: a partial write-up of a real defect is
@@ -6862,6 +6945,8 @@ class Runner:
             "branch": node.branch or None,
             "events": [_compact(e) for e in window],
         }
+        result.update(home_provider=node.home_provider or node.provider,
+                      current_provider=node.provider, segments=node.segments)
         if node.reason == "session_lost":
             result["requested_session"] = node.requested_session
         result.update(self._no_commits_note(node))
@@ -6944,6 +7029,8 @@ class Runner:
             "log_dir": str(run_dir),
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
+        payload.update(home_provider=node.home_provider or node.provider,
+                       current_provider=node.provider, segments=node.segments)
         if data.get("warnings") or node.warnings:
             payload["warnings"] = data.get("warnings") or node.warnings
         if node.reason == "session_lost":
@@ -7386,6 +7473,8 @@ class Runner:
         thing `stop_agent` ever asks for) still writes `cancelled` here.
         Automatic timeouts leave terminal unknown-liveness holds intact.
         """
+        if not internal:
+            self._qh_cancel(agent_id)
         if not internal and release_terminal_hold:
             released = await self._stop_blocked_steer(agent_id)
             if released is not None:
@@ -7840,10 +7929,30 @@ class Runner:
 
     @_admitted("the steer")
     async def steer(self, agent_id: str, message: str,
-                    queued: dict | None = None) -> dict[str, Any]:
-        """SF-R3: refuse another steer until this node's handoff and any
+                    queued: dict | None = None, provider: str | None = None) -> dict[str, Any]:
+        """SF-R3: per-agent ownership spans predecessor death, transfer and
+        launch. The admission gate counts transitions without serialising
+        them; no global lock is held across these awaits, so another agent's
+        stop/steer/merge can proceed.
+
+        Refuse another steer until this node's handoff and any
         pending cleanup finish. Nothing new is claimed on that refusal."""
         node = self.tree.get(agent_id)
+        if agent_id in self.__dict__.get("_qh_busy", set()):
+            return {"agent_id": agent_id, "error": "quota handover is in progress"}
+        if node and (node.handover_attempt or {}).get("state") in ("prepared", "transferred", "launching", "launched"):
+            return {"agent_id": agent_id, "error": "quota handover is in progress"}
+        if provider is not None and node and node.node_id:
+            return {"agent_id": agent_id, "error": "scheduler-managed runs have a frozen provider binding"}
+        if provider is not None and node and provider != node.provider:
+            active = self.__dict__.setdefault("_steering_nodes", set())
+            if agent_id in active:
+                return {"agent_id": agent_id, "error": "a steer is in progress"}
+            active.add(agent_id)
+            try:
+                return await self._qh_manual(node, message, provider)
+            finally:
+                active.discard(agent_id)
         if node and (self.scheduler_enabled() or node.node_id):
             if node.node_id and agent_id not in self.runs and not getattr(self, "_scheduler_supervisor", False):
                 from .scheduler import steer_managed
@@ -9905,12 +10014,21 @@ class Runner:
         one tree transaction, and a concurrent drain skips what it did not
         claim, so two drains never restart the same entry.
         """
-        if self.gate.closed or self.scheduler_enabled():
+        if self.gate.closed:
+            return {"paused": False, "restarted": []}
+        await self._qh_reconcile()
+        reserve_restarted = await self._qh_drain_reserve()
+        # Recovery follows a launched target, never launches that attempt
+        # twice. Adoption is also needed when no ordinary quota entry is due.
+        if any(n.handover_attempt and n.handover_attempt.get("state") in
+               ("launching", "launched") and n.id not in self.runs for n in self._qh_nodes()):
+            await self.adopt()
+        if self.scheduler_enabled():
             # CW-R2: the server is stopping; the entries stay queued for the
             # next one, untouched.
-            return {"paused": False, "restarted": []}
+            return {"paused": False, "restarted": reserve_restarted}
         self._prune_unreadable_entries()
-        recovered = self._recover_stale_restarts()
+        recovered = self._recover_stale_restarts() + reserve_restarted
         paused = self.tree.pause_state()          # clears itself when expired
         if paused:
             result: dict[str, Any] = {"paused": True,
@@ -10144,6 +10262,11 @@ class Runner:
                             "itself when this clears. Wait rather than re-planning."}
 
         deadline = time.monotonic() + timeout
+        requests = [r for r in self.tree.read().get("quota_reserve", [])
+                    if r.get("state") == "requested"]
+        if requests:
+            return {"status": "awaiting_orchestrator", "reserve_requests": requests,
+                    "changed": [], "still_running": [], **pause()}
         if agent_ids:
             watched = list(agent_ids)
         else:
@@ -10282,6 +10405,9 @@ class Runner:
         node = self.tree.get(agent_id)
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
+        if agent_id in self.__dict__.get("_qh_busy", set()) or (node.handover_attempt or {}).get("state") in (
+                "prepared", "transferred", "launching", "launched"):
+            return {"agent_id": agent_id, "merged": False, "error": "quota handover is in progress"}
         if node.node_id:
             return {"error": "managed_run", "hint": "use node ops"}
         node = self.authoritative(node, "merge_agent")

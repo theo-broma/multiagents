@@ -539,6 +539,9 @@ def agent_tree() -> dict:
             for n in run.tree.active()
         ],
         "deferred": len(data.get("deferred", [])),
+        "runs": [{"agent_id": key, "home_provider": n.get("home_provider") or n.get("provider"),
+                  "current_provider": n.get("provider"), "segments": n.get("segments", [])}
+                 for key, n in data.get("nodes", {}).items() if not n.get("role")],
     })
 
 
@@ -882,7 +885,7 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
 
 
 @_tool()
-async def steer_agent(agent_id: str, message: str) -> dict:
+async def steer_agent(agent_id: str, message: str, provider: str | None = None) -> dict:
     """Redirect a running or stuck agent without losing its context.
 
     A subprocess cannot be interrupted mid-turn, so this stops the current turn
@@ -892,7 +895,7 @@ async def steer_agent(agent_id: str, message: str) -> dict:
     """
     run = runner()
     try:
-        return _ok(await run.steer(agent_id, message))
+        return _ok(await run.steer(agent_id, message, **({"provider": provider} if provider is not None else {})))
     except KeyError as exc:
         return _ok({"error": str(exc)})
 
@@ -905,6 +908,24 @@ async def stop_agent(agent_id: str) -> dict:
     if denied:
         return _ok({"error": denied})
     return _ok(await run.stop(agent_id))
+
+
+@_tool()
+async def allow_reserve(request_id: str) -> dict:
+    """Allow one queued task to use the orchestrator's reserved quota floor."""
+    run = runner()
+    if run.self_id():
+        return _ok({"error": "only the orchestrator can allow reserve"})
+    return _ok(await run.reserve_answer(request_id))
+
+
+@_tool()
+async def veto_reserve(request_id: str, reason: str) -> dict:
+    """Protect the quota floor until the next reset of an eligible instance."""
+    run = runner()
+    if run.self_id():
+        return _ok({"error": "only the orchestrator can veto reserve"})
+    return _ok(await run.reserve_answer(request_id, veto=True, reason=reason))
 
 
 @_tool()
@@ -1491,17 +1512,19 @@ def budget_status() -> dict:
     data = run.tree.read()
     spend: dict[str, dict[str, Any]] = {}
     for node in data.get("nodes", {}).values():
-        provider = node.get("provider", "")
-        if not provider:
-            continue
-        usage = node.get("usage") or {}
-        entry = spend.setdefault(provider, {"tokens": 0, "cost_usd": 0.0})
-        total = usage.get("total") or usage.get("total_tokens") or 0
-        if isinstance(total, (int, float)):
-            entry["tokens"] += int(total)
-        cost = usage.get("cost_usd")
-        if isinstance(cost, (int, float)):
-            entry["cost_usd"] = round(entry["cost_usd"] + cost, 6)
+        rows = node.get("segments") or [node]
+        for row in rows:
+            provider = row.get("provider", "")
+            if not provider:
+                continue
+            usage = row.get("usage") or (node.get("usage") if len(rows) == 1 else {}) or {}
+            entry = spend.setdefault(provider, {"tokens": 0, "cost_usd": 0.0})
+            total = usage.get("total") or usage.get("total_tokens") or 0
+            if isinstance(total, (int, float)):
+                entry["tokens"] += int(total)
+            cost = usage.get("cost_usd")
+            if isinstance(cost, (int, float)):
+                entry["cost_usd"] = round(entry["cost_usd"] + cost, 6)
 
     budgets = budget_mod.read_all(
         run.providers, lambda name: run.executor(), global_config_dir(),
@@ -1520,6 +1543,8 @@ def budget_status() -> dict:
     return _ok({
         "providers": {k: v.to_dict() for k, v in budgets.items()},
         "tree_usage": run.tree.rollup_usage(),
+        "quota_handover": {"reserved_instance": run._qh_reserved(),
+                           "reserve_fraction": run._qh_settings().get("reserve_fraction", .25)},
         "by_model": billed_rows(run.tree.usage_by_model(), run.providers),
         "deferred_tasks": len(data.get("deferred", [])),
         # PC-R4: per-provider concurrency, for the providers that limit it.

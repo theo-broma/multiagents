@@ -281,6 +281,8 @@ class Provider:
     extends: str = ""
     family: str = ""
     instance_strategy: str | None = None
+    handover_mode: dict[str, str] = field(default_factory=dict)
+    session_store: dict[str, str] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
     # PS-R1/R5: providers that share tooling but keep their own models and
     # quota. `auth_from` names the credential OWNER — this provider logs in
@@ -414,6 +416,8 @@ class Provider:
             # and a provider that extends nothing is its own family of one.
             family=data.get("family") or data.get("extends") or name,
             instance_strategy=data.get("instance_strategy"),
+            handover_mode=data.get("handover_mode") or {},
+            session_store=dict(data.get("session_store") or {}),
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             auth_from=_owner_key(name, "auth_from", data),
             budget_from=_owner_key(name, "budget_from", data),

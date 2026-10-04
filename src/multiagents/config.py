@@ -563,6 +563,7 @@ class AgentSpec:
     # claude-opus-4-6-thinking". The move was right and the options came with
     # it uninvited.
     models: dict[str, Any] = field(default_factory=dict)
+    handover: bool = True
     launch: bool = False
     # Paths this agent may not MODIFY, as gitignore-style globs. Adding a new
     # file is always allowed; changing, deleting or renaming a matching one is
@@ -1084,6 +1085,27 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
     # validated here, so a config error surfaces at load, and the roster's
     # routes are checked against the allowlists of the providers they name.
     providers = load_providers(providers_raw)
+    # QH-R1/R2: validate even when disabled, before any admission occurs.
+    handover = merged["project.yaml"].get("quota_handover") or {}
+    if not isinstance(handover, dict):
+        raise ValueError("quota_handover must be a mapping")
+    if not isinstance(handover.get("enabled", True), bool):
+        raise ValueError("quota_handover.enabled must be a boolean")
+    reserved = handover.get("reserved_instance")
+    if reserved is not None and reserved not in providers:
+        raise ValueError(f"quota_handover.reserved_instance {reserved!r} must name an existing instance")
+    fraction = handover.get("reserve_fraction", 0.25)
+    if (isinstance(fraction, bool) or not isinstance(fraction, (int, float))
+            or not 0 < fraction < 1):
+        raise ValueError("quota_handover.reserve_fraction must be in (0, 1)")
+    window = handover.get("veto_window_seconds", 120)
+    if isinstance(window, bool) or not isinstance(window, int) or window < 0:
+        raise ValueError("quota_handover.veto_window_seconds must be an integer >= 0")
+    for name, provider in providers.items():
+        if (not isinstance(provider.handover_mode, dict)
+                or any(context not in ("local", "docker") or mode not in ("shared", "copy", "none")
+                       for context, mode in provider.handover_mode.items())):
+            raise ValueError(f"provider {name}: invalid handover_mode")
     agents_raw = merged["agents.yaml"].get("agents", {}) or {}
     agents = {
         name: AgentSpec.from_dict(name, data or {})

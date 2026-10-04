@@ -186,6 +186,7 @@ providers:
       MULTIAGENTS_OPENCODE_PLAN: deepinfra
 
   agy:
+    handover_mode: {docker: none, local: none}
     bin: agy
     budget_profile_env: HOME
     # The host keyring is shared even when HOME is relocated. In the
@@ -401,6 +402,7 @@ providers:
 
   # Claude Code as a full provider: orchestrator AND delegate.
   claude:
+    handover_mode: {docker: shared, local: none}
     bin: claude
     # The variable that relocates this CLI's whole state to a second account.
     # `claude-b` (see the commented block below) inherits it through `extends`;
@@ -669,6 +671,15 @@ providers:
   # its `app-server` JSON-RPC protocol need more than declarative rules can
   # express. See providers/codex.py and providers/README.md.
   codex:
+    handover_mode: {docker: copy, local: copy}
+    # QH-R8: the adapter selects this private profile per account. Transfer
+    # only its matching rollout; Codex repairs its own index on resume.
+    session_store:
+      profile_env: MULTIAGENTS_CODEX_PROFILE
+      profile_default: "~/.multiagents/profiles/codex"
+      dir: sessions
+      glob: "**/rollout-*{session_id}.jsonl"
+      forbidden_profile: "~/.codex"
     bin: codex
     adapter: codex.py
     family: codex

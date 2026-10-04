@@ -389,7 +389,8 @@ class Ledger:
                 raise LedgerError(f"spend ledger {self.path}: {exc}") from exc
 
     def charge(self, *, key: str, provider: str, model: str, agent: str,
-               node: str, usd: float, caps: list[Cap], at: float | None = None
+               node: str, usd: float, caps: list[Cap], at: float | None = None,
+               account: str | None = None
                ) -> tuple[list[dict], list[dict]]:
         """Record one cost event and claim the crossings it causes, in one
         locked transaction. Returns `(new_crossings, binding)`: the crossing
@@ -406,7 +407,8 @@ class Ledger:
             if key not in self.keys and usd:
                 records.append({"kind": "charge", "ts": at, "key": key,
                                 "provider": provider, "model": model,
-                                "agent": agent, "node": node, "usd": usd})
+                                "agent": agent, "node": node, "usd": usd,
+                                **({"account": account} if account is not None else {})})
             for record in records:
                 self._absorb(record)
             binding, new = [], []
