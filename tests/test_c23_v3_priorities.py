@@ -474,13 +474,26 @@ async def hold_on(w, target, gate_name):
     return aid
 
 
+async def start_live_pinnable(w, tool_name):
+    """Live run on alpha whose CLI has emitted its session id (a steer needs it).
+
+    The fake CLI only prints a session id with its first stream event, so the
+    hold is a `tool_gate`, which prints one before it waits, not a `gate`.
+    """
+    w.set_plan('alpha', quota=False, tool_gate=str(w.tmp / tool_name))
+    aid = (await w.r.start('worker', TASK))['agent_id']
+    def session_captured():
+        rows = [json.loads(x) for x in w.paths.events_file.read_text().splitlines()] if w.paths.events_file.exists() else []
+        return any(e.get('kind') == 'session' and aid in (e.get('agent'), e.get('agent_id')) for e in rows)
+    await wait_until(session_captured)
+    return aid
+
+
 def test_qh_r27_explicitly_pinned_run_is_not_promoted_and_new_runs_still_launch_on_best(world):
     w = world()
-    w.set_plan('alpha', quota=False, gate=str(w.tmp / 'hold-alpha'))
     async def body():
-        aid = (await w.r.start('worker', TASK))['agent_id']
-        await wait_until(lambda: bool(w.calls()))
-        w.set_plan('beta', gate=str(w.tmp / 'hold-beta'))
+        aid = await start_live_pinnable(w, 'tool-alpha')
+        w.set_plan('beta', tool_gate=str(w.tmp / 'tool-beta'))
         result = await server.steer_agent(aid, 'Continue assigned work', provider='beta')
         assert not result.get('error'), result
         await wait_until(lambda: instances(w)[-1] == 'beta')
@@ -497,11 +510,9 @@ def test_qh_r27_explicitly_pinned_run_is_not_promoted_and_new_runs_still_launch_
 
 def test_qh_r27_steer_provider_auto_unpins_and_promotion_resumes(world):
     w = world()
-    w.set_plan('alpha', quota=False, gate=str(w.tmp / 'hold-alpha'))
     async def body():
-        aid = (await w.r.start('worker', TASK))['agent_id']
-        await wait_until(lambda: bool(w.calls()))
-        w.set_plan('beta', gate=str(w.tmp / 'hold-beta'))
+        aid = await start_live_pinnable(w, 'tool-alpha')
+        w.set_plan('beta', tool_gate=str(w.tmp / 'tool-beta'))
         await server.steer_agent(aid, 'go to beta', provider='beta')
         await wait_until(lambda: instances(w)[-1] == 'beta')
         await tick(w, 900)
@@ -629,7 +640,7 @@ def test_qh_r29_headroom_zero_accepts_any_usable_target(world):
     w = world(options={'promote_min_headroom': 0})
     async def body():
         await demoted(w)
-        regain(w, headroom=.02)
+        regain(w, headroom=.03)   # above the existing admission reserve (<= .02 is not usable)
         await tick(w, 300)
         await await_promotion(w)
     run_scenario(w, body)
