@@ -4196,3 +4196,13 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **Next:** C23 implementation (implementer-deep) after M2 merges, on the R ids QH-R1..R10, R13..R30 (R11/R12 withdrawn).
   - **Tests:** tests/test_c23_*.py.
   - **Seams to provide:** a mid-transfer fault and a crash before transfer, after which the tester completes the tests.
+- 2026-10-04: the user asked for tests optimised for fast parallel runs.
+  - **Tester instructions:** `.multiagents/config/agents/team/tester.md` gains a section "Fast, and safe to run in parallel" (the file is untracked).
+  - **Speed rework, test semantics unchanged, budget tag nc-test-speed:**
+    - ag-cbeaa2: shared harness and nc_fixture; it also fixes the 3 M2 lifecycle tests that gate the wrong provider (pcfx vs fx), and the timing-dependent M1 revocation test;
+    - ag-239967: M3 tests;
+    - ag-9dd1c8: M4 tests;
+    - ag-87b4ac: M5 tests;
+    - ag-e196e5: M6 tests.
+  - **Merge order:** harness first, then milestones (separate files).
+  - **M2 implementer ag-eb2369:** resumed after the 5400 s wall-clock timeout. It reported 86 M2 passed, with 7 failures: 4 M4 alias tests and the 3 wrong-gate tests above.
