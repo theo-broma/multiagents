@@ -4174,3 +4174,15 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **C23 tests merged (2d546dd, tester ag-dbaced):** `tests/test_c23_quota_handover.py`, 64 tests (60 red, 4 green: the off-switch and opt-out cases).
     - Seams to document: clock and headroom.
     - Gaps the implementer must cover with seams, then the tester completes: a mid-transfer I/O fault, a crash before transfer, scheduler exclusion, vault-account attribution, and carry-over of limits, budget tag and readonly paths.
+- 2026-10-04 ~10:30 CEST: **M1 merged** (4932934). Before the merge, adversary round 3 found 2 defects, both fixed:
+  - config drift froze every plan write (NC-R6/R50: agent existence is now checked only for new or changed assignments);
+  - broken YAML with the gate on escaped `start_agent`.
+
+  The x01 test was replaced (6ce8429, ag-486377; the old one was removed in b3bb444). On main: 520 passed (tests/test_nc_m1_*, r8f leftovers, root transcript host).
+
+  **Review of round 3 (ag-63ef80): 3 findings, all declined.**
+  - (1) A bypass of the changed-assignment check. False: new ids are always checked, and re-setting the same agent is a retained assignment by design.
+  - (2) The alias family check is skipped when the retained agent has no provider. Deferred to M4, where aliases are bound (NC-R56 freezes the binding at first activation); **M4 must recheck it**.
+  - (3) `scheduler_unavailable` hides the YAML parse error when no runner is loaded. A cosmetic diagnostic gap, not a contract issue.
+
+  **M2 in flight:** implementer-deep ag-eb2369 (codex-b), budget tag phase7-p1-m2. Then: reviewer, then merge, then C23 implementation (runner/executor, after M2), alongside M3.
