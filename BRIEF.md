@@ -4237,3 +4237,12 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - from adversary round 2 (ag-0a5e9b, tests merged 35786c4): capability leak when a worker dies before the tree records the run, and a lock leak when reconcile leaves the attempt `claimed` after a mid-launch crash. Its 5 round-1 mutants are now killed.
 
   ag-0a5e9b was marked failed with "agy-b reported ERROR" although its work was complete: this is bug-93a3e4 recurring. That fix is blocked by the spent `tickets` budget.
+- 2026-10-04 ~14:30 CEST **HANDOFF (orchestrator context near wind-down)**:
+  - **In flight:**
+    - (a) M2 round-3 re-review, reviewer ag-cee330 (steered), on ag-eb2369 tip 6c7fcad. M1+M2+core: 1,212 passed; the 4 failures are the M4 aliases. **If approved: merge_agent(ag-eb2369), then verify on main tests/test_nc_m1_* + test_nc_m2_* (the 3 lifecycle wrong-gate tests are fixed only once ag-cbeaa2 merges).** If still rejected: this is round 3, so escalate to an opus implementer per the user rule, passing ag-eb2369's context.
+    - (b) Harness speed tester ag-cbeaa2, resumed after a claude 429. It has 5 commits: harness, nc_fixture, the M2 lifecycle gates and the M1 revocation test. Merge after checking the counts.
+  - **Next:**
+    - C23 implementation (implementer-deep) on QH-R1..R10, R13..R30 with tests/test_c23_*.py, once M2 is merged. Restrict verification to the C23 + M1/M2 + core suites, never the full suite.
+    - Then M3 (implementer-deep, adversary mandatory), M4, M5 (adversary), M6.
+    - Reviewer rule: M4 must recheck the alias family check for a retained agent with no provider (M1 round-3 review finding 2).
+  - **Pending user answer:** raise budget tag `tickets` (spent 6.48M/6M) so bug-93a3e4 (a trailing agy ERROR marks complete runs failed; seen again on ag-0a5e9b) can be fixed.
