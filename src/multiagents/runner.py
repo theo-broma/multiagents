@@ -4491,6 +4491,9 @@ class Runner:
         refusal answers `pc_full` (still no slot: the entry keeps its place)
         or `blocked` (refused for another reason, reported by the drain)."""
         context = _launch_context.get()
+        if context and context.node_id:
+            # Managed activations always work on their recorded input checkout.
+            workdir = None
         spec = self.config.agent(agent_name)
         if context and context.provider:
             spec = self._usable_spec(spec, context.provider, resume=True) or spec
@@ -5043,7 +5046,16 @@ class Runner:
                 if self.authority:
                     self.authority.add(node)
                 if not workdir:
-                    gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
+                    if context:
+                        from .scheduler.results import Results
+                        from .scheduler.store import Store
+                        from .scheduler.engine import attempts
+                        with Store(repo).transaction(write=False) as db:
+                            activation = attempts(db)[context.attempt_id]
+                        Results(self.paths, self.config).create_checkout(
+                            worktree_path, branch, activation["input_commit"])
+                    else:
+                        gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
                 if routed_from:
                     # Loud enough to find later. This decision changes which model does
                     # the work, and until now it left no trace anywhere.
@@ -5055,6 +5067,12 @@ class Runner:
                 prompt = self.compose_prompt(spec, task, node, worktree_path)
                 if context:
                     prompt += f"\nworking directory: {worktree_path}\nnode: {context.node_id}\n"
+                    review = activation.get("review")
+                    if review:
+                        # State the reviewed identity separately from the
+                        # activation's own node and working directory.
+                        prompt = (f"review: node_id={review['node_id']} "
+                                  f"generation_seq={review['generation_seq']} commit={review['commit']}\n" + prompt)
                 try:
                     run = await self._launch(
                         node_id=node_id, spec=spec, provider=provider, prompt=prompt,
@@ -6476,7 +6494,21 @@ class Runner:
         """Is there anything to show for this run besides its silence?"""
         node = self.tree.get(run.node_id)
         branch = getattr(node, "branch", "") if node else ""
-        if branch:
+        if node and node.node_id:
+            from .scheduler.results import checkout_tip, MissingCheckout
+            try:
+                from .scheduler.store import Store
+                from .scheduler.engine import attempts
+                with Store(self.paths.root).transaction(write=False) as db:
+                    activation = attempts(db)[node.attempt_id]
+                if checkout_tip(node, self.authority) != activation["input_commit"]:
+                    return True
+            except MissingCheckout:
+                pass
+            except (gitops.GitError, OSError, ValueError, KeyError) as exc:
+                self.git_unreadable(run.node_id, Path(node.worktree), exc)
+                return True  # Unreadable work is unknown, never silent success.
+        elif branch:
             try:
                 base = self.config.base_branch or gitops.current_branch(self.paths.root)
                 if gitops.commits_on(self.paths.root, branch, base,
@@ -6746,6 +6778,8 @@ class Runner:
         force-deleting the branch is safe: its commits are already elsewhere.
         True when the branch is left for the host to delete (SG-R2).
         """
+        if node.node_id:
+            return None
         if self.authority:
             if not self.identity_ok(node.id, "cleanup"):
                 return None
@@ -8020,11 +8054,17 @@ class Runner:
         root_is_repo = gitops.is_repo(self.paths.root)
         if workdir is None or not workdir.is_dir():
             missing = True
+        elif node.node_id and branch:
+            from .scheduler.results import checkout_branch
+            missing = checkout_branch(node, self.authority) != branch
         elif branch and root_is_repo:
             missing = gitops.worktree_branch(workdir, root=self.paths.root) != branch
         else:
             missing = False
         if missing:
+            if node.node_id:
+                return {"agent_id": agent_id, "steered": False,
+                        "error": "managed checkout is missing or differs from its host record"}
             if not root_is_repo:
                 return {
                     "agent_id": agent_id, "steered": False,

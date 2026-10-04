@@ -189,7 +189,9 @@ def validate(nodes, config, *, check_agents=None):
             if not node["children"] or loop.get("verdict_child") != node["children"][-1]:
                 invalid("loop.verdict_child: must be the last child")
             maximum = loop.get("max_rounds")
-            if type(maximum) is not int or maximum < 1 or maximum <= loop["rounds_rejected"]:
+            # Runtime rejection can reach the maximum. Client edits must
+            # exceed the counter (checked by update_node), even at loop_max.
+            if type(maximum) is not int or maximum < 1 or maximum < loop["rounds_rejected"]:
                 invalid("loop.max_rounds: must exceed the rejected counter")
         elif loop is not None:
             invalid("loop: only valid on loop nodes")
