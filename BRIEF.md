@@ -4246,3 +4246,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
     - Then M3 (implementer-deep, adversary mandatory), M4, M5 (adversary), M6.
     - Reviewer rule: M4 must recheck the alias family check for a retained agent with no provider (M1 round-3 review finding 2).
   - **Pending user answer:** raise budget tag `tickets` (spent 6.48M/6M) so bug-93a3e4 (a trailing agy ERROR marks complete runs failed; seen again on ag-0a5e9b) can be fixed.
+- 2026-10-04: **M2 review round 3 (ag-cee330) still rejected**, 2 findings:
+  - cancel_sync awaits stopper.stop while holding the SQLite write transaction;
+  - missing-tree recovery sets held(termination_unconfirmed) even when death is confirmed.
+
+  **Escalated to opus per the round-3 rule:** implementer-deep ag-543098 (claude opus), which cherry-picks ag-eb2369's commits and fixes both. **Merge ag-543098, not ag-eb2369; discard eb2369 after.** Next: a reviewer on ag-543098, then merge.
