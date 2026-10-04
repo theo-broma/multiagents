@@ -25,9 +25,30 @@ from nc_fixture.gitworld import GitWorld  # noqa: E402
 from nc_fixture.world import blocked_codes, err_code  # noqa: E402
 
 
+# Upper bound on every poll-until-condition wait (run to start, node to settle,
+# scheduler restart to converge). A red test hits its assertion within this
+# bound instead of the harness defaults of 30-60 s.
+WAIT_BOUND = 8.0
+# Same, for the few waits that span several runs or a scheduler restart (the
+# test asked for 60 s).
+LONG_BOUND = 20.0
+
+
+def bound(world: GitWorld) -> None:
+    """Cap each `world.until` deadline (the base of wait_state, done,
+    wait_running, wait_spawn) at WAIT_BOUND (LONG_BOUND where 60 s or more was asked)."""
+    until = world.until
+
+    def capped(pred, timeout: float = 30, *args, **kw):
+        return until(pred, min(timeout, LONG_BOUND if timeout >= 60 else WAIT_BOUND), *args, **kw)
+
+    world.until = capped
+
+
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = GitWorld(tmp_path, monkeypatch)
+    bound(world)
     yield world
     world.close()
 
