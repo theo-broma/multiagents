@@ -4257,3 +4257,18 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The 4 test fixes (3 M2 lifecycle gates, 1 M1 revocation) are included; the gate tests go green once M2 merges.
 - 2026-10-04: **the user approved raising the `tickets` budget to 8M.** Tags cannot be raised by design (tree.set_budget: the first value wins; "give it a new name"), so the extra goes under a new tag **`tickets-2`, ceiling 2,000,000**, for 8M in total.
   - bug-93a3e4 will run under tickets-2 **after M2 merges**: it touches Runner._consume, which ag-543098 is editing right now.
+- 2026-10-04 ~16:30 CEST: **M2 MERGED** (08d2087, ag-543098 opus, carrying ag-eb2369's cherry-picked work; eb2369 discarded).
+  - **On main:** core + M1 + M2 + need_decision + r8f + root transcript give 1,268 passed and 4 failed, the 4 being the M4 alias tests (NC-R81). The lifecycle gate tests are green.
+  - **The merge also brings decision-marker fixes in runner.py:**
+    - 49c4393 and bb72084: line breaks between text parts come from provider block ids (opencode part.id, claude line uuid, codex item id); parts of the same block concatenate as-is;
+    - a marker followed by DEFAULT and then exit parks correctly.
+  - **Final review ag-88cfe2: 2 findings DECLINED by the orchestrator.**
+    - (1) A claude text-block boundary mid-sentence: content blocks are not split mid-sentence in practice, and block = line is the chosen rule.
+    - (2) `0 or ""` strips an integer block id 0: all shipped providers use string ids, and the pattern pre-exists for turn/step_id.
+  - The running MCP server still has pre-8c529d3 code: false decision-marker parks continue until it restarts.
+  - **NEXT:**
+    1. bug-93a3e4 (implementer-quick, budget tag tickets-2 = 2,000,000, user-approved), then a reviewer.
+    2. C23 implementation (implementer-deep) on QH-R1..R10 and R13..R30, tests tests/test_c23_*.py; verify on C23 + M1/M2 + core only.
+    3. M3 implementation (implementer-deep), then reviewer and adversary (mandatory).
+
+    C23 and M3 both touch runner/scheduler, so run them sequentially or split by files. Advisor: decide.
