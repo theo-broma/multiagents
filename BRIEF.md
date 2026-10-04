@@ -4192,3 +4192,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - configurable settings (QH-R29).
 
   QH-R11/R12 are withdrawn. The v3 tests are to be added by a tester on top of tests/test_c23_quota_handover.py, in a separate file.
+- 2026-10-04: C23 v3 tests merged (d1ec264, ag-abeb4b): tests/test_c23_v3_priorities.py (87) plus 55 v2 tests. Clarifications QH-R30 (1-9) validated by the user.
+  - **Next:** C23 implementation (implementer-deep) after M2 merges, on the R ids QH-R1..R10, R13..R30 (R11/R12 withdrawn).
+  - **Tests:** tests/test_c23_*.py.
+  - **Seams to provide:** a mid-transfer fault and a crash before transfer, after which the tester completes the tests.

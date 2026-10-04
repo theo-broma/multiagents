@@ -176,3 +176,15 @@ Once validated, this amendment changes the following, and its requirements repla
     - the durations must be integers ≥ 0, except `promote_check_seconds`, which must be ≥ 1.
   - A value of 0 for the dwell or the grace means immediate.
   - *Verified by:* config-load tests (valid, invalid, per-agent override), plus one promotion test per non-default value.
+
+## QH-R30 — Clarifications raised by tester ag-abeb4b (validated by the user 2026-10-04)
+
+1. **Syntax of `priorities:` entries.** An entry is `{family: X}` or `{instance: X}`, each with an optional `model`. A bare string `X` is shorthand: it names the family when a family of that name exists, and the instance otherwise.
+2. **Rank.** Rank is 0-based; smaller is better.
+3. **Demoted (replaces the QH-R24 definition).** A run is demoted when its expanded priority list contains an instance of better rank than its current one. History plays no part, so a run launched on a fallback because its preferred instance was exhausted is promoted too, once that instance becomes usable again.
+4. **When the check runs.** The promotion check runs in the scheduling pass that resumes deferred runs: at each budget refresh, at each `wait_for_agents`, and at least every `promote_check_seconds` while the server is running.
+5. **Refresh.** A refresh of an instance is a new budget reading for that instance (a more recent `read_at`). A re-read that returns the same reading is not a refresh.
+6. **Promote events.** They carry no `tier`; `from_rank` and `to_rank` take its place.
+7. **`provider="auto"`.** It unpins the run, and the steer resumes immediately on the best usable instance under QH-R5/R23. Hysteresis and dwell are not applied, because this is an explicit order.
+8. **Return of a copied session (complements QH-R8).** When the target already holds a strict prefix of the source session, which is the case of a return, the copy fast-forwards it. The copy is refused only when the two diverge, that is, when neither is a prefix of the other.
+9. **List order over sibling-first.** With `priorities:` declared, the list order decides. QH-R5's "sibling first" falls out of the expansion of a family entry, but does not override a list that interleaves instances. Without `priorities:`, QH-R5 applies as written.
