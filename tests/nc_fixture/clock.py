@@ -9,6 +9,7 @@ to have seen the new instant.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from nc_fixture.world import CLI, World, blocked_codes
+from nc_fixture.world import CLI, START_TIMEOUT, World, blocked_codes
 
 UTC = timezone.utc
 PARIS = ZoneInfo("Europe/Paris")
@@ -50,16 +51,49 @@ class ClockWorld(World):
         self.now = instant
 
     def set_clock(self, instant: datetime, settle: float = 1.4) -> None:
-        """Move "now" and give the scheduler one tick (tick_seconds is 1) to
-        evaluate it."""
+        """Move "now" and return as soon as the scheduler has evaluated it,
+        at most `settle` seconds later (one tick, tick_seconds is 1).
+
+        Evaluated is read from `scheduler_status.last_tick`: it names the new
+        instant, or it has advanced twice since the write (the first tick may
+        have started before the write, the second cannot have). A scheduler that
+        shows no `last_tick` (or is not answering) costs the full `settle`."""
+        before = self._last_tick()
         self.write_clock(instant)
-        time.sleep(settle)
+        end = time.monotonic() + settle
+        advanced = 0
+        seen = before
+        while time.monotonic() < end:
+            time.sleep(0.05)
+            tick = self._last_tick()
+            if tick is None:
+                continue
+            if self._names(tick, instant):
+                return
+            if tick != seen:
+                seen = tick
+                advanced += 1
+                if advanced >= 2:
+                    return
+        return
+
+    def _last_tick(self):
+        try:
+            return json.dumps(self.status().get("last_tick"), sort_keys=True, default=str)
+        except (OSError, ValueError, KeyError, AssertionError):
+            return None
+
+    @staticmethod
+    def _names(tick: str, instant: datetime) -> bool:
+        stamps = {instant.isoformat(), instant.astimezone(UTC).isoformat(),
+                  instant.astimezone(UTC).isoformat().replace("+00:00", "Z")}
+        return any(stamp in tick for stamp in stamps)
 
     def advance(self, **delta) -> None:
         self.set_clock(self.now + timedelta(**delta))
 
     # ------------------------------------------------------------- scheduler
-    def start_scheduler(self, timeout: float = 20) -> int:
+    def start_scheduler(self, timeout: float = START_TIMEOUT) -> int:
         self.write_config()
         self.write_clock(self.now)
         proc = subprocess.Popen(
@@ -96,14 +130,6 @@ class ClockWorld(World):
         assert bool(node.get("ready")) == (not win), \
             f"`ready`={node.get('ready')!r} disagrees with blocked={codes} for {node_id}"
         return not win
-
-    def hold_lock(self, lock: str = "L") -> str:
-        """A gated running node on `lock`: whatever else names `lock` is
-        `ready` but never launches, so its `ready` can be read without it
-        racing into `running`."""
-        holder = self.simple("HOLDER", locks=[lock], fx={"gate": "holder"})
-        self.wait_running(holder)
-        return holder
 
     def count(self, transition: str, node_id: str) -> int:
         return self.transitions(node_id).count(transition)

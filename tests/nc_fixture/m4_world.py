@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nc_fixture.m4_agent import M4Provider  # noqa: E402
-from nc_fixture.world import World, blocked_codes, err_code, unwrap  # noqa: E402
+from nc_fixture.world import WAIT_TIMEOUT, World, blocked_codes, err_code, unwrap  # noqa: E402
 
 __all__ = ["M4World", "blocked_codes", "err_code", "unwrap", "M4Provider"]
 
@@ -81,10 +81,19 @@ class M4World(World):
                 out += self.by_agent(c, agent)
         return out
 
-    def wait_held(self, node_id: str, reason: str, timeout: float = 60) -> dict:
-        return self.until(lambda: (n := self.get(node_id))["state"] == "held"
-                          and (n["hold"] or {}).get("reason") == reason and n,
-                          timeout, what=f"{node_id} held for {reason}")
+    def wait_held(self, node_id: str, reason: str, timeout: float = 2 * WAIT_TIMEOUT) -> dict:
+        """Wait for `node_id` to be held for `reason`; a node that is `done` or
+        `cancelled` (final) fails at once."""
+        def probe():
+            n = self.get(node_id)
+            if n["state"] == "held" and (n["hold"] or {}).get("reason") == reason:
+                return n
+            if n["state"] in ("done", "cancelled"):
+                raise AssertionError(
+                    f"{node_id} is {n['state']} (final), it will never be held for {reason}")
+            return None
+        return self.until(probe, timeout, what=f"{node_id} held for {reason}",
+                          give_up=self.stall_probe())
 
     def root_op(self, op: str, node_id: str, **args) -> dict:
         rev = self.get(node_id)["revision"]

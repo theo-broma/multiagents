@@ -117,7 +117,7 @@ def test_nc_r16_stop_does_not_launch_what_was_waiting(w):
     w.until(lambda: "admission:provider_concurrency" in blocked_codes(w.get(b)),
             what="B blocked by the provider limit")
     w.stop_scheduler()
-    w.gate("ga")
+    w.gate("ga", w.providers["pcfx"])
     w.until(lambda: len(w.providers["pcfx"].done()) == 1, what="A to finish")
     w.quiet(3)
     assert w.providers["pcfx"].by_tag("B") == []
@@ -156,7 +156,7 @@ def test_nc_r57_killing_the_scheduler_changes_no_run_and_frees_no_slot(w):
     assert w.get(b)["state"] == "open"
     assert "admission:provider_concurrency" in blocked_codes(w.get(b))
 
-    w.gate("ga")
+    w.gate("ga", pc)
     w.wait_state(a, "done")
     w.wait_state(b, "done")
     assert [len(pc.by_tag(t)) for t in ("A", "B")] == [1, 1]
@@ -188,7 +188,7 @@ def test_nc_r57_r61_a_run_that_ends_while_the_scheduler_is_dead_is_captured_befo
     w.until(lambda: "admission:provider_concurrency" in blocked_codes(w.get(b)),
             what="B blocked by the provider limit")
     w.kill9()
-    w.gate("ga")
+    w.gate("ga", pc)
     w.until(lambda: w.tree_nodes()[run_a]["status"] == "done",
             what="today's supervision to record the end of the run")
     w.start_scheduler()

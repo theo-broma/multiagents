@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nc_fixture import agent as _agent  # noqa: E402
 from nc_fixture.agent import FixtureProvider  # noqa: E402
-from nc_fixture.world import World  # noqa: E402
+from nc_fixture.world import WAIT_TIMEOUT, World  # noqa: E402
 
 _SHELL = r'''
 for cmd in (fx.get("shell") or []):
@@ -132,7 +132,7 @@ class GitWorld(World):
         return (self.fx.dir / name).read_text()
 
     # ------------------------------------------------------------ node helpers
-    def done(self, node_id: str, timeout: float = 45) -> dict:
+    def done(self, node_id: str, timeout: float = WAIT_TIMEOUT) -> dict:
         return self.wait_state(node_id, "done", timeout)
 
     def coder(self, tag: str, files: dict[str, str] | None = None, *, agent: str = "coder",

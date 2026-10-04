@@ -37,6 +37,18 @@ import c3_harness as h  # noqa: E402
 import sc_harness as sc  # noqa: E402
 from multiagents.paths import ProjectPaths, state_root  # noqa: E402
 
+# Every wait is bounded by one of these: short by default, overridable per call.
+CLI_TIMEOUT = 20         # one `multiagents ...` command
+START_TIMEOUT = 12       # `scheduler start` until the socket answers
+STATUS_TIMEOUT = 2       # one status probe while waiting for start
+DEAD_TIMEOUT = 5         # a stopped / killed scheduler until its pid is gone
+RPC_TIMEOUT = 10         # one request on the socket (plus the op's own `timeout`)
+CONNECT_TIMEOUT = 10     # a bare connection's socket timeout
+THREAD_START_TIMEOUT = 5   # in_threads: all callables reaching the barrier
+THREAD_JOIN_TIMEOUT = 20   # in_threads: each callable finishing
+TEARDOWN_STOP = 8        # close(): the polite `scheduler stop`
+REAP_TIMEOUT = 3         # close(): waiting for a killed child
+
 ROOT = object()          # token sentinel: the root capability
 ABSENT = object()        # token sentinel: no `token` key at all
 
@@ -188,12 +200,12 @@ class Sched:
         return self.root / ".multiagents" / "events.jsonl"
 
     # -- lifecycle --------------------------------------------------------
-    def cli(self, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    def cli(self, *args: str, timeout: float = CLI_TIMEOUT) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-m", "multiagents.cli", "--path", str(self.root), *args],
             capture_output=True, text=True, timeout=timeout, cwd=self.root)
 
-    def start(self, wait: float = 20) -> None:
+    def start(self, wait: float = START_TIMEOUT) -> None:
         """`multiagents scheduler start`, then wait until the socket answers.
 
         The command may return once the scheduler is ready (detached) or stay
@@ -214,7 +226,7 @@ class Sched:
                 raise AssertionError(
                     f"`multiagents scheduler start` exited {rc}:\n{self._log.read_text()[-2000:]}")
             try:
-                reply = self.rpc("scheduler_status", timeout=2)
+                reply = self.rpc("scheduler_status", timeout=STATUS_TIMEOUT)
                 if reply.get("ok") is True:
                     pid = (reply.get("result") or {}).get("pid")
                     if isinstance(pid, int):
@@ -241,7 +253,7 @@ class Sched:
         if pid is not None:
             self.wait_dead(pid)
 
-    def wait_dead(self, pid: int, timeout: float = 15) -> None:
+    def wait_dead(self, pid: int, timeout: float = DEAD_TIMEOUT) -> None:
         for proc in self._procs:
             if proc.pid == pid:
                 try:
@@ -269,7 +281,7 @@ class Sched:
         """Finalizer: never raises, never signals a process it did not start."""
         try:
             if self.sock.exists():
-                self.cli("scheduler", "stop", timeout=20)
+                self.cli("scheduler", "stop", timeout=TEARDOWN_STOP)
         except Exception:
             pass
         for pid in list(self._pids):
@@ -280,9 +292,13 @@ class Sched:
                     pass
         for proc in self._procs:
             if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
                 proc.kill()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=REAP_TIMEOUT)
             except Exception:
                 pass
         try:
@@ -307,18 +323,22 @@ class Sched:
         revoke_run_capability(self.root, run_id)
 
     # -- the wire ---------------------------------------------------------
-    def connect(self, timeout: float = 15) -> socket.socket:
+    def connect(self, timeout: float = CONNECT_TIMEOUT) -> socket.socket:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(timeout)
         conn.connect(str(self.sock))
         return conn
 
     def rpc(self, op: str, args: dict | None = None, token: Any = ROOT,
-            request_id: str | None = None, timeout: float = 30,
+            request_id: str | None = None, timeout: float | None = None,
             extra: dict | None = None) -> dict:
         """One request on a fresh connection; the parsed reply line."""
         if token is ROOT:
             token = self.root_token()
+        if timeout is None:
+            # a long-poll op (`wait_for_nodes`) is given room to answer
+            wait = (args or {}).get("timeout")
+            timeout = RPC_TIMEOUT + (wait if isinstance(wait, (int, float)) else 0)
         request: dict[str, Any] = {"op": op, "args": args or {},
                                    "request_id": request_id or uuid.uuid4().hex}
         if token is not ABSENT:
@@ -416,7 +436,7 @@ class Sched:
         gate = threading.Barrier(len(calls))
 
         def run(i, fn):
-            gate.wait(timeout=10)
+            gate.wait(timeout=THREAD_START_TIMEOUT)
             try:
                 results[i] = fn()
             except Exception as exc:        # surfaced by the assertion on the result
@@ -426,7 +446,7 @@ class Sched:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=60)
+            t.join(timeout=THREAD_JOIN_TIMEOUT)
         return results
 
 

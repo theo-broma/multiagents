@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import signal
 import socket
 import subprocess
@@ -40,6 +41,25 @@ from multiagents.paths import ProjectPaths, state_root  # noqa: E402
 from multiagents.tree import Tree  # noqa: E402
 
 from nc_fixture.agent import FixtureProvider, alive, task  # noqa: E402
+
+# Every wait in this module is bounded by one of these, short by default, and
+# overridable per call (`timeout=`). A red test (feature missing) must reach its
+# assertion in seconds, not a library default.
+RPC_TIMEOUT = 10        # one request on the scheduler socket
+CLI_TIMEOUT = 20        # one `multiagents ...` command
+START_TIMEOUT = 12      # `scheduler start` until the socket answers
+STOP_TIMEOUT = 10       # `scheduler stop` until the socket stops answering
+KILL_TIMEOUT = 5        # SIGKILL until the pid is gone
+MAX_WAIT = float(os.environ.get("NC_MAX_WAIT", 120))  # cap on any `until`; World.max_wait per instance
+LAUNCH_GRACE = 8        # wait_state: an open, unblocked simple node that long is not being launched
+WAIT_TIMEOUT = 10       # `until` / `wait_state` / `wait_running` / `wait_spawn`
+HOLD_TIMEOUT = 15       # `hold_lock`: the holder reaching `running`
+TEARDOWN_GRACE = 3      # how long close() lets a scheduler exit before SIGKILL
+UNREACHABLE_GRACE = 5   # `until` gives up when the scheduler socket is dead this long
+REFUSED_GRACE = 3       # ... or answers the same refusal this long
+LEGACY_TIMEOUT = 20     # legacy_start: the helper's first output line
+# a reply that no amount of waiting turns into success
+_PERMANENT = {"unknown_op", "invalid", "scheduler_disabled", "unauthenticated", "forbidden"}
 
 CLI = "import sys; from multiagents.cli import main; sys.exit(main(sys.argv[1:]))"
 
@@ -84,8 +104,11 @@ class World:
     """One project with a gate-on config, fixture providers and a scheduler."""
 
     def __init__(self, tmp_path: Path, monkeypatch, *, scheduler: dict | None = None,
-                 gate: bool = True):
+                 gate: bool = True, tick_seconds: float = 1):
         self.tmp = tmp_path
+        self.max_wait = MAX_WAIT
+        self.tick_seconds = tick_seconds
+        self._pid: int | None = None
         self.monkeypatch = monkeypatch
         h.as_root(monkeypatch)
         self.root = tmp_path / "proj"
@@ -97,7 +120,7 @@ class World:
         self.project: dict[str, Any] = {
             "team": "", "limits": {"max_depth": 7},
             "budget": {"blind_cooldown_seconds": 1},
-            "scheduler": {"enabled": gate, "tick_seconds": 1,
+            "scheduler": {"enabled": gate, "tick_seconds": tick_seconds,
                           "admission_timeout_seconds": 5, **(scheduler or {})}}
         self._tick = time.time()
         self._popen: list[subprocess.Popen] = []
@@ -135,7 +158,7 @@ class World:
     def _env(self) -> dict[str, str]:
         return dict(os.environ, MULTIAGENTS_PROJECT=str(self.root))
 
-    def cli(self, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    def cli(self, *args: str, timeout: float = CLI_TIMEOUT) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, "-c", CLI, "--path", str(self.root), *args],
                               cwd=self.root, env=self._env(), capture_output=True,
                               text=True, timeout=timeout)
@@ -144,7 +167,7 @@ class World:
     def sock(self) -> Path:
         return state_root() / "scheduler-rpc" / self.paths.slug / "rpc.sock"
 
-    def start_scheduler(self, timeout: float = 20) -> int:
+    def start_scheduler(self, timeout: float = START_TIMEOUT) -> int:
         """`multiagents scheduler start`; returns the scheduler's pid once it
         answers on the socket. Fails with the CLI output if it never does."""
         self.write_config()
@@ -158,7 +181,8 @@ class World:
             try:
                 status = self.status()
                 if status.get("pid"):
-                    return int(status["pid"])
+                    self._pid = int(status["pid"])
+                    return self._pid
             except (OSError, ValueError, KeyError, ImportError, AssertionError):
                 pass
             if proc.poll() not in (None, 0):
@@ -170,16 +194,16 @@ class World:
         raise AssertionError(
             f"the scheduler did not come up (exit {proc.poll()}): {out[-1500:]}")
 
-    def stop_scheduler(self) -> subprocess.CompletedProcess:
+    def stop_scheduler(self, timeout: float = STOP_TIMEOUT) -> subprocess.CompletedProcess:
         res = self.cli("scheduler", "stop")
-        self.until(lambda: not self.sock_answers(), timeout=20,
+        self.until(lambda: not self.sock_answers(), timeout=timeout,
                    what="the scheduler to stop answering")
         return res
 
-    def kill9(self) -> int:
+    def kill9(self, timeout: float = KILL_TIMEOUT) -> int:
         pid = self.status()["pid"]
         os.kill(int(pid), signal.SIGKILL)
-        self.until(lambda: not alive(int(pid)), timeout=10, what="the scheduler to die")
+        self.until(lambda: not alive(int(pid)), timeout=timeout, what="the scheduler to die")
         return int(pid)
 
     def restart_scheduler(self) -> int:
@@ -194,22 +218,39 @@ class World:
             return False
 
     def close(self) -> None:
+        """Finalizer: never raises, bounded by a few seconds even when the
+        scheduler is wedged. Stops the scheduler it started by pid, then kills
+        what is left (its process group, the fixture runs)."""
         pid = None
         try:
             pid = int(self.status().get("pid") or 0)
         except Exception:                                   # noqa: BLE001
             pass
-        try:
-            self.cli("scheduler", "stop", timeout=30)
-        except Exception:                                   # noqa: BLE001
-            pass
         if pid and alive(pid):
-            time.sleep(1)
+            try:
+                self.cli("scheduler", "stop", timeout=TEARDOWN_GRACE * 2)
+            except Exception:                               # noqa: BLE001
+                pass
+            end = time.monotonic() + TEARDOWN_GRACE
+            while alive(pid) and time.monotonic() < end:
+                time.sleep(0.05)
             if alive(pid):
-                os.kill(pid, signal.SIGKILL)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
         for proc in self._popen:
             if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
                 proc.kill()
+            for stream in (proc.stdout,):
+                try:
+                    stream and stream.close()
+                except Exception:                           # noqa: BLE001
+                    pass
         for fx in self.providers.values():
             for pid in fx.pids():
                 if alive(pid):
@@ -220,9 +261,14 @@ class World:
 
     # ------------------------------------------------------------------ rpc
     def raw(self, op: str, token: str | None, args: dict | None = None,
-            request_id: str | None = None, timeout: float = 30) -> dict:
+            request_id: str | None = None,
+            timeout: float | None = None) -> dict:
         req = {"op": op, "token": token, "args": args or {},
                "request_id": request_id or uuid.uuid4().hex}
+        if timeout is None:
+            # a long-poll op (`wait_for_nodes`) is given room to answer
+            wait = (args or {}).get("timeout")
+            timeout = RPC_TIMEOUT + (wait if isinstance(wait, (int, float)) else 0)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             s.connect(str(self.sock))
@@ -363,29 +409,127 @@ class World:
         return [p for p in base.rglob("*") if p.is_file()] if base.is_dir() else []
 
     # --------------------------------------------------------------- waiting
-    def until(self, pred: Callable[[], Any], timeout: float = 30, step: float = 0.1,
-              what: str = "the condition") -> Any:
-        end = time.monotonic() + timeout
+    def until(self, pred: Callable[[], Any], timeout: float = WAIT_TIMEOUT, step: float = 0.1,
+              what: str = "the condition", give_up: Callable[[], Any] | None = None) -> Any:
+        """Poll `pred` until it is truthy, for at most `min(timeout, max_wait)`.
+        `give_up`, when given, is called after each miss; a truthy return (the
+        reason) fails the wait at once. Fails early, with the reason, when
+        the scheduler's socket has been dead for UNREACHABLE_GRACE seconds or
+        has answered the same permanent refusal (unknown op, scheduler
+        disabled, ...) for REFUSED_GRACE seconds: no wait helps then."""
+        if give_up is None and self._pid is not None and self.project["scheduler"].get("enabled"):
+            give_up = self.stall_probe()
+        start = time.monotonic()
+        timeout = min(timeout, self.max_wait)
+        end = start + timeout
         last: Any = None
+        dead_since: float | None = None
+        refused: tuple[str, float] | None = None
         while time.monotonic() < end:
+            now = time.monotonic()
             try:
                 last = pred()
-            except (OSError, ValueError, KeyError, RpcError):
+                dead_since = refused = None
+            except RpcError as exc:
                 last = None
+                dead_since = None
+                code = re.search(r"'(?:error|code)': '(\w+)'", str(exc))
+                key = code.group(1) if code else None
+                if key in _PERMANENT:
+                    if refused is None or refused[0] != key:
+                        refused = (key, now)
+                    elif now - refused[1] >= REFUSED_GRACE:
+                        raise AssertionError(
+                            f"gave up waiting for {what}: the scheduler keeps answering {exc}")
+                else:
+                    refused = None
+            except (OSError, ValueError, KeyError) as exc:
+                last = None
+                refused = None
+                if isinstance(exc, (ConnectionError, FileNotFoundError)):
+                    dead_since = dead_since if dead_since is not None else now
+                    exited = self._pid is not None and not alive(self._pid)
+                    if (exited or now - dead_since >= UNREACHABLE_GRACE) and not self.sock_alive():
+                        raise AssertionError(
+                            f"gave up waiting for {what}: the scheduler socket is dead ({exc!r})")
             if last:
                 return last
+            if give_up is not None:
+                try:
+                    reason = give_up()
+                except (OSError, ValueError, KeyError, RpcError):
+                    reason = None
+                if reason:
+                    raise AssertionError(f"gave up waiting for {what}: {reason}")
             time.sleep(step)
         raise AssertionError(f"timed out after {timeout}s waiting for {what}")
 
-    def wait_state(self, node_id: str, state: str, timeout: float = 30) -> dict:
-        return self.until(lambda: (n := self.get(node_id))["state"] == state and n,
-                          timeout, what=f"{node_id} to be {state}")
+    def stall_probe(self) -> Callable[[], Any]:
+        """A `give_up` for waits on a plan: it trips once nothing in the plan has
+        ever run (no node running, suspended, held or done) while some simple
+        node has sat open and unblocked for LAUNCH_GRACE seconds, i.e. the
+        scheduler is not launching anything."""
+        since: list[float] = []
 
-    def wait_running(self, node_id: str, timeout: float = 30) -> dict:
-        return self.wait_state(node_id, "running", timeout)
+        def probe():
+            nodes = self.list()
+            started = any(n.get("state") in ("running", "suspended", "held", "done")
+                          for n in nodes)
+            idle = any(n.get("state") == "open" and n.get("kind", "simple") == "simple"
+                       and not blocked_codes(n) for n in nodes)
+            if started or not idle:
+                since.clear()
+                return None
+            if not since:
+                since.append(time.monotonic())
+            if time.monotonic() - since[0] >= LAUNCH_GRACE:
+                return f"nothing was launched in {LAUNCH_GRACE}s although a node is open and unblocked"
+            return None
+        return probe
+
+    def sock_alive(self) -> bool:
+        """Is anything answering on the scheduler socket (one quick attempt)?"""
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect(str(self.sock))
+            return True
+        except OSError:
+            return False
+
+    def wait_state(self, node_id: str, state: str, timeout: float = WAIT_TIMEOUT,
+                   give_up: Callable[[], Any] | None = None) -> dict:
+        """Wait for `node_id` to be in `state`. `done` and `cancelled` are
+        final (NC-R1), so a node there that is not in `state` fails at once."""
+        idle: list[float] = []
+
+        def probe():
+            n = self.get(node_id)
+            if n["state"] == state:
+                return n
+            if n["state"] in ("done", "cancelled"):
+                raise AssertionError(
+                    f"{node_id} is {n['state']} (final), it will never be {state}: "
+                    f"outcome={n.get('outcome')!r} blocked={blocked_codes(n)}")
+            if (state != "open" and n["state"] == "open" and n.get("kind", "simple") == "simple"
+                    and not blocked_codes(n)):
+                idle.append(time.monotonic()) if not idle else None
+                if time.monotonic() - idle[0] >= LAUNCH_GRACE:
+                    raise AssertionError(
+                        f"{node_id} has been open and unblocked for {LAUNCH_GRACE}s: "
+                        f"the scheduler is not launching it")
+            else:
+                idle.clear()
+            return None
+        return self.until(probe, timeout, what=f"{node_id} to be {state}",
+                          give_up=give_up)
+
+    def wait_running(self, node_id: str, timeout: float = WAIT_TIMEOUT,
+                     give_up: Callable[[], Any] | None = None) -> dict:
+        return self.wait_state(node_id, "running", timeout, give_up)
 
     def wait_spawn(self, tag: str, fx: FixtureProvider | None = None,
-                   timeout: float = 30) -> dict:
+                   timeout: float = WAIT_TIMEOUT) -> dict:
         fx = fx or self.fx
         return self.until(lambda: (fx.by_tag(tag) or [None])[0], timeout,
                           what=f"the fixture run {tag!r} to start")
@@ -396,6 +540,14 @@ class World:
 
     def gate(self, name: str, fx: FixtureProvider | None = None) -> None:
         (fx or self.fx).open_gate(name)
+
+    def hold_lock(self, lock: str = "L", timeout: float = HOLD_TIMEOUT) -> str:
+        """A gated running node on `lock`: whatever else names `lock` is
+        `ready` but never launches, so its `ready` can be read without it
+        racing into `running`."""
+        holder = self.simple("HOLDER", locks=[lock], fx={"gate": "holder"})
+        self.wait_running(holder, timeout)
+        return holder
 
 
 def write_tree_entries(world: World, build: Callable[[Tree], None]) -> None:
@@ -419,7 +571,7 @@ asyncio.run(main())
 
 
 def legacy_start(world: World, agent: str, task_text: str,
-                 timeout: float = 60) -> tuple[str, subprocess.Popen]:
+                 timeout: float = LEGACY_TIMEOUT) -> tuple[str, subprocess.Popen]:
     """Launch a run the way today's code does (gate OFF: the config of this
     world must say `scheduler.enabled: false` when this is called), from a
     helper process that keeps supervising it. Returns (run id, helper)."""
@@ -428,6 +580,8 @@ def legacy_start(world: World, agent: str, task_text: str,
                             cwd=world.root, env=world._env(), stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, text=True)
     world._popen.append(proc)
+    ready, _, _ = select.select([proc.stdout], [], [], timeout)
+    assert ready, f"the legacy start printed nothing within {timeout}s"
     line = proc.stdout.readline()
     result = json.loads(line)
     assert result.get("agent_id"), f"legacy start was not admitted: {result}"

@@ -82,17 +82,22 @@ def test_adv3_a_run_waiting_without_a_cursor_starts_from_zero_not_roots_ack(live
 
 
 def test_adv3_a_capability_revoked_during_a_wait_gets_no_transition(live):
-    own = live.create()
+    # `own` depends on a cancelled node, so it can never become eligible and no
+    # launch transition can reach the waiter before the revocation (NC-R15
+    # makes a wait return the transitions available to it).
+    blocker = live.create()
+    assert live.cancel_raw(blocker["id"])["ok"] is True
+    own = live.create(depends_on=[{"node": blocker["id"], "require": "success"}])
     token = live.issue("run-1", own["id"], {"read", "delegate"})
     top = live.ok("wait_for_nodes", {"timeout": 0}, token=token)["next_cursor"]
     out = {}
     waiter = threading.Thread(target=lambda: out.update(reply=live.rpc(
-        "wait_for_nodes", {"cursor": top, "timeout": 8}, token=token, timeout=30)))
+        "wait_for_nodes", {"cursor": top, "timeout": 8}, token=token, timeout=15)))
     waiter.start()
-    time.sleep(1.0)
+    time.sleep(0.3)
     live.revoke("run-1")
     live.update(own["id"], task="changed after revocation")
-    waiter.join(timeout=30)
+    waiter.join(timeout=15)
     assert code(out["reply"]) == "unauthenticated", out
 
 
