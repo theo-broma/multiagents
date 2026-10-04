@@ -4226,3 +4226,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   **Tooling bug:** the decision marker was detected mid-line (inside backticks) in the adversary's report, which parked it twice and truncated its message. bug-reporter ag-0b451c is in flight (fix in-house).
 
   **M4 speed rework merged** (c0159e9): 612 s → 137 s. The bounds WAIT=8 and WAIT_ROUNDS=20 were not timed on a green run: raise them if M4 is flaky.
+- 2026-10-04: **bug-f59d6c fixed and merged** (8c529d3; 3 review rounds). The ticket is resolved as fixed.
+  - **M3/M4/M5/M6 speed reworks merged** (9fb0b6d, c0159e9, 852f843, 13a83c7). The harness tester ag-cbeaa2 is still running.
+  - **M2 round 2 done** (ag-eb2369, tip 5054a20). M1+M2+core: 1,195 passed; the 4 failures are the M4 aliases.
+    - Reviewer replies: R3 declined (claim after enqueue, with a `finally` release); R4 kept the 0.5 s poll.
+    - Re-review ag-cee330 and adversary round 2 ag-0a5e9b are in flight.
+  - **Budget tag `tickets` is spent** (6.48M of 6M). bug-93a3e4 (minor, agy trailing ERROR) is not started: raising the tag is the user's call.
