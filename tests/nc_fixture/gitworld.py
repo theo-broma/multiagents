@@ -51,7 +51,7 @@ if vr:
     sock_path = os.environ.get("MULTIAGENTS_RPC_SOCKET") or mcp_env.get("MULTIAGENTS_RPC_SOCKET")
     if sock_path:
         s = socket.socket(socket.AF_UNIX); s.connect(sock_path)
-        s.sendall((json.dumps(req) + "\\n").encode()); s.recv(65536)
+        s.sendall((json.dumps(req) + "\n").encode()); s.recv(65536)
 '''
 
 _MARK = '\nif fx.get("commit"):'
