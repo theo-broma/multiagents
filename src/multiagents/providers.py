@@ -199,6 +199,10 @@ class Event:
     # SC-R2a: the provider's own id for the step a cost belongs to (`fields.
     # step_id`), the spend ledger's dedup key. Empty when not reported.
     step_id: str = ""
+    # The provider's id for the content block or message part a text belongs
+    # to (`fields.block`). Text events with different ids are separate blocks;
+    # empty when the provider declares none.
+    block: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
     startup_progress: bool = False
 
@@ -740,6 +744,7 @@ class Provider:
                     session_id=session_id,
                     turn=str(extracted.get("turn") or ""),
                     step_id=str(extracted.get("step_id") or ""),
+                    block=str(extracted.get("block") or ""),
                     raw=payload,
                     startup_progress=progress,
                 )

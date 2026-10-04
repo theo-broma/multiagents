@@ -132,7 +132,19 @@ def _tool():
     register = mcp.tool()
 
     def decorate(fn):
-        register(_reported(fn))
+        permissions = os.environ.get("MULTIAGENTS_NODE_PERMISSIONS")
+        allowed = None
+        if permissions is not None:
+            granted = set(permissions.split(","))
+            allowed = {"get_node", "list_nodes", "wait_for_nodes", "scheduler_status", "list_templates"}
+            if "delegate" in granted:
+                allowed |= {"create_node", "update_node", "cancel_node", "instantiate_template",
+                            "start_agent", "consult", "answer_question", "steer_agent", "stop_agent",
+                            "wait_for_agents", "check_agent", "collect_agent", "list_agents"}
+            if "verdict" in granted:
+                allowed.add("give_verdict")
+        if allowed is None or fn.__name__ in allowed:
+            register(_reported(fn))
         return fn
     return decorate
 
@@ -567,6 +579,8 @@ async def start_agent(
     verifies: str = "",
     budget_tag: str = "",
     budget_tokens: int = 0,
+    urgent: bool = False,
+    request_id: str | None = None,
 ) -> dict:
     """Start a subagent on a task. Returns immediately with an agent_id.
 
@@ -617,9 +631,19 @@ async def start_agent(
         # A valid gate still takes effect if a separate provider reload fails.
         gate = run.config.project.get("scheduler", {}).get("enabled", False)
     if gate:
-        # M1 has no launch implementation and must never fall back to Runner.
+        # Authenticate even an empty run label before touching host authority.
         status = _node_rpc("scheduler_status", {})
-        return status if status.get("error") else {"error": "not_implemented"}
+        if status.get("error"):
+            return status
+        if status.get("launch_context") is False:
+            return {"error": "not_implemented"}
+        from .scheduler import submit
+        return await asyncio.to_thread(submit, paths.root, agent, task,
+                                       caller=os.environ.get("MULTIAGENTS_AGENT_ID") or None,
+                                       request_id=request_id, urgent=urgent,
+                                       workdir=workdir or None, timeout=timeout,
+                                       model=model or None, verifies=verifies,
+                                       budget_tag=budget_tag, budget_tokens=budget_tokens)
     run = run or runner()
     try:
         result = await run.start(

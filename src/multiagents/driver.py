@@ -191,6 +191,13 @@ def _restore_terminal(saved) -> None:
         pass
 
 
+
+def _keep_scheduler(project_root):
+    from . import scheduler
+    if scheduler.enabled(project_root):
+        scheduler.start(project_root)
+
+
 def _run_attached(argv, env, stalled=None) -> int:
     """Run the CLI as a child that owns the terminal, and return its exit code.
 
@@ -247,6 +254,8 @@ def _run_attached(argv, env, stalled=None) -> int:
         if attached is not None:
             attached(child.pid)
         while True:
+            if env.get("MULTIAGENTS_PROJECT"):
+                _keep_scheduler(Path(env["MULTIAGENTS_PROJECT"]))
             try:
                 return child.wait(timeout=STALL_POLL_SECONDS)
             except subprocess.TimeoutExpired:
@@ -1316,6 +1325,8 @@ def _supervise(paths, config, role, spec, provider, executor,
             # can sit there indefinitely, and an unattended loop is exactly
             # where nobody is watching it do that.
             while True:
+                if config.project.get("scheduler", {}).get("enabled"):
+                    _keep_scheduler(paths.root)
                 try:
                     code = child.wait(timeout=STALL_POLL_SECONDS)
                     break

@@ -306,6 +306,8 @@ class Normalizer:
             out.update(kind="step", state=item.get("status", ""))
             if typ == "agent_message" and kind == "item.completed":
                 out.update(kind="text", text=item.get("text", ""))
+                if item.get("id") is not None:
+                    out["block"] = str(item["id"])
             elif typ in {"command_execution", "mcp_tool_call", "file_change", "web_search"}:
                 ident = item.get("id")
                 # Missing ids remain raw: never invent repeat signatures.

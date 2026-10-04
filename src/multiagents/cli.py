@@ -3254,7 +3254,7 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     from . import scheduler
     paths = _resolve(args.path)
     if args.scheduler_command == "start":
-        result = scheduler.start(paths.root, foreground=args.foreground)
+        result = scheduler.start(paths.root, foreground=args.foreground, clock_file=getattr(args, "clock_file", None))
     elif args.scheduler_command == "stop":
         result = scheduler.stop(paths.root)
     else:
@@ -3279,6 +3279,7 @@ def main(argv: list[str] | None = None) -> int:
         command.set_defaults(func=cmd_scheduler, foreground=False)
         if action == "start":
             command.add_argument("--foreground", action="store_true")
+            command.add_argument("--clock-file", help=argparse.SUPPRESS)
 
     p = sub.add_parser("plan", help="commit plans and new specifications")
     p.set_defaults(func=cmd_plan)

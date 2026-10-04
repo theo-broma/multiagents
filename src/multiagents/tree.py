@@ -295,6 +295,8 @@ class Node:
     # (DQ-R8). Written in the SAME transaction as the node itself (DQ-R11): a
     # drain that dies after start() returns leaves a node that recovery can
     # find, so the task is never started a second time.
+    node_id: str = ""
+    attempt_id: str = ""
     deferred_id: str = ""
     turns: int = 0
     # The base commit a conversation's worktree was last placed on: where it

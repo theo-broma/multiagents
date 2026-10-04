@@ -125,7 +125,8 @@ providers:
       rules:
         - match: {type: "text"}
           as: text
-          fields: {text: "part.text"}
+          # Each text event is one whole part; its id tells parts apart.
+          fields: {text: "part.text", block: "part.id"}
         - match: {type: "tool_use"}
           as: tool
           fields:
@@ -613,6 +614,9 @@ providers:
           fields:
             text: "message.content[type=text].text"
             turn: "message.id"
+            # One whole content block per line (no partial messages); several
+            # lines share message.id, so the line's own uuid tells them apart.
+            block: "uuid"
         - match: {type: "result"}
           as: result
           status_map:
@@ -755,7 +759,7 @@ providers:
       rules:
         - match: {kind: "text"}
           as: text
-          fields: {text: "text", turn: "turn"}
+          fields: {text: "text", turn: "turn", block: "block"}
         - match: {kind: "tool"}
           as: tool
           fields: {name: "name", args: "args", state: "state", turn: "turn"}

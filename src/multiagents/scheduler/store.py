@@ -57,6 +57,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS requests
                     (subject TEXT NOT NULL, request_id TEXT NOT NULL, payload TEXT NOT NULL,
                      reply TEXT NOT NULL, PRIMARY KEY(subject, request_id));
+                CREATE TABLE IF NOT EXISTS attempts
+                    (id TEXT PRIMARY KEY, record TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notifications
                     (seq INTEGER PRIMARY KEY AUTOINCREMENT, record TEXT NOT NULL);
             """
@@ -75,7 +77,8 @@ class Store:
         db = sqlite3.connect(self.file if write else f"{self.file.as_uri()}?mode=ro",
                              uri=not write, timeout=30, isolation_level=None)
         try:
-            db.execute("PRAGMA synchronous=FULL")
+            if write:
+                db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
             db.commit()

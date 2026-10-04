@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from contextvars import ContextVar
 import copy
 import fcntl
 import functools
@@ -113,6 +114,40 @@ COMMIT_FIX = (
     "Do not bypass the hook — never use --no-verify.\n\n"
     "The hook's output (its last {chars} characters at most):\n\n{output}"
 ).replace("{chars}", str(COMMIT_FIX_OUTPUT_CHARS))
+
+
+@dataclass(frozen=True)
+class LaunchContext:
+    """Host-supplied identity for a planned activation (NC-R12)."""
+    caller: str | None
+    run_parent: str | None
+    depth: int
+    node_id: str
+    attempt_id: str
+    run_id: str = ""
+    provider: str = ""
+    effort: str = ""
+    admission_only: bool = False
+
+
+_launch_context: ContextVar[LaunchContext | None] = ContextVar("launch_context", default=None)
+
+
+def encode_admission(admission):
+    return json.dumps(admission, sort_keys=True)
+
+
+def admission_block(reason, retry_after=None):
+    text = str(reason)
+    code = next((code for needle, code in (
+        ("provider_concurrency", "provider_concurrency"),
+        ("max_concurrent", "max_concurrent"), ("Depth limit", "max_depth"),
+        ("active children", "max_children"), ("token budget", "budget_tokens"),
+        ("Budget for", "budget_tokens"), ("spend_cap", "spend_cap"),
+        ("disabled", "provider_disabled"), ("not granted permission", "permission"),
+    ) if needle in text), "refused")
+    return {"blocked": [{"code": "admission:" + code, "detail": text}],
+            **({"retry_after": retry_after} if retry_after else {})}
 
 
 def _both_ends(text: str, keep: int = 80, tail: int = 200) -> str:
@@ -614,6 +649,7 @@ class Run:
     provider: Provider
     spec: AgentSpec
     handle: Handle | None = None
+    capability_hash: str = ""
     supervisor: Supervisor | None = None
     task: asyncio.Task | None = None
     events: list[dict] = field(default_factory=list)
@@ -752,6 +788,37 @@ def _admitted(what: str):
     return decorate
 
 
+def _scheduled_start(fn):
+    """NC-R56: route starts through node admission with task-local authority."""
+    @functools.wraps(fn)
+    async def scheduled(self, agent_name, task, *, launch_context=None, **kwargs):
+        context = launch_context or _launch_context.get()
+        token = _launch_context.set(context)
+        try:
+            if self.scheduler_enabled() and context is None:
+                from .scheduler import submit
+                internal = {key: kwargs.pop(key, None) for key in
+                            ("deferred_id", "recorded_provider", "queued", "_cap_raced")}
+                if any(internal.get(key) for key in ("deferred_id", "recorded_provider", "queued")):
+                    return admission_block("legacy queue start requires scheduler migration")
+                return await asyncio.to_thread(submit, self.paths.root, agent_name, task,
+                                               caller=self.self_id(), **kwargs)
+            try:
+                result = await fn(self, agent_name, task, **kwargs)
+            except (RuntimeError, PermissionError, ValueError, KeyError, FileNotFoundError) as exc:
+                if context:
+                    return admission_block(exc)
+                raise
+            if context and not result.get("agent_id") and not result.get("admitted"):
+                if not isinstance(result.get("blocked"), list):
+                    return admission_block(result.get("error") or result.get("reason") or result,
+                                           result.get("retry_after"))
+            return result
+        finally:
+            _launch_context.reset(token)
+    return scheduled
+
+
 class Runner:
     # How often `_watch_timers` looks at a run's silence and wall clock, and
     # how much longer than the other turn's own limit a consult waits for that
@@ -772,6 +839,8 @@ class Runner:
         self.paths = paths
         self.config = config
         self.config_error = ""
+        self._scheduler_version = config_mod.source_version(paths)
+        self._scheduler_gate = config.project.get("scheduler", {}).get("enabled", False)
         self.providers = load_providers(config.providers, config.provider_sources)
         self.tree = Tree(paths.tree_file, paths.events_file)
         self.startup = StartupHealth(paths)
@@ -796,6 +865,19 @@ class Runner:
         self._cap_tasks: set[asyncio.Task] = set()
         # SC-R4c: (crossing id, node) stops whose record has not landed yet.
         self._unrecorded_stops: set[tuple[str, str]] = set()
+
+    def scheduler_enabled(self):
+        if self.config.project.get("scheduler", {}).get("enabled"):
+            return True
+        version = config_mod.source_version(self.paths)
+        if version != self._scheduler_version:
+            from .scheduler_config import settings
+            try:
+                self._scheduler_gate = settings(self.paths.root).get("enabled", False)
+                self._scheduler_version = version
+            except Exception:
+                pass  # Retain the last valid gate during a malformed reload.
+        return self._scheduler_gate
 
     def authoritative(self, node: Node, action: str) -> Node | None:
         """Use recorded operands, reporting container-written disagreements once.
@@ -898,7 +980,8 @@ class Runner:
 
     def self_id(self) -> str | None:
         """Which node *this* server is running as, if it was spawned by us."""
-        return os.environ.get("MULTIAGENTS_AGENT_ID") or None
+        context = _launch_context.get()
+        return context.caller if context else os.environ.get("MULTIAGENTS_AGENT_ID") or None
 
     def session(self) -> str:
         """Which launched session this server belongs to, if any.
@@ -910,6 +993,9 @@ class Runner:
         return os.environ.get("MULTIAGENTS_SESSION_ID", "")
 
     def self_depth(self) -> int:
+        context = _launch_context.get()
+        if context:
+            return context.depth - 1
         try:
             return int(os.environ.get("MULTIAGENTS_DEPTH", "0"))
         except ValueError:
@@ -1216,6 +1302,11 @@ class Runner:
         return ""
 
     def can_spawn(self) -> bool:
+        context = _launch_context.get()
+        if context:
+            parent = self.tree.get(context.caller) if context.caller else None
+            return not context.caller or bool(parent and self.config.agents.get(parent.agent)
+                                              and self.config.agents[parent.agent].can_spawn)
         if self.self_id() is None:
             return True                       # the root orchestrator always may
         return os.environ.get("MULTIAGENTS_CAN_SPAWN", "0") == "1"
@@ -2273,7 +2364,8 @@ class Runner:
         # children, not its siblings. The root orchestrator is not capped
         # here: max_concurrent bounds it, and `limits.max_children` would
         # halve the tree's parallelism (LM-R3).
-        parent = self.self_id()
+        context = _launch_context.get()
+        parent = context.run_parent if context else self.self_id()
         if parent:
             siblings = [c for c in self.tree.children_of(parent) if _occupies_slot(c)]
             cap = self._child_cap(parent)
@@ -2863,6 +2955,7 @@ class Runner:
         recovery uses instead of whatever the config says later.
         """
         hold = self._new_hold(node_id, provider_name, startup_token, executor)
+        self._record_node_launch_evidence(node_id, hold.record)
         self.tree.update(node_id, cleanup_hold=dict(hold.record))
         hold.durable = True
         self._holds[node_id] = hold
@@ -2879,6 +2972,7 @@ class Runner:
                           or (procs.start_time(handle.pid) if handle.pid else "")
                           or "")
         hold.record = dict(hold.record, pid=hold.pid, pid_start=hold.pid_start)
+        self._record_node_launch_evidence(node_id, hold.record)
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node_id)
             if entry is not None:
@@ -3397,6 +3491,39 @@ class Runner:
         if not task.cancelled():
             task.exception()
 
+    def _check_node_launch(self, node_id):
+        context = _launch_context.get()
+        run = self.tree.get(node_id)
+        managed = context.node_id if context else run.node_id if run else ""
+        if not managed:
+            return
+        from .scheduler import enabled
+        if not enabled(self.paths.root):
+            raise RuntimeError("scheduler_disabled: node runs require scheduler admission")
+        from .scheduler.engine import attempts
+        from .scheduler.store import Store
+        store = Store(self.paths.root)
+        with store.transaction(write=False) as db:
+            node = store.nodes(db)[managed]
+            attempt = next((a for a in attempts(db).values() if a["run_id"] == node_id), None)
+            if not attempt or attempt["state"] not in {"claimed", "launched"} or attempt.get("cancel_requested"):
+                raise RuntimeError(f"node_state: {managed} has no live launch permission; nothing launched")
+            expected = "open" if attempt and attempt["state"] == "claimed" else "running"
+            if node["state"] != expected:
+                raise RuntimeError(f"node_state: {managed} is {node['state']}; nothing launched")
+
+    def _record_node_launch_evidence(self, node_id, record):
+        context = _launch_context.get()
+        if not context or not context.node_id:
+            return
+        from .scheduler.engine import attempts, save_attempt
+        from .scheduler.store import Store
+        store = Store(self.paths.root)
+        with store.transaction() as db:
+            attempt = attempts(db)[context.attempt_id]
+            attempt["launch_evidence"] = {k: record[k] for k in ("pid", "pid_start", "executor")}
+            save_attempt(db, attempt)
+
     async def _launch(
         self,
         *,
@@ -3428,6 +3555,19 @@ class Runner:
         reading `self.runs[node_id]` during that window would otherwise get a
         fresh event nobody will ever set.
         """
+        if self.scheduler_enabled() and (
+                _launch_context.get() is None or session_id or self.launch_limits.launch_time(node_id) is not None):
+            from .scheduler import resume_admission
+            admission = await asyncio.to_thread(resume_admission, self.paths.root,
+                                               node_id, None if _launch_context.get() else self.self_id())
+            if admission.get("error") or admission.get("blocked"):
+                self._startup_release(provider.name, node_id, startup_token)
+                raise RuntimeError(encode_admission(admission))
+        try:
+            self._check_node_launch(node_id)
+        except BaseException:
+            self._startup_release(provider.name, node_id, startup_token)
+            raise
         transport_error = self._transport_refusal(provider)
         if transport_error:
             self._startup_release(provider.name, node_id, startup_token)
@@ -3598,8 +3738,24 @@ class Runner:
                         f"script directories (project, global, shipped)")
                 argv[0] = str(adapter)
 
-            # SM-R1/R2: the server goes to an agent that may spawn, and only to one.
-            if spec.can_spawn:
+            managed = self.tree.get(node_id)
+            if managed and managed.node_id:
+                from .scheduler import issue_run_capability, transport_directory
+                permissions = {"read"} | ({"delegate"} if spec.can_spawn else set())
+                from .scheduler.store import Store
+                plan = Store(self.paths.root)
+                with plan.transaction(write=False) as db:
+                    records = plan.nodes(db)
+                own = records[managed.node_id]
+                composite = records.get(own["parent"])
+                if composite and composite["kind"] == "loop" and composite["loop"]["verdict_child"] == managed.node_id:
+                    permissions.add("verdict")
+                env["MULTIAGENTS_RPC_TOKEN"] = issue_run_capability(
+                    self.paths.root, node_id, managed.node_id, permissions)
+                env["MULTIAGENTS_RPC_SOCKET"] = str(transport_directory(self.paths.root) / "rpc.sock")
+                env["MULTIAGENTS_NODE_PERMISSIONS"] = ",".join(sorted(permissions))
+            # Managed runs always have their scoped node server (NC-R58).
+            if spec.can_spawn or managed and managed.node_id:
                 server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
                 argv += server_argv
                 env.update(server_env)
@@ -3693,6 +3849,7 @@ class Runner:
             _run_write(run_dir, "command.json",
                        json.dumps(scrub(command_record), indent=2))
             env["MULTIAGENTS_TURN_STARTED_AT"] = str(launched_at)
+            self._check_node_launch(node_id)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
                                           deadline=launched_at + wall if wall else 0,
                                           provider=provider.name)
@@ -3739,6 +3896,8 @@ class Runner:
             pending_charges=list(getattr(self.runs.get(node_id), "pending_charges", None) or []),
             **({"done": done} if done is not None else {}),
         )
+        if env.get("MULTIAGENTS_RPC_TOKEN"):
+            run.capability_hash = hashlib.sha256(env["MULTIAGENTS_RPC_TOKEN"].encode()).hexdigest()
         self.runs[node_id] = run
         try:
             await self._track_container_run(run, executor)
@@ -4162,6 +4321,22 @@ class Runner:
                                      problem.get("retry_after"))
         return None
 
+    def _budget_providers(self, spec):
+        if _launch_context.get() is None:
+            return self.providers
+        # Planned admission only waits for routes this agent can use and the
+        # accounts that supply their quota readings.
+        names = {spec.provider, *(spec.models or {})}
+        pending = list(names)
+        while pending:
+            candidate = self.providers.get(pending.pop())
+            for owner in (getattr(candidate, "budget_from", ""),
+                          getattr(candidate, "auth_from", "")):
+                if owner and owner not in names:
+                    names.add(owner)
+                    pending.append(owner)
+        return {name: p for name, p in self.providers.items() if name in names}
+
     async def _pin_health(self, spec: AgentSpec) -> dict | None:
         problem = self._pin_problem(spec)
         if problem:
@@ -4170,7 +4345,7 @@ class Runner:
             return self._pin_refusal(spec.provider, "provider is not authenticated")
         cooldowns = self.tree.read().get("cooldowns", {})
         budgets = await asyncio.to_thread(
-            budget_mod.read_all, self.providers, lambda _name: self.executor(spec),
+            budget_mod.read_all, self._budget_providers(spec), lambda _name: self.executor(spec),
             global_config_dir(), self.paths.config, None, cooldowns,
             limits=self.config.limits)
         self._half_open(budgets, cooldowns)
@@ -4293,6 +4468,7 @@ class Runner:
     # ----------------------------------------------------------------- start --
 
     @_admitted("a new agent")
+    @_scheduled_start
     async def start(
         self,
         agent_name: str,
@@ -4314,7 +4490,13 @@ class Runner:
         entry in the admission transaction, and is never re-queued — a
         refusal answers `pc_full` (still no slot: the entry keeps its place)
         or `blocked` (refused for another reason, reported by the drain)."""
+        context = _launch_context.get()
         spec = self.config.agent(agent_name)
+        if context and context.provider:
+            spec = self._usable_spec(spec, context.provider, resume=True) or spec
+            spec = spec.replace(provider=context.provider)
+        if context and context.effort:
+            spec = spec.replace(effort=context.effort)
         queued_model, queued_pinned = "", False
         if queued:
             # PC-R3d: a queued start runs the provider and model recorded
@@ -4419,7 +4601,9 @@ class Runner:
             # was asked for — the queuing agent's child, at its depth.
             parent = queued["spec"].get("parent")
             depth = int(queued["spec"].get("depth") or depth)
-        node_id = new_id()
+        if context:
+            parent, depth = context.run_parent, context.depth
+        node_id = context.run_id if context and context.run_id else new_id()
 
         # --- budget routing -------------------------------------------------
         # Budget now shells out to provider scripts, so it must not run on the
@@ -4427,7 +4611,7 @@ class Runner:
         # wait_for_agents and check_agent. Cached for 60s and offloaded.
         cooldowns = self.tree.read().get("cooldowns", {})
         budgets = await asyncio.to_thread(
-            budget_mod.read_all, self.providers,
+            budget_mod.read_all, self._budget_providers(spec),
             # read_all hands the PROVIDER name; Runner.executor takes an
             # AgentSpec. The budget scripts only need the backend kind and any
             # container context, so the project default is the right answer.
@@ -4602,6 +4786,8 @@ class Runner:
                                                pinned_model=pinned_spec)
                     pc_full[chosen] = (full, routed.model if routed else spec.model)
                     continue
+            if chosen is None and pc_full and context:
+                return admission_block(next(iter(pc_full.values()))[0])
             if chosen is None and pc_full:
                 return self._pc_queue_start(next(iter(pc_full.values())), agent_name, task,
                                             model=model, timeout=timeout, workdir=workdir,
@@ -4626,6 +4812,9 @@ class Runner:
                 return self._pin_refusal(spec.provider, problem.get("reason") or why,
                                          problem.get("retry_after") or
                                          (entry.cooldown_until if entry else None))
+            if chosen is None and context:
+                return admission_block(why, min((b.cooldown_until for b in budgets.values()
+                                                if b.cooldown_until), default=None))
             if chosen is None:
                 self._deferral_notices(agent_name, choose, budgets, before_wind_down, reserve)
             else:
@@ -4767,6 +4956,8 @@ class Runner:
             # try/finally below only runs for a claim that was actually
             # taken.
             self._effort_conflict(spec, provider)
+            if context and context.admission_only:
+                return {"admitted": True, "provider": provider.name, "model": spec.model}
             try:
                 startup_token = self.startup.claim(provider.name, node_id)
             except StartupUnavailable as exc:
@@ -4822,6 +5013,8 @@ class Runner:
                 # bookkeeping leaves a node recovery can find — the restart
                 # happened once, and nothing starts the task a second time.
                 deferred_id=deferred_id,
+                node_id=context.node_id if context else "",
+                attempt_id=context.attempt_id if context else "",
                 routed_from=routed_from, routed_why=routed_why,
                 effort=spec.effort or "",
                 limits=limits, session=self.session(),
@@ -4860,6 +5053,8 @@ class Runner:
                                                          "reason": routed_why})
 
                 prompt = self.compose_prompt(spec, task, node, worktree_path)
+                if context:
+                    prompt += f"\nworking directory: {worktree_path}\nnode: {context.node_id}\n"
                 try:
                     run = await self._launch(
                         node_id=node_id, spec=spec, provider=provider, prompt=prompt,
@@ -4987,6 +5182,7 @@ class Runner:
                         and gitops.is_repo(Path(node.worktree)) else None)
         last_progress = 0.0
         decision_text = ""
+        text_block = ""
         pending_decision: dict[str, str] | None = None
 
         def decision_pending(*, ended: bool = False) -> bool:
@@ -5162,7 +5358,14 @@ class Runner:
                 # A decision only a human can make: stop once its following
                 # default line is complete, or the message ends.
                 if event.kind == "text":
+                    # Parts of separate blocks (distinct provider block ids)
+                    # are separate lines; parts of one block, or of a provider
+                    # declaring no ids, join as-is. Any non-text event already
+                    # ends the buffered line (`ended` below).
+                    if decision_text and event.block and text_block and event.block != text_block:
+                        decision_text += "\n"
                     decision_text += event.text or ""
+                    text_block = event.block
                 if decision_pending(ended=event.kind != "text"):
                     await handle.stop()
                     break
@@ -5692,7 +5895,7 @@ class Runner:
             # spent the whole wall clock, the second is not known to have died.
             if (status == "failed" and said_nothing
                     and not timed_out and not unrecorded
-                    and fresh and not fresh.retries
+                    and fresh and not fresh.node_id and not fresh.retries
                     and fresh.turn_elapsed() < float(self.config.limits.get(
                         "retry_silent_failure_under_seconds", 60))):
                 transport_error = self._transport_refusal(run.provider)
@@ -6165,7 +6368,7 @@ class Runner:
         is a surprise worth being able to inspect.
         """
         node = self.tree.get(node_id)
-        if node is None or not node.branch or spec.writes or spec.conversational:
+        if node is None or node.node_id or not node.branch or spec.writes or spec.conversational:
             return                            # a live conversation keeps its worktree
         if self.authority:
             record = self.authority.get(node_id)
@@ -6430,7 +6633,7 @@ class Runner:
     async def _maybe_merge_into_parent(self, node_id: str, pending: bool = False,
                                        ending_parent: str | None = None) -> None:
         node = self.tree.get(node_id)
-        if not node or not node.branch or not node.parent:
+        if not node or node.node_id or not node.branch or not node.parent:
             return                            # depth-1 lands via explicit merge
         policy = self.config.project.get("git", {}).get("merge", {})
         if policy.get("inside_tree", "auto") != "auto":
@@ -6814,7 +7017,7 @@ class Runner:
                 return driver.role
         return ""
 
-    async def adopt(self) -> list[str]:
+    async def adopt(self, *, exclude: set[str] | None = None) -> list[str]:
         """SV-R6: take over the runs a previous server of this role left.
 
         Only a root server adopts: a nested one's agents are its own spawns,
@@ -6836,7 +7039,7 @@ class Runner:
         mine = self._role_of(self.session())
         taken = []
         for node in self.tree.active():
-            if node.status not in self.ADOPTABLE or node.id in self._locks:
+            if node.id in (exclude or set()) or node.status not in self.ADOPTABLE or node.id in self._locks:
                 continue
             if node.cleanup_hold:
                 # RM-R1d (review ag-43f57f): a held node is not a run to
@@ -7019,7 +7222,7 @@ class Runner:
 
         return bool(wall) and bool(launched) and now() >= launched + wall
 
-    async def shutdown(self, *, detach: bool) -> None:
+    async def shutdown(self, *, detach: bool, preserve_status: bool = False) -> None:
         """This server is going. SV-R3: a root server leaves its agents
         running and says so; a nested one ends them, as it always has."""
         # PC (round 6, finding 3): no drain dispatches and no reconciliation
@@ -7053,7 +7256,7 @@ class Runner:
             return
         for run in runs:
             node = self.tree.get(run.node_id)
-            if node and node.status in ("running", "stuck", "pending"):
+            if not preserve_status and node and node.status in ("running", "stuck", "pending"):
                 self.tree.set_status(
                     run.node_id, "detached",
                     f"left running when its server exited at "
@@ -7587,6 +7790,16 @@ class Runner:
         """SF-R3: refuse another steer until this node's handoff and any
         pending cleanup finish. Nothing new is claimed on that refusal."""
         node = self.tree.get(agent_id)
+        if node and (self.scheduler_enabled() or node.node_id):
+            if node.node_id and agent_id not in self.runs and not getattr(self, "_scheduler_supervisor", False):
+                from .scheduler import steer_managed
+                return await asyncio.to_thread(steer_managed, self.paths.root, agent_id,
+                                               message, self.self_id())
+            from .scheduler import resume_admission
+            refusal = await asyncio.to_thread(resume_admission, self.paths.root, agent_id,
+                                              self.self_id())
+            if refusal.get("error") or refusal.get("blocked"):
+                return refusal
         if node and node.reason == "session_lost":
             return {"agent_id": agent_id, "steered": False,
                     "error": f"{agent_id}: session_lost — the session is lost. "
@@ -8517,6 +8730,17 @@ class Runner:
                 f"Agent {agent_name!r} is not conversational. Use start_agent for "
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
+        if self.scheduler_enabled():
+            from .scheduler import agent_admission, resume_admission
+            conversation = self._find_conversation(agent_name)
+            if conversation:
+                admission = await asyncio.to_thread(resume_admission, self.paths.root,
+                                                    conversation.id, self.self_id())
+            else:
+                admission = await asyncio.to_thread(agent_admission, self.paths.root,
+                                                    agent_name, self.self_id())
+            if admission.get("error") or admission.get("blocked"):
+                return admission
         # Waiting for the other turn is bounded by how long that turn may run.
         # PC-R3b: ONE deadline covers that wait, the wait for a provider slot
         # and the reply; the slot is waited for no longer than the consult's
@@ -8575,6 +8799,8 @@ class Runner:
                             agent_name, spec, message, timeout, ticket,
                             waiter=waiter, deadline=deadline)
                     except ProviderFull as full:
+                        if self.scheduler_enabled():
+                            return admission_block(full)
                         refused = full
                 if refused.gone:
                     waiter = ""             # cancelled from the queue: rejoin
@@ -9031,6 +9257,12 @@ class Runner:
             return {"question_id": question_id, "agent_id": agent_id,
                     "resumed": False, "error": transport_error}
 
+        if self.scheduler_enabled() or node.node_id:
+            from .scheduler import resume_admission
+            refusal = await asyncio.to_thread(resume_admission, self.paths.root,
+                                              agent_id, self.self_id())
+            if refusal.get("error") or refusal.get("blocked"):
+                return refusal
         claimed = self.tree.answer_question(question_id, answer, answered_by)
         if claimed is None or claimed.get("already_answered"):
             return {"error": f"{question_id} was answered by someone else first"}
@@ -9239,6 +9471,8 @@ class Runner:
         waiting in this process, and drain the queue soon — the release-driven
         half of draining. Never raises; outside an event loop it only wakes.
         Nothing at all once shutdown has begun (round 7)."""
+        if self.scheduler_enabled():
+            return
         if self.__dict__.get("_pc_shutting_down"):
             return
         for waiter in list(self.__dict__.get("_pc_waiters", ())):
@@ -9386,6 +9620,9 @@ class Runner:
                     f"retry was refused: {exc}")
                 return {"refused": str(exc)}
             full = exc
+            if self.scheduler_enabled():
+                self.tree.set_status(node.id, "failed", f"free retry refused: {full}")
+                return {"refused": str(full)}
             entry = self.tree.enqueue(
                 provider,
                 {"op": "retry", "node_id": node.id, "agent": node.agent,
@@ -9567,7 +9804,7 @@ class Runner:
         drains is still being launched — and makes it look once more. The
         drain itself is shielded: a caller that gives up does not cut a
         launch in half."""
-        if self.gate.closed:
+        if self.gate.closed or self.scheduler_enabled():
             return []
         loop = asyncio.get_running_loop()
         current = self.__dict__.get("_pc_drain_task")
@@ -9608,7 +9845,7 @@ class Runner:
         one tree transaction, and a concurrent drain skips what it did not
         claim, so two drains never restart the same entry.
         """
-        if self.gate.closed:
+        if self.gate.closed or self.scheduler_enabled():
             # CW-R2: the server is stopping; the entries stay queued for the
             # next one, untouched.
             return {"paused": False, "restarted": []}
@@ -9985,6 +10222,8 @@ class Runner:
         node = self.tree.get(agent_id)
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
+        if node.node_id:
+            return {"error": "managed_run", "hint": "use node ops"}
         node = self.authoritative(node, "merge_agent")
         if node is None:
             return {"agent_id": agent_id, "result": "blocked",
@@ -10165,6 +10404,8 @@ class Runner:
         node = self.tree.get(agent_id)
         if node is None:
             raise KeyError(f"Unknown agent {agent_id!r}")
+        if node.node_id:
+            return {"error": "managed_run", "hint": "use node ops"}
         node = self.authoritative(node, "discard_agent")
         if node is None:
             return {"agent_id": agent_id, "discarded": False,
