@@ -22,13 +22,13 @@ Verified by QH-R9: continuation prompt, commits, dirty work, stable agent id.
 Verified by QH-R10: durable pre-launch attempts, no ping-pong, and process
     restart before target resume verification. Before-transfer crash injection
     still needs a deterministic seam.
-Verified by QH-R11: reset boundary, live turn, failure, cross-family home state.
-Verified by QH-R12: reserved run leaves for a freed sibling.
+QH-R11 and QH-R12 were withdrawn by amendment v3; their tests were retired and
+the behaviour is covered, as promotion, by tests/test_c23_v3_priorities.py.
 Verified by QH-R13: reserved routing above/below the floor.
 Verified by QH-R14: idle eligibility and an actual running competing agent.
 Verified by QH-R15: FIFO candidates and a gated live floor run.
 Verified by QH-R16: wakeup, allow, veto, pre-deadline/deadline dispatch.
-Verified by QH-R17: floor quota stop and boundary return after reset.
+Verified by QH-R17: floor quota stop (leaving the floor is QH-R25/R26 now).
 Verified by QH-R18: event schemas checked whenever scenario events are read.
 Verified by QH-R19: check/collect/tree provider and segment output.
 Verified by QH-R20: provider spend attribution and floor budget output;
@@ -99,12 +99,18 @@ if plan.get('commit'):
     Path('c23-commit.txt').write_text('committed first segment')
     subprocess.run(['git','add','c23-commit.txt'],check=True)
     subprocess.run(['git','commit','-m','C23 first segment commit'],check=True,capture_output=True)
+if plan.get('tool_gate'):
+    print(json.dumps({'type':'tool_use','session_id':sid,'name':'bash'}),flush=True)
+    end = time.monotonic()+12
+    while not Path(plan['tool_gate']).exists() and time.monotonic()<end: time.sleep(.01)
+    Path(plan['tool_gate']+'.finished').write_text(name)
+    print(json.dumps({'type':'tool_result','session_id':sid}),flush=True)
 if plan.get('gate'):
     end = time.monotonic()+12
     while not Path(plan['gate']).exists() and time.monotonic()<end: time.sleep(.01)
 limited = plan.get('quota', False)
 print(json.dumps({'type':'text','session_id':sid,
-                  'text':'C23 fixture quota exhausted' if limited else 'C23 turn complete'}),flush=True)
+                  'text':plan.get('say') or ('C23 fixture quota exhausted' if limited else 'C23 turn complete')}),flush=True)
 print(json.dumps({'type':'usage','session_id':sid,'usage':{'input_tokens':10,'output_tokens':2,'cost_usd':0.1}}),flush=True)
 sys.exit(1 if limited else 0)
 '''
@@ -152,6 +158,8 @@ class World:
                          'optional':{'effort':['--effort','{effort}']}},
                 'stream':{'format':'ndjson','session_id_paths':['session_id'], 'rules':[
                     {'match':{'type':'text'},'as':'text','fields':{'text':'text'}},
+                    {'match':{'type':'tool_use'},'as':'tool','fields':{}},
+                    {'match':{'type':'tool_result'},'as':'raw','fields':{}},
                     {'match':{'type':'usage'},'as':'step','fields':{'tokens':'usage'}}]},
                 'transcript':{'dir':str(store),'glob':'*.jsonl',
                               'limit_markers':[{'match':MARKER,'detail':'fixture quota','resets':True}]}}
@@ -429,43 +437,6 @@ def test_qh_r10_successive_quota_stops_never_ping_pong_before_reset(world):
     keys=[(e['agent_id'],e['segment'],e['attempt']) for e in attempts]
     assert len(keys)==len(set(keys))==2
 
-
-@pytest.mark.parametrize('reset',[False,True])
-def test_qh_r11_return_home_only_at_resume_boundary_after_reset(world,reset):
-    w=world()
-    async def scenario():
-        result=await w.start()
-        switched(w,'beta')
-        if reset: w.reset('alpha')
-        assert len(w.calls())==2, 'quota reset must not interrupt a live turn'
-        await w.steer(result['agent_id'])
-    asyncio.run(scenario())
-    assert w.calls()[-1]['instance']==('alpha' if reset else 'beta')
-    if reset: assert w.events('return_home')
-
-
-def test_qh_r11_return_home_failure_keeps_current_and_emits_event(world):
-    w=world()
-    async def scenario():
-        result=await w.start()
-        switched(w,'beta')
-        w.reset('alpha'); w.set_plan('alpha',reject=True)
-        await w.steer(result['agent_id'])
-    asyncio.run(scenario())
-    assert w.calls()[-1]['instance']=='beta'
-    assert w.events('return_home_failed')
-
-
-def test_qh_r12_reserved_instance_leaves_for_freed_better_tier(world):
-    w=world(reserved='reserve',models={'beta':'model-a','reserve':'model-a'})
-    w.unusable('beta','other')
-    async def scenario():
-        result=await w.start()
-        switched(w,'reserve')
-        w.reset('beta')
-        await w.steer(result['agent_id'])
-    asyncio.run(scenario())
-    assert w.calls()[-1]['instance']=='beta'
 
 
 async def reserve_tool(name,*args):
@@ -786,43 +757,6 @@ def test_qh_r15_second_floor_run_cannot_overlap_first(world):
     asyncio.run(scenario())
 
 
-def test_qh_r17_floor_leaves_at_boundary_when_home_reset(world):
-    w=floor_world(world)
-    async def scenario():
-        initial=await w.r.start('worker',TASK)
-        requests=w.events('reserve_request')
-        assert requests
-        await reserve_tool('allow_reserve',requests[0]['request_id'])
-        await w.r.resume_deferred()
-        await wait_until(lambda: bool(w.calls()))
-        aid=w.events('reserve_request')[0]['agent_id']
-        await w.settle(aid)
-        w.reset('alpha')
-        await w.steer(aid)
-        assert w.calls()[-1]['instance']=='alpha'
-    asyncio.run(scenario())
-
-
-def test_qh_r11_quota_reset_does_not_interrupt_live_foreign_turn(world):
-    w=world()
-    gate=w.tmp/'release-beta'
-    w.set_plan('beta',gate=str(gate))
-    async def scenario():
-        result=await w.r.start('worker',TASK)
-        try:
-            await wait_until(lambda: len(w.calls())>=2 or w.r.check(result['agent_id'])['status'] not in ('running','pending'))
-            switched(w,'beta')
-            assert w.calls()[-1]['instance']=='beta'
-            w.reset('alpha')
-            await w.r.resume_deferred()
-            assert len(w.calls())==2
-            assert w.r.check(result['agent_id'])['status']=='running'
-        finally:
-            gate.touch()
-            await w.settle(result['agent_id'])
-    asyncio.run(scenario())
-
-
 def test_qh_r22_no_candidates_preserves_old_quota_stop(world):
     w=world(models={})
     w.unusable('beta','reserve','other')
@@ -859,24 +793,6 @@ def test_qh_r1_enabled_defaults_true_when_omitted(world):
     asyncio.run(w.start())
     switched(w,'beta')
 
-
-@pytest.mark.parametrize('home_mode,changed,expected',[('copy',False,'alpha'),('copy',True,'other'),('none',False,'other')])
-def test_qh_r11_cross_family_return_requires_resumable_unchanged_home(world,home_mode,changed,expected):
-    w=world(mode=home_mode,models={'other':'model-o'})
-    w.unusable('beta','reserve')
-    async def scenario():
-        result=await w.start()
-        a,b=switched(w,'other')
-        if changed:
-            source=w.stores['alpha']/(a['session_id']+'.jsonl')
-            source.write_text(source.read_text()+'{"external":"changed home transcript"}\n')
-        w.reset('alpha')
-        await w.steer(result['agent_id'])
-        final=w.calls()[-1]
-        assert final['instance']==expected
-        if expected=='alpha': assert final['resume']==a['session_id']
-        else: assert final['resume']==b['session_id']
-    asyncio.run(scenario())
 
 
 def test_qh_r10_restart_during_unverified_target_resume_does_not_launch_twice(world):

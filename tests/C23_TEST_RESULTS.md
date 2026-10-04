@@ -1,7 +1,8 @@
 # C23 contract test handoff
 
 Contract: `context/specs/c23-quota-handover.md`, QH-R1..QH-R22.
-Suite: `tests/test_c23_quota_handover.py` (64 cases).
+Suites: `tests/test_c23_quota_handover.py` (55 cases after the v3 retirements) and
+`tests/test_c23_v3_priorities.py` (87 cases, amendment v3, QH-R23..R29; section at the end).
 No production changes or not-implemented stubs. The provider CLI is a real
 subprocess with atomic invocation records and per-session transcript files.
 
@@ -91,3 +92,45 @@ cannot be demonstrated on this branch. Existing tests were not edited.
 Tooling note: the prescribed `rm -rf /var/tmp/pt-dbaced` cleanup was rejected
 by the command tool with “rm -f style commands are not permitted”, despite
 the unrestricted permission profile. Cleanup used Python shutil instead.
+
+
+## Amendment v3 (QH-R23..R29), run ag-abeb4b
+
+Command: `PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/pt-c23v3/b tests/test_c23_*.py`
+Final: **121 failed, 21 passed** (142 cases). Expected red. The 21 green are
+4 v2 regression guards (off-switch, opt-out, above-floor admission, no-candidate),
+13 "valid value still loads" config cases, one valid-priorities load, one
+"run already on the best instance is untouched", and two family-expansion cases
+that today's routing already satisfies (the discriminating one, `blocked1-alpha`, is red).
+
+### Retired from the v2 file (withdrawn by v3)
+Deleted, 9 cases: `test_qh_r11_return_home_only_at_resume_boundary_after_reset[False,True]`,
+`test_qh_r11_return_home_failure_keeps_current_and_emits_event`,
+`test_qh_r11_cross_family_return_requires_resumable_unchanged_home[3]`,
+`test_qh_r11_quota_reset_does_not_interrupt_live_foreign_turn` (a live turn may now be stopped),
+`test_qh_r12_reserved_instance_leaves_for_freed_better_tier`,
+`test_qh_r17_floor_leaves_at_boundary_when_home_reset`.
+Their behaviour is rewritten as promotion in the v3 file: reset -> promote, cross-family
+back (resumable / changed / mode none), floor run promoted off the floor.
+No QH-R5 test changed outcome: with no `priorities:` the list equals the old agent list.
+Seam additions to the v2 CLI (inert unless set): plan keys `tool_gate`, `say`; rules for tool_use/tool_result.
+
+### Why the v3 tests are red
+| Group | Cases | First failing condition |
+| --- | ---: | --- |
+| R29 invalid values (project and per-agent) | 26 | No error raised at config load |
+| R23 unknown/duplicate priorities | 5 | No error raised |
+| R23 routing by priorities / family expansion | 5 | `priorities:` ignored |
+| R24/R28 rank, pinned output | 3 | `rank`, `pinned` absent from tool output |
+| R25/R26/R27/R28/R29 behavioural (promotion) | 46 | Stops at the explicit precondition "quota stop never handed over" (v2 handover not implemented on this branch) |
+| R27 pin / R7 | 4 | `steer_agent` has no `provider` parameter |
+
+**Caveat:** because v2 handover is not implemented either, the promotion scenarios never run past
+their setup, so their later assertions (safe point, grace, fallback, ranks in events) have not yet
+been exercised against any implementation. Expect the first green run to expose fixture mistakes there.
+
+### Contract gaps
+See the report. Short list: entry syntax of `priorities:`; base of `rank`; meaning of
+"demoted" (literal reading is vacuous); entry point of the promotion check; what a "budget
+refresh" is observable as; "being merged" has no seam; `provider="auto"` effect on the live
+turn; sibling return in `copy` mode (target holds a prefix of the source); `tier` on promote events.
