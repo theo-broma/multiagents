@@ -439,8 +439,10 @@ class _Hold:
 
 
 # Matched against an agent's TEXT only, never tool arguments — an agent reading
-# a file that mentions the marker must not park itself.
-NEED_DECISION = re.compile(r"NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
+# a file that mentions the marker must not park itself. Require a line start,
+# optionally with a list bullet, so prose and inline-code examples do not count.
+NEED_DECISION = re.compile(
+    r"(?m)^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
 PROPOSED_DEFAULT = re.compile(r"(?im)^\s*DEFAULT\s*:\s*(.+)$")
 # A bug in multiagents itself, written up for publication. Parsed from the
 # finished message rather than mid-stream like NEED_DECISION: a ticket is the
@@ -6706,7 +6708,7 @@ class Runner:
             except (OSError, json.JSONDecodeError):
                 text = node.summary
         text = text or ""
-        if "NEED_INFO(" in text or "NEED_DECISION(" in text:
+        if "NEED_INFO(" in text or NEED_DECISION.search(text):
             return {}
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         try:
