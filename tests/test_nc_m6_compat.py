@@ -53,14 +53,14 @@ def bounded_waits(world):
     """Give the world's default-timeout waits a short bound; returns the world."""
     real_until, real_state, real_spawn = world.until, world.wait_state, world.wait_spawn
 
-    def until(pred, timeout=WAIT_BOUND, step=0.1, what="the condition"):
-        return real_until(pred, timeout, step, what)
+    def until(pred, timeout=WAIT_BOUND, step=0.1, what="the condition", **kw):
+        return real_until(pred, timeout, step, what, **kw)
 
-    def wait_state(node_id, state, timeout=WAIT_BOUND):
-        return real_state(node_id, state, timeout)
+    def wait_state(node_id, state, timeout=WAIT_BOUND, **kw):
+        return real_state(node_id, state, timeout, **kw)
 
-    def wait_running(node_id, timeout=WAIT_BOUND):
-        return real_state(node_id, "running", timeout)
+    def wait_running(node_id, timeout=WAIT_BOUND, **kw):
+        return real_state(node_id, "running", timeout, **kw)
 
     def wait_spawn(tag, fx=None, timeout=WAIT_BOUND):
         return real_spawn(tag, fx, timeout)
