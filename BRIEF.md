@@ -4435,3 +4435,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Trial note: collect_agent shows commits 0 / branch agents/tester/... while the node branch nodes/nd-... carries the commit.
 - Trial note: merge_node refuses when main has uncommitted changes — set_finding_status writes context/review/ledger.yaml uncommitted, so ledger updates must be committed before merge_node.
 - 20:55 TI impl loop nd-3691c87b (implementer nd-5520f8e3 ↔ reviewer nd-3675ced3, max 3 rounds) released.
+- 21:10 Specs committed (user OK): AU auth-checks-uncertain.md, EV env-forwarding.md, BQ claude-quota-config-dir.md (73cb260, advisor-reviewed: BQ corrected — read_provider's config_dir is the multiagents dir, not a claude profile), RV verdict-after-transport-error.md (user chose "complete verdict = success"). F10 uses existing phase2-entry-semantics R14/R15 + red tests.
+- Queue once TI merges (via implement template): SL, AU, EV (lock executor), allowlist F10 (lock executor), BQ, RV. Implementers = `implementer` tier (Space Bunny max); no medium comparison during this trial (user).
