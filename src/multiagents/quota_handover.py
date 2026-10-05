@@ -1033,24 +1033,38 @@ class QuotaHandover:
         except (OSError, ValueError):
             return None
 
+    def _qh_promotion_eligible(self, node, *, recovery=False):
+        roster = self.config.agents.get(node.agent) if node else None
+        if (not roster or self.gate.closed or self.__dict__.get("_pc_shutting_down")
+                or not self._qh_enabled(roster, node)
+                or node.id not in self.runs or node.id not in self._locks
+                or node.status not in ("running", "stuck", "detached") or node.pinned):
+            return False
+        # Recover an already-started migration before considering exceptions
+        # to starting a new one: its steering marker may outlive its owner.
+        return recovery or (not node.promotion
+                            and node.id not in self.__dict__.get("_qh_busy", set())
+                            and node.id not in self.__dict__.get("_steering_nodes", set())
+                            and node.id not in self.__dict__.get("_qh_merging", set())
+                            and (node.handover_attempt or {}).get("state") not in
+                            ("prepared", "transferred", "launching"))
+
     async def _qh_promote_check(self):
         if self.gate.closed or not self._qh_enabled() or self.__dict__.get("_pc_shutting_down"):
             return
-        nodes = [n for n in self._qh_nodes() if self._qh_enabled(node=n)
-                 and n.status in ("running", "stuck", "detached") and not n.pinned]
-        if not nodes:
-            return
-        if any(n.id not in self.runs for n in nodes) and not self.self_id():
-            await self.adopt()
-        nodes = [n for n in nodes if n.id in self.runs]
+        # QH-R23..R27: only our supervised runs with a configured agent
+        # can be promoted. Adoption is a separate lifecycle pass: invoking it
+        # here can fail unrelated, synthetic or externally owned tree nodes.
+        nodes = [n for n in self._qh_nodes() if self._qh_promotion_eligible(n, recovery=True)]
         if not nodes:
             return
         readings = await self._qh_budgets()
         self.__dict__["_qh_readings"] = readings
         for node in nodes:
-            roster = self.config.agents.get(node.agent)
-            if not roster or not self._qh_enabled(roster, node):
+            node = self.tree.get(node.id)
+            if not self._qh_promotion_eligible(node, recovery=True):
                 continue
+            roster = self.config.agents[node.agent]
             if (node.promotion and node.id not in self.__dict__.get("_qh_promotions", {})
                     and not procs.alive(node.promotion.get("owner_pid", 0), node.promotion.get("owner_start", ""))
                     and not (node.handover_attempt or {}).get("promotion")):
@@ -1060,16 +1074,14 @@ class QuotaHandover:
                 task = asyncio.create_task(self._qh_promote(node.id, node.promotion, self._qh_settings(roster)))
                 self.__dict__.setdefault("_qh_promotions", {})[node.id] = task
                 continue
+            if not self._qh_promotion_eligible(node):
+                continue
             names = self._qh_priority_names(roster, readings)
             if node.provider not in names:
                 continue
             rank = names.index(node.provider)
             self.tree.update(node.id, rank=rank)
-            if (rank == 0 or node.promotion or node.id in self.__dict__.get("_qh_busy", set())
-                    or node.id in self.__dict__.get("_steering_nodes", set())
-                    or node.id in self.__dict__.get("_qh_merging", set())
-                    or (node.handover_attempt or {}).get("state") in
-                    ("prepared", "transferred", "launching")):
+            if rank == 0:
                 continue
             settings = self._qh_settings(roster)
             since = node.segments[-1]["started_at"] if node.segments else node.started_at
@@ -1111,12 +1123,16 @@ class QuotaHandover:
                         self.tree.emit(node.id, "handover_policy_gap", provider=target,
                                        reason="same-family different-model migration policy is unresolved")
                     continue
-                if not routed or not await self._qh_usable(target, routed, readings, usable_node):
+                if not routed:
                     continue
+                usable = await self._qh_usable(target, routed, readings, usable_node)
                 current = self.tree.get(node.id)
-                if (current.status not in ("running", "stuck", "detached") or current.pinned
-                        or current.promotion or current.provider != node.provider):
+                if (not self._qh_promotion_eligible(current)
+                        or current.provider != node.provider or current.agent != node.agent
+                        or self.config.agents.get(node.agent) != roster):
                     break
+                if not usable:
+                    continue
                 promotion = {"from": node.provider, "to": target, "session_id": node.session_id,
                              "from_rank": rank, "to_rank": names.index(target),
                              "segment": len(node.segments) + 1,
