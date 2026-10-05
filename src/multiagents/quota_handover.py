@@ -17,6 +17,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
+import functools
+import threading
 from contextvars import ContextVar
 from dataclasses import asdict, replace
 import os
@@ -282,14 +285,36 @@ def transfer_paths(source_provider, target_provider, worktree, session_id, sourc
     return source, target
 
 
+def promotion_merge_guard(fn):
+    """Reserve metadata only; git and tree I/O happen after this lock."""
+    @functools.wraps(fn)
+    def guarded(self, agent_id, *args, **kwargs):
+        with self._qh_mutex:
+            merging = self.__dict__.setdefault("_qh_merging", set())
+            if agent_id in self.__dict__.get("_qh_busy", set()) or agent_id in merging:
+                return {"agent_id": agent_id, "merged": False, "error": "quota handover or merge is in progress"}
+            merging.add(agent_id)
+        try:
+            return fn(self, agent_id, *args, **kwargs)
+        finally:
+            with self._qh_mutex:
+                merging.discard(agent_id)
+    return guarded
+
+
 class QuotaHandover:
+    @property
+    def _qh_mutex(self):
+        return self.__dict__.setdefault("_qh_metadata_lock", threading.Lock())
+
     def _qh_now(self):
         # The existing runner clock is the public deterministic clock seam.
         from .runner import now
         return now()
 
-    def _qh_settings(self):
-        return self.config.project.get("quota_handover") or {}
+    def _qh_settings(self, spec=None):
+        return {**(self.config.project.get("quota_handover") or {}),
+                **(spec.quota_handover if spec else {})}
 
     def _qh_enabled(self, spec=None, node=None):
         # Scheduler admission of a legacy start does not make it managed.
@@ -316,7 +341,33 @@ class QuotaHandover:
         return headroom > self._qh_settings().get("reserve_fraction", .25)
 
     def _qh_names(self, spec):
+        if spec.priorities is not None:
+            from .config import priority_entries
+            return [name for names, _ in priority_entries(spec, self.providers) for name in names]
         return list(dict.fromkeys([spec.provider, *(spec.models or {})]))
+
+    def _qh_priority_names(self, spec, readings=None):
+        if spec.priorities is None:
+            return self._qh_names(spec)
+        from .config import priority_entries
+        load, last_used = self._instance_load()
+        result = []
+        for names, _ in priority_entries(spec, self.providers):
+            pool = [n for n in names if n != self._qh_reserved()]
+            while pool:
+                chosen = budget.pick_instance(pool, readings or {}, 0, set(), load, last_used,
+                                              **self._instance_strategy(pool[0]))
+                chosen = chosen or pool[0]
+                result.append(chosen)
+                pool.remove(chosen)
+            result.extend(n for n in names if n == self._qh_reserved())
+        return result
+
+    def _qh_position(self, node):
+        if node is None:
+            return {"rank": None, "pinned": False}
+        return {"rank": node.rank, "pinned": node.pinned}
+
 
     async def _qh_budgets(self, spec=None):
         return await asyncio.to_thread(
@@ -350,7 +401,24 @@ class QuotaHandover:
 
     def _qh_choose_new(self, spec, readings, choose, *, managed=False, floor=False):
         """QH-R6/R13: apply reservation around C22, retaining its strategy."""
+        self.__dict__["_qh_readings"] = readings
         reserved = self._qh_reserved()
+        if spec.priorities is not None and not managed:
+            for name in self._qh_priority_names(spec, readings):
+                provider = self.providers[name]
+                routed = self._usable_spec(spec, name)
+                entry = readings.get(name)
+                if (not provider.enabled or not routed or not routed.model
+                        or self._model_refusal(name, routed.model) or self._transport_refusal(provider)
+                        or self.startup.availability(name)):
+                    continue
+                if entry and (entry.cooldown_until and entry.cooldown_until > self._qh_now()
+                              or entry.known and entry.headroom is not None and entry.headroom <= .02):
+                    continue
+                if name == reserved and not floor and not self._qh_above_floor(entry):
+                    continue
+                return name, "agent priority list"
+            return None, "no usable instance in agent priority list"
         if managed or not reserved or reserved not in self._qh_names(spec):
             return choose(readings)
         alternative = dict(readings)
@@ -364,16 +432,26 @@ class QuotaHandover:
         return None, "reserved instance is at its quota floor"
 
     def _qh_event(self, node, kind, attempt, reason="", **extra):
-        self.tree.emit_checked(node.id if node else "", kind, **{
+        fields = {
             "agent_id": node.id if node else "",
             "session_id": attempt.get("session_id", ""),
             "from": attempt.get("from", ""), "to": attempt.get("to", ""),
             "tier": attempt.get("tier", 4), "segment": attempt.get("segment", 1),
             "attempt": attempt.get("attempt", 1), "reason": reason or attempt.get("reason", "quota"),
-            "at": self._qh_now(), **extra})
+            "at": self._qh_now(), **extra}
+        if kind.startswith("promote_"):
+            fields.pop("tier")
+            fields.update(from_rank=attempt["from_rank"], to_rank=attempt["to_rank"])
+        self.tree.emit_checked(node.id if node else "", kind, **fields)
 
     def _qh_cancel(self, node_id):
+        task = self.__dict__.get("_qh_promotions", {}).get(node_id)
+        if task and task is not asyncio.current_task():
+            task.cancel()
         node = self.tree.get(node_id)
+        if node and node.promotion:
+            self._qh_event(node, "promote_failed", node.promotion, "stopped by parent")
+            self.tree.update(node_id, promotion=None)
         attempt = node.handover_attempt if node else None
         if attempt and attempt.get("state") in ("prepared", "transferred", "launching", "launched"):
             failed = dict(attempt, state="failed", error="stopped by parent")
@@ -413,13 +491,23 @@ class QuotaHandover:
         attempt = node.handover_attempt if node else None
         if (not attempt or attempt.get("state") not in ("launching", "launched")
                 or attempt.get("to") != run.provider.name or not session_id
-                or (attempt.get("resume") and session_id != attempt.get("session_id"))):
+                or (attempt.get("resume") and session_id != attempt.get("target_session_id", attempt.get("session_id")))):
             return
         # A provider's session event verifies the handover. The remainder of
         # a live turn is steerable; it is no longer an in-flight transfer.
         completed = dict(attempt, state="completed")
         self.tree.update(node.id, handover_attempt=completed)
         self._qh_event(node, "handover_completed", completed)
+        self._qh_promoted(node, completed)
+
+    def _qh_promoted(self, node, attempt):
+        promotion = attempt.get("promotion")
+        if not promotion or not node.promotion:
+            return
+        self._qh_event(node, "promote_completed", promotion)
+        self.tree.update(node.id, promotion=None, on_reserve_floor=False)
+        if node.reserve_request:
+            self._qh_request_state(node.reserve_request, state="finished")
 
     def _qh_restore_launch(self, node_id, attempt):
         self.launch_limits.record_spec(node_id, attempt["source_spec"],
@@ -435,7 +523,10 @@ class QuotaHandover:
             segments.append(self._qh_segment(provider, spec, session_id or ""))
         base = copy.deepcopy(segments[-1].get("usage") or {})
         segments[-1].update(ended_at=None, end_reason="")
-        self.tree.update(node_id, home_provider=node.home_provider or provider.name,
+        roster = self.config.agents.get(node.agent)
+        names = self._qh_priority_names(roster, self.__dict__.get("_qh_readings", {})) if roster else []
+        self.tree.update(node_id, rank=names.index(provider.name) if provider.name in names else None,
+                         home_provider=node.home_provider or provider.name,
                          segments=segments, provider=provider.name, model=spec.model,
                          effort=spec.effort or "", segment_usage_base=base)
         attempt = node.handover_attempt or {}
@@ -470,7 +561,7 @@ class QuotaHandover:
         roster = self.config.agent(node.agent)
         reserved = self._qh_reserved()
         candidates = []
-        for name in self._qh_names(roster):
+        for name in self._qh_priority_names(roster, readings):
             if name == node.provider:
                 continue
             prior = node.handover_attempt or {}
@@ -491,6 +582,8 @@ class QuotaHandover:
             tier = (2 if name == reserved else 1) if resume else 3
             if await self._qh_usable(name, routed, readings, node):
                 candidates.append((tier, name, resume))
+        if roster.priorities is not None:
+            return candidates
         result = []
         for tier in (1, 2, 3):
             pool = [c for c in candidates if c[0] == tier]
@@ -508,7 +601,7 @@ class QuotaHandover:
         # QH-R13: use a reserved sibling only after every nonreserved route.
         return [c for c in result if c[1] != reserved] + [c for c in result if c[1] == reserved]
 
-    def _qh_prompt(self, node, message, *, resume):
+    def _qh_prompt(self, node, message, *, resume, promotion=False):
         if resume:
             return message or self._retry_prompt(node.id, "prompt.md")
         run_dir = self.paths.run_dir(node.id)
@@ -516,21 +609,29 @@ class QuotaHandover:
         base = self.config.base_branch or gitops.current_branch(self.paths.root)
         commits = gitops.run(self.paths.root, "log", "--format=%h %s",
                              f"{base}..{node.branch}").out if node.branch else ""
-        return (original + "\n\nContinuation: the previous segment was cut by quota. "
+        cause = "moved for priority" if promotion else "cut by quota"
+        return (original + f"\n\nContinuation: the previous segment was {cause}. "
                 f"Read its run log at .multiagents/runs/{node.id}/. "
                 f"Commits since launch: {commits}. The worktree may contain uncommitted "
                 "work from that segment.\n" + message)
 
-    async def _qh_switch(self, node, spec, target, tier, resume, *, run=None, message="", attempt=None):
+    async def _qh_switch(self, node, spec, target, tier, resume, *, run=None, message="", attempt=None,
+                         promotion=None, target_session_id=None, target_spec=None, promotion_rollback=None):
         # Same-session migration preserves the complete frozen launch spec;
         # a continuation remaps only destination options, never ownership.
         if resume:
             routed = spec.replace(provider=target)
         else:
             roster = self.config.agent(node.agent)
-            destination = roster.routed(target)
+            destination = self._usable_spec(roster, target) or roster.routed(target)
             routed = spec.replace(provider=target, model=destination.model,
                                   effort=destination.effort, extra=destination.extra)
+        if target_spec is not None:
+            routed = target_spec.replace(provider=target)
+        if attempt is not None:
+            promotion = attempt.get("promotion")
+            target_session_id = attempt.get("target_session_id", target_session_id)
+        launch_session = target_session_id if target_session_id is not None else node.session_id
         provider = self.providers[target]
         if attempt is None:
             prior = node.handover_attempt or {}
@@ -538,10 +639,11 @@ class QuotaHandover:
                 prior.get("from") == node.provider
                 and prior.get("segment") == len(node.segments) + 1) else []
             attempt = {"from": node.provider, "to": target, "tier": tier,
-                       "segment": len(node.segments) + 1,
+                       "segment": len(node.segments) + (target != node.provider),
+                       "new_segment": target != node.provider,
                        "attempt": int(prior.get("attempt", 0)) + 1,
                        "session_id": node.session_id, "resume": resume,
-                       "state": "prepared", "reason": "quota" if not message else "explicit steer",
+                       "state": "prepared", "reason": "priority" if promotion else "quota" if not message else "explicit steer",
                        "source_spec": asdict(spec), "source_pid": node.pid,
                        "target_exec_identity": self._new_hold(node.id, target, "", self.executor(routed)).record["executor"],
                        "source_limits": self.launch_limits.lookup(node.id),
@@ -550,9 +652,18 @@ class QuotaHandover:
                        "message": message, "owner_pid": os.getpid(),
                        "owner_start": procs.start_time(os.getpid()),
                        "tried": [*tried, target]}
+            if promotion_rollback:
+                attempt["promotion_rollback"] = promotion_rollback
+            if promotion:
+                attempt.update(promotion=promotion, target_session_id=launch_session,
+                               target_spec=asdict(routed))
+                attempt["target_spec"]["set_fields"] = sorted(routed.set_fields or ())
             attempt["source_spec"]["set_fields"] = sorted(spec.set_fields or ())
             self.tree.update(node.id, handover_attempt=attempt)
             self._qh_event(node, "handover_started", attempt)
+        if attempt.get("target_spec"):
+            routed = AgentSpec(**attempt["target_spec"])
+            launch_session = attempt["target_session_id"]
         prior_status = node.status
         try:
             self._pc_reserve_resume(routed, node, target, "")
@@ -561,7 +672,8 @@ class QuotaHandover:
                 raise RuntimeError("predecessor wrapper or session is not confirmed dead")
             with contextlib.ExitStack() as transfer_files:
                 opened_source = None
-                if resume and provider.handover_mode.get(self.executor(spec).kind, "none") == "copy":
+                if (resume and self._family_of(attempt["from"]) == self._family_of(target)
+                        and provider.handover_mode.get(self.executor(spec).kind, "none") == "copy"):
                     source_provider = self.providers[attempt["from"]]
                     source, target_path = transfer_paths(source_provider, provider,
                         Path(node.worktree), attempt["session_id"], self.executor(spec), self.executor(routed))
@@ -587,9 +699,16 @@ class QuotaHandover:
             self._qh_check_switch(node.id)
             attempt = dict(attempt, state="transferred")
             self.tree.update(node.id, handover_attempt=attempt)
-            prompt = self._qh_prompt(node, message, resume=resume)
+            prompt = self._qh_prompt(node, message, resume=resume, promotion=bool(attempt.get("promotion")))
             segments = copy.deepcopy(node.segments)
-            segments.append(self._qh_segment(provider, routed, node.session_id if resume else ""))
+            if segments and not resume and (node.handover_attempt or {}).get("state") != "failed":
+                fingerprint = await asyncio.to_thread(self._qh_session_fingerprint, node.provider, spec,
+                                                     Path(node.worktree), node.session_id)
+                segments[-1]["session_fingerprint"] = fingerprint
+                segments[-1]["spec"] = asdict(spec)
+                segments[-1]["spec"]["set_fields"] = sorted(spec.set_fields or ())
+            if attempt.get("new_segment", True):
+                segments.append(self._qh_segment(provider, routed, launch_session if resume else ""))
             # The new provider and segment are recorded before the wrapper;
             # adoption therefore follows the right account after any crash.
             run_dir = self.paths.run_dir(node.id)
@@ -599,13 +718,14 @@ class QuotaHandover:
             attempt = dict(attempt, state="launching", target_follow={
                 "turn": offset, "offset": offset, "log": size(run_dir / "stream.jsonl")})
             self.tree.update(node.id, provider=target, model=routed.model,
-                             segments=segments, segment_usage_base={}, handover_attempt=attempt)
+                             session_id=launch_session if resume else "", segments=segments, segment_usage_base={},
+                             promotion_dwell_at=self._qh_now(), handover_attempt=attempt)
             with await self.gate.enter_when_open():
                 self._qh_check_switch(node.id)
                 launched = await self._launch(node_id=node.id, spec=routed, provider=provider,
                                              prompt=prompt, workdir=Path(node.worktree), branch=node.branch,
                                              parent=node.parent, depth=node.depth,
-                                             session_id=node.session_id if resume else None,
+                                             session_id=launch_session if resume else None,
                                              done=run.done if run else None,
                                              release_lock=False,
                                              preserved_limits=attempt["source_limits"],
@@ -632,11 +752,11 @@ class QuotaHandover:
             attempt = dict(attempt, state="failed", error=str(exc))
             current = self.tree.get(node.id)
             segments = copy.deepcopy(current.segments)
-            if len(segments) >= attempt["segment"]:
+            if attempt.get("new_segment", True) and len(segments) >= attempt["segment"]:
                 segments.pop()
             self.tree.update(node.id, provider=attempt["from"], model=spec.model,
                              session_id=attempt["session_id"], segments=segments,
-                             handover_attempt=attempt)
+                             rank=promotion["from_rank"] if promotion else node.rank, handover_attempt=attempt)
             self._qh_restore_launch(node.id, attempt)
             self.tree.set_status(node.id, "cancelled" if current.status == "cancelled" else prior_status)
             self._qh_event(node, "handover_failed", attempt, str(exc))
@@ -647,16 +767,33 @@ class QuotaHandover:
         if not node or not self._qh_enabled(run.spec, node):
             return False
         attempt = node.handover_attempt or {}
+        promotion = attempt.get("promotion")
+        if (promotion and attempt.get("state") in ("launching", "launched")
+                and attempt.get("to") == run.provider.name):
+            requested = attempt.get("target_session_id", attempt["session_id"])
+            if (status in ("unauthenticated", "refused", "failed", "session_lost")
+                    or run.requested_session or attempt.get("resume") and session_id != requested):
+                source_spec = AgentSpec(**attempt["source_spec"])
+                segments = copy.deepcopy(node.segments)
+                if attempt.get("new_segment", True) and len(segments) >= attempt["segment"]:
+                    segments.pop()
+                failed = dict(attempt, state="failed", error="target rejected priority migration")
+                self.tree.update(node.id, provider=attempt["from"], model=source_spec.model,
+                                 session_id=attempt["session_id"], segments=segments,
+                                 rank=promotion["from_rank"], handover_attempt=failed)
+                self._qh_restore_launch(node.id, attempt)
+                return await self._qh_promotion_failed(node.id, promotion, source_spec, run,
+                                                       failed["error"])
         if attempt.get("state") in ("launching", "launched", "completed") and attempt.get("to") == run.provider.name:
             if (attempt.get("resume") and (not session_id
-                    or session_id != attempt["session_id"]
+                    or session_id != attempt.get("target_session_id", attempt["session_id"])
                     or run.requested_session or status == "unauthenticated")):
                 # No fresh old-id session: return to source bookkeeping and
                 # walk remaining candidates with the same run identity.
                 source_spec = AgentSpec(**attempt["source_spec"])
                 failed = dict(attempt, state="failed", error="target rejected session")
                 segments = copy.deepcopy(node.segments)
-                if len(segments) >= attempt["segment"]:
+                if attempt.get("new_segment", True) and len(segments) >= attempt["segment"]:
                     segments.pop()
                 self.tree.update(node.id, provider=attempt["from"], model=source_spec.model,
                                  session_id=attempt["session_id"], segments=segments,
@@ -682,9 +819,8 @@ class QuotaHandover:
                 completed = dict(attempt, state="completed")
                 self.tree.update(node.id, handover_attempt=completed)
                 self._qh_event(node, "handover_completed", completed)
+                self._qh_promoted(node, completed)
         self._qh_segment_end(run, usage, session_id, status)
-        if node.id in self.__dict__.get("_qh_busy", set()):
-            return False   # an explicit steer already owns this handoff
         if run.cap_stop is not None or (status != "quota" and not (status == "limited" and limited)):
             return False
         if run.stop_requested or node.on_reserve_floor:
@@ -695,15 +831,35 @@ class QuotaHandover:
         roster = self.config.agent(node.agent)
         if not any(name != node.provider for name in self._qh_names(roster)):
             return False
-        stops = dict(node.quota_stops)
-        stops[node.provider] = (limited or {}).get("until") or self._qh_now() + float(
-            self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900))
-        self.tree.update(node.id, quota_stops=stops, session_id=session_id)
-        node = self.tree.get(node.id)
-        readings = await self._qh_budgets(run.spec)
+        stop_time = self._qh_now()
         busy = self.__dict__.setdefault("_qh_busy", set())
-        busy.add(node.id)
+        if node.id in busy:
+            # Exhaustion takes precedence over an optional safe-point wait.
+            # Cancel that wait and let the normal quota handover own this stop.
+            if not await self._qh_abort_pending_promotion(
+                    node.id, "source exhausted while awaiting a safe point"):
+                return False
+            node = self.tree.get(node.id)
+        # The abort awaits: claim under the mutex, and leave a run that a
+        # recovery, steer or merge took meanwhile to its owner.
+        with self._qh_mutex:
+            if node.id in busy or node.id in self.__dict__.get("_qh_merging", set()):
+                return False
+            busy.add(node.id)
         try:
+            stops = dict(node.quota_stops)
+            stops[node.provider] = (limited or {}).get("until") or stop_time + float(
+                self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900))
+            self.tree.update(node.id, quota_stops=stops, session_id=session_id)
+            node = self.tree.get(node.id)
+            readings = await self._qh_budgets(run.spec)
+            stamps = dict(node.quota_stop_readings)
+            stamp = readings[node.provider].read_at if node.provider in readings else None
+            # budget._from_script preserves the provider script's clock.
+            # Compare its stamps with each other; only an unstamped stop uses
+            # our local stop time, marked as such (QH-R30.5, _qh_refreshed).
+            stamps[node.provider] = stamp if stamp is not None else {"local": stop_time}
+            self.tree.update(node.id, quota_stop_readings=stamps)
             for tier, target, resume in await self._qh_candidates(node, run.spec, readings):
                 if self.tree.get(node.id).status == "cancelled":
                     return False
@@ -730,6 +886,16 @@ class QuotaHandover:
         if not node or not self.unrecorded_branch_ok(node, "steer"):
             return {"error": "run authority or branch validation failed"}
         roster = self.config.agent(node.agent)
+        readings = await self._qh_budgets(spec)
+        if target == "auto":
+            target = None
+            for name in self._qh_priority_names(roster, readings):
+                alternative = self._usable_spec(roster, name)
+                if alternative and await self._qh_usable(name, alternative, readings, node):
+                    target = name
+                    break
+            if target is None:
+                return {"agent_id": node.id, "error": "no usable instance in priority list"}
         if target not in self._qh_names(roster):
             return {"agent_id": node.id, "error": "target is not in the agent's allowed provider list"}
         routed = self._usable_spec(roster, target)
@@ -755,9 +921,14 @@ class QuotaHandover:
             return {"agent_id": node.id, "error": "session or worktree is unavailable"}
         # Stop and steer share the supervision lock and cancellation path.
         # Busy covers the awaits before stop too; merge cannot consume the
-        # branch while we transfer. A concurrent explicit stop wins.
+        # branch while we transfer. A concurrent explicit stop wins. The
+        # validation above awaits, so a recovery may have claimed the run
+        # since steer() checked; refuse without releasing its reservation.
         busy = self.__dict__.setdefault("_qh_busy", set())
-        busy.add(node.id)
+        with self._qh_mutex:
+            if node.id in busy or node.id in self.__dict__.get("_qh_merging", set()):
+                return {"agent_id": node.id, "error": "quota handover or merge is in progress"}
+            busy.add(node.id)
         run = self.runs.get(node.id)
         try:
             current = self.tree.get(node.id)
@@ -784,6 +955,328 @@ class QuotaHandover:
                     **({} if success else {"error": "handover failed; source session is preserved"})}
         finally:
             busy.discard(node.id)
+
+    def _qh_short_headroom(self, entry):
+        if entry is None or not entry.known or entry.headroom is None:
+            return None
+        windows = [(float(w.get("span_minutes") or 0), w) for w in entry.windows.values()
+                   if isinstance(w, dict) and w.get("counted", True)
+                   and w.get("span_minutes") and w.get("percent") is not None]
+        if not windows:
+            return entry.headroom
+        shortest = min(span for span, _ in windows)
+        return min(1 - float(w["percent"]) / 100 for span, w in windows if span == shortest)
+
+    def _qh_observe(self, run, event):
+        # Results may be raw or step events in older stream declarations.
+        # Call identities keep concurrent tools from ending each other's pause.
+        raw = event.raw or {}
+        kind = str(raw.get("type") or raw.get("event") or "")
+        step = raw.get("step_update")
+        step = step if isinstance(step, dict) else {}
+        part = raw.get("part")
+        part = part if isinstance(part, dict) else {}
+        identity = str(raw.get("tool_id") or raw.get("tool_use_id") or raw.get("call_id")
+                       or raw.get("id") or part.get("id") or step.get("step_index") or "tool")
+        message = raw.get("message")
+        message = message if isinstance(message, dict) else {}
+        blocks = message.get("content", raw.get("content", []))
+        tool_blocks = False
+        if isinstance(blocks, list):
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    run.active_tools.add(str(block.get("id") or "tool"))
+                    tool_blocks = True
+                elif block.get("type") == "tool_result":
+                    run.active_tools.discard(str(block.get("tool_use_id") or "tool"))
+                    tool_blocks = True
+        terminal = (str(event.state or "").lower() in ("completed", "complete", "done", "finished", "success",
+                                             "succeeded", "failed", "error", "cancelled")
+                    or kind in ("tool_result", "tool_end", "function_call_output", "tool.completed", "item.completed"))
+        if terminal:
+            run.active_tools.discard(identity)
+        elif event.kind == "tool" and not tool_blocks:
+            run.active_tools.add(identity)
+        if event.kind == "result":
+            run.active_tools.clear()
+
+    def _qh_session_fingerprint(self, name, spec, worktree, session_id):
+        if not session_id:
+            return None
+        provider = self.providers[name]
+        if provider.handover_mode.get(self.executor(spec).kind, "none") == "none":
+            return None
+        try:
+            path = (stored_session(provider, self.executor(spec), session_id)[1]
+                    if provider.session_store else
+                    session_transcript(provider, worktree, session_id, self.executor(spec)))
+            if path is None:
+                return None
+            profile = None
+            if provider.session_store:
+                profile = session_store_root(provider, self.executor(spec))
+                for _ in Path(provider.session_store["dir"]).parts:
+                    profile = profile.parent
+            with _source_session(path, profile) as (source, _):
+                return hashlib.sha256(source.read()).hexdigest()
+        except (OSError, ValueError):
+            return None
+
+    async def _qh_promote_check(self):
+        if self.gate.closed or not self._qh_enabled() or self.__dict__.get("_pc_shutting_down"):
+            return
+        nodes = [n for n in self._qh_nodes() if self._qh_enabled(node=n)
+                 and n.status in ("running", "stuck", "detached") and not n.pinned]
+        if not nodes:
+            return
+        if any(n.id not in self.runs for n in nodes) and not self.self_id():
+            await self.adopt()
+        nodes = [n for n in nodes if n.id in self.runs]
+        if not nodes:
+            return
+        readings = await self._qh_budgets()
+        self.__dict__["_qh_readings"] = readings
+        for node in nodes:
+            roster = self.config.agents.get(node.agent)
+            if not roster or not self._qh_enabled(roster, node):
+                continue
+            if (node.promotion and node.id not in self.__dict__.get("_qh_promotions", {})
+                    and not procs.alive(node.promotion.get("owner_pid", 0), node.promotion.get("owner_start", ""))
+                    and not (node.handover_attempt or {}).get("promotion")):
+                # Adoption owns the source's supervisor flock. Continue a
+                # dead owner's safe-point wait without a second start event.
+                self.__dict__.setdefault("_qh_busy", set()).add(node.id)
+                task = asyncio.create_task(self._qh_promote(node.id, node.promotion, self._qh_settings(roster)))
+                self.__dict__.setdefault("_qh_promotions", {})[node.id] = task
+                continue
+            names = self._qh_priority_names(roster, readings)
+            if node.provider not in names:
+                continue
+            rank = names.index(node.provider)
+            self.tree.update(node.id, rank=rank)
+            if (rank == 0 or node.promotion or node.id in self.__dict__.get("_qh_busy", set())
+                    or node.id in self.__dict__.get("_steering_nodes", set())
+                    or node.id in self.__dict__.get("_qh_merging", set())
+                    or (node.handover_attempt or {}).get("state") in
+                    ("prepared", "transferred", "launching")):
+                continue
+            settings = self._qh_settings(roster)
+            since = node.segments[-1]["started_at"] if node.segments else node.started_at
+            since = max(since, node.promotion_dwell_at or since)
+            if self._qh_now() - since < settings.get("promote_min_dwell_seconds", 300):
+                continue
+            for target in names[:rank]:
+                entry = readings.get(target)
+                stamp = entry.read_at if entry else None
+                if target in node.promotion_refusals:
+                    old = node.promotion_refusals[target]
+                    if stamp is None or old is not None and stamp <= old:
+                        continue
+                # Only a fresh quota reading ends the stop episode. Expiry of
+                # its blind cooldown is not a refresh: a wedged script would
+                # otherwise resurrect the exhausted instance (QH-R30.5).
+                stops = dict(node.quota_stops)
+                if target in stops and not self._qh_refreshed(node, target, stamp):
+                    continue
+                headroom = self._qh_short_headroom(entry)
+                if headroom is None or headroom + 1e-12 < settings.get("promote_min_headroom", .10):
+                    continue
+                if target in stops:
+                    stops.pop(target)
+                    cooldown = self.tree.read().get("cooldowns", {}).get(target) or {}
+                    if isinstance(cooldown, dict) and cooldown.get("cause") == "quota":
+                        self.tree.clear_quota({target})
+                        if entry.cooldown_until == cooldown.get("until"):
+                            readings[target] = replace(entry, cooldown_until=0)
+                usable_node = replace(node, quota_stops=stops)
+                routed = self._usable_spec(roster, target)
+                source_spec, _ = self._spec_of(node)
+                if (routed and self._family_of(target) == self._family_of(node.provider)
+                        and routed.model != source_spec.model):
+                    gap = (node.id, node.provider, source_spec.model, target, routed.model)
+                    gaps = self.__dict__.setdefault("_qh_promotion_gaps", set())
+                    if gap not in gaps:
+                        gaps.add(gap)
+                        self.tree.emit(node.id, "handover_policy_gap", provider=target,
+                                       reason="same-family different-model migration policy is unresolved")
+                    continue
+                if not routed or not await self._qh_usable(target, routed, readings, usable_node):
+                    continue
+                current = self.tree.get(node.id)
+                if (current.status not in ("running", "stuck", "detached") or current.pinned
+                        or current.promotion or current.provider != node.provider):
+                    break
+                promotion = {"from": node.provider, "to": target, "session_id": node.session_id,
+                             "from_rank": rank, "to_rank": names.index(target),
+                             "segment": len(node.segments) + 1,
+                             "attempt": int((node.handover_attempt or {}).get("attempt", 0)) + 1,
+                             "reason": "moved to a higher priority instance", "read_at": stamp,
+                             "triggered_at": self._qh_now(), "phase": "waiting", "owner_pid": os.getpid(),
+                             "owner_start": procs.start_time(os.getpid())}
+                with self._qh_mutex:
+                    busy = self.__dict__.setdefault("_qh_busy", set())
+                    if node.id in busy or node.id in self.__dict__.get("_qh_merging", set()):
+                        break
+                    busy.add(node.id)
+                self.tree.update(node.id, promotion=promotion, quota_stops=stops,
+                                 promotion_dwell_at=promotion["triggered_at"])
+                self._qh_event(node, "promote_started", promotion)
+                task = asyncio.create_task(self._qh_promote(node.id, promotion, settings))
+                self.__dict__.setdefault("_qh_promotions", {})[node.id] = task
+                break
+
+    def _qh_refreshed(self, node, name, stamp):
+        """QH-R30.5: is a reading stamped `stamp` newer than the quota stop's?
+
+        A provider baseline compares the provider's own stamps. A stop whose
+        reading was unstamped has only our local stop time: a stamp after it
+        counts, and the first stamp seen after the stop is kept as a provider
+        baseline too, so a provider clock behind ours refreshes on its next
+        reading rather than never. Unstamped re-reads cannot show they are new.
+        """
+        baseline = node.quota_stop_readings.get(name)
+        if stamp is None:
+            # Accepted: a never-stamping provider is not promoted back to this run.
+            return False
+        if not isinstance(baseline, dict):
+            return baseline is None or stamp > baseline
+        if stamp > baseline["local"] or stamp > baseline.get("anchor", stamp):
+            return True
+        if "anchor" not in baseline:
+            stamps = dict(node.quota_stop_readings)
+            stamps[name] = dict(baseline, anchor=stamp)
+            self.tree.update(node.id, quota_stop_readings=stamps)
+        return False
+
+    async def _qh_promote(self, node_id, promotion, settings):
+        try:
+            while True:
+                node = self.tree.get(node_id)
+                if (node.status not in ("running", "stuck", "detached") or node.pinned
+                        or not node.promotion or self.gate.closed):
+                    return
+                run = self.runs.get(node_id)
+                if run and run.awaiting:
+                    return
+                if run and run.adopted and getattr(run.handle, "offset", 0) < run.replay_to:
+                    await asyncio.sleep(.05)
+                    continue
+                if (not run or not run.active_tools or
+                        self._qh_now() >= promotion["triggered_at"] + settings.get("promote_grace_seconds", 120)):
+                    break
+                await asyncio.sleep(.05)
+            node = self.authoritative(node, "steer")
+            if not node or not self.unrecorded_branch_ok(node, "steer"):
+                raise RuntimeError("run authority or branch validation failed")
+            spec, _ = self._spec_of(node)
+            source_run = self.runs.get(node_id)
+            predecessor = self._steer_predecessor(node_id)
+            self.tree.update(node_id, promotion=dict(promotion, phase="switching"))
+            await self.stop(node_id, internal=True)
+            if not await self._steer_predecessor_dead(predecessor):
+                raise RuntimeError("predecessor is not confirmed dead")
+            node = self.tree.get(node_id)
+            if node.status == "cancelled":
+                return
+            if node.segments:
+                segments = copy.deepcopy(node.segments)
+                segments[-1].update(ended_at=self._qh_now(), end_reason="promoted")
+                self.tree.update(node_id, segments=segments)
+                node = self.tree.get(node_id)
+            target = promotion["to"]
+            sibling = self._family_of(target) == self._family_of(node.provider)
+            mode = self.providers[target].handover_mode.get(self.executor(spec).kind, "none")
+            routed = self._usable_spec(self.config.agent(node.agent), target)
+            resume = bool(node.session_id) and sibling and mode != "none" and routed.model == spec.model
+            saved_session, saved_spec = None, None
+            if not sibling and mode != "none":
+                for segment in reversed(node.segments):
+                    if self._family_of(segment["provider"]) != self._family_of(target):
+                        continue
+                    frozen = AgentSpec(**segment["spec"]) if segment.get("spec") else routed
+                    fingerprint = await asyncio.to_thread(self._qh_session_fingerprint, target, frozen,
+                                                         Path(node.worktree), segment["session_id"])
+                    if fingerprint and fingerprint == segment.get("session_fingerprint"):
+                        resume, saved_session, saved_spec = True, segment["session_id"], frozen
+                    break
+            message = "Moved to a higher priority instance because its quota is available. Continue the assigned work."
+            if not await self._qh_switch(node, spec, target, 1 if resume else 3, resume,
+                                         run=source_run, message=message, promotion=promotion,
+                                         target_session_id=saved_session, target_spec=saved_spec):
+                await self._qh_promotion_failed(node_id, promotion, spec, source_run,
+                                                "target launch refused")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            node = self.tree.get(node_id)
+            if node and node.status != "cancelled" and node.promotion:
+                self._qh_event(node, "promote_failed", promotion, str(exc))
+                self.tree.update(node_id, promotion=None)
+        finally:
+            self.__dict__.setdefault("_qh_busy", set()).discard(node_id)
+            self.__dict__.setdefault("_qh_promotions", {}).pop(node_id, None)
+            node = self.tree.get(node_id)
+            if node and node.promotion and not (node.handover_attempt or {}).get("promotion"):
+                self.tree.update(node_id, promotion=None)
+
+    async def _qh_abort_pending_promotion(self, node_id, reason, *, pinned=None):
+        node = self.tree.get(node_id)
+        task = self.__dict__.get("_qh_promotions", {}).get(node_id)
+        if (not node or not node.promotion
+                or node.promotion.get("phase", "waiting") != "waiting" or not task):
+            return False
+        promotion = node.promotion
+        changes = {"promotion": None}
+        if pinned is not None:
+            changes["pinned"] = pinned
+        self.tree.update(node_id, **changes)
+        self._qh_event(node, "promote_failed", promotion, reason)
+        steering = self.__dict__.setdefault("_steering_nodes", set())
+        owned = node_id not in steering
+        steering.add(node_id)
+        task.cancel()
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        finally:
+            self.__dict__.setdefault("_qh_busy", set()).discard(node_id)
+            if self.__dict__.get("_qh_promotions", {}).get(node_id) is task:
+                self._qh_promotions.pop(node_id)
+            if owned:
+                steering.discard(node_id)
+        return True
+
+    def _qh_fail_promotion(self, node_id, promotion, reason):
+        node = self.tree.get(node_id)
+        if not node or node.status == "cancelled":
+            return False
+        refusals = dict(node.promotion_refusals)
+        reported = (not node.promotion and promotion["to"] in refusals
+                    and refusals[promotion["to"]] == promotion["read_at"])
+        refusals[promotion["to"]] = promotion["read_at"]
+        self.tree.update(node_id, promotion=None, promotion_refusals=refusals,
+                         promotion_dwell_at=max(node.promotion_dwell_at or 0,
+                                                promotion.get("triggered_at", 0)))
+        if not reported:
+            self._qh_event(node, "promote_failed", promotion, reason)
+        return True
+
+    async def _qh_promotion_failed(self, node_id, promotion, source_spec, run, reason):
+        if not self._qh_fail_promotion(node_id, promotion, reason):
+            return False
+        node = self.tree.get(node_id)
+        # The original instance still holds the stopped source session.
+        return await self._qh_switch(node, source_spec, promotion["from"], 1, True,
+                                     run=run, message="Continue after the priority migration was refused.",
+                                     promotion_rollback=promotion)
+
+    async def _qh_shutdown(self):
+        for task in list(self.__dict__.get("_qh_promotions", {}).values()):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
     def _qh_idle(self, exclude=""):
         return not any(n.id != exclude and not n.role and n.status in (
@@ -1018,13 +1511,71 @@ class QuotaHandover:
             raise RuntimeError("floor admission grant no longer owns its run")
         return node_id, request_id
 
+    async def _qh_recover_promotion_failed(self, node, attempt, reason):
+        promotion = attempt.get("promotion") or attempt.get("promotion_rollback")
+        if not promotion:
+            return
+        busy = self.__dict__.setdefault("_qh_busy", set())
+        with self._qh_mutex:
+            if node.id in busy or node.id in self.__dict__.get("_qh_merging", set()):
+                return
+            busy.add(node.id)
+        try:
+            if not self._claim(node.id) or self._held(node.id):
+                return   # failed-launch cleanup must confirm death first
+            predecessor = self._steer_predecessor(node.id)
+            identity = attempt.get("target_exec_identity") or node.exec_identity or {}
+            predecessor = replace(predecessor, probe_raw=self._identity_probe(identity, node.id))
+            if not await self._steer_predecessor_dead(predecessor):
+                return
+            if attempt.get("state") in ("launching", "launched") and identity.get("kind") == "local":
+                from .runner import _recorded_wrapper
+                recorded = _recorded_wrapper(self.paths.run_dir(node.id))
+                if recorded and recorded != attempt.get("source_pid"):
+                    return   # a late wrapper record belongs to target adoption
+            current = self.tree.get(node.id)
+            if (current.handover_attempt or {}).get("attempt") != attempt["attempt"]:
+                return
+            # An explicit stop during the death probe still wins, but only
+            # after the source binding is restored: a later resume must not
+            # find the run stranded on the target that never launched.
+            stopped = current.status == "cancelled"
+            spec = AgentSpec(**attempt["source_spec"])
+            segments = copy.deepcopy(current.segments)
+            if attempt.get("new_segment", True) and len(segments) >= attempt["segment"]:
+                segments.pop()
+            failed = dict(attempt, state="failed", error=reason)
+            # A target segment is write-ahead data, not a successful move.
+            # Restore the frozen source before the ordinary failed-promotion
+            # path prepares a durable same-instance rollback attempt.
+            self.tree.update(node.id, provider=promotion["from"], model=spec.model,
+                             session_id=attempt["session_id"], rank=promotion["from_rank"],
+                             segments=segments, handover_attempt=failed,
+                             **({"promotion": None} if stopped else {}))
+            self._qh_restore_launch(node.id, attempt)
+            if attempt.get("state") != "failed":
+                self._qh_event(node, "handover_failed", failed, reason)
+            if stopped:
+                return
+            await self._qh_promotion_failed(node.id, promotion, spec, None, reason)
+        finally:
+            busy.discard(node.id)
+            if node.id not in self.runs and not self._held(node.id):
+                self._release(node.id)
+
     async def _qh_reconcile(self):
         for node in self._qh_nodes():
             attempt = node.handover_attempt or {}
-            if node.status == "cancelled" or not self._qh_enabled(node=node) or attempt.get("state") not in (
-                    "prepared", "transferred", "launching", "launched"):
+            if (node.status == "cancelled" or not self._qh_enabled(node=node)
+                    or node.id in self.runs
+                    or procs.alive(attempt.get("owner_pid", 0), attempt.get("owner_start", ""))):
                 continue
-            if node.id in self.runs or procs.alive(attempt.get("owner_pid", 0), attempt.get("owner_start", "")):
+            if (attempt.get("state") == "failed" and
+                    (attempt.get("promotion") or attempt.get("promotion_rollback"))):
+                await self._qh_recover_promotion_failed(
+                    node, attempt, attempt.get("error", "promotion recovery failed"))
+                continue
+            if attempt.get("state") not in ("prepared", "transferred", "launching", "launched"):
                 continue
             if attempt["state"] in ("launching", "launched"):
                 pid, started = node.pid, node.pid_start
@@ -1066,6 +1617,10 @@ class QuotaHandover:
                     except Exception as exc:
                         await self._unadoptable(self.tree.get(node.id), exc)
                     continue
+                if attempt.get("promotion") or attempt.get("promotion_rollback"):
+                    await self._qh_recover_promotion_failed(
+                        node, attempt, "target did not launch before its owner exited")
+                    continue
                 failed = dict(attempt, state="failed", error="spawn outcome unknown after crash")
                 self.tree.update(node.id, handover_attempt=failed)
                 self.tree.set_status(node.id, "limited", failed["error"])
@@ -1075,9 +1630,12 @@ class QuotaHandover:
                 continue
             spec = AgentSpec(**attempt["source_spec"])
             try:
-                await self._qh_switch(node, spec, attempt["to"], attempt["tier"],
-                                      attempt["resume"], attempt=attempt,
-                                      message=attempt.get("message", ""))
+                switched = await self._qh_switch(node, spec, attempt["to"], attempt["tier"],
+                                                attempt["resume"], attempt=attempt,
+                                                message=attempt.get("message", ""))
+                if not switched and attempt.get("promotion"):
+                    await self._qh_promotion_failed(node.id, attempt["promotion"], spec, None,
+                                                    "target recovery refused")
             finally:
                 if node.id not in self.runs:
                     self._release(node.id)

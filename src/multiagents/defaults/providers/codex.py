@@ -310,6 +310,8 @@ class Normalizer:
                     out["block"] = str(item["id"])
             elif typ in {"command_execution", "mcp_tool_call", "file_change", "web_search"}:
                 ident = item.get("id")
+                if ident is not None:
+                    out["tool_id"] = str(ident)
                 # Missing ids remain raw: never invent repeat signatures.
                 if ident is None:
                     out["kind"] = "raw"

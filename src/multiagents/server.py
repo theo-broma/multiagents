@@ -540,7 +540,8 @@ def agent_tree() -> dict:
         ],
         "deferred": len(data.get("deferred", [])),
         "runs": [{"agent_id": key, "home_provider": n.get("home_provider") or n.get("provider"),
-                  "current_provider": n.get("provider"), "segments": n.get("segments", [])}
+                  "current_provider": n.get("provider"), "segments": n.get("segments", []),
+                  **run._qh_position(run.tree.get(key))}
                  for key, n in data.get("nodes", {}).items() if not n.get("role")],
     })
 
@@ -1830,6 +1831,7 @@ async def _adopt_forever() -> None:
             await asyncio.get_running_loop().run_in_executor(None, runner)
             if _runner is not None:
                 await _runner.adopt()
+                await _runner._qh_promote_check()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1839,7 +1841,10 @@ async def _adopt_forever() -> None:
                 print(f"multiagents: adoption pass failed, retrying every "
                       f"{ADOPT_SECONDS}s\n{traceback.format_exc()}",
                       file=sys.stderr, flush=True)
-        await asyncio.sleep(ADOPT_SECONDS)
+        check_seconds = min([ADOPT_SECONDS, *[
+            _runner._qh_settings(_runner.config.agent(n.agent)).get("promote_check_seconds", 60)
+            for n in _runner._qh_nodes() if n.agent in _runner.config.agents]]) if _runner else ADOPT_SECONDS
+        await asyncio.sleep(check_seconds)
 
 
 def _safe_point_limit() -> float:

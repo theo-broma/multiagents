@@ -564,6 +564,8 @@ class AgentSpec:
     # it uninvited.
     models: dict[str, Any] = field(default_factory=dict)
     handover: bool = True
+    priorities: list | None = None
+    quota_handover: dict[str, Any] = field(default_factory=dict)
     launch: bool = False
     # Paths this agent may not MODIFY, as gitignore-style globs. Adding a new
     # file is always allowed; changing, deleting or renaming a matching one is
@@ -668,6 +670,55 @@ class AgentSpec:
         extra = {k: v for k, v in data.items() if k not in known}
         return cls(name=name, extra=extra, set_fields=frozenset(kwargs) - {"name"},
                    **{k: v for k, v in kwargs.items() if k != "name"})
+
+
+def priority_entries(spec: AgentSpec, providers: dict) -> list[tuple[list[str], str]]:
+    """QH-R23/R30: resolve syntax before strategy orders each family."""
+    from .providers import families
+    groups = families(providers)
+    result = []
+    seen = set()
+    if not isinstance(spec.priorities, list) or not spec.priorities:
+        raise ValueError(f"agent {spec.name}: priorities must be a nonempty list")
+    for entry in spec.priorities:
+        model = ""
+        if isinstance(entry, str):
+            name, family = entry, entry in groups
+        elif isinstance(entry, dict) and ("family" in entry) != ("instance" in entry):
+            family = "family" in entry
+            name = entry["family" if family else "instance"]
+            model = entry.get("model", "")
+            if not isinstance(model, str):
+                raise ValueError(f"agent {spec.name}: priorities model must be a string")
+        else:
+            raise ValueError(f"agent {spec.name}: invalid priorities entry {entry!r}")
+        if not isinstance(name, str) or name not in (groups if family else providers):
+            raise ValueError(f"agent {spec.name}: unknown priority {'family' if family else 'instance'} {name!r}")
+        names = groups[name] if family else [name]
+        for instance in names:
+            if instance in seen:
+                raise ValueError(f"agent {spec.name}: duplicate priority instance {instance!r}")
+            seen.add(instance)
+        result.append((names, model))
+    return result
+
+
+def validate_promotion_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError("quota_handover must be a mapping")
+    for key in ("promote_min_headroom", "promote_min_dwell_seconds",
+                "promote_grace_seconds", "promote_check_seconds"):
+        if key not in settings:
+            continue
+        value = settings[key]
+        if key == "promote_min_headroom":
+            valid = (not isinstance(value, bool) and isinstance(value, (int, float))
+                     and math.isfinite(value) and 0 <= value < 1)
+        else:
+            valid = (not isinstance(value, bool) and isinstance(value, int)
+                     and value >= (1 if key == "promote_check_seconds" else 0))
+        if not valid:
+            raise ValueError(f"quota_handover.{key} has an invalid value")
 
 
 # LM-R1: the run limits an agent may set for itself, the `limits:` key each
@@ -1091,6 +1142,7 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
         raise ValueError("quota_handover must be a mapping")
     if not isinstance(handover.get("enabled", True), bool):
         raise ValueError("quota_handover.enabled must be a boolean")
+    validate_promotion_settings(handover)
     reserved = handover.get("reserved_instance")
     if reserved is not None and reserved not in providers:
         raise ValueError(f"quota_handover.reserved_instance {reserved!r} must name an existing instance")
@@ -1112,6 +1164,10 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
         for name, data in agents_raw.items()
         if not (data or {}).get("disabled")
     }
+    for spec in agents.values():
+        validate_promotion_settings(spec.quota_handover)
+        if spec.priorities is not None:
+            priority_entries(spec, providers)
     _validate_routes(agents_raw, providers)
     warnings: list[str] = []
     _warn_unknown_entry_keys(agents_raw, providers, warnings)

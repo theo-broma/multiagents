@@ -69,7 +69,7 @@ from .tree import (ACTIVE, DRIVER_ROLES, PC_CAUSE, TERMINAL, Node, Tree,
                    deferred_malformed, find_deferred, new_id, node_from_raw,
                    now, pc_waiting)
 from .transcripts import session_transcript
-from .quota_handover import QuotaHandover
+from .quota_handover import QuotaHandover, promotion_merge_guard
 
 MAX_SUMMARY_CHARS = 6000
 _HOST_HOOK_NOTIFIED: set[Path] = set()
@@ -664,6 +664,7 @@ class Run:
     requested_session: str = ""     # adapter explicitly reported a resume mismatch
     startup_token: str = ""
     startup_progress: bool = False
+    active_tools: set[str] = field(default_factory=set)
     stop_requested: bool = False      # distinguishes an explicit stop from teardown
     internal_stop: bool = False       # steer() ending this turn to respawn it, not a real cancel
     awaiting: dict | None = None      # a NEED_DECISION seen mid-stream
@@ -5420,7 +5421,8 @@ class Runner(QuotaHandover):
                 captured_session = bool(event.session_id and not session_id)
                 if captured_session:
                     session_id = event.session_id
-                if event.session_id and event.status.upper() != "SESSION_LOST":
+                self._qh_observe(run, event)
+                if event.session_id and event.status.upper() not in {"SESSION_LOST", "REFUSED", "TRUNCATED", "FAILED"}:
                     self._qh_confirm(run, event.session_id)
                 if event.status:
                     if event.status.upper() == "SESSION_LOST":
@@ -5526,6 +5528,11 @@ class Runner(QuotaHandover):
                             events=remainder, follow=follow())
                     self.tree.update(node_id, follow=follow())
                 raise
+            if run.internal_stop:
+                remainder = flush.drain()
+                self.tree.note_event(node_id, steps=run.supervisor.steps or None,
+                                     usage=usage or None, session_id=session_id or None,
+                                     events=remainder, follow=follow())
             await handle.stop()
             # Both an explicit stop_agent() and the event loop shutting down
             # arrive here as a CancelledError, but they mean different things
@@ -6961,7 +6968,8 @@ class Runner(QuotaHandover):
             "events": [_compact(e) for e in window],
         }
         result.update(home_provider=node.home_provider or node.provider,
-                      current_provider=node.provider, segments=node.segments)
+                      current_provider=node.provider, segments=node.segments,
+                      **self._qh_position(node))
         if node.reason == "session_lost":
             result["requested_session"] = node.requested_session
         result.update(self._no_commits_note(node))
@@ -7045,7 +7053,8 @@ class Runner(QuotaHandover):
             "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
         }
         payload.update(home_provider=node.home_provider or node.provider,
-                       current_provider=node.provider, segments=node.segments)
+                       current_provider=node.provider, segments=node.segments,
+                       **self._qh_position(node))
         if data.get("warnings") or node.warnings:
             payload["warnings"] = data.get("warnings") or node.warnings
         if node.reason == "session_lost":
@@ -7385,6 +7394,7 @@ class Runner(QuotaHandover):
         # kicks from here on; the reconciliation task is ended BEFORE the
         # runs are captured, so nothing it confirms can launch work now.
         self.__dict__["_pc_shutting_down"] = True
+        await self._qh_shutdown()
         for waiter in list(self.__dict__.get("_pc_waiters", ())):
             # Consults waiting for a slot wake to the flag and end.
             if not waiter.done():
@@ -7953,19 +7963,28 @@ class Runner(QuotaHandover):
         Refuse another steer until this node's handoff and any
         pending cleanup finish. Nothing new is claimed on that refusal."""
         node = self.tree.get(agent_id)
+        if provider is not None and node and not node.node_id:
+            await self._qh_abort_pending_promotion(
+                agent_id, "superseded by explicit provider steer", pinned=provider != "auto")
+            node = self.tree.get(agent_id)
         if agent_id in self.__dict__.get("_qh_busy", set()):
             return {"agent_id": agent_id, "error": "quota handover is in progress"}
         if node and (node.handover_attempt or {}).get("state") in ("prepared", "transferred", "launching", "launched"):
             return {"agent_id": agent_id, "error": "quota handover is in progress"}
         if provider is not None and node and node.node_id:
             return {"agent_id": agent_id, "error": "scheduler-managed runs have a frozen provider binding"}
-        if provider is not None and node and provider != node.provider:
+        if provider is not None and node:
+            self.tree.update(agent_id, pinned=provider != "auto")
+        if provider is not None and node and (provider != node.provider or provider == "auto"):
             active = self.__dict__.setdefault("_steering_nodes", set())
             if agent_id in active:
                 return {"agent_id": agent_id, "error": "a steer is in progress"}
             active.add(agent_id)
             try:
-                return await self._qh_manual(node, message, provider)
+                result = await self._qh_manual(node, message, provider)
+                if not result.get("steered") and provider != "auto":
+                    self.tree.update(agent_id, pinned=node.pinned)
+                return result
             finally:
                 active.discard(agent_id)
         if node and (self.scheduler_enabled() or node.node_id):
@@ -8683,6 +8702,16 @@ class Runner(QuotaHandover):
         `AgentSpec.routed`), and a per-run `pinned_model` wins over the entry's
         model without losing its options.
         """
+        if spec.priorities is not None:
+            from .config import priority_entries
+            for names, priority_model in priority_entries(spec, self.providers):
+                if provider in names:
+                    legacy = spec.replace(priorities=None)
+                    routed, route = self._routed_spec(legacy, provider, resume=True)
+                    routed = routed or legacy.routed(provider)
+                    return routed.replace(model=pinned_model or priority_model or routed.model), route
+            if not resume:
+                return None, ""
         if provider == spec.provider:
             return spec.routed(provider, pinned_model=pinned_model), ""
         alternative, _ = spec.fallback_for(provider)
@@ -10032,6 +10061,7 @@ class Runner(QuotaHandover):
         if self.gate.closed:
             return {"paused": False, "restarted": []}
         await self._qh_reconcile()
+        await self._qh_promote_check()
         reserve_restarted = await self._qh_drain_reserve()
         # Recovery follows a launched target, never launches that attempt
         # twice. Adoption is also needed when no ordinary quota entry is due.
@@ -10416,6 +10446,7 @@ class Runner(QuotaHandover):
 
     # ------------------------------------------------------------------- git --
 
+    @promotion_merge_guard
     def merge_agent(self, agent_id: str, into: str | None = None) -> dict[str, Any]:
         node = self.tree.get(agent_id)
         if node is None:

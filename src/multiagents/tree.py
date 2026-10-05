@@ -203,8 +203,17 @@ class Node:
     segment_usage_base: dict[str, Any] = field(default_factory=dict)
     handover_attempt: dict | None = None
     quota_stops: dict[str, float] = field(default_factory=dict)
+    # Provider read_at at each quota stop, or {"local": t[, "anchor": read_at]}
+    # when the stop's reading was unstamped (QH-R30.5).
+    quota_stop_readings: dict[str, float | dict | None] = field(default_factory=dict)
     reserve_request: str = ""
     on_reserve_floor: bool = False
+    pinned: bool = False
+    rank: int | None = None
+    promotion: dict | None = None
+    promotion_refusals: dict[str, float | None] = field(default_factory=dict)
+    # Last promotion attempt or switch, including a same-provider rollback.
+    promotion_dwell_at: float | None = None
     model_pinned: bool = False
     pid: int | None = None
     # What makes `pid` an identity rather than a number: see
