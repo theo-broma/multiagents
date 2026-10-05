@@ -167,7 +167,7 @@ class Supervisor:
             self.last_digest, self.last_step = digest, event.step
             if event.tool_id:
                 if len(self._call_digests) > 256:
-                    self._call_digests.clear()
+                    del self._call_digests[next(iter(self._call_digests))]
                 self._call_digests[event.tool_id] = digest
             if not repeat:
                 self.signatures.append((digest, self.current_progress))
@@ -200,11 +200,12 @@ class Supervisor:
         """
         if not digest:
             return
-        seen = self._results.get(digest)
+        seen = self._results.pop(digest, None)
         if seen is None:
             if len(self._results) >= 256:
-                self._results.clear()
-            seen = self._results[digest] = deque(maxlen=self.loop_window)
+                del self._results[next(iter(self._results))]
+            seen = deque(maxlen=self.loop_window)
+        self._results[digest] = seen    # re-insert: a signature in use is never the oldest
         novel = bool(seen) and result not in seen
         seen.append(result)
         if not novel:
