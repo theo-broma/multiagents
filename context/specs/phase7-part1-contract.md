@@ -911,3 +911,14 @@ to the id used to name it. An input naming a loop's work child — unpinned, or
 pinned to the rejected `generation` — blocks with `input` exactly as an input
 naming the loop does. Verified by:
 `tests/test_nc_m3_adv_inputs.py::test_adv_the_rejected_generation_is_not_usable_through_the_work_childs_id`.
+
+**NC-R97 — only an approved generation is usable as input (2026-10-05;
+user-approved).** Extends NC-R47 and NC-R96. An input naming a loop, or its
+work child, unpinned or pinned to a `generation`, resolves only to a generation
+the loop has **approved**. A generation not yet judged (review pending, or the
+work child's turn finished but no verdict yet) blocks the consuming node with
+`input` exactly as a rejected one does; it is never launched against
+unreviewed work. Closing the loop's root with `approved` (host or orchestrator,
+without a reviewer verdict) counts as approval, and is recorded distinctly
+from a reviewer's verdict, so the record shows who approved. Verified by:
+`tests/test_nc_r97_approved_generation_only.py` (to be written by the tester).
