@@ -30,7 +30,11 @@ from nc_fixture.m4_world import (M4World, blocked_codes, commit_entry, err_code,
 
 # Bounds on every wait: red tests fail on their own assertion within seconds.
 WAIT = 8            # one launch / one transition
-WAIT_ROUNDS = 20    # several activations in a row (loops, sessions)
+# Two/three rounds require four/six serial provider activations plus Git
+# integration. Under concurrent suites, a correct loop has finished at 8.126s;
+# 20s gives that work load headroom without widening single-transition waits.
+# wait_state/wait_held poll and retain the fixture's early-failure probes.
+WAIT_ROUNDS = 20    # multi-round completion / hold, retries and sessions
 
 
 @pytest.fixture
@@ -72,7 +76,7 @@ def test_nc_r35_r67_a_rejection_relaunches_the_first_child_with_the_findings_onc
     w.fxr.queue(verdict_entry("rejected", [finding("FINDING-ALPHA-7")]), verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    done = w.wait_state(loop, "done", timeout=WAIT)
+    done = w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved" and done["loop"]["rounds_rejected"] == 1
     first, second = w.fxw.calls()
     assert "FINDING-ALPHA-7" not in first["prompt"]
@@ -88,7 +92,7 @@ def test_nc_r67_findings_are_delivered_once_not_repeated_in_later_rounds(w):
                 verdict_entry("rejected", [finding("FINDING-ONCE-2")]), verdict_entry("approved"))
     w.start_scheduler()
     loop, _, _ = w.mkloop(5)
-    w.wait_state(loop, "done", timeout=WAIT)
+    w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     c1, c2, c3 = w.fxw.calls()
     assert "FINDING-ONCE-1" in c2["prompt"] and "FINDING-ONCE-1" not in c3["prompt"]
     assert "FINDING-ONCE-2" in c3["prompt"]
@@ -99,7 +103,7 @@ def test_nc_r35_at_the_maximum_the_loop_holds_and_launches_nothing_more(w):
     w.fxr.queue(verdict_entry("rejected", [finding("one")]), verdict_entry("rejected", [finding("two")]))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(2)
-    held = w.wait_held(loop, "loop_max", timeout=WAIT)
+    held = w.wait_held(loop, "loop_max", timeout=WAIT_ROUNDS)
     assert held["loop"]["rounds_rejected"] == 2
     w.quiet(3)
     assert w.fxw.spawns() == 2 and w.fxr.spawns() == 2, "a third round was launched"
@@ -199,7 +203,7 @@ def test_nc_r34_a_second_verdict_of_one_activation_is_refused_and_the_first_stan
     w.fxw.queue(work(2))
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    w.wait_state(loop, "done", timeout=WAIT)
+    w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     replies = w.fxr.verdicts()[0]["replies"]
     assert replies[0]["ok"] is True and replies[-1]["ok"] is False
     assert w.get(loop)["loop"]["rounds_rejected"] == 1
@@ -291,7 +295,7 @@ def held_at_max(w, max_rounds=2):
     w.fxr.queue(*[verdict_entry("rejected", [finding(f"r{i}")]) for i in range(max_rounds)])
     w.start_scheduler()
     loop, wk, rv = w.mkloop(max_rounds)
-    w.wait_held(loop, "loop_max", timeout=WAIT)
+    w.wait_held(loop, "loop_max", timeout=WAIT_ROUNDS if max_rounds > 1 else WAIT)
     return loop, wk, rv
 
 
