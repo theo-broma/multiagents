@@ -4363,3 +4363,33 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - 17:45Z: b29f0f (store upsert, NC-R99) merged 1441dee: reviewer ag-d0ab7d produced VERDICT(approved) in its output, then agy-b hit a 503 and the run was marked failed (agy-b ERROR after a complete answer; it happened 3x today; possible tooling misclassification). Space Bunny trial ag-742564 still running (~15 min). 17:26Z wake pending: steer ag-c4b36a + ag-7676ac.
 - 17:52Z: user asked for a GPT comparison: ag-c830f9 (implementer, codex-b gpt-6.1-sol medium) runs the SAME task as Space Bunny ag-742564. Compare time, steps, correctness (reviewer on both); merge only the better one, discard the other. c4b36a and 7676ac resumed on codex-b.
 - 17:55Z: USER ROSTER DECISION: no more GPT for implementers; all implementer tiers → opencode-go/space-bunny-free variant max, fallback claude (sonnet / opus deep), codex removed from implementer chains (backup /var/tmp/agents.yaml.pre-bunny-tiers.bak). Running codex implementers (c4b36a, 7676ac, c830f9 comparison) continue.
+
+### HANDOFF 2026-10-05 ~18:00Z (orchestrator context wind-down)
+
+**Done today, all on main:**
+- M4, M5 (port 13c631a) and M6, with the NC-R43 window tests and the acceptance fixtures fixed.
+- NC-R97 fixes, and the NC-R98 and NC-R99 specs. NC-R99 (list_nodes creation order) is in 1441dee.
+- episode() lock-scope fix d2a0ab1.
+- NC-R38 DST tests.
+- pc_counting r2 test relaxed.
+- Ticket bug-2e68e4 (doom-loop watchdog) fixed (5c5a75e, 63a2ca9, tests 7b6a9be) and resolved.
+
+**Roster (user, 17:55Z):** all implementer tiers run opencode-go/space-bunny-free with variant max, falling back to claude (sonnet; opus for deep). No GPT for implementers. The trial agent `implementer-bunny` is in the implement roster.
+
+**In flight (wait_for_agents on these):**
+- ag-c4b36a (implementer-deep, codex-b), slot-leak fix round 2. Review r1 ag-b4e830 asked for no /proc read inside the transaction, and for bare-pid "dead" only on positive evidence. Next: reviewer round 2, then merge. tests/test_pc_finalizing_reclamation.py on main is red until this merges.
+- ag-7676ac (implementer, codex-b), C23 promote regression (75eea26 adopted synthetic nodes; 14 wait-paused/unseen reds). Commit 4ca736d plus WIP; it is finishing the full-suite comparison. Next: reviewer, then merge.
+- ag-c830f9 (implementer, codex-b gpt), the SAME task as the Space Bunny trial, run for comparison at the user's request.
+
+**Space Bunny trial result, ag-742564, DONE (branch agents/implementer-bunny/742564):**
+- 1418s (~24 min) including tests, 2 commits (5a2bcea test, e918097 fix).
+- It found that the task's premise was wrong: the end-of-tick pop already existed, so the real defect was the mirror one (a still-broken node lost its "last" entry after one tick). It fixed that in both directions.
+- New file tests/test_nc_r97_evaluation_failure_recovery.py; both tests fail without the fix.
+- 209 passed (nc_r97 + nc_m2), plus 438 passed on m3/m4/m6.
+- Next: when ag-c830f9 finishes, review BOTH branches (reviewer with verifies). Report the comparison to the user (time, steps, verdicts, quality). Merge the better one and discard the other.
+
+**Watch out:**
+- agy-b reviewers sometimes end "failed: agy-b reported ERROR" (a 503) AFTER writing a complete verdict. Read output.ndjson and stderr.log before rerunning.
+- Pinning a model on a reviewer routes to the exhausted primary (agy/codex). Omit the model to get agy-b.
+
+**Pending user items:** none.
