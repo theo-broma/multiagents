@@ -4403,3 +4403,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - C23 promotion ownership merged b416fef (r2 approved ag-7bf100). 14 wait reds fixed.
 - GPT vs Space Bunny (same NC-R97-followup task): both rejected by gemini on the same 2 points (F1 declined, F2 tests white-box). GPT 750s/2.2M tok/1 test/208 green; Bunny 1418s/2.1M tok/2 tests (still-broken + recovered)/209+438 green, clearer report. Kept Bunny; gpt ag-c830f9 discarded. Bunny ag-742564 steered for r2 (rename test file, black-box asserts) → reviewer r2 then merge.
 - Slot-leak fix PC-R2a/PC-R3f merged 3f97cc4 (r2 approved ag-b2e012). In flight: only Bunny ag-742564 r2.
+- Bunny r2 done (c8ee3aa: tests renamed + black-box). Doubt: fix's only observable effect may be delaying recovery 1 tick → reviewer r2 ag-8bc769 asked whether fix has real benefit; if not, discard rather than merge.
