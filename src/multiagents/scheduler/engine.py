@@ -627,7 +627,9 @@ class Engine:
                 self.store.transition(db, "session_unavailable", id, detail)
 
     def episode(self, id, ready):
-        config, instant = self.service.configuration(), self.instant()
+        # Prepare file-backed inputs before taking the notification/store locks.
+        starvation_after = self.service.configuration().project["scheduler"]["starvation_after_seconds"]
+        instant = self.instant()
         with self.service.changed, self.store.transaction() as db:
             node = self.store.nodes(db)[id]
             if node["state"] != "open":
@@ -636,7 +638,7 @@ class Engine:
                 if not node.get("ready_since"):
                     node["ready_since"] = datetime.fromtimestamp(instant, timezone.utc).isoformat()
                 age = instant - epoch(node["ready_since"])
-                if age >= config.project["scheduler"]["starvation_after_seconds"] and not node.get("starvation_notified"):
+                if age >= starvation_after and not node.get("starvation_notified"):
                     self.store.transition(db, "starving", id)
                     node["starvation_notified"] = True
             else:
