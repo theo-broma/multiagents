@@ -139,6 +139,12 @@ dependencies:
   match: exact
   used_by:
   - providers.yaml#/opencode-zai/stream/rules/1/fields/state
+- id: stream_field.part-state-output
+  kind: stream_field
+  value: part.state.output
+  match: exact
+  used_by:
+  - providers.yaml#/opencode-zai/stream/rules/1/fields/result
 - id: stream_field.step-finish
   kind: stream_field
   value: step_finish
