@@ -162,6 +162,7 @@ dependencies:
   value: part.id
   match: exact
   used_by:
+  - providers.yaml#/opencode/stream/rules/0/fields/block
   - providers.yaml#/opencode/stream/rules/2/fields/step_id
 - id: stream_field.part-reason
   kind: stream_field

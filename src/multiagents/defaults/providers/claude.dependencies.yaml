@@ -184,6 +184,12 @@ dependencies:
   match: exact
   used_by:
   - providers.yaml#/claude/stream/rules/1/fields/text
+- id: stream_field.uuid
+  kind: stream_field
+  value: uuid
+  match: exact
+  used_by:
+  - providers.yaml#/claude/stream/rules/1/fields/block
 - id: stream_field.result
   kind: stream_field
   value: result
