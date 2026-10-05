@@ -12,6 +12,9 @@ from ..paths import ProjectPaths
 from ..runner import LaunchContext, Runner
 from ..tree import now, ACTIVE, PAUSED
 from .engine import attempts, record_launch, save_attempt
+from . import sessions
+from .model import Refused
+from .. import gitops
 from .store import Store
 
 
@@ -40,13 +43,39 @@ async def supervise(root, attempt_id, lock_fd=None):
             # the recorded wrapper, session and run directory, never relaunches.
             await runner.adopt(exclude={n.id for n in runner.tree.active() if n.id != attempt["run_id"]})
         else:
+            with store.transaction(write=False) as db:
+                checked_attempt = attempts(db)[attempt_id]
+                checked_node = store.nodes(db)[checked_attempt["node_id"]]
+                checked_binding = sessions.aliases(db).get(checked_attempt.get("alias_id"))
+            preflight_failure = None
+            if checked_binding:
+                try:
+                    if sessions.unavailable(checked_binding, runner):
+                        raise Refused("session_unavailable", detail=checked_binding["provider"])
+                    sessions.check_clean(paths, checked_binding, runner.authority)
+                except (Refused, gitops.GitError, OSError, ValueError) as exc:
+                    preflight_failure = (exc.result if isinstance(exc, Refused)
+                                         else {"error": "reseat_failed", "detail": str(exc)})
             with store.transaction() as db:
                 attempt = attempts(db)[attempt_id]
                 node = store.nodes(db)[attempt["node_id"]]
-                if node["state"] != "open" or attempt["state"] != "claimed" or attempt.get("cancel_requested"):
+                if (node["state"] != "open" or attempt["state"] != "claimed" or attempt.get("cancel_requested")
+                        or node["revision"] != checked_node["revision"] or attempt != checked_attempt
+                        or sessions.aliases(db).get(attempt.get("alias_id")) != checked_binding):
                     if attempt["state"] == "claimed":
                         attempt.update(state="abandoned", ended_at=now())
                         save_attempt(db, attempt)
+                    db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
+                    return
+                if preflight_failure:
+                    detail = preflight_failure
+                    if detail["error"] != "session_unavailable":
+                        node.update(state="held", hold={"reason": detail["error"], "detail": detail.get("detail", "")},
+                                    revision=node["revision"] + 1)
+                        store.save_node(db, node)
+                        store.transition(db, detail["error"], node["id"], node["hold"])
+                    attempt.update(state="abandoned", refusal=detail, ended_at=now())
+                    save_attempt(db, attempt)
                     db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
                     return
                 attempt["launch_in_progress"] = True
@@ -56,10 +85,11 @@ async def supervise(root, attempt_id, lock_fd=None):
             context = LaunchContext(caller=node.get("launch_caller", parent), run_parent=parent,
                                     depth=node.get("depth") or (creator.depth + 1 if creator else 1),
                                     node_id=node["id"], attempt_id=attempt_id, run_id=attempt["run_id"],
-                                    provider=node["pins"].get("provider", ""), effort=node["pins"].get("effort", ""))
+                                    provider=attempt.get("binding", {}).get("provider", node["pins"].get("provider", "")),
+                                    effort=node["pins"].get("effort", ""))
             try:
                 result = await runner.start(node["agent"], node["task"], launch_context=context,
-                                            model=node["pins"].get("model"), **node.get("launch", {}))
+                                            model=attempt.get("binding", {}).get("model", node["pins"].get("model")), **node.get("launch", {}))
             except BaseException:
                 with store.transaction() as db:
                     current = attempts(db)[attempt_id]

@@ -59,6 +59,10 @@ class Store:
                      reply TEXT NOT NULL, PRIMARY KEY(subject, request_id));
                 CREATE TABLE IF NOT EXISTS attempts
                     (id TEXT PRIMARY KEY, record TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS templates
+                    (name TEXT PRIMARY KEY, record TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS aliases
+                    (id TEXT PRIMARY KEY, record TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notifications
                     (seq INTEGER PRIMARY KEY AUTOINCREMENT, record TEXT NOT NULL);
             """

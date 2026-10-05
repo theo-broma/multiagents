@@ -24,6 +24,7 @@ from ..tree import ACTIVE, PAUSED
 from . import model
 from .store import encode
 from .results import Results, input_generation, top_node
+from . import sessions, effects
 from .. import gitops
 
 
@@ -56,6 +57,15 @@ def record_launch(store, db, attempt, run):
         node.update(state="running", ready_since=None, revision=node["revision"] + 1)
         node.pop("starvation_notified", None)
     store.save_node(db, node)
+    nodes = store.nodes(db)
+    parent = nodes.get(node["parent"])
+    while parent:
+        if parent["kind"] != "simple":
+            parent["lock_claimed"] = True
+            if parent["state"] == "open":
+                parent.update(state="running", revision=parent["revision"] + 1)
+            store.save_node(db, parent)
+        parent = nodes.get(parent["parent"])
     store.transition(db, "launched", node["id"], {"run_id": run.id, "attempt_id": attempt["attempt_id"]})
     return True
 
@@ -147,23 +157,26 @@ class Engine:
         # ancestor therefore imposes no composite gate on them (NC-R12).
         cur = node
         while cur:
-            if cur is not node and cur["state"] in {"held", "cancelled", "suspended"}:
+            if cur.get("completion_pending") or cur.get("disposal_pending"):
+                return [{"code": "ancestor", "detail": cur["id"]}]
+            if cur is not node and (cur["state"] in {"held", "cancelled", "suspended"}
+                    or cur["kind"] != "simple" and cur["state"] == "done"):
                 return [{"code": "ancestor", "detail": cur["id"]}]
             for ref in cur["depends_on"]:
                 other = nodes.get(ref["node"])
                 if other is None:
-                    return [{"code": "dependency", "detail": ref["node"]}]
+                    return [{"code": "dependency" if cur is node else "ancestor", "detail": ref["node"]}]
                 allowed = ({"completed", "approved"} if ref.get("require", "success") == "success"
                            else {"approved"} if ref["require"] == "approved" else None)
                 if other["state"] != "done" or allowed and other["outcome"] not in allowed:
-                    return [{"code": "dependency", "detail": ref["node"]}]
+                    return [{"code": "dependency" if cur is node else "ancestor", "detail": ref["node"]}]
             for ref in cur["inputs"]:
                 if not input_generation(nodes.get(ref["node"]), ref, nodes):
                     return [{"code": "input", "detail": ref["node"]}]
             parent = nodes.get(cur["parent"])
             if parent and parent["kind"] in {"sequence", "loop"}:
                 index = parent["children"].index(cur["id"])
-                if index and nodes[parent["children"][index-1]]["state"] != "done":
+                if index and not model.succeeded(nodes[parent["children"][index-1]]):
                     return [{"code": "ancestor", "detail": parent["id"]}]
             cur = parent
         return []
@@ -176,24 +189,45 @@ class Engine:
             parent = nodes.get(parent["parent"])
         return locks
 
-    def lock_blockers(self, node, nodes, journal):
-        wanted = self.lock_set(node, nodes)
-        held = set()
-        for attempt in journal.values():
-            if attempt["state"] not in {"claimed", "launched"} or attempt["node_id"] == node["id"]:
-                continue
-            held.update(attempt.get("locks", []))
-        overlap = sorted(wanted & held)
-        return [{"code": "lock", "detail": overlap}] if overlap else []
+    def lock_owners(self, node, nodes):
+        owners = {name: node["id"] for name in node["locks"]}
+        parent = nodes.get(node["parent"])
+        while parent:
+            for name in parent["locks"]:
+                owners[name] = parent["id"]
+            parent = nodes.get(parent["parent"])
+        return owners
 
-    def view(self, node, nodes, journal):
+    def lock_blockers(self, node, nodes, journal):
+        wanted = self.lock_owners(node, nodes)
+        overlap = set()
+        for attempt in journal.values():
+            if attempt["state"] not in {"claimed", "launched", "captured"} or attempt["node_id"] == node["id"]:
+                continue
+            holders = attempt.get("lock_owners") or {name: attempt["node_id"] for name in attempt.get("locks", [])}
+            overlap.update(name for name in wanted.keys() & holders.keys() if wanted[name] != holders[name])
+        for composite in nodes.values():
+            if composite.get("lock_claimed") and composite["state"] not in {"done", "cancelled"}:
+                holders = self.lock_owners(composite, nodes)
+                overlap.update(name for name in wanted.keys() & holders.keys() if wanted[name] != holders[name])
+        return [{"code": "lock", "detail": sorted(overlap)}] if overlap else []
+
+    def session_blockers(self, node, nodes, journal, db=None):
+        if db is None:
+            with self.store.transaction(write=False) as connection:
+                bindings = sessions.aliases(connection)
+        else:
+            bindings = sessions.aliases(db)
+        return sessions.blockers(node, nodes, journal, bindings, self.runner)
+
+    def view(self, node, nodes, journal, db=None):
         structural = self.structural(node, nodes)
         ready = node["kind"] == "simple" and node["state"] == "open" and not structural
         active = next((a["run_id"] for a in journal.values()
                        if a["node_id"] == node["id"] and a["state"] in {"claimed", "launched"}), None)
         blocked = structural
         if ready:
-            blocked = self.lock_blockers(node, nodes, journal) or self.reasons.get(node["id"], [])
+            blocked = self.lock_blockers(node, nodes, journal) or self.session_blockers(node, nodes, journal, db) or self.reasons.get(node["id"], [])
         if node["state"] in {"running", "done", "cancelled", "suspended"}:
             blocked = []
         return {**copy.deepcopy(node), "ready": ready, "ready_since": node.get("ready_since"),
@@ -201,12 +235,18 @@ class Engine:
                 "eligible_since": node.get("ready_since") if ready and not blocked else None,
                 "active_run": active if node["state"] not in {"done", "cancelled"} else None}
 
-    def status(self, nodes, journal):
+    def status(self, nodes, journal, db=None):
         return {"last_tick": self.last_tick,
                 "held": [{"node_id": n["id"], "hold": n["hold"]} for n in nodes.values() if n["state"] == "held"],
                 "locks": [{"name": name, "holder_run": a["run_id"], "holder_node": a["node_id"]}
                           for a in journal.values() if a["state"] in {"claimed", "launched"}
-                          for name in a.get("locks", [])], "aliases": [], "windows": []}
+                          for name in a.get("locks", [])], "aliases": self.alias_status(db), "windows": []}
+
+    def alias_status(self, db=None):
+        if db is not None:
+            return list(sessions.aliases(db).values())
+        with self.store.transaction(write=False) as db:
+            return list(sessions.aliases(db).values())
 
     def start(self):
         self.thread.start()
@@ -225,7 +265,19 @@ class Engine:
             deadline = time.monotonic() + self.service.configuration().project["scheduler"]["tick_seconds"]
             while time.monotonic() < deadline and not self.stopped.is_set():
                 await asyncio.sleep(min(0.1, max(0, deadline - time.monotonic())))
+                if self.completion_changed():
+                    break
         await self.runner.shutdown(detach=True, preserve_status=True)
+
+    def completion_changed(self):
+        # Detached supervisors cannot signal this process's condition variable.
+        # Keep waking until reconciliation records the result. Terminal tree
+        # status can precede confirmed wrapper death; consuming that first
+        # wakeup would leave subsequent rounds waiting for the periodic tick.
+        with self.store.transaction(write=False) as db:
+            active = {a["run_id"] for a in attempts(db).values() if a["state"] in {"claimed", "launched"}}
+        return any(id in active and run["status"] not in ACTIVE | PAUSED | {"quota_paused"}
+                   for id, run in self.runner.tree.read()["nodes"].items())
 
     def stop(self):
         self.stopped.set()
@@ -263,6 +315,9 @@ class Engine:
         await self.runner.adopt(exclude=managed)
         await self.reconcile()
         self.composites()
+        # Mirror recorded results before admission awaits launches, so a
+        # client that sees a node done finds its transitions in the log.
+        self.store.mirror()
         with self.store.transaction(write=False) as db:
             nodes, journal = self.store.nodes(db), attempts(db)
         # Deposits arriving while reconciliation awaits I/O belong to the
@@ -279,33 +334,98 @@ class Engine:
                 continue
             if self.lock_blockers(node, nodes, journal):
                 continue
+            session_blocked = self.session_blockers(node, nodes, journal)
+            if session_blocked:
+                self.reasons[node["id"]] = session_blocked
+                if session_blocked[0]["code"] == "session_unavailable":
+                    self.session_notice(node["id"], session_blocked[0])
+                continue
+            with self.store.transaction(write=False) as db:
+                alias_key = sessions.alias_id(node, nodes)
+                checked_binding = sessions.aliases(db).get(alias_key)
+                checked_attempts = {id: a for id, a in attempts(db).items()
+                                    if alias_key and a.get("alias_id") == alias_key}
+            binding = checked_binding
+            probe = self.context(node, probe=True)
+            if binding and binding.get("renew"):
+                binding = None
+            if binding:
+                probe = replace(probe, provider=binding["provider"])
             result = await self.runner.start(node["agent"], node["task"],
-                                             model=node["pins"].get("model"),
-                                             launch_context=self.context(node, probe=True),
+                                             model=binding["model"] if binding else node["pins"].get("model"),
+                                             launch_context=probe,
                                              **node.get("launch", {}))
+            blocked = result.get("blocked", [])
+            if binding and result.get("error"):
+                blocked = [{"code": "session_unavailable", "detail": result.get("reason", result["error"])}]
+                self.session_notice(node["id"], blocked[0])
             with self.service.changed:
-                self.reasons[node["id"]] = result.get("blocked", [])
+                self.reasons[node["id"]] = blocked
             if not result.get("admitted") or self.stopped.is_set():
                 continue
+            clean_failure = None
+            try:
+                if checked_binding:
+                    sessions.check_clean(self.paths, checked_binding, self.runner.authority)
+            except model.Refused as exc:
+                clean_failure = (exc.result["error"], exc.result.get("detail", exc.result.get("problems", "")))
+            except (gitops.GitError, OSError, ValueError) as exc:
+                clean_failure = ("reseat_failed", str(exc))
+            with self.store.transaction(write=False) as db:
+                preparation_nodes = self.store.nodes(db)
+            prospective = preparation_nodes[node["id"]]
+            if prospective["state"] != "open" or prospective["revision"] != node["revision"]:
+                continue
+            prepared_nodes = copy.deepcopy(preparation_nodes)
+            preparation_failure = None
+            if not clean_failure:
+                try:
+                    with effects.serialized(self.store):
+                        prepared = Results(self.paths, config).prepare(prepared_nodes[node["id"]], prepared_nodes)
+                except gitops.GitError as exc:
+                    preparation_failure = str(exc)
             with self.service.changed, self.store.transaction() as db:
                 if self.service.configuration() is not config:
                     continue
                 current_nodes = self.store.nodes(db)
+                if current_nodes != preparation_nodes:
+                    continue
                 current = current_nodes[node["id"]]
                 if current["state"] != "open" or current["revision"] != node["revision"]:
                     continue
+                if sessions.alias_id(current, current_nodes) != alias_key:
+                    continue
+                current_journal = attempts(db)
+                if alias_key and (sessions.aliases(db).get(alias_key) != checked_binding
+                        or {id: a for id, a in current_journal.items() if a.get("alias_id") == alias_key} != checked_attempts):
+                    continue
                 if self.structural(current, current_nodes):
                     continue
-                if self.lock_blockers(current, current_nodes, attempts(db)):
+                if self.lock_blockers(current, current_nodes, current_journal) or self.session_blockers(current, current_nodes, current_journal, db):
                     continue
+                if clean_failure:
+                    self.hold(db, current, *clean_failure)
+                    continue
+                if preparation_failure:
+                    self.hold(db, current, "input_conflict", preparation_failure)
+                    continue
+                top = current_nodes[prepared["branch_node"]]
+                top.update(branch=prepared_nodes[top["id"]]["branch"], branch_tip=prepared_nodes[top["id"]]["branch_tip"])
+                self.store.save_node(db, top)
                 try:
-                    prepared = Results(self.paths, config).prepare(current, current_nodes)
-                except gitops.GitError as exc:
-                    self.hold(db, current, "input_conflict", str(exc))
+                    alias = sessions.freeze(db, current, current_nodes, result, self.paths, config)
+                    if alias:
+                        bound = sessions.aliases(db)[alias["alias_id"]]
+                        if bound.get("commit"):
+                            alias["previous_commit"] = bound["commit"]
+                        prepared.update(alias)
+                except model.Refused as exc:
+                    self.hold(db, current, exc.result["error"], exc.result.get("detail", exc.result.get("problems", "")))
                     continue
-                for ancestor in current_nodes.values():
-                    if ancestor.get("branch_tip") != nodes.get(ancestor["id"], {}).get("branch_tip"):
-                        self.store.save_node(db, ancestor)
+                except (gitops.GitError, OSError, ValueError) as exc:
+                    self.hold(db, current, "reseat_failed", str(exc))
+                    continue
+                current.pop("session_unavailable_notified", None)
                 spec = config.agents[current["agent"]]
                 prepared["readonly_paths"] = list(config.readonly_paths_for(spec))
                 parent = current_nodes.get(current["parent"])
@@ -313,11 +433,14 @@ class Engine:
                     reviewed = parent["generations"][-1]
                     prepared["review"] = {"node_id": parent["id"], "generation_seq": reviewed["seq"], "commit": reviewed["commit"]}
                     prepared["input_commit"] = reviewed["commit"]
+                if current.get("findings"):
+                    prepared["findings"] = current["findings"]
                 activation = current.get("activation_id") or uuid.uuid4().hex
                 current["activation_id"] = activation
                 attempt = {"attempt_id": uuid.uuid4().hex, "activation_id": activation,
                            "node_id": node["id"], "run_id": "ag-" + uuid.uuid4().hex[:6],
                            "state": "claimed", "locks": sorted(self.lock_set(current, current_nodes)),
+                           "lock_owners": self.lock_owners(current, current_nodes),
                            "retry_count": current.get("launch_tries", 0), "at": now(), **prepared}
                 current["launch_tries"] = attempt["retry_count"] + 1
                 self.store.save_node(db, current)
@@ -325,8 +448,23 @@ class Engine:
             # The branch intent and input are durable before any git ref is
             # created. A crash here abandons only this claim, not its input.
             results = Results(self.paths, config)
-            results.ensure_branch(current_nodes[attempt["branch_node"]])
-            results.move("refs/heads/node-inputs/" + attempt["attempt_id"], attempt["input_commit"], "")
+            try:
+                results.ensure_branch(current_nodes[attempt["branch_node"]])
+                results.move("refs/heads/node-inputs/" + attempt["attempt_id"], attempt["input_commit"], "")
+            except effects.FAILURES as exc:
+                # Nothing was spawned: abandon this claim and hold the node,
+                # rather than failing every later evaluation at this point.
+                with self.service.changed, self.store.transaction() as db:
+                    claimed = attempts(db)[attempt["attempt_id"]]
+                    if claimed["state"] == "claimed":
+                        claimed.update(state="abandoned", ended_at=now())
+                        save_attempt(db, claimed)
+                        db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
+                        self.hold(db, self.store.nodes(db)[attempt["node_id"]], "input_conflict",
+                                  str(exc) or type(exc).__name__)
+                with self.store.transaction(write=False) as db:
+                    nodes, journal = self.store.nodes(db), attempts(db)
+                continue
             self.spawn(attempt)
             # The next candidate observes the tree reservation made by Runner,
             # so a deposited urgent node cannot lose its place to worker latency.
@@ -338,8 +476,17 @@ class Engine:
                     break
                 await asyncio.sleep(0.05)
             with self.store.transaction(write=False) as db:
-                journal = attempts(db)
+                nodes, journal = self.store.nodes(db), attempts(db)
+        self.composites()
         self.store.mirror()
+
+    def session_notice(self, id, detail):
+        with self.service.changed, self.store.transaction() as db:
+            node = self.store.nodes(db)[id]
+            if not node.get("session_unavailable_notified"):
+                node["session_unavailable_notified"] = True
+                self.store.save_node(db, node)
+                self.store.transition(db, "session_unavailable", id, detail)
 
     def episode(self, id, ready):
         with self.service.changed, self.store.transaction() as db:
@@ -374,6 +521,8 @@ class Engine:
         self.children.append(proc)
 
     async def reconcile(self):
+        effects.finish_completions(self)
+        effects.finish_operations(self)
         with self.store.transaction(write=False) as db:
             journal = attempts(db)
         settled = []
@@ -564,46 +713,99 @@ class Engine:
                 self.hold(db, node, "result_capture_failed", result["capture_error"])
             current.update(state="captured", result=result)
             save_attempt(db, current)
-            self.store.transition(db, "run_finished", node["id"], {"run_id": run.id})
+            self.store.transition(db, "run_finished", node["id"], {"run_id": run.id, "status": result["status"], **({"failure": result["failure"]} if result.get("failure") else {})})
             self.service.changed.notify_all()
         self.integrate(current)
 
     def integrate(self, attempt):
-        # Journal the exact merge commit BEFORE the external ref mutation.
-        # Recovery reuses it, even when git moved the ref but sqlite did not.
+        with effects.serialized(self.store):
+            self._integrate(attempt)
+
+    def _integrate(self, attempt):
+        # Snapshot, compute, journal, apply, checkpoint. Every Git call runs
+        # after its store transaction has closed, including retention refs.
         while True:
-            pending = None
-            with self.service.changed, self.store.transaction() as db:
-                current = attempts(db)[attempt["attempt_id"]]
-                if current["state"] != "captured":
-                    return
+            with self.store.transaction(write=False) as db:
+                journal = attempts(db)
+                current = journal[attempt["attempt_id"]]
                 nodes = self.store.nodes(db)
-                node = nodes[current["node_id"]]
-                result = current["result"]
-                parent = nodes.get(node.get("parent"))
-                reviewer = parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == node["id"]
-                if result["status"] == "done" and result.get("commit") and not result.get("capture_error") and not reviewer:
-                    results = Results(self.paths, self.service.configuration())
-                    top = nodes[current["branch_node"]]
+            if current["state"] != "captured":
+                return
+            node = nodes[current["node_id"]]
+            result = current["result"]
+            parent = nodes.get(node.get("parent"))
+            reviewer = parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == node["id"]
+            integration = current.get("integration")
+            if result["status"] == "done" and result.get("commit") and not result.get("capture_error") and not reviewer:
+                results = Results(self.paths, self.service.configuration())
+                top = nodes[current["branch_node"]]
+                try:
                     actual = results.tip(top["branch"])
-                    pending = self.pending_integration(db, current, top, actual)
-                    if not pending and (not current.get("integration") or top["branch_tip"] != current["integration"]["before"]):
-                        try:
-                            generation, before = results.integrate(node, nodes, current)
-                        except gitops.GitError as exc:
+                except effects.FAILURES as exc:
+                    if self.integration_failed(attempt, nodes, current, node, exc):
+                        continue
+                    return
+                pending = self.pending_integration(journal, current, top, actual)
+                if pending:
+                    self.integrate(pending)
+                    continue
+                if not integration or top["branch_tip"] != integration["before"]:
+                    try:
+                        generation, before = results.integrate(node, nodes, current)
+                    except effects.FAILURES as exc:
+                        with self.service.changed, self.store.transaction() as db:
+                            if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                                continue
                             self.hold(db, node, "integration_conflict", str(exc))
                             current["state"] = "recorded"
                             save_attempt(db, current)
-                            return
-                        current["integration"] = {"generation": generation, "before": before}
+                        return
+                    integration = {"generation": generation, "before": before}
+                    with self.service.changed, self.store.transaction() as db:
+                        if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                            continue
+                        current["integration"] = integration
                         save_attempt(db, current)
-                elif reviewer:
-                    self.store.transition(db, "reviewer_commits_ignored", node["id"])
-            if pending:
-                # Complete another host-journalled ref move before preparing
-                # this sibling. Its git effect survived but its sqlite commit did not.
-                self.integrate(pending)
-                continue
+                    continue
+                generation = integration["generation"]
+                if actual not in {integration["before"], generation["commit"]}:
+                    with self.service.changed, self.store.transaction() as db:
+                        if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                            continue
+                        self.hold(db, node, "integration_conflict", "node branch differs from its host-recorded tip")
+                        current["state"] = "recorded"
+                        save_attempt(db, current)
+                    return
+                if "refs" not in integration:
+                    refs = [[f"refs/heads/node-generations/{node['id']}/{generation['seq']}", generation["commit"]]]
+                    if parent and parent["kind"] == "loop":
+                        refs.append([f"refs/heads/node-generations/{parent['id']}/{len(parent['generations']) + 1}", generation["commit"]])
+                    with self.store.transaction() as db:
+                        if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                            continue
+                        current["integration"]["refs"] = refs
+                        save_attempt(db, current)
+                    continue
+                try:
+                    results.move(top["branch"], generation["commit"], integration["before"])
+                except effects.FAILURES as exc:
+                    if self.integration_failed(attempt, nodes, current, node, exc):
+                        continue
+                    return
+                try:
+                    for ref, target in integration["refs"]:
+                        results.move(ref, target, "")
+                except effects.FAILURES as exc:
+                    # Leave the node branch where the host record says it is.
+                    try:
+                        if results.tip(top["branch"]) == generation["commit"] != integration["before"]:
+                            results.git("update-ref", "--no-deref", top["branch"],
+                                        integration["before"], generation["commit"], check=True)
+                    except effects.FAILURES:
+                        pass
+                    if self.integration_failed(attempt, nodes, current, node, exc):
+                        continue
+                    return
             with self.service.changed, self.store.transaction() as db:
                 current = attempts(db)[attempt["attempt_id"]]
                 if current["state"] != "captured":
@@ -614,66 +816,90 @@ class Engine:
                 if integration:
                     generation = integration["generation"]
                     top = nodes[current["branch_node"]]
-                    results = Results(self.paths, self.service.configuration())
-                    actual = results.tip(top["branch"])
-                    if actual == integration["before"]:
-                        results.move(top["branch"], generation["commit"], actual)
-                    elif actual != generation["commit"]:
-                        if actual == top["branch_tip"] or self.pending_integration(db, current, top, actual):
-                            # A sibling advanced the host-recorded tip between
-                            # phases. Recompute and journal against it before CAS.
-                            current.pop("integration")
-                            save_attempt(db, current)
-                            continue
-                        self.hold(db, node, "integration_conflict", "node branch differs from its host-recorded tip")
-                        current["state"] = "recorded"
-                        save_attempt(db, current)
-                        return
                     top["branch_tip"] = generation["commit"]
                     node["generations"].append(generation)
-                    results.move(f"refs/heads/node-generations/{node['id']}/{generation['seq']}", generation["commit"], "")
                     parent = nodes.get(node["parent"])
                     if parent and parent["kind"] == "loop":
                         parent_seq = len(parent["generations"]) + 1
                         parent["generations"].append({**generation, "seq": parent_seq})
-                        results.move(f"refs/heads/node-generations/{parent['id']}/{parent_seq}", generation["commit"], "")
                         self.store.save_node(db, parent)
                     self.store.save_node(db, top)
                     entry = next(r for r in node["runs"] if r["attempt_id"] == current["attempt_id"])
                     entry["generation"] = generation["seq"]
                     self.store.transition(db, "integrated", node["id"], generation)
+                elif reviewer:
+                    self.store.transition(db, "reviewer_commits_ignored", parent["id"], {"run_id": current["run_id"]})
                 # Legacy launch journals have no immutable input identity. Keep
                 # their abandoned state after missing-tree recovery; modern runs
                 # retain their captured result as a recorded attempt.
                 current["state"] = ("abandoned" if current.get("completion_proven") == "missing_tree"
                                     and "input_commit" not in current else "recorded")
                 save_attempt(db, current)
+                if current.get("alias_id"):
+                    bound = sessions.aliases(db)[current["alias_id"]]
+                    if result.get("session_id"):
+                        bound["session_id"] = result["session_id"]
+                    if result.get("commit"):
+                        bound["commit"] = result.get("checkout_commit", result["commit"])
+                    bound["last_run"] = current["run_id"]
+                    sessions.save_alias(db, bound)
                 if node["state"] not in {"cancelled", "held"}:
                     loop = nodes.get(node.get("parent"))
                     while loop and loop["kind"] != "loop":
                         loop = nodes.get(loop["parent"])
-                    if (result.get("failure") == "missing_tree" and loop
+                    if result["status"] != "done" and loop:
+                        loop.pop("pending_verdict", None)
+                        self.store.save_node(db, loop)
+                    if (result["status"] != "done" and loop
                             and loop["state"] not in {"held", "cancelled", "done"}
                             and node.get("crash_retry_round") != loop["loop"]["rounds_rejected"]):
                         node.update(state="open", outcome=None, revision=node["revision"] + 1,
                                     crash_retry_round=loop["loop"]["rounds_rejected"])
                         self.store.transition(db, "run_retry", node["id"], {"attempt_id": current["attempt_id"]})
                     else:
-                        node.update(state="done", outcome="completed" if result["status"] == "done" else "failed",
+                        verdict = loop.get("pending_verdict") if reviewer and loop else None
+                        outcome = "completed" if result["status"] == "done" else "failed"
+                        if (result["status"] == "done" and verdict
+                                and verdict["attempt_id"] == current["attempt_id"]):
+                            round_generations = loop["generations"][loop.get("round_generation_start", 0):verdict["generation_seq"]]
+                            identities = {(g["run_id"], g["commit"]) for g in round_generations}
+                            for owner in nodes.values():
+                                for generation in owner["generations"]:
+                                    if (generation["run_id"], generation["commit"]) in identities:
+                                        generation["verdict"] = verdict["verdict"]
+                                        self.store.save_node(db, owner)
+                            verdict["settled"] = True
+                            self.store.save_node(db, loop)
+                            self.store.transition(db, "verdict_settled", loop["id"], verdict)
+                            outcome = verdict["verdict"]
+                        node.update(state="done", outcome=outcome,
                                     revision=node["revision"] + 1)
                         self.store.transition(db, "done", node["id"], {"outcome": node["outcome"]})
-                        if result.get("failure") == "missing_tree" and loop and loop["state"] not in {"held", "cancelled", "done"}:
+                        if result["status"] != "done" and loop and loop["state"] not in {"held", "cancelled", "done"}:
                             self.hold(db, loop, "run_failed", node["id"])
+                tree_run = self.runner.tree.get(current["run_id"])
+                if current.get("alias_id") and tree_run and tree_run.reason == "session_lost":
+                    self.hold(db, node, "session_lost", current["run_id"])
                 self.store.save_node(db, node)
                 self.service.changed.notify_all()
             return
 
-    def pending_integration(self, db, current, top, actual):
+    def integration_failed(self, attempt, nodes, current, node, exc):
+        """Hold the node on a ref that is not as journalled; True to re-read."""
+        with self.service.changed, self.store.transaction() as db:
+            if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                return True
+            self.hold(db, node, "integration_conflict", str(exc) or type(exc).__name__)
+            current["state"] = "recorded"
+            save_attempt(db, current)
+        return False
+
+    def pending_integration(self, journal, current, top, actual):
         own = current.get("integration", {})
         if (actual == top["branch_tip"] or (own.get("before") == top["branch_tip"]
                 and own.get("generation", {}).get("commit") == actual)):
             return None
-        return next((other for other in attempts(db).values()
+        return next((other for other in journal.values()
                      if other["attempt_id"] != current["attempt_id"] and other["state"] == "captured"
                      and other.get("branch_node") == current["branch_node"]
                      and other.get("integration", {}).get("before") == top["branch_tip"]
@@ -682,33 +908,83 @@ class Engine:
     def composites(self):
         with self.service.changed, self.store.transaction() as db:
             nodes = self.store.nodes(db)
-            for node in sorted((n for n in nodes.values() if n.get("kind") != "simple"),
+            for node in sorted((n for n in nodes.values() if n["kind"] != "simple"),
                                key=lambda n: len(model.subtree(nodes, n["id"]))):
-                if node["kind"] == "simple" or node["state"] in {"done", "cancelled", "held"}:
+                if node["state"] in {"done", "cancelled", "suspended"} or node.get("completion_pending") or node.get("disposal_pending"):
                     continue
                 children = [nodes[id] for id in node["children"]]
+                held = next((c for c in children if c["state"] == "held"), None)
+                if node["state"] == "held":
+                    if (node["hold"] or {}).get("reason") != "child_held" or held:
+                        continue
+                    node.update(state="running", hold=None, revision=node["revision"] + 1)
+                    self.store.save_node(db, node)
+                if held:
+                    self.hold(db, node, "child_held", held["id"])
+                    continue
+                if node["kind"] == "sequence" and any(c["state"] == "done" and not model.succeeded(c) for c in children):
+                    self.complete(db, node, "failed")
+                    continue
                 if children and all(c["state"] == "done" for c in children):
                     if node["kind"] == "loop":
                         verdict = node.get("pending_verdict")
-                        if not verdict:
+                        if not verdict or not verdict.get("settled"):
+                            self.hold(db, node, "unresolved_round")
                             continue
-                        generation = node["generations"][-1]
-                        generation["verdict"] = verdict["verdict"]
-                        for owner in nodes.values():
-                            for mirrored in owner["generations"]:
-                                if (mirrored["run_id"], mirrored["commit"]) == (generation["run_id"], generation["commit"]):
-                                    mirrored["verdict"] = verdict["verdict"]
-                                    self.store.save_node(db, owner)
                         if verdict["verdict"] == "rejected":
                             node["loop"]["rounds_rejected"] += 1
-                            reason = ("loop_max" if node["loop"]["rounds_rejected"] >= node["loop"]["max_rounds"]
-                                      else "unresolved_round")
-                            self.hold(db, node, reason)
+                            node["findings"] = verdict["findings"]
+                            self.store.transition(db, "round_rejected", node["id"], verdict)
+                            if node["loop"]["rounds_rejected"] >= node["loop"]["max_rounds"]:
+                                self.hold(db, node, "loop_max")
+                            else:
+                                self.reset_round(db, node, nodes)
                             continue
-                    node.update(state="done", outcome="approved" if all(c["outcome"] in {"completed", "approved"} for c in children) else "failed",
-                                revision=node["revision"] + 1)
+                        self.store.transition(db, "loop_exited", node["id"], verdict)
+                    self.complete(db, node, "approved" if all(model.succeeded(c) for c in children) else "failed")
+                elif children and node["state"] == "open":
+                    node.update(state="running", revision=node["revision"] + 1)
                     self.store.save_node(db, node)
-                    self.store.transition(db, "done", node["id"], {"outcome": node["outcome"]})
+            self.service.changed.notify_all()
+        if effects.finish_completions(self):
+            self.composites()
+
+    def complete(self, db, node, outcome):
+        if node.get("completion_pending"):
+            return
+        if node["kind"] in {"sequence", "group"} and outcome == "approved":
+            nodes = self.store.nodes(db)
+            top = top_node(node, nodes)
+            commit = top.get("branch_tip")
+            produced = [g for id in model.subtree(nodes, node["id"])
+                        for g in nodes[id]["generations"] if g["commit"] == commit]
+            if commit and produced and (not node["generations"] or node["generations"][-1]["commit"] != commit):
+                generation = {"seq": len(node["generations"]) + 1, "commit": commit,
+                              "run_id": produced[-1]["run_id"], "verdict": "approved"}
+                node["completion_pending"] = {"generation": generation, "outcome": outcome,
+                    "ref": f"refs/heads/node-generations/{node['id']}/{generation['seq']}"}
+                self.store.save_node(db, node)
+                return
+        node.update(state="done", outcome=outcome, hold=None, revision=node["revision"] + 1)
+        self.store.save_node(db, node)
+        self.store.transition(db, "done", node["id"], {"outcome": outcome})
+
+    def reset_round(self, db, node, nodes, verdict_only=False):
+        findings = node.get("findings", [])
+        children = [node["loop"]["verdict_child"]] if verdict_only else node["children"]
+        for id in children:
+            for descendant in model.subtree(nodes, id):
+                model.reset(nodes[descendant])
+                self.store.save_node(db, nodes[descendant])
+        if not verdict_only and findings:
+            nodes[node["children"][0]]["findings"] = findings
+            self.store.save_node(db, nodes[node["children"][0]])
+        node.update(state="running", outcome=None, hold=None, revision=node["revision"] + 1)
+        node.pop("pending_verdict", None)
+        node.pop("findings", None)
+        if not verdict_only:
+            node["round_generation_start"] = len(node["generations"])
+        self.store.save_node(db, node)
 
     async def cancel(self, ids):
         results = {}

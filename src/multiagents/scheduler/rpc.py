@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import hmac
 import json
 import logging
@@ -14,7 +15,7 @@ import uuid
 
 from ..config import load, source_version
 from ..paths import ProjectPaths
-from . import model
+from . import model, effects
 from .model import Refused, invalid
 from .store import Store, encode, token_hash
 
@@ -97,10 +98,10 @@ class Service:
         if self.engine:
             from .engine import attempts
             if db is not None:
-                extra = self.engine.status(nodes, attempts(db))
+                extra = self.engine.status(nodes, attempts(db), db)
             else:
                 with self.store.transaction(write=False) as connection:
-                    extra = self.engine.status(nodes, attempts(connection))
+                    extra = self.engine.status(nodes, attempts(connection), connection)
         return {"pid": os.getpid(), "since": self.since, "gate": True, "counts": counts, **extra}
 
     @staticmethod
@@ -121,7 +122,7 @@ class Service:
             raise Refused("unauthenticated")
         return {"subject": row[0], "node_id": row[1], "permissions": json.loads(row[2]), "root": False}
 
-    def authorize(self, principal, op, args, nodes):
+    def authorize(self, principal, op, args, nodes, db=None):
         if principal["root"]:
             if op == "give_verdict":
                 raise Refused("forbidden")
@@ -130,9 +131,13 @@ class Service:
         if op in {"admit_run", "steer_run", "steer_result"} and args.get("run_id") != subject:
             run = self.engine.runner.tree.get(args.get("run_id")) if self.engine else None
             from .engine import attempts
-            with self.store.transaction(write=False) as db:
-                target = next((a["node_id"] for a in attempts(db).values()
-                               if a["run_id"] == args.get("run_id")), None)
+            if db is None:
+                with self.store.transaction(write=False) as connection:
+                    journal = attempts(connection)
+            else:
+                journal = attempts(db)
+            target = next((a["node_id"] for a in journal.values()
+                           if a["run_id"] == args.get("run_id")), None)
             recorded = self.engine.runner.authority.get(run.id) if run and self.engine.runner.authority else None
             if target not in model.subtree(nodes, principal["node_id"]) and not (
                     recorded and recorded.get("parent") == subject):
@@ -145,12 +150,17 @@ class Service:
             if "verdict" not in permissions:
                 raise Refused("forbidden")
             from .engine import attempts
-            with self.store.transaction(write=False) as db:
-                activation = next((a for a in attempts(db).values()
-                                   if a["run_id"] == subject and a["state"] in {"claimed", "launched"}), None)
+            if db is None:
+                with self.store.transaction(write=False) as connection:
+                    journal = attempts(connection)
+            else:
+                journal = attempts(db)
+            activation = next((a for a in journal.values()
+                               if a["run_id"] == subject and a["state"] in {"claimed", "launched"}), None)
             review = (activation or {}).get("review")
-            if review:
-                scope.add(review["node_id"])
+            if not review:
+                raise Refused("forbidden")
+            scope.add(review["node_id"])
         if op in {"create_node", "start_agent", "admit_agent", "steer_run", "instantiate_template", "update_node", "cancel_node"} and "delegate" not in permissions:
             raise Refused("forbidden")
         for field in ("id", "node_id"):
@@ -190,14 +200,17 @@ class Service:
             validate_wire_value(request)
             op, args = request.get("op"), request.get("args", {})
             after = []
-            with self.changed:
+            # Reads use one SQLite snapshot and never wait behind a writer
+            # holding the notification condition while reserving the store.
+            with self.changed if isinstance(op, str) and op in MUTATING else nullcontext():
                 with self.store.transaction(write=isinstance(op, str) and op in MUTATING) as db:
                     principal = self.authenticate(db, request.get("token"))
                     if not isinstance(op, str) or not isinstance(args, dict):
                         invalid("request: expected op string and args object")
                     validate_arguments(args)
+                    principal["request_id"] = request_id
                     nodes = self.store.nodes(db)
-                    self.authorize(principal, op, args, nodes)
+                    self.authorize(principal, op, args, nodes, db)
                     if op not in OPS:
                         raise Refused("unknown_op")
                     if self.stopping:
@@ -219,15 +232,27 @@ class Service:
                         if op in MUTATING:
                             db.execute("INSERT INTO requests VALUES (?, ?, ?, ?)",
                                        (principal["subject"], request_id, payload, encode(reply)))
-                if op in {"get_node", "list_nodes", "scheduler_status"}:
-                    self.store.mirror()
                 if op == "wait_for_nodes":
                     reply.update(ok=True, result=self.wait(request, principal, args))
                 elif op in MUTATING:
                     self.store.mirror()
                     self.changed.notify_all()
+            if self.engine and op in MUTATING:
+                effects.finish_completions(self.engine)
+                effects.finish_operations(self.engine)
+                self.store.mirror()
+                with self.store.transaction(write=False) as db:
+                    saved = db.execute("SELECT reply FROM requests WHERE subject=? AND request_id=?",
+                                       (principal["subject"], request_id)).fetchone()
+                if saved:
+                    reply = json.loads(saved[0])
             for pending in after:
-                reply = self.finish_cancel(principal, request_id, reply, pending)
+                if pending.get("kind") == "spawn":
+                    self.engine.spawn(pending["attempt"])
+                elif pending.get("kind") == "admit_agent":
+                    reply["result"] = self.engine.agent_admission(args, principal)
+                else:
+                    reply = self.finish_cancel(principal, request_id, reply, pending)
         except Refused as exc:
             reply = {"request_id": reply["request_id"], "ok": False, "error": exc.result}
         except Exception:
@@ -240,7 +265,7 @@ class Service:
         def view(node):
             if self.engine and op in {"get_node", "list_nodes"}:
                 from .engine import attempts
-                return {**self.engine.view(node, nodes, attempts(db)), "plan_revision": plan_revision}
+                return {**self.engine.view(node, nodes, attempts(db), db), "plan_revision": plan_revision}
             return self.view(node, plan_revision)
         if op in {"steer_run", "steer_result"}:
             from .engine import attempts, save_attempt
@@ -262,10 +287,11 @@ class Service:
             command_id = uuid.uuid4().hex
             attempt.setdefault("steer_commands", {})[command_id] = {"message": args["message"]}
             save_attempt(db, attempt)
-            self.engine.spawn(attempt)
+            after.append({"kind": "spawn", "attempt": attempt})
             return {"command_id": command_id}
         if op == "admit_agent":
-            return self.engine.agent_admission(args, principal)
+            after.append({"kind": "admit_agent"})
+            return {}
         if op == "admit_run":
             return self.engine.resume_admission(args.get("run_id"), db)
         if op == "start_agent":
@@ -287,7 +313,33 @@ class Service:
                 self.engine and self.engine.runner.tree.get(principal["subject"]))
             return result
         if op == "list_templates":
-            return {"templates": []}
+            from .templates import registry
+            return {"templates": [{"name": t["template"], "version": t["version"]} for t in registry(db).values()]}
+        if op in {"register_template", "instantiate_template"}:
+            from . import templates
+            if op == "register_template":
+                model.check_fields(args, {"yaml"}, set())
+                return {**templates.register(db, args.get("yaml")), "plan_revision": plan_revision}
+            model.check_fields(args, {"name", "params", "parent"}, {"plan_revision"})
+            if "plan_revision" in args:
+                model.revision(args["plan_revision"], plan_revision)
+            name = args.get("name")
+            if not isinstance(name, str):
+                invalid("name: expected template name")
+            template = templates.registry(db).get(name)
+            if template is None:
+                raise Refused("not_found")
+            original = copy.deepcopy(nodes)
+            parent = args.get("parent") or (None if principal["root"] else principal["node_id"])
+            root = templates.expand(template, args.get("params", {}), self.configuration(), principal["subject"], nodes, parent)
+            for id, node in nodes.items():
+                if node != original.get(id):
+                    self.store.save_node(db, node)
+                    if id not in original:
+                        self.store.transition(db, "created", id)
+            plan_revision += 1
+            self.store.set_meta(db, "plan_revision", plan_revision)
+            return self.view(root, plan_revision)
         if op == "get_node":
             node = nodes.get(args.get("id"))
             if node is None:
@@ -307,30 +359,49 @@ class Service:
             cursor = max(cursor, int(self.store.meta(db, "ack")))
             self.store.set_meta(db, "ack", cursor)
             return {"cursor": cursor, "plan_revision": plan_revision}
-        if op in {"merge_node", "dispose_node", "relaunch_node", "give_verdict"}:
+        if op in {"relaunch_node", "close_node"}:
+            from .control import decide
+            node = decide(self, db, op, args, nodes)
+            if node.get("completion_pending"):
+                node["completion_pending"]["request"] = [principal["subject"], principal["request_id"]]
+                self.store.save_node(db, node)
+            return view(node)
+        if op in {"merge_node", "dispose_node", "give_verdict"}:
             from .engine import attempts
-            from .results import Results
             from ..tree import now
             node = nodes.get(args.get("node_id" if op == "give_verdict" else "id"))
             if node is None:
                 raise Refused("not_found")
-            results = Results(self.paths, self.configuration())
             if op == "give_verdict":
                 journal = attempts(db)
                 active = next((a for a in journal.values() if a["run_id"] == principal["subject"]
                                and a["state"] in {"claimed", "launched"}), None)
                 review = (active or {}).get("review")
-                if not review:
-                    raise Refused("not_implemented")
+                if not review or nodes[active["node_id"]]["parent"] != node["id"] or node["loop"]["verdict_child"] != active["node_id"]:
+                    raise Refused("forbidden")
                 if any(args.get(k) != review[k] for k in ("node_id", "generation_seq", "commit")):
                     raise Refused("forbidden")
-                if args.get("verdict") not in {"approved", "rejected"}:
+                if not isinstance(args.get("verdict"), str) or args["verdict"] not in {"approved", "rejected"}:
                     invalid("verdict: expected approved or rejected")
                 if node.get("pending_verdict"):
                     raise Refused("conflict")
-                node["pending_verdict"] = {"verdict": args["verdict"], "findings": args.get("findings", [])}
+                model.check_fields(args, {"node_id", "generation_seq", "commit", "verdict", "findings"}, set())
+                findings = args.get("findings", [])
+                if not isinstance(findings, list) or any(not isinstance(f, dict) or not isinstance(f.get("summary"), str)
+                        or not isinstance(f.get("severity"), str) for f in findings):
+                    invalid("findings: expected summary and severity records")
+                reviewed = next((g for g in node["generations"] if g["seq"] == review["generation_seq"] and g["commit"] == review["commit"]), None)
+                if reviewed is None:
+                    raise Refused("forbidden")
+                # Receipt records the proposal; only successful activation
+                # completion can apply it to the reviewed generations.
+                node["pending_verdict"] = {"verdict": args["verdict"], "findings": findings,
+                                           "attempt_id": active["attempt_id"], **review}
+                self.store.transition(db, "verdict", node["id"], {**review, **node["pending_verdict"]})
             elif op == "merge_node":
-                model.check_fields(args, {"force"}, {"id"})
+                model.check_fields(args, {"force"}, {"id", "revision"})
+                if "revision" in args:
+                    model.revision(args["revision"], node["revision"])
                 if node["parent"]:
                     raise Refused("not_top_level")
                 if node["state"] != "done":
@@ -341,76 +412,51 @@ class Service:
                     return view(node)
                 if node.get("disposed"):
                     raise Refused("disposed")
-                node["published"] = results.publish(node)
-                self.store.transition(db, "published", node["id"], {"commit": node["published"]})
+                if node.get("git_operation") or node.get("completion_pending"):
+                    raise Refused("active")
+                node["git_operation"] = {"kind": "publish", "request": [principal["subject"], principal["request_id"]]}
+                self.store.save_node(db, node)
+                return view(node)
             else:
-                model.check_fields(args, {"retry", "pins", "task", "loop"} if op == "relaunch_node" else set(), {"id", "revision"})
+                model.check_fields(args, set(), {"id", "revision"})
                 model.revision(args.get("revision"), node["revision"])
                 scope = model.subtree(nodes, node["id"])
                 if any(a["node_id"] in scope and a["state"] in {"claimed", "launched", "captured"}
                        for a in attempts(db).values()):
                     raise Refused("active")
                 if op == "dispose_node":
-                    from .results import top_node
+                    from .sessions import alias_id
                     def alias_key(record):
-                        instance = (top_node(record, nodes).get("template") or {}).get("instance")
-                        return (instance, record["session"]) if instance and record["session"] else None
+                        return alias_id(record, nodes)
                     aliases = {alias_key(nodes[id]) for id in scope} - {None}
                     if any(n["id"] not in scope and (any(r["node"] in scope for r in n["inputs"])
                            or alias_key(n) in aliases) for n in nodes.values() if not n.get("disposed")):
                         raise Refused("referenced")
-                    # Host-derived names only; cancellation retains every result
-                    # until this separate operation authorises destruction.
+                    if any(nodes[id].get("completion_pending") or nodes[id].get("git_operation")
+                           or nodes[id].get("disposal_pending") for id in scope):
+                        raise Refused("active")
+                    refs = set()
                     for id in scope:
                         child = nodes[id]
                         if child.get("branch"):
-                            results.git("update-ref", "--no-deref", "-d", child["branch"], check=True)
-                        refs = results.git("for-each-ref", "--format=%(refname)", "refs/heads/node-generations/" + id).out
-                        for ref in refs.splitlines():
-                            results.git("update-ref", "--no-deref", "-d", ref, check=True)
-                        for run in child["runs"]:
-                            results.git("update-ref", "--no-deref", "-d", "refs/heads/node-results/" + run["attempt_id"], check=True)
-                            results.git("update-ref", "--no-deref", "-d", "refs/heads/node-inputs/" + run["attempt_id"], check=True)
-                            authority = self.engine.runner.authority
-                            record = authority.get(run["run_id"]) if authority else None
-                            if record and record.get("worktree"):
-                                from pathlib import Path
-                                checkout = Path(record["worktree"])
-                                if (checkout.exists() or checkout.is_symlink()) and not authority.remove_worktree(checkout, recorded=True):
-                                    raise Refused("disposal_failed")
-                                authority.clear(run["run_id"], worktree=True, branch=True)
-                        if child["state"] not in {"done", "cancelled"}:
-                            child["state"] = "cancelled"
-                        child.update(disposed=now(), revision=child["revision"] + 1)
+                            refs.add(child["branch"])
+                        refs.update(f"refs/heads/node-generations/{id}/{g['seq']}" for g in child["generations"])
+                        child["disposal_pending"] = node["id"]
                         self.store.save_node(db, child)
-                    for activation in attempts(db).values():
+                    journal = attempts(db)
+                    for child in (nodes[id] for id in scope):
+                        for run in child["runs"]:
+                            for namespace in ("inputs", "results"):
+                                refs.add("refs/heads/node-" + namespace + "/" + run["attempt_id"])
+                    for activation in journal.values():
                         if activation["node_id"] in scope:
                             for namespace in ("inputs", "results"):
-                                results.git("update-ref", "--no-deref", "-d",
-                                            "refs/heads/node-" + namespace + "/" + activation["attempt_id"], check=True)
-                    self.store.transition(db, "disposed", node["id"])
+                                refs.add("refs/heads/node-" + namespace + "/" + activation["attempt_id"])
+                            refs.update(ref for ref, _ in activation.get("integration", {}).get("refs", []))
+                    node["git_operation"] = {"kind": "dispose", "scope": sorted(scope), "refs": sorted(refs),
+                        "aliases": sorted(aliases), "request": [principal["subject"], principal["request_id"]]}
+                    self.store.save_node(db, node)
                     return view(node)
-                if node.get("published"):
-                    raise Refused("published")
-                if node.get("disposed"):
-                    raise Refused("disposed")
-                if node["kind"] != "simple":
-                    raise Refused("not_implemented")
-                if node["state"] not in {"done", "held"}:
-                    invalid("state: relaunch requires a settled node")
-                for field in ("task", "pins"):
-                    if field in args:
-                        node[field] = args[field]
-                node.update(state="open", outcome=None, hold=None)
-                node.pop("activation_id", None)
-                node.pop("ready_since", None)
-                node["launch_tries"] = 0
-                for dependent in nodes.values():
-                    if any(ref["node"] == node["id"] for ref in dependent["depends_on"] + dependent["inputs"]):
-                        if dependent["runs"]:
-                            self.store.transition(db, "dependency_reopened", dependent["id"], {"node": node["id"]})
-                model.validate(nodes, self.configuration(), check_agents=set())
-                self.store.transition(db, "reopened", node["id"])
             node["revision"] += 1
             self.store.save_node(db, node)
             return view(node)
@@ -419,6 +465,11 @@ class Service:
         config = self.configuration()
         if not config.project["scheduler"]["enabled"]:
             raise Refused("scheduler_disabled", pending_nodes=len(self.store.pending()))
+        if op == "update_node" and nodes.get(args.get("id"), {}).get("completion_pending"):
+            raise Refused("active")
+        if any(n.get("disposal_pending") and (n["id"] == args.get("id") or n["id"] == args.get("parent")
+               or any(ref["node"] == n["id"] for ref in args.get("inputs", []))) for n in nodes.values()):
+            raise Refused("active")
         original = copy.deepcopy(nodes)
         reply_node = None
         if op == "create_node":
@@ -491,7 +542,7 @@ class Service:
                 descendants = model.subtree(nodes, node["id"])
                 from .engine import attempts
                 managed = {a["node_id"] for a in attempts(db).values()}
-                if any(nodes[id]["state"] in {"running", "suspended"} and id not in managed
+                if any(nodes[id]["kind"] == "simple" and nodes[id]["state"] in {"running", "suspended"} and id not in managed
                        for id in descendants):
                     raise Refused("not_implemented")
                 decided, stops = self.engine.request_cancel(descendants, db) if self.engine else ({}, {})
@@ -525,6 +576,10 @@ class Service:
         check_agents = {id for id, record in nodes.items()
                         if id not in original or record.get("agent") != original[id].get("agent")}
         model.validate(nodes, config, check_agents=check_agents)
+        if op in {"create_node", "update_node"}:
+            from . import sessions
+            from .engine import attempts
+            sessions.validate_attachments(nodes, original, attempts(db), sessions.aliases(db))
         for id, changed_node in nodes.items():
             if changed_node != original.get(id):
                 self.store.save_node(db, changed_node)
@@ -583,7 +638,7 @@ class Service:
                 # A wait cannot outlive revocation as an authenticated reader.
                 principal = self.authenticate(db, request.get("token"))
                 nodes = self.store.nodes(db)
-                self.authorize(principal, "wait_for_nodes", args, nodes)
+                self.authorize(principal, "wait_for_nodes", args, nodes, db)
                 after = (cursor if cursor is not None else
                          int(self.store.meta(db, "ack")) if principal["root"] else 0)
                 rows = db.execute("SELECT record FROM notifications WHERE seq>? ORDER BY seq", (after,))
@@ -598,7 +653,11 @@ class Service:
             if transitions or remaining <= 0 or self.stopping:
                 return {"transitions": transitions, "next_cursor": max(after, top),
                         "capacity": {}, "scheduler": self.status(nodes)}
-            self.changed.wait(min(remaining, 0.5))
+            if self.changed.acquire(timeout=min(remaining, 0.5)):
+                try:
+                    self.changed.wait(min(max(0, end - time.monotonic()), 0.5))
+                finally:
+                    self.changed.release()
 
 
 class Handler(socketserver.StreamRequestHandler):

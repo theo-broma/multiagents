@@ -83,7 +83,8 @@ def top_node(node, nodes):
 
 
 def input_generation(node, ref, nodes):
-    if not node or node.get("disposed") or node["state"] != "done":
+    if (not node or node.get("disposed") or node.get("completion_pending")
+            or node.get("disposal_pending") or node["state"] != "done"):
         return None
     generations = node["generations"]
     if "generation" in ref:
@@ -91,9 +92,20 @@ def input_generation(node, ref, nodes):
     for generation in reversed(generations):
         # Mirrors on a loop and its work child identify the same generation
         # by result run and commit, even when their local sequence numbers differ.
-        rejected = any(other["verdict"] == "rejected" and other["commit"] == generation["commit"]
-                       and other["run_id"] == generation["run_id"]
-                       for owner in nodes.values() for other in owner["generations"])
+        identity = (generation["run_id"], generation["commit"])
+        mirrors = [(owner, other) for owner in nodes.values() for other in owner["generations"]
+                   if (other["run_id"], other["commit"]) == identity]
+        overridden = any(owner["state"] == "done" and owner["outcome"] == "approved"
+                         and owner.get("closure", {}).get("outcome") == "approved"
+                         and (owner["closure"].get("generation", {}).get("run_id"),
+                              owner["closure"].get("generation", {}).get("commit")) == identity
+                         for owner, _ in mirrors)
+        if overridden:
+            return generation
+        loops = [other for owner, other in mirrors if owner["kind"] == "loop"]
+        if loops and any(other["verdict"] != "approved" for other in loops):
+            continue
+        rejected = any(other["verdict"] == "rejected" for _, other in mirrors)
         if rejected:
             continue
         if generation["verdict"] == "approved" or (generation["verdict"] is None
@@ -189,6 +201,7 @@ class Results:
                 raise gitops.GitError("result git directory was replaced")
             # Read the recorded branch, never the agent's HEAD or .git pointer.
             commit = recorded_tip(pinned, branch)
+            checkout_commit = commit
             # Quarantine and verify before adding immutable objects to the
             # project. An agent cannot overwrite an existing host object.
             with tempfile.TemporaryDirectory(dir=self.paths.scheduler) as tmp:
@@ -246,7 +259,7 @@ class Results:
             raise gitops.GitError("captured result changed after run completion")
         self.move(retention_ref, commit, "")
         return {"status": run.status, "session_id": run.session_id, "branch": branch,
-                "run_dir": str(self.paths.run_dir(run.id)), "commit": commit,
+                "run_dir": str(self.paths.run_dir(run.id)), "commit": commit, "checkout_commit": checkout_commit,
                 "readonly_reverted": reverted}
 
     def integrate(self, node, nodes, attempt):
@@ -262,27 +275,44 @@ class Results:
                 **({"readonly_reverted": attempt["result"]["readonly_reverted"]}
                    if attempt["result"].get("readonly_reverted") else {})}, before
 
-    def publish(self, node):
+    def prepare_publication(self, node):
         from .model import Refused
         if self.tip(node["branch"]) != node["branch_tip"]:
             raise Refused("merge_conflict", detail="node branch differs from host record")
-        # Node publication needs an identity even for a divergent squash's
-        # merge step. Keep this fallback out of the legacy merge_agent path.
-        with gitops._host_scope(self.root):
-            if gitops.is_dirty(self.root):
-                raise Refused("merge_conflict", detail="target worktree has uncommitted changes; commit or stash first")
-            extra = gitops._identity_fallback_args(self.root, "multiagents", "orchestrator@multiagents.invalid")
-            result = gitops.run(self.root, *extra, "merge", "--squash", node["branch_tip"], timeout=300)
-            if not result.ok:
-                gitops._undo_merge(self.root, [])
-                raise Refused("merge_conflict", detail=result.err or result.out)
-            if not gitops.run(self.root, "diff", "--cached", "--quiet").ok:
-                result = gitops.run(self.root, *extra, "-c", "commit.gpgSign=false", "commit", "-m",
-                                    "multiagents: publish " + node["id"], timeout=120)
-                if not result.ok:
-                    gitops._undo_merge(self.root, [])
-                    raise Refused("merge_conflict", detail=result.err or result.out)
-        return gitops.head_sha(self.root, root=self.root)
+        if self.git("status", "--porcelain").out:
+            raise Refused("merge_conflict", detail="target worktree has uncommitted changes; commit or stash first")
+        ref = self.git("symbolic-ref", "-q", "HEAD", check=True).out
+        before = self.tip(ref)
+        merged = self.git("merge-tree", "--write-tree", before, node["branch_tip"])
+        if not merged.ok:
+            raise Refused("merge_conflict", detail=merged.err or merged.out)
+        tree = merged.out.splitlines()[0]
+        target = before if tree == self.git("rev-parse", before + "^{tree}", check=True).out else self.commit(
+            tree, [before], "multiagents: publish " + node["id"])
+        return {"ref": ref, "before": before, "target": target}
+
+    def apply_publication(self, intent):
+        from .model import Refused
+        ref, before, target = intent["ref"], intent["before"], intent["target"]
+        actual = self.tip(ref)
+        if actual not in {before, target}:
+            # A replay after update-ref may find later commits on top of the
+            # journalled one: only this process could have made it reachable.
+            if actual and target != before and self.git("merge-base", "--is-ancestor", target, actual).ok:
+                return
+            raise Refused("merge_conflict", detail="publication target changed")
+        try:
+            self.move(ref, target, before)
+        except gitops.GitError as exc:
+            raise Refused("merge_conflict", detail=str(exc)) from exc
+        # Replaying after update-ref repairs the index/checkout as well. The
+        # two-tree merge refuses intervening work instead of deleting it, and
+        # main goes back to where it was so a retry starts from it (NC-R86).
+        checkout = self.git("read-tree", "-u", "-m", before, target)
+        if not checkout.ok:
+            if target != before:
+                self.git("update-ref", "--no-deref", ref, before, target)
+            raise Refused("merge_conflict", detail=checkout.err or checkout.out)
 
 
 def checkout_branch(run, authority):

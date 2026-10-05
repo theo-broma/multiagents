@@ -77,6 +77,9 @@ def attach(nodes, node, old_children=None):
             invalid("parent: unknown node")
         if nodes[parent]["state"] in {"done", "cancelled"}:
             invalid("parent: terminal node")
+        if (nodes[parent].get("completion_pending") or nodes[parent].get("git_operation")
+                or nodes[parent].get("disposal_pending")):
+            raise Refused("active")
         if node["id"] not in nodes[parent]["children"]:
             nodes[parent]["children"].append(node["id"])
             nodes[parent]["revision"] += 1
@@ -117,6 +120,16 @@ def subtree(nodes, root):
         out.add(id)
         pending.extend(nodes[id]["children"])
     return out
+
+
+def succeeded(node):
+    return node["state"] == "done" and node["outcome"] in {"completed", "approved"}
+
+
+def reset(node):
+    node.update(state="open", hold=None, outcome=None, revision=node["revision"] + 1)
+    for field in ("activation_id", "ready_since", "starvation_notified", "launch_tries", "pending_verdict", "findings", "crash_retry_round"):
+        node.pop(field, None)
 
 
 def validate(nodes, config, *, check_agents=None):
@@ -199,19 +212,17 @@ def validate(nodes, config, *, check_agents=None):
         if alias is not None:
             if not isinstance(alias, str) or not alias:
                 invalid("session: expected an alias name")
-            top = node
-            while top["parent"] is not None:
-                top = nodes[top["parent"]]
-            template = top["template"]
+            from .sessions import instance_node
+            instance = instance_node(node, nodes)
+            template = instance["template"] if instance else None
             if not template or not template.get("instance"):
                 invalid("session: outside a template instance")
             agent = config.agents.get(node["agent"])
             provider = pins.get("provider") or (agent.provider if agent is not None else None)
-            # An existing assignment can outlive its configured agent. Without
-            # a declared provider, its family cannot be resolved until M2
-            # handles the unavailable assignment; it must remain editable.
+            # Retained assignments can outlive their configured provider.
+            # The actual route is checked against the alias again at activation.
             if provider is not None:
-                family = config.providers.get(provider, {}).get("family", provider)
+                family = config.providers.get(provider, {}).get("family") or config.providers.get(provider, {}).get("extends") or provider
                 key = (template["instance"], alias)
                 if key in aliases and aliases[key] != family:
                     invalid("session: incompatible provider families")

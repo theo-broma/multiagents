@@ -680,6 +680,8 @@ providers:
       dir: sessions
       glob: "**/rollout-*{session_id}.jsonl"
       forbidden_profile: "~/.codex"
+    # NC-R32: enable only after session preservation is verified on the CLI.
+    session_model_change: false
     bin: codex
     adapter: codex.py
     family: codex

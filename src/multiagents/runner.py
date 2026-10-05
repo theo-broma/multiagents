@@ -3570,7 +3570,7 @@ class Runner(QuotaHandover):
         fresh event nobody will ever set.
         """
         if self.scheduler_enabled() and (
-                _launch_context.get() is None or session_id or self.launch_limits.launch_time(node_id) is not None):
+                _launch_context.get() is None or self.launch_limits.launch_time(node_id) is not None):
             from .scheduler import resume_admission
             admission = await asyncio.to_thread(resume_admission, self.paths.root,
                                                node_id, None if _launch_context.get() else self.self_id())
@@ -3644,7 +3644,14 @@ class Runner(QuotaHandover):
                     [*(owner.home_links if owner else []), *provider.home_links]))
                 copies = list(dict.fromkeys(
                     [*(owner.home_copy if owner else []), *provider.home_copy]))
-                home = prepare_home(self.paths.home(node_id), links,
+                home_id = node_id
+                context = _launch_context.get()
+                if context and context.node_id:
+                    from .scheduler.store import Store
+                    from .scheduler.engine import attempts
+                    with Store(self.paths.root).transaction(write=False) as db:
+                        home_id = attempts(db)[context.attempt_id].get("alias_home", node_id)
+                home = prepare_home(self.paths.home(home_id), links,
                                     "per-agent", agent=spec.name, copies=copies)
             identity = {
                 "MULTIAGENTS_AGENT_ID": node_id,
@@ -5047,6 +5054,12 @@ class Runner(QuotaHandover):
                 base = self.config.base_branch or gitops.current_branch(repo)
                 desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
                 worktree_path = self.paths.worktree(node_id)
+                if context:
+                    from .scheduler.store import Store
+                    from .scheduler.engine import attempts
+                    with Store(repo).transaction(write=False) as db:
+                        activation = attempts(db)[context.attempt_id]
+                    worktree_path = Path(activation.get("alias_worktree", worktree_path))
                 branch = gitops.unique_branch(repo, desired)
 
             node = Node(
@@ -5096,12 +5109,9 @@ class Runner(QuotaHandover):
                 if not workdir:
                     if context:
                         from .scheduler.results import Results
-                        from .scheduler.store import Store
-                        from .scheduler.engine import attempts
-                        with Store(repo).transaction(write=False) as db:
-                            activation = attempts(db)[context.attempt_id]
-                        Results(self.paths, self.config).create_checkout(
-                            worktree_path, branch, activation["input_commit"])
+                        from .scheduler.sessions import create_checkout
+                        create_checkout(Results(self.paths, self.config), self.authority,
+                                        worktree_path, branch, activation)
                     else:
                         gitops.create_worktree(repo, worktree_path, branch, base, unique=False)
                 if routed_from:
@@ -5115,6 +5125,8 @@ class Runner(QuotaHandover):
                 prompt = self.compose_prompt(spec, task, node, worktree_path)
                 if context:
                     prompt += f"\nworking directory: {worktree_path}\nnode: {context.node_id}\n"
+                    if activation.get("findings"):
+                        prompt += "\nfindings:\n" + json.dumps(activation["findings"]) + "\n"
                     review = activation.get("review")
                     if review:
                         # State the reviewed identity separately from the
@@ -5126,6 +5138,7 @@ class Runner(QuotaHandover):
                         node_id=node_id, spec=spec, provider=provider, prompt=prompt,
                         workdir=worktree_path, branch=branch, parent=parent, depth=depth,
                         timeout=timeout, startup_token=startup_token,
+                        session_id=activation.get("session_id") if context else None,
                     )
                 except SpendCapRefused as exc:
                     # SC-R3/R3b (#7): admitted, then a crossing landed before
@@ -5837,7 +5850,9 @@ class Runner(QuotaHandover):
         # commit per question would both add noise and change what
         # _drop_if_empty decides for every later run.
         node = self.tree.get(node_id)
-        if node and node.branch and Path(node.worktree).is_dir() and not run.awaiting:
+        from .scheduler.sessions import retains_checkout
+        if (node and node.branch and Path(node.worktree).is_dir() and not run.awaiting
+                and not retains_checkout(self.paths, node)):
             # CI-R7: off the event loop — a git hook is the agent's code, and
             # nothing it does may freeze every other run this server supervises.
             commit_result = await asyncio.to_thread(

@@ -1,0 +1,15 @@
+template: review-loop
+version: 1
+params:
+  task: {type: text}
+  worker: {type: agent}
+  reviewer: {type: agent}
+  rounds: {type: int, default: 3}
+root:
+  key: loop
+  kind: loop
+  verdict_child: review
+  max_rounds: {param: rounds}
+  children:
+    - {key: work, kind: simple, agent: {param: worker}, task: {param: task}, session: A}
+    - {key: review, kind: simple, agent: {param: reviewer}, task: Review the work and give a verdict., session: B}
