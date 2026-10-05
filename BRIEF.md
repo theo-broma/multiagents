@@ -4398,3 +4398,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - ag-7676ac (C23 promote fix, 4ca736d) done: 14 wait reds gone; reviewer ag-73555d (verifies) running.
 - Space Bunny ag-742564 reviewer ag-873b7f (verifies) started early; gpt ag-c830f9 still running — review it when done, then compare/merge best.
 - ag-c4b36a (slot-leak r2) still running → reviewer r2 then merge.
+- 2026-10-05 user: reviewer opencode/minimax-m3 fallback removed (agents.yaml reviewer models `opencode: ""`). Space Bunny review relaunched on gemini agy-b: ag-52442a (minimax run ag-873b7f stopped). agy primary exhausted ~35h. C23 r1 changes_requested → ag-7676ac steered. Slot-leak r2 reviewer ag-b2e012 (agy-b) running. gpt NC-R97 reviewer ag-2e3038 running.
