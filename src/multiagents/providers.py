@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import atexit
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -203,6 +204,15 @@ class Event:
     # to (`fields.block`). Text events with different ids are separate blocks;
     # empty when the provider declares none.
     block: str = ""
+    # bug-2e68e4: a stable DIGEST of what a tool call returned, for providers
+    # that deliver it (`fields.result`) — never the output itself, which is
+    # hashed in `parse_line` and so reaches no log or stream file through
+    # this field. `tool_id` is the provider's id for
+    # the call (`fields.tool_id`) so a result on a later event finds its call.
+    # Empty when not reported. NOT part of `loop_signature`: a call is the
+    # same call whatever it returned; the supervisor weighs the result.
+    result: str = ""
+    tool_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
     startup_progress: bool = False
 
@@ -215,6 +225,18 @@ class Event:
         except (TypeError, ValueError):
             args = str(self.args)[:2000]
         return f"{self.name}:{args}"
+
+
+def _result_text(value: Any) -> str:
+    """Digest of a tool result, hashed where it is extracted (bug-2e68e4)."""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            value = str(value)
+    return hashlib.sha1(value.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 @dataclass
@@ -749,6 +771,8 @@ class Provider:
                     turn=str(extracted.get("turn") or ""),
                     step_id=str(extracted.get("step_id") or ""),
                     block=str(extracted.get("block") or ""),
+                    result=_result_text(extracted.get("result")),
+                    tool_id=str(extracted.get("tool_id") or ""),
                     raw=payload,
                     startup_progress=progress,
                 )

@@ -77,6 +77,11 @@ class Supervisor:
     # The last signature seen, and the step it belonged to: together they say
     # whether the next event is a NEW call or the same one reported again.
     last_digest: str = ""
+    # bug-2e68e4: recent result digests per call signature (each bounded by
+    # `loop_window`), and which signature each provider call id belongs to.
+    # See `_note_result`.
+    _results: dict[str, deque] = field(default_factory=dict)
+    _call_digests: dict[str, str] = field(default_factory=dict)
     last_step: int | None = None
     # SL-R3/SL-R6: opaque tool calls skip the loop-signature tracking above
     # entirely (that is what keeps them from tripping doom_loop on their
@@ -136,6 +141,12 @@ class Supervisor:
         elif event.kind == "step":
             self.steps += 1
 
+        if event.result and event.kind != "tool":
+            # A result delivered on a later event than the call (codex's
+            # item.completed): find its call by id, else the latest call.
+            self._note_result(self._call_digests.get(event.tool_id, self.last_digest),
+                              event.result)
+
         trip: Trip | None = None
         is_opaque_call = event.kind == "tool" and (
             event.name in self.opaque_tools or self._matches_opaque_args(event))
@@ -154,8 +165,15 @@ class Supervisor:
             repeat = (digest == self.last_digest and event.step is not None
                       and event.step == self.last_step)
             self.last_digest, self.last_step = digest, event.step
+            if event.tool_id:
+                if len(self._call_digests) > 256:
+                    self._call_digests.clear()
+                self._call_digests[event.tool_id] = digest
             if not repeat:
                 self.signatures.append((digest, self.current_progress))
+            if event.result:
+                self._note_result(digest, event.result)
+            if not repeat:
                 trip = self._check_loop(event)
 
         if trip:
@@ -164,6 +182,38 @@ class Supervisor:
             self._runaway_reported = True
             return Trip("runaway_steps", f"{self.steps} steps exceeds max_steps={self.max_steps}")
         return None
+
+    def _note_result(self, digest: str, result: str) -> None:
+        """bug-2e68e4: a call that returned something new is progress.
+
+        Polling a log with the same `tail -3 x.log` repeats the signature
+        while the output moves (13% -> 18% -> 25%). `result` is a digest (see
+        `Event.result`). When it has not been seen for this signature within
+        the window, the newest entry of that signature in `signatures` is
+        tagged with it: the entry then differs from every other, so neither
+        the identical-run nor the two-step-cycle check can count it, wherever
+        it sits in the window. A result seen before stays untagged, so a poll
+        that oscillates A, B, A, B — or a call whose output never changes —
+        still trips. The first result for a signature is not "new": there is
+        nothing yet to have changed from. A provider that reports no result
+        never gets here and keeps the signature-only behaviour.
+        """
+        if not digest:
+            return
+        seen = self._results.get(digest)
+        if seen is None:
+            if len(self._results) >= 256:
+                self._results.clear()
+            seen = self._results[digest] = deque(maxlen=self.loop_window)
+        novel = bool(seen) and result not in seen
+        seen.append(result)
+        if not novel:
+            return
+        for i in range(len(self.signatures) - 1, -1, -1):
+            entry_digest, progress = self.signatures[i]
+            if entry_digest == digest:
+                self.signatures[i] = (entry_digest, f"{progress}|r:{result}")
+                return
 
     def _matches_opaque_args(self, event: Event) -> bool:
         """bug-8615db: does this call match one of `opaque_tool_args`?

@@ -133,6 +133,8 @@ providers:
             name: "part.tool"
             args: "part.state.input"
             state: "part.state.status"
+            # bug-2e68e4: the tool's output, for the doom-loop watchdog.
+            result: "part.state.output"
         - match: {type: "step_finish"}
           as: step
           # OpenCode stores the model's finishReason in part.reason.
@@ -775,7 +777,8 @@ providers:
           fields: {text: "text", turn: "turn", block: "block"}
         - match: {kind: "tool"}
           as: tool
-          fields: {name: "name", args: "args", state: "state", turn: "turn"}
+          fields: {name: "name", args: "args", state: "state", turn: "turn",
+                   tool_id: "tool_id"}
         - match: {kind: "result"}
           as: result
           fields: {status: "status", text: "text", tokens: "tokens", turn: "turn"}
@@ -784,7 +787,8 @@ providers:
           fields: {text: "text", turn: "turn"}
         - match: {kind: "step"}
           as: step
-          fields: {state: "state", turn: "turn"}
+          # bug-2e68e4: a completed call's output digest, keyed by tool_id.
+          fields: {state: "state", turn: "turn", result: "result", tool_id: "tool_id"}
 
   # ---------------------------------------------------------------------
   # Template for a new integration. Uncomment, fill in, then verify with

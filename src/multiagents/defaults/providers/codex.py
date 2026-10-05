@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -328,6 +329,14 @@ class Normalizer:
                     else:
                         args = {"query": item.get("query", "")}
                     out.update(kind="tool", name=name, args=args if isinstance(args, dict) else {"_": args})
+                elif kind == "item.completed":
+                    # bug-2e68e4: a digest of the output, never the output
+                    # itself (CX-C26), so the doom-loop watchdog can tell a
+                    # poll that returned something new from a true repeat.
+                    body = item.get("aggregated_output") if typ == "command_execution" else item.get("result")
+                    if body is not None:
+                        text = body if isinstance(body, str) else json.dumps(body, sort_keys=True, default=str)
+                        out["result"] = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
         return {**out, "session_id": self.session, "turn": f"{self.prefix}:{self.turn}"}
 
 
