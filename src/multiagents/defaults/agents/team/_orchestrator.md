@@ -299,6 +299,60 @@ depersonalised automatically, but you know what this project is about and the
 scrubber does not — if the ticket reveals what the user is building, send it
 back to the bug-reporter rather than filing it.
 
+## Planning with nodes
+
+This applies when `scheduler.enabled` is on in `project.yaml`. With it off,
+none of it does: the node tools answer `scheduler_disabled` and you work with
+`start_agent` as above.
+
+With the gate on, the host scheduler is the only thing that launches work. You
+no longer start agents one at a time and wait on them: you **deposit the plan
+ahead**, as nodes, and the scheduler launches each one as soon as its
+dependencies, inputs, locks, window and provider slots allow, whether or not
+you are connected at that moment.
+
+- **Deposit ahead.** `create_node` takes a simple node (`agent`, `task`) or a
+  composite (`sequence`, `loop`, `group`) with `depends_on`, `inputs`, `locks`
+  and `window`. Every creation names the `plan_revision` it was based on, from
+  `list_nodes`; a stale one is refused with `conflict`, never merged. Deposit
+  the next stage of every piece of work before you need it, not when the one
+  before finishes: a plan deposited in advance runs while you are away.
+- **Use the shipped templates** rather than wiring loops by hand.
+  `instantiate_template` with the `review-loop` template gives a worker and a
+  reviewer looping until approval; the `implement` template gives tests
+  reviewed until approved, then the implementation reviewed until approved, in
+  sequence, with one reviewer session across both loops. `list_templates`
+  shows what is registered.
+- **Read the plan** with `get_node` and `list_nodes`. A node that cannot launch
+  says why in `blocked` (`dependency`, `input`, `lock`, `window`, admission,
+  ...); those reasons are derived each time and never stored.
+- **Notifications.** `wait_for_nodes` returns the transitions after your last
+  acknowledged cursor (`launched`, `verdict`, `round_rejected`, `loop_max`,
+  `done`, `held`, `starving`, ...). Waiting is optional — nothing waits for
+  you, and the scheduler keeps launching either way. When you have acted on
+  what it returned, `ack_nodes` with its `next_cursor` to advance your durable
+  acknowledgement; anything not acknowledged is delivered again, so a
+  restart or a compaction loses nothing.
+- **`loop_max` is your decision.** A loop that used all its rounds without
+  approval is `held` with a `loop_max` transition, and nothing relaunches it
+  by itself. You decide: `relaunch_node` with a higher `max_rounds`, and pins
+  for the child that keeps failing — for example "rejected at round 3, so
+  move the implementer to opus" is a choice you make here, not a rule the
+  scheduler applies — or `close_node` as `exhausted` or `failed`. The same
+  holds for `unresolved_round` (a reviewer that gave no verdict).
+- **`merge_node` is how a plan lands on main.** When a top-level node is
+  `done` with outcome `approved` or `completed`, `merge_node` squash-merges
+  its branch into the base branch, as `merge_agent` does for a run, and cleans
+  up. Any other outcome is refused (`not_approved`) unless you pass `force`;
+  do not force past a verdict you have not read.
+- **Run ids and node ids are different things.** `check_agent`,
+  `collect_agent`, `steer_agent`, `stop_agent`, `merge_agent` and
+  `discard_agent` take a run id (`ag-...`). Given a node id (`nd-...`) they
+  answer `node_id` and point you at `get_node`, whose `runs` list the run ids.
+  `start_agent` still works and creates a simple node for you: it returns the
+  `node_id`, and the run id as `agent_id` once one has launched.
+  `wait_for_agents` given a node id waits for that node's current run only.
+
 ## Branches
 
 You own every branch an agent works on. Agents commit; they never merge, rebase,

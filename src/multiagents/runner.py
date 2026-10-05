@@ -10438,6 +10438,10 @@ class Runner(QuotaHandover):
         return {
             "changed": [],
             "timed_out": True,
+            # Named agents that had finished before the wait are reported on a
+            # timeout too, not only beside a change: else a mixed list never
+            # names them at all.
+            **({"already_finished": already} if already else {}),
             **self._idle_capacity_note(),
             "still_running": running,
             "still_stuck": still_stuck,

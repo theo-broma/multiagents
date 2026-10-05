@@ -828,6 +828,29 @@ def _seen(run: Runner, result: dict) -> dict:
     return result
 
 
+def _plan_node(run: Runner, agent_id: str) -> dict | None:
+    """NC-R21: the plan node `agent_id` names, when it is not a run.
+
+    Only with the gate on, only for an id the tree does not know, and only a
+    node the caller may read (`get_node` keeps the scope). Run ids never pay
+    for the round trip.
+    """
+    if not isinstance(agent_id, str) or not agent_id.startswith("nd-") \
+            or run.tree.get(agent_id) is not None:
+        return None
+    node = _node_rpc("get_node", {"id": agent_id})
+    return node if isinstance(node, dict) and node.get("id") == agent_id else None
+
+
+def _node_id_refusal(run: Runner, agent_id: str) -> dict | None:
+    """NC-R21: a run tool given a node id refuses it, with no side effect."""
+    if _plan_node(run, agent_id) is None:
+        return None
+    return {"error": "node_id",
+            "hint": f"{agent_id} is a plan node, not a run: use get_node for its "
+                    f"state and its runs' ids, which these tools take."}
+
+
 @_tool()
 def check_agent(agent_id: str, since: int = 0) -> dict:
     """Check a running agent's status and read new stream events.
@@ -838,6 +861,9 @@ def check_agent(agent_id: str, since: int = 0) -> dict:
     which. A stuck agent is NOT killed: decide whether to steer, wait, or stop.
     """
     run = runner()
+    refused = _node_id_refusal(run, agent_id)
+    if refused:
+        return _ok(refused)
     try:
         return _ok(_seen(run, run.check(agent_id, since)))
     except KeyError as exc:
@@ -858,7 +884,32 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
     active agent.
     """
     run = runner()
-    return _ok(_seen(run, await run.wait_for_any(agent_ids, float(timeout))))
+    # NC-R21: a node id waits for that node's current run, never a later one
+    # (that is wait_for_nodes); a node with no run yet is answered at once.
+    nodes, no_run = {}, []
+    if agent_ids:
+        ids = []
+        for agent_id in agent_ids:
+            node = await asyncio.to_thread(_plan_node, run, agent_id)
+            if node is None:
+                ids.append(agent_id)
+            elif node.get("runs"):
+                nodes[agent_id] = node["runs"][-1]["run_id"]
+                ids.append(nodes[agent_id])
+            else:
+                no_run.append(agent_id)
+        if not ids:
+            return _ok({"changed": [], "still_running": [], "no_run_yet": no_run,
+                        "capacity": run.capacity(),
+                        "note": "no run has started for these nodes yet; "
+                                "wait_for_nodes follows a node, not a run"})
+        agent_ids = list(dict.fromkeys(ids))
+    result = await run.wait_for_any(agent_ids, float(timeout))
+    if nodes:
+        result["node_runs"] = nodes
+    if no_run:
+        result["no_run_yet"] = no_run
+    return _ok(_seen(run, result))
 
 
 @_tool()
@@ -880,6 +931,9 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
     deciding which is wrong is yours.
     """
     run = runner()
+    refused = _node_id_refusal(run, agent_id)
+    if refused:
+        return _ok(refused)
     try:
         return _ok(_seen(run, run.collect(agent_id, mode)))
     except KeyError as exc:
@@ -896,6 +950,9 @@ async def steer_agent(agent_id: str, message: str, provider: str | None = None) 
     the null check") or to answer a NEED_INFO question.
     """
     run = runner()
+    refused = await asyncio.to_thread(_node_id_refusal, run, agent_id)
+    if refused:
+        return _ok(refused)
     try:
         return _ok(await run.steer(agent_id, message, **({"provider": provider} if provider is not None else {})))
     except KeyError as exc:
@@ -906,6 +963,9 @@ async def steer_agent(agent_id: str, message: str, provider: str | None = None) 
 async def stop_agent(agent_id: str) -> dict:
     """Stop an agent and everything it spawned. Its branch and logs survive."""
     run = runner()
+    refused = await asyncio.to_thread(_node_id_refusal, run, agent_id)
+    if refused:
+        return _ok(refused)
     denied = _may_act_on(agent_id)
     if denied:
         return _ok({"error": denied})
@@ -1415,6 +1475,9 @@ def merge_agent(agent_id: str, into: str = "") -> dict:
     outcome you want rather than a green suite that was quietly weakened.
     """
     run = runner()
+    refused = _node_id_refusal(run, agent_id)
+    if refused:
+        return _ok(refused)
     try:
         denied = _may_act_on(agent_id)
         if denied:
@@ -1432,6 +1495,9 @@ def discard_agent(agent_id: str, force: bool = False) -> dict:
     work an agent actually did should be a deliberate act.
     """
     run = runner()
+    refused = _node_id_refusal(run, agent_id)
+    if refused:
+        return _ok(refused)
     try:
         denied = _may_act_on(agent_id)
         if denied:

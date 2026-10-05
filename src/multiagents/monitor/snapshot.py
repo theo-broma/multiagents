@@ -637,6 +637,11 @@ def snapshot(paths: ProjectPaths, config: Config,
 
     drivers = watchdog.read_all_status(paths) or {}
     status = drivers.get("orchestrator", {})
+    # NC-R43: the plan scheduler, only while the gate is on; absent otherwise.
+    scheduler = {}
+    if (config.project.get("scheduler") or {}).get("enabled"):
+        from ..scheduler import overview
+        scheduler = {"scheduler": overview.section(paths.root, config)}
     return {
         "at": now,
         "project": {
@@ -687,6 +692,7 @@ def snapshot(paths: ProjectPaths, config: Config,
             "open_questions": sum(1 for q in data.get("questions", [])
                                   if not q.get("answered_at")),
         },
+        **scheduler,
     }
 
 

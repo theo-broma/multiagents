@@ -1663,6 +1663,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if pending:
             print(f"  ! scheduler disabled with pending nodes: {', '.join(pending)}")
             problems += 1
+    elif paths:
+        # NC-R43: the scheduler and its plan; a dead one is a problem.
+        from .scheduler import overview
+        info, trouble = overview.doctor_lines(overview.section(paths.root, config))
+        print("scheduler")
+        for line in info:
+            print(f"  {line}")
+        for line in trouble:
+            print(f"  ! {line}")
+        problems += len(trouble)
 
     print("providers")
     for name, provider in sorted(providers.items()):

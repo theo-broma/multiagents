@@ -114,6 +114,7 @@ details[open] > summary { margin-bottom: 8px; }
 textarea.grow { resize: both; min-height: 2.6em; font-size: 12px; line-height: 1.45; }
 .saved { color: var(--ok); }
 .failed { color: var(--err); }
+.starving { color: var(--warn); }
 
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
@@ -238,6 +239,9 @@ function signature(s) {
     (s.tickets || []).map((t) => [t.id, t.status]),
     (s.deferred || []).length,
     (s.drivers || []).map((d) => [d.role, d.verdict, d.running]),
+    s.scheduler ? [s.scheduler.running, s.scheduler.last_tick,
+      s.scheduler.nodes.map((n) => [n.node_id, n.state, n.blocked]),
+      s.scheduler.locks, s.scheduler.starving] : null,
     SELECTED, TAB, FILTER,
   ]);
 }
@@ -365,6 +369,47 @@ function providerPanel(p) {
   );
 }
 
+// NC-R43: the plan scheduler, present only while scheduler.enabled is on.
+// Held nodes come first (the payload's order); starving ones are marked.
+function blockedText(b) {
+  if (typeof b !== "object" || b === null) return String(b);
+  const d = b.detail;
+  const detail = Array.isArray(d) ? d.join(", ")
+    : (d && typeof d === "object") ? Object.values(d).filter(Boolean).join(", ") : (d || "");
+  return detail ? `${b.code} ${detail}` : b.code;
+}
+
+function schedulerPanel(sc) {
+  const starving = new Set(sc.starving || []);
+  const counts = Object.entries(sc.counts || {}).filter(([, n]) => n)
+    .map(([state, n]) => `${n} ${state}`).join(" · ");
+  return el("div", { class: "panel" },
+    el("h2", {}, "scheduler"),
+    el("div", { class: "row" },
+      el("span", { class: "dot " + (sc.running ? "running" : "failed") }),
+      el("strong", {}, sc.running ? `running · pid ${sc.pid}` : "NOT RUNNING — nothing will launch"),
+      el("span", { class: "right muted" }, sc.last_tick ? `last tick ${sc.last_tick}` : "")),
+    counts && el("div", { class: "muted", style: "margin:4px 0" }, counts),
+    (sc.nodes || []).filter((n) => !["done", "cancelled"].includes(n.state)).map((n) =>
+      el("div", { class: "row" },
+        el("span", { class: n.state === "held" ? "failed" : starving.has(n.node_id) ? "starving" : "muted" },
+          n.state === "held" ? "held" : starving.has(n.node_id) ? "starving" : n.state),
+        el("code", {}, n.node_id),
+        el("span", {}, n.agent || n.kind),
+        el("span", { class: "right muted" },
+          n.state === "held" && n.hold ? blockedText({ code: n.hold.reason, detail: n.hold.detail })
+            : (n.blocked || []).map(blockedText).join("; ")),
+        n.window && el("span", { class: "muted" },
+          n.window.open ? `window closes ${n.window.next_close || "?"}` : `window opens ${n.window.next_open || "?"}`),
+      )),
+    (sc.locks || []).length ? el("div", { class: "muted", style: "margin-top:6px" },
+      "locks: " + sc.locks.map((l) => `${l.name} ← ${l.holder_node}`).join(", ")) : null,
+    (sc.aliases || []).length ? el("div", { class: "muted" },
+      "sessions: " + sc.aliases.map((a) =>
+        `${a.alias}@${a.instance}: ${a.bound ? "" : "unbound, "}${a.provider || "?"} ${a.model || ""}`).join(", ")) : null,
+  );
+}
+
 function renderLive() {
   const s = STATE;
   const left = el("div", {});
@@ -383,6 +428,8 @@ function renderLive() {
         : null,
     ));
   }
+
+  if (s.scheduler) left.append(schedulerPanel(s.scheduler));
 
   left.append(el("div", { class: "panel" },
     el("h2", {}, `running — ${s.running.length}`),

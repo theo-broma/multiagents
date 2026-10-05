@@ -79,6 +79,9 @@ class Engine:
         self.runner = Runner(self.paths, service.configuration())
         self.reasons = {}
         self.last_tick = None
+        # Read from the configuration at each tick, so status() can name the
+        # starving nodes without reading files inside a store transaction.
+        self.starvation_after = None
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.run, name="node-evaluation", daemon=True)
         self.stopped = threading.Event()
@@ -235,12 +238,22 @@ class Engine:
                 "eligible_since": node.get("ready_since") if ready and not blocked else None,
                 "active_run": active if node["state"] not in {"done", "cancelled"} else None}
 
-    def status(self, nodes, journal, db=None):
+    def status(self, nodes, journal, db=None, at=None):
         return {"last_tick": self.last_tick,
                 "held": [{"node_id": n["id"], "hold": n["hold"]} for n in nodes.values() if n["state"] == "held"],
                 "locks": [{"name": name, "holder_run": a["run_id"], "holder_node": a["node_id"]}
                           for a in journal.values() if a["state"] in {"claimed", "launched"}
-                          for name in a.get("locks", [])], "aliases": self.alias_status(db), "windows": []}
+                          for name in a.get("locks", [])], "aliases": self.alias_status(db), "windows": [],
+                "starving": self.starving(nodes, at)}
+
+    def starving(self, nodes, at):
+        """NC-R53 as shown (NC-R43): open nodes ready for longer than the
+        threshold, by the scheduler's own clock rather than the last tick.
+        `at` is that clock, read by the caller before any store transaction."""
+        if self.starvation_after is None or at is None:
+            return []                   # before the first tick
+        return [n["id"] for n in nodes.values() if n["state"] == "open" and n.get("ready_since")
+                and at - epoch(n["ready_since"]) >= self.starvation_after]
 
     def alias_status(self, db=None):
         if db is not None:
@@ -309,6 +322,7 @@ class Engine:
         if self.runner.config is not config:
             self.runner.reload(config)
         self.last_tick = datetime.fromtimestamp(self.instant(), timezone.utc).isoformat()
+        self.starvation_after = config.project["scheduler"]["starvation_after_seconds"]
         with self.store.transaction(write=False) as db:
             candidates = set(self.store.nodes(db))
             managed = {a["run_id"] for a in attempts(db).values()}
@@ -504,6 +518,32 @@ class Engine:
                 node.pop("ready_since", None)
                 node.pop("starvation_notified", None)
             self.store.save_node(db, node)
+
+    def observe(self, deposited):
+        """NC-R53: a node deposited ready is ready from its deposit, as
+        `get_node` already shows it, not from the next tick that sees it.
+
+        Only the nodes the request just deposited are evaluated, and outside
+        any write: the write itself is one batch proportional to the deposit."""
+        if not deposited:
+            return
+        with self.store.transaction(write=False) as db:
+            rows = list(db.execute("SELECT id, record FROM nodes"))
+        nodes = {id: json.loads(record) for id, record in rows}
+        ready = [id for id in deposited if (n := nodes.get(id)) and n["state"] == "open"
+                 and n["kind"] == "simple" and not n.get("ready_since") and not self.structural(n, nodes)]
+        if not ready:
+            return
+        since = datetime.fromtimestamp(self.instant(), timezone.utc).isoformat()
+        with self.service.changed, self.store.transaction() as db:
+            for id in ready:
+                row = db.execute("SELECT record FROM nodes WHERE id=?", (id,)).fetchone()
+                node = json.loads(row[0]) if row else None
+                # A tick may have stamped or launched it since; the next tick
+                # corrects a readiness that changed in between (episode).
+                if node and node["state"] == "open" and not node.get("ready_since"):
+                    node["ready_since"] = since
+                    self.store.save_node(db, node)
 
     def spawn(self, attempt):
         with (self.store.directory / (attempt["attempt_id"] + ".lock")).open("a+") as lock:

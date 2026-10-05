@@ -90,7 +90,11 @@ class Service:
             self._config_version = version
         return self._config
 
-    def status(self, nodes, db=None):
+    def status(self, nodes, db=None, at=None):
+        # `at`, the scheduler's clock, is read before any store transaction:
+        # given `db`, the caller read it; else it is read here, before ours.
+        if self.engine and db is None and at is None:
+            at = self.engine.instant()
         counts = {s: 0 for s in ("open", "running", "suspended", "held", "done", "cancelled")}
         for node in nodes.values():
             counts[node["state"]] += 1
@@ -98,10 +102,10 @@ class Service:
         if self.engine:
             from .engine import attempts
             if db is not None:
-                extra = self.engine.status(nodes, attempts(db), db)
+                extra = self.engine.status(nodes, attempts(db), db, at)
             else:
                 with self.store.transaction(write=False) as connection:
-                    extra = self.engine.status(nodes, attempts(connection), connection)
+                    extra = self.engine.status(nodes, attempts(connection), connection, at)
         return {"pid": os.getpid(), "since": self.since, "gate": True, "counts": counts, **extra}
 
     @staticmethod
@@ -200,6 +204,8 @@ class Service:
             validate_wire_value(request)
             op, args = request.get("op"), request.get("args", {})
             after = []
+            clock = self.engine.instant() if self.engine and op == "scheduler_status" else None
+            deposited = []
             # Reads use one SQLite snapshot and never wait behind a writer
             # holding the notification condition while reserving the store.
             with self.changed if isinstance(op, str) and op in MUTATING else nullcontext():
@@ -227,7 +233,9 @@ class Service:
                             raise Refused("request_id_reused")
                         reply = json.loads(previous[1])
                     elif op != "wait_for_nodes":
-                        result = self.dispatch(db, principal, op, args, nodes, after)
+                        before = set(nodes)
+                        result = self.dispatch(db, principal, op, args, nodes, after, clock)
+                        deposited = [id for id in nodes if id not in before]
                         reply.update(ok=True, result=result)
                         if op in MUTATING:
                             db.execute("INSERT INTO requests VALUES (?, ?, ?, ?)",
@@ -246,6 +254,8 @@ class Service:
                                        (principal["subject"], request_id)).fetchone()
                 if saved:
                     reply = json.loads(saved[0])
+                if reply.get("ok"):
+                    self.engine.observe(deposited)
             for pending in after:
                 if pending.get("kind") == "spawn":
                     self.engine.spawn(pending["attempt"])
@@ -260,7 +270,7 @@ class Service:
             reply = {"request_id": reply["request_id"], "ok": False, "error": {"error": "internal"}}
         return reply
 
-    def dispatch(self, db, principal, op, args, nodes, after=None):
+    def dispatch(self, db, principal, op, args, nodes, after=None, clock=None):
         plan_revision = int(self.store.meta(db, "plan_revision"))
         def view(node):
             if self.engine and op in {"get_node", "list_nodes"}:
@@ -308,7 +318,7 @@ class Service:
             self.store.save_node(db, node)
             return self.view(node, plan_revision + 1)
         if op == "scheduler_status":
-            result = self.status(nodes, db)
+            result = self.status(nodes, db, clock)
             result["launch_context"] = principal["root"] or bool(
                 self.engine and self.engine.runner.tree.get(principal["subject"]))
             return result
