@@ -82,10 +82,41 @@ def top_node(node, nodes):
     return node
 
 
-def input_generation(node, ref, nodes):
+def root_approved_generation(node, identity):
+    if node["state"] != "done" or node["outcome"] != "approved":
+        return False
+    closure = node.get("closure")
+    if closure is not None:
+        if closure.get("outcome") != "approved":
+            return False
+        generation = closure.get("generation", {})
+    elif node["kind"] == "loop" and node.get("closed_by") == "root":
+        # NC-R97: records carrying only NC-R37's root marker approve the
+        # latest generation, never every generation in the loop's history.
+        generation = node["generations"][-1] if node["generations"] else {}
+    else:
+        return False
+    return (generation.get("run_id"), generation.get("commit")) == identity
+
+
+def input_generation(node, ref, nodes, consumer=None):
+    """Resolve for the consuming node; no consumer means an external reader."""
     if (not node or node.get("disposed") or node.get("completion_pending")
             or node.get("disposal_pending") or node["state"] != "done"):
         return None
+    inside = set()
+    cur = consumer
+    while cur and cur["parent"]:
+        cur = nodes[cur["parent"]]
+        inside.add(cur["id"])
+    review_loops = [node] if node["kind"] == "loop" and node["id"] not in inside else []
+    child = node
+    while child["parent"]:
+        parent = nodes[child["parent"]]
+        if (parent["kind"] == "loop" and parent["id"] not in inside
+                and parent["loop"]["verdict_child"] != child["id"]):
+            review_loops.append(parent)
+        child = parent
     generations = node["generations"]
     if "generation" in ref:
         generations = [g for g in generations if g["seq"] == ref["generation"]]
@@ -95,14 +126,19 @@ def input_generation(node, ref, nodes):
         identity = (generation["run_id"], generation["commit"])
         mirrors = [(owner, other) for owner in nodes.values() for other in owner["generations"]
                    if (other["run_id"], other["commit"]) == identity]
-        overridden = any(owner["state"] == "done" and owner["outcome"] == "approved"
-                         and owner.get("closure", {}).get("outcome") == "approved"
-                         and (owner["closure"].get("generation", {}).get("run_id"),
-                              owner["closure"].get("generation", {}).get("commit")) == identity
-                         for owner, _ in mirrors)
+        # Tree membership precedes mirrored records: finished work is still
+        # unjudged if its loop has not recorded the generation yet (NC-R97).
+        # Each loop gates only consumers outside its subtree; its own work
+        # and reviewer must be able to consume pending results.
+        if any(not any(owner["id"] == loop["id"] and
+                       (other["verdict"] == "approved" or root_approved_generation(loop, identity))
+                       for owner, other in mirrors) for loop in review_loops):
+            continue
+        overridden = any(root_approved_generation(owner, identity) for owner, _ in mirrors)
         if overridden:
             return generation
-        loops = [other for owner, other in mirrors if owner["kind"] == "loop"]
+        loops = [other for owner, other in mirrors
+                 if owner["kind"] == "loop" and owner["id"] not in inside]
         if loops and any(other["verdict"] != "approved" for other in loops):
             continue
         rejected = any(other["verdict"] == "rejected" for _, other in mirrors)
@@ -167,7 +203,7 @@ class Results:
             cur = nodes.get(cur["parent"])
         commit = tip
         if refs:
-            inputs = [input_generation(nodes.get(ref["node"]), ref, nodes) for ref in refs]
+            inputs = [input_generation(nodes.get(ref["node"]), ref, nodes, consumer=node) for ref in refs]
             if any(generation is None for generation in inputs):
                 raise gitops.GitError("input generation is unavailable")
             commit = inputs[0]["commit"]

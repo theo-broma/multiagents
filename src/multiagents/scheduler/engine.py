@@ -171,7 +171,7 @@ class Engine:
                 if other["state"] != "done" or allowed and other["outcome"] not in allowed:
                     return [{"code": "dependency" if cur is node else "ancestor", "detail": ref["node"]}]
             for ref in cur["inputs"]:
-                if not input_generation(nodes.get(ref["node"]), ref, nodes):
+                if not input_generation(nodes.get(ref["node"]), ref, nodes, consumer=node):
                     return [{"code": "input", "detail": ref["node"]}]
             parent = nodes.get(cur["parent"])
             if parent and parent["kind"] in {"sequence", "loop"}:
