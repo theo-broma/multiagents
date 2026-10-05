@@ -55,12 +55,30 @@ REOPEN = local(2026, 10, 6, 9, 0)          # Tuesday 09:00
 # LONG_WAIT covers a chain of them (stop, confirm death, release a lock, relaunch).
 WAIT = 8
 LONG_WAIT = 15
+# The `resumed` transition is published shortly after the provider process is
+# launched (NC-R33 decision, tests/test_nc_m3_branches.py EVENTS_LOG_DEADLINE):
+# a test that saw the process's first call polls for the event, it does not
+# read it at once.
+EVENTS_LOG_DEADLINE = 5.0
 
 
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = ClockWorld(tmp_path, monkeypatch, now=NOON,
                        scheduler={"starvation_after_seconds": 10**7})
+    world.start_scheduler()
+    yield world
+    world.close()
+
+
+@pytest.fixture
+def wpc(tmp_path, monkeypatch):
+    """`w` with a one-slot provider `pcfx` and its agent `pcworker`, configured
+    before the scheduler starts (config written after startup is not read)."""
+    world = ClockWorld(tmp_path, monkeypatch, now=NOON,
+                       scheduler={"starvation_after_seconds": 10**7})
+    world.pc = world.provider("pcfx", max_concurrent=1)
+    world.agent("pcworker", "pcfx")
     world.start_scheduler()
     yield world
     world.close()
@@ -73,13 +91,14 @@ def hold_lock(w: ClockWorld, lock: str = "L") -> str:
     return holder
 
 
-def running(w: ClockWorld, tag: str = "A", **fields):
-    """A windowed node, running at noon. Returns (node id, pid, session)."""
+def running(w: ClockWorld, tag: str = "A", on=None, **fields):
+    """A windowed node, running at noon. Returns (node id, pid, session).
+    `on` is the fixture provider the node's agent uses (default: `w.fx`)."""
     fields.setdefault("window", WIN)
     fields.setdefault("fx", {"gate": "ga"})
     node = w.simple(tag, **fields)
     w.wait_running(node, timeout=WAIT)
-    call = w.wait_spawn(tag, timeout=WAIT)
+    call = w.wait_spawn(tag, on, timeout=WAIT)
     return node, call["pid"], call["session"]
 
 
@@ -90,6 +109,11 @@ def until_suspended(w: ClockWorld, node: str, timeout: float = WAIT) -> dict:
 def suspend(w: ClockWorld, node: str, after: int = 20) -> dict:
     w.set_clock(CLOSE + timedelta(seconds=after))
     return until_suspended(w, node)
+
+
+def until_resumed(w: ClockWorld, node: str, n: int = 1) -> None:
+    w.until(lambda: w.transitions(node).count("resumed") >= n, timeout=EVENTS_LOG_DEADLINE,
+            what=f"the `resumed` transition #{n} of {node}")
 
 
 def resumes(w: ClockWorld, tag: str = "A") -> list[dict]:
@@ -160,6 +184,7 @@ def test_nc_r40_a_suspended_node_resumes_the_same_session_within_the_tolerance_o
     call = resumes(w)[0]
     assert call["resume"] == session, "resume must use the interrupted run's provider session"
     assert "resume" in call["prompt"].lower()
+    until_resumed(w, node)
     assert w.transitions(node).count("resumed") == 1
     w.gate("ga")
     done = w.wait_state(node, "done", timeout=WAIT)
@@ -175,7 +200,7 @@ def test_nc_r62_a_window_resumption_runs_in_place_without_cleaning_the_checkout(
     # a second activation instead: use a run that wrote first, then hangs.
     w.gate("ga")
     w.wait_state(node, "done", timeout=WAIT)
-    node2, _, session = running(w, "B", fx={"write": {"wip.txt": "half done\n"}, "hang": True})
+    node2, _, session = running(w, "B", fx={"write": {"wip.txt": "half done\n"}, "gate_after": "gb2"})
     first_cwd = w.wait_spawn("B", timeout=WAIT)["cwd"]
     wip = Path(first_cwd) / "wip.txt"
     w.until(lambda: wip.exists(), timeout=WAIT, what="the interrupted run's file")
@@ -199,6 +224,7 @@ def test_nc_r40_a_node_can_be_suspended_and_resumed_repeatedly_on_one_session(w)
         w.until(lambda d=day: len(resumes(w)) == d + 1, timeout=WAIT, what=f"resume #{day + 1}")
         w.wait_running(node, timeout=WAIT)
     assert {c["resume"] for c in resumes(w)} == {session}
+    until_resumed(w, node, 3)
     kinds = w.transitions(node)
     assert kinds.count("suspended") == 3 and kinds.count("resumed") == 3
     assert len(w.fx.by_tag("A")) == 4
@@ -239,10 +265,9 @@ def test_nc_r40_the_lock_is_released_only_once_the_stopped_run_is_really_dead(w)
     assert w.fx.by_tag("X")[0]["watch_alive"] is False
 
 
-def test_nc_r40_a_suspended_node_frees_its_provider_slot(w):
-    pc = w.provider("pcfx", max_concurrent=1)
-    w.agent("pcworker", "pcfx")
-    a, _, _ = running(w, "A", agent="pcworker", fx={"hang": True})
+def test_nc_r40_a_suspended_node_frees_its_provider_slot(wpc):
+    w, pc = wpc, wpc.pc
+    a, _, _ = running(w, "A", on=pc, agent="pcworker", fx={"hang": True})
     b = w.simple("B", "pcworker", fx={"gate": "gb"})
     w.until(lambda: "admission:provider_concurrency" in w.codes(b), timeout=WAIT, what="B blocked")
     suspend(w, a)
@@ -250,10 +275,9 @@ def test_nc_r40_a_suspended_node_frees_its_provider_slot(w):
     assert len(pc.by_tag("B")) == 1
 
 
-def test_nc_r40_a_resume_blocked_by_admission_leaves_the_node_suspended_with_the_reason(w):
-    pc = w.provider("pcfx", max_concurrent=1)
-    w.agent("pcworker", "pcfx")
-    a, _, session = running(w, "A", agent="pcworker", fx={"hang": True})
+def test_nc_r40_a_resume_blocked_by_admission_leaves_the_node_suspended_with_the_reason(wpc):
+    w, pc = wpc, wpc.pc
+    a, _, session = running(w, "A", on=pc, agent="pcworker", fx={"hang": True})
     b = w.simple("B", "pcworker", fx={"gate": "gb"})
     suspend(w, a)
     w.wait_running(b, timeout=WAIT)
@@ -271,6 +295,7 @@ def test_nc_r40_a_resume_blocked_by_admission_leaves_the_node_suspended_with_the
     w.until(lambda: [c for c in pc.by_tag("A") if c["resume"]], timeout=LONG_WAIT,
             what="the resumed invocation after admission freed")
     assert [c for c in pc.by_tag("A") if c["resume"]][0]["resume"] == session
+    until_resumed(w, a)
     assert w.transitions(a).count("resumed") == 1
 
 
@@ -294,6 +319,7 @@ def test_nc_r40_a_scheduler_restart_while_suspended_preserves_the_suspension(w, 
     w.set_clock(REOPEN + timedelta(seconds=10))
     w.until(lambda: resumes(w), timeout=WAIT, what="the resumed invocation after the restart")
     assert resumes(w)[0]["resume"] == session
+    until_resumed(w, node)
     assert w.transitions(node).count("resumed") == 1
 
 
@@ -317,6 +343,7 @@ def test_nc_r69_at_start_a_suspended_node_inside_an_open_window_is_resumed(w):
     w.start_scheduler()
     w.until(lambda: resumes(w), timeout=WAIT, what="the resumption at start")
     assert resumes(w)[0]["resume"] == session
+    until_resumed(w, node)
     assert w.transitions(node).count("resumed") == 1
     assert len([c for c in w.fx.by_tag("A") if c["resume"]]) == 1
 
@@ -324,9 +351,9 @@ def test_nc_r69_at_start_a_suspended_node_inside_an_open_window_is_resumed(w):
 def test_nc_r69_windows_are_evaluated_before_anything_is_admitted_at_start(w):
     # a closed-window node waiting to launch must not be launched by the first
     # admission pass of a restarted scheduler that sees the window shut.
-    w.stop_scheduler()
-    w.write_clock(local(2026, 10, 5, 18))
+    w.set_clock(local(2026, 10, 5, 18))
     node = w.simple("W", window=WIN, fx={"gate": "gw"})
+    w.stop_scheduler()
     w.start_scheduler()
     w.quiet(2.5)
     assert w.fx.by_tag("W") == []
@@ -473,6 +500,7 @@ def test_nc_r47_nc_r40_window_closing_mid_loop_suspends_the_reviewer_and_resumes
     assert len(w.fx.by_tag("WRITER")) == 1, "the loop advanced before the resumption"
     order = w.transitions(loop) + w.transitions(rv)
     assert w.get(loop)["loop"]["rounds_rejected"] == counter
+    until_resumed(w, rv)
     events = [w.kind_of(e) for e in w.events() if rv in str(e) or loop in str(e)]
     first_resumed = events.index("node.resumed")
     assert not {"node.round_rejected", "node.loop_exited", "node.loop_max",
