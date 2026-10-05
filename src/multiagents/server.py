@@ -55,6 +55,7 @@ from .executor import executor_for
 from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
 from .providers import billed_rows
+from .quota_handover import quota_handover_settings
 from .redact import scrub
 from .runner import Runner
 from .tree import Tree, deferred_malformed, find_deferred, now
@@ -1532,6 +1533,8 @@ def budget_status() -> dict:
         run.paths.config, spend, data.get("cooldowns", {}),
     )
     reserve = float(run.config.project.get("budget", {}).get("reserve_headroom", 0.15))
+    # This read-only view needs configuration, not the runner's handover machinery.
+    handover = quota_handover_settings(run.config.project)
     tokens = _context_reading(run)
     advice = []
     for name, entry in budgets.items():
@@ -1544,8 +1547,8 @@ def budget_status() -> dict:
     return _ok({
         "providers": {k: v.to_dict() for k, v in budgets.items()},
         "tree_usage": run.tree.rollup_usage(),
-        "quota_handover": {"reserved_instance": run._qh_reserved(),
-                           "reserve_fraction": run._qh_settings().get("reserve_fraction", .25)},
+        "quota_handover": {"reserved_instance": handover["reserved_instance"],
+                           "reserve_fraction": handover["reserve_fraction"]},
         "by_model": billed_rows(run.tree.usage_by_model(), run.providers),
         "deferred_tasks": len(data.get("deferred", [])),
         # PC-R4: per-provider concurrency, for the providers that limit it.

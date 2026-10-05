@@ -40,6 +40,15 @@ from .providers import expand_env_value, resolved_profile
 _floor_dispatch: ContextVar[str] = ContextVar("quota_floor_dispatch", default="")
 
 
+def quota_handover_settings(project: dict) -> dict:
+    """Resolve project defaults and the effective reservation without runner state."""
+    settings = {"enabled": True, "reserved_instance": None, "reserve_fraction": .25,
+                **(project.get("quota_handover") or {})}
+    if not settings["enabled"]:
+        settings["reserved_instance"] = None
+    return settings
+
+
 async def before_transfer(attempt: dict) -> None:
     """Deterministic test gate, after prepared is durable, before transfer.
 
@@ -313,18 +322,18 @@ class QuotaHandover:
         return now()
 
     def _qh_settings(self, spec=None):
-        return {**(self.config.project.get("quota_handover") or {}),
+        return {**quota_handover_settings(self.config.project),
                 **(spec.quota_handover if spec else {})}
 
     def _qh_enabled(self, spec=None, node=None):
         # Scheduler admission of a legacy start does not make it managed.
         # Only the persisted node_id/activation identity excludes a run.
-        return (self._qh_settings().get("enabled", True)
+        return (self._qh_settings()["enabled"]
                 and (spec is None or spec.handover)
                 and (node is None or (not node.node_id and not node.role)))
 
     def _qh_reserved(self):
-        return self._qh_settings().get("reserved_instance") if self._qh_enabled() else None
+        return self._qh_settings()["reserved_instance"]
 
     def _qh_above_floor(self, entry):
         if entry is None or not entry.known or entry.headroom is None:
@@ -338,7 +347,7 @@ class QuotaHandover:
             shortest = min(span for span, _ in windows)
             headroom = min(1 - float(w["percent"]) / 100
                            for span, w in windows if span == shortest)
-        return headroom > self._qh_settings().get("reserve_fraction", .25)
+        return headroom > self._qh_settings()["reserve_fraction"]
 
     def _qh_names(self, spec):
         if spec.priorities is not None:
