@@ -102,11 +102,13 @@ class Store:
 
     @staticmethod
     def nodes(db) -> dict[str, dict]:
-        return {id: json.loads(record) for id, record in db.execute("SELECT id, record FROM nodes")}
+        # Creation order: save_node keeps a node's rowid across updates.
+        return {id: json.loads(record) for id, record in db.execute("SELECT id, record FROM nodes ORDER BY rowid")}
 
     @staticmethod
     def save_node(db, node):
-        db.execute("INSERT OR REPLACE INTO nodes VALUES (?, ?)", (node["id"], encode(node)))
+        db.execute("INSERT INTO nodes VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record",
+                   (node["id"], encode(node)))
 
     @staticmethod
     def transition(db, kind, node_id=None, detail=None):
