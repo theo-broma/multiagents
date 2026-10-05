@@ -69,6 +69,11 @@ def check_value(name, param, value, config=None):
         invalid(f"params.{name}: unknown agent")
 
 
+# The fields a client may set on an instance's root, as it sets them on a
+# composite `create_node` (context/specs/template-instantiation.md, TI-R2/R3).
+ROOT_FIELDS = frozenset({"urgent", "window", "depends_on", "inputs", "locks"})
+
+
 def host_registry():
     result = {}
     # Project files are deliberately absent: only the host registry is used.
@@ -117,7 +122,7 @@ def materialize(template, supplied, config):
     return substitute(template["root"]), bindings
 
 
-def expand(template, supplied, config, subject, nodes, parent=None):
+def expand(template, supplied, config, subject, nodes, parent=None, root_fields=None):
     expanded, bindings = materialize(template, supplied, config)
     local, made = {}, []
     def create(item, parent):
@@ -150,6 +155,9 @@ def expand(template, supplied, config, subject, nodes, parent=None):
         if node["kind"] == "loop":
             node["loop"] = {"verdict_child": resolve(item.get("verdict_child")),
                             "max_rounds": item.get("max_rounds"), "rounds_rejected": 0}
+    # Client-supplied root fields name nodes of the plan, not template-local
+    # keys, so they are applied after expansion and validated with the rest.
+    root.update({k: copy.deepcopy(v) for k, v in (root_fields or {}).items() if k in ROOT_FIELDS})
     model.attach(nodes, root)
     model.validate(nodes, config, check_agents={node["id"] for node, _ in made})
     return root

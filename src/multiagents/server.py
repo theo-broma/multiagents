@@ -1810,11 +1810,24 @@ def list_templates() -> dict:
 
 @_tool()
 def instantiate_template(name: str, params: dict, plan_revision: int,
-                         parent: str | None = None, urgent: bool = False,
-                         window: dict | None = None, ctx: _ToolContext = None) -> dict:
-    """Deposit an expanded template instance (available in M4)."""
-    return _node_rpc("instantiate_template", dict(name=name, params=params,
-                     plan_revision=plan_revision, parent=parent, urgent=urgent, window=window), ctx)
+                         parent: str | None = None, urgent: bool = _NODE_UNSET,
+                         window: dict | None = None, depends_on: list[dict] | None = None,
+                         inputs: list[dict] | None = None, locks: list[str] | None = None,
+                         ctx: _ToolContext = None) -> dict:
+    """Deposit an expanded template instance at the current plan_revision.
+
+    Takes the template `name` and its `params`, the `plan_revision` from
+    list_nodes and the `parent` to deposit under, plus `urgent`, `window`,
+    `depends_on`, `inputs` and `locks`, which apply to the instance's root node
+    exactly as they do on create_node for a composite node. A root field the
+    caller leaves out is the template's own, as on a plain call.
+    """
+    fields = dict(name=name, params=params, plan_revision=plan_revision, parent=parent)
+    if urgent is not _NODE_UNSET:
+        fields["urgent"] = urgent
+    fields.update({k: v for k, v in dict(window=window, depends_on=depends_on,
+                  inputs=inputs, locks=locks).items() if v is not None})
+    return _node_rpc("instantiate_template", fields, ctx)
 
 
 @_tool()

@@ -360,7 +360,7 @@ class Service:
             if op == "register_template":
                 model.check_fields(args, {"yaml"}, set())
                 return {**templates.register(db, args.get("yaml"), principal.get("host_templates")), "plan_revision": plan_revision}
-            model.check_fields(args, {"name", "params", "parent"}, {"plan_revision"})
+            model.check_fields(args, {"name", "params", "parent"} | templates.ROOT_FIELDS, {"plan_revision"})
             if "plan_revision" in args:
                 model.revision(args["plan_revision"], plan_revision)
             name = args.get("name")
@@ -373,7 +373,8 @@ class Service:
                 raise Refused("conflict", current_version=template["version"])
             original = copy.deepcopy(nodes)
             parent = args.get("parent") or (None if principal["root"] else principal["node_id"])
-            root = templates.expand(template, args.get("params", {}), config, principal["subject"], nodes, parent)
+            root = templates.expand(template, args.get("params", {}), config, principal["subject"], nodes, parent,
+                                    root_fields={k: args[k] for k in templates.ROOT_FIELDS if k in args})
             for id, node in nodes.items():
                 if node != original.get(id):
                     self.store.save_node(db, node)
