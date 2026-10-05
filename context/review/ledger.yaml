@@ -401,8 +401,15 @@ findings:
         or the fix is undefended.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: cache
+        source reading is copy-returned and caller spend merges without mutating cache,
+        src/multiagents/budget.py:1592-1603; tests/test_phase3_cache_aliasing.py run
+        and pass (merge test :283-314).'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: A cache hit mutates the shared cached `Budget` in place and *overwrites*
       `spent` instead of merging it, while a fresh (uncached) read merges correctly
   F123:
@@ -740,8 +747,14 @@ findings:
         discovered during it.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: the defect-pinning
+        characterization test was inverted and documents the correction, tests/test_c2_budget_characterization.py:359-390;
+        copy/merge at budget.py:1600-1603; run and pass.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: The characterization suite pins F122's defect as correct, so fixing the
       code will fail the test
   F151:
@@ -800,8 +813,14 @@ findings:
         the cache path match it leaves the thing it was matched against undefended.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: fresh
+        path merges both sources, budget.py:1600-1603; tests/test_phase3_cache_aliasing.py:380-390
+        run and pass.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: 'The fresh-read `spent` merge is not pinned: replacing the merge with
       an overwrite survives all 70 tests'
   F155:
@@ -1235,8 +1254,15 @@ findings:
         not catch.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228 (node
+        nd-7b4aa36e): exact directive emitted at src/multiagents/executor/docker.py:2212;
+        tests/test_phase2_proxy_directives.py:59-66 run and pass. Fixed in passing
+        by phase 2/6 work.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: critical
-    status: scheduled
+    status: fixed
     summary: Removing `FilterDefaultDeny Yes` inverts the proxy from allow-list to
       deny-list, and every test still passes
   F51:
@@ -1259,8 +1285,14 @@ findings:
         '
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: `FilterType
+        ere` at executor/docker.py:2214; tests/test_phase2_proxy_directives.py:74-81
+        run and pass.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`FilterType ere` can be changed to `regex` with no test failing'
   F52:
     class: correctness
@@ -1279,8 +1311,14 @@ findings:
         '
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: `FilterCaseSensitive
+        Off` at executor/docker.py:2215; tests/test_phase2_proxy_directives.py:88-95
+        run and pass.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`FilterCaseSensitive Off` can be changed to `On` with no test failing'
   F53:
     class: correctness
@@ -1297,8 +1335,14 @@ findings:
         as F51: the brief schedules it, the ledger said `open`.'
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: `FilterURLs
+        Off` at executor/docker.py:2216; tests/test_phase2_proxy_directives.py:102-108
+        run and pass.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`FilterURLs Off` can be changed to `On` with no test failing'
   F54:
     class: correctness
@@ -1315,8 +1359,15 @@ findings:
         as F51: the brief schedules it, the ledger said `open`.'
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: scheduled
+    - by: orchestrator
+      note: 'Re-verified 2026-10-05 on main 6b0a8c1 by researcher ag-8dc228: correct
+        `Filter "/etc/tinyproxy/filter"` at executor/docker.py:2213; directive/file
+        and bind-mount tests tests/test_phase2_proxy_directives.py:124-142 run and
+        pass.'
+      sha: 1d696119079dbb778d8eb4890f95d45b97572f0f
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: The filter file path in `tinyproxy.conf` can be changed with no test
       failing
   F55:
