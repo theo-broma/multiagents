@@ -46,8 +46,11 @@ def reading(name, headroom, read_at=None):
 
 
 def regain(w, name='alpha', headroom=.8):
-    """The instance gets its quota back and the budget layer refreshes."""
-    w.readings[name] = reading(name, headroom, read_at=w.clock[0])
+    """The instance gets its quota back and the budget layer refreshes. QH-R25
+    note 5: a refresh is a reading with a read_at strictly later than the stop,
+    so the reading is stamped a second after the frozen stop time. The clock
+    itself is not moved: dwell tests count from the handover."""
+    w.readings[name] = reading(name, headroom, read_at=w.clock[0] + 1)
     w.set_plan(name, quota=False)
 
 

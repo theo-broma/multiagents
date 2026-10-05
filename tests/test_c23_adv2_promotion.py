@@ -56,6 +56,7 @@ def test_adv2_explicit_pin_during_promotion_safe_point_wait_is_honoured(world):
     tool = w.tmp / 'tool-beta'
     async def body():
         aid = await demoted(w, tool_gate=str(tool))
+        w.clock[0] += 1     # QH-R25 note 5: the refresh is strictly after the stop
         w.readings['alpha'] = reading('alpha', .8, read_at=w.clock[0])
         w.set_plan('alpha', quota=False)
         await tick(w, 300)

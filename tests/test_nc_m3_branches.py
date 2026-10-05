@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,8 @@ def w(tmp_path, monkeypatch):
     bound(world)
     yield world
     world.close()
+
+EVENTS_LOG_DEADLINE = 5.0   # seconds events.jsonl may trail the state change
 
 
 def settled(w: GitWorld, node_id: str, timeout: float = 45) -> dict:
@@ -152,8 +155,15 @@ def test_nc_r33_integration_is_recorded_once_in_the_log_after_run_finished(w):
     w.start_scheduler()
     node = w.coder("A", {"a.txt": "a"})
     w.done(node)
-    seq = [t for t in w.transitions(node) if t in ("run_finished", "integrated", "done")]
-    assert seq == ["run_finished", "integrated", "done"]
+
+    def seq():
+        return [t for t in w.transitions(node) if t in ("run_finished", "integrated", "done")]
+
+    # events.jsonl is written shortly after the commit, not in its transaction
+    deadline = time.monotonic() + EVENTS_LOG_DEADLINE
+    while "done" not in seq() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert seq() == ["run_finished", "integrated", "done"]
 
 
 def test_nc_r33_the_sibling_node_branches_are_independent(w):
