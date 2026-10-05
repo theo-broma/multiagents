@@ -24,7 +24,7 @@ from ..tree import ACTIVE, PAUSED
 from . import model
 from .store import encode
 from .results import Results, input_generation, recording_loops, top_node
-from . import sessions, effects
+from . import sessions, effects, windows
 from .. import gitops
 
 
@@ -82,6 +82,7 @@ class Engine:
         # Read from the configuration at each tick, so status() can name the
         # starving nodes without reading files inside a store transaction.
         self.starvation_after = None
+        self.window_instant = self.instant()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.run, name="node-evaluation", daemon=True)
         self.stopped = threading.Event()
@@ -91,6 +92,11 @@ class Engine:
         self.evaluating = None
         self.evaluation_failures = {}
         self.migrate()
+        with self.store.transaction(write=False) as db:
+            window_nodes = self.store.nodes(db)
+        windows.prepare(self.runner.config.project["scheduler"].get("timezone", "Europe/Paris"), window_nodes)
+        with self.store.transaction() as db:
+            self.store.set_meta(db, "clock_file", str(self.clock_file) if self.clock_file else "")
         # Runtime configuration is host state, not project work to integrate.
         exclude = self.paths.root / ".git" / "info" / "exclude"
         if exclude.parent.is_dir():
@@ -154,6 +160,18 @@ class Engine:
                              run_id=(attempt or {}).get("run_id", ""),
                              provider=node["pins"].get("provider", ""),
                              effort=node["pins"].get("effort", ""), admission_only=probe)
+
+    def window(self, node, nodes, instant=None):
+        return windows.effective(node, nodes, self.runner.config.project["scheduler"].get("timezone", "Europe/Paris"),
+                                 self.window_instant if instant is None else instant)
+
+    def window_blockers(self, node, nodes, instant=None):
+        window = self.window(node, nodes, instant)
+        if window["empty"]:
+            return [{"code": "empty_window", "detail": node["id"]}]
+        if not window["open"]:
+            return [{"code": "window", "detail": window}]
+        return []
 
     def structural(self, node, nodes):
         if node["state"] == "held":
@@ -227,15 +245,19 @@ class Engine:
             bindings = sessions.aliases(db)
         return sessions.blockers(node, nodes, journal, bindings, self.runner)
 
-    def view(self, node, nodes, journal, db=None):
+    def view(self, node, nodes, journal, db=None, instant=None):
         structural = self.structural(node, nodes)
+        if node["state"] in {"open", "suspended"}:
+            structural = self.window_blockers(node, nodes, instant) or structural
         ready = node["kind"] == "simple" and node["state"] == "open" and not structural
         active = next((a["run_id"] for a in journal.values()
-                       if a["node_id"] == node["id"] and a["state"] in {"claimed", "launched"}), None)
+                       if a["node_id"] == node["id"] and a["state"] in {"claimed", "launched", "suspended"}), None)
         blocked = structural
         if ready:
             blocked = self.lock_blockers(node, nodes, journal) or self.session_blockers(node, nodes, journal, db) or self.reasons.get(node["id"], [])
-        if node["state"] in {"running", "done", "cancelled", "suspended"}:
+        if node["state"] == "suspended" and not blocked:
+            blocked = self.lock_blockers(node, nodes, journal) or self.reasons.get(node["id"], [])
+        if node["state"] in {"running", "done", "cancelled"}:
             blocked = []
         return {**copy.deepcopy(node), "ready": ready, "ready_since": node.get("ready_since"),
                 "eligible": ready and not blocked and not active, "blocked": copy.deepcopy(blocked),
@@ -247,7 +269,9 @@ class Engine:
                 "held": [{"node_id": n["id"], "hold": n["hold"]} for n in nodes.values() if n["state"] == "held"],
                 "locks": [{"name": name, "holder_run": a["run_id"], "holder_node": a["node_id"]}
                           for a in journal.values() if a["state"] in {"claimed", "launched"}
-                          for name in a.get("locks", [])], "aliases": self.alias_status(db), "windows": [],
+                          for name in a.get("locks", [])], "aliases": self.alias_status(db),
+                "windows": [{"node_id": n["id"], **{k: v for k, v in self.window(n, nodes, at).items()
+                             if k in {"open", "next_open", "next_close"}}} for n in nodes.values()],
                 "starving": self.starving(nodes, at)}
 
     def starving(self, nodes, at):
@@ -282,7 +306,8 @@ class Engine:
                 if self.evaluating:
                     self.evaluation_failures[self.evaluating] = time.monotonic()
             self.evaluating = None
-            deadline = time.monotonic() + self.service.configuration().project["scheduler"]["tick_seconds"]
+            policy = self.service.configuration().project["scheduler"]
+            deadline = time.monotonic() + min(policy["tick_seconds"], policy.get("window_tolerance_seconds", 60))
             while time.monotonic() < deadline and not self.stopped.is_set():
                 await asyncio.sleep(min(0.1, max(0, deadline - time.monotonic())))
                 if self.completion_changed():
@@ -344,12 +369,16 @@ class Engine:
             return
         if self.runner.config is not config:
             self.runner.reload(config)
-        self.last_tick = datetime.fromtimestamp(self.instant(), timezone.utc).isoformat()
+        self.window_instant = self.instant()
+        self.last_tick = datetime.fromtimestamp(self.window_instant, timezone.utc).isoformat()
         self.starvation_after = config.project["scheduler"]["starvation_after_seconds"]
         with self.store.transaction(write=False) as db:
-            candidates = set(self.store.nodes(db))
+            initial_nodes = self.store.nodes(db)
+            candidates = set(initial_nodes)
             managed = {a["run_id"] for a in attempts(db).values()}
+        windows.prepare(config.project["scheduler"].get("timezone", "Europe/Paris"), initial_nodes)
         await self.runner.adopt(exclude=managed)
+        await self.evaluate_windows()
         await self.reconcile()
         self.composites()
         # Mirror recorded results before admission awaits launches, so a
@@ -363,7 +392,8 @@ class Engine:
             if self.evaluating:
                 self.evaluation_failures.pop(self.evaluating, None)
             self.evaluating = node["id"]
-            ready = node["kind"] == "simple" and node["state"] == "open" and not self.structural(node, nodes)
+            ready = (node["kind"] == "simple" and node["state"] == "open"
+                     and not self.structural(node, nodes) and not self.window_blockers(node, nodes))
             if node["state"] == "open" and not ready:
                 self.episode(node["id"], False)
             if not ready:
@@ -423,8 +453,9 @@ class Engine:
                         prepared = Results(self.paths, config).prepare(prepared_nodes[node["id"]], prepared_nodes)
                 except gitops.GitError as exc:
                     preparation_failure = str(exc)
+            current_config = self.service.configuration()
             with self.service.changed, self.store.transaction() as db:
-                if self.service.configuration() is not config:
+                if current_config is not config:
                     continue
                 current_nodes = self.store.nodes(db)
                 if current_nodes != preparation_nodes:
@@ -438,7 +469,7 @@ class Engine:
                 if alias_key and (sessions.aliases(db).get(alias_key) != checked_binding
                         or {id: a for id, a in current_journal.items() if a.get("alias_id") == alias_key} != checked_attempts):
                     continue
-                if self.structural(current, current_nodes):
+                if self.structural(current, current_nodes) or self.window_blockers(current, current_nodes):
                     continue
                 if self.lock_blockers(current, current_nodes, current_journal) or self.session_blockers(current, current_nodes, current_journal, db):
                     continue
@@ -525,6 +556,68 @@ class Engine:
         self.composites()
         self.store.mirror()
 
+    async def evaluate_windows(self):
+        # Persist stop intent before a supervisor signals anything. Reconcile
+        # cannot mistake the ensuing terminal tree status for a completion.
+        with self.service.changed, self.store.transaction() as db:
+            nodes, journal = self.store.nodes(db), attempts(db)
+            for node in nodes.values():
+                window = self.window(node, nodes)
+                if node["state"] not in {"done", "cancelled"}:
+                    if window["empty"] and not node.get("empty_window_notified"):
+                        node["empty_window_notified"] = True
+                        self.store.save_node(db, node)
+                        self.store.transition(db, "empty_window", node["id"])
+                    elif not window["empty"] and node.pop("empty_window_notified", None):
+                        self.store.save_node(db, node)
+                if window["open"] or node["state"] != "running":
+                    continue
+                for attempt in journal.values():
+                    if (attempt["node_id"] == node["id"] and attempt["state"] == "launched"
+                            and not attempt.get("capture_intent") and not attempt.get("cancel_requested")):
+                        attempt.setdefault("window_stop", True)
+                        save_attempt(db, attempt)
+        with self.store.transaction(write=False) as db:
+            nodes, journal = self.store.nodes(db), attempts(db)
+        for attempt in journal.values():
+            if attempt.get("window_stop"):
+                self.spawn(attempt)
+                continue
+            if attempt["state"] != "suspended":
+                continue
+            node = nodes[attempt["node_id"]]
+            if node["state"] != "suspended" or self.window_blockers(node, nodes):
+                continue
+            admission = self.resume_admission(attempt["run_id"], window=True)
+            self.reasons[node["id"]] = admission.get("blocked", [])
+            if not admission.get("admitted"):
+                if admission.get("error"):
+                    self.reasons[node["id"]] = [{"code": "session_unavailable", "detail": admission["error"]}]
+                continue
+            run = self.runner.tree.get(attempt["run_id"])
+            with self.service.changed, self.store.transaction() as db:
+                current_nodes, current_journal = self.store.nodes(db), attempts(db)
+                current = current_journal[attempt["attempt_id"]]
+                current_node = current_nodes[node["id"]]
+                if (current != attempt or current_node != node or current_node["state"] != "suspended"
+                        or self.window_blockers(current_node, current_nodes)
+                        or self.lock_blockers(current_node, current_nodes, current_journal)):
+                    continue
+                message = ("Resume your interrupted task.\n\n" + run.task
+                           + f"\n\nworking directory: {run.worktree}\nnode: {node['id']}")
+                if current.get("review"):
+                    review = current["review"]
+                    message += (f"\nreview: node_id={review['node_id']} generation_seq={review['generation_seq']}"
+                                f" commit={review['commit']}")
+                current.update(state="launched", launch_in_progress=True,
+                               locks=sorted(self.lock_set(current_node, current_nodes)),
+                               lock_owners=self.lock_owners(current_node, current_nodes),
+                               window_resume={"previous_turn": run.turn_started_at,
+                                              "previous_pid": (current.get("launch_evidence") or {}).get("pid"),
+                                              "message": message})
+                save_attempt(db, current)
+            self.spawn(current)
+
     def session_notice(self, id, detail):
         with self.service.changed, self.store.transaction() as db:
             node = self.store.nodes(db)[id]
@@ -534,15 +627,16 @@ class Engine:
                 self.store.transition(db, "session_unavailable", id, detail)
 
     def episode(self, id, ready):
+        config, instant = self.service.configuration(), self.instant()
         with self.service.changed, self.store.transaction() as db:
             node = self.store.nodes(db)[id]
             if node["state"] != "open":
                 return
             if ready:
                 if not node.get("ready_since"):
-                    node["ready_since"] = datetime.fromtimestamp(self.instant(), timezone.utc).isoformat()
-                age = self.instant() - epoch(node["ready_since"])
-                if age >= self.service.configuration().project["scheduler"]["starvation_after_seconds"] and not node.get("starvation_notified"):
+                    node["ready_since"] = datetime.fromtimestamp(instant, timezone.utc).isoformat()
+                age = instant - epoch(node["ready_since"])
+                if age >= config.project["scheduler"]["starvation_after_seconds"] and not node.get("starvation_notified"):
                     self.store.transition(db, "starving", id)
                     node["starvation_notified"] = True
             else:
@@ -602,6 +696,19 @@ class Engine:
                 self.integrate(attempt)
                 continue
             if attempt["state"] not in {"claimed", "launched"}:
+                continue
+            if attempt.get("window_stop") or attempt.get("window_stop_started") or attempt.get("window_resume"):
+                run = self.runner.tree.get(attempt["run_id"])
+                from . import suspension
+                own_result = suspension.natural_result(self.paths, run) if run else None
+                if (not attempt.get("window_resume") and own_result
+                        and await self.runner._steer_predecessor_dead(self.runner._steer_predecessor(run.id))):
+                    self.finished(attempt, run)
+                else:
+                    self.spawn(attempt)
+                continue
+            if attempt.get("window_completion"):
+                self.finished(attempt, SimpleNamespace(**attempt["window_completion"]))
                 continue
             if attempt.get("capture_intent"):
                 self.finished(attempt, SimpleNamespace(**attempt["capture_intent"]))
@@ -753,16 +860,34 @@ class Engine:
         The launched attempt retains ownership until its capture outcome is
         durable. Reconcile resumes either the intent or the captured result.
         """
+        from . import suspension
+        config = self.service.configuration()
+        own_result = suspension.natural_result(self.paths, run) if hasattr(run, "turn_started_at") else None
         with self.service.changed, self.store.transaction() as db:
             current = attempts(db)[attempt["attempt_id"]]
-            if current["state"] in {"recorded", "captured"}:
+            if (current.get("window_resumed_at") != attempt.get("window_resumed_at")
+                    or (getattr(run, "turn_started_at", None) is not None
+                        and current.get("turn_started_at") is not None
+                        and run.turn_started_at != current["turn_started_at"])):
                 return
-            current.setdefault("capture_intent", {"id": run.id, "status": run.status,
-                                                   "session_id": run.session_id})
+            if own_result and (current.get("window_stop") or current.get("window_stop_started")):
+                suspension.record_completion(self.store, db, current, own_result)
+            if (current["state"] in {"recorded", "captured", "suspended"}
+                    or current.get("window_stop") or current.get("window_stop_started") or current.get("window_resume")
+                    or current.get("window_resumed_at") != attempt.get("window_resumed_at")
+                    or (current["state"] == "abandoned" and current.get("cancel_requested") and current.get("window_suspended_at"))):
+                return
+            current.setdefault("capture_intent", current.get("window_completion") or
+                               {"id": run.id, "status": run.status, "session_id": run.session_id})
             save_attempt(db, current)
             db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
-            config = self.service.configuration()
         run = SimpleNamespace(**current["capture_intent"])
+        if current.get("window_completion"):
+            # The journal owns confirmed completion before the tree looks
+            # terminal. Replaying this publication never recaptures a stop.
+            self.runner._settle_holds()
+            self.runner.tree.update(run.id, status=run.status, reason="", session_id=run.session_id)
+            self.runner._release(run.id)
         result = {"status": run.status, "session_id": run.session_id,
                   "run_dir": str(self.paths.run_dir(run.id))}
         if "input_commit" in current:
@@ -777,7 +902,10 @@ class Engine:
             result.update(status="failed", failure="missing_tree")
         with self.service.changed, self.store.transaction() as db:
             current = attempts(db)[attempt["attempt_id"]]
-            if current["state"] in {"recorded", "captured"}:
+            if (current["state"] in {"recorded", "captured", "suspended"}
+                    or current.get("window_stop") or current.get("window_stop_started") or current.get("window_resume")
+                    or current.get("window_resumed_at") != attempt.get("window_resumed_at")
+                    or (current["state"] == "abandoned" and current.get("cancel_requested") and current.get("window_suspended_at"))):
                 return
             node = self.store.nodes(db)[attempt["node_id"]]
             if result.get("capture_error") and result.get("failure") != "missing_tree":
@@ -1078,8 +1206,14 @@ class Engine:
         """
         decided, stops = {}, {}
         for attempt in attempts(db).values():
+            if attempt["node_id"] in ids and attempt["state"] == "suspended":
+                attempt.update(state="abandoned", cancel_requested=True, cancel_confirmed=True)
+                save_attempt(db, attempt)
+                decided[attempt["node_id"]] = True
             if attempt["node_id"] in ids and attempt["state"] in {"claimed", "launched"}:
                 attempt["cancel_requested"] = True
+                if attempt.get("window_resume") or attempt.get("window_stop"):
+                    attempt["cancel_kind"] = "node"
                 save_attempt(db, attempt)
                 if attempt.get("launch_in_progress"):
                     # Do not confirm absence while the independent worker
@@ -1108,7 +1242,22 @@ class Engine:
             return results
         return asyncio.run(stop_all())
 
-    def resume_admission(self, run_id, db=None):
+    def window_launch_admission(self, run_id, instant):
+        admission = self.resume_admission(run_id, window=True)
+        if not admission.get("admitted"):
+            return admission
+        with self.store.transaction(write=False) as db:
+            nodes, journal = self.store.nodes(db), attempts(db)
+            owner = next((a for a in journal.values() if a["run_id"] == run_id), None)
+            if not owner or not owner.get("window_resume") or owner.get("cancel_requested"):
+                return {"error": "node_suspended"}
+            node = nodes[owner["node_id"]]
+            if node["state"] != "suspended" or self.window_blockers(node, nodes, instant):
+                return {"error": "node_suspended"}
+            return {"blocked": self.lock_blockers(node, nodes, journal)} if self.lock_blockers(node, nodes, journal) else admission
+
+    def resume_admission(self, run_id, db=None, *, window=False, config=None):
+        config = config or (self.service.configuration() if db is None else self.runner.config)
         run = self.runner.tree.get(run_id)
         if run is None:
             return {"error": "not_found"}
@@ -1117,14 +1266,14 @@ class Engine:
         else:
             with self.store.transaction(write=False) as connection:
                 nodes, journal = self.store.nodes(connection), attempts(connection)
-        if not self.service.configuration().project["scheduler"]["enabled"]:
+        if not config.project["scheduler"]["enabled"]:
             return {"error": "scheduler_disabled",
                     "pending_nodes": sum(n["state"] not in {"done", "cancelled"} for n in nodes.values())}
         owner = next((a for a in journal.values() if a["run_id"] == run_id), None)
         node_id = owner["node_id"] if owner else None
         if node_id:
             state = nodes[node_id]["state"]
-            if state == "suspended":
+            if state == "suspended" and not window:
                 return {"error": "node_suspended"}
             if state == "held":
                 return {"blocked": [{"code": "held", "detail": nodes[node_id]["hold"]}]}
@@ -1144,12 +1293,18 @@ class Engine:
                 return admission_block("provider is disabled")
             if node_id:
                 node = nodes[node_id]
-                if node["state"] != "running":
+                if node["state"] != "running" and not (window and node["state"] == "suspended"):
                     return {"error": "invalid", "message": f"node is {node['state']}; it cannot be resumed"}
+                if window:
+                    ancestor = nodes.get(node["parent"])
+                    while ancestor:
+                        if ancestor["state"] in {"held", "cancelled", "done", "suspended"}:
+                            return {"blocked": [{"code": "ancestor", "detail": ancestor["id"]}]}
+                        ancestor = nodes.get(ancestor["parent"])
                 blockers = self.lock_blockers(node, nodes, journal)
                 if blockers:
                     return {"blocked": blockers}
-            if db is not None and node_id:
+            if db is not None and node_id and not window:
                 node = self.store.nodes(db)[node_id]
                 journal = attempts(db)
                 attempt = next(a for a in journal.values() if a["run_id"] == run_id)

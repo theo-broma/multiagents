@@ -218,6 +218,38 @@ def resume_admission(project_root, run_id, caller=None):
         return {"error": "scheduler_unavailable"}
 
 
+def window_resume_admission(project_root, run_id, caller=None):
+    try:
+        reply = call(project_root, "admit_window_resume", {"run_id": run_id}, root_capability(project_root))
+        return reply["result"] if reply.get("ok") else reply["error"]
+    except (OSError, ValueError):
+        return {"error": "scheduler_unavailable"}
+
+
+def stop_managed(project_root, run_id, caller=None):
+    token = os.environ.get("MULTIAGENTS_RPC_TOKEN") if caller else root_capability(project_root)
+    try:
+        reply = call(project_root, "stop_run", {"run_id": run_id}, token)
+        return reply["result"] if reply.get("ok") else reply["error"]
+    except (OSError, ValueError):
+        # NC-R57 leaves runs alive when the scheduler stops. An operator can
+        # still end the suspension durably, so restart cannot undo that stop.
+        from .rpc import Service
+        from .model import Refused
+        from .suspension import operator_stop
+        service = Service(project_root, now())
+        try:
+            with service.store.transaction() as db:
+                principal = service.authenticate(db, token)
+                nodes = service.store.nodes(db)
+                service.authorize(principal, "stop_run", {"run_id": run_id}, nodes, db)
+                result = operator_stop(service.store, db, run_id)
+            service.store.mirror()
+            return result
+        except Refused as exc:
+            return exc.result
+
+
 def agent_admission(project_root, agent, caller=None, model=None):
     try:
         token = os.environ.get("MULTIAGENTS_RPC_TOKEN") if caller else root_capability(project_root)

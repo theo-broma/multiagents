@@ -65,7 +65,7 @@ from .launch_limits import LaunchLimits
 from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
 from .supervisor import Supervisor, looks_like_quota_failure
-from .tree import (ACTIVE, DRIVER_ROLES, PC_CAUSE, TERMINAL, Node, Tree,
+from .tree import (ACTIVE, PAUSED, DRIVER_ROLES, PC_CAUSE, TERMINAL, Node, Tree,
                    deferred_malformed, find_deferred, new_id, node_from_raw,
                    now, pc_waiting)
 from .transcripts import session_transcript
@@ -2985,7 +2985,8 @@ class Runner(QuotaHandover):
                           or (procs.start_time(handle.pid) if handle.pid else "")
                           or "")
         hold.record = dict(hold.record, pid=hold.pid, pid_start=hold.pid_start)
-        self._record_node_launch_evidence(node_id, hold.record)
+        self._record_node_launch_evidence(node_id, hold.record,
+                                          turn_started_at=getattr(handle, "launched_at", 0) or None)
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node_id)
             if entry is not None:
@@ -3504,7 +3505,7 @@ class Runner(QuotaHandover):
         if not task.cancelled():
             task.exception()
 
-    def _check_node_launch(self, node_id):
+    def _check_node_launch(self, node_id, *, window_resume=False):
         context = _launch_context.get()
         run = self.tree.get(node_id)
         managed = context.node_id if context else run.node_id if run else ""
@@ -3521,20 +3522,34 @@ class Runner(QuotaHandover):
             attempt = next((a for a in attempts(db).values() if a["run_id"] == node_id), None)
             if not attempt or attempt["state"] not in {"claimed", "launched"} or attempt.get("cancel_requested"):
                 raise RuntimeError(f"node_state: {managed} has no live launch permission; nothing launched")
-            expected = "open" if attempt and attempt["state"] == "claimed" else "running"
+            expected = ("suspended" if window_resume and attempt.get("window_resume")
+                        else "open" if attempt["state"] == "claimed" else "running")
             if node["state"] != expected:
                 raise RuntimeError(f"node_state: {managed} is {node['state']}; nothing launched")
+            nodes = store.nodes(db)
+            clock_file = store.meta(db, "clock_file")
+        from .scheduler import suspension, windows
+        zone = self.config.project["scheduler"].get("timezone", "Europe/Paris")
+        windows.prepare(zone, nodes)
+        window = windows.effective(node, nodes, zone, suspension.instant(clock_file))
+        if not window["open"]:
+            raise RuntimeError("node_suspended: the window closed before launch")
 
-    def _record_node_launch_evidence(self, node_id, record):
+    def _record_node_launch_evidence(self, node_id, record, *, turn_started_at=None):
         context = _launch_context.get()
-        if not context or not context.node_id:
+        run = self.tree.get(node_id) if context is None else None
+        managed = context.node_id if context else run.node_id if run else ""
+        attempt_id = context.attempt_id if context else run.attempt_id if run else ""
+        if not managed or not attempt_id:
             return
         from .scheduler.engine import attempts, save_attempt
         from .scheduler.store import Store
         store = Store(self.paths.root)
         with store.transaction() as db:
-            attempt = attempts(db)[context.attempt_id]
+            attempt = attempts(db)[attempt_id]
             attempt["launch_evidence"] = {k: record[k] for k in ("pid", "pid_start", "executor")}
+            if turn_started_at is not None:
+                attempt["turn_started_at"] = turn_started_at
             save_attempt(db, attempt)
 
     async def _launch(
@@ -3555,6 +3570,7 @@ class Runner(QuotaHandover):
         release_lock: bool = True,
         preserved_limits: dict | None = None,
         handover_attempt: int | None = None,
+        window_resume: bool = False,
     ) -> Run:
         """Build the environment and command for one turn and start the process.
 
@@ -3572,14 +3588,15 @@ class Runner(QuotaHandover):
         """
         if self.scheduler_enabled() and (
                 _launch_context.get() is None or self.launch_limits.launch_time(node_id) is not None):
-            from .scheduler import resume_admission
-            admission = await asyncio.to_thread(resume_admission, self.paths.root,
+            from .scheduler import resume_admission, window_resume_admission
+            check = window_resume_admission if window_resume else resume_admission
+            admission = await asyncio.to_thread(check, self.paths.root,
                                                node_id, None if _launch_context.get() else self.self_id())
             if admission.get("error") or admission.get("blocked"):
                 self._startup_release(provider.name, node_id, startup_token)
                 raise RuntimeError(encode_admission(admission))
         try:
-            self._check_node_launch(node_id)
+            self._check_node_launch(node_id, window_resume=True) if window_resume else self._check_node_launch(node_id)
         except BaseException:
             self._startup_release(provider.name, node_id, startup_token)
             raise
@@ -3875,7 +3892,7 @@ class Runner(QuotaHandover):
             _run_write(run_dir, "command.json",
                        json.dumps(scrub(command_record), indent=2))
             env["MULTIAGENTS_TURN_STARTED_AT"] = str(launched_at)
-            self._check_node_launch(node_id)
+            self._check_node_launch(node_id, window_resume=True) if window_resume else self._check_node_launch(node_id)
             if handover_attempt is not None:
                 self._qh_check_switch(node_id, handover_attempt)
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
@@ -3944,6 +3961,10 @@ class Runner(QuotaHandover):
                              turn_ended_at=None)
             self.tree.set_status(node_id, "running")
             run.slot_token = self._launch_slot_owner(node_id, provider.name)
+            if window_resume:
+                from .scheduler.suspension import resumed
+                from .scheduler.store import Store
+                resumed(Store(self.paths.root), node_id)
         except BaseException:
             # RM-R1c (review ag-467011): the process is ALIVE here and no
             # consumer follows it yet. ONE cleanup task stops it, confirms
@@ -5548,6 +5569,11 @@ class Runner(QuotaHandover):
             # write lands — is bug-8195f2: a reader polling in the gap sees a
             # run that is being resumed reported as terminally ended, with a
             # reason blaming a parent that called nothing.
+            if run.internal_stop:
+                remainder = flush.drain()
+                self.tree.note_event(node_id, steps=run.supervisor.steps or None,
+                                     usage=usage or None, session_id=session_id or None,
+                                     events=remainder, follow=follow())
             if not run.internal_stop:
                 reason = ("stopped by parent" if run.stop_requested
                           else "interrupted: the server exited while this agent was running")
@@ -5940,7 +5966,7 @@ class Runner(QuotaHandover):
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
         record = {
             "status": status, "exit_code": code, "session_id": session_id,
-            "usage": usage, "text": text, "stderr_tail": stderr,
+            "turn_started_at": run.launched_at, "usage": usage, "text": text, "stderr_tail": stderr,
         }
         warnings = [event["warning"] for event in run.events if event.get("warning")]
         if warnings:
@@ -7487,6 +7513,54 @@ class Runner(QuotaHandover):
             return True
         return False
 
+    async def suspend(self, agent_id: str) -> dict[str, Any]:
+        """NC-R40: end a turn in place, freeing its slot only after proof."""
+        from .scheduler import suspension
+        from .scheduler.store import Store
+        predecessor = self._steer_predecessor(agent_id)
+        node = self.tree.get(agent_id)
+        store = Store(self.paths.root) if node and node.node_id else None
+
+        def finish(result):
+            if store and not suspension.completed(store, agent_id, result):
+                # A confirmed suspension or a newer invocation owns this
+                # run now. Refused evidence cannot publish a terminal tree
+                # entry or release that invocation's slot.
+                return {"agent_id": agent_id, "predecessor_death_confirmed": False}
+            self._settle_holds()
+            self.tree.update(agent_id, status=result["status"], reason="",
+                             session_id=result["session_id"])
+            self._release(agent_id)
+            return {"agent_id": agent_id, "completed": True}
+
+        # A finalized turn or a wrapper's natural exit is independent of the
+        # scheduler's stop intent. Still require death proof before releasing.
+        result = suspension.natural_result(self.paths, node) if node else None
+        if (node and (result or (node.status not in ACTIVE | PAUSED | {"quota_paused"}
+                                and node.reason != "window suspended"))
+                and await self._steer_predecessor_dead(predecessor)):
+            return finish(result or {"id": node.id, "status": node.status,
+                                     "session_id": node.session_id,
+                                     "turn_started_at": node.turn_started_at})
+        if predecessor.absent:
+            return {"agent_id": agent_id, "predecessor_death_confirmed": False}
+        if store and not suspension.starting(store, agent_id):
+            return {"agent_id": agent_id, "completed": True}
+        self.tree.set_status(agent_id, "pending", "window stopping")
+        await self.stop(agent_id, internal=True)
+        confirmed = await self._steer_predecessor_dead(predecessor)
+        if confirmed:
+            node = self.tree.get(agent_id)
+            result = suspension.natural_result(self.paths, node) if node else None
+            if result:
+                return finish(result)
+            if store and not suspension.confirmed(store, agent_id, node):
+                raise RuntimeError("suspension could not record termination confirmation")
+            self._settle_holds()
+            self.tree.set_status(agent_id, "idle", "window suspended")
+            self._release(agent_id)
+        return {"agent_id": agent_id, "predecessor_death_confirmed": confirmed}
+
     async def stop(self, agent_id: str, *, internal: bool = False,
                    release_terminal_hold: bool = True) -> dict[str, Any]:
         """End this run's current turn.
@@ -7499,6 +7573,12 @@ class Runner(QuotaHandover):
         Automatic timeouts leave terminal unknown-liveness holds intact.
         """
         if not internal:
+            node = self.tree.get(agent_id)
+            if node and node.node_id and not getattr(self, "_scheduler_supervisor", False):
+                from .scheduler import stop_managed
+                refusal = await asyncio.to_thread(stop_managed, self.paths.root, agent_id, self.self_id())
+                if refusal.get("error"):
+                    return refusal
             self._qh_cancel(agent_id)
         if not internal and release_terminal_hold:
             released = await self._stop_blocked_steer(agent_id)
@@ -8033,7 +8113,7 @@ class Runner(QuotaHandover):
             active.discard(agent_id)
 
     async def _steer(self, agent_id: str, message: str,
-                     queued: dict | None = None) -> dict[str, Any]:
+                     queued: dict | None = None, *, window_resume: bool = False) -> dict[str, Any]:
         """Redirect a running agent.
 
         A subprocess cannot be injected into mid-run, so the honest equivalent
@@ -8326,7 +8406,7 @@ class Runner(QuotaHandover):
                 reserved_from = self._pc_reserve_resume(spec, current, provider.name,
                                                         queued_id)
             except ProviderFull as full:
-                if queued_id:
+                if queued_id or window_resume:
                     return {"agent_id": agent_id, "steered": False, "pc_full": True,
                             "gone": full.gone, "reason": str(full)}
                 entry = self.tree.enqueue(
@@ -8428,7 +8508,7 @@ class Runner(QuotaHandover):
                 # SF-R3 (review r2 finding 1): a steer's inherited lock may
                 # still have a live predecessor under it; `_steer_release`
                 # decides its fate.
-                release_lock=False,
+                release_lock=False, window_resume=window_resume,
             )
         except SpendCapRefused as exc:
             # SC-R3a/R3b: a crossing landed since the check above; the

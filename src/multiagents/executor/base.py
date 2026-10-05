@@ -270,7 +270,9 @@ def stop_wrapped(run_dir: Path, pid: int | None, start: str = "",
     pgid = agent_group(run_dir)
     if not pgid and not running(pid, start):
         return False
-    _signal(pid, start, pgid, signal.SIGTERM)
+    # NC-R40: the wrapper records whether its signal interrupted the child.
+    # Let it forward TERM before resorting to a direct group kill.
+    _signal(pid, start, None if running(pid, start) else pgid, signal.SIGTERM)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         if not running(pid, start) and not agent_group(run_dir):

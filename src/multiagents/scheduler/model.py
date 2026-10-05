@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 import secrets
 
-from ..scheduler_config import SchedulerConfigError, validate_setting
 from ..tree import now
 
 KINDS = {"simple", "sequence", "loop", "group"}
@@ -90,10 +89,10 @@ def validate_window(window, timezone):
         return
     if not isinstance(window, dict) or set(window) - {"timezone", "days", "ranges"}:
         invalid("window: expected timezone, days and ranges")
-    try:
-        validate_setting("timezone", window.get("timezone", timezone))
-    except SchedulerConfigError as exc:
-        invalid(f"window: {exc}")
+    from .windows import ZONES
+    zone = window.get("timezone", timezone)
+    if not isinstance(zone, str) or ZONES.get(zone) is None:
+        invalid(f"window: scheduler.timezone: invalid value {zone!r}")
     days, ranges = window.get("days"), window.get("ranges")
     if (not isinstance(days, list) or not days
             or any(not isinstance(d, str) or d not in {"mon", "tue", "wed", "thu", "fri", "sat", "sun"} for d in days)):

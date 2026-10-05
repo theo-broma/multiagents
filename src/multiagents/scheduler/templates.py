@@ -69,29 +69,34 @@ def check_value(name, param, value, config=None):
         invalid(f"params.{name}: unknown agent")
 
 
-def registry(db):
+def host_registry():
     result = {}
     # Project files are deliberately absent: only the host registry is used.
     for directory in (shipped_defaults_dir() / "node-templates", global_config_dir() / "node-templates"):
         for path in sorted(directory.glob("*.yaml")):
             template = definition(path.read_text())
             result[template["template"]] = template
+    return result
+
+
+def registry(db, host=None):
+    result = dict(host_registry() if host is None else host)
     import json
     for name, raw in db.execute("SELECT name, record FROM templates"):
         result[name] = json.loads(raw)
     return result
 
 
-def register(db, text):
+def register(db, text, host=None):
     template = definition(text)
-    previous = registry(db).get(template["template"])
+    previous = registry(db, host).get(template["template"])
     if previous and template["version"] <= previous["version"]:
         raise Refused("conflict", current_version=previous["version"])
     db.execute("INSERT OR REPLACE INTO templates VALUES (?, ?)", (template["template"], encode(template)))
     return {"name": template["template"], "version": template["version"]}
 
 
-def expand(template, supplied, config, subject, nodes, parent=None):
+def materialize(template, supplied, config):
     if not isinstance(supplied, dict) or set(supplied) - set(template["params"]):
         invalid("params: unknown parameter")
     bindings = {}
@@ -109,7 +114,11 @@ def expand(template, supplied, config, subject, nodes, parent=None):
         if isinstance(item, list):
             return [substitute(v) for v in item]
         return item
-    expanded = substitute(template["root"])
+    return substitute(template["root"]), bindings
+
+
+def expand(template, supplied, config, subject, nodes, parent=None):
+    expanded, bindings = materialize(template, supplied, config)
     local, made = {}, []
     def create(item, parent):
         fields = {k: copy.deepcopy(v) for k, v in item.items() if k in model.CREATABLE - {"children", "loop"}}

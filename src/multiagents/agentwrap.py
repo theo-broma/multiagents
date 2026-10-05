@@ -48,6 +48,7 @@ POLL = 0.1
 OUTPUT = "output.ndjson"
 STDERR = "stderr.log"
 EXIT_STATUS = "exit_status"
+EXIT_REASON = "exit_reason.json"
 WRAPPER_PID = "wrapper.pid"
 SUPERVISOR_LOCK = "supervisor.lock"
 TIMEOUT = "timeout"
@@ -180,10 +181,20 @@ def main(argv):
         return 2
     run_dir, deadline, pid_file, command = argv[0], float(argv[1]), argv[2], argv[4:]
     status_path = os.path.join(run_dir, EXIT_STATUS)
-    try:
-        os.unlink(status_path)
-    except FileNotFoundError:
-        pass
+    reason_path = os.path.join(run_dir, EXIT_REASON)
+    started_at = time.time()
+    for path in (status_path, reason_path):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+    def record_exit(code, cause):
+        # NC-R40: persist why the child exited before publishing its code.
+        # A stop intent alone cannot distinguish a natural completion.
+        _write_atomic(reason_path, json.dumps({"exit_code": code, "cause": cause,
+                                               "started_at": started_at}) + "\n")
+        _write_atomic(status_path, (TIMEOUT if cause == "timeout" else str(code)) + "\n")
     # RM-R1c: the wrapper leads its own session, so "no live process left in
     # it" is what the death of the whole run means — the agent only
     # `setpgrp`s and stays in it. Already so under both executors; made so
@@ -206,7 +217,7 @@ def main(argv):
         out.close()
         err.write(("agentwrap: could not start %s: %s\n" % (command[0], exc)).encode())
         err.close()
-        _write_atomic(status_path, "127\n")
+        record_exit(127, "natural")
         return 0
     finally:
         if hasattr(source, "close"):
@@ -220,6 +231,9 @@ def main(argv):
     state = {"kill_at": None, "timed_out": False, "probed": 0.0}
 
     def end(timed_out=False):
+        # A signal arriving after the child exited did not interrupt its work.
+        if _exited(proc.pid):
+            return
         if state["kill_at"] is None:
             state["kill_at"] = time.monotonic() + GRACE
             _killpg(proc.pid, signal.SIGTERM)
@@ -243,7 +257,8 @@ def main(argv):
     # goes with it: nothing is reading their output any more.
     _killpg(proc.pid, signal.SIGKILL)
     code = proc.wait()
-    _write_atomic(status_path, (TIMEOUT if state["timed_out"] else str(code)) + "\n")
+    record_exit(code, "timeout" if state["timed_out"] else
+                "stop" if state["kill_at"] is not None else "natural")
     return 0
 
 

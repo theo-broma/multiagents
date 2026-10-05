@@ -6,7 +6,7 @@ from .engine import attempts
 from .model import Refused, invalid
 
 
-def decide(service, db, op, args, nodes):
+def decide(service, db, op, args, nodes, config=None):
     allowed = {"outcome"} if op == "close_node" else {"max_rounds", "pins", "new_session", "retry", "task", "loop"}
     model.check_fields(args, allowed, {"id", "revision"})
     node = nodes.get(args.get("id"))
@@ -40,7 +40,7 @@ def decide(service, db, op, args, nodes):
     if (node["kind"] == "loop" and node["state"] == "held"
             and (node["hold"] or {}).get("reason") not in {"loop_max", "unresolved_round"}):
         invalid("state: relaunch requires loop_max, unresolved_round or a done loop")
-    config = service.configuration()
+    config = config or service._config
     bindings = sessions.aliases(db)
     pins = args.get("pins", {})
     if not isinstance(pins, dict):

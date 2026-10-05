@@ -54,7 +54,7 @@ def blockers(node, nodes, journal, bindings, runner):
     key = alias_id(node, nodes)
     if not key:
         return []
-    if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured"}
+    if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured", "suspended"}
            for a in journal.values()):
         return [{"code": "session_busy", "detail": node["session"]}]
     binding = bindings.get(key)

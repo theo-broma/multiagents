@@ -151,8 +151,17 @@ alive() {
   for e in $seen; do live "${e%%:*}" "${e#*:}" && return 0; done
   [ -n "$w" ] && live "$w"
 }
-hit TERM
-[ -n "$w" ] && kill -TERM "$w" 2>/dev/null
+# NC-R40: leave the first TERM to the wrapper, so its durable exit reason
+# distinguishes an already finished child from a stopped one. Keep the
+# descendant identities for escalation, including children in other sessions.
+if [ -n "$w" ] && live "$w"; then
+  [ -n "$a" ] && live "$a" && seen="$seen $(walk "$a")"
+  kill -TERM "$w" 2>/dev/null
+  for e in $seen; do kill -CONT "${e%%:*}" 2>/dev/null; done
+  [ -n "$a" ] && kill -CONT -"$a" 2>/dev/null
+else
+  hit TERM
+fi
 i=0; while [ $i -lt "$g" ]; do
   alive || exit 0
   sleep 1; i=$((i+1)); done

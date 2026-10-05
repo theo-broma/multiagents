@@ -12,7 +12,7 @@ from ..paths import ProjectPaths
 from ..runner import LaunchContext, Runner
 from ..tree import now, ACTIVE, PAUSED
 from .engine import attempts, record_launch, save_attempt
-from . import sessions
+from . import sessions, suspension, windows
 from .model import Refused
 from .. import gitops
 from .store import Store
@@ -33,20 +33,28 @@ async def supervise(root, attempt_id, lock_fd=None):
         with store.transaction(write=False) as db:
             attempt = attempts(db)[attempt_id]
             node = store.nodes(db)[attempt["node_id"]]
-        if attempt["state"] not in {"claimed", "launched"} and not any("result" not in c for c in attempt.get("steer_commands", {}).values()):
+        if attempt["state"] not in {"claimed", "launched", "suspended"} and not any("result" not in c for c in attempt.get("steer_commands", {}).values()):
             return
-        runner = Runner(paths, load(paths, seed=False))
+        configuration = load(paths, seed=False)
+        runner = Runner(paths, configuration)
+        window_timezone = configuration.project["scheduler"].get("timezone", "Europe/Paris")
         runner._scheduler_supervisor = True
+        with store.transaction(write=False) as db:
+            window_nodes = store.nodes(db)
+        windows.prepare(window_timezone, window_nodes)
         existing = runner.tree.get(attempt["run_id"])
-        if existing:
+        if existing and not (attempt.get("window_stop") or attempt.get("window_resume") or attempt["state"] == "suspended"):
             # A supervisor died after writing launch evidence. Adoption reads
             # the recorded wrapper, session and run directory, never relaunches.
             await runner.adopt(exclude={n.id for n in runner.tree.active() if n.id != attempt["run_id"]})
-        else:
+        elif not existing:
             with store.transaction(write=False) as db:
                 checked_attempt = attempts(db)[attempt_id]
-                checked_node = store.nodes(db)[checked_attempt["node_id"]]
+                checked_nodes = store.nodes(db)
+                checked_node = checked_nodes[checked_attempt["node_id"]]
+                clock_file = store.meta(db, "clock_file")
                 checked_binding = sessions.aliases(db).get(checked_attempt.get("alias_id"))
+            checked_instant = suspension.instant(clock_file)
             preflight_failure = None
             if checked_binding:
                 try:
@@ -59,7 +67,10 @@ async def supervise(root, attempt_id, lock_fd=None):
             with store.transaction() as db:
                 attempt = attempts(db)[attempt_id]
                 node = store.nodes(db)[attempt["node_id"]]
-                if (node["state"] != "open" or attempt["state"] != "claimed" or attempt.get("cancel_requested")
+                current_nodes = store.nodes(db)
+                current_window = windows.effective(node, current_nodes, window_timezone,
+                                                   checked_instant)
+                if (not current_window["open"] or node["state"] != "open" or attempt["state"] != "claimed" or attempt.get("cancel_requested")
                         or node["revision"] != checked_node["revision"] or attempt != checked_attempt
                         or sessions.aliases(db).get(attempt.get("alias_id")) != checked_binding):
                     if attempt["state"] == "claimed":
@@ -110,19 +121,33 @@ async def supervise(root, attempt_id, lock_fd=None):
         if run:
             with store.transaction() as db:
                 current = attempts(db)[attempt_id]
-                current.pop("launch_in_progress", None)
+                if not current.get("window_resume"):
+                    current.pop("launch_in_progress", None)
                 save_attempt(db, current)
                 record_launch(store, db, attempt, run)
             store.mirror()
         while True:
             with store.transaction(write=False) as db:
                 current = attempts(db)[attempt_id]
+            if await suspension.command(store, runner, current):
+                with store.transaction(write=False) as db:
+                    settled = attempts(db)[attempt_id]
+                if settled["state"] in {"suspended", "abandoned", "recorded"}:
+                    break
+                await asyncio.sleep(0.05)
+                continue
+            with store.transaction(write=False) as db:
+                owner = store.nodes(db)[current["node_id"]]
+            if current["state"] == "suspended" and owner["state"] == "suspended":
+                break
             if current.get("cancel_requested") and not current.get("cancel_confirmed"):
                 result = await runner.stop(attempt["run_id"])
                 with store.transaction() as db:
                     current = attempts(db)[attempt_id]
                     current["cancel_confirmed"] = result.get("predecessor_death_confirmed", False)
                     current.pop("launch_in_progress", None)
+                    if current["cancel_confirmed"] and (current.get("window_resumed_at") or current.get("window_resume")):
+                        suspension.cancelled(store, db, current)
                     save_attempt(db, current)
             command = next(((id, c) for id, c in current.get("steer_commands", {}).items()
                             if "result" not in c), None)

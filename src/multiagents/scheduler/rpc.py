@@ -15,16 +15,16 @@ import uuid
 
 from ..config import load, source_version
 from ..paths import ProjectPaths
-from . import model, effects
+from . import model, effects, windows
 from .model import Refused, invalid
 from .store import Store, encode, token_hash
 
 OPS = {"create_node", "update_node", "cancel_node", "get_node", "list_nodes",
        "instantiate_template", "register_template", "list_templates", "wait_for_nodes",
        "ack_nodes", "give_verdict", "relaunch_node", "close_node", "merge_node",
-       "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_agent", "steer_run", "steer_result"}
-MUTATING = OPS - {"get_node", "list_nodes", "list_templates", "wait_for_nodes", "scheduler_status", "admit_agent", "steer_result"}
-ROOT_ONLY = {"register_template", "ack_nodes", "relaunch_node", "close_node", "merge_node", "dispose_node"}
+       "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_agent", "steer_run", "steer_result", "stop_run", "admit_window_resume"}
+MUTATING = OPS - {"get_node", "list_nodes", "list_templates", "wait_for_nodes", "scheduler_status", "admit_agent", "steer_result", "admit_window_resume"}
+ROOT_ONLY = {"register_template", "ack_nodes", "relaunch_node", "close_node", "merge_node", "dispose_node", "admit_window_resume"}
 
 
 def validate_wire_value(value):
@@ -90,7 +90,7 @@ class Service:
             self._config_version = version
         return self._config
 
-    def status(self, nodes, db=None, at=None):
+    def status(self, nodes, db=None, at=None, scope=None):
         # `at`, the scheduler's clock, is read before any store transaction:
         # given `db`, the caller read it; else it is read here, before ours.
         if self.engine and db is None and at is None:
@@ -106,6 +106,8 @@ class Service:
             else:
                 with self.store.transaction(write=False) as connection:
                     extra = self.engine.status(nodes, attempts(connection), connection, at)
+        if scope is not None and "windows" in extra:
+            extra["windows"] = [window for window in extra["windows"] if window["node_id"] in scope]
         return {"pid": os.getpid(), "since": self.since, "gate": True, "counts": counts, **extra}
 
     @staticmethod
@@ -132,7 +134,7 @@ class Service:
                 raise Refused("forbidden")
             return
         subject = principal["subject"]
-        if op in {"admit_run", "steer_run", "steer_result"} and args.get("run_id") != subject:
+        if op in {"admit_run", "steer_run", "steer_result", "stop_run"} and args.get("run_id") != subject:
             run = self.engine.runner.tree.get(args.get("run_id")) if self.engine else None
             from .engine import attempts
             if db is None:
@@ -165,7 +167,7 @@ class Service:
             if not review:
                 raise Refused("forbidden")
             scope.add(review["node_id"])
-        if op in {"create_node", "start_agent", "admit_agent", "steer_run", "instantiate_template", "update_node", "cancel_node"} and "delegate" not in permissions:
+        if op in {"create_node", "start_agent", "admit_agent", "steer_run", "stop_run", "instantiate_template", "update_node", "cancel_node"} and "delegate" not in permissions:
             raise Refused("forbidden")
         for field in ("id", "node_id"):
             if field in args and args[field] not in scope:
@@ -204,8 +206,24 @@ class Service:
             validate_wire_value(request)
             op, args = request.get("op"), request.get("args", {})
             after = []
-            clock = self.engine.instant() if self.engine and op == "scheduler_status" else None
             deposited = []
+            clock = self.engine.instant() if self.engine else None
+            config = self.configuration()
+            host_templates, window_template, expanded = None, None, None
+            if isinstance(op, str) and op in {"register_template", "instantiate_template", "list_templates"}:
+                from . import templates
+                host_templates = templates.host_registry()
+            with self.store.transaction(write=False) as snapshot:
+                window_nodes = self.store.nodes(snapshot)
+                if op == "instantiate_template" and isinstance(args, dict) and isinstance(args.get("name"), str):
+                    window_template = templates.registry(snapshot, host_templates).get(args["name"])
+            if window_template:
+                try:
+                    expanded, _ = templates.materialize(window_template, args.get("params", {}), config)
+                except Refused:
+                    # Preserve authentication and argument-error precedence.
+                    pass
+            windows.prepare(config.project["scheduler"].get("timezone", "Europe/Paris"), [window_nodes, args, expanded])
             # Reads use one SQLite snapshot and never wait behind a writer
             # holding the notification condition while reserving the store.
             with self.changed if isinstance(op, str) and op in MUTATING else nullcontext():
@@ -215,6 +233,8 @@ class Service:
                         invalid("request: expected op string and args object")
                     validate_arguments(args)
                     principal["request_id"] = request_id
+                    principal["host_templates"] = host_templates
+                    principal["window_template"] = window_template
                     nodes = self.store.nodes(db)
                     self.authorize(principal, op, args, nodes, db)
                     if op not in OPS:
@@ -234,7 +254,7 @@ class Service:
                         reply = json.loads(previous[1])
                     elif op != "wait_for_nodes":
                         before = set(nodes)
-                        result = self.dispatch(db, principal, op, args, nodes, after, clock)
+                        result = self.dispatch(db, principal, op, args, nodes, after, clock, config)
                         deposited = [id for id in nodes if id not in before]
                         reply.update(ok=True, result=result)
                         if op in MUTATING:
@@ -259,6 +279,8 @@ class Service:
             for pending in after:
                 if pending.get("kind") == "spawn":
                     self.engine.spawn(pending["attempt"])
+                elif pending.get("kind") == "window_admission":
+                    reply["result"] = self.engine.window_launch_admission(pending["run_id"], pending["instant"])
                 elif pending.get("kind") == "admit_agent":
                     reply["result"] = self.engine.agent_admission(args, principal)
                 else:
@@ -270,13 +292,18 @@ class Service:
             reply = {"request_id": reply["request_id"], "ok": False, "error": {"error": "internal"}}
         return reply
 
-    def dispatch(self, db, principal, op, args, nodes, after=None, clock=None):
+    def dispatch(self, db, principal, op, args, nodes, after=None, clock=None, config=None):
+        config = config or self._config
         plan_revision = int(self.store.meta(db, "plan_revision"))
         def view(node):
             if self.engine and op in {"get_node", "list_nodes"}:
                 from .engine import attempts
-                return {**self.engine.view(node, nodes, attempts(db), db), "plan_revision": plan_revision}
+                return {**self.engine.view(node, nodes, attempts(db), db, clock), "plan_revision": plan_revision}
             return self.view(node, plan_revision)
+        if op == "stop_run":
+            from .suspension import operator_stop
+            model.check_fields(args, {"run_id"}, set())
+            return operator_stop(self.store, db, args.get("run_id"))
         if op in {"steer_run", "steer_result"}:
             from .engine import attempts, save_attempt
             model.check_fields(args, {"run_id", "message", "command_id"}, set())
@@ -290,7 +317,7 @@ class Service:
                 return {"result": command.get("result")}
             if not isinstance(args.get("message"), str):
                 invalid("message: expected string")
-            admission = self.engine.resume_admission(args.get("run_id"), db)
+            admission = self.engine.resume_admission(args.get("run_id"), db, config=config)
             if admission.get("error") or admission.get("blocked"):
                 return admission
             attempt = attempts(db)[attempt["attempt_id"]]
@@ -302,46 +329,51 @@ class Service:
         if op == "admit_agent":
             after.append({"kind": "admit_agent"})
             return {}
+        if op == "admit_window_resume":
+            model.check_fields(args, {"run_id"}, set())
+            after.append({"kind": "window_admission", "run_id": args.get("run_id"), "instant": clock})
+            return {}
         if op == "admit_run":
-            return self.engine.resume_admission(args.get("run_id"), db)
+            return self.engine.resume_admission(args.get("run_id"), db, config=config)
         if op == "start_agent":
-            config = self.configuration()
             allowed = {"agent", "task", "urgent", "model", "timeout", "workdir", "verifies", "budget_tag", "budget_tokens"}
             model.check_fields(args, allowed, set())
             fields = {"kind": "simple", "agent": args.get("agent"), "task": args.get("task"),
                       "urgent": args.get("urgent", False), "plan_revision": plan_revision}
             if args.get("model"):
                 fields["pins"] = {"model": args["model"]}
-            made = self.dispatch(db, principal, "create_node", fields, nodes)
+            made = self.dispatch(db, principal, "create_node", fields, nodes, config=config)
             node = nodes[made["id"]]
             node["launch"] = {k: v for k, v in args.items() if k in allowed - {"agent", "task", "urgent", "model"}}
             self.store.save_node(db, node)
             return self.view(node, plan_revision + 1)
         if op == "scheduler_status":
-            result = self.status(nodes, db, clock)
+            result = self.status(nodes, db, clock, scope=None if principal["root"] else model.subtree(nodes, principal["node_id"]))
             result["launch_context"] = principal["root"] or bool(
                 self.engine and self.engine.runner.tree.get(principal["subject"]))
             return result
         if op == "list_templates":
             from .templates import registry
-            return {"templates": [{"name": t["template"], "version": t["version"]} for t in registry(db).values()]}
+            return {"templates": [{"name": t["template"], "version": t["version"]} for t in registry(db, principal.get("host_templates")).values()]}
         if op in {"register_template", "instantiate_template"}:
             from . import templates
             if op == "register_template":
                 model.check_fields(args, {"yaml"}, set())
-                return {**templates.register(db, args.get("yaml")), "plan_revision": plan_revision}
+                return {**templates.register(db, args.get("yaml"), principal.get("host_templates")), "plan_revision": plan_revision}
             model.check_fields(args, {"name", "params", "parent"}, {"plan_revision"})
             if "plan_revision" in args:
                 model.revision(args["plan_revision"], plan_revision)
             name = args.get("name")
             if not isinstance(name, str):
                 invalid("name: expected template name")
-            template = templates.registry(db).get(name)
+            template = templates.registry(db, principal.get("host_templates")).get(name)
             if template is None:
                 raise Refused("not_found")
+            if "window_template" in principal and template != principal["window_template"]:
+                raise Refused("conflict", current_version=template["version"])
             original = copy.deepcopy(nodes)
             parent = args.get("parent") or (None if principal["root"] else principal["node_id"])
-            root = templates.expand(template, args.get("params", {}), self.configuration(), principal["subject"], nodes, parent)
+            root = templates.expand(template, args.get("params", {}), config, principal["subject"], nodes, parent)
             for id, node in nodes.items():
                 if node != original.get(id):
                     self.store.save_node(db, node)
@@ -371,7 +403,7 @@ class Service:
             return {"cursor": cursor, "plan_revision": plan_revision}
         if op in {"relaunch_node", "close_node"}:
             from .control import decide
-            node = decide(self, db, op, args, nodes)
+            node = decide(self, db, op, args, nodes, config)
             if node.get("completion_pending"):
                 node["completion_pending"]["request"] = [principal["subject"], principal["request_id"]]
                 self.store.save_node(db, node)
@@ -472,7 +504,6 @@ class Service:
             return view(node)
         if op not in {"create_node", "update_node", "cancel_node"}:
             raise Refused("not_implemented")
-        config = self.configuration()
         if not config.project["scheduler"]["enabled"]:
             raise Refused("scheduler_disabled", pending_nodes=len(self.store.pending()))
         if op == "update_node" and nodes.get(args.get("id"), {}).get("completion_pending"):
@@ -662,7 +693,7 @@ class Service:
             remaining = end - time.monotonic()
             if transitions or remaining <= 0 or self.stopping:
                 return {"transitions": transitions, "next_cursor": max(after, top),
-                        "capacity": {}, "scheduler": self.status(nodes)}
+                        "capacity": {}, "scheduler": self.status(nodes, scope=None if principal["root"] else scope)}
             if self.changed.acquire(timeout=min(remaining, 0.5)):
                 try:
                     self.changed.wait(min(max(0, end - time.monotonic()), 0.5))
