@@ -202,7 +202,8 @@ def test_nc_r45_every_transition_is_delivered_after_the_orchestrator_reconnects(
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     started = [t for t in got["transitions"] if t["kind"].removeprefix("node.") == "scheduler_started"]
     assert len(started) >= 2, "the restart is a transition too"
-    assert by_node[a].index("done") < by_node[b].index("launched")
+    seq_of = {(t["node_id"], t["kind"].removeprefix("node.")): t["seq"] for t in got["transitions"]}
+    assert seq_of[(a, "done")] < seq_of[(b, "launched")]
     again = w.ok("wait_for_nodes", {"timeout": 0.5})
     assert [t["seq"] for t in again["transitions"]] == seqs, "un-acked transitions are redelivered"
     w.ok("ack_nodes", {"cursor": got["next_cursor"]})
@@ -357,21 +358,21 @@ def test_nc_r47_a_real_runs_token_creates_under_its_own_node_and_nowhere_else(w)
     n = w.simple("DELEG", "spawner", fx={"gate": "g"})
     sibling = w.simple("SIB", "worker", fx={"gate": "gs"})
     w.wait_running(n)
+    w.wait_running(sibling)
     token = run_token(w.wait_spawn("DELEG"))
     kid = w.rpc("create_node", {"kind": "simple", "agent": "worker", "task": task("KID"),
                                 "plan_revision": w.plan_revision()}, token)
     assert kid.get("ok"), kid
     assert unwrap(kid["result"])["parent"] == n
     assert unwrap(kid["result"])["created_by"] != "root"
+    own = w.rpc("create_node", {"kind": "simple", "agent": "worker", "task": task("OWN"),
+                                "plan_revision": w.plan_revision()}, token)
+    assert own.get("ok"), own
+    assert unwrap(own["result"])["parent"] == n
     before = [x["id"] for x in w.list()]
-    for parent in (sibling, None):
-        fields = {"kind": "simple", "agent": "worker", "task": task("EVIL"),
-                  "plan_revision": w.plan_revision()}
-        if parent:
-            fields["parent"] = parent
-        out = w.rpc("create_node", fields, token)
-        if parent:
-            assert err_code(out) == "forbidden", out
+    out = w.rpc("create_node", {"kind": "simple", "agent": "worker", "task": task("EVIL"),
+                                "plan_revision": w.plan_revision(), "parent": sibling}, token)
+    assert err_code(out) == "forbidden", out
     assert w.fx.by_tag("EVIL") == []
     assert [x["id"] for x in w.list()][:len(before)] == before
     assert w.rpc("cancel_node", {"id": sibling, "revision": w.get(sibling)["revision"]},
@@ -386,7 +387,7 @@ def test_nc_r47_a_forged_or_altered_run_token_is_unauthenticated(w):
     w.wait_running(n)
     token = run_token(w.wait_spawn("DELEG"))
     for bad in (token + "0", token[:-1] + ("0" if token[-1] != "0" else "1"), token[1:], "", "root"):
-        out = w.rpc("list_nodes", {}, bad)
+        out = w.raw("list_nodes", bad, {})
         assert err_code(out) == "unauthenticated", (bad, out)
     assert w.rpc("list_nodes", {}, token)["ok"]
 
