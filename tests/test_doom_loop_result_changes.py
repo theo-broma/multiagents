@@ -167,3 +167,51 @@ def test_opencode_result_is_a_digest_not_the_output():
     ev = prov.parse_line(line)
     assert ev.kind == "tool" and ev.result and secret not in ev.result
     assert len(ev.result) == 16
+
+
+# bug-2e68e4 (follow-up 379db5c): the per-call bookkeeping is bounded at 256
+# entries. Overflow must forget the OLDEST entry, never everything. Both tests
+# observe only trips, so they hold for any bounded implementation that does so.
+Y = {"command": "poll-other"}
+
+
+def _other(i: int, result: str = "", step: int | None = None,
+           args: dict | None = None) -> Event:
+    return Event(kind="tool", name="read_file", args=args or {"path": f"/f{i}"},
+                 tool_id=f"o{i}", result=result, step=step)
+
+
+def test_pending_call_result_reaches_its_own_signature_after_overflow():
+    sup = _sup()
+    sup.observe(_call(0, "0%"))                  # the poll has a history: "0%"
+    for i in range(100):                         # older than the pending call
+        assert sup.observe(_other(i)) is None
+    sup.observe(Event(kind="tool", name="command_execution", args=dict(CMD),
+                      tool_id="pending", step=1))   # its result comes later
+    # 200 more calls, all one signature on one step (one entry in the loop
+    # window), each with its own call id: >256 call ids in all, but the
+    # pending one is still among the newest 256.
+    for i in range(1000, 1200):
+        assert sup.observe(_other(i, step=1, args=Y)) is None
+    sup.observe(Event(kind="step", tool_id="pending", result="3%"))
+    # "3%" is news for the poll, not for Y. If it were credited to Y, Y's
+    # first real result below would count as a change and the loop would go
+    # unseen; credited to the poll, Y sees repeats 1-3 untagged and trips.
+    assert sup.observe(_other(2000, "z", step=2, args=Y)) is None
+    trip = sup.observe(_other(2001, "z", step=3, args=Y))
+    assert trip is not None and trip.reason == "doom_loop"
+
+
+def test_result_history_of_a_signature_in_use_survives_overflow():
+    sup = _sup()
+    sup.observe(_call(0, "10%"))
+    for i in range(200):
+        sup.observe(_other(i, f"r{i}"))
+    sup.observe(_call(1, "10%"))                 # the poll is still in use
+    for i in range(200, 300):                    # >256 signatures in all
+        sup.observe(_other(i, f"r{i}"))
+    # Its history ("10%") survived, so 30% is progress and the identical
+    # repeats that follow it are only two: no trip. With the history wiped,
+    # the first 30% is "first result", and three in a row trip.
+    for i in (2, 3, 4):
+        assert sup.observe(_call(i, "30%")) is None
