@@ -128,7 +128,8 @@ def succeeded(node):
 
 def reset(node):
     node.update(state="open", hold=None, outcome=None, revision=node["revision"] + 1)
-    for field in ("activation_id", "ready_since", "starvation_notified", "launch_tries", "pending_verdict", "findings", "crash_retry_round"):
+    for field in ("activation_id", "ready_since", "starvation_notified", "launch_tries", "pending_verdict", "findings", "crash_retry_round",
+                  "closed_by", "closure"):
         node.pop(field, None)
 
 

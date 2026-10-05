@@ -23,7 +23,7 @@ from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
 from .store import encode
-from .results import Results, input_generation, top_node
+from .results import Results, input_generation, recording_loops, top_node
 from . import sessions, effects
 from .. import gitops
 
@@ -86,6 +86,10 @@ class Engine:
         self.thread = threading.Thread(target=self.run, name="node-evaluation", daemon=True)
         self.stopped = threading.Event()
         self.children = []
+        # A node whose admission raised is retried after the others, so one
+        # failing evaluation cannot starve every node ordered behind it.
+        self.evaluating = None
+        self.evaluation_failures = {}
         self.migrate()
         # Runtime configuration is host state, not project work to integrate.
         exclude = self.paths.root / ".git" / "info" / "exclude"
@@ -275,6 +279,9 @@ class Engine:
                 await self.tick()
             except Exception:
                 logging.getLogger(__name__).exception("scheduler evaluation failed")
+                if self.evaluating:
+                    self.evaluation_failures[self.evaluating] = time.monotonic()
+            self.evaluating = None
             deadline = time.monotonic() + self.service.configuration().project["scheduler"]["tick_seconds"]
             while time.monotonic() < deadline and not self.stopped.is_set():
                 await asyncio.sleep(min(0.1, max(0, deadline - time.monotonic())))
@@ -315,6 +322,22 @@ class Engine:
             urgent |= top["urgent"]
         return not urgent, epoch(top["created_at"]), epoch(node["created_at"]), node["id"]
 
+    def admission_order(self, nodes, candidates):
+        """Candidates in admission order; a node whose evaluation or order key
+        raised is recorded as failing and goes after the others."""
+        keyed = []
+        for id, node in nodes.items():
+            if id not in candidates:
+                continue
+            try:
+                key = self.order(node, nodes)
+            except Exception:
+                logging.getLogger(__name__).exception("scheduler could not order node %s", id)
+                self.evaluation_failures[id] = time.monotonic()
+                key = (True, float("inf"), float("inf"), id)
+            keyed.append(((self.evaluation_failures.get(id, 0), key), node))
+        return [node for _, node in sorted(keyed, key=lambda pair: pair[0])]
+
     async def tick(self):
         config = self.service.configuration()
         if not config.project["scheduler"]["enabled"]:
@@ -336,8 +359,10 @@ class Engine:
             nodes, journal = self.store.nodes(db), attempts(db)
         # Deposits arriving while reconciliation awaits I/O belong to the
         # next tick, so every admission pass has a coherent candidate set.
-        for node in sorted((n for id, n in nodes.items() if id in candidates),
-                           key=lambda n: self.order(n, nodes)):
+        for node in self.admission_order(nodes, candidates):
+            if self.evaluating:
+                self.evaluation_failures.pop(self.evaluating, None)
+            self.evaluating = node["id"]
             ready = node["kind"] == "simple" and node["state"] == "open" and not self.structural(node, nodes)
             if node["state"] == "open" and not ready:
                 self.episode(node["id"], False)
@@ -444,6 +469,9 @@ class Engine:
                 prepared["readonly_paths"] = list(config.readonly_paths_for(spec))
                 parent = current_nodes.get(current["parent"])
                 if parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == current["id"]:
+                    if not parent["generations"]:
+                        self.hold(db, current, "input_conflict", "the loop recorded no generation to review")
+                        continue
                     reviewed = parent["generations"][-1]
                     prepared["review"] = {"node_id": parent["id"], "generation_seq": reviewed["seq"], "commit": reviewed["commit"]}
                     prepared["input_commit"] = reviewed["commit"]
@@ -491,6 +519,9 @@ class Engine:
                 await asyncio.sleep(0.05)
             with self.store.transaction(write=False) as db:
                 nodes, journal = self.store.nodes(db), attempts(db)
+        if self.evaluating:
+            self.evaluation_failures.pop(self.evaluating, None)
+        self.evaluating = None
         self.composites()
         self.store.mirror()
 
@@ -818,8 +849,8 @@ class Engine:
                     return
                 if "refs" not in integration:
                     refs = [[f"refs/heads/node-generations/{node['id']}/{generation['seq']}", generation["commit"]]]
-                    if parent and parent["kind"] == "loop":
-                        refs.append([f"refs/heads/node-generations/{parent['id']}/{len(parent['generations']) + 1}", generation["commit"]])
+                    for loop in recording_loops(node, nodes):
+                        refs.append([f"refs/heads/node-generations/{loop['id']}/{len(loop['generations']) + 1}", generation["commit"]])
                     with self.store.transaction() as db:
                         if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
                             continue
@@ -858,11 +889,10 @@ class Engine:
                     top = nodes[current["branch_node"]]
                     top["branch_tip"] = generation["commit"]
                     node["generations"].append(generation)
-                    parent = nodes.get(node["parent"])
-                    if parent and parent["kind"] == "loop":
-                        parent_seq = len(parent["generations"]) + 1
-                        parent["generations"].append({**generation, "seq": parent_seq})
-                        self.store.save_node(db, parent)
+                    # Every loop whose work subtree produced it records it (NC-R97).
+                    for loop in recording_loops(node, nodes):
+                        loop["generations"].append({**generation, "seq": len(loop["generations"]) + 1})
+                        self.store.save_node(db, loop)
                     self.store.save_node(db, top)
                     entry = next(r for r in node["runs"] if r["attempt_id"] == current["attempt_id"])
                     entry["generation"] = generation["seq"]
@@ -904,6 +934,9 @@ class Engine:
                             round_generations = loop["generations"][loop.get("round_generation_start", 0):verdict["generation_seq"]]
                             identities = {(g["run_id"], g["commit"]) for g in round_generations}
                             for owner in nodes.values():
+                                # Another loop's record is its own judgement (NC-R97).
+                                if owner["kind"] == "loop" and owner["id"] != loop["id"]:
+                                    continue
                                 for generation in owner["generations"]:
                                     if (generation["run_id"], generation["commit"]) in identities:
                                         generation["verdict"] = verdict["verdict"]
@@ -1020,8 +1053,8 @@ class Engine:
             nodes[node["children"][0]]["findings"] = findings
             self.store.save_node(db, nodes[node["children"][0]])
         node.update(state="running", outcome=None, hold=None, revision=node["revision"] + 1)
-        node.pop("pending_verdict", None)
-        node.pop("findings", None)
+        for field in ("pending_verdict", "findings", "closed_by", "closure"):
+            node.pop(field, None)
         if not verdict_only:
             node["round_generation_start"] = len(node["generations"])
         self.store.save_node(db, node)

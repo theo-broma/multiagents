@@ -99,6 +99,21 @@ def root_approved_generation(node, identity):
     return (generation.get("run_id"), generation.get("commit")) == identity
 
 
+def recording_loops(node, nodes):
+    """Enclosing loops that record and review this node's generations.
+
+    A loop reviews work produced anywhere in its work subtree, nearest loop
+    first; its verdict child's subtree is review, never recorded work (NC-R97).
+    """
+    loops, child = [], node
+    while child["parent"]:
+        parent = nodes[child["parent"]]
+        if parent["kind"] == "loop" and parent["loop"]["verdict_child"] != child["id"]:
+            loops.append(parent)
+        child = parent
+    return loops
+
+
 def input_generation(node, ref, nodes, consumer=None):
     """Resolve for the consuming node; no consumer means an external reader."""
     if (not node or node.get("disposed") or node.get("completion_pending")
@@ -109,14 +124,14 @@ def input_generation(node, ref, nodes, consumer=None):
     while cur and cur["parent"]:
         cur = nodes[cur["parent"]]
         inside.add(cur["id"])
-    review_loops = [node] if node["kind"] == "loop" and node["id"] not in inside else []
-    child = node
-    while child["parent"]:
-        parent = nodes[child["parent"]]
-        if (parent["kind"] == "loop" and parent["id"] not in inside
-                and parent["loop"]["verdict_child"] != child["id"]):
-            review_loops.append(parent)
-        child = parent
+    # Every enclosing loop judges this node's work, including one whose
+    # verdict child holds it: review output descends from unjudged work.
+    enclosing = [node] if node["kind"] == "loop" else []
+    cur = node
+    while cur["parent"]:
+        cur = nodes[cur["parent"]]
+        if cur["kind"] == "loop":
+            enclosing.append(cur)
     generations = node["generations"]
     if "generation" in ref:
         generations = [g for g in generations if g["seq"] == ref["generation"]]
@@ -126,26 +141,25 @@ def input_generation(node, ref, nodes, consumer=None):
         identity = (generation["run_id"], generation["commit"])
         mirrors = [(owner, other) for owner in nodes.values() for other in owner["generations"]
                    if (other["run_id"], other["commit"]) == identity]
+        root_approved = {loop["id"] for loop in enclosing if root_approved_generation(loop, identity)}
         # Tree membership precedes mirrored records: finished work is still
         # unjudged if its loop has not recorded the generation yet (NC-R97).
         # Each loop gates only consumers outside its subtree; its own work
         # and reviewer must be able to consume pending results.
-        if any(not any(owner["id"] == loop["id"] and
-                       (other["verdict"] == "approved" or root_approved_generation(loop, identity))
-                       for owner, other in mirrors) for loop in review_loops):
+        if any(loop["id"] not in inside and loop["id"] not in root_approved
+               and not any(owner["id"] == loop["id"] and other["verdict"] == "approved"
+                           for owner, other in mirrors) for loop in enclosing):
             continue
-        overridden = any(root_approved_generation(owner, identity) for owner, _ in mirrors)
-        if overridden:
-            return generation
-        loops = [other for owner, other in mirrors
-                 if owner["kind"] == "loop" and owner["id"] not in inside]
-        if loops and any(other["verdict"] != "approved" for other in loops):
+        # A rejection blocks every consumer. Only the rejecting loop's own
+        # root close overturns it: never a close of a node inside it, nor an
+        # inner loop's approval. Rejections copied onto plain records yield
+        # to any enclosing loop's root approval.
+        if any(other["verdict"] == "rejected"
+               and (owner["id"] not in root_approved if owner["kind"] == "loop" else not root_approved)
+               for owner, other in mirrors):
             continue
-        rejected = any(other["verdict"] == "rejected" for _, other in mirrors)
-        if rejected:
-            continue
-        if generation["verdict"] == "approved" or (generation["verdict"] is None
-                and node["kind"] != "loop" and node["outcome"] in {"completed", "approved"}):
+        if (root_approved or generation["verdict"] == "approved" or (generation["verdict"] is None
+                and node["kind"] != "loop" and node["outcome"] in {"completed", "approved"})):
             return generation
     return None
 
