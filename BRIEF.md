@@ -4393,3 +4393,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Pinning a model on a reviewer routes to the exhausted primary (agy/codex). Omit the model to get agy-b.
 
 **Pending user items:** none.
+
+### 2026-10-05 post-compaction
+- ag-7676ac (C23 promote fix, 4ca736d) done: 14 wait reds gone; reviewer ag-73555d (verifies) running.
+- Space Bunny ag-742564 reviewer ag-873b7f (verifies) started early; gpt ag-c830f9 still running — review it when done, then compare/merge best.
+- ag-c4b36a (slot-leak r2) still running → reviewer r2 then merge.
