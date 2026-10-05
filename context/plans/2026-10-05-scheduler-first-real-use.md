@@ -1,5 +1,6 @@
 ---
-status: ready
+status: applied
+applied_in: 473908e
 ---
 # The scheduler's first real use: re-verify and close the scheduled review findings
 
