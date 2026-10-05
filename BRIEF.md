@@ -4338,3 +4338,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Tester removal of shared-branch tests merged (NC-R98 item 5). M5 ag-e712b0 cut by codex-b 5h quota (resets 12:22Z) after committing round-2 fixes + HANDOFF-M5-ROUND3.md on its branch — RESUME BY STEER after 12:22Z. Nothing running now. Wake-up armed for 11:22Z (claude) → steer ag-9bca5b, ag-b07874; then arm 12:24Z for ag-e712b0.
 
 - 2026-10-05 11:23Z: claude window reset — steered ag-9bca5b (M6) and ag-b07874 (NC-R97 adversary fixes, told about NC-R98/0a64e4c). Wake armed 12:24Z → steer ag-e712b0 (M5 round-2), then reviewer round 3 (opus if rejected), M5 adversary.
+- 11:42Z: M6 ag-9bca5b done (5 commits; 3 window tests wait on M5; NC-R44 needs live .multiagents/config/_orchestrator.md patch after merge; expect small conflict with M5 in engine.status()). Tester ag-132b8f fixing M6 bounded_waits **kw fixture; reviewer ag-7adda7 on M6.
