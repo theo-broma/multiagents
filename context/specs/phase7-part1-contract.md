@@ -947,3 +947,13 @@ from a reviewer's verdict, so the record shows who approved. Verified by:
 - **Verified by:** `tests/test_nc_r97_internal_consumers.py`,
   `tests/test_nc_r97_adv_rejected_leaks.py`, `tests/test_nc_r97_adv_reopen.py`,
   `tests/test_nc_r97_adv_composite_work.py`.
+
+## Decision after the M6 acceptance read (2026-10-05, ag-b29f0f; user-approved)
+
+**NC-R99 — list order.** `list_nodes` returns nodes in creation order, and
+that order is stable: updating a node (state, revision, any field) never moves
+it. Nodes created later always come after nodes created earlier. Scoped calls
+return the same relative order restricted to their subtree.
+- **Verified by:** `tests/test_nc_m6_acceptance.py::test_nc_r47_a_real_runs_token_creates_under_its_own_node_and_nowhere_else`
+  (the prefix of the list is unchanged after later creations and updates);
+  a dedicated NC-R99 test to be added by the tester. `[M6]`
