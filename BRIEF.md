@@ -4405,3 +4405,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Slot-leak fix PC-R2a/PC-R3f merged 3f97cc4 (r2 approved ag-b2e012). In flight: only Bunny ag-742564 r2.
 - Bunny r2 done (c8ee3aa: tests renamed + black-box). Doubt: fix's only observable effect may be delaying recovery 1 tick → reviewer r2 ag-8bc769 asked whether fix has real benefit; if not, discard rather than merge.
 - 2026-10-05 user: compare Space Bunny max vs medium on the next implementer tasks. Agent implementer-bunny-medium added (agents.yaml + roster; backups /var/tmp/*.pre-bunny-medium.bak). Protocol: same task to tier agent (max) + implementer-bunny-medium, review both, merge better, report time/tokens/verdicts/rounds.
+- Comparison #1 (DM-R1/DM-R5 manifest lint reds, 2 tests): max = implementer-quick ag-ff4c25, medium = implementer-bunny-medium ag-e817d5. Bunny NC-R97-followup r2 reviewer ag-8bc769 running.
