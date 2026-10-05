@@ -435,6 +435,9 @@ def test_r2a_a_server_dying_does_not_release_its_live_agents_slot(cp):
     assert len(p.invocations()) == 1
 
 
+RECLAIM_DEADLINE = 60  # seconds for a queued start to launch after the dead run's release
+
+
 def test_r2_an_agent_killed_with_sigkill_frees_its_slot_across_processes(cp):
     import os, signal
     p = cp(1)
@@ -454,6 +457,10 @@ def test_r2_an_agent_killed_with_sigkill_frees_its_slot_across_processes(cp):
             return True
         other.call("wait_for_agents", 30, args={"timeout": 2})
         return len(p.invocations()) >= 2
-    assert r.get("agent_id") and sv.wait_until(launched, 60, 0.5), \
+    # A genuine post-mortem by the first server may still hold the slot at
+    # admission (PC-R2: held through post-mortem work), so a queued start is
+    # as correct as an immediate one, provided it launches within the bound.
+    assert r.get("agent_id") or r.get("deferred_id"), ("neither admitted nor queued", r)
+    assert sv.wait_until(launched, RECLAIM_DEADLINE, 0.5), \
         ("the dead run's slot was never reclaimed", r)
     assert len(p.invocations()) == 2
