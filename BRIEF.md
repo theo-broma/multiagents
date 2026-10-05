@@ -4424,3 +4424,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Step 3: two defects as nodes — tests leaking scheduler processes (+ regression test counting processes), agy-b breaker tripping on successful reviews.
 - Step 4: trial report in this BRIEF (what worked, what was awkward, scheduler defects); scheduler defects fixed before part 2.
 - Trial log (append below as it happens):
+- 20:25 researcher node nd-7b4aa36e (16 findings) launched as ag-8dc228; researcher nd-c1b1de2b (agy-b breaker cause) deposited, queued. Spec context/specs/test-process-leak.md (SL-R1..R5) drafted, awaiting user OK before commit.
+- Trial note: `wait_for_nodes` returns `capacity: {}` (empty) — gives no idle-slot info, unlike wait_for_agents.
+- Trial note: `implement` template has no params for `locks`/`depends_on`, and instantiate_template takes neither; the plan's per-group locks + dependency on the researcher need another route (update_node?) — to check.
