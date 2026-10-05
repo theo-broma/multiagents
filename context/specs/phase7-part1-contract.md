@@ -922,3 +922,28 @@ unreviewed work. Closing the loop's root with `approved` (host or orchestrator,
 without a reviewer verdict) counts as approval, and is recorded distinctly
 from a reviewer's verdict, so the record shows who approved. Verified by:
 `tests/test_nc_r97_approved_generation_only.py` (to be written by the tester).
+
+## Decisions after the NC-R97 reviews and adversary (2026-10-05, ag-68812e, ag-3f6c3d; user-approved)
+
+**NC-R98 — NC-R97 scope and precedence.** These refine NC-R97.
+1. **Only outside consumers wait.** A loop gates approval only for consumers
+   that are not its descendants. A consumer inside the loop (its verdict child,
+   or a node inside a composite work child) may read a pending generation.
+   With nested loops, each loop gates the consumers outside itself.
+2. **A rejection binds everyone.** A rejected generation blocks every
+   consumer, inside or outside the loop. Only the loop's own close with
+   `approved` makes a generation usable, and only the loop's latest generation;
+   closing a child (the work child or an inner node) never does.
+3. **Outer rejection wins.** An inner loop's approval, by reviewer or by root
+   close, never overrides an enclosing loop's rejection of the same generation.
+4. **Root close over a rejection.** A root close of the loop with `approved`
+   makes its latest generation usable even if the reviewer rejected it; it is
+   recorded distinctly from a reviewer verdict (NC-R97), and a later relaunch
+   clears that record.
+5. **Name, not content (known limit).** NC-R97 governs which generation an
+   input names. Content that reaches a consumer through a shared node branch
+   (NC-R33 integration before the verdict, picked up by a sibling outside the
+   loop) is out of scope for part 1; content isolation is deferred to part 2.
+- **Verified by:** `tests/test_nc_r97_internal_consumers.py`,
+  `tests/test_nc_r97_adv_rejected_leaks.py`, `tests/test_nc_r97_adv_reopen.py`,
+  `tests/test_nc_r97_adv_composite_work.py`.
