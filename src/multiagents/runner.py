@@ -375,6 +375,34 @@ def _owner_alive(owner: dict) -> bool:
     return procs.alive(pid, owner.get("owner_start") or "")
 
 
+def _slot_process_state(pid: int | None, start: str) -> tuple[bool, bool]:
+    """Running and existing, releasing only on positive death evidence.
+
+    A zombie has exited but still exists (the historical tree-wide count
+    includes it). Unreadable process state and unexpected probe errors are
+    unknown, so both counts conservatively keep the slot. Outside locks.
+    """
+    if pid is None or pid == 0:
+        return False, False
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
+        return True, True
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()
+    except OSError:
+        fields = []
+    if len(fields) > 19:
+        if start and fields[19] != start:
+            return False, False
+        return fields[0] not in ("Z", "X"), True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, False
+    except (OSError, ValueError):
+        return True, True
+    return True, True
+
+
 def _claim_alive(claim: dict) -> bool:
     """A consult waiter's process, by pid AND start time: a reused pid is
     not the waiter (review round 2, finding 6)."""
@@ -643,6 +671,20 @@ class _FlushGate:
 
 
 @dataclass
+class _SlotSnapshot:
+    """Process observations taken before admission takes the tree lock."""
+
+    nodes: dict
+    claims: dict
+    running: dict
+    alive: dict
+    confirmed_dead: set
+
+    def matches(self, key: str, raw: dict) -> bool:
+        return self.nodes.get(key) == raw
+
+
+@dataclass
 class Run:
     """In-process state for a run this server started."""
 
@@ -695,8 +737,9 @@ class Run:
     # records `fix_verdict` for the loop in the original run's `_finalize`,
     # which owns the result.
     fix_turn: bool = False
-    # PC-R3f: the token of the post-mortem slot claim this run set at launch
-    # ("" when it set none: unlimited provider, or nested in an outer one).
+    # PC-R3f: the token of the launch marker this run set, activated when
+    # its post-mortem starts ("" when it set none: unlimited provider, or
+    # nested in an outer one).
     slot_token: str = ""
     fix_verdict: dict | None = None
     fix_timed_out: bool = False       # CI-R5: ended at `commit_fix_timeout`
@@ -1315,21 +1358,77 @@ class Runner(QuotaHandover):
 
     # ------------------------------------------------------------- guardrails --
 
-    def _occupying(self, nodes: dict, exclude: str = ""):
+    def _slot_snapshot(self, data: dict | None = None) -> _SlotSnapshot:
+        """PC-R2a: observe candidate processes outside the global lock.
+
+        Admission compares the copied node records with the durable ones
+        under the lock. New or changed records hold capacity until another
+        admission can observe them; stale evidence never releases a slot.
+        Owner and consult-waiter checks use the same snapshot.
+        """
+        if data is None:
+            data = self.tree.read()
+        nodes = copy.deepcopy(data["nodes"])
+        claims = {entry.get("id"): copy.deepcopy(entry["claim"])
+                  for entry in data.get("deferred", [])
+                  if isinstance(entry, dict) and isinstance(entry.get("claim"), dict)}
+        identities = set()
+        for raw in nodes.values():
+            if not isinstance(raw, dict):
+                continue
+            identities.add((raw.get("pid"), raw.get("pid_start") or ""))
+            owner = raw.get("slot_owner")
+            if isinstance(owner, dict):
+                identities.add((owner.get("owner_pid"), owner.get("owner_start") or ""))
+        for claim in claims.values():
+            identities.add((claim.get("pid"), claim.get("start") or ""))
+        live, alive = {}, {}
+        for pid, start in identities:
+            live[pid, start], alive[pid, start] = _slot_process_state(pid, start)
+        return _SlotSnapshot(nodes, claims, live, alive,
+                             set(self.__dict__.get("_pc_confirmed_dead", set())))
+
+    @staticmethod
+    def _slot_owner_alive(owner: dict, snapshot: _SlotSnapshot | None) -> bool:
+        if snapshot is None:
+            return _owner_alive(owner)
+        pid = owner.get("owner_pid")
+        if isinstance(pid, bool) or not isinstance(pid, int):
+            return False
+        return snapshot.alive.get((pid, owner.get("owner_start") or ""), True)
+
+    @staticmethod
+    def _tree_slot_holds(node: Node, snapshot: _SlotSnapshot) -> bool:
+        """The unlimited-provider tree rule, without process reads in-lock."""
+        if node.cleanup_hold or node.status == "pending":
+            return True
+        if node.status == "running":
+            return node.pid is None or snapshot.alive.get((node.pid, node.pid_start or ""), True)
+        if node.status == "stuck":
+            return node.pid is not None and snapshot.alive.get((node.pid, node.pid_start or ""), True)
+        return False
+
+    def _occupying(self, nodes: dict, exclude: str = "",
+                   snapshot: _SlotSnapshot | None = None):
         """The (key, raw) entries holding a slot — the rule `_occupants`
         documents, shared with the per-provider count (PC-R2).
 
         PC-R2a adds two cases. A node's `slot_owner` (a reservation before
-        launch, or a post-mortem after exit) holds its slot while that
+        launch, or an active post-mortem after exit) holds its slot while that
         server lives; a `pending` reservation whose server died holds
         nothing (reconciliation by owner identity). And a `detached` node
         — a live agent its server left behind — holds its slot until its
         process is confirmed gone."""
+        if snapshot is None:
+            snapshot = self._slot_snapshot({"nodes": nodes})
         for key, raw in nodes.items():
             if (key == exclude or not isinstance(raw, dict)
                     or raw.get("role", "") in DRIVER_ROLES):
                 continue
             if raw.get("cleanup_hold") or key in self._holds:
+                yield key, raw
+                continue
+            if not snapshot.matches(key, raw):
                 yield key, raw
                 continue
             status = raw.get("status")
@@ -1342,29 +1441,34 @@ class Runner(QuotaHandover):
                     node = node_from_raw(raw, key)
                 except (TypeError, ValueError):
                     continue
-                if _occupies_slot(node):
+                if self._tree_slot_holds(node, snapshot):
                     yield key, raw
                 continue
             try:
                 node = node_from_raw(raw, key)
             except (TypeError, ValueError):
                 continue
-            if self._pc_holds(node, status, raw.get("slot_owner")):
+            if self._pc_holds(node, status, raw.get("slot_owner"), snapshot):
                 yield key, raw
 
-    def _pc_process_live(self, node: Node) -> bool:
+    def _pc_process_live(self, node: Node,
+                         snapshot: _SlotSnapshot | None = None) -> bool:
         """PC-R2a: is the node's recorded run still running — released only
         on CONFIRMED exit? The local pid first (zombie-aware). A container
         run whose local pid (the host's `docker exec` client) is gone is NOT
-        asked here: this runs inside the tree transaction. It counts as held
+        asked here. Admission supplies its pre-lock snapshot. It counts as held
         unless reconciliation (`_pc_reconcile_containers`, off the loop and
         outside the lock) has recorded its death for this process identity."""
-        if node.pid and running(node.pid, node.pid_start):
+        live = (snapshot.running.get((node.pid, node.pid_start or ""), True)
+                if snapshot is not None else _slot_process_state(node.pid, node.pid_start)[0])
+        if node.pid and live:
             return True
         key = self._pc_container_key(node)
         if key is None:
             return False
-        return key not in self.__dict__.get("_pc_confirmed_dead", set())
+        dead = (snapshot.confirmed_dead if snapshot is not None
+                else self.__dict__.get("_pc_confirmed_dead", set()))
+        return key not in dead
 
     @staticmethod
     def _pc_container_key(node: Node) -> tuple | None:
@@ -1470,27 +1574,32 @@ class Runner(QuotaHandover):
             self._pc_kick()
         return confirmed
 
-    def _pc_holds(self, node: Node, status: Any, owner: Any) -> bool:
+    def _pc_holds(self, node: Node, status: Any, owner: Any,
+                  snapshot: _SlotSnapshot | None = None) -> bool:
         """PC-R2a: does a node on a LIMITED provider hold its slot?
 
         A slot is released only on confirmed exit, so a live process holds
         one whatever its status says — `cancelled` written before a detached
         kill lands, `pending` under a dead reservation owner, `detached`
-        with no server. A `slot_owner` (a pre-launch reservation, or a run's
-        post-mortem, PC-R3f) holds it while its server lives; a `pending`
+        with no server. A pre-launch reservation or an active post-mortem
+        (PC-R3f) holds it while its server lives. A launch marker alone does
+        not keep a confirmed-dead process's slot; a `pending`
         reservation whose server died, with no live process of its own,
         holds nothing."""
         def pid_live() -> bool:
-            return self._pc_process_live(node)
-        if (isinstance(owner, dict) and owner.get("kind") == "finalizing"
-                and _owner_alive(owner)):
+            return self._pc_process_live(node, snapshot)
+        finalizing = isinstance(owner, dict) and owner.get("kind") == "finalizing"
+        if finalizing and owner.get("active") and self._slot_owner_alive(owner, snapshot):
             # PC-R3f (round 3, finding 4): a live post-mortem holds the slot
             # whatever status it has already written.
             return True
         if status not in ACTIVE:
-            # Only with the start time recorded: a bare pid may be reused.
-            return bool(node.pid_start) and pid_live()
-        if isinstance(owner, dict) and _owner_alive(owner):
+            # A live bare pid is not evidence of death, even after a stop
+            # has moved the node out of ACTIVE. Identity mismatch releases
+            # only when a recorded start time positively proves it.
+            return pid_live()
+        if (not finalizing and isinstance(owner, dict)
+                and self._slot_owner_alive(owner, snapshot)):
             return True
         if status == "detached":
             return node.pid is None or pid_live()
@@ -1498,36 +1607,109 @@ class Runner(QuotaHandover):
             return pid_live() if isinstance(owner, dict) else True
         if status in ("running", "stuck") and node.pid is not None:
             return pid_live()
-        return _occupies_slot(node)
+        return (self._tree_slot_holds(node, snapshot) if snapshot is not None
+                else _occupies_slot(node))
 
     def _slot_claim(self, kind: str) -> dict:
         """A `slot_owner` naming this server (PC-R2a)."""
         return {"kind": kind, **self._owner_fields()}
 
     def _launch_slot_owner(self, node_id: str, provider: str) -> str:
-        """PC-R3f: the moment a launched process runs, its pre-launch
-        reservation becomes the run's post-mortem claim — written while the
-        process is alive, so there is no instant at which it can be seen
-        dead with its slot unclaimed. The claim nests: a commit-fix turn
+        """PC-R2a/R3f: replace the reservation with a launch marker. It can
+        become an active post-mortem claim, unless admission has reclaimed
+        it after confirmed death. The claim nests: a commit-fix turn
         launched inside a post-mortem of this server keeps the outer claim
         and takes none, so only the outer one ends it. Returns the token
         that ends it ("" for none). With no provider limit, only the
         reservation is dropped (PC-R5)."""
         token = ""
+        claim = dict(self._slot_claim("finalizing"),
+                     token=os.urandom(6).hex(), active=False)
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node_id)
             if entry is None:
                 return ""
             owner = entry.get("slot_owner")
             if (isinstance(owner, dict) and owner.get("kind") == "finalizing"
+                    and owner.get("active")
                     and owner.get("owner") == self._hold_owner):
                 return ""
             if self._pc_limit(provider) is not None:
-                token = os.urandom(6).hex()
-                entry["slot_owner"] = dict(self._slot_claim("finalizing"), token=token)
+                token = claim["token"]
+                entry["slot_owner"] = claim
             elif isinstance(owner, dict):
                 entry["slot_owner"] = None
         return token
+
+    def _pc_reclaim_launch_claims(self, nodes: dict, snapshot: _SlotSnapshot) -> None:
+        """PC-R2a: revoke dead launch markers in the admission transaction.
+
+        Counting alone is not revocation: a delayed finalizer could restore
+        its marker after a replacement took the slot. Active post-mortems,
+        cleanup holds and processes whose death is unknown are kept.
+        """
+        for key, raw in nodes.items():
+            if not isinstance(raw, dict):
+                continue
+            owner = raw.get("slot_owner")
+            if (not isinstance(owner, dict) or owner.get("kind") != "finalizing"
+                    or owner.get("active") or raw.get("cleanup_hold")
+                    or key in self._holds or not snapshot.matches(key, raw)
+                    or self._pc_limit(str(raw.get("provider") or "")) is None):
+                continue
+            try:
+                node = node_from_raw(raw, key)
+            except (TypeError, ValueError):
+                continue
+            if not self._pc_holds(node, raw.get("status"), owner, snapshot):
+                raw["slot_owner"] = None
+
+    async def _begin_slot_claim(self, run: Run) -> bool:
+        """PC-R3f: activate an intact marker, or reacquire a revoked slot.
+
+        An intact token already owns capacity, even after a limit was lowered.
+        Reclaimed or adopted dead runs reserve both limits again before any
+        post-mortem work, never restoring their claim over a replacement.
+        False means another turn already owns this node, or it was removed.
+        """
+        provider = run.provider.name
+        if not run.slot_token and self._pc_limit(provider) is None:
+            return True                     # PC-R5: no claim on an unlimited provider
+        claim = dict(self._slot_claim("finalizing"),
+                     token=run.slot_token or os.urandom(6).hex(), active=True)
+        while True:
+            snapshot = self._slot_snapshot()
+            with self.tree.transaction() as data:
+                entry = data["nodes"].get(run.node_id)
+                if entry is None:
+                    return False
+                unchanged = snapshot.matches(run.node_id, entry)
+                owner = entry.get("slot_owner")
+                if isinstance(owner, dict):
+                    if (owner.get("kind") == "finalizing"
+                            and owner.get("owner") == self._hold_owner
+                            and ((run.slot_token and owner.get("token") == run.slot_token)
+                                 or (run.fix_turn and not run.slot_token
+                                     and owner.get("active")))):
+                        owner["active"] = True
+                        return True
+                    if unchanged and self._slot_owner_alive(owner, snapshot):
+                        return False
+                if self._pc_limit(provider) is None:
+                    return True
+                if unchanged:
+                    active = self._occupants(data["nodes"], exclude=run.node_id,
+                                             snapshot=snapshot)
+                    if (active < int(self.config.limits.get("max_concurrent", 4))
+                            and self._pc_admit(data, provider, run.node_id,
+                                               snapshot=snapshot) is None):
+                        entry["slot_owner"] = claim
+                        run.slot_token = claim["token"]
+                        return True
+            # The dead run may have freed capacity for queued work ahead
+            # of this finalizer, including when a limit was added mid-run.
+            self._pc_kick(provider)
+            await self._pc_wait(PC_RECONCILE_SECONDS)
 
     def _end_slot_claim(self, node_id: str, token: str) -> bool:
         """End the post-mortem claim `token` set, and no other."""
@@ -1541,13 +1723,14 @@ class Runner(QuotaHandover):
                 return True
         return False
 
-    def _slot_holders(self, nodes: dict, exclude: str = "") -> dict[str, list[str]]:
+    def _slot_holders(self, nodes: dict, exclude: str = "",
+                      snapshot: _SlotSnapshot | None = None) -> dict[str, list[str]]:
         """PC-R2: who holds a slot on each provider — the provider the run
         actually launched on, as recorded on its node — by exactly the rule
         the tree-wide count uses, so a dead process (`_occupies_slot`'s pid
         check) frees its slot in every process's view at once."""
         out: dict[str, list[str]] = {}
-        for key, raw in self._occupying(nodes, exclude):
+        for key, raw in self._occupying(nodes, exclude, snapshot):
             out.setdefault(str(raw.get("provider") or ""), []).append(key)
         return out
 
@@ -1558,7 +1741,7 @@ class Runner(QuotaHandover):
         return here.max_concurrent if here is not None else None
 
     @staticmethod
-    def _pc_eligible(entry: dict) -> bool:
+    def _pc_eligible(entry: dict, snapshot: _SlotSnapshot | None = None) -> bool:
         """PC-R3a: does a queued entry stand ahead of later arrivals? Not a
         head skipped for another reason (`blocked`), and not a consult's
         waiter whose waiting process has died."""
@@ -1568,12 +1751,20 @@ class Runner(QuotaHandover):
             # arrival cannot overtake it on a stale verdict.
             return False
         claim = entry.get("claim")
-        if isinstance(claim, dict) and not _claim_alive(claim):
-            return False
+        if isinstance(claim, dict):
+            if snapshot is None:
+                alive = _claim_alive(claim)
+            elif snapshot.claims.get(entry.get("id")) != claim:
+                alive = True
+            else:
+                alive = snapshot.alive.get((claim.get("pid"), claim.get("start") or ""), True)
+            if not alive:
+                return False
         return True
 
     def _pc_admit(self, data: dict, provider: str, exclude: str = "",
-                  queued_id: str = "") -> ProviderFull | None:
+                  queued_id: str = "",
+                  snapshot: _SlotSnapshot | None = None) -> ProviderFull | None:
         """PC-R2a/R3a: the provider half of an admission, INSIDE the caller's
         tree transaction — the same one that takes the tree-wide slot, so
         the two are reserved together or not at all.
@@ -1584,7 +1775,12 @@ class Runner(QuotaHandover):
         being drained (`queued_id`) any with a lower sequence number. On
         success a drained entry is consumed in this same transaction, so
         claiming it and reserving its slot are one step.
+
+        Transactional callers must supply a snapshot taken before locking.
+        Read-only routing callers can observe their copied data here.
         """
+        if snapshot is None:
+            snapshot = self._slot_snapshot(data)
         limit = self._pc_limit(provider)
         queue = pc_waiting(data["deferred"], provider)
         if queued_id:
@@ -1595,12 +1791,13 @@ class Runner(QuotaHandover):
                      if float(d.get("seq") or 0) < float(mine.get("seq") or 0)]
         else:
             ahead = queue
-        ahead = [d for d in ahead if self._pc_eligible(d)]
+        ahead = [d for d in ahead if self._pc_eligible(d, snapshot)]
         holders: list[str] = []
         if limit is not None:
-            holders = self._slot_holders(data["nodes"], exclude).get(provider, [])
+            holders = self._slot_holders(data["nodes"], exclude, snapshot).get(provider, [])
         if ahead or (limit is not None and len(holders) >= limit):
             return ProviderFull(provider, limit, holders, ahead=len(ahead))
+        self._pc_reclaim_launch_claims(data["nodes"], snapshot)
         if queued_id:
             data["deferred"] = [d for d in data["deferred"]
                                 if not (isinstance(d, dict) and d.get("id") == queued_id)]
@@ -2133,7 +2330,8 @@ class Runner(QuotaHandover):
                 out.append(entry)
         return out
 
-    def _occupants(self, nodes: dict, exclude: str = "") -> int:
+    def _occupants(self, nodes: dict, exclude: str = "",
+                   snapshot: _SlotSnapshot | None = None) -> int:
         """How many nodes hold a `max_concurrent` slot — the ONE count every
         admission and `capacity()` uses.
 
@@ -2145,7 +2343,7 @@ class Runner(QuotaHandover):
         and only while active. Drivers never count; a malformed entry is
         skipped (HA-R12).
         """
-        return sum(1 for _ in self._occupying(nodes, exclude))
+        return sum(1 for _ in self._occupying(nodes, exclude, snapshot))
 
     def _refuse_full(self, spec: AgentSpec, active: int,
                      max_concurrent: int) -> RuntimeError:
@@ -2192,17 +2390,19 @@ class Runner(QuotaHandover):
         self._settle_holds()
         max_concurrent = int(self.config.limits.get("max_concurrent", 4))
         full = None
+        claim = self._slot_claim("reservation")
+        snapshot = self._slot_snapshot()
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node.id)
             held = bool((entry or {}).get("cleanup_hold")) or node.id in self._holds
-            active = self._occupants(data["nodes"], exclude=node.id)
+            active = self._occupants(data["nodes"], exclude=node.id, snapshot=snapshot)
             if not held and active < max_concurrent:
                 # PC-R2a: the provider slot in the same transaction.
-                full = self._pc_admit(data, node.provider, node.id, queued_id)
+                full = self._pc_admit(data, node.provider, node.id, queued_id, snapshot)
                 if full is None:
                     if entry is not None:
                         entry["status"] = "pending"
-                        entry["slot_owner"] = self._slot_claim("reservation")
+                        entry["slot_owner"] = claim
         if full is not None:
             raise full
         if not held and active < max_concurrent:
@@ -2235,16 +2435,19 @@ class Runner(QuotaHandover):
         max_concurrent = int(self.config.limits.get("max_concurrent", 4))
         admitted = False
         full = None
+        claim = self._slot_claim("reservation")
+        snapshot = self._slot_snapshot()
         with self.tree.transaction() as data:
-            active = self._occupants(data["nodes"])
+            active = self._occupants(data["nodes"], snapshot=snapshot)
             # PC-R2a: the provider slot is reserved in this same transaction,
             # so a tree-wide refusal leaves no provider slot held and the
             # reverse.
             if active < max_concurrent:
-                full = self._pc_admit(data, node.provider, queued_id=queued_id)
+                full = self._pc_admit(data, node.provider, queued_id=queued_id,
+                                      snapshot=snapshot)
             if active < max_concurrent and full is None:
                 data["nodes"][node.id] = dict(asdict(node),
-                                              slot_owner=self._slot_claim("reservation"))
+                                              slot_owner=claim)
                 if node.parent and node.parent in data["nodes"]:
                     kids = data["nodes"][node.parent].setdefault("children", [])
                     if node.id not in kids:
@@ -5620,8 +5823,11 @@ class Runner(QuotaHandover):
         relaunched = False
         # PC-R3f: the run keeps its slot through its post-mortem — commit-fix
         # turns and the free retry relaunch the same node from it — by the
-        # claim `_launch` set (`run.slot_token`), ended below.
+        # claim activated here, before any post-mortem work (and before
+        # calling `_finalize`, which may itself await), ended below.
         try:
+            if not await self._begin_slot_claim(run):
+                return
             remainder = flush.drain()
             if remainder:
                 self.tree.note_event(node_id, steps=run.supervisor.steps or None,
@@ -7395,9 +7601,10 @@ class Runner(QuotaHandover):
             self.tree.update(node.id, adopted_at=now())
             self.tree.set_status(node.id, "running", "adopted")
             self.tree.emit(node.id, "adopted", pid=node.pid)
-        # PC-R3f (round 3, finding 5): the adopter's post-mortem holds the
-        # slot, whether the wrapper still runs or has already exited.
-        run.slot_token = self._launch_slot_owner(node.id, provider.name)
+        # PC-R2a/R3f: a live adoption transfers the existing slot. A dead
+        # adoption must reacquire capacity before beginning its post-mortem.
+        if live:
+            run.slot_token = self._launch_slot_owner(node.id, provider.name)
         run.task = asyncio.create_task(self._supervise(run))
         if live:
             asyncio.create_task(self._wrap_up_watch(node.id))
@@ -8635,15 +8842,17 @@ class Runner(QuotaHandover):
         self._settle_holds()
         max_concurrent = int(self.config.limits.get("max_concurrent", 4))
         prior, full = "", None
+        claim = self._slot_claim("reservation")
+        snapshot = self._slot_snapshot()
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node.id)
             prior = (entry or {}).get("status", "")
-            active = self._occupants(data["nodes"], exclude=node.id)
+            active = self._occupants(data["nodes"], exclude=node.id, snapshot=snapshot)
             if active < max_concurrent:
-                full = self._pc_admit(data, provider, node.id, queued_id)
+                full = self._pc_admit(data, provider, node.id, queued_id, snapshot)
                 if full is None and entry is not None:
                     entry["status"] = "pending"
-                    entry["slot_owner"] = self._slot_claim("reservation")
+                    entry["slot_owner"] = claim
         if active >= max_concurrent:
             raise self._refuse_full(spec, active, max_concurrent)
         if full is not None:
@@ -8654,13 +8863,14 @@ class Runner(QuotaHandover):
 
     def _pc_hold_slot(self, node_id: str) -> str | None:
         """PC-R3b: pin a live run's slot for the steer handoff."""
+        claim = self._slot_claim("reservation")
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node_id)
             if entry is None or entry.get("status") not in ACTIVE:
                 return None
             prior = entry.get("status", "")
             entry["status"] = "pending"
-            entry["slot_owner"] = self._slot_claim("reservation")
+            entry["slot_owner"] = claim
             return prior
 
     def _pc_unreserve(self, node_id: str, prior: str | None) -> None:
