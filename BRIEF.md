@@ -4409,3 +4409,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - evaluation_failures follow-up DROPPED: r2 ag-8bc769 showed the fix's only observable effect is delaying recovery 1 tick (evaluation_failures read only by admission_order); main behaviour already correct. Branch ag-742564 discarded. Task premise (mine) was wrong; both gpt and Bunny 'fixed' a non-defect.
 - Comparison #1 result: max ag-ff4c25 267s/1.0M tok/1.7k reasoning; medium ag-e817d5 core fix in ~100s, then silent 15 min (launched full suite, interrupted), 1165s total/1.2M tok/2.5k reasoning. Byte-identical diffs. Kept max branch → reviewer ag-b455d6; medium discarded.
 - DM-R1/R5 lint fix merged 9daa7a0 (review ag-b455d6 approved). Next: checking phase 7 part 1 completeness (NS-D6) via nc/c23/pc suites on main; then either remaining reds → next comparison task, or report brief done.
+
+### 2026-10-05 — Phase 7 part 1 DONE (NS-D6)
+- Main @ 9daa7a0+: tests/test_nc_*, test_c23_*, test_pc_* = 1555 passed, 1 skipped. Contract passes.
+- Gate `scheduler.enabled` still false (NC-R1). Turning it on = user decision; changes the docker mount list → needs `multiagents docker rm && up` by the user when nothing runs.
+- Nothing in flight, no open questions, no tickets. Space Bunny max-vs-medium comparison continues on the next phase's tasks (1 done: identical diffs, max faster).
+- Remaining outside this brief: scheduled review findings (F10, F33, F50-54, F112, F120, F122, F130-132, F140, F150, F154) — next phase via `multiagents init-agent`.
