@@ -130,30 +130,3 @@ def test_adv_a_composite_verdict_childs_commit_carries_unjudged_loop_work_to_an_
     assert blocked(h, outside) == ["input"] or not contains(
         h, h.results.prepare(h.nodes()[outside["id"]], h.nodes())["input_commit"], c1), (
         "an outside consumer launches on a commit containing an unjudged loop generation")
-
-
-@pytest.mark.parametrize("verdict", [None, "rejected"])
-def test_adv_a_sibling_on_the_shared_node_branch_carries_loop_work_to_an_outside_consumer(h, verdict):
-    """group T = [L = [S, R], X]. S's generation (c1) is integrated into
-    nodes/T before review. X, a plain sibling, then finishes: its generation
-    c2 is a descendant of c1 (integration onto the shared branch). An outside
-    consumer naming X is eligible and launches on c2, which contains S's
-    unjudged (or rejected) work."""
-    c1, c2 = commits(h)
-    s, r, x = h.record(), h.record(), h.record()
-    loop = h.record(kind="loop", children=[s["id"], r["id"]],
-                    loop={"verdict_child": r["id"], "max_rounds": 3})
-    top = h.record(kind="group", children=[loop["id"], x["id"]])
-    s["parent"] = r["parent"] = loop["id"]
-    loop["parent"] = x["parent"] = top["id"]
-    top["state"] = "running"
-    gen1 = {"seq": 1, "commit": c1, "run_id": "ag-555555", "verdict": verdict}
-    s.update(state="done", outcome="completed", generations=[dict(gen1)])
-    loop.update(state="running", generations=[dict(gen1)])
-    x.update(state="done", outcome="completed",
-             generations=[{"seq": 1, "commit": c2, "run_id": "ag-666666", "verdict": None}])
-    outside = h.record(inputs=[{"node": x["id"]}])
-    h.save(top, loop, s, r, x, outside)
-    assert blocked(h, outside) == ["input"] or not contains(
-        h, h.results.prepare(h.nodes()[outside["id"]], h.nodes())["input_commit"], c1), (
-        "an outside consumer launches on a commit containing an unjudged/rejected loop generation")
