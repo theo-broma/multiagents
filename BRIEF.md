@@ -4415,3 +4415,12 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Gate `scheduler.enabled` still false (NC-R1). Turning it on = user decision; changes the docker mount list → needs `multiagents docker rm && up` by the user when nothing runs.
 - Nothing in flight, no open questions, no tickets. Space Bunny max-vs-medium comparison continues on the next phase's tasks (1 done: identical diffs, max faster).
 - Remaining outside this brief: scheduled review findings (F10, F33, F50-54, F112, F120, F122, F130-132, F140, F150, F154) — next phase via `multiagents init-agent`.
+
+### 2026-10-05 — Scheduler first real use (plan context/plans/2026-10-05-scheduler-first-real-use.md, applied)
+- Gate `scheduler.enabled: true` (user, container recreated). Everything in this plan runs as nodes.
+- User: Space Bunny max only for implementers; NO max-vs-medium comparison during this trial (don't mix experiments). `implementer-bunny-medium` stays in the roster, unused.
+- Step 1: one read-only researcher node re-verifies the 16 scheduled findings (F10, F33, F50–F54, F112, F120, F122, F130–F132, F140, F150, F154) → ledger update.
+- Step 2: one `implement` template instance per group still open, each depending on the researcher node: auth (F130–132, F140; lock providers-sh), budget (F122, F150, F154; lock budget.py), env (F33, F112; lock executor), allowlist (F10; lock executor). Groups that are all fixed are not instantiated.
+- Step 3: two defects as nodes — tests leaking scheduler processes (+ regression test counting processes), agy-b breaker tripping on successful reviews.
+- Step 4: trial report in this BRIEF (what worked, what was awkward, scheduler defects); scheduler defects fixed before part 2.
+- Trial log (append below as it happens):
