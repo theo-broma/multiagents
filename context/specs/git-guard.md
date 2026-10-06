@@ -61,7 +61,7 @@ A finding is any of:
 |---|---|
 | `email` | an email address that is none of: the repo's `user.email`, an entry of `allowed_emails`, an agent identity (`*@multiagents.local`, `*@multiagents.invalid`), a `noreply` address, or an address at `example.com/.org/.net/.invalid` |
 | `tailnet-ip` | an IPv4 address in `100.64.0.0/10` |
-| `tailnet-host` | a `*.example.ts.net` host name that is not a placeholder (one containing `<`) |
+| `tailnet-host` | a `<name>.ts.net` host name that is not a placeholder (one containing `<`; see GG-R7) |
 | `private-key` | a `-----BEGIN … PRIVATE KEY-----` block |
 | `token` | a string shaped like a known credential: GitHub `ghp_`/`gho_`/`github_pat_`, Anthropic `sk-ant-`, OpenAI-style `sk-` followed by 20+ characters, Slack `xox[abpr]-`, AWS `AKIA` + 16 characters |
 | `private` | any line of `patterns_file`, matched case-insensitively. A line is a literal string, unless it starts with `re:`, in which case the rest is a regular expression; blank lines and `#` lines are ignored |
@@ -140,5 +140,59 @@ no address outside the placeholders above.
 - **Library tests.** `tests/test_core.py::test_every_library_agent_ships_a_brief_and_a_pasteable_block` and `test_every_library_brief_is_listed_in_the_readme` pin four library agents. GG-R6 makes it five, so they are updated deliberately by a tester.
 
 ## Decisions after review ag-7957dd (2026-10-06)
-- **Email exemptions stay exactly as GG-R3 lists them.** The implementation exempted the whole `.invalid` TLD; that is withdrawn, because `first.last@example.invalid` would leak a name. Existing fixtures that commit as `t@example.invalid` (the h1 and h3 tests) are changed deliberately by a tester to an exempt address (`…@example.invalid`).
+- **Email exemptions stay exactly as GG-R3 lists them.** The implementation exempted the whole `.invalid` TLD; that is withdrawn, because an address like `<first>.<last>@<company>.invalid` would leak a name. Existing fixtures that commit as a one-letter address at `e.invalid` (the h1 and h3 tests) are changed deliberately by a tester to an exempt address at `example.invalid`.
 - **Line-wrapped secrets are out of scope.** Detection is per line by design. A private key is caught by its `BEGIN` line, and a token split across lines is not usable as written. Recorded as a known limit.
+
+## Extension (2026-10-06): placeholders, fingerprints, reporting
+
+Source: user, 2026-10-06, after the first real scan stopped a push on 55
+fictional fixtures. The answer was that placeholders must be exempted by the
+guard, there must be a local allow list, and the reasons for a block must
+reach the orchestrator, who reports them in the chat so the user can add them
+to the allow list if they want to.
+
+**GG-R7. Placeholders the guard recognises.** None of these is a finding:
+- `tailnet-host`: a `*.example.ts.net` name that contains `<`, as before, or whose
+  label just before `ts.net` is `example`, as in `phone.example.ts.net`.
+- `tailnet-ip`: the CIDR text `100.64.0.0/10`. A bare address in the range is
+  still a finding.
+- `private-key`: a `BEGIN … PRIVATE KEY` line whose key type is a placeholder,
+  meaning it contains `…` or `<`. A real armour line never contains either.
+
+Existing fixtures that use other fictional names are changed by a tester to
+these forms: MT test hosts become `*.example.ts.net`, and the MT IP literal
+moves to a documentation range (`192.0.2.0/24`). The current spec texts are
+changed to placeholders. History that still carries the old forms is handled
+by the local allow list (GG-R8), not by widening the exemptions.
+Verified by: one test per exemption, plus one showing that the near miss is
+still a finding (`phone.example.ts.net`, `192.0.2.2`, a real armour line).
+
+**GG-R8. Fingerprints and the local allow list.**
+- Every finding carries a `fingerprint`: an HMAC-SHA256 of the exact match,
+  keyed by a per-user secret and truncated to 16 hex characters. The key is
+  created on first use at `$XDG_STATE_HOME/multiagents/guard-key`, mode 0600 in
+  a 0700 directory. The fingerprint never reveals the match to someone without
+  the key, and it is stable for the same match on the same machine.
+- `git.guard.allow_fingerprints: []` is a new list of strings, validated like
+  `allow`. A finding whose fingerprint is listed is not a finding.
+- The scan output gives one line per finding: category, short SHA, location,
+  masked match and fingerprint. When there are findings, it ends with a block
+  the user can paste into `git.guard.allow_fingerprints`. The scan never writes
+  the config itself.
+Verified by: tests that the same match gives the same fingerprint and a
+different key gives a different one; that a listed fingerprint is not
+reported; that the key file and directory modes are as stated; and that the
+unmasked match appears in no output.
+
+**GG-R9. A block is reported to the user.**
+- A `push_branch` refusal returns each finding with category, commit,
+  location, masked match and fingerprint.
+- The orchestrator's composed instructions (GG-R2) tell it, on a guard
+  refusal, to report in the chat a table of the findings (category, commit,
+  location, masked match, fingerprint), saying which ones look fictional and
+  which look real. The orchestrator never adds an entry to `allow` or
+  `allow_fingerprints` itself: the user decides.
+- The `git` library agent's brief says the same for its audits.
+Verified by: a `push_branch` test asserting the fingerprint field; a brief
+composition test asserting the reporting rule; and a library test asserting the
+rule in `git.md`.
