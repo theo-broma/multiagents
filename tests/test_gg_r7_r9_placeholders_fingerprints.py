@@ -348,6 +348,7 @@ def test_gg_r8_a_fingerprint_from_another_key_does_not_suppress(tmp_path):
     sha_a = a.commit_file("a.txt", "m " + EMAIL + "\n")
     sha_b = b.commit_file("a.txt", "m " + EMAIL + "\n")
     (fp_a,) = fps(a.scan(), sha_a)
+    assert fp_a, said(a.scan())
     set_config(b, allow_fingerprints=[fp_a])
     p = b.scan()
     assert p.returncode == 1 and lines_of(p, sha_b), said(p)

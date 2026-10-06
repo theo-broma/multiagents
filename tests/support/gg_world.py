@@ -64,7 +64,7 @@ def tokens() -> dict[str, str]:
 # ------------------------------------------------------------------ git -----
 def base_env(base: Path) -> dict:
     home = base / "home"
-    home.mkdir(exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
     empty = base / "empty.gitconfig"
     empty.write_text("")
     env = {k: v for k, v in os.environ.items()
