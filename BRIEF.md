@@ -4489,3 +4489,16 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - User: ntfy notifications from the orchestrator (root-only MCP `notify`) AND the host scheduler; self-hosted ntfy on their tailnet; in-house code. Spec context/specs/ntfy-notifications.md (NT-R1..R8, advisor gaps folded in), committed 4b7c19f. Rule: generic placeholder addresses only in tracked files; the user's real host/tailnet only in untracked .multiagents/config.
 - Part 1 (R1, R2, R7, R8): tester nd-c3ba8b2a. Part 2 (R3–R6 scheduler sender): tests and implementation after VR and AN merge.
 - 10:3x MT tests merged (7c12d89, 96 tests, red). Clarifications 7169a64 (Origin rule on /api/action, Origin==Host, plain start ignores a corrupt stored token). Follow-up tester nd-ecd541e7, then MT implementer (random model). VR continuation ag-ac9706 done (branch nodes/nd-f0bf4a1e = efa962b, no hang found; full suite 32 min under load) → reviewer nd-12906adc.
+
+### 2026-10-06 — personal data in the public history (URGENT, user)
+- User: "il faut absolument retirer toute trace de données personnelles du git public". Found in origin/main (audit by advisor ag-aed397, list in its worktree `history-audit-origin-main.json`): personal machine/account names in BRIEF.md (937 commits), and a Tailscale account name in src/multiagents/defaults/project.yaml (1 commit, 2e680f2). Nothing in commit messages. Author email stays (user: public identity). Tip already cleaned (d6169f5).
+- User chose: rewrite at a QUIET moment. No new launches; in-flight work finishes first. NT part-1 tests merged (b1815ad); NT implementer NOT launched yet.
+- Advisor findings on the rewrite:
+  - The scheduler compares stored SHAs (results.py:207-234, 290, 330; rpc.py:425-436), so held loops SL/EV/AU/RV and any live node become unpublishable after a rewrite. Finish and publish what is needed, then retire the affected plans and sessions, or migrate the records with filter-repo's commit map.
+  - Do not rewrite in place with 54 worktrees: rewrite a separate bare clone, verify it, then reconnect.
+  - Stop the scheduler and drivers during the cutover.
+  - Use both --replace-text and --replace-message.
+  - Audit filenames, tags, notes and binaries too.
+  - Never push --mirror or --tags (the local tag backup-before-rewrite must stay private).
+  - GitHub keeps orphaned SHAs; support purge is not guaranteed.
+- Proposed to the user, awaiting OK: a deterministic pre-push hook (patterns from an untracked ~/.config/multiagents/sensitive-patterns) plus a `git` roster agent (claude sonnet; audits every push, does the heavy git tasks, never pushes itself).
