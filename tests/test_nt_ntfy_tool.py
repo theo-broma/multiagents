@@ -327,18 +327,18 @@ def test_nt_r2_a_connection_dropped_without_an_answer_is_a_failure(world, fake):
 
 
 def test_nt_r2_failure_kinds_have_distinct_reasons(tmp_path, monkeypatch, fake):
-    reasons = {}
-    NotifyProject(tmp_path, monkeypatch, "absent")
+    reasons = {}      # one project per case: the harness refuses to build twice in a directory
+    NotifyProject(tmp_path / "case1", monkeypatch, "absent")
     reasons["not configured"] = send("t", "m")["reason"]
-    NotifyProject(tmp_path, monkeypatch, {"ntfy_url": fake.url, "topic": "t1"})
+    NotifyProject(tmp_path / "case2", monkeypatch, {"ntfy_url": fake.url, "topic": "t1"})
     reasons["invalid argument"] = send("t", "m", priority="critical")["reason"]
     fake.mode, fake.status = "status", 500
     reasons["http status"] = send("t", "m")["reason"]
     fake.mode, fake.status, fake.location = "redirect", 302, fake.url + "/elsewhere"
     reasons["redirect"] = send("t", "m")["reason"]
-    NotifyProject(tmp_path, monkeypatch, {"ntfy_url": closed_port_url(), "topic": "t1"})
+    NotifyProject(tmp_path / "case3", monkeypatch, {"ntfy_url": closed_port_url(), "topic": "t1"})
     reasons["network"] = send("t", "m")["reason"]
-    NotifyProject(tmp_path, monkeypatch, {"ntfy_url": fake.url, "topic": "t1",
+    NotifyProject(tmp_path / "case4", monkeypatch, {"ntfy_url": fake.url, "topic": "t1",
                                           "token_file": str(tmp_path / "absent")})
     reasons["token file"] = send("t", "m")["reason"]
     assert len(set(reasons.values())) == len(reasons), reasons
