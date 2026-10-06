@@ -101,3 +101,12 @@ Verified by: review.
   - `tests/test_core.py::test_r7_an_unrouted_run_resumes_exactly_as_it_does_today`
   - `tests/test_c3_prompt_transport.py::test_pf_r2_consult_resume_reaches_the_native_whole[opencode]`, together with `CORE` and `tests/support/pf_harness.py::SHIPPED_PROVIDERS`
   - `tests/test_fo_round5.py::test_fo_r3a_a_provider_key_is_reported_even_when_the_provider_declares_it`
+
+## Decisions after implementer ag-503821 (round 3, 2026-10-06)
+- **History stays as written; the two tests that say otherwise are wrong.** `tests/test_og_opencode_go_r3_state.py::test_og_r3_no_record_is_left_under_the_old_name_on_disk` and `::test_og_r3_merge_is_idempotent_and_leaves_nothing_old` assert that no node or segment `provider` is `opencode` after load. That contradicts the Clarifications. A tester limits their `_providers_in` helper to live, provider-keyed records: health, cooldowns, headroom, claims, `pc_seq`, pause, deferred.
+- **The ledger fix is kept.** The spend ledger now loads the rename declaration in its constructor rather than under its own lock. It is the same defect class as defect 2.
+- **Readers of history map old names (follow-up, same feature).** Any code that acts on a recorded `provider`, rather than only displaying it, maps it through the rename declaration first:
+  - resume and steer in `runner._spec_of`;
+  - per-provider load counts in the runner;
+  - the monitor snapshot.
+  A conversation recorded under `opencode` resumes on `opencode-go`, never on the non-routable base. The tester adds a failing test for the resume case, and an opus implementer-deep makes it pass.
