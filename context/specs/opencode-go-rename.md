@@ -117,3 +117,15 @@ Verified by: review.
   - every `self.providers[...]` / `_usable_spec(...)` lookup reached from recorded state.
 - **`promotion_refusals` is keyed and read through `_qh_keys`,** like `quota_stops`.
 - **Audit required.** The round-6 implementer lists every place in quota_handover.py where a recorded provider name flows into a route, a provider lookup, a key or a comparison, with its disposition. A reviewer checks that list against their own grep.
+
+## Decisions after review ag-c280ef (round 6, 2026-10-06)
+- Round 6 is correct for quota_handover.py. Round 7 applies the same rule (convert a recorded name once, at the entry where it becomes a route) to the runner's remaining leaks:
+  - `_conversation_route` (runner.py ~9097): a standing conversation recorded under the old name must resume on the new route, never be cancelled and replaced;
+  - `_pc_admit` (~1817/1829), which is reached from ~2442;
+  - the steer pre-check (~8510);
+  - `_model_refusal` (~9531);
+  - the transport check (~9511);
+  - the cleanup `token_for` (~3590);
+  - `quota_handover.py:704`'s recorded `target_spec`, made consistent with line 668;
+  - `quota_handover.reserved_instance` naming the old name, aliased with the OG-R2 warning.
+- The round-6 reviewer listed no other class. If round 7's reviewer finds only minor items, they are recorded and OG merges.
