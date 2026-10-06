@@ -4593,3 +4593,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - merge MT, OG and NT2;
   - the user's allow-list decision;
   - the rewrite itself (git agent; it must remove fingerprint 60d01c970f424abb from a3a244c).
+- 19:5x MT MERGED (cb5419c; round 2 approved by ag-1946e9). A non-atomic token write (O_TRUNC) remains: it is not a blocker and fails safe. NT part-2 tests merged (c47e379) with the spec clarifications. NT2 implementer-deep runs on muse (nd-0ee8aba4, ag-2deb41). OG ag-302e01 is still running. I missed the MT reviewer's completion: wait_for_agents without ids skipped a node that had not launched yet. Memory saved.
