@@ -1568,6 +1568,80 @@ def _clear_provider(paths, providers, name: str, force: bool) -> int:
     return 0
 
 
+def cmd_git_guard(args: argparse.Namespace) -> int:
+    """GG-R3/R4: scan a range for sensitive material, manage the pre-push hook."""
+    from . import git_guard as gg
+
+    action = args.git_guard_command
+    if action in ("install", "uninstall"):
+        try:
+            repo = gg.discover_repo(Path.cwd())
+        except gg.GitError as exc:
+            print(f"git-guard {action}: {exc}", file=sys.stderr)
+            return 2
+        if action == "install":
+            code, message = gg.install_hook(repo, force=args.force)
+        else:
+            code, message = gg.uninstall_hook(repo)
+        print(f"git-guard {action}: {message}",
+              file=sys.stderr if code else sys.stdout)
+        return code
+
+    paths = _resolve_if_project(args.path)
+    try:
+        config = load_config(paths)
+    except ValueError as exc:
+        print(f"git-guard: invalid config: {exc}", file=sys.stderr)
+        return 2
+    settings = gg.settings_from_git(config.project.get("git", {}))
+    if action == "scan":
+        try:
+            repo = gg.discover_repo(paths.root if paths else Path.cwd())
+        except gg.GitError as exc:
+            print(f"git-guard scan: {exc}", file=sys.stderr)
+            return 2
+        try:
+            if args.range:
+                commits = gg.rev_list(repo, args.range, "--")
+            else:
+                commits = gg.default_range_commits(repo, settings)
+            result = gg.scan_commits(repo, commits, settings)
+        except gg.GitError as exc:
+            print(f"git-guard scan: {exc}", file=sys.stderr)
+            return 2
+        except gg.PatternsFileError as exc:
+            print(f"git-guard scan: {exc}", file=sys.stderr)
+            return 2
+        if result.notice:
+            print(result.notice)
+        for finding in result.findings:
+            print(finding.line())
+        return 1 if result.findings else 0
+    if action == "check-push":
+        try:
+            repo = gg.discover_repo(paths.root if paths else Path.cwd())
+        except gg.GitError as exc:
+            print(f"git-guard: {exc}", file=sys.stderr)
+            return 1
+        lines = (sys.stdin.read() or "").splitlines()
+        try:
+            result = gg.check_push_input(repo, settings, lines)
+        except (gg.GitError, gg.PatternsFileError) as exc:
+            print(f"git-guard: push refused: {exc}", file=sys.stderr)
+            return 1
+        if result.notice:
+            print(f"git-guard: {result.notice}", file=sys.stderr)
+        for finding in result.findings:
+            print(f"git-guard: {finding.line()}", file=sys.stderr)
+        if result.findings:
+            print(f"git-guard: push refused: "
+                  f"{len(result.findings)} finding(s)", file=sys.stderr)
+            return 1
+        return 0
+    print(f"git-guard: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
 def cmd_prompt(args) -> int:
     """Print the prompt an agent would actually receive.
 
@@ -3505,6 +3579,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--provider", default="opencode-go")
     p.add_argument("--update", action="store_true", help="record the live catalog as the baseline")
     p.set_defaults(func=cmd_catalog)
+
+    p = sub.add_parser("git-guard", help="refuse sensitive material before it leaves through a push")
+    p.set_defaults(func=cmd_git_guard)
+    gg_sub = p.add_subparsers(dest="git_guard_command", required=True)
+    s = gg_sub.add_parser("scan", help="scan a range for sensitive material")
+    s.add_argument("range", nargs="?", default="",
+                   help="commit range (default: <remote>/<base>..<base>)")
+    s.set_defaults(func=cmd_git_guard)
+    s = gg_sub.add_parser("install", help="install the pre-push hook")
+    s.add_argument("--force", action="store_true",
+                   help="keep an existing hook as pre-push.local and chain to it")
+    s.set_defaults(func=cmd_git_guard)
+    s = gg_sub.add_parser("uninstall", help="remove the pre-push hook this tool wrote")
+    s.set_defaults(func=cmd_git_guard)
+    s = gg_sub.add_parser("check-push", help=argparse.SUPPRESS)
+    s.add_argument("remote_name", nargs="?", default="")
+    s.add_argument("remote_url", nargs="?", default="")
+    s.set_defaults(func=cmd_git_guard)
 
     
     p = sub.add_parser("view", help="view an agent stream")

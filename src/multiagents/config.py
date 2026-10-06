@@ -917,7 +917,21 @@ class Config:
         agent's brief without touching the machine-wide copy.
         """
         parts = [self._resolve_instruction(part) for part in self.instruction_parts(spec)]
-        return "\n\n".join(part.strip() for part in parts if part.strip())
+        text = "\n\n".join(part.strip() for part in parts if part.strip())
+        # GG-R2: the orchestrator's composed instructions state the co-author
+        # rule from the config, so a value change lands at the next launch.
+        if spec.name == "orchestrator" or (
+                spec.launch and spec.role == "orchestrator"):
+            coauthor = (self.project.get("git", {}) or {}).get(
+                "coauthor_orchestrator", True)
+            if coauthor is not True:
+                rule = ("Commit attribution: never add a `Co-Authored-By:` "
+                        "trailer to any commit message.")
+            else:
+                rule = ("Commit attribution: end every commit message with "
+                        "one `Co-Authored-By:` trailer naming your model.")
+            text = (text.strip() + "\n\n" + rule + "\n") if text.strip() else rule + "\n"
+        return text
 
     def _resolve_instruction(self, name: str) -> str:
         spec = AgentSpec(name="", provider="", model="", instructions=name)
@@ -1132,6 +1146,9 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
                                 f"{scope} layer {layer / name}{line}")
 
     providers_raw = merged["providers.yaml"].get("providers", {}) or {}
+    # GG-R1: wrongly typed git guard settings are refused at load, the way
+    # other invalid settings are.
+    _validate_git_section(merged["project.yaml"])
     # PS-R1/R5/R6: the providers (and their sharing keys) are built and
     # validated here, so a config error surfaces at load, and the roster's
     # routes are checked against the allowlists of the providers they name.
@@ -1193,6 +1210,40 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
         warnings=warnings,
         provider_sources=provider_sources,
     )
+
+
+def _validate_git_section(project: dict) -> None:
+    """GG-R1: refuse wrongly typed git guard settings at load.
+
+    Raises ValueError naming the key, the way existing invalid settings do.
+    Absent keys are fine: every one of them has a default.
+    """
+    git = project.get("git", None)
+    if git is None:
+        return
+    if not isinstance(git, dict):
+        raise ValueError("git: expected mapping")
+    if "coauthor_orchestrator" in git and type(git["coauthor_orchestrator"]) is not bool:
+        raise ValueError(
+            "git.coauthor_orchestrator: expected a boolean, "
+            f"got {git['coauthor_orchestrator']!r}")
+    guard = git.get("guard", None)
+    if guard is None:
+        return
+    if not isinstance(guard, dict):
+        raise ValueError(f"git.guard: expected a mapping, got {guard!r}")
+    if "patterns_file" in guard and not isinstance(guard["patterns_file"], str):
+        raise ValueError(
+            "git.guard.patterns_file: expected a string, "
+            f"got {guard['patterns_file']!r}")
+    for key in ("allowed_emails", "allow"):
+        if key in guard:
+            value = guard[key]
+            if (not isinstance(value, list)
+                    or any(not isinstance(entry, str) for entry in value)):
+                raise ValueError(
+                    f"git.guard.{key}: expected a list of strings, "
+                    f"got {value!r}")
 
 
 def _validate_routes(agents_raw: dict, providers: dict) -> None:

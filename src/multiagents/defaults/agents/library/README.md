@@ -125,7 +125,6 @@ that a boundary can still be moved for free.
 ```
 
 ## `pentester` — attacks existing code from an attacker's position
-
 Reports the attacker's position, the path and what they get. May commit a test
 that fails now and passes once fixed.
 
@@ -154,4 +153,31 @@ by whoever approved the design.
     can_spawn: false
     timeout: 1500
     silence_timeout: 240
+```
+
+## `git` — audits git ranges before anything leaves the machine
+
+Inspects everything a push would carry — added lines, messages, authors,
+paths — against the private pattern list and the co-author rule, and prepares
+history rewrites in a separate clone. Advises and prepares; never publishes.
+
+**Add it when** pushes leave the machine and personal data or credentials
+could travel with them. The deterministic `git-guard` scan runs the same
+mechanical checks; this agent is the judgement on top of it.
+
+```yaml
+  git:
+    provider: opencode
+    model: opencode-go/glm-5.3-flash
+    instructions: library/git.md
+    models:
+      agy: gemini-3.8-flash-medium
+    description: >-
+      Audits git ranges before a push for personal data, secrets and the
+      co-author rule. Advises and prepares; never pushes.
+    writes: true
+    permission: sandbox
+    can_spawn: false
+    timeout: 600
+    silence_timeout: 120
 ```

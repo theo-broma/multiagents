@@ -11121,9 +11121,38 @@ class Runner(QuotaHandover):
             branch = node.branch
         else:
             branch = gitops.current_branch(self.paths.root)
+        # GG-R5: the guard scans what the push would add, first. There is no
+        # parameter that skips it: a refused push leaves the remote untouched.
+        refused = self._guard_refuses_push(branch, target_remote)
+        if refused is not None:
+            return refused
         result = gitops.push(self.paths.root, target_remote, branch)
         return {"pushed": result.ok, "branch": branch, "remote": target_remote,
-                "detail": (result.err or result.out)[:500]}
+                "detail": (result.err or result.out)[:500],
+                "ok": bool(result.ok)}
+
+    def _guard_refuses_push(self, branch: str, target_remote: str) -> dict[str, Any] | None:
+        """GG-R5: scan the commits this push would add. A refusal dict, else None."""
+        from . import git_guard as gg
+
+        root = self.paths.root
+        settings = gg.settings_from_git(self.config.project.get("git", {}))
+        base = {"branch": branch, "remote": target_remote, "pushed": False}
+        try:
+            tip = gg._git(root, "rev-parse", "--verify", branch).strip()
+            published = gg.published_shas(root, target_remote)
+            commits = gg.commits_for_branch_push(root, tip, published)
+            result = gg.scan_commits(root, commits, settings)
+        except gg.PatternsFileError as exc:
+            return {**base, "ok": False, "reason": "guard", "findings": [],
+                    "error": f"guard scan failed: {exc}"}
+        except gg.GitError as exc:
+            return {**base, "ok": False, "reason": "guard", "findings": [],
+                    "error": f"guard scan failed: {exc}"}
+        if result.findings:
+            return {**base, "ok": False, "reason": "guard",
+                    "findings": [gg.finding_dict(f) for f in result.findings]}
+        return None
 
 
 def _branch_released(node: dict) -> bool:
