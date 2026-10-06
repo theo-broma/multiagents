@@ -4641,3 +4641,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **OG:** round 3 (ag-503821, nd-39f1a692) fixed both defects. Decisions are in 60c76ea. Tester ag-96171a (nd-ea094eb1) wrote the red readers tests; opus implementer-deep nd-a87a6895 makes them green. A reviewer comes next, then merge_node of the final node.
   - **Rewrite:** the user chose **option B**: fictional values are replaced as well, so the history scans clean with no allow entries. Git agent nd-15746245 is rehearsing in /var/tmp/rewrite-*; it produces rewrite.sh and changes nothing in the project. Cutover comes after the NT and OG merges, with the scheduler stopped. The force-push of main needs the user's explicit go.
   - Reviewers on claude have no shell. Give them their code under review through node `inputs`, so the files are in their worktree.
+- 2026-10-06 ~19:2x **Tooling bugs found (fix in-house; add to the list):**
+  - (a) An API 429 ("every account for this provider is rate limited; the run will be retried") ended node run ag-742cf3 as `failed`, exit 1, cause "natural". Nothing retried it.
+  - (b) `relaunch_node` on a simple node always fails with "only loops accept round controls", because `retry` defaults to `verdict_child`.
+  - (c) Reviewers on claude have no shell. The workaround is node `inputs`.
+
+  OG is at round 5 (nd-0252e182), with reviewer nd-3211b4a6 queued after it. The NT round-2 implementation is done (nd-e0060d42); its review is being re-run as nd-cea601ed.
