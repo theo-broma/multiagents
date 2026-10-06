@@ -4663,3 +4663,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Git rehearsal: nd-bb03aee5 (Bunny); it commits rewrite.sh on its branch.
 
   **Tooling bug (d), diagnosed by researcher ag-ecaecb.** `_half_open` (runner.py:1232-1274) calls `claim_trial` for EVERY tripped provider in `budgets` on every real start, not just for the provider it routes to. Starts on other providers therefore keep consuming claude's half-open trial, and the admission probe sees `trial_pending` (runner.py:1275-1277) and refuses claude forever. events.jsonl shows 91/91 cycles. Fix: claim only for the routed provider. Workaround: `uv run --frozen multiagents doctor --clear <provider>`.
+- 2026-10-06 ~20:40 **NT2 round 2 REJECTED by ag-d8aa3b.** The decisions are in 5fd236a.
+  - Round 3: Bunny implementer-deep nd-68ac87a1 (inputs nd-e0060d42), then opus reviewer nd-7293dc8c.
+  - Bug (d) fix: Muse implementer nd-f7e1f5f6, then opus reviewer nd-b5b2de5e.
