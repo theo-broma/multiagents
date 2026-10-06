@@ -249,3 +249,23 @@ Fix in round 2, each with a failing test first:
 
 Jitter: zero satisfies "at most ±10 %". It stays as it is.
 Test race: `test_nt_r3_only_the_listed_kinds_send[*]` raises its event before the activation summary has gone out. A tester changes it to wait for the summary first. The sender behaves correctly, because the spec puts events that happen before activation into the summary.
+
+## Decisions after review ag-d8aa3b (round 2, 2026-10-06)
+
+Items 2–8 are accepted. Round 3 fixes the items below, each with a failing regression test first, in the new file tests/test_nt_part2_round3.py.
+
+1. **Every hold path writes a `held` transition.** These are:
+   - the pre-launch failures in `scheduler/worker.py`, such as `reseat_failed`;
+   - recovery `termination_unconfirmed` in `scheduler/engine.py`;
+   - the `rpc.py` path that holds without writing one.
+
+   The hold mark is then always the `held` seq, which fixes both failure modes:
+   - a duplicate notification when an `update_node` bumps the revision of a held node;
+   - a missed re-hold after a resume.
+
+   The revision fallback stays only for holds that existed before this change.
+2. **The sender's polling must not scan the history.**
+   - The pause, backoff and rate-limit checks come before any staleness read.
+   - The staleness and scan queries are bounded: they cover only the outbox's node ids, or use an index, or both. The developer chooses.
+   - No read transaction is opened while the sender is paused or backing off.
+3. **(minor)** An accepted `notify test` clears `notify_failure`.
