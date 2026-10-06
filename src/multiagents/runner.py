@@ -1200,7 +1200,7 @@ class Runner(QuotaHandover):
                          f"down before its window ends",
                          "lower it there to keep starting work closer to the wall")
 
-    def _half_open(self, budgets: dict, cooldowns: dict) -> None:
+    def _half_open(self, budgets: dict, cooldowns: dict, claim: bool = True) -> None:
         """When a tripped provider's cooldown lapses, allow exactly one trial.
 
         Two faults are fixed here. The first is a barrage: every task deferred
@@ -1214,6 +1214,16 @@ class Runner(QuotaHandover):
         the provider's `check` — one subprocess, no tokens — and a pass clears
         the cooldown immediately, so logging back in takes effect at once
         instead of at the end of a timer.
+
+        `claim=False` is the observational half, for a caller that will not
+        launch the run this trial is for — the admission check `_pin_health`
+        runs before routing. It reads the breaker and refuses exactly what the
+        launching caller would have refused, but spends no trial: a check that
+        claimed it left the routing pass in the same `start()` finding its own
+        claim held, refusing the pin it had just been admitted for and burning
+        the retry without running anything (bug-521be6). An authentication
+        block is unaffected — there the trial IS the probe below, which does
+        run, so it is spent by something that happened.
         """
         health = self.tree.provider_health()
         auth_window = float(self.config.limits.get(
@@ -1239,17 +1249,33 @@ class Runner(QuotaHandover):
             # keeps the provider out of routing between probes.
             if cooling and not entry.get("needs_login"):
                 continue
-            if not self.tree.claim_trial(name, window=probe_every):
+            # A real run is the trial, and only the caller that RUNS one may
+            # take it (bug-521be6). An admission check claims nothing: it
+            # launches nothing, and the routing pass in the same `start()`
+            # would find its own claim held — refusing the pin it had just
+            # been admitted for, the retry spent and nothing run. It still
+            # refuses while somebody else holds the trial, which is what that
+            # routing pass would find anyway.
+            #
+            # An authentication block is the exception that proves the rule:
+            # there the trial IS the probe below, so it is spent by something
+            # that actually happened.
+            if claim or entry.get("needs_login"):
+                if not self.tree.claim_trial(name, window=probe_every):
+                    if not cooling:
+                        budget.cooldown_until = now() + 60  # somebody else is trying
+                    continue
                 if not cooling:
-                    budget.cooldown_until = now() + 60     # somebody else is trying
+                    # This run IS the trial, so the tally of what went wrong
+                    # before it starts again. Left standing, it is read as "this
+                    # provider is unsafe" by everything that looks — including
+                    # the orchestrator, which then never routes the run that
+                    # would have cleared it.
+                    self.tree.begin_trial(name)
+            elif self.tree.trial_pending(name, window=probe_every):
+                if not cooling:
+                    budget.cooldown_until = now() + 60         # somebody else is trying
                 continue
-            if not cooling:
-                # This run IS the trial, so the tally of what went wrong before
-                # it starts again. Left standing, it is read as "this provider
-                # is unsafe" by everything that looks — including the
-                # orchestrator, which then never routes the run that would have
-                # cleared it.
-                self.tree.begin_trial(name)
             if not entry.get("needs_login"):
                 continue                      # a real run is the trial; let it
             # PS-R4b: the probe asks the login the block was observed in, and
@@ -4598,6 +4624,21 @@ class Runner(QuotaHandover):
         return {name: p for name, p in self.providers.items() if name in names}
 
     async def _pin_health(self, spec: AgentSpec) -> dict | None:
+        """The health a pin is admitted against. Observational, always: it
+        reads the breaker and refuses exactly what it would have refused, but
+        spends no trial.
+
+        Both callers launch nothing. `start()` routes afterwards and its routing
+        pass claims, as it must — that pass is what decides where the run goes,
+        so the claim is what routes a barrage away. `steer()` goes straight to
+        `_launch` with no routing pass behind it, so it claims separately, in
+        `_claim_trial`, once every check that could still refuse has passed.
+
+        A pin's health check that CLAIMED spent the breaker's one trial on a
+        decision, and the launch that decision was for then found its own claim
+        held, cooled the provider for a minute and refused the pin it had just
+        been admitted for (bug-521be6).
+        """
         problem = self._pin_problem(spec)
         if problem:
             return problem
@@ -4608,7 +4649,7 @@ class Runner(QuotaHandover):
             budget_mod.read_all, self._budget_providers(spec), lambda _name: self.executor(spec),
             global_config_dir(), self.paths.config, None, cooldowns,
             limits=self.config.limits)
-        self._half_open(budgets, cooldowns)
+        self._half_open(budgets, cooldowns, claim=False)
         self._wind_down(budgets)
         cfg = self.config.project.get("budget", {})
         chosen, why = budget_mod.choose_provider(
@@ -4621,6 +4662,49 @@ class Runner(QuotaHandover):
             return self._pin_refusal(spec.provider, why,
                                      entry.cooldown_until if entry else None)
         return None
+
+    async def _claim_trial(self, spec: AgentSpec) -> dict | None:
+        """Take the single trial a lapsed cooldown allows, for a run that is
+        about to be launched.
+
+        The claim half of `_pin_health`, split from its refusal half because a
+        steer needs the two at different points. The refusal is the answer to
+        "may this respawn happen at all", asked before the live run is stopped,
+        where it has always been asked and where its structured shape is part
+        of the contract (PS-R6). The claim is a resource spent BY the run that
+        follows, so it belongs after every check that could still refuse —
+        `_model_refusal`, `_cap_refusal`, the missing session, the checkout
+        recovery, the launch hold, the concurrency reservation and the startup
+        claim. Claimed before them, a refusal spent a provider's one retry
+        without launching anything (bug-521be6).
+
+        A refusal here is the authoritative form of the one `_pin_health` has
+        already made observationally: somebody took the trial in between. It
+        reads the breaker again rather than composing a reason of its own, so
+        there is one answer to "is this provider usable for a pin", not two.
+        """
+        provider = spec.provider
+        cooldowns = self.tree.read().get("cooldowns", {})
+        entry = cooldowns.get(provider) or {}
+        health = self.tree.provider_health()
+        # `_half_open`'s own gate, for the same reason it has one: a healthy
+        # provider has no trial to spend, and one still cooling is routed around
+        # rather than retried — which is why the refusal above already let it
+        # through and this is reached at all. An authentication block is the
+        # exception: it is probed even while cooling, so it does claim here.
+        if not (health.get(provider) or {}).get("tripped") \
+                and not entry.get("needs_login"):
+            return None
+        probe_every = float(self.config.limits.get("provider_probe_seconds", 120))
+        if self.tree.claim_trial(provider, window=probe_every):
+            if entry.get("until", 0) <= now():
+                # `_half_open` does this with a claim of its own: the run about
+                # to start IS the trial, so the tally of what went wrong before
+                # it must start again, or everything that reads the breaker
+                # keeps calling the provider unsafe.
+                self.tree.begin_trial(provider)
+            return None
+        return await self._pin_health(spec)
 
     def _instance_strategy(self, preferred: str) -> dict[str, Any]:
         """IS-R2a: the preferred instance's effective strategy for the pool."""
@@ -4889,7 +4973,15 @@ class Runner(QuotaHandover):
             # RM-R4b: a reading older than this routes as unknown.
             max_reading_age=budget_mod.reading_age_bound(self.config.project),
         )
-        self._half_open(budgets, cooldowns)
+        # Bug-521be6: an admission probe launches nothing. It routes so it can
+        # answer "would this start be admitted?", and the start that follows the
+        # answer is the one that runs — so the probe observes the breaker and
+        # the routing pass of a real start is the caller that spends the trial.
+        # Claiming here burned the provider's one retry on the question and the
+        # real start then found its own claim held, cooled the provider and
+        # refused the very pin it had just been admitted for.
+        self._half_open(budgets, cooldowns,
+                        claim=not (context and context.admission_only))
         spend_now = self.tree.rollup_usage().get("cost_usd", 0)
         for name, entry in budgets.items():
             # RM-R4c: a reading that routes as unknown is not a sample — its
@@ -8425,6 +8517,11 @@ class Runner(QuotaHandover):
                     "error": f"refusing to steer: current limits are invalid: {exc}"}
 
         if node.model_pinned:
+            # Observational (bug-521be6): this is the answer to "may this
+            # respawn happen at all", asked where it always has been, before
+            # the live run is stopped and with the shape callers expect. It
+            # spends no trial — `_claim_trial` below is what takes that, once
+            # nothing is left that could still refuse.
             refusal = await self._pin_health(spec.replace(provider=provider.name))
             if refusal:
                 return {**refusal, "steered": False}
@@ -8672,6 +8769,27 @@ class Runner(QuotaHandover):
                 agent_id, provider.name, "", reserved_from, queued, queued_id,
                 live, _Predecessor())
             raise
+        # The breaker's one trial, spent by the launch this steer is about to
+        # make (bug-521be6) — and by nothing else. Every check that could still
+        # refuse has now passed: the model allowlist, the spend caps, the
+        # session, the checkout, the launch hold, the concurrency reservation
+        # and the startup claim. Claiming earlier meant a refusal here or
+        # between spent a provider's one retry without running anything.
+        #
+        # Still ahead of `stop()`, which is deliberate: refusing AFTER the stop
+        # would trade a spent trial for a killed live run, and the live run is
+        # the more expensive of the two (PS-R5a). The one thing between here
+        # and `_launch` that can still refuse is the predecessor's confirmed
+        # death, which is a liveness fact about a process already on its way
+        # out rather than a verdict on this provider.
+        if node.model_pinned:
+            refusal = await self._claim_trial(spec.replace(provider=provider.name))
+            if refusal:
+                restored = await self._steer_release(
+                    agent_id, provider.name, startup_token, reserved_from,
+                    queued, queued_id, live, _Predecessor())
+                return {**refusal, "steered": False,
+                        **({"blocked": True} if restored else {})}
         # `internal=True`: this ends the turn to respawn the very same run, not
         # a cancellation, and must not report the run as `cancelled` while
         # that is in flight (bug-8195f2) — see `run.internal_stop`.

@@ -1733,6 +1733,18 @@ class Tree:
         return {name: len([t for t in stamps if current - t < window])
                 for name, stamps in (self.read().get("claims") or {}).items()}
 
+    def trial_pending(self, provider: str, window: float = 120.0) -> bool:
+        """Whether the single trial a lapsed cooldown allows is already taken.
+
+        The read half of `claim_trial`, for a caller that must decide without
+        spending it. An admission check is such a caller: it reads the breaker
+        and launches nothing, so claiming there would leave the routing pass
+        that does launch finding its own claim held and refusing the provider
+        the pin had just been admitted for (bug-521be6).
+        """
+        health = (self.read().get("provider_health") or {}).get(provider) or {}
+        return now() - float(health.get("trial_at") or 0) < window
+
     def claim_trial(self, provider: str, window: float = 120.0) -> bool:
         """Take the single retry allowed when a cooldown has just lapsed.
 
