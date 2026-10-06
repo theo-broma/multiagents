@@ -4513,3 +4513,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - In flight: GG tester nd-2f300881; OZ superseded-tests tester nd-20eaa394 (cherry-picks OZ 19af7e8+3cc08d0; then OZ reviewer); breaker fix ag-aa6122 (still running).
 - 13:2x GG tests merged (60fe4db, 191 red), clarifications committed. GG implementer nd-2be8cada (implementer, model drawn at random: muse) + test_core library update tester nd-f5874dc8 in parallel. OZ superseded tests done (6a26a81 on nodes/nd-20eaa394) → OZ reviewer nd-3541463a.
 - 13:4x OZ MERGED (7c00795; impl + 44 superseded tests updated). Project providers.yaml override reduced to `opencode-zen: {enabled: true}`; doctor resolves it. GG impl nd-2be8cada (muse) running; test_core library tests updated (640e3b0).
+
+### 2026-10-06 — opencode → opencode-go rename (OG)
+- User: rename the Go route so `opencode` no longer reads as opencode in general. Spec context/specs/opencode-go-rename.md (OG-R1..R5, dcf4d43): `opencode` = CLI base, not routable; `opencode-go` = Go subscription; old name aliased with a warning; one-time state migration.
+- Tester nd-6144e536 (it lists superseded tests without editing them). Implementation (implementer-deep, random model) AFTER GG merges, since both touch config. Then switch this repo's own config files to `opencode-go`.
