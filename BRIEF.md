@@ -4483,4 +4483,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 | breaker-trial fix | ag-aa6122 | bunny | | | |
 
 ### 2026-10-06 — monitor over Tailscale (MT)
-- User: reach the monitor from the phone through `tailscale serve` (tailnet only, never Funnel). Spec context/specs/monitor-tailnet-access.md (MT-R1..R7: --allow-host, --persistent-token, --rotate-token; bind stays 127.0.0.1), approved by the user and committed d8ec8fd. Tester nd-0a2ee3dc → merge tests → implementer (random Muse/Bunny) → reviewer → merge. Then tell the user: `tailscale serve --bg 8787` + `multiagents monitor --allow-host REDACTED.<tailnet>.ts.net --persistent-token`.
+- User: reach the monitor from the phone through `tailscale serve` (tailnet only, never Funnel). Spec context/specs/monitor-tailnet-access.md (MT-R1..R7: --allow-host, --persistent-token, --rotate-token; bind stays 127.0.0.1), approved by the user and committed d8ec8fd. Tester nd-0a2ee3dc → merge tests → implementer (random Muse/Bunny) → reviewer → merge. Then tell the user: `tailscale serve --bg 8787` + `multiagents monitor --allow-host <host>.<tailnet>.ts.net --persistent-token`.
