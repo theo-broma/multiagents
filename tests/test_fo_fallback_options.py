@@ -417,7 +417,7 @@ def _all_text(cap, config=None):
 
 def test_fo_r3_an_unconsumed_key_is_reported_naming_agent_provider_and_key(tmp_path, cap):
     config = _load(tmp_path, {"fo3-agent-a": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "bogus_fo3_key": 1}}}})
 
     text = _all_text(cap, config)
@@ -428,17 +428,17 @@ def test_fo_r3_an_unconsumed_key_is_reported_naming_agent_provider_and_key(tmp_p
 
 def test_fo_r3_an_unknown_key_does_not_fail_the_load_and_the_agent_is_usable(tmp_path, cap):
     config = _load(tmp_path, {"fo3-agent-b": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "bogus_fo3_key_b": 1}}}})
 
     spec = config.agents["fo3-agent-b"]
     assert spec.fallback_for("opencode-zai")[0] == "zai-coding-plan/glm"
-    assert spec.model == "opencode/x"
+    assert spec.model == "opencode-go/x"
 
 
 def test_fo_r3b_a_reloaded_config_still_carries_the_warning_and_validation_returns_it(tmp_path, cap):
     agents = {"fo3-agent-c": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "bogus_fo3_key_c": 1}}}}
 
     first = _load(tmp_path / "a", agents)
@@ -461,7 +461,7 @@ def test_fo_r3b_a_reloaded_config_still_carries_the_warning_and_validation_retur
 
 
 def test_fo_r3_a_distinct_key_is_reported_in_its_own_right(tmp_path, cap):
-    base = {"provider": "opencode", "model": "opencode/x"}
+    base = {"provider": "opencode", "model": "opencode-go/x"}
     _all_text(cap, _load(tmp_path / "a", {"fo3-agent-d": {
         **base, "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "bogus_d1": 1}}}}))
 
@@ -472,7 +472,7 @@ def test_fo_r3_a_distinct_key_is_reported_in_its_own_right(tmp_path, cap):
 
 
 def test_fo_r3_the_same_key_on_another_provider_is_reported_again(tmp_path, cap):
-    base = {"provider": "opencode", "model": "opencode/x"}
+    base = {"provider": "opencode", "model": "opencode-go/x"}
     _all_text(cap, _load(tmp_path / "a", {"fo3-agent-e": {
         **base, "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "bogus_e": 1}}}}))
 
@@ -497,7 +497,7 @@ def test_fo_r3_valid_keys_are_not_reported(tmp_path, cap, provider, model, key, 
     entry = {"model": model, key: value}
     agent = f"fo3-ok-{provider}-{key}"
     config = _load(tmp_path, {agent: {
-        "provider": "opencode", "model": "opencode/x", "models": {provider: entry}}})
+        "provider": "opencode", "model": "opencode-go/x", "models": {provider: entry}}})
 
     text = _all_text(cap, config)
 
@@ -514,7 +514,7 @@ def test_fo_r3a_a_key_only_another_shipped_provider_consumes_is_reported(
         tmp_path, cap, provider, model, key, value):
     agent = "fo3a-agent"
     config = _load(tmp_path, {agent: {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {provider: {"model": model, key: value}}}})
 
     text = _all_text(cap, config)
@@ -528,7 +528,7 @@ def test_fo_r3_a_key_consumed_by_a_configured_provider_is_not_reported(tmp_path,
                              "models_include": ["fo3/*"],
                              "spawn": {"optional": {"fo3_flavour": ["--flavour", "{fo3_flavour}"]}}}}
     config = _load(tmp_path, {"fo3-agent-f": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"fo3prov": {"model": "fo3/m", "fo3_flavour": "mint"}}}},
         providers=providers)
 
@@ -542,7 +542,7 @@ def test_fo_r3_a_key_only_a_different_provider_consumes_is_reported(tmp_path, ca
                              "models_include": ["fo3/*"],
                              "spawn": {"optional": {"fo3_flavour": ["--flavour", "{fo3_flavour}"]}}}}
     config = _load(tmp_path, {"fo3-agent-g": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm", "fo3_flavour": "mint"}}}},
         providers=providers)
 
@@ -554,7 +554,7 @@ def test_fo_r3_a_key_only_a_different_provider_consumes_is_reported(tmp_path, ca
 
 def test_fo_r3_bare_string_entries_produce_no_warning(tmp_path, cap):
     config = _load(tmp_path, {"fo3-agent-h": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": "zai-coding-plan/glm"}}})
 
     assert "fo3-agent-h" not in _all_text(cap, config)

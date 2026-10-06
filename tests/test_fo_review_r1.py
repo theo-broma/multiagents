@@ -52,7 +52,7 @@ def test_fo_r3_a_shipped_key_the_destination_does_not_consume_is_reported(tmp_pa
     # is dropped at launch and must be reported, not waved through because
     # some OTHER shipped provider consumes it.
     config = _load(tmp_path, {"fo-r1-codex-variant": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"codex": {"variant": "max"}}}})
 
     text = _all_text(config)
@@ -64,7 +64,7 @@ def test_fo_r3_a_shipped_key_the_destination_does_not_consume_is_reported(tmp_pa
 def test_fo_r3_a_shipped_option_absent_from_the_route_provider_is_reported(tmp_path):
     # `max_budget_usd` is claude's; on an opencode-zai route it is dropped.
     config = _load(tmp_path, {"fo-r1-zai-budget": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm",
                                     "max_budget_usd": 5}}}})
 
@@ -77,7 +77,7 @@ def test_fo_r3_a_shipped_option_absent_from_the_route_provider_is_reported(tmp_p
 def test_fo_r3_an_option_the_destination_consumes_is_not_reported(tmp_path):
     # Same key, a destination that actually renders it: no warning.
     config = _load(tmp_path, {"fo-r1-claude-budget": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"claude": {"model": "sonnet", "max_budget_usd": 5}}}})
 
     assert "fo-r1-claude-budget" not in _all_text(config)
@@ -88,11 +88,11 @@ def test_fo_r3_a_project_provider_is_validated_the_same_way_as_a_shipped_one(tmp
                              "models_include": ["fo1/*"],
                              "spawn": {"optional": {"fo1_flag": ["--x", "{fo1_flag}"]}}}}
     ok = _load(tmp_path / "a", {"fo-r1-proj-ok": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"fo1prov": {"model": "fo1/m", "fo1_flag": "yes"}}}},
         providers=providers)
     bad = _load(tmp_path / "b", {"fo-r1-proj-bad": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm",
                                     "fo1_flag": "yes"}}}},
         providers=providers)
@@ -111,7 +111,7 @@ def test_fo_r3_a_project_provider_is_validated_the_same_way_as_a_shipped_one(tmp
 
 def test_fo_r3_the_warning_is_surfaced_by_validate_agent_models(tmp_path):
     config = _load(tmp_path, {"fo-r1-doctor": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"codex": {"variant": "max"}}}})
 
     shown = "\n".join(validate_agent_models(config))
@@ -126,7 +126,7 @@ def test_fo_r3_the_warning_is_surfaced_by_validate_agent_models(tmp_path):
 
 def test_fo_r3_the_provider_key_is_reported(tmp_path):
     config = _load(tmp_path, {"fo-r1-provider-key": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"codex": {"model": "gpt-5", "provider": "claude"}}}})
 
     text = _all_text(config)

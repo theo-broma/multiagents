@@ -17,11 +17,13 @@ esac
 # `opencode-zai` instance). MULTIAGENTS_OPENCODE_PLAN=deepinfra selects Deep
 # Infra (the `opencode-deepinfra` instance), which is metered — real dollars
 # per token, no quota windows anywhere — so its budget is honestly unknown.
-# Unset, empty or any other value is the Go behaviour below, unchanged. The
-# quota origin can be overridden with MULTIAGENTS_ZAI_ORIGIN, which is for
-# tests only.
+# MULTIAGENTS_OPENCODE_PLAN=zen selects the free Zen tier (the `opencode-zen`
+# instance). Unset, empty or any other value is the Go behaviour below,
+# unchanged. The quota origin can be overridden with MULTIAGENTS_ZAI_ORIGIN,
+# which is for tests only.
 zai_plan() { [ "${MULTIAGENTS_OPENCODE_PLAN:-}" = "zai-coding-plan" ]; }
 di_plan() { [ "${MULTIAGENTS_OPENCODE_PLAN:-}" = "deepinfra" ]; }
+zen_plan() { [ "${MULTIAGENTS_OPENCODE_PLAN:-}" = "zen" ]; }
 
 # zai_py check|budget|usage. The key is read from opencode's auth store inside
 # python and sent with urllib, so it is never on a command line; every message
@@ -198,6 +200,64 @@ print(json.dumps({
 PYEOF
 }
 
+# zen_py check|budget. Zen is the FREE tier of the same opencode CLI, and it is
+# not the Go subscription: its credential is the `opencode` entry of opencode's
+# auth store (Go's is `opencode-go`) and it has no documented quota endpoint at
+# all. So `budget` reports unknown headroom and probes nothing — reading the Go
+# usage URL here would answer Zen's capacity with Go's windows, and it is Go's
+# key that URL answers to, so the fall-through also sent the wrong credential to
+# the wrong subscription's endpoint. The branch is taken before the Go probe, so
+# no key is read and no request is made.
+#
+# `check` reads that same store for the `opencode` entry. A missing entry answers
+# UNKNOWN (20), never "not logged in" (10): the free Zen models run without a
+# credential, so an absent one is not a failed login, and a go-only store leaves
+# Zen exactly as usable as it was. Every message is a fixed string — nothing
+# here is built from store content, so no key can leak.
+zen_py() {
+    python3 - "$1" "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" <<'PYEOF'
+import json, os, sys
+
+mode, auth = sys.argv[1], sys.argv[2]
+ENTRY = "opencode"
+
+def load_key():
+    """Returns (key, why) where why is set when there is no store or no parse."""
+    if not os.path.isfile(auth):
+        return None, "no opencode auth store at " + auth
+    try:
+        data = json.load(open(auth))
+    except Exception:
+        return None, "the opencode auth store is not valid JSON"
+    entry = data.get(ENTRY) if isinstance(data, dict) else None
+    key = entry.get("key") if isinstance(entry, dict) else None
+    if isinstance(key, str) and key:
+        return key, None
+    return None, None
+
+if mode == "check":
+    key, why = load_key()
+    if key:
+        print("OpenCode Zen credential present in the opencode auth store")
+        raise SystemExit(0)
+    # The free models need no credential, so this is unknown rather than a
+    # failed authentication: nothing is known that would stop a run.
+    print(why or "no '%s' entry with a key in the opencode auth store; the free "
+          "OpenCode Zen models do not need one" % ENTRY)
+    raise SystemExit(20)
+
+# budget. No windows and no headroom number: Zen publishes no quota endpoint to
+# read, and a missing window is not an exhausted one.
+print(json.dumps({
+    "known": False,
+    "headroom": None,
+    "windows": {},
+    "note": "OpenCode Zen has no documented quota endpoint; headroom is unknown "
+            "and its free models are unmetered",
+}))
+PYEOF
+}
+
 case "${1:-check}" in
 identity)
     # API keys and their fragments are credentials, never account identities.
@@ -206,6 +266,7 @@ identity)
 check)
     if zai_plan; then zai_py check; exit $?; fi
     if di_plan; then di_py check; exit $?; fi
+    if zen_plan; then zen_py check; exit $?; fi
     out=$("$BIN" providers list 2>/dev/null) || {
         echo "could not run '$BIN providers list'"; exit 20; }
     # "0 credentials" means no stored login. An API key in the environment is
@@ -227,6 +288,15 @@ login)
         echo "Choose the Deep Infra provider, then paste its API key."
         exec "$BIN" providers login
     fi
+    if zen_plan; then
+        echo "Choose the OpenCode Zen provider, then sign in if you want its"
+        echo "free models (they also work with no credential at all)."
+        echo
+        echo "Credentials are stored on the host (~/.local/share/opencode/auth.json)"
+        echo "under the 'opencode' entry, separately from the Go subscription's."
+        echo
+        exec "$BIN" providers login
+    fi
     echo "opencode sign-in."
     echo "You will be asked to pick a provider, then a login method."
     echo "For an OpenCode Go subscription choose 'OpenCode' and follow the link."
@@ -238,9 +308,12 @@ login)
     ;;
 budget)
     # DeepInfra is metered: the branch is taken BEFORE the Go probe, so no
-    # network call is made and no key is read.
+    # network call is made and no key is read. Zen is the same for a different
+    # reason: its quota surface does not exist, and the endpoint below answers
+    # to the Go key with Go's windows.
     if di_plan; then di_py budget; exit 0; fi
     if zai_plan; then zai_py budget; exit 0; fi
+    if zen_plan; then zen_py budget; exit 0; fi
     # The Go subscription serves real headroom over HTTP:
     #   GET https://opencode.ai/zen/go/v1/usage   Authorization: Bearer <key>
     # returning percent-used and a reset time for three windows (rolling,
@@ -319,6 +392,10 @@ print(json.dumps({
 usage)
     # Quota windows are rendered by the monitor; this action supplies extras.
     if zai_plan; then zai_py usage; exit $?; fi
+    # Zen has no capacity figures of any kind to add below the windows, so
+    # there are no extras: exit 64 quietly rather than repeat the unknown
+    # budget's own note, which the monitor already shows.
+    if zen_plan; then exit 64; fi
     python3 - <<'PYEOF'
 import json, os, sys
 b = json.loads(os.environ.get('MULTIAGENTS_BUDGET') or '{}')

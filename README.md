@@ -1119,11 +1119,16 @@ anything gitignored — all of `.multiagents/` — does not exist for them.
 stored, because a stored fact goes stale and lies.
 
 `models_include` in `providers.yaml` decides which model namespaces get
-recorded. It ships restricted to `opencode/*` (free zen tier) and
-`opencode-go/*` (the subscription); `deepinfra/*` is excluded deliberately,
-because those bill against a separate API key rather than the subscription and
-listing them would invite agents onto an account you did not intend to spend
-from.
+recorded, and each opencode billing surface is its own provider with its own
+allowlist: `opencode` takes `opencode-go/*` (the subscription), `opencode-zen`
+takes `opencode/*` (the free tier), `opencode-deepinfra` takes `deepinfra/*`.
+The split is by namespace and not by model name, because the same model is
+served under two of them — `opencode/space-bunny-free` and
+`opencode-go/space-bunny-free` — so a Go route must never launch a zen id and a
+zen route must never launch a Go one. `deepinfra/*` is excluded from the Go
+provider deliberately, because those models bill against a separate API key
+rather than the subscription and listing them under it would invite agents onto
+an account you did not intend to spend from.
 
 ## One project, one repository
 

@@ -151,8 +151,8 @@ def test_fo_r3a_a_provider_key_is_reported_even_when_the_provider_declares_it(tm
         "spawn": {"args": ["--x"],
                   "optional": {"provider": ["--provider", "{provider}"]}}}}
     config = _load(tmp_path, {"fo-r5-provider-key": {
-        "provider": "opencode", "model": "opencode/x",
-        "models": {"custom": {"model": "opencode/m", "provider": "other"}}}},
+        "provider": "opencode", "model": "opencode-go/x",
+        "models": {"custom": {"model": "opencode-go/m", "provider": "other"}}}},
         providers=providers)
 
     text = "\n".join(config.warnings)

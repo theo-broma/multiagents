@@ -106,14 +106,15 @@ providers:
     usage_mode: delta
     models_cmd: ["opencode", "models"]
     models_parse: lines
-    # Which model namespaces `refresh-models` records as available.
-    #   opencode/*     free zen tier, unmetered
-    #   opencode-go/*  the Go subscription
-    # deepinfra/* is deliberately excluded here: those models bill against a
-    # separate DEEPINFRA_API_KEY rather than the subscription. They have their
-    # own instance below — see `opencode-deepinfra`.
+    # Which model namespaces `refresh-models` records as available: the Go
+    # subscription's `opencode-go/*`, and nothing else. The same CLI serves two
+    # unrelated billing surfaces, and each is a provider of its own (see
+    # `opencode-zen` and `opencode-deepinfra` below), so this list names only
+    # what the Go subscription pays for: a go route never launches a zen model
+    # id, and vice versa. The two can serve models of the SAME name under their
+    # own prefixes (`opencode/space-bunny-free` and `opencode-go/space-bunny-
+    # free`), which is why the split is by namespace and not by model name.
     models_include:
-      - "opencode/*"
       - "opencode-go/*"
     home_links:
       - ".local/share/opencode"
@@ -151,6 +152,30 @@ providers:
         - match: {type: "step_start"}
           as: step
           fields: {}
+
+  # OpenCode Zen — the free tier served by the SAME CLI as the Go subscription
+  # above, and a provider of its own rather than part of `opencode`. One outage
+  # is why: every `opencode-go/…` call answered "Unexpected server error" while
+  # `opencode/…` of the very same model kept working, and because both lived in
+  # one provider the single breaker tripped by Go then refused Zen too — the one
+  # thing that could still serve the request. Its own `family` keeps the breaker,
+  # the cooldowns, the headroom and the spend separate (OZ-R2), and its own
+  # `models_include` keeps the two namespaces apart in both directions (OZ-R4).
+  #
+  # Zen has no documented quota endpoint, so `budget` reports capacity as
+  # unknown and probes nothing — it must never read the Go usage URL, whose key
+  # it does not share. Its credential is the `opencode` entry of opencode's auth
+  # store (Go's is `opencode-go`), and the free models work without one.
+  #
+  # Ships DISABLED. To enable it, set `enabled: true` for `opencode-zen` in
+  # .multiagents/config/providers.yaml; that override needs nothing else.
+  opencode-zen:
+    extends: opencode
+    family: opencode-zen
+    enabled: false
+    models_include: ["opencode/*"]
+    env:
+      MULTIAGENTS_OPENCODE_PLAN: zen
 
   # The Z.AI GLM Coding Plan through opencode: same CLI, script and stream
   # rules, but its own family (its billing and models are unrelated to OpenCode

@@ -187,7 +187,7 @@ SHIPPED_PROVIDERS = {
     "claude": ("claude", "sonnet"),
     "codex": ("codex", "gpt-5"),
     "agy": ("agy", "gemini-3.8-flash-low"),
-    "opencode": ("opencode", "opencode/test-model"),
+    "opencode": ("opencode", "opencode-go/test-model"),
     # `extends` variants
     "opencode-zai": ("opencode", "zai-coding-plan/glm"),
     "opencode-deepinfra": ("opencode", "deepinfra/test-model"),

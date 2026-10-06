@@ -62,7 +62,7 @@ def _load(tmp_path, agents):
 
 def test_fo_r3b_a_reloaded_config_still_carries_and_shows_its_warnings(tmp_path):
     agents = {"fo-r2-reload": {
-        "provider": "opencode", "model": "opencode/x",
+        "provider": "opencode", "model": "opencode-go/x",
         "models": {"opencode-zai": {"model": "zai-coding-plan/glm",
                                     "bogus_r2_key": 1}}}}
 
