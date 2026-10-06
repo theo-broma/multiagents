@@ -110,3 +110,10 @@ Verified by: review.
   - per-provider load counts in the runner;
   - the monitor snapshot.
   A conversation recorded under `opencode` resumes on `opencode-go`, never on the non-routable base. The tester adds a failing test for the resume case, and an opus implementer-deep makes it pass.
+
+## Decisions after review ag-12bc6a (round 5, 2026-10-06)
+- **A recorded name is converted where it becomes a route, never at each comparison.** Any recorded provider that is used as a launch target or a provider-block lookup goes through `canonical` exactly once, at the entry of the function that acts on it. This covers:
+  - `_qh_switch`'s `target`, which is the source of the rollback `promotion["from"]` and of the recovery `promotion["to"]` / `attempt["to"]`;
+  - every `self.providers[...]` / `_usable_spec(...)` lookup reached from recorded state.
+- **`promotion_refusals` is keyed and read through `_qh_keys`,** like `quota_stops`.
+- **Audit required.** The round-6 implementer lists every place in quota_handover.py where a recorded provider name flows into a route, a provider lookup, a key or a comparison, with its disposition. A reviewer checks that list against their own grep.
