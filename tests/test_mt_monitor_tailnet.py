@@ -307,6 +307,94 @@ def test_mt_r2_get_quota_follows_the_same_origin_rule(proxied):
     assert bad[0] == 403
 
 
+ACTION = "/api/action"
+SECOND = "second.example.ts.net"
+
+
+def action_post(run, origin, host=NAME, token=True):
+    """POST /api/action with a harmless unknown action; token goes in the query."""
+    headers = {"Content-Type": "application/json"}
+    if origin is not None:
+        headers["Origin"] = origin
+    path = ACTION + (f"?token={run.token}" if token else "")
+    return get(run, path, host=host, headers=headers, method="POST",
+               body='{"action":"no-such-action"}')
+
+
+def is_origin_refusal(result):
+    status, body = result
+    return status == 403 and b"bad origin" in body
+
+
+@pytest.mark.parametrize("origin", [
+    "https://evil.example", "http://evil.example", "null",
+    f"https://evil.{NAME}", f"https://{NAME}.evil.example",
+    "https://other.example.ts.net:443", "https://localhost", "https://127.0.0.1"])
+def test_mt_r2_action_refuses_a_bad_origin(proxied, origin):
+    assert is_origin_refusal(action_post(proxied, origin))
+
+
+@pytest.mark.parametrize("origin", [
+    "https://evil.example", "null", f"https://evil.{NAME}"])
+def test_mt_r2_action_refuses_a_bad_origin_without_the_flag_on_a_loopback_host(world, origin):
+    run = world.start()
+    assert is_origin_refusal(action_post(run, origin, host=f"127.0.0.1:{run.port}"))
+
+
+@pytest.mark.parametrize("origin", [
+    f"https://{NAME}", f"http://{NAME}", f"https://{NAME}:8443",
+    "https://phone.example.ts.net", None])
+def test_mt_r2_action_does_not_refuse_the_origin_of_the_request_host(proxied, origin):
+    assert not is_origin_refusal(action_post(proxied, origin))
+
+
+def test_mt_r2_action_without_origin_behaves_as_before(proxied):
+    # no Origin: the token still decides, exactly as today
+    assert action_post(proxied, None, token=False)[0] == 403
+    assert b"bad origin" not in action_post(proxied, None, token=False)[1]
+
+
+def test_mt_r2_action_loopback_origin_keeps_working(proxied):
+    host = f"127.0.0.1:{proxied.port}"
+    assert not is_origin_refusal(action_post(proxied, f"http://{host}", host=host))
+
+
+def test_mt_r2_action_origin_is_refused_before_anything_is_performed(proxied):
+    # a refused Origin with a valid token must not reach the action
+    status, body = action_post(proxied, "https://evil.example")
+    assert status == 403
+    assert b"unknown" not in body.lower()
+
+
+def test_mt_r2_origin_must_match_the_request_host_not_just_any_allowed_name(proxied):
+    for path_check in (
+        lambda o, h: origin_status(proxied, o, host=h),
+        lambda o, h: action_post(proxied, o, host=h),
+    ):
+        assert is_origin_refusal(path_check(f"https://{NAME}", SECOND))
+        assert is_origin_refusal(path_check(f"https://{SECOND}", NAME))
+        assert not is_origin_refusal(path_check(f"https://{SECOND}", SECOND))
+        assert not is_origin_refusal(path_check(f"https://{NAME}", NAME))
+
+
+def test_mt_r2_origin_host_comparison_ignores_case_and_ports(proxied):
+    assert not is_origin_refusal(origin_status(proxied, f"https://{NAME.upper()}", host=NAME))
+    assert not is_origin_refusal(origin_status(proxied, f"https://{NAME}", host=NAME.upper()))
+    assert not is_origin_refusal(origin_status(proxied, f"https://{NAME}:8443", host=f"{NAME}:80"))
+
+
+def test_mt_r2_loopback_origin_on_an_allowed_host_is_refused(proxied):
+    for origin in (f"http://127.0.0.1:{proxied.port}", f"http://localhost:{proxied.port}"):
+        assert is_origin_refusal(origin_status(proxied, origin, host=NAME))
+        assert is_origin_refusal(action_post(proxied, origin, host=NAME))
+
+
+def test_mt_r2_https_loopback_origin_is_still_refused_as_today(proxied):
+    host = f"127.0.0.1:{proxied.port}"
+    assert is_origin_refusal(origin_status(proxied, f"https://{host}", host=host))
+    assert is_origin_refusal(action_post(proxied, f"https://{host}", host=host))
+
+
 # --------------------------------------------------------------------------
 # MT-R3: bind address and rejected values
 # --------------------------------------------------------------------------
@@ -415,6 +503,29 @@ def test_mt_r4_start_without_the_flag_mints_a_fresh_token_and_keeps_the_stored_o
     assert [f.read_bytes() for f in world.stored_files()] == before
     again = world.start("--persistent-token")
     assert again.token == stored
+
+
+@pytest.mark.parametrize("damage", ["empty", "whitespace", "short", "garbage", "group-readable"])
+def test_mt_r4_plain_start_ignores_a_corrupt_stored_token(world, stored, damage):
+    f, good = stored
+    if damage == "empty":
+        f.write_bytes(b"")
+    elif damage == "whitespace":
+        f.write_bytes(b"   \n")
+    elif damage == "short":
+        f.write_bytes(b"abc\n")
+    elif damage == "garbage":
+        f.write_bytes(b"\xff\xfe\x00 not a token \x00" * 3)
+    else:
+        f.chmod(0o644)
+    before = (f.read_bytes(), stat.S_IMODE(f.stat().st_mode))
+    run = world.start()                                  # a plain start must come up
+    assert run.token != good
+    assert len(run.token) >= len(good)
+    assert page(run, run.token)[0] == 200
+    world.stop(run)
+    assert (f.read_bytes(), stat.S_IMODE(f.stat().st_mode)) == before
+    assert world.stored_files() == [f]
 
 
 def test_mt_r4_the_plain_start_never_reuses_a_token_either(world):
