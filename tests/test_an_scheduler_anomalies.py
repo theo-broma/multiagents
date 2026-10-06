@@ -694,9 +694,11 @@ def test_an_r4_an_anomaly_is_delivered_by_wait_for_nodes_as_any_transition(env):
 
 
 def test_an_r4_a_wait_in_flight_returns_on_an_anomaly(env):
+    # AN-R3: an unchanged anomaly is emitted once, so the waiter must already be in
+    # flight when the first check that emits it runs.
     node, _ = env.stuck_node()
-    env.at_offset(0)
     cursor = env.request("wait_for_nodes", {"timeout": 0, "cursor": 0})["result"]["next_cursor"]
+    assert not [t for t in env.transitions() if t["kind"] == "anomaly"], "emitted before any check"
     box = {}
 
     def wait():
@@ -708,7 +710,9 @@ def test_an_r4_a_wait_in_flight_returns_on_an_anomaly(env):
     thread.start()
     time.sleep(0.15)
     assert thread.is_alive(), "the wait returned with nothing to deliver"
-    env.at_offset(INTERVAL + 1)
+    env.at_offset(0)                      # the first check(s): whichever emits ends the wait
+    if thread.is_alive():
+        env.at_offset(INTERVAL + 1)
     thread.join(SHORT_WAIT + 2)
     assert not thread.is_alive()
     kinds = [(t["kind"], t["node_id"]) for t in box["reply"]["result"]["transitions"]]

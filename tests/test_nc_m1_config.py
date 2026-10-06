@@ -39,6 +39,9 @@ DEFAULTS = {
     "window_tolerance_seconds": 60,
     "admission_timeout_seconds": 10,
     "tick_seconds": 5,
+    "anomaly_interval_seconds": 120,
+    "anomaly_admission_seconds": 600,
+    "anomaly_held_seconds": 600,
 }
 
 
