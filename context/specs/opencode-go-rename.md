@@ -68,3 +68,20 @@ Verified by: review.
 - Renaming the opencode CLI's own auth-store entries (`opencode-go`,
   `opencode`), which belong to opencode.
 - Removing the OG-R2 alias. That is a later, separate decision.
+
+## Clarifications (2026-10-06, answering tester ag-b79b07)
+- **Warning channel.** The deprecation warning goes to stderr and into `Config.warnings`.
+- **CLI-level-only override.** A project override named `opencode` that sets only CLI-level keys (`bin`, `bin_search`, `spawn`, `mcp`, `stream`, …) applies to the base, with no warning.
+- **Surfaces.**
+  - The alias also covers `fallback_chain` entries, with the same warning.
+  - `refresh-quota` is a CLI command only.
+- **Collision.** A `models:` chain naming both `opencode` and `opencode-go` is refused at load as ambiguous.
+- **Merge (OG-R3), where records exist under both keys.**
+  - Breaker failure counts take the larger value.
+  - A cooldown or pause ends at the later of the two ends.
+  - Samples and history are united, de-duplicated and kept in time order.
+- **What is not migrated.**
+  - `spend-ledger.jsonl` stays append-only and is never rewritten. Readers that aggregate by provider count `opencode` entries as `opencode-go`.
+  - Scheduler attempt and history records stay as they are, because they are history. Only live routing keys move: node pins, aliases and deferred tasks.
+- **`doctor`.** It may list the base `opencode` as the CLI (binary, auth tool), but never as a route with a budget row or models.
+- **Superseded tests.** The 20 tests listed by ag-b79b07, which pin `opencode` as the go route, are updated deliberately by a tester.
