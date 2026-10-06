@@ -4481,7 +4481,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 | VR continuation | ag-ac9706 | bunny | 59 min (mostly a 32-min full suite) | rejected 1 (ag-4952e9: _with_spec KeyError on taskless node) | 1 → fix nd-029f8408 (quick, bunny, 3 min) approved by ag-9eee51 |
 | OZ impl | ag-36f162 | bunny | 98 min (several full suites) | approved (ag-cca152) | 44 superseded tests → tester nd-20eaa394 (not the impl's fault) |
 | breaker-trial fix | ag-aa6122 | bunny | 3 h 10 (two full suites + baseline; found and fixed a steer regression itself) | rejected 2 (ag-d2bda7: admission_only still claims; steer claims before cap/model refusal) | 1 → round 2 nd-6dc26a8f (ag-3f94d8, deep, bunny, 46 min; fixed both, found its own round-1 test red here) → approved by ag-a23089 |
-| GG impl | nd-2be8cada (ag-76422e) | muse | 87 min (full suite + baseline) | rejected 4 (ag-7957dd: blanket .invalid email exemption; hook temp-file trap; stderr swallowed; [line-wrap withdrawn]) | 1 → round 2 nd-2308f437 (ag-6c392d, muse, 2.6 min) → rejected 1 (ag-1b916e: quoted git paths skip the binary scan) → round 3 nd-0698c087 (ag-7669f9, muse) |
+| GG impl | nd-2be8cada (ag-76422e) | muse | 87 min (full suite + baseline) | rejected 4 (ag-7957dd: blanket .invalid email exemption; hook temp-file trap; stderr swallowed; [line-wrap withdrawn]) | 1 → round 2 nd-2308f437 (ag-6c392d, muse, 2.6 min) → rejected 1 (ag-1b916e: quoted git paths skip the binary scan) → round 3 nd-0698c087 (ag-7669f9, muse, 5.6 min, 749 passed) → reviewer NEXT |
 
 ### 2026-10-06 — monitor over Tailscale (MT)
 - User: reach the monitor from the phone through `tailscale serve` (tailnet only, never Funnel). Spec context/specs/monitor-tailnet-access.md (MT-R1..R7: --allow-host, --persistent-token, --rotate-token; bind stays 127.0.0.1), approved by the user and committed d8ec8fd. Tester nd-0a2ee3dc → merge tests → implementer (random Muse/Bunny) → reviewer → merge. Then tell the user: `tailscale serve --bg 8787` + `multiagents monitor --allow-host <host>.<tailnet>.ts.net --persistent-token`.
@@ -4525,3 +4525,36 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - 15:3x GG reviewer ag-7957dd rejected 4. Decisions in the spec: the email exemptions are strict (no blanket .invalid; the h1/h3 fixtures are changed by a tester afterwards); line-wrapped secrets are out of scope. Round 2 nd-2308f437 (muse) lists the red fixture tests for the tester.
 - 15:4x GG round 2 done (ba62c02; 744 passed; 1 fixture test red as expected). Fixture tester nd-34510e2d (h1 IDENTITY → t@example.invalid; test-only branch) and round-2 reviewer nd-ddc43748 run in parallel. Merge both, then the quiet point → history rewrite.
 - 16:0x Fixture update merged (7060bec: h1 IDENTITY and c3_harness → t@example.invalid). GG round-2 reviewer rejected 1: `_split_git_path` keeps the quotes on git-quoted paths, so binaries with space or non-ASCII names go unscanned. Round 3 nd-0698c087 (muse). If round 3 is rejected → opus (user rule).
+
+### HANDOFF 2026-10-06 ~16:1x (orchestrator context wind-down)
+**Nothing is running.** No agent is in flight. Durable state: this BRIEF, specs under context/specs/, and the Muse vs Bunny table above.
+
+**Next steps, in order:**
+1. **GG reviewer.** Start a reviewer with verifies=ag-7669f9 on branch nodes/nd-0698c087: the round-3 fix for git-quoted paths, `_unquote_git_c_style` plus `core.quotePath=false`, with tests in tests/test_gg_quoted_paths.py.
+   - If approved, merge_node nd-0698c087. Its branch holds every GG commit, so nd-2be8cada and nd-2308f437 are superseded: cancel or leave them.
+   - If rejected (that would be round 3), move to an opus implementer (user rule).
+2. **After GG merges.**
+   - Run `multiagents git-guard install` for this repo; `push_branch` already scans.
+   - Then the QUIET POINT, at which nothing may run:
+     a. Restart the host scheduler (pid 1969063) to load VR (merged 0ebd883), so VR-R5 settles the 4 held loops (SL nd-e2cde527, EV nd-283b4ce4, AU nd-928293e3, RV nd-0ef8ebbd). Before the restart, ask the user whether to retire those loops instead, since the history rewrite invalidates their SHAs anyway (advisor).
+     b. **History rewrite**, done by the git agent in a separate bare clone, following the advisor plan in the "personal data" section above:
+        - use the private patterns file;
+        - run both `--replace-text` and `--replace-message`;
+        - verify the result;
+        - stop the scheduler during the cutover;
+        - force-push main only, and only with the user's explicit go;
+        - never `--mirror` or `--tags`.
+3. **Then the paused implementers.** Draw the model at random between bunny and muse for each:
+   - **AN** implementer, after VR. Its tests are on main: 61 red.
+   - **MT** implementer. Tests on main.
+   - **NT** part 1 implementer (R1, R2, R7, R8). Tests on main.
+   - **OG** implementer-deep. Tests on main, plus 20 superseded tests already updated. Afterwards, switch this repo's config files from `provider: opencode` to `opencode-go`.
+   - NT part 2 (the scheduler sender) after AN.
+4. **Pending from earlier:**
+   - flip RV_IMPLEMENTED in the VR tests when RV lands;
+   - ledger: AU → F130, F131, F132, F140; EV → F112, F33; BQ (F120) after AU; allowlist F10 after EV;
+   - TI-R7 needs the user's OK;
+   - §4 trial report.
+5. **Optional, offered to the user and not started:** a faster VR fixture world (an in-process worker) to get VR tests under 2 s.
+
+**Muse vs Bunny so far:** Muse is fast but rejected twice on GG; Bunny is thorough but slow and rejected once on VR and on the breaker. No clear winner yet; keep drawing at random.
