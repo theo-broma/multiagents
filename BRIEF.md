@@ -4696,3 +4696,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   1. NT round 3: the same task as nd-f805d594 (cherry-pick 2e67e14, 807cafc and 659448c from `agents/implementer-deep/5fc11f` onto inputs nd-e0060d42), then an opus reviewer with the nd-07edc3be task;
   2. git rehearsal: the same task as nd-cd00c466 (cherry-pick 54b560e and 6b90c51; rehearse empty and dummy patterns; report).
 - The user said "oui" to the global ~/.config changes (fallback_chain → opencode-go; drop the `opencode` override's `models_include`), but the auto-mode classifier refused my edit, so the user applies it. Backups are in the scratchpad.
+- 2026-10-07 ~00:20 **Resumed on LongCat.** The "outage" was the Zen free-model quota. User: try `opencode-go/longcat-2.5-preview-free` (provider opencode-go) as implementer, and keep it while its results are acceptable. The Muse/Bunny A/B is paused. Recreated nodes:
+  - nd-71f841ca (run ag-4619fc): NT round 3, LongCat; then nd-f3f9667d: opus reviewer, depends on it;
+  - nd-eab3e1e2 (run ag-258317): git rehearsal, LongCat.
+  Tooling bug: both nodes were refused admission ("opencode-go and all fallbacks are exhausted or cooling down") at 0 % usage, with a breaker record of "0 consecutive failures, cooldown lapsed". `doctor --clear opencode-go` unblocked them. This looks like bug (d) again, despite the 679df78 fix; to be investigated in-house.
