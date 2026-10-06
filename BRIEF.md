@@ -4478,7 +4478,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 
 | task | run | model | duration | review verdict | rework rounds |
 |---|---|---|---|---|---|
-| VR continuation | ag-ac9706 | bunny | | | |
+| VR continuation | ag-ac9706 | bunny | 59 min (mostly a 32-min full suite) | pending (reviewer nd-12906adc) | 0 — found prior work complete, no hang |
 | OZ impl | ag-36f162 | bunny | | | |
 | breaker-trial fix | ag-aa6122 | bunny | | | |
 
@@ -4488,3 +4488,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 ### 2026-10-06 — ntfy notifications (NT)
 - User: ntfy notifications from the orchestrator (root-only MCP `notify`) AND the host scheduler; self-hosted ntfy on their tailnet; in-house code. Spec context/specs/ntfy-notifications.md (NT-R1..R8, advisor gaps folded in), committed 4b7c19f. Rule: generic placeholder addresses only in tracked files; the user's real host/tailnet only in untracked .multiagents/config.
 - Part 1 (R1, R2, R7, R8): tester nd-c3ba8b2a. Part 2 (R3–R6 scheduler sender): tests and implementation after VR and AN merge.
+- 10:3x MT tests merged (7c12d89, 96 tests, red). Clarifications 7169a64 (Origin rule on /api/action, Origin==Host, plain start ignores a corrupt stored token). Follow-up tester nd-ecd541e7, then MT implementer (random model). VR continuation ag-ac9706 done (branch nodes/nd-f0bf4a1e = efa962b, no hang found; full suite 32 min under load) → reviewer nd-12906adc.
