@@ -4484,3 +4484,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 
 ### 2026-10-06 — monitor over Tailscale (MT)
 - User: reach the monitor from the phone through `tailscale serve` (tailnet only, never Funnel). Spec context/specs/monitor-tailnet-access.md (MT-R1..R7: --allow-host, --persistent-token, --rotate-token; bind stays 127.0.0.1), approved by the user and committed d8ec8fd. Tester nd-0a2ee3dc → merge tests → implementer (random Muse/Bunny) → reviewer → merge. Then tell the user: `tailscale serve --bg 8787` + `multiagents monitor --allow-host <host>.<tailnet>.ts.net --persistent-token`.
+
+### 2026-10-06 — ntfy notifications (NT)
+- User: ntfy notifications from the orchestrator (root-only MCP `notify`) AND the host scheduler; self-hosted ntfy on their tailnet; in-house code. Spec context/specs/ntfy-notifications.md (NT-R1..R8, advisor gaps folded in), committed 4b7c19f. Rule: generic placeholder addresses only in tracked files; the user's real host/tailnet only in untracked .multiagents/config.
+- Part 1 (R1, R2, R7, R8): tester nd-c3ba8b2a. Part 2 (R3–R6 scheduler sender): tests and implementation after VR and AN merge.
