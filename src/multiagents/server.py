@@ -133,6 +133,12 @@ def _tool():
     register = mcp.tool()
 
     def decorate(fn):
+        if fn.__name__ == "notify" and os.environ.get("MULTIAGENTS_AGENT_ID"):
+            # NT-R2: root only, legacy runs included. A legacy subagent's
+            # server (an agent id but no node permissions) otherwise lists
+            # every tool; notify is never among them. The function itself
+            # still refuses a direct call from a subagent at runtime.
+            return fn
         permissions = os.environ.get("MULTIAGENTS_NODE_PERMISSIONS")
         allowed = None
         if permissions is not None:
@@ -1852,6 +1858,45 @@ def ack_nodes(cursor: int, ctx: _ToolContext = None) -> dict:
 def scheduler_status() -> dict:
     """Read the scheduler pid, startup time, gate and node counts."""
     return _node_rpc("scheduler_status", {})
+
+
+@_tool()
+def notify(title: str, message: str, priority: str = "default",
+           tags: list | None = None) -> dict:
+    """Send a push notification through the project's ntfy server (NT-R2).
+
+    Publishes one message to `<ntfy_url>/<topic>` from the project's
+    `notify:` section. The body is free text truncated to 1000 characters
+    (NT-R7). Returns `{"ok": True}` when the server accepted the message,
+    else `{"ok": False, "reason": ...}` — it never raises, never follows
+    redirects, and is not rate limited.
+
+    Root orchestrator only: it is in no subagent's tool list, and a
+    subagent calling it directly is refused.
+    """
+    if os.environ.get("MULTIAGENTS_AGENT_ID"):
+        caller = os.environ.get("MULTIAGENTS_AGENT_ID")
+        return _ok({"ok": False,
+                    "reason": f"notify is reserved for the orchestrator; {caller} is a subagent."})
+    try:
+        run = runner()
+        section = (run.config.project or {}).get("notify")
+    except Exception as exc:
+        # Fixed template, not the exception text: the message is built from
+        # the project's own files and is not known to be free of the token.
+        return _ok({"ok": False,
+                    "reason": (f"invalid config ({type(exc).__name__}): "
+                               "the project configuration could not be loaded")})
+    try:
+        from . import notify as notify_mod
+
+        return _ok(notify_mod.send(section, title, message, priority, tags))
+    except Exception as exc:
+        # notify.send never raises; if it ever did, its exception text could
+        # quote the Authorization header, so it must not reach the reason.
+        return _ok({"ok": False,
+                    "reason": (f"network error ({type(exc).__name__}): "
+                               "the notification could not be sent")})
 
 
 @_tool()

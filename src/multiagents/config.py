@@ -1056,6 +1056,12 @@ def source_version(paths: ProjectPaths | None) -> tuple:
 def read_project_layer(layer: Path, scheduler_errors: list[str] | None = None) -> dict:
     """Validate scheduler policy at its source; doctor may collect bad keys."""
     data = read_yaml_cached(layer / "project.yaml", strict=True)
+    if "notify" in data:
+        # NT-R1: the notify section is refused at load, the way invalid
+        # scheduler settings are — naming the key and the file with its line.
+        from .notify import validate_layer_block
+
+        validate_layer_block(data["notify"], layer / "project.yaml")
     if "scheduler" not in data:
         return data
     from .notices import _node_at
@@ -1155,6 +1161,13 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
                                 f"{scope} layer {layer / name}{line}")
 
     providers_raw = merged["providers.yaml"].get("providers", {}) or {}
+    # NT-R1: the merged notify section needs its required keys (each layer's
+    # own values were checked at their source in read_project_layer) and
+    # gains its defaults; absent, the feature is off.
+    from .notify import finalize_notify
+
+    finalize_notify(merged["project.yaml"],
+                    [layer / "project.yaml" for layer in layers])
     # GG-R1: wrongly typed git guard settings are refused at load, the way
     # other invalid settings are.
     _validate_git_section(merged["project.yaml"])

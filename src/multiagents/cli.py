@@ -3340,6 +3340,50 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def cmd_notify(args: argparse.Namespace) -> int:
+    """`multiagents notify test|status` (NT-R8, first round).
+
+    `test` sends one message with the project's config and exits 0 when the
+    server accepts it, non-zero with the reason otherwise. `status` prints
+    the sending state — the pending count — and never publishes. Clearing
+    the NT-R4 pause on a successful test belongs to the scheduler sender
+    (part 2); there is no pause store yet, so there is nothing to clear.
+    """
+    from . import notify as notify_mod
+
+    paths = _resolve(args.path)
+    action = getattr(args, "notify_command", "")
+    try:
+        config = load_config(paths)
+    except Exception as exc:
+        print(f"notify {action}: invalid config: {exc}")
+        return 1
+    section = (config.project or {}).get("notify")
+    if action == "status":
+        if section is None:
+            print("notify: not configured")
+        else:
+            print(f"notify: {section.get('ntfy_url')}, topic {section.get('topic')}")
+        # Part 1 keeps no outbox: nothing is ever pending yet.
+        print("pending: 0")
+        return 0
+    if action == "test":
+        if section is None:
+            print("notify test: notify is not configured: no notify: section in project.yaml")
+            return 1
+        result = notify_mod.send(section, "multiagents notify test",
+                                 "This is a test notification from multiagents. "
+                                 "If you read this, push notifications are working.")
+        if result.get("ok") is True:
+            print(f"notify test: accepted by {section.get('ntfy_url')} "
+                  f"(topic {section.get('topic')})")
+            return 0
+        print(f"notify test: {result.get('reason', 'failed')}")
+        return 1
+    print(f"unknown notify action {action!r}", file=sys.stderr)
+    return 2
+
+
 def cmd_scheduler(args: argparse.Namespace) -> int:
     from . import scheduler
     paths = _resolve(args.path)
@@ -3370,6 +3414,12 @@ def main(argv: list[str] | None = None) -> int:
         if action == "start":
             command.add_argument("--foreground", action="store_true")
             command.add_argument("--clock-file", help=argparse.SUPPRESS)
+
+    p = sub.add_parser("notify", help="test ntfy push notifications and show their state")
+    p.set_defaults(func=cmd_notify)
+    notify_sub = p.add_subparsers(dest="notify_command", required=True)
+    notify_sub.add_parser("test", help="send one test message with the project's config").set_defaults(func=cmd_notify)
+    notify_sub.add_parser("status", help="show the notification sending state").set_defaults(func=cmd_notify)
 
     p = sub.add_parser("plan", help="commit plans and new specifications")
     p.set_defaults(func=cmd_plan)
