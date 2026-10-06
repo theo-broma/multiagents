@@ -15,16 +15,14 @@ fake CLIs and stop everything they started in a fixture finalizer.
 
 SILENCES in the contract (each assumption is the loosest reading, and is the
 only place this file goes beyond the text):
-- Zen's credential in opencode's auth.json. opencode names that provider
-  `opencode` (go is `opencode-go`); the positive `check` tests store the key
-  under `opencode`.
-- A zen `check` with nothing stored: only "never exit 0" is asserted (10 and 20
-  are both accepted); a zen `check` mechanism (auth store vs `providers list`)
-  is not fixed, so positives set both signals consistently.
-- What a go-only credential means to zen `check` is NOT asserted.
-- "Unknown capacity" for `budget`: the existing form, exit 0 and a JSON object
-  `{"known": false, "note": "..."}` with no numeric headroom and no windows
-  (the form DI-R4 already uses).
+Clarifications (spec, 2026-10-06) now fix what used to be silences:
+- Zen's credential is the `opencode` entry of opencode's auth.json (go's is
+  `opencode-go`).
+- Unknown capacity is the deepinfra form, exactly:
+  `{"known": false, "headroom": null, "windows": {}, "note": "..."}`, exit 0.
+- `check` under zen never exits 10: no `opencode` entry (a go-only store
+  included) exits 20; an entry present exits 0 with a "present" message.
+- `usage` under zen exits 64 and makes no network call.
 """
 
 from __future__ import annotations
@@ -638,10 +636,11 @@ def _budget(env, **kw):
 
 
 def _assert_unknown_capacity(b):
-    assert b.get("known") is False, b
-    assert b.get("headroom") is None, f"unknown capacity must not carry a number: {b}"
-    assert not b.get("windows"), b
-    assert isinstance(b.get("note"), str) and b["note"], b
+    assert set(b) == {"known", "headroom", "windows", "note"}, b
+    assert b["known"] is False, b
+    assert b["headroom"] is None, f"unknown capacity must not carry a number: {b}"
+    assert b["windows"] == {}, b
+    assert isinstance(b["note"], str) and b["note"], b
 
 
 def _no_go_numbers(text):
@@ -747,25 +746,41 @@ def test_oz_r3_check_with_a_stored_credential_is_logged_in(env):
     assert env.any_contacts == [], "check must not use the network"
 
 
-def test_oz_r3_check_with_nothing_stored_is_not_logged_in(env):
+def test_oz_r3_check_with_a_stored_credential_says_the_entry_is_present(env):
+    env.zen_store()
+    cp = env.run("check")
+    assert cp.returncode == 0, (cp.stdout, cp.stderr)
+    assert "present" in (cp.stdout + cp.stderr).lower(), (cp.stdout, cp.stderr)
+
+
+def test_oz_r3_check_with_nothing_stored_is_unknown_exit_20_never_10(env):
     env.set_bin("echo '0 credentials'")
     cp = env.run("check")
-    assert cp.returncode in (10, 20), (cp.returncode, cp.stdout, cp.stderr)
+    assert cp.returncode == 20, (cp.returncode, cp.stdout, cp.stderr)
     assert (cp.stdout + cp.stderr).strip()
     assert env.go_contacts == []
+
+
+def test_oz_r3_check_with_a_go_only_store_is_unknown_exit_20_never_10(env):
+    env.store({"opencode-go": {"type": "api", "key": GO_KEY}})
+    env.set_bin("echo '1 credentials'")
+    cp = env.run("check")
+    assert cp.returncode == 20, (cp.returncode, cp.stdout, cp.stderr)
+    assert env.any_contacts == []
+    assert_no_key(cp, GO_KEY)
 
 
 def test_oz_r3_check_missing_store_and_a_binary_that_says_nothing_is_never_logged_in(env):
     """AU's rule: unknown is never reported as logged in."""
     env.set_bin("exit 0")                  # empty output, exit 0
     cp = env.run("check")
-    assert cp.returncode != 0, (cp.stdout, cp.stderr)
+    assert cp.returncode == 20, (cp.returncode, cp.stdout, cp.stderr)
 
 
 def test_oz_r3_check_with_a_failing_binary_and_no_store_is_never_logged_in(env):
     env.set_bin("exit 1")
     cp = env.run("check")
-    assert cp.returncode != 0, (cp.stdout, cp.stderr)
+    assert cp.returncode == 20, (cp.returncode, cp.stdout, cp.stderr)
 
 
 @pytest.mark.parametrize("store", ["{ garbage", "[1, 2, 3]", '{"opencode": {"key": ""}}',
@@ -775,7 +790,11 @@ def test_oz_r3_check_with_an_unusable_store_and_unrecognisable_binary_is_never_l
     env.store(store)
     env.set_bin("echo 'something nobody agreed to parse'")
     cp = env.run("check")
-    assert cp.returncode != 0, (cp.stdout, cp.stderr)
+    # never "not logged in", never logged in; an entry with an empty or odd
+    # value is not pinned further by the Clarifications
+    assert cp.returncode not in (0, 10), (cp.returncode, cp.stdout, cp.stderr)
+    if store in ("{ garbage", "[1, 2, 3]", '{"opencode": null}'):
+        assert cp.returncode == 20, (cp.returncode, cp.stdout, cp.stderr)
     assert "Traceback" not in cp.stdout + cp.stderr
     assert_no_key(cp)
 
@@ -802,7 +821,7 @@ def test_oz_r3_usage_never_contacts_go_and_prints_none_of_its_numbers(env):
     env.zen_store()
     env.set_go_reply(GO_REPLY_40)
     cp = env.run("usage")
-    assert cp.returncode in (0, 64), (cp.returncode, cp.stdout, cp.stderr)
+    assert cp.returncode == 64, (cp.returncode, cp.stdout, cp.stderr)
     assert env.any_contacts == [], env.any_contacts
     _no_go_numbers(cp.stdout + cp.stderr)
     assert_no_key(cp, ZEN_KEY, GO_KEY)
@@ -813,7 +832,7 @@ def test_oz_r3_usage_fed_zens_own_unknown_budget_reports_no_capacity_figures(env
     env.set_go_reply(GO_REPLY_40)
     _, b = _budget(env)
     cp = env.run("usage", extra={"MULTIAGENTS_BUDGET": json.dumps(b)})
-    assert cp.returncode in (0, 64), (cp.returncode, cp.stdout, cp.stderr)
+    assert cp.returncode == 64, (cp.returncode, cp.stdout, cp.stderr)
     _no_go_numbers(cp.stdout)
     assert "%" not in cp.stdout, f"a percentage appeared for a provider with no quota: {cp.stdout}"
     assert env.any_contacts == []
@@ -823,7 +842,7 @@ def test_oz_r3_usage_with_a_go_credential_only_does_not_use_it(env):
     env.store({"opencode-go": {"type": "api", "key": GO_KEY}})
     env.set_go_reply(GO_REPLY_40)
     cp = env.run("usage")
-    assert cp.returncode in (0, 64)
+    assert cp.returncode == 64, (cp.returncode, cp.stdout, cp.stderr)
     assert env.any_contacts == []
     assert_no_key(cp, GO_KEY)
 

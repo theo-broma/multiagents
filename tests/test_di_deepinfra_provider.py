@@ -168,7 +168,7 @@ def test_di_r1_opencode_and_opencode_zai_are_unchanged():
     ps = _load(_shipped_raw())
     assert ps.get(NAME) is not None
     o, z = ps["opencode"], ps["opencode-zai"]
-    assert list(o.models_include) == ["opencode/*", "opencode-go/*"]
+    assert list(o.models_include) == ["opencode-go/*"]      # OZ-R4: zen is its own provider
     assert o.family == "opencode" and o.enabled is not False
     assert "MULTIAGENTS_OPENCODE_PLAN" not in (o.env or {})
     assert list(z.models_include) == ["zai-coding-plan/*"]
@@ -211,7 +211,7 @@ def test_di_r1_refresh_models_splits_the_namespaces_keeping_two_slash_ids(tmp_pa
         f"{MODEL} {MODEL_B} deepinfra/zai-org/GLM-4.7/extra")
     ids = lambda n: sorted(m["id"] for m in models.get(n) or [])   # noqa: E731
     assert ids(NAME) == sorted([MODEL, MODEL_B, "deepinfra/zai-org/GLM-4.7/extra"]), (models, out)
-    assert ids("opencode") == ["opencode-go/glm-5.1", "opencode/big-pickle"], models
+    assert ids("opencode") == ["opencode-go/glm-5.1"], models   # OZ-R4: no opencode/* under go
     assert ids("opencode-zai") == ["zai-coding-plan/glm-4.7"], models
     for other in ("opencode", "opencode-zai"):
         assert not [i for i in ids(other) if i.startswith("deepinfra/")], models
@@ -632,10 +632,11 @@ def test_di_r6_other_shipped_providers_are_not_given_the_plan_variable():
     ps = _load(_shipped_raw())
     assert ps.get(NAME) is not None
     for name, p in ps.items():
-        if name in (NAME, "opencode-zai"):
+        if name in (NAME, "opencode-zai", "opencode-zen"):
             continue
         assert (p.env or {}).get("MULTIAGENTS_OPENCODE_PLAN") is None, name
     assert ps["opencode-zai"].env["MULTIAGENTS_OPENCODE_PLAN"] == "zai-coding-plan"
+    assert ps["opencode-zen"].env["MULTIAGENTS_OPENCODE_PLAN"] == "zen"      # OZ-R1
 
 
 def test_di_r6_shipped_roster_never_uses_the_instance():

@@ -254,7 +254,7 @@ def test_za_r1_failover_between_go_and_zai_is_never_implicit():
 
 def test_za_r1_opencode_itself_is_unchanged():
     o = _load(_shipped_raw())["opencode"]
-    assert list(o.models_include) == ["opencode/*", "opencode-go/*"]
+    assert list(o.models_include) == ["opencode-go/*"]      # OZ-R4: zen is its own provider
     assert o.family == "opencode"
     assert o.enabled is not False
     assert "MULTIAGENTS_OPENCODE_PLAN" not in (o.env or {})
@@ -288,8 +288,7 @@ def test_za_r1_refresh_models_splits_the_namespaces(tmp_path, monkeypatch):
     ids = lambda n: sorted(m["id"] for m in models.get(n) or [])   # noqa: E731
     assert ids("opencode-zai") == ["zai-coding-plan/glm-4.7", "zai-coding-plan/glm-5.3-flash"], (
         models, out)
-    assert ids("opencode") == ["opencode-go/glm-5.1", "opencode-go/kimi-k2",
-                               "opencode/big-pickle"], models
+    assert ids("opencode") == ["opencode-go/glm-5.1", "opencode-go/kimi-k2"], models   # OZ-R4
 
 
 def test_za_r1_disabled_instance_is_not_refreshed(tmp_path, monkeypatch):
