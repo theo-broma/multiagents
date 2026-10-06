@@ -12,4 +12,15 @@ root:
   max_rounds: {param: rounds}
   children:
     - {key: work, kind: simple, agent: {param: worker}, task: {param: task}, session: A}
-    - {key: review, kind: simple, agent: {param: reviewer}, task: Review the work and give a verdict., session: B}
+    - key: review
+      kind: simple
+      agent: {param: reviewer}
+      session: B
+      task: |
+        Review the work and give a verdict.
+
+        You are this loop's verdict child, so call `give_verdict` over the RPC
+        with the verdict you reached; the loop waits for that call and is held
+        for a human without it. Also end your message with the verdict line,
+        `VERDICT(approved): ...` or `VERDICT(rejected, 2): ...`, whatever the
+        call said.

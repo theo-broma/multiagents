@@ -437,9 +437,11 @@ class Service:
                 if reviewed is None:
                     raise Refused("forbidden")
                 # Receipt records the proposal; only successful activation
-                # completion can apply it to the reviewed generations.
+                # completion can apply it to the reviewed generations. Its
+                # provenance is `tool`, the other of VR-R4's two.
                 node["pending_verdict"] = {"verdict": args["verdict"], "findings": findings,
-                                           "attempt_id": active["attempt_id"], **review}
+                                           "attempt_id": active["attempt_id"], "verdict_source": "tool",
+                                           **review}
                 self.store.transition(db, "verdict", node["id"], {**review, **node["pending_verdict"]})
             elif op == "merge_node":
                 model.check_fields(args, {"force"}, {"id", "revision"})

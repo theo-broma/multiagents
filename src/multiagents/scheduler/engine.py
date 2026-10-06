@@ -34,6 +34,10 @@ def epoch(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
+# The only two things a verdict can say, whoever said them (VR-R1).
+VERDICTS = {"approved", "rejected"}
+
+
 def attempts(db):
     return {id: json.loads(raw) for id, raw in db.execute("SELECT id, record FROM attempts")}
 
@@ -91,6 +95,11 @@ class Engine:
         # failing evaluation cannot starve every node ordered behind it.
         self.evaluating = None
         self.evaluation_failures = {}
+        # VR-R5: the one sweep that settles the rounds an older engine held
+        # `unresolved_round` although their reviewer had answered in writing.
+        # Once per engine, at the first tick: a settled round is no longer
+        # held, so a restart finds nothing to do and nothing is settled twice.
+        self.settle_held_once = True
         self.migrate()
         with self.store.transaction(write=False) as db:
             window_nodes = self.store.nodes(db)
@@ -855,6 +864,72 @@ class Engine:
         self.store.transition(db, reason, node["id"], node["hold"])
         self.store.transition(db, "held", node["id"], node["hold"])
 
+    # ------------------------------------------------------------- verdicts
+    # Two paths reach a round's verdict: the reviewer's `give_verdict` call,
+    # and the `VERDICT(...)` line the runner parses out of that run's own
+    # final text. Both are bound to the attempt that judged the round, the
+    # generation it judged and the commit that generation sits on, so a run's
+    # text can only ever settle its own round.
+
+    def written_verdict(self, run, status):
+        """The verdict the runner parsed from `run`'s own final text (VR-R1).
+
+        None unless the run finished `done`: text left behind by a run that
+        failed or was stopped is not a verdict (VR-R3). The runner persists
+        no verdict at all when a text's verdict lines contradict each other,
+        so a parsed one is always lines that agreed.
+        """
+        if status != "done" or run is None:
+            return None
+        return run.verdict if run.verdict in VERDICTS else None
+
+    def round_verdict(self, loop, attempt, written):
+        """The verdict that settles this round, and where it came from
+        (VR-R1..VR-R4). An explicit `give_verdict` always wins; a verdict the
+        reviewer wrote is used when the tool was not called, and the two
+        disagreeing is recorded rather than resolved. None when neither path
+        produced one: the round stays unresolved, as it does today.
+
+        `written` is None unless `attempt`'s run finished `done` with a
+        verdict the runner parsed from its own text.
+        """
+        proposed = loop.get("pending_verdict")
+        if proposed and proposed.get("attempt_id") == attempt["attempt_id"]:
+            verdict = dict(proposed, verdict_source="tool")
+            if written and written != verdict["verdict"]:
+                verdict["verdict_disagreement"] = {"tool": verdict["verdict"], "text": written}
+            return verdict
+        review = attempt.get("review") or {}
+        judged = (review.get("node_id") == loop["id"]
+                  and any(g["seq"] == review.get("generation_seq") and g["commit"] == review.get("commit")
+                          for g in loop["generations"]))
+        if written and judged:
+            # No findings: a verdict line is a judgement, not a list of
+            # defects, and nothing reads prose to invent one.
+            return {**review, "verdict": written, "findings": [], "verdict_source": "text",
+                    "attempt_id": attempt["attempt_id"]}
+        return None
+
+    def record_round(self, db, loop, nodes, verdict):
+        """Write a settled round's verdict on every record of the work it
+        judged — each mirrored generation (VR-R4) — and on the loop's pending
+        verdict, which is what `composites` reads to exit or relaunch."""
+        round_generations = loop["generations"][loop.get("round_generation_start", 0):verdict["generation_seq"]]
+        identities = {(g["run_id"], g["commit"]) for g in round_generations}
+        for owner in nodes.values():
+            # Another loop's record is its own judgement (NC-R97).
+            if owner["kind"] == "loop" and owner["id"] != loop["id"]:
+                continue
+            for generation in owner["generations"]:
+                if (generation["run_id"], generation["commit"]) in identities:
+                    generation["verdict"] = verdict["verdict"]
+                    generation["verdict_source"] = verdict["verdict_source"]
+                    if verdict.get("verdict_disagreement"):
+                        generation["verdict_disagreement"] = verdict["verdict_disagreement"]
+                    self.store.save_node(db, owner)
+        loop["pending_verdict"] = verdict
+        self.store.save_node(db, loop)
+
     def finished(self, attempt, run):
         """Journal confirmed death, capture outside the lock, then save its result.
 
@@ -936,6 +1011,10 @@ class Engine:
             result = current["result"]
             parent = nodes.get(node.get("parent"))
             reviewer = parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == node["id"]
+            # The runner's parse of this run's own final text, read once here:
+            # only the verdict child has a verdict to give (VR-R3).
+            written = (self.written_verdict(self.runner.tree.get(current["run_id"]), result["status"])
+                       if reviewer else None)
             integration = current.get("integration")
             if result["status"] == "done" and result.get("commit") and not result.get("capture_error") and not reviewer:
                 results = Results(self.paths, self.service.configuration())
@@ -1013,6 +1092,13 @@ class Engine:
                     return
                 nodes = self.store.nodes(db)
                 node = nodes[current["node_id"]]
+                # Decided here, in the transaction that settles it, so a
+                # written verdict is receipted exactly where an explicit one
+                # already was: before this run's own bookkeeping.
+                verdict = (self.round_verdict(nodes.get(node.get("parent")), current, written)
+                           if reviewer and result["status"] == "done" else None)
+                if verdict and verdict["verdict_source"] == "text":
+                    self.store.transition(db, "verdict", verdict["node_id"], dict(verdict))
                 integration = current.get("integration")
                 if integration:
                     generation = integration["generation"]
@@ -1057,22 +1143,10 @@ class Engine:
                                     crash_retry_round=loop["loop"]["rounds_rejected"])
                         self.store.transition(db, "run_retry", node["id"], {"attempt_id": current["attempt_id"]})
                     else:
-                        verdict = loop.get("pending_verdict") if reviewer and loop else None
                         outcome = "completed" if result["status"] == "done" else "failed"
-                        if (result["status"] == "done" and verdict
-                                and verdict["attempt_id"] == current["attempt_id"]):
-                            round_generations = loop["generations"][loop.get("round_generation_start", 0):verdict["generation_seq"]]
-                            identities = {(g["run_id"], g["commit"]) for g in round_generations}
-                            for owner in nodes.values():
-                                # Another loop's record is its own judgement (NC-R97).
-                                if owner["kind"] == "loop" and owner["id"] != loop["id"]:
-                                    continue
-                                for generation in owner["generations"]:
-                                    if (generation["run_id"], generation["commit"]) in identities:
-                                        generation["verdict"] = verdict["verdict"]
-                                        self.store.save_node(db, owner)
+                        if verdict:
                             verdict["settled"] = True
-                            self.store.save_node(db, loop)
+                            self.record_round(db, loop, nodes, verdict)
                             self.store.transition(db, "verdict_settled", loop["id"], verdict)
                             outcome = verdict["verdict"]
                         node.update(state="done", outcome=outcome,
@@ -1108,9 +1182,46 @@ class Engine:
                      and other.get("integration", {}).get("before") == top["branch_tip"]
                      and other.get("integration", {}).get("generation", {}).get("commit") == actual), None)
 
+    def settle_held_rounds(self, db, nodes, journal):
+        """VR-R5: settle, once, the rounds an earlier engine held
+        `unresolved_round` although their own reviewer had answered in
+        writing. This is how the trial loops resolve — from their reviewers'
+        verdicts, not from the orchestrator's reading of them.
+
+        A round whose last verdict-child run does not qualify is left exactly
+        as it was; a settled round is no longer held, so nothing is settled
+        twice and a restart finds nothing to do.
+        """
+        for loop in [n for n in nodes.values()
+                     if n["kind"] == "loop" and n["state"] == "held"
+                     and (n["hold"] or {}).get("reason") == "unresolved_round"]:
+            child = nodes.get((loop["loop"] or {}).get("verdict_child"))
+            runs = (child or {}).get("runs") or []
+            if not runs:
+                continue
+            run_id = runs[-1]["run_id"]
+            attempt = next((a for a in journal.values() if a["run_id"] == run_id and a.get("review")), None)
+            if attempt is None:
+                continue          # nothing binds a verdict to this round
+            run = self.runner.tree.get(run_id)
+            verdict = self.round_verdict(loop, attempt, self.written_verdict(run, run.status if run else ""))
+            if not verdict:
+                continue
+            if verdict["verdict_source"] == "text":
+                self.store.transition(db, "verdict", loop["id"], dict(verdict))
+            verdict["settled"] = True
+            self.record_round(db, loop, nodes, verdict)
+            # Lift the hold: the loop below settles the round as it would
+            # after a give_verdict, emitting loop_exited or round_rejected.
+            loop.update(state="running", hold=None, revision=loop["revision"] + 1)
+            self.store.save_node(db, loop)
+
     def composites(self):
         with self.service.changed, self.store.transaction() as db:
             nodes = self.store.nodes(db)
+            if self.settle_held_once:
+                self.settle_held_once = False
+                self.settle_held_rounds(db, nodes, attempts(db))
             for node in sorted((n for n in nodes.values() if n["kind"] != "simple"),
                                key=lambda n: len(model.subtree(nodes, n["id"]))):
                 if node["state"] in {"done", "cancelled", "suspended"} or node.get("completion_pending") or node.get("disposal_pending"):

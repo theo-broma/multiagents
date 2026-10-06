@@ -34,7 +34,7 @@ def definition(text):
     keys = set()
     def check(node):
         if (not isinstance(node, dict) or set(node) - {"key", "kind", "agent", "task", "session",
-                "pins", "children", "verdict_child", "max_rounds", "depends_on", "inputs", "locks", "urgent", "window"}
+                "spec_path", "pins", "children", "verdict_child", "max_rounds", "depends_on", "inputs", "locks", "urgent", "window"}
                 or not isinstance(node.get("key"), str) or not node["key"]
                 or node["key"] in keys or not isinstance(node.get("kind"), str) or node["kind"] not in model.KINDS):
             invalid("root: invalid node or duplicate local key")
@@ -72,6 +72,22 @@ def check_value(name, param, value, config=None):
 # The fields a client may set on an instance's root, as it sets them on a
 # composite `create_node` (context/specs/template-instantiation.md, TI-R2/R3).
 ROOT_FIELDS = frozenset({"urgent", "window", "depends_on", "inputs", "locks"})
+
+
+def _with_spec(task, spec_path):
+    """A node's own task, with the specification this instance names.
+
+    Template-local: `spec_path` never reaches the node, it only tells the task
+    where the thing under review is written down. Interpolation is not a thing
+    (NC-R41), so this is whole-value composition at expansion time.
+
+    A node may carry `spec_path` with no task of its own (or an explicitly null
+    one): the reference is then the whole task, since a node needs one to run.
+    """
+    reference = f"The specification is at `{spec_path}`."
+    if not task:
+        return reference
+    return f"{task}\n\n{reference}"
 
 
 def host_registry():
@@ -127,6 +143,8 @@ def expand(template, supplied, config, subject, nodes, parent=None, root_fields=
     local, made = {}, []
     def create(item, parent):
         fields = {k: copy.deepcopy(v) for k, v in item.items() if k in model.CREATABLE - {"children", "loop"}}
+        if item.get("spec_path"):
+            fields["task"] = _with_spec(fields.get("task"), item["spec_path"])
         fields["parent"] = parent
         node = model.create_record(fields, subject)
         while node["id"] in nodes:

@@ -6199,13 +6199,19 @@ class Runner(QuotaHandover):
         # worth more than a lost one, and the orchestrator can see the status.
         # The last verdict wins, for the same reason the last TICKET does: a
         # verifier reasoning about the format may quote it before giving one.
+        # Lines that contradict each other are no verdict at all: which of
+        # them the reviewer meant is exactly what cannot be read out of prose,
+        # so the run stays unjudged rather than judged on the last word
+        # (VR-R3). Repeated agreeing lines qualify, the last one is the one
+        # kept.
         verdicts = list(VERDICT.finditer(text or ""))
         if verdicts and not run.awaiting:
             found = verdicts[-1]
+            agreeing = len({v.group(1).lower() for v in verdicts}) == 1
             self.tree.update(
                 node_id,
-                verdict=found.group(1).lower(),
-                defects=int(found.group(2)) if found.group(2) else 0,
+                verdict=found.group(1).lower() if agreeing else "",
+                defects=int(found.group(2) or 0) if agreeing else 0,
             )
 
         filed = self._file_tickets(node_id, text) if not run.awaiting else []

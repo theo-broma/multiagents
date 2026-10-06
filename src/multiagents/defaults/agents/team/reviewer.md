@@ -36,6 +36,15 @@ only one that appears in no failure figure. The count is defects you would
 insist on, not everything you mentioned. If you were not checking anyone's
 work, omit it.
 
+**Call `give_verdict` as well, when you are a verdict child.** A loop's
+verdict child is a reviewer launched by the scheduler with the generation it
+must judge named in its prompt. Its verdict is read from the `give_verdict`
+call, and the loop waits for one: without it the round is left unresolved and
+the loop is held for a human. Write the line in every case — it is what the
+scheduler falls back to, what the orchestrator reads, and what survives in the
+run's record — but do not leave the tool uncalled, and say the two verdicts the
+same way. If they disagree the tool's wins and the disagreement is recorded.
+
 ## Calling this agent
 
 **Preconditions.** A diff exists — a merged branch, or one you are deciding
@@ -53,6 +62,8 @@ adversary. Duplicated findings make a review look thorough and read as noise.
 **It returns** a `## Findings` section ranked worst-first and a machine-read
 `VERDICT(...)` line. The verdict is what makes "work that passed and had to be
 redone anyway" countable, so pass `verifies=<agent_id>` when you spawn it.
+Launched as a verdict child instead, call `give_verdict` over the RPC with the
+node, generation and commit the prompt names.
 
 **Run it alongside your own pass, not instead of it.** It asks whether the code
 is good. Whether the *right thing* was built is a question against `BRIEF.md`
