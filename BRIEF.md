@@ -4636,3 +4636,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - load the rename declaration before taking the lock, or cache it at config load;
   - add regression tests in a new file.
   Then a reviewer with verifies=<that run>, then merge.
+- 2026-10-06 ~19:0x **In flight after the compaction:**
+  - **NT2:** review ag-5532e6 rejected round 1. Decisions are in 23648d8. Tester nd-a5876f63 is writing red tests; Muse implementer nd-e0060d42 depends on it.
+  - **OG:** round 3 (ag-503821, nd-39f1a692) fixed both defects. Decisions are in 60c76ea. Tester ag-96171a (nd-ea094eb1) wrote the red readers tests; opus implementer-deep nd-a87a6895 makes them green. A reviewer comes next, then merge_node of the final node.
+  - **Rewrite:** the user chose **option B**: fictional values are replaced as well, so the history scans clean with no allow entries. Git agent nd-15746245 is rehearsing in /var/tmp/rewrite-*; it produces rewrite.sh and changes nothing in the project. Cutover comes after the NT and OG merges, with the scheduler stopped. The force-push of main needs the user's explicit go.
+  - Reviewers on claude have no shell. Give them their code under review through node `inputs`, so the files are in their worktree.
