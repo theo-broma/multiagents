@@ -1612,11 +1612,17 @@ def cmd_git_guard(args: argparse.Namespace) -> int:
         except gg.PatternsFileError as exc:
             print(f"git-guard scan: {exc}", file=sys.stderr)
             return 2
+        except gg.KeyFileError as exc:
+            print(f"git-guard scan: {exc}", file=sys.stderr)
+            return 2
         if result.notice:
             print(result.notice)
         for finding in result.findings:
             print(finding.line())
-        return 1 if result.findings else 0
+        if result.findings:
+            print(gg.paste_block(result.findings))
+            return 1
+        return 0
     if action == "check-push":
         try:
             repo = gg.discover_repo(paths.root if paths else Path.cwd())
@@ -1626,7 +1632,7 @@ def cmd_git_guard(args: argparse.Namespace) -> int:
         lines = (sys.stdin.read() or "").splitlines()
         try:
             result = gg.check_push_input(repo, settings, lines)
-        except (gg.GitError, gg.PatternsFileError) as exc:
+        except (gg.GitError, gg.PatternsFileError, gg.KeyFileError) as exc:
             print(f"git-guard: push refused: {exc}", file=sys.stderr)
             return 1
         if result.notice:

@@ -11143,7 +11143,7 @@ class Runner(QuotaHandover):
             published = gg.published_shas(root, target_remote)
             commits = gg.commits_for_branch_push(root, tip, published)
             result = gg.scan_commits(root, commits, settings)
-        except gg.PatternsFileError as exc:
+        except (gg.PatternsFileError, gg.KeyFileError) as exc:
             return {**base, "ok": False, "reason": "guard", "findings": [],
                     "error": f"guard scan failed: {exc}"}
         except gg.GitError as exc:

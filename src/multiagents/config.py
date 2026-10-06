@@ -930,6 +930,15 @@ class Config:
             else:
                 rule = ("Commit attribution: end every commit message with "
                         "one `Co-Authored-By:` trailer naming your model.")
+            # GG-R9: when the guard blocks a push, the reasons must reach the
+            # user in the chat. One paragraph, so it reads as one rule.
+            rule += ("\n\nGuard refusal reporting: when the guard refuses a "
+                     "push (a `push_branch` refusal with reason `guard`), "
+                     "report in the chat a table of the findings with columns "
+                     "category, commit, location, masked match and "
+                     "fingerprint, saying which findings look fictional and "
+                     "which look real. Never add an entry to `allow` or "
+                     "`allow_fingerprints` yourself: the user decides.")
             text = (text.strip() + "\n\n" + rule + "\n") if text.strip() else rule + "\n"
         return text
 
@@ -1236,7 +1245,7 @@ def _validate_git_section(project: dict) -> None:
         raise ValueError(
             "git.guard.patterns_file: expected a string, "
             f"got {guard['patterns_file']!r}")
-    for key in ("allowed_emails", "allow"):
+    for key in ("allowed_emails", "allow", "allow_fingerprints"):
         if key in guard:
             value = guard[key]
             if (not isinstance(value, list)

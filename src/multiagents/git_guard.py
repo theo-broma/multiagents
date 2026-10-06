@@ -9,8 +9,12 @@ repository's own pushes, and a literal here would block every one of them.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -80,12 +84,103 @@ def mask(match: str) -> str:
     return match[:2] + "…"
 
 
+# --------------------------------------------------------------------------
+# the guard key and finding fingerprints (GG-R8)
+# --------------------------------------------------------------------------
+
+class KeyFileError(ValueError):
+    """The guard key cannot be used: bad directory or file permissions."""
+
+
+def guard_key_path() -> Path:
+    """Where the per-user guard key lives (GG-R8).
+
+    `$XDG_STATE_HOME/multiagents/guard-key`, defaulting to
+    `~/.local/state` when `XDG_STATE_HOME` is unset, as in MT-R4.
+    """
+    raw = os.environ.get("XDG_STATE_HOME")
+    base = Path(raw).expanduser() if raw else Path.home() / ".local" / "state"
+    return base / "multiagents" / "guard-key"
+
+
+def _decode_key(raw: bytes) -> bytes | None:
+    """Key material from the key file's bytes, or None when it holds none."""
+    text = raw.strip()
+    if not text:
+        return None
+    for decode in (bytes.fromhex, base64.b64decode,
+                   base64.urlsafe_b64decode):
+        try:
+            key = decode(text)
+        except Exception:
+            continue
+        if key:
+            return bytes(key)
+    return bytes(text)
+
+
+def ensure_guard_key() -> bytes:
+    """The per-user guard key, creating it on first use (GG-R8).
+
+    Created with mode 0600 in a 0700 directory, whatever the umask. A
+    `multiagents/` directory or key file readable by group or others is
+    refused with KeyFileError — modes are never silently changed. The key
+    itself is never printed or logged anywhere.
+    """
+    path = guard_key_path()
+    parent = path.parent
+    if parent.is_dir():
+        mode = stat.S_IMODE(parent.stat().st_mode)
+        if mode & 0o077:
+            raise KeyFileError(
+                f"guard key directory {parent} is accessible by group or "
+                f"others (mode {mode:03o}); refusing: fix its permissions")
+    else:
+        parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if stat.S_IMODE(parent.stat().st_mode) & 0o077:
+            os.chmod(parent, 0o700)
+    if path.is_file():
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            raise KeyFileError(
+                f"guard key file {path} is readable by group or others "
+                f"(mode {mode:03o}); refusing: fix its permissions")
+        key = _decode_key(path.read_bytes())
+        if key is not None:
+            return key
+        key = secrets.token_bytes(32)
+        fd = os.open(path, os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, key.hex().encode("ascii"))
+        finally:
+            os.close(fd)
+        return key
+    key = secrets.token_bytes(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return ensure_guard_key()
+    try:
+        os.write(fd, key.hex().encode("ascii"))
+    finally:
+        os.close(fd)
+    return key
+
+
+def fingerprint(match: str, key: bytes) -> str:
+    """The reportable identity of a match (GG-R8): HMAC-SHA256 of the exact
+    match under the guard key, truncated to 16 lowercase hex characters."""
+    return hmac.new(key, match.encode("utf-8"),
+                    hashlib.sha256).hexdigest()[:16]
+
+
 @dataclass
 class Finding:
     category: str
     commit: str          # full SHA; shortened at display
     where: str           # `path:line`, `path:bin`, `message`, `author`…
     match: str           # the exact matched text (never printed raw)
+    fingerprint: str = ""  # GG-R8: HMAC of the match, 16 hex chars
 
     def masked(self) -> str:
         return mask(self.match)
@@ -93,8 +188,20 @@ class Finding:
     def line(self) -> str:
         """One output line with the match masked everywhere it appears."""
         shown = _mask_in(self.where, self.match, self.masked())
-        return _one_line(
-            f"{self.category} {self.commit[:7]} {shown} {self.masked()}")
+        text = (f"{self.category} {self.commit[:7]} {shown} {self.masked()}"
+                + (f" {self.fingerprint}" if self.fingerprint else ""))
+        return _one_line(text)
+
+
+def paste_block(findings: list[Finding]) -> str:
+    """The block a scan ends with when it found anything (GG-R8): the
+    fingerprints to paste into `git.guard.allow_fingerprints`. It holds no
+    commit, no location and no match — only fingerprints."""
+    fps = sorted({f.fingerprint for f in findings if f.fingerprint})
+    listed = ", ".join(f'"{fp}"' for fp in fps)
+    return ("To silence these findings, add their fingerprints to\n"
+            "git.guard.allow_fingerprints in the project config:\n"
+            f"allow_fingerprints: [{listed}]")
 
 
 def _one_line(text: str) -> str:
@@ -138,6 +245,7 @@ class GuardSettings:
     patterns_file: str = DEFAULT_PATTERNS_FILE
     allowed_emails: list[str] = field(default_factory=list)
     allow: set[str] = field(default_factory=set)
+    allow_fingerprints: set[str] = field(default_factory=set)
 
 
 def settings_from_git(git: dict | None) -> GuardSettings:
@@ -154,6 +262,8 @@ def settings_from_git(git: dict | None) -> GuardSettings:
     allowed = [str(e) for e in raw_allowed] if isinstance(raw_allowed, list) else []
     raw_allow = guard.get("allow", [])
     allow = {str(e) for e in raw_allow} if isinstance(raw_allow, list) else set()
+    raw_fps = guard.get("allow_fingerprints", [])
+    allow_fps = {str(e) for e in raw_fps} if isinstance(raw_fps, list) else set()
     return GuardSettings(
         remote=str(git.get("remote") or ""),
         base_branch=str(git.get("base_branch") or ""),
@@ -161,6 +271,7 @@ def settings_from_git(git: dict | None) -> GuardSettings:
         patterns_file=patterns_file,
         allowed_emails=allowed,
         allow=allow,
+        allow_fingerprints=allow_fps,
     )
 
 
@@ -187,7 +298,7 @@ def validate_git_section(project: dict) -> None:
         raise ValueError(
             f"git.guard.patterns_file: expected a string, "
             f"got {guard['patterns_file']!r}")
-    for key in ("allowed_emails", "allow"):
+    for key in ("allowed_emails", "allow", "allow_fingerprints"):
         if key in guard:
             value = guard[key]
             if (not isinstance(value, list)
@@ -272,55 +383,134 @@ def _tailnet_ip(match: str) -> bool:
     return parts[0] == 100 and 64 <= parts[1] <= 127
 
 
+def _tailnet_host_placeholder(host: str) -> bool:
+    """Whether a `*.example.ts.net` match is a placeholder (GG-R7): it holds `<`, as
+    before, or its label just before `ts.net` is `example`, case-insensitively
+    (`phone.example.ts.net`, and the bare `example.ts.net` itself)."""
+    if "<" in host:
+        return True
+    low = host.lower()
+    suffix = "." + _TS + "." + _NET
+    if not low.endswith(suffix):
+        return False
+    labels = low[: -len(suffix)].split(".")
+    return bool(labels) and labels[-1] == "example"
+
+
+# The CIDR text, not a bare address: exempt from `tailnet-ip` (GG-R7). Built
+# from fragments like every other shaped literal in this file.
+_CIDR_NETWORK = "100" + ".64.0.0"
+
+
+def _cidr_exempt(text: str, end: int, match: str) -> bool:
+    """Whether this `tailnet-ip` occurrence is the exempt CIDR text (GG-R7):
+    the network address followed by exactly `/10`. Any other prefix length —
+    `/1`, `/100` — is still a finding, as is the network address bare."""
+    if match != _CIDR_NETWORK:
+        return False
+    after = text[end:end + 3]
+    if after != "/10":
+        return False
+    rest = text[end + 3:end + 4]
+    return not rest.isdigit()
+
+
+def _private_key_placeholder(match: str) -> bool:
+    """Whether a `BEGIN … PRIVATE KEY` line names a placeholder key type
+    (GG-R7): its key type holds `…` or `<`, which a real armour line never
+    contains."""
+    return "…" in match or "<" in match
+
+
 class Scanner:
     """All detectors over one body of text, sharing one config."""
 
     def __init__(self, own_email: str, settings: GuardSettings,
-                 private: PrivatePatterns):
+                 private: PrivatePatterns, key: bytes = b"",
+                 allowed_fingerprints: set[str] | frozenset[str] = frozenset()):
         self.own_email = own_email or ""
         self.allowed = {e.lower() for e in settings.allowed_emails}
         self.allow = set(settings.allow)
         self.private = private
         self.check_coauthor = not settings.coauthor_orchestrator
+        self.key = key
+        self.allowed_fps = {f.lower() for f in allowed_fingerprints}
+        self._fp_cache: dict[str, str] = {}
+
+    def _fp(self, match: str) -> str:
+        found = self._fp_cache.get(match)
+        if found is None:
+            found = fingerprint(match, self.key)
+            self._fp_cache[match] = found
+        return found
 
     def _kept(self, match: str) -> bool:
-        return match not in self.allow
+        if match in self.allow:
+            return False
+        if self.allowed_fps and self._fp(match) in self.allowed_fps:
+            return False
+        return True
 
-    def scan_text(self, text: str, *, message: bool = False) -> list[tuple[str, str]]:
-        """(category, match) pairs in `text`, in detector order."""
-        out: list[tuple[str, str]] = []
+    def scan_text(self, text: str, *, message: bool = False
+                  ) -> list[tuple[str, str, str]]:
+        """(category, match, fingerprint) triples in `text`, detector order."""
+        out: list[tuple[str, str, str]] = []
+
+        def keep(match: str) -> str | None:
+            if not self._kept(match):
+                return None
+            return self._fp(match)
+
         for found in _EMAIL_RX.findall(text):
-            if (not _email_excluded(found, self.own_email, self.allowed)
-                    and self._kept(found)):
-                out.append(("email", found))
-        for found in _TAILNET_IP_RX.findall(text):
-            if _tailnet_ip(found) and self._kept(found):
-                out.append(("tailnet-ip", found))
+            if (not _email_excluded(found, self.own_email, self.allowed)):
+                fp = keep(found)
+                if fp is not None:
+                    out.append(("email", found, fp))
+        for found in _TAILNET_IP_RX.finditer(text):
+            match = found.group(0)
+            if not _tailnet_ip(match):
+                continue
+            if _cidr_exempt(text, found.end(), match):
+                continue
+            fp = keep(match)
+            if fp is not None:
+                out.append(("tailnet-ip", match, fp))
         for found in _TAILNET_HOST_RX.findall(text):
-            if "<" not in found and self._kept(found):
-                out.append(("tailnet-host", found))
+            if _tailnet_host_placeholder(found):
+                continue
+            fp = keep(found)
+            if fp is not None:
+                out.append(("tailnet-host", found, fp))
         for found in _PRIVATE_KEY_RX.findall(text):
-            if self._kept(found):
-                out.append(("private-key", found))
+            if _private_key_placeholder(found):
+                continue
+            fp = keep(found)
+            if fp is not None:
+                out.append(("private-key", found, fp))
         for rx in _TOKEN_RES:
             for found in rx.findall(text):
-                if self._kept(found):
-                    out.append(("token", found))
+                fp = keep(found)
+                if fp is not None:
+                    out.append(("token", found, fp))
         for literal in self.private.literals:
             for found in re.finditer(re.escape(literal), text, re.IGNORECASE):
-                if self._kept(found.group(0)):
-                    out.append(("private", found.group(0)))
+                fp = keep(found.group(0))
+                if fp is not None:
+                    out.append(("private", found.group(0), fp))
         for rx in self.private.regexes:
             for found in rx.finditer(text):
-                if found.group(0) and self._kept(found.group(0)):
-                    out.append(("private", found.group(0)))
+                if found.group(0):
+                    fp = keep(found.group(0))
+                    if fp is not None:
+                        out.append(("private", found.group(0), fp))
         if message and self.check_coauthor:
             for line in text.splitlines():
                 trailer = _TRAILER_RX.match(line)
                 if trailer and _MODEL_RX.search(trailer.group(1) or ""):
                     match = line.strip()
-                    if self._kept(match):
-                        out.append(("coauthor", match))
+                    fp = keep(match)
+                    if fp is not None:
+                        out.append(("coauthor", match, fp))
         return out
 
 
@@ -754,13 +944,16 @@ class ScanResult:
 def scan_commits(repo: Path, commits: list[str],
                  settings: GuardSettings) -> ScanResult:
     """GG-R3 over an explicit commit list. Never writes to the repository."""
+    key = ensure_guard_key()
     private, notice = load_private_patterns(settings.patterns_file)
-    scanner = Scanner(repo_own_email(repo), settings, private)
+    scanner = Scanner(repo_own_email(repo), settings, private, key=key,
+                      allowed_fingerprints=settings.allow_fingerprints)
     findings: list[Finding] = []
     for sha in commits:
         content = read_commit(repo, sha)
-        for category, match in scanner.scan_text(content.message, message=True):
-            findings.append(Finding(category, sha, "message", match))
+        for category, match, fp in scanner.scan_text(content.message,
+                                                     message=True):
+            findings.append(Finding(category, sha, "message", match, fp))
         for label, name, email in (
                 ("author", content.author_name, content.author_email),
                 ("committer", content.committer_name,
@@ -768,24 +961,24 @@ def scan_commits(repo: Path, commits: list[str],
             for value in (name, email):
                 if not value:
                     continue
-                for category, match in scanner.scan_text(value):
-                    findings.append(Finding(category, sha, label, match))
+                for category, match, fp in scanner.scan_text(value):
+                    findings.append(Finding(category, sha, label, match, fp))
         for path, lineno, text in content.added:
-            for category, match in scanner.scan_text(text):
+            for category, match, fp in scanner.scan_text(text):
                 findings.append(
-                    Finding(category, sha, f"{path}:{lineno}", match))
+                    Finding(category, sha, f"{path}:{lineno}", match, fp))
         for path, blob_id in content.binaries:
             # By object id: `<sha>:<path>` would put the path back into a
             # revision expression git has to parse.
             blob = _git_bytes(repo, "cat-file", "blob", blob_id)
             text = blob.decode("latin-1")
-            for category, match in scanner.scan_text(text):
+            for category, match, fp in scanner.scan_text(text):
                 findings.append(
-                    Finding(category, sha, f"{path}:bin", match))
+                    Finding(category, sha, f"{path}:bin", match, fp))
         for path in content.paths:
-            for category, match in scanner.scan_text(path):
+            for category, match, fp in scanner.scan_text(path):
                 findings.append(
-                    Finding(category, sha, "path-name", match))
+                    Finding(category, sha, "path-name", match, fp))
     return ScanResult(findings=findings, notice=notice)
 
 
@@ -793,7 +986,8 @@ def finding_dict(finding: Finding) -> dict:
     return {"category": finding.category, "commit": finding.commit[:7],
             "where": _mask_in(finding.where, finding.match,
                               finding.masked()),
-            "match": finding.masked()}
+            "match": finding.masked(),
+            "fingerprint": finding.fingerprint}
 
 
 # --------------------------------------------------------------------------

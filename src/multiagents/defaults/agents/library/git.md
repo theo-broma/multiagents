@@ -72,11 +72,19 @@ gives you its current value. Check every commit in the range:
   a verification that the patterns no longer appear in any commit of the
   rewritten refs.
 - One line at the end:
-
 ```
 VERDICT(approved): nothing in the range should be stopped
 VERDICT(rejected, N): N findings must be fixed before a push
 ```
+
+## Guard refusal reporting
+
+Guard refusal reporting: when the guard refuses a push (a `push_branch`
+refusal with reason `guard`), or your audit finds anything the push must not
+carry, report in the chat a table of the findings with columns category,
+commit, location, masked match and fingerprint, saying which findings look
+fictional and which look real. Never add an entry to `allow` or
+`allow_fingerprints` yourself: the user decides.
 
 ## Calling this agent
 
