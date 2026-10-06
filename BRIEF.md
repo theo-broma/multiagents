@@ -4479,7 +4479,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 | task | run | model | duration | review verdict | rework rounds |
 |---|---|---|---|---|---|
 | VR continuation | ag-ac9706 | bunny | 59 min (mostly a 32-min full suite) | rejected 1 (ag-4952e9: _with_spec KeyError on taskless node) | 1 → fix nd-029f8408 (quick, bunny, 3 min) approved by ag-9eee51 |
-| OZ impl | ag-36f162 | bunny | 98 min (several full suites) | pending | 44 superseded tests → tester nd-20eaa394 (not the impl's fault) |
+| OZ impl | ag-36f162 | bunny | 98 min (several full suites) | approved (ag-cca152) | 44 superseded tests → tester nd-20eaa394 (not the impl's fault) |
 | breaker-trial fix | ag-aa6122 | bunny | 2.5 h+ (repeated full suites) | | |
 | GG impl | nd-2be8cada | muse | | | |
 
@@ -4512,3 +4512,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Order (user): build the guard first, then the history rewrite once GG is merged and nothing is running. Until then only GG and finishing work run; AN, NT and MT implementers stay paused.
 - In flight: GG tester nd-2f300881; OZ superseded-tests tester nd-20eaa394 (cherry-picks OZ 19af7e8+3cc08d0; then OZ reviewer); breaker fix ag-aa6122 (still running).
 - 13:2x GG tests merged (60fe4db, 191 red), clarifications committed. GG implementer nd-2be8cada (implementer, model drawn at random: muse) + test_core library update tester nd-f5874dc8 in parallel. OZ superseded tests done (6a26a81 on nodes/nd-20eaa394) → OZ reviewer nd-3541463a.
+- 13:4x OZ MERGED (7c00795; impl + 44 superseded tests updated). Project providers.yaml override reduced to `opencode-zen: {enabled: true}`; doctor resolves it. GG impl nd-2be8cada (muse) running; test_core library tests updated (640e3b0).
