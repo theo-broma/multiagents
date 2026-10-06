@@ -183,7 +183,7 @@ def test_mt_r1_allowed_host_with_a_port_is_served(proxied):
 
 def test_mt_r1_match_ignores_case(proxied):
     # The option was given with capitals; the request arrives in other case.
-    assert page(proxied, proxied.token, host="phone.example.ts.net")[0] == 200
+    assert page(proxied, proxied.token, host="PHONE.tail-net.EXAMPLE.TS.NET")[0] == 200
     assert page(proxied, proxied.token, host="second.EXAMPLE.ts.net")[0] == 200
 
 
@@ -581,7 +581,14 @@ def test_mt_r4_one_file_per_project_with_independent_tokens(world):
 def refused_start(world, expect_file_unchanged=True):
     files = world.stored_files()
     assert len(files) == 1
-    before = (files[0].read_bytes(), stat.S_IMODE(files[0].stat().st_mode))
+    def snapshot():
+        try:
+            content = files[0].read_bytes()
+        except PermissionError:      # e.g. a 0o000 file as a non-root uid
+            content = None
+        return content, stat.S_IMODE(files[0].stat().st_mode)
+
+    before = snapshot()
     run = world.start("--persistent-token", wait=False)
     code = run.wait_exit()
     out = run.output()
@@ -590,7 +597,7 @@ def refused_start(world, expect_file_unchanged=True):
     assert "--rotate-token" in out                   # says what to do about it
     assert not run.url(), "a refused start must not serve"
     # never silently replaced
-    assert (files[0].read_bytes(), stat.S_IMODE(files[0].stat().st_mode)) == before
+    assert snapshot() == before
     return run
 
 
@@ -599,7 +606,6 @@ def stored(world):
     first = world.start("--persistent-token")
     world.stop(first)
     (f,) = world.stored_files()
-    f.token = first.token
     return f, first.token
 
 
