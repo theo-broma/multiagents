@@ -1224,6 +1224,16 @@ class Runner(QuotaHandover):
         the retry without running anything (bug-521be6). An authentication
         block is unaffected — there the trial IS the probe below, which does
         run, so it is spent by something that happened.
+
+        The non-authentication half is observational too, even with
+        `claim=True`: this pass runs before routing, so it cannot know which
+        provider the run will launch on, and claiming for every lapsed
+        provider spent the one trial of each tripped provider on starts that
+        launched elsewhere. The next admission probe then saw `trial_pending`
+        and refused the tripped provider for another minute — forever, while
+        other providers kept starting. So a free trial stays routable here,
+        and `start()` claims only the chosen provider's trial, once nothing
+        can still refuse it.
         """
         health = self.tree.provider_health()
         auth_window = float(self.config.limits.get(
@@ -1249,18 +1259,22 @@ class Runner(QuotaHandover):
             # keeps the provider out of routing between probes.
             if cooling and not entry.get("needs_login"):
                 continue
-            # A real run is the trial, and only the caller that RUNS one may
-            # take it (bug-521be6). An admission check claims nothing: it
-            # launches nothing, and the routing pass in the same `start()`
-            # would find its own claim held — refusing the pin it had just
-            # been admitted for, the retry spent and nothing run. It still
-            # refuses while somebody else holds the trial, which is what that
-            # routing pass would find anyway.
+            # A real run is the trial, and only the run that routes onto this
+            # provider may take it — this pass runs before routing and cannot
+            # know where the run will launch, so claiming here for every
+            # lapsed provider spent unrelated trips on starts that launched
+            # elsewhere, and the `trial_pending` read below then refused each
+            # tripped provider for another minute, for as long as other
+            # starts kept happening. So this pass only observes: a held trial
+            # routes around, a free one stays routable, and `start()` claims
+            # the chosen provider's trial once nothing can still refuse it.
+            # (bug-521be6's rule stands: an admission check claims nothing,
+            # because it launches nothing.)
             #
             # An authentication block is the exception that proves the rule:
             # there the trial IS the probe below, so it is spent by something
             # that actually happened.
-            if claim or entry.get("needs_login"):
+            if entry.get("needs_login"):
                 if not self.tree.claim_trial(name, window=probe_every):
                     if not cooling:
                         budget.cooldown_until = now() + 60  # somebody else is trying
@@ -4706,6 +4720,41 @@ class Runner(QuotaHandover):
             return None
         return await self._pin_health(spec)
 
+    def _take_half_open_trial(self, provider_name: str) -> str:
+        """Take the single trial a lapsed cooldown allows, for the run about
+        to launch on `provider_name`. Returns `"free"` when the run may
+        proceed and `"held"` when somebody else holds the trial.
+
+        The claim half of `_half_open`'s observational pass, kept separate
+        because the pass runs before routing and cannot know which provider
+        the run will launch on. Claiming there for every lapsed provider
+        spent the one trial of each tripped provider on starts that launched
+        elsewhere, and the next admission probe saw `trial_pending` and
+        refused the tripped provider for another minute — for as long as
+        other starts kept happening. So the pass only observes, and the run
+        claims here, once routing has chosen and every check that could still
+        refuse has passed (bug-521be6's discipline, as in `_claim_trial`).
+        """
+        state = self.tree.read()
+        live = (state.get("cooldowns") or {}).get(provider_name) or {}
+        health = (state.get("provider_health") or {}).get(provider_name) or {}
+        # The gate `_half_open` uses, for the same reason it has one: a
+        # healthy provider has no trial to spend, and one still cooling is
+        # routed around rather than retried. An authentication block is the
+        # exception: it is probed even while cooling, so it does claim here.
+        if not health.get("tripped") and not live.get("needs_login"):
+            return "free"
+        if live.get("until", 0) > now() and not live.get("needs_login"):
+            return "free"
+        probe_every = float(self.config.limits.get("provider_probe_seconds", 120))
+        if not self.tree.claim_trial(provider_name, window=probe_every):
+            return "held"                     # somebody else is trying
+        if live.get("until", 0) <= now():
+            # This run IS the trial, so the tally of what went wrong before
+            # it starts again — as `_half_open` does with its own claim.
+            self.tree.begin_trial(provider_name)
+        return "free"
+
     def _instance_strategy(self, preferred: str) -> dict[str, Any]:
         """IS-R2a: the preferred instance's effective strategy for the pool."""
         cfg = self.config.project.get("budget", {})
@@ -4976,10 +5025,13 @@ class Runner(QuotaHandover):
         # Bug-521be6: an admission probe launches nothing. It routes so it can
         # answer "would this start be admitted?", and the start that follows the
         # answer is the one that runs — so the probe observes the breaker and
-        # the routing pass of a real start is the caller that spends the trial.
-        # Claiming here burned the provider's one retry on the question and the
-        # real start then found its own claim held, cooled the provider and
-        # refused the very pin it had just been admitted for.
+        # the run that routing chooses claims the trial, once nothing can
+        # still refuse it (`_take_half_open_trial` below). Claiming here
+        # burned the provider's one retry on the question and the real start
+        # then found its own claim held, cooled the provider and refused the
+        # very pin it had just been admitted for. Claiming here for EVERY
+        # lapsed provider burned unrelated trials the same way, on starts
+        # that launched elsewhere.
         self._half_open(budgets, cooldowns,
                         claim=not (context and context.admission_only))
         spend_now = self.tree.rollup_usage().get("cost_usd", 0)
@@ -5335,6 +5387,30 @@ class Runner(QuotaHandover):
                 if model:
                     return self._pin_refusal(provider.name, exc.reason, exc.retry_after)
                 unclaimable.add(provider.name)
+                continue
+            # The half-open trial belongs to the run that launches on this
+            # provider — and to nothing else. It is claimed here, after every
+            # check that could still refuse (bug-521be6's discipline) and
+            # after the startup claim, so losing the race holds no claim of
+            # any kind once the release below runs. A pinned start that loses
+            # it gets the PS-R6 refusal; an unpinned one routes again with
+            # this provider cooled, exactly as PS-R5b handles the startup
+            # race (siblings and fallbacks are tried, and deferral applies
+            # when none is left).
+            if self._take_half_open_trial(provider.name) == "held":
+                self._startup_finish(provider.name, node_id, startup_token)
+                startup_token = ""
+                if model:
+                    return self._pin_refusal(
+                        provider.name,
+                        "half-open trial held by another start",
+                        now() + 60)
+                entry = budgets.get(provider.name)
+                base = entry or budget_mod.Budget(provider.name, known=False)
+                budgets[provider.name] = replace(
+                    base,
+                    cooldown_until=max(base.cooldown_until or 0, now() + 60),
+                    note="half-open trial held by another start")
                 continue
             break
         launched = False
