@@ -4647,3 +4647,13 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - (c) Reviewers on claude have no shell. The workaround is node `inputs`.
 
   OG is at round 5 (nd-0252e182), with reviewer nd-3211b4a6 queued after it. The NT round-2 implementation is done (nd-e0060d42); its review is being re-run as nd-cea601ed.
+- 2026-10-06 ~19:2x **PAUSE: claude session 100%, resets 20:10 UTC (22:10 CEST).** The 429s killed three runs, all marked failed (bug (a)):
+  - ag-742cf3, NT reviewer;
+  - ag-8b797b, OG round 5 (nd-0252e182);
+  - ag-38c37c, git rewrite rehearsal (nd-dd4c9be4).
+
+  `relaunch_node` is broken (bug (b)), so on resume deposit fresh nodes and point each one at its old run's `.multiagents/runs/<id>/`:
+  1. **OG round 5:** opus implementer-deep, `inputs` nd-e6974b60. Task: same as nd-0252e182, plus "check .multiagents/runs/ag-8b797b for prior progress". Reviewer nd-3211b4a6 depends on nd-0252e182, so replace it with a reviewer that depends on the new node.
+  2. **NT review:** nd-cea601ed is open and blocked on admission. It launches by itself when claude clears.
+  3. **Git rehearsal:** redo with the nd-dd4c9be4 task. /var/tmp in the container is NOT visible on the host, so the agent must COMMIT `rewrite.sh` (generic, no private terms) on its own branch. I then read it with `git show` and run it on the host with ~/.config/multiagents/sensitive-patterns.
+  - **Rule:** do not use claude-b for agents; it belongs to the orchestrator.
