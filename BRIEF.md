@@ -4576,3 +4576,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - AN ag-5bd1ab (nd-b3d2a17f, muse);
   - NT1 ag-84841e (nd-412ff7fa, muse).
   Each needs a reviewer before merge. OG waits for GG-R8 (config.py).
+- 18:1x GG-R7..R9 MERGED (8420238; reviewer ag-e60ed3 approved). Helper fix 1caf4db. NT1 round 1 rejected 2 by ag-f16f98: a token with CR/LF leaks via the exception text, and the 10 s bound was not overall. Round 2: muse ag-764458 (nd-1614d29e). OG implementer-deep started: bunny ag-302e01 (nd-0a9084fe). The scan of origin/main..main still gives exit 1 with 19 distinct fingerprints, reported to the user. Fingerprint 60d01c970f424abb is the REAL private hit (a3a244c) and must NOT be allowed; the rewrite removes it. The other fingerprints are fictional: old MT fixtures in history, spec examples, and the literal `.example.ts.net` in docs.
