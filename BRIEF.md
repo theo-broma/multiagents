@@ -4569,3 +4569,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   Held back:
   - MT implementer until the tester's fixture change merges;
   - OG implementer-deep until GG-R8 is in (both touch config.py).
+- 17:5x GG-R7..R9 tests MERGED (51e774f, 75 cases; MT fixtures now *.example.ts.net / 192.0.2.12). Clarifications committed.
+  In flight:
+  - GG-R7..R9 implementer ag-61d397 (nd-347faba8, muse);
+  - MT implementer ag-0d4eb6 (nd-231532e7, bunny);
+  - AN ag-5bd1ab (nd-b3d2a17f, muse);
+  - NT1 ag-84841e (nd-412ff7fa, muse).
+  Each needs a reviewer before merge. OG waits for GG-R8 (config.py).
