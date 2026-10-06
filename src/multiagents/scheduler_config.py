@@ -21,7 +21,9 @@ def validate_setting(key, value, source=""):
         except (ValueError, ZoneInfoNotFoundError):
             valid = False
     elif key in {"starvation_after_seconds", "window_tolerance_seconds",
-                 "admission_timeout_seconds", "tick_seconds"}:
+                 "admission_timeout_seconds", "tick_seconds",
+                 "anomaly_interval_seconds", "anomaly_admission_seconds",
+                 "anomaly_held_seconds"}:
         valid = (type(value) in (int, float) and math.isfinite(value) and value > 0)
     if not valid:
         raise SchedulerConfigError(f"scheduler.{key}: invalid value {value!r}" + (f" ({source})" if source else ""))

@@ -18,7 +18,7 @@ import time
 import uuid
 
 from .. import procs
-from ..runner import LaunchContext, Runner, admission_block
+from ..runner import LaunchContext, Runner, VERDICT, admission_block
 from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
@@ -87,6 +87,24 @@ class Engine:
         # starving nodes without reading files inside a store transaction.
         self.starvation_after = None
         self.window_instant = self.instant()
+        # AN: held_idle ages are read on the scheduler's clock only. Every
+        # hold Engine.hold writes records (window_instant, log seq) as it
+        # is written, so a hold laid down between two checks is aged from
+        # when it happened, not from either neighbouring check, and no
+        # real-time transition stamp is ever mapped onto the scheduler
+        # clock. Holds the engine did not write (RPC/suspension holds,
+        # run events racing a hold, this check's own anomaly emission, or
+        # a record dropped by a restart) fall back to the previous check,
+        # or to first observation when there is none: never early by more
+        # than the stored episode allows. The per-episode times persist in
+        # anomaly_seen meta keys, so a restart resumes from the stored
+        # scheduler-clock time.
+        self.anomaly_last_hold = {}
+        self.anomaly_tick_start = time.time()
+        self.last_anomaly_check = None
+        # Nodes the admission probe refused this tick, with the scheduler
+        # clock of the first consecutive refusal and the refusal itself.
+        self.admission_refusals = {}
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.run, name="node-evaluation", daemon=True)
         self.stopped = threading.Event()
@@ -373,6 +391,7 @@ class Engine:
         return [node for _, node in sorted(keyed, key=lambda pair: pair[0])]
 
     async def tick(self):
+        self.anomaly_tick_start = time.time()
         config = self.service.configuration()
         if not config.project["scheduler"]["enabled"]:
             return
@@ -406,17 +425,21 @@ class Engine:
             if node["state"] == "open" and not ready:
                 self.episode(node["id"], False)
             if not ready:
+                self.admission_refusals.pop(node["id"], None)
                 continue
             self.episode(node["id"], True)
             if any(a["node_id"] == node["id"] and a["state"] in {"claimed", "launched"} for a in journal.values()):
+                self.admission_refusals.pop(node["id"], None)
                 continue
             if self.lock_blockers(node, nodes, journal):
+                self.admission_refusals.pop(node["id"], None)
                 continue
             session_blocked = self.session_blockers(node, nodes, journal)
             if session_blocked:
                 self.reasons[node["id"]] = session_blocked
                 if session_blocked[0]["code"] == "session_unavailable":
                     self.session_notice(node["id"], session_blocked[0])
+                self.admission_refusals.pop(node["id"], None)
                 continue
             with self.store.transaction(write=False) as db:
                 alias_key = sessions.alias_id(node, nodes)
@@ -440,7 +463,20 @@ class Engine:
             with self.service.changed:
                 self.reasons[node["id"]] = blocked
             if not result.get("admitted") or self.stopped.is_set():
+                # AN-R2: a ready node the probe refused. Only a refusal with
+                # a reason counts; a transport error carries none. The clock
+                # of the first consecutive refusal is what the anomaly ages.
+                if not result.get("admitted") and blocked and not result.get("error"):
+                    entry = self.admission_refusals.get(node["id"])
+                    if entry is None:
+                        self.admission_refusals[node["id"]] = {"since": self.window_instant,
+                                                               "blocked": blocked}
+                    else:
+                        entry["blocked"] = blocked
+                else:
+                    self.admission_refusals.pop(node["id"], None)
                 continue
+            self.admission_refusals.pop(node["id"], None)
             clean_failure = None
             try:
                 if checked_binding:
@@ -564,6 +600,9 @@ class Engine:
         self.evaluating = None
         self.composites()
         self.store.mirror()
+        # AN runs after VR's settle step (composites above): a round VR just
+        # settled is no longer held, so there is nothing left to report.
+        self.anomaly_check()
 
     async def evaluate_windows(self):
         # Persist stop intent before a supervisor signals anything. Reconcile
@@ -680,6 +719,235 @@ class Engine:
                 if node and node["state"] == "open" and not node.get("ready_since"):
                     node["ready_since"] = since
                     self.store.save_node(db, node)
+
+    # ------------------------------------------------------------ anomalies
+    # AN-R1..AN-R5 (context/specs/scheduler-anomalies.md): the scheduler
+    # reports what is stuck instead of waiting silently. The check only
+    # reports: it never changes a node, a run or a verdict.
+    #
+    # Lock scope: phase one reads the store read-only, takes one locked tree
+    # read and reads run result files, all outside any store transaction.
+    # Phase two appends `anomaly` transitions and bookkeeping keys in a
+    # single short write transaction, then wakes the waiters. No git,
+    # subprocess or file I/O runs inside the transaction or a runner lock.
+    def anomaly_check(self):
+        try:
+            scheduler = self.service.configuration().project["scheduler"]
+            interval = scheduler.get("anomaly_interval_seconds", 120)
+            admission_after = scheduler.get("anomaly_admission_seconds", 600)
+            held_after = scheduler.get("anomaly_held_seconds", 600)
+        except Exception:
+            logging.getLogger(__name__).exception("scheduler anomaly check failed")
+            return
+        at = self.window_instant
+        if self.last_anomaly_check is not None and at - self.last_anomaly_check < interval:
+            return
+        try:
+            candidates, revisions, aging, held_ids, pending_writes, pending_clears = \
+                self._anomaly_candidates(at, admission_after, held_after)
+        except Exception:
+            logging.getLogger(__name__).exception("scheduler anomaly check failed")
+            return
+        self.last_anomaly_check = at
+        try:
+            self._anomaly_commit(candidates, revisions, aging, held_ids,
+                                 pending_writes, pending_clears)
+        except Exception:
+            logging.getLogger(__name__).exception("scheduler anomaly check failed")
+            return
+        self.store.mirror()
+
+    def _anomaly_text(self, run_id, tree_nodes):
+        try:
+            record = json.loads((self.paths.run_dir(run_id) / "result.json").read_text())
+            if record.get("text"):
+                return record["text"]
+        except (OSError, ValueError):
+            pass
+        return (tree_nodes.get(run_id) or {}).get("summary") or ""
+
+    def _anomaly_candidates(self, at, admission_after, held_after):
+        with self.store.transaction(write=False) as db:
+            nodes = self.store.nodes(db)
+            latest = {}
+            for (record,) in db.execute("SELECT record FROM notifications"):
+                try:
+                    event = json.loads(record)
+                except ValueError:
+                    continue
+                nid = event.get("node_id")
+                if not nid:
+                    continue
+                seq = event.get("seq", 0)
+                if seq >= latest.get(nid, (-1, 0))[0]:
+                    latest[nid] = (seq, event.get("at", 0))
+            seen = {key: value for key, value in
+                    db.execute("SELECT key, value FROM meta WHERE key LIKE 'anomaly_seen:%'")}
+            pending = {key for key, in
+                       db.execute("SELECT key FROM meta WHERE key LIKE 'anomaly_pending:%'")}
+        for nid in list(self.admission_refusals):
+            if nid not in nodes:
+                self.admission_refusals.pop(nid, None)
+        # One locked tree read, outside any store transaction.
+        tree_nodes = self.runner.tree.read()["nodes"]
+        candidates, aging, held_ids = [], {}, set()
+        pending_writes, pending_clears = set(), set()
+        revisions = {id: node["revision"] for id, node in nodes.items()}
+        for node in nodes.values():
+            nid = node["id"]
+            runs = node.get("runs") or []
+            if runs:
+                run_id = runs[-1]["run_id"]
+                raw = tree_nodes.get(run_id) or {}
+                if raw.get("status") == "stuck":
+                    candidates.append({"node_id": nid, "kind": "run_stuck",
+                                       "reason": raw.get("reason") or f"run {run_id} is stuck",
+                                       "run_id": run_id, "revision": node["revision"]})
+            # verdict_unrecorded has no age threshold, so it needs
+            # observation stability instead: the round must have been seen
+            # unresolved with a contradictory text at the previous check.
+            # A round VR just settled, or one composites just re-held while
+            # a late verdict lands, is not reported yet.
+            verdict_key = f"anomaly_pending:{nid}:verdict_unrecorded"
+            if (node["kind"] == "loop" and node["state"] == "held"
+                    and (node.get("hold") or {}).get("reason") == "unresolved_round"):
+                child = nodes.get((node.get("loop") or {}).get("verdict_child"))
+                child_runs = (child or {}).get("runs") or []
+                contradictory = False
+                run_id = child_runs[-1]["run_id"] if child_runs else None
+                if run_id is not None:
+                    verdicts = {match.group(1).lower() for match in
+                                VERDICT.finditer(self._anomaly_text(run_id, tree_nodes))}
+                    contradictory = "approved" in verdicts and "rejected" in verdicts
+                if contradictory:
+                    # A hold (re)written during this very tick — composites
+                    # re-holding a round that was open when the tick began —
+                    # is not observed yet. It may still be settling.
+                    _, last_at = latest.get(nid, (-1, None))
+                    try:
+                        held_this_tick = last_at is not None and epoch(last_at) >= self.anomaly_tick_start
+                    except (ValueError, OverflowError, OSError, TypeError):
+                        held_this_tick = False
+                    if not held_this_tick:
+                        if verdict_key in pending:
+                            candidates.append({
+                                "node_id": nid, "kind": "verdict_unrecorded",
+                                "reason": (f"loop {nid} round is held unresolved_round but verdict "
+                                           f"child {child['id']}'s run {run_id} holds contradictory "
+                                           "verdict lines (approved and rejected)"),
+                                "run_id": run_id, "revision": node["revision"]})
+                        else:
+                            pending_writes.add(verdict_key)
+                elif verdict_key in pending:
+                    pending_clears.add(verdict_key)
+            elif verdict_key in pending:
+                pending_clears.add(verdict_key)
+            if (node["kind"] == "simple" and node["state"] == "open"
+                    and not self.structural(node, nodes)
+                    and not self.window_blockers(node, nodes)):
+                refusal = self.admission_refusals.get(nid)
+                ready = node.get("ready_since")
+                if refusal and refusal.get("blocked") and ready:
+                    try:
+                        since = max(epoch(ready), refusal["since"])
+                    except (ValueError, OverflowError, OSError, TypeError):
+                        since = None
+                    if since is not None and at - since >= admission_after:
+                        parts = [f"{block.get('code')}: {block.get('detail')}"
+                                 for block in refusal["blocked"] if isinstance(block, dict)]
+                        candidates.append({"node_id": nid, "kind": "admission_blocked",
+                                           "reason": "; ".join(parts) or "admission refused",
+                                           "run_id": None, "revision": node["revision"]})
+            if node["state"] == "held":
+                held_ids.add(nid)
+                seq = latest.get(nid, (-1, None))[0]
+                try:
+                    stored = json.loads(seen["anomaly_seen:" + nid])
+                except (KeyError, ValueError, TypeError):
+                    stored = None
+                # The write-time record is consumed here: it belongs to the
+                # episode that starts now, never to a later one.
+                wrote = self.anomaly_last_hold.pop(nid, None)
+                previous = self.last_anomaly_check
+                if stored is not None and seq <= stored["seq"]:
+                    attributed = stored["at"]
+                elif (wrote is not None and wrote[0] <= at
+                        and seq == wrote[1]):
+                    # The log ends with the hold this engine wrote: age the
+                    # episode from when it happened on the scheduler clock,
+                    # not from either neighbouring check.
+                    attributed = wrote[0]
+                elif previous is None:
+                    # Never observed, and not written by this engine (an
+                    # RPC/suspension hold, or a restart dropped the
+                    # in-memory record): first observation. Never early,
+                    # at most an interval late.
+                    attributed = at
+                else:
+                    # A transition this engine did not write landed since
+                    # the stored episode (a run event from an attempt that
+                    # raced the hold, or this check's own anomaly): it
+                    # happened since the previous check, so the episode
+                    # restarts there. test_an_r3_a_changed_node_state pins
+                    # this: the re-fire must survive the stray worker
+                    # transitions, which carry no scheduler-clock time.
+                    attributed = previous
+                aging[nid] = (seq, attributed)
+                if at - attributed >= held_after:
+                    hold = node.get("hold") or {}
+                    reason = (f"held as {hold.get('reason') or 'held'} with no transition "
+                              f"for {at - attributed:.0f}s")
+                    if hold.get("detail"):
+                        reason += f": {hold['detail']}"
+                    candidates.append({"node_id": nid, "kind": "held_idle",
+                                       "reason": reason, "run_id": None,
+                                       "revision": node["revision"]})
+        # A write-time record for a node that is not held belongs to an
+        # episode that already ended (releases write no transition, so the
+        # seq cannot tell): drop it, or a later hold would inherit its age.
+        for nid in list(self.anomaly_last_hold):
+            if nid not in held_ids:
+                del self.anomaly_last_hold[nid]
+        return candidates, revisions, aging, held_ids, pending_writes, pending_clears
+
+    def _anomaly_commit(self, candidates, revisions, aging, held_ids, pending_writes, pending_clears):
+        with self.service.changed:
+            with self.store.transaction() as db:
+                nodes = self.store.nodes(db)
+                fresh = [c for c in candidates
+                         if nodes.get(c["node_id"], {}).get("revision") == revisions.get(c["node_id"])
+                         and c["revision"] == revisions.get(c["node_id"])]
+                current = {(c["node_id"], c["kind"]) for c in fresh}
+                for c in fresh:
+                    key = f"anomaly_emitted:{c['node_id']}:{c['kind']}"
+                    if db.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone():
+                        continue
+                    detail = {"kind": c["kind"], "reason": c["reason"]}
+                    if c.get("run_id"):
+                        detail["run_id"] = c["run_id"]
+                    self.store.transition(db, "anomaly", c["node_id"], detail)
+                    self.store.set_meta(db, key, "1")
+                for (key,) in db.execute("SELECT key FROM meta WHERE key LIKE 'anomaly_emitted:%'"):
+                    nid, _, kind = key[len("anomaly_emitted:"):].rpartition(":")
+                    if (nid, kind) not in current:
+                        db.execute("DELETE FROM meta WHERE key=?", (key,))
+                for key in pending_writes:
+                    self.store.set_meta(db, key, "1")
+                for key in pending_clears:
+                    db.execute("DELETE FROM meta WHERE key=?", (key,))
+                for (key,) in db.execute("SELECT key FROM meta WHERE key LIKE 'anomaly_pending:%'"):
+                    nid = key[len("anomaly_pending:"):].rpartition(":")[0]
+                    if nid not in nodes:
+                        db.execute("DELETE FROM meta WHERE key=?", (key,))
+                for nid, (seq, attributed) in aging.items():
+                    if nid in nodes and nodes[nid]["revision"] == revisions.get(nid):
+                        self.store.set_meta(db, "anomaly_seen:" + nid,
+                                            encode({"seq": seq, "at": attributed}))
+                for (key,) in db.execute("SELECT key FROM meta WHERE key LIKE 'anomaly_seen:%'"):
+                    nid = key[len("anomaly_seen:"):]
+                    if nid not in held_ids or nid not in nodes or nid not in aging:
+                        db.execute("DELETE FROM meta WHERE key=?", (key,))
+            self.service.changed.notify_all()
 
     def spawn(self, attempt):
         with (self.store.directory / (attempt["attempt_id"] + ".lock")).open("a+") as lock:
@@ -862,7 +1130,12 @@ class Engine:
                     revision=node["revision"] + 1)
         self.store.save_node(db, node)
         self.store.transition(db, reason, node["id"], node["hold"])
-        self.store.transition(db, "held", node["id"], node["hold"])
+        held = self.store.transition(db, "held", node["id"], node["hold"])
+        # AN-R2: when this hold happened on the scheduler clock, anchored
+        # to its log position so a later transition cannot steal its age.
+        # window_instant is the current tick's reading inside a tick, and
+        # the last tick's reading between ticks.
+        self.anomaly_last_hold[node["id"]] = (self.window_instant, held["seq"])
 
     # ------------------------------------------------------------- verdicts
     # Two paths reach a round's verdict: the reviewer's `give_verdict` call,

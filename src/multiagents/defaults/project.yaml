@@ -580,3 +580,9 @@ scheduler:
   admission_timeout_seconds: 10
   # Maximum idle delay between evaluations.
   tick_seconds: 5
+  # How often the scheduler reports stuck or starving work (AN-R1).
+  anomaly_interval_seconds: 120
+  # How long a ready node refused admission goes unreported (AN-R2).
+  anomaly_admission_seconds: 600
+  # How long a held node with no transition goes unreported (AN-R2).
+  anomaly_held_seconds: 600
