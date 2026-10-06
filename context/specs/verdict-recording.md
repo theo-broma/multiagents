@@ -65,3 +65,9 @@ reviewer task contains `give_verdict` and the given `spec_path`.
 ## Out of scope
 - Any LLM in the verdict path (user decision: deterministic first).
 - Changing the verdict grammar.
+
+## Clarifications (2026-10-06, answering tester ag-4b6a46)
+- Provenance (VR-R4): the field is `verdict_source`, valued `tool` or `text`. It is on the round's record (as `get_node` shows it) and in the `verdict` transition's `detail`.
+- Disagreement (VR-R2): recorded as `verdict_disagreement: {tool: <verdict>, text: <verdict>}` on the round's record.
+- Repeated agreeing lines (all `approved`, or all `rejected`) qualify. The last line is the one used.
+- VR-R5 relies on the verdict the runner persists for the run. If it does not persist it today, persisting it is part of the work.

@@ -54,3 +54,12 @@ a check that emits anomalies.
   launch/resume policy, singleton protection and a cooldown.
 - The cheap LLM "sentinel" agent for ambiguous anomalies. It would be advisory
   only and would never record a verdict.
+
+## Clarifications (2026-10-06, answering tester ag-748af7)
+- Order: the check runs AFTER VR's settle step in the same tick. `verdict_unrecorded` therefore fires only for a round VR could not settle while the verdict child's text still holds parser-accepted lines — the contradictory-lines case (VR-R3), or any other case VR left unsettled. Positive tests use contradictory lines.
+- `node_id` of an anomaly: the node that needs attention — the loop for `verdict_unrecorded` and `held_idle`, the node whose run it is for `run_stuck`, the refused node for `admission_blocked`.
+- Ages are read on the scheduler's clock (the same clock as windows). A hold's age is the time since the node's last transition.
+- The first check runs at scheduler start, then every interval.
+- `detail` holds `kind`, `reason` (a human-readable string) and, where one exists, `run_id`.
+- The three settings must be positive numbers. Other values are refused when the config is loaded, the way existing scheduler settings are refused.
+- Scope: `anomaly` transitions follow the same subtree scoping as every other transition.
