@@ -208,4 +208,4 @@ rule in `git.md`.
 - **CIDR exemption.** Only the exact text `100.64.0.0/10` is exempt. Any other prefix length is not.
 - **Fingerprints.**
   - A fingerprint is 16 lowercase hex characters.
-  - An `allow_fingerprints` entry of any other shape is refused at load, as other invalid settings are.
+  - ~~An `allow_fingerprints` entry of any other shape is refused at load.~~ Withdrawn 2026-10-06, after implementer ag-61d397 found the clash with the tests: an entry is only checked to be a string. A malformed entry matches nothing, so the push stays blocked, which fails closed.
