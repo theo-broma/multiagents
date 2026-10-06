@@ -4666,3 +4666,13 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - 2026-10-06 ~20:40 **NT2 round 2 REJECTED by ag-d8aa3b.** The decisions are in 5fd236a.
   - Round 3: Bunny implementer-deep nd-68ac87a1 (inputs nd-e0060d42), then opus reviewer nd-7293dc8c.
   - Bug (d) fix: Muse implementer nd-f7e1f5f6, then opus reviewer nd-b5b2de5e.
+- 2026-10-06 ~21:00 **Bug (d) fixed and merged** (679df78, Muse ag-243f67, approved by ag-27124c). Targeted tests are green on main: 63 + 40 + 5. Optional follow-ups from the review:
+  - `_half_open`'s `claim` parameter is now dead, and its docstrings are stale;
+  - the claim still precedes `_admission_add` and the spend-cap retry (pre-existing);
+  - the "race" test is sequential.
+
+  OG round 6 is d28a28b (nd-a311ac4d), with reviewer run ag-c280ef. Not fixed in that round:
+  - `quota_handover.reserved_instance: <old name>` is not aliased by OG-R2;
+  - `runner.steer` compares the raw name (harmless).
+
+  dev-advisor still returns `forbidden` to implementer-deep.
