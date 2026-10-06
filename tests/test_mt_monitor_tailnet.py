@@ -169,16 +169,16 @@ def page(run, token, host=None):
 @pytest.fixture
 def proxied(world):
     """One monitor allowing two names, one written with capitals."""
-    return world.start("--allow-host", "phone.example.ts.net",
+    return world.start("--allow-host", "Phone.Tail-Net.example.ts.net",
                        "--allow-host", "second.example.ts.net")
 
 
 def test_mt_r1_allowed_host_is_served(proxied):
-    assert page(proxied, proxied.token, host="phone.example.ts.net")[0] == 200
+    assert page(proxied, proxied.token, host="phone.tail-net.example.ts.net")[0] == 200
 
 
 def test_mt_r1_allowed_host_with_a_port_is_served(proxied):
-    assert page(proxied, proxied.token, host="phone.example.ts.net:8443")[0] == 200
+    assert page(proxied, proxied.token, host="phone.tail-net.example.ts.net:8443")[0] == 200
 
 
 def test_mt_r1_match_ignores_case(proxied):
@@ -203,13 +203,13 @@ def test_mt_r1_other_name_is_refused_even_with_the_token(proxied):
 
 
 def test_mt_r1_subdomain_of_an_allowed_name_is_refused(proxied):
-    assert page(proxied, proxied.token, host="evil.example.ts.net")[0] == 403
-    assert page(proxied, proxied.token, host="evil.example.ts.net:443")[0] == 403
+    assert page(proxied, proxied.token, host="evil.phone.tail-net.example.ts.net")[0] == 403
+    assert page(proxied, proxied.token, host="evil.phone.tail-net.example.ts.net:443")[0] == 403
 
 
 def test_mt_r1_prefix_and_suffix_variants_are_refused(proxied):
-    for host in ("phone.example.ts.net.evil.com", "xphone.example.ts.net",
-                 "phone.tail-net.ts.ne", "tail-net.example.ts.net"):
+    for host in ("phone.tail-net.example.ts.net.evil.com", "xphone.tail-net.example.ts.net",
+                 "phone.tail-net.example.ts.ne", "tail-net.example.ts.net"):
         assert page(proxied, proxied.token, host=host)[0] == 403, host
 
 
@@ -228,13 +228,13 @@ def test_mt_r1_host_is_refused_before_the_token_is_checked(proxied):
 def test_mt_r1_api_routes_also_check_the_host(proxied):
     token = {"X-Monitor-Token": proxied.token}
     assert get(proxied, "/api/settings", host="other.example.ts.net", headers=token)[0] == 403
-    assert get(proxied, "/api/settings", host="phone.example.ts.net",
+    assert get(proxied, "/api/settings", host="phone.tail-net.example.ts.net",
                headers=token)[0] == 200
 
 
 def test_mt_r1_allowed_host_still_needs_the_token(proxied):
-    assert get(proxied, "/", host="phone.example.ts.net")[0] == 403
-    assert page(proxied, "wrong", host="phone.example.ts.net")[0] == 403
+    assert get(proxied, "/", host="phone.tail-net.example.ts.net")[0] == 403
+    assert page(proxied, "wrong", host="phone.tail-net.example.ts.net")[0] == 403
 
 
 def test_mt_r1_equals_form_of_the_option_works(world):
@@ -247,7 +247,7 @@ def test_mt_r1_equals_form_of_the_option_works(world):
 # --------------------------------------------------------------------------
 
 QUOTA_ID = "/api/quota/identity"
-NAME = "phone.example.ts.net"
+NAME = "phone.tail-net.example.ts.net"
 
 
 def origin_status(run, origin, host=NAME):
@@ -260,7 +260,7 @@ def origin_status(run, origin, host=NAME):
 
 @pytest.mark.parametrize("origin", [
     f"https://{NAME}", f"http://{NAME}", f"https://{NAME}:8443",
-    f"http://{NAME}:80", "https://phone.example.ts.net", None])
+    f"http://{NAME}:80", "https://PHONE.tail-net.example.ts.net", None])
 def test_mt_r2_origin_of_an_allowed_name_is_accepted(proxied, origin):
     status, body = origin_status(proxied, origin)
     assert status != 403, body
@@ -343,7 +343,7 @@ def test_mt_r2_action_refuses_a_bad_origin_without_the_flag_on_a_loopback_host(w
 
 @pytest.mark.parametrize("origin", [
     f"https://{NAME}", f"http://{NAME}", f"https://{NAME}:8443",
-    "https://phone.example.ts.net", None])
+    "https://PHONE.tail-net.example.ts.net", None])
 def test_mt_r2_action_does_not_refuse_the_origin_of_the_request_host(proxied, origin):
     assert not is_origin_refusal(action_post(proxied, origin))
 
@@ -445,7 +445,7 @@ REFUSED = {
     "trailing-space": "phone.example.ts.net ",
     "tab": "phone\tts.net",
     "only-space": "   ",
-    "ipv4": "192.0.2.2",
+    "ipv4": "192.0.2.12",
     "loopback-ip": "127.0.0.1",
     "ipv6": "fd7a:115c:a1e0::1",
     "ipv6-bracketed": "[::1]",
@@ -706,8 +706,8 @@ def test_mt_r5_rotate_together_with_persistent_is_accepted(world):
 
 def test_mt_r6_start_output_prints_a_url_per_allowed_name(proxied):
     out = proxied.stdout()
-    assert TS_URL.format(name="phone.example.ts.net", token=proxied.token) in out or \
-        TS_URL.format(name="phone.example.ts.net", token=proxied.token) in out
+    assert TS_URL.format(name="Phone.Tail-Net.example.ts.net", token=proxied.token) in out or \
+        TS_URL.format(name="phone.tail-net.example.ts.net", token=proxied.token) in out
     assert TS_URL.format(name="second.example.ts.net", token=proxied.token) in out
     assert re.search(r"http://127\.0\.0\.1:\d+/\?token=", out)
 
@@ -784,7 +784,7 @@ def test_mt_r7_without_flags_only_loopback_hosts_are_served(world):
     run = world.start()
     assert page(run, run.token)[0] == 200
     assert page(run, run.token, host=f"localhost:{run.port}")[0] == 200
-    assert page(run, run.token, host="phone.example.ts.net")[0] == 403
+    assert page(run, run.token, host="phone.tail-net.example.ts.net")[0] == 403
     assert page(run, run.token, host="")[0] == 403
 
 

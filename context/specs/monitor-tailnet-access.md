@@ -21,7 +21,7 @@ NAME as a Host:
 - with or without a port in the Host header, compared the way loopback names
   already are;
 - the match ignores case and is exact: `x.example.ts.net` does not admit
-  `evil.example.ts.net`.
+  `evil.x.example.ts.net`.
 
 A request whose Host is not loopback or an allowed name is still refused,
 before the token is checked.
