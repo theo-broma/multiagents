@@ -4034,7 +4034,7 @@ def test_every_library_agent_ships_a_brief_and_a_pasteable_block():
     there, fails at spawn time inside someone's session instead."""
     blocks = _library_blocks()
     assert set(blocks) == {"specifier", "spec-adversary",
-                           "security-advisor", "pentester"}, sorted(blocks)
+                           "security-advisor", "pentester", "git"}, sorted(blocks)
 
     roster = _shipped_agents()
     for name, spec in blocks.items():
@@ -4054,6 +4054,8 @@ def test_every_library_brief_is_listed_in_the_readme():
               if p.name != "README.md"}
     listed = {f"{n}.md" for n in _library_blocks()}
     assert briefs == listed, (briefs, listed)
+    assert briefs == {"specifier.md", "spec-adversary.md", "security-advisor.md",
+                      "pentester.md", "git.md"}, briefs
 
 
 def test_the_library_spec_pair_stays_on_different_model_families():
