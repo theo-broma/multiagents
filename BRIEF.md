@@ -4478,7 +4478,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 
 | task | run | model | duration | review verdict | rework rounds |
 |---|---|---|---|---|---|
-| VR continuation | ag-ac9706 | bunny | 59 min (mostly a 32-min full suite) | rejected 1 (ag-4952e9: _with_spec KeyError on taskless node) | 1 → fix nd-029f8408 (quick, bunny) |
+| VR continuation | ag-ac9706 | bunny | 59 min (mostly a 32-min full suite) | rejected 1 (ag-4952e9: _with_spec KeyError on taskless node) | 1 → fix nd-029f8408 (quick, bunny, 3 min) approved by ag-9eee51 |
 | OZ impl | ag-36f162 | bunny | | | |
 | breaker-trial fix | ag-aa6122 | bunny | | | |
 
@@ -4503,3 +4503,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - GitHub keeps orphaned SHAs; support purge is not guaranteed.
 - Proposed to the user, awaiting OK: a deterministic pre-push hook (patterns from an untracked ~/.config/multiagents/sensitive-patterns) plus a `git` roster agent (claude sonnet; audits every push, does the heavy git tasks, never pushes itself).
 - 11:2x MT follow-up tests merged (6c8a9e7). VR reviewer ag-4952e9 rejected 1 (_with_spec, templates.py:141), and said the settle-held-rounds risk is fine. Fix nd-029f8408 (implementer-quick, bunny: a continuation) on top of efa962b; it counts as finishing in-flight work. Breaker fix ag-aa6122 hit the 3600 s wall clock while still running a suite, with commit f166658; let it finish. OZ ag-36f162 is still running.
+- 11:5x VR MERGED (0ebd883, via nd-029f8408; the superseded nd-f0bf4a1e stays unmerged). The host scheduler (pid 1969063) must be restarted at the quiet point to load VR; VR-R5 then settles the 4 held loops on its first tick. AN implementer next, but it waits for the pause (the user's quiet-moment rewrite) to lift.
