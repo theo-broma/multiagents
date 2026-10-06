@@ -4595,3 +4595,36 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the rewrite itself (git agent; it must remove fingerprint 60d01c970f424abb from a3a244c).
 - 19:5x MT MERGED (cb5419c; round 2 approved by ag-1946e9). A non-atomic token write (O_TRUNC) remains: it is not a blocker and fails safe. NT part-2 tests merged (c47e379) with the spec clarifications. NT2 implementer-deep runs on muse (nd-0ee8aba4, ag-2deb41). OG ag-302e01 is still running. I missed the MT reviewer's completion: wait_for_agents without ids skipped a node that had not launched yet. Memory saved.
 - 20:2x OG round 2 (bunny ag-638db3, nd-8056fe4c): data-driven rename, 766 + 1852 tests green; reviewer nd-22fec760. Decisions are recorded in the OG spec (92527de); the tester's updates are merged (600744e). Tooling: implementer-deep got `forbidden` from consult("dev-advisor") in both rounds. Investigate (the roster or the spawn rights of dev-advisor). NT2 ag-2deb41 is still running.
+
+### HANDOFF 2026-10-06 ~20:3x (orchestrator context wind-down)
+**Running:** OG reviewer ag-30876b (node nd-22fec760), verifying ag-638db3 on nodes/nd-8056fe4c. Nothing else is running.
+
+**Merged this session:**
+- GG R1..R9, with the pre-push hook installed;
+- NT part 1;
+- AN;
+- MT;
+- the test fixes.
+
+**Next steps, in order:**
+1. **OG.** Collect ag-30876b.
+   - If approved: merge_node nd-8056fe4c. Then switch this repo's untracked .multiagents/config files from `provider: opencode` to `opencode-go`, which removes the deprecation warning.
+   - If rejected: round 3 goes to an opus implementer-deep (user rule).
+2. **NT part 2** (implementer-deep, muse, ag-2deb41, nd-0ee8aba4: commits 3fdf303, 5b60bc3, 29a0ef4). Decisions are recorded in the NT spec: held_idle is not notified, and the test_nt_r6 log-count test gets a tester fix.
+   - First: a tester fixes that one test.
+   - Then: a reviewer with verifies=ag-2deb41 on nd-0ee8aba4, followed by merge.
+3. **History rewrite** (the user's order: after the false-positive work; GG-R7..R9 is DONE). Before it:
+   - ask the user about the allow list (19 fingerprints). `60d01c970f424abb` is REAL and must not be allowed.
+   - The git agent rewrites in a bare clone, using the patterns file and both `--replace-text` and `--replace-message`, then verifies with `multiagents git-guard scan`.
+   - Stop the scheduler during the cutover. Force-push main only, and only with the user's explicit go.
+4. **After the rewrite.** The git agent replays the retired loops' test commits onto the new main: SL 4a0810e; EV d6c43a0; AU be8f003; RV 3bc9528 and f79302c. Their task texts are readable via get_node on the cancelled nodes nd-cea9d844, nd-87d4f389, nd-2b545a6b and nd-c2304e99. Then a reviewer, then implementation.
+5. **Tooling bugs to fix in-house:**
+   - a steer during a long bash call SIGTERMs a node run, which is then marked failed without publishing its commits (MT ag-0d4eb6);
+   - consult("dev-advisor") returns forbidden for implementer-deep;
+   - collect_agent reports no_commits for node runs that did commit;
+   - agy-b reviewers end in "reported ERROR" after a complete verdict (RV, not yet implemented);
+   - wait_for_agents without ids misses nodes not launched yet (memory saved; wait with explicit run ids).
+6. **Muse vs Bunny today.**
+   - Muse is fast: GG-R7..R9, NT1 (2 rounds), AN (2 rounds) and NT2.
+   - Bunny is slower and twice had provider turns drop: MT (2 rounds), OG (2 rounds).
+   - Both produce sound work after review. Still no clear winner; keep drawing.

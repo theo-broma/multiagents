@@ -232,3 +232,6 @@ Verified by: CLI tests against the fake server.
   - "N notifications expired" counts events, not messages.
 - **Grouping.** A grouped message takes the highest priority of ALL the events it carries, including those hidden behind "+N more".
 - **Logging.** The once-per-outage failure line goes to the scheduler's own log, wherever its other log lines go.
+- **Decisions after implementer ag-2deb41 (2026-10-06).**
+  - `held_idle` anomalies are NOT notified. They only remind of a hold that the `held` event already announced. All other anomaly kinds are notified.
+  - `test_nt_r6_a_failure_is_logged_once_per_outage_per_process` counts the printed `scheduler_status` JSON of the `scheduler start` wrapper as a log line. A tester fixes it deliberately so that it counts only the scheduler's log lines.
