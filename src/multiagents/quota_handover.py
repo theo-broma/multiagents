@@ -33,6 +33,7 @@ from .config import AgentSpec
 from .paths import global_config_dir
 from .transcripts import session_transcript
 from .providers import expand_env_value, resolved_profile
+from .tree import _node_from_raw
 
 
 # Retained as an inert diagnostic seam for old observers. Admission never
@@ -384,7 +385,11 @@ class QuotaHandover:
             global_config_dir(), self.paths.config, None,
             self.tree.read().get("cooldowns", {}), limits=self.config.limits)
 
-    async def _qh_usable(self, name, spec, readings, node=None, *, floor=False):
+    async def _qh_usable(self, name, spec, readings, node=None, *, floor=False, data=None):
+        # `data` is a `tree.read()` the caller already holds; without one this
+        # parses the tree itself, once.
+        if data is None:
+            data = self.tree.read()
         provider = self.providers.get(name)
         if (not provider or not provider.enabled or not spec.model
                 or self._model_refusal(name, spec.model)
@@ -393,7 +398,7 @@ class QuotaHandover:
             return False
         if node and node.quota_stops.get(name, 0) > self._qh_now():
             return False
-        cooldown = self.tree.read().get("cooldowns", {}).get(name) or {}
+        cooldown = data.get("cooldowns", {}).get(name) or {}
         until = cooldown.get("until", 0) if isinstance(cooldown, dict) else cooldown
         if until and until > self._qh_now():
             return False
@@ -404,7 +409,7 @@ class QuotaHandover:
             return False
         if name == self._qh_reserved() and not floor and not self._qh_above_floor(entry):
             return False
-        if self._pc_admit(self.tree.read(), name, node.id if node else "") is not None:
+        if self._pc_admit(data, name, node.id if node else "") is not None:
             return False
         return await asyncio.to_thread(self._auth_ok, name, self.executor(spec)) is not False
 
@@ -1303,11 +1308,11 @@ class QuotaHandover:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
-    def _qh_idle(self, exclude=""):
+    def _qh_idle(self, exclude="", data=None):
         return not any(n.id != exclude and not n.role and n.status in (
-            "running", "pending", "stuck", "awaiting_user", "detached") for n in self._qh_nodes())
+            "running", "pending", "stuck", "awaiting_user", "detached") for n in self._qh_nodes(data))
 
-    def _qh_nodes(self):
+    def _qh_nodes(self, data=None):
         """Every node in `tree.json`, from one parse of it.
 
         This used to read the tree once and then call `tree.get` per key, and
@@ -1318,7 +1323,9 @@ class QuotaHandover:
         and — unlike `tree.get` — leaves a malformed entry out with a
         `malformed_entry` event rather than raising it out of the pass.
         """
-        return self.tree._nodes(bool, self.tree.read()["nodes"].items(), "quota_handover")
+        if data is None:
+            data = self.tree.read()
+        return self.tree._nodes(bool, data["nodes"].items(), "quota_handover")
 
     def _qh_request(self, agent, task, *, node=None, kwargs=None):
         with self.tree.transaction() as data:
@@ -1332,23 +1339,32 @@ class QuotaHandover:
         return {"deferred": True, "deferred_id": request["id"], "reason": "reserved instance quota floor",
                 "paused": False, **({"agent_id": node.id} if node else {})}
 
-    def _qh_propose(self):
-        requests = self.tree.read().get("quota_reserve", [])
+    def _qh_propose(self, data=None):
+        """Move the first queued request to `requested`, when nothing blocks it.
+
+        `data` is a `tree.read()` the caller already holds. True when the tree
+        was written, so a caller holding a snapshot knows to drop it.
+        """
+        if data is None:
+            data = self.tree.read()
+        requests = data.get("quota_reserve", [])
         if any(r["state"] in ("requested", "allowed", "running") for r in requests):
-            return
+            return False
         request = next((r for r in requests if r["state"] == "queued"), None)
-        if not request or not self._qh_idle(request["node_id"]):
-            return
+        if not request or not self._qh_idle(request["node_id"], data):
+            return False
         with self.tree.transaction() as data:
             current = next(r for r in data["quota_reserve"] if r["id"] == request["id"])
             if current["state"] != "queued":
-                return
+                return True
             current.update(state="requested", deadline=self._qh_now() + self._qh_settings().get("veto_window_seconds", 120))
-        node = self.tree.get(request["node_id"]) if request["node_id"] else None
+        raw = data["nodes"].get(request["node_id"]) if request["node_id"] else None
+        node = _node_from_raw(raw, request["node_id"]) if raw else None
         self._qh_event(node, "reserve_request", {"from": node.provider if node else "",
                        "to": self._qh_reserved(), "session_id": node.session_id if node else ""},
                        "idle; no other instance is usable", request_id=request["id"],
                        agent=request["agent"], task=request["task"])
+        return True
 
     async def reserve_answer(self, request_id, *, veto=False, reason=""):
         # Read before the transaction: a veto clears only on a later reset.
@@ -1432,26 +1448,47 @@ class QuotaHandover:
             return []
         readings = await self._qh_budgets()
         restarted = []
-        for request in self.tree.read().get("quota_reserve", []):
+        # One parse of tree.json serves every read until something can have
+        # changed it: an await, or a write of this pass's own. Then `stale()`
+        # drops it and the next `view()` parses again, so a node that changed
+        # during an await is still seen. This used to parse per request, twice.
+        snap = []
+
+        def view():
+            if not snap:
+                snap.append(self.tree.read())
+            return snap[0]
+
+        def stale():
+            snap.clear()
+
+        def node_of(node_id):
+            raw = view()["nodes"].get(node_id) if node_id else None
+            return _node_from_raw(raw, node_id) if raw else None
+
+        for request in view().get("quota_reserve", []):
             state = request["state"]
             if state == "running":
-                node = self.tree.get(request.get("dispatched_id") or request.get("node_id", ""))
+                node = node_of(request.get("dispatched_id") or request.get("node_id", ""))
                 if node is None:
-                    node = next((n for n in self._qh_nodes() if n.reserve_request == request["id"]), None)
+                    node = next((n for n in self._qh_nodes(view()) if n.reserve_request == request["id"]), None)
                 # A crash may precede dispatch's final bookkeeping. The node
                 # records reserve_request before spawn, so finding it prevents
                 # a second launch and lets a completed task release the floor.
                 if node is None and not procs.alive(request.get("owner_pid", 0), request.get("owner_start", "")):
                     self._qh_requeue(request["id"])
+                    stale()
                 if node and node.status not in ("running", "pending", "stuck", "detached"):
                     self._qh_request_state(request["id"], state="finished")
+                    stale()
                 continue
             if state not in ("queued", "requested", "allowed", "vetoed"):
                 continue
             roster = self.config.agents.get(request["agent"])
-            node = self.tree.get(request["node_id"]) if request["node_id"] else None
+            node = node_of(request["node_id"])
             if roster is None or (node and (node.node_id or node.status in ("cancelled", "merged"))):
                 self._qh_request_state(request["id"], state="cancelled")
+                stale()
                 continue
             if state == "vetoed":
                 fresh = self._qh_reading_keys(roster, readings)
@@ -1460,13 +1497,17 @@ class QuotaHandover:
                            (old[n][0] is None or fresh[n][0] > old[n][0]) for n in fresh):
                     continue
                 self._qh_request_state(request["id"], state="queued")
+                stale()
                 state = "queued"
             other = None
             for name in self._qh_names(roster):
                 routed = self._usable_spec(roster, name)
-                if name != self._qh_reserved() and routed and await self._qh_usable(name, routed, readings, node):
-                    other = name
-                    break
+                if name != self._qh_reserved() and routed:
+                    usable = await self._qh_usable(name, routed, readings, node, data=view())
+                    stale()
+                    if usable:
+                        other = name
+                        break
             if other:
                 if node:
                     spec, _ = self._spec_of(node)
@@ -1475,24 +1516,31 @@ class QuotaHandover:
                     result = {"agent_id": node.id} if success else {"error": "resume failed"}
                 else:
                     result = await self.start(request["agent"], request["task"], **request["kwargs"])
+                stale()
                 if result.get("agent_id") and not result.get("deferred"):
                     self._qh_request_state(request["id"], state="finished")
                     restarted.append(result)
                 continue
-            if not self._qh_idle(node.id if node else ""):
+            if not self._qh_idle(node.id if node else "", view()):
                 continue
             if state == "queued":
-                self._qh_propose()
+                if self._qh_propose(view()):
+                    stale()
                 continue
             if state == "requested":
                 if self._qh_now() < request["deadline"]:
                     continue
                 await self.reserve_answer(request["id"])
-            if any(r["state"] == "running" for r in self.tree.read().get("quota_reserve", [])):
+                stale()
+            if any(r["state"] == "running" for r in view().get("quota_reserve", [])):
                 continue
             target = self._qh_reserved()
             routed = self._usable_spec(roster, target)
-            if routed is None or not await self._qh_usable(target, routed, readings, node, floor=True):
+            if routed is None:
+                continue
+            usable = await self._qh_usable(target, routed, readings, node, floor=True, data=view())
+            stale()
+            if not usable:
                 continue
             # Claim before launch. A competing drain sees running, not allowed.
             with self.tree.transaction() as data:
@@ -1528,7 +1576,8 @@ class QuotaHandover:
                     self._qh_requeue(request["id"])
             finally:
                 grants.pop(grant, None)
-        self._qh_propose()
+                stale()
+        self._qh_propose(view())
         return restarted
 
     def _qh_new_floor_id(self):
