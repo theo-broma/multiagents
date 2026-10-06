@@ -4517,3 +4517,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 ### 2026-10-06 — opencode → opencode-go rename (OG)
 - User: rename the Go route so `opencode` no longer reads as opencode in general. Spec context/specs/opencode-go-rename.md (OG-R1..R5, dcf4d43): `opencode` = CLI base, not routable; `opencode-go` = Go subscription; old name aliased with a warning; one-time state migration.
 - Tester nd-6144e536 (it lists superseded tests without editing them). Implementation (implementer-deep, random model) AFTER GG merges, since both touch config. Then switch this repo's own config files to `opencode-go`.
+- 13:1x Test speed check (user question): the new test files are fast (MT, GG and NT at 10–22 s for 100–200 tests; reds fail fast), except VR at 60 s (tests of 8–13 s waiting on real ticks) and 2 AN tests at 7 s and 3 s. Speed-up tester nd-153b9bf9, test files only; counts must stay identical.
