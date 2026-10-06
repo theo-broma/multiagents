@@ -210,3 +210,25 @@ Verified by: CLI tests against the fake server.
 - NT-R1, R2, R7 and R8 (the config, the tool and the CLI) are built first.
 - NT-R3 to R6 (the scheduler sender) come after VR and AN merge, because they
   touch the scheduler loop.
+
+## Clarifications to part 2 (2026-10-06, answering tester ag-7031ce)
+- **Clock.**
+  - Retry backoff, the rate limit and the 24 h expiry all run on the scheduler's clock (the one `--clock-file` drives in tests), never on wall time.
+  - Backoff doubles from 30 s up to a 10 min cap, with at most ±10 % jitter.
+  - A 429 `Retry-After` is honoured when it falls within [30 s, 10 min], and clamped to that range otherwise.
+- **Status.**
+  - `scheduler_status` gains a `notify` mapping with `pending` (int), `last_accepted_at` (ISO-8601 UTC, or null) and `failure` (a short reason string, or null).
+  - `notify status` prints `pending: N`, `last accepted: <time or never>` and `failure: <reason or none>`.
+- **Activation summary.**
+  - It is a message like any other, so it is rate-limited.
+  - It is sent even when both counts are zero.
+  - It is not filtered by `events`.
+- **`done`.**
+  - Any top-level node reaching a terminal state sends it, including `cancelled`, with the outcome or state as the reason.
+  - Children of a composite never send `done`.
+- **Title.** The title is `<project> · <kind>`, where `<project>` is the project root directory's name.
+- **Pause and expiry.**
+  - A restart does not clear an NT-R4 pause.
+  - "N notifications expired" counts events, not messages.
+- **Grouping.** A grouped message takes the highest priority of ALL the events it carries, including those hidden behind "+N more".
+- **Logging.** The once-per-outage failure line goes to the scheduler's own log, wherever its other log lines go.
