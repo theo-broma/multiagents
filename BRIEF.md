@@ -4686,3 +4686,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - agent-level `reserved_instance` is not aliased;
   - `startup.json` is not migrated (decided: reading both keys is enough);
   - `doctor` prints each deprecation warning 4 times (OG-R2 says once per load).
+- 2026-10-06 ~22:30 **Steering a node run kills it.** Steering ag-5fc11f (NT round 3, silent for 15 min after committing 2e67e14, 807cafc and WIP 659448c on `agents/implementer-deep/5fc11f`) gave "exited -15". The node nd-68ac87a1 is marked failed and its commits never reached the node branch. This is the known steer-SIGTERM bug, and it also hits nodes. Recovery:
+  - Bunny nd-f805d594 cherry-picks those commits and checks them;
+  - reviewer nd-07edc3be follows; nd-7293dc8c is cancelled.
+
+  Avoid steering node runs: prefer a fresh node.
+- **Git rehearsal ag-5702d4** committed rewrite.sh on `agents/git/5702d4` (54b560e, 6b90c51). It was steered to wrap up.
