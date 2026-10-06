@@ -4628,3 +4628,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
    - Muse is fast: GG-R7..R9, NT1 (2 rounds), AN (2 rounds) and NT2.
    - Bunny is slower and twice had provider turns drop: MT (2 rounds), OG (2 rounds).
    - Both produce sound work after review. Still no clear winner; keep drawing.
+- 20:4x **OG reviewer ag-30876b REJECTED 2** (on nd-8056fe4c):
+  1. tree.py:347 `migrate_provider_names` rewrites the `provider` of past runs and segments in tree.json nodes. That is history, and the spec says it stays as written; only live routing keys move.
+  2. tree.py:747 the migration runs inside `Tree.load` under the global tree lock, and `shipped_renames()` reads providers.yaml from disk on its first call. That is I/O under a lock.
+  **Next (not started, because of the context wind-down):** round 3 goes to an **opus implementer-deep** (user rule). It cherry-picks nodes/nd-8056fe4c and fixes both defects:
+  - leave history records untouched;
+  - load the rename declaration before taking the lock, or cache it at config load;
+  - add regression tests in a new file.
+  Then a reviewer with verifies=<that run>, then merge.
