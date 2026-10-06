@@ -4472,3 +4472,12 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - User: distinguish opencode-go and opencode-zen. Project providers.yaml gains `opencode-zen` (extends opencode, own family, models_include opencode/*, plan zen); 5 Space Bunny agents → provider opencode-zen. VR continuation now nd-f0bf4a1e (ag-ac9706) on opencode-zen bunny max. Spec draft context/specs/opencode-zen-provider.md (OZ-R1..R4) awaiting user OK.
 - 07:4x drain-reserve fix merged (cd34d0f, reviewer ag-4da325 approved). OZ tests merged (d576e49); clarifications 4b136f3; OZ follow-up tester nd-26421555 (tighten + update 5 superseded di/za tests), then OZ implementer. Ticket bug-521be6 (pinned pre-admission burns breaker trial, runner.py:4611) → fix implementer nd-cbd967c2, reviewer to follow, then resolve_ticket fixed (never submit).
 - 07:5x OZ follow-up tests merged (06edab2, 59 red). In flight on opencode-zen Space Bunny: VR continuation nd-f0bf4a1e (ag-ac9706, implementer-deep), OZ implementer nd-910d1e9b (ag-36f162), breaker-trial fix nd-cbd967c2 (ag-aa6122). Each → reviewer with verifies, then merge_node. After VR: check the 4 held loops settle (VR-R5), start AN implementer. After breaker fix: resolve_ticket bug-521be6 fixed. After OZ: project providers.yaml override can shrink to `enabled: true`.
+
+### 2026-10-06 — Muse vs Bunny (implementers, both opencode-zen, variant max)
+- User 08:0x: assign implementer runs at random between `opencode/space-bunny-free` and `opencode/muse-spark-1.3-contributor-free`, and switch everything to whichever is clearly better. Muse probe on zen OK. Continuations keep their run's model.
+
+| task | run | model | duration | review verdict | rework rounds |
+|---|---|---|---|---|---|
+| VR continuation | ag-ac9706 | bunny | | | |
+| OZ impl | ag-36f162 | bunny | | | |
+| breaker-trial fix | ag-aa6122 | bunny | | | |
