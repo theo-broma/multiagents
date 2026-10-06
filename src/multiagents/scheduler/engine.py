@@ -26,6 +26,7 @@ from . import model
 from .store import encode
 from .results import Results, input_generation, recording_loops, top_node
 from . import sessions, effects, windows
+from .. import notify_sender
 from .. import gitops
 
 
@@ -109,6 +110,11 @@ class Engine:
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.run, name="node-evaluation", daemon=True)
         self.stopped = threading.Event()
+        # NT-R6: sending happens on its own thread, outside every tick and
+        # every store transaction, so a slow, hanging or failing ntfy server
+        # never delays a tick and never changes a node, run or transition.
+        self.notifier = notify_sender.Sender(service, self.store, self.runner.tree,
+                                             self.paths.root.name, self.instant)
         self.children = []
         # A node whose admission raised is retried after the others, so one
         # failing evaluation cannot starve every node ordered behind it.
@@ -205,6 +211,10 @@ class Engine:
                         node.update(state="held", hold={"reason": "admission:refused"})
                     self.store.save_node(db, node)
                     self.store.transition(db, "created", node["id"], {"migration_id": entry["id"]})
+                    if entry.get("status") == "refused":
+                        # NT-R3: the mark of a hold is the seq of its `held`
+                        # transition, this one included.
+                        self.store.transition(db, "held", node["id"], node["hold"])
                     revision += 1
                     migrated.add(entry["id"])
                 self.store.set_meta(db, "plan_revision", revision)
@@ -326,7 +336,7 @@ class Engine:
                 "active_run": active if node["state"] not in {"done", "cancelled"} else None}
 
     def status(self, nodes, journal, db=None, at=None):
-        return {"last_tick": self.last_tick,
+        counts = {"last_tick": self.last_tick,
                 "held": [{"node_id": n["id"], "hold": n["hold"]} for n in nodes.values() if n["state"] == "held"],
                 "locks": [{"name": name, "holder_run": a["run_id"], "holder_node": a["node_id"]}
                           for a in journal.values() if a["state"] in {"claimed", "launched"}
@@ -334,6 +344,15 @@ class Engine:
                 "windows": [{"node_id": n["id"], **{k: v for k, v in self.window(n, nodes, at).items()
                              if k in {"open", "next_open", "next_close"}}} for n in nodes.values()],
                 "starving": self.starving(nodes, at)}
+        # NT-R6: the state of sending — pending count, last accepted message
+        # and current failure — read from the store only, so it never stalls
+        # behind a hanging send. The open connection is passed down: a second
+        # one inside this read would deadlock against a commit-waiting writer.
+        try:
+            counts["notify"] = notify_sender.snapshot(self.store, db)
+        except Exception:
+            counts["notify"] = {"pending": 0, "last_accepted_at": None, "failure": None}
+        return counts
 
     def starving(self, nodes, at):
         """NC-R53 as shown (NC-R43): open nodes ready for longer than the
@@ -352,6 +371,7 @@ class Engine:
 
     def start(self):
         self.thread.start()
+        self.notifier.start()
 
     def run(self):
         asyncio.set_event_loop(self.loop)
@@ -387,7 +407,9 @@ class Engine:
 
     def stop(self):
         self.stopped.set()
+        self.notifier.stopped.set()
         self.thread.join(timeout=10)
+        self.notifier.join(timeout=2)
         with self.service.changed, self.store.transaction() as db:
             for attempt in attempts(db).values():
                 # The worker marks entry into Runner.start atomically with its
@@ -637,6 +659,14 @@ class Engine:
         # AN runs after VR's settle step (composites above): a round VR just
         # settled is no longer held, so there is nothing left to report.
         self.anomaly_check()
+        # NT-R3: detect new scheduler events into the durable notification
+        # outbox. The scan only enqueues; sending happens on the notifier
+        # thread. It never raises out of the tick.
+        try:
+            notify_sender.scan(self.service, self.store, self.runner.tree,
+                               self.paths.root.name, self.window_instant)
+        except Exception:
+            logging.getLogger(__name__).exception("scheduler notification scan failed")
 
     async def evaluate_windows(self):
         # Persist stop intent before a supervisor signals anything. Reconcile
@@ -1092,6 +1122,13 @@ class Engine:
                                                 "detail": str(evidence), "since": now()},
                                                 revision=node["revision"] + 1)
                                     self.store.save_node(db, node)
+                                    # NT-R3: the per-hold mark is the seq of
+                                    # this `held` transition, as it is for
+                                    # Engine.hold. A hold that records none
+                                    # can only be told apart from its
+                                    # successor by the revision, so a re-hold
+                                    # would announce nothing.
+                                    self.store.transition(db, "held", node["id"], node["hold"])
                                     current["recovery_hold"] = {"state": prior, "revision": node["revision"]}
                                 save_attempt(db, current)
                             else:

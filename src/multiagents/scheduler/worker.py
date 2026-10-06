@@ -85,6 +85,11 @@ async def supervise(root, attempt_id, lock_fd=None):
                                     revision=node["revision"] + 1)
                         store.save_node(db, node)
                         store.transition(db, detail["error"], node["id"], node["hold"])
+                        # NT-R3: one notification per hold, keyed on the seq of
+                        # its `held` transition (engine.hold writes the same
+                        # pair), so a preflight hold is announced exactly once
+                        # however often the node is edited or resumed.
+                        store.transition(db, "held", node["id"], node["hold"])
                     attempt.update(state="abandoned", refusal=detail, ended_at=now())
                     save_attempt(db, attempt)
                     db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))

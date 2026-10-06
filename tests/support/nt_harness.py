@@ -52,6 +52,7 @@ class FakeNtfy:
         self.mode = "accept"
         self.status = 200
         self.location = ""
+        self.extra_headers: dict[str, str] = {}      # sent with every "status" answer (e.g. Retry-After)
         self.release = threading.Event()
         fake = self
 
@@ -97,6 +98,9 @@ class FakeNtfy:
                 self.send_response(fake.status if mode in ("status", "redirect") else 200)
                 if mode == "redirect":
                     self.send_header("Location", fake.location)
+                if mode == "status":
+                    for name, value in fake.extra_headers.items():
+                        self.send_header(name, value)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(out)))
                 self.end_headers()
@@ -184,3 +188,11 @@ def wait_until(predicate, timeout: float = 3.0, interval: float = 0.02) -> bool:
             return True
         time.sleep(interval)
     return predicate()
+
+
+def plan_db(world) -> Path:
+    """The scheduler's own store: the only place its transitions are visible to
+    a test. Read it through `sqlite3` in read-only mode."""
+    files = [p for p in world.scheduler_files() if p.name == "plan.sqlite3"]
+    assert files, "the scheduler has no database"
+    return files[0]

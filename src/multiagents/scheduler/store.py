@@ -65,6 +65,14 @@ class Store:
                     (id TEXT PRIMARY KEY, record TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notifications
                     (seq INTEGER PRIMARY KEY AUTOINCREMENT, record TEXT NOT NULL);
+                -- NT-R3: every hold writes a `held` transition whose seq is that
+                -- hold's mark, so the mark of a node is looked up by node id and
+                -- kind rather than by walking the log.
+                CREATE INDEX IF NOT EXISTS notifications_by_node ON notifications
+                    (json_extract(record, '$.node_id'), json_extract(record, '$.kind'), seq);
+                CREATE TABLE IF NOT EXISTS notify_outbox
+                    (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+                     ref TEXT NOT NULL, data TEXT NOT NULL, enqueued_at REAL NOT NULL);
             """
             for statement in schema.split(";"):
                 if statement.strip():
@@ -78,6 +86,9 @@ class Store:
     def transaction(self, *, write=True):
         # DELETE journals and FULL sync make the effect durable before reply;
         # BEGIN IMMEDIATE serialises host seams as well as RPC worker threads.
+        # Never nest one transaction inside another: an inner read blocks
+        # behind a commit-waiting writer while holding the outer read, which
+        # is a 30 s deadlock by construction. Pass the open connection down.
         db = sqlite3.connect(self.file if write else f"{self.file.as_uri()}?mode=ro",
                              uri=not write, timeout=30, isolation_level=None)
         try:
@@ -104,6 +115,20 @@ class Store:
     def nodes(db) -> dict[str, dict]:
         # Creation order: save_node keeps a node's rowid across updates.
         return {id: json.loads(record) for id, record in db.execute("SELECT id, record FROM nodes ORDER BY rowid")}
+
+    @staticmethod
+    def some_nodes(db, ids) -> dict[str, dict]:
+        """The named nodes, and nothing else: `ids` is the caller's own short
+        list, so this is one index lookup per id and never a walk of the plan."""
+        out: dict[str, dict] = {}
+        wanted = [id for id in dict.fromkeys(ids) if isinstance(id, str)]
+        for start in range(0, len(wanted), 400):        # SQLite's bound-parameter limit
+            chunk = wanted[start:start + 400]
+            for id, record in db.execute(
+                    "SELECT id, record FROM nodes WHERE id IN (%s)" % ",".join("?" * len(chunk)),
+                    chunk):
+                out[id] = json.loads(record)
+        return out
 
     @staticmethod
     def save_node(db, node):

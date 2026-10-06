@@ -164,16 +164,27 @@ def finish_operations(engine):
                     store.save_node(db, node)
                     store.transition(db, "published", id, {"commit": node["published"]})
                 else:
+                    flipped = []
                     for child_id in intent["scope"]:
                         child = nodes[child_id]
                         child.pop("disposal_pending", None)
                         if child["state"] not in {"done", "cancelled"}:
                             child["state"] = "cancelled"
+                            flipped.append(child_id)
                         child.update(disposed=now(), revision=child["revision"] + 1)
                         store.save_node(db, child)
                     for alias in intent["aliases"]:
                         db.execute("DELETE FROM aliases WHERE id=?", (alias,))
                     store.transition(db, "disposed", id)
+                    # NT-R3 (round-2 fix 2): a top-level node that becomes
+                    # `cancelled` through disposal sends `done` like any
+                    # other terminal top-level node. The scheduler's
+                    # notification scan reads `cancelled` transitions, so
+                    # each node the disposal actually cancelled gets one —
+                    # and a node that was already finished gets none, so it
+                    # is not announced again.
+                    for child_id in flipped:
+                        store.transition(db, "cancelled", child_id)
                 reply(store, db, intent, node)
                 engine.service.changed.notify_all()
 

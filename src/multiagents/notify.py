@@ -257,18 +257,27 @@ def encode_title(title: str) -> str:
     return f"=?utf-8?b?{encoded}?="
 
 
-def _exchange(conn: http.client.HTTPConnection, target: str, body: bytes,
-              headers: dict, box: dict) -> None:
+def _exchange_full(conn: http.client.HTTPConnection, target: str, body: bytes,
+                   headers: dict, box: dict) -> None:
     """The HTTP round trip, on a daemon worker: never raises (NT-R2).
 
     Reports `{"status": code}` or `{"error": "timeout" | "network"}` into
-    `box`. Only the outcome kind crosses back to the calling thread — never
-    exception text, which may quote the Authorization header and with it
-    the token.
+    `box`, plus a 429's `Retry-After` value (if any) as `{"retry_after":
+    value}`. Only the outcome kind crosses back to the calling thread —
+    never exception text, which may quote the Authorization header and with
+    it the token. Header values are the server's own words about timing;
+    they never carry the token.
     """
     try:
         conn.request("POST", target, body=body, headers=headers)
-        box["status"] = conn.getresponse().status
+        response = conn.getresponse()
+        box["status"] = response.status
+        try:
+            received = {k.lower(): v for k, v in response.getheaders()}
+        except Exception:
+            received = {}
+        if received.get("retry-after") is not None:
+            box["retry_after"] = received["retry-after"]
     except (socket.timeout, TimeoutError):
         box["error"] = "timeout"
     except Exception:
@@ -314,15 +323,16 @@ def _check_args(title: Any, message: Any, priority: Any,
     return None
 
 
-def publish(base_url: str, topic: str, title: str, message: str,
-            priority: str = "default", tags: list[str] | None = None,
-            token: str | None = None,
-            bound: float = SEND_BOUND_SECONDS) -> dict:
-    """Publish one message; never raises, never follows redirects (NT-R2).
+def publish_detailed(base_url: str, topic: str, title: str, message: str,
+                     priority: str = "default", tags: list[str] | None = None,
+                     token: str | None = None,
+                     bound: float = SEND_BOUND_SECONDS) -> dict:
+    """Like `publish`, plus the machine-readable outcome (NT-R4).
 
-    Returns `{"ok": True, ...}` when the server accepted the message, else
-    `{"ok": False, "reason": ...}` with a distinct reason per failure kind.
-    The whole attempt — connection, response and cleanup — fits in `bound`.
+    Returns `publish`'s mapping with `status` (the HTTP status, or None on a
+    transport failure), `error` (`"timeout"`, `"network"` or None) and
+    `retry_after` (the server's `Retry-After` value, or None) added. Never
+    raises; the token appears in no field.
     """
     started = time.monotonic()
     deadline = started + bound
@@ -334,10 +344,12 @@ def publish(base_url: str, topic: str, title: str, message: str,
         parts = urllib.parse.urlsplit(base_url.strip())
     except ValueError:
         return {"ok": False,
-                "reason": "invalid ntfy_url: expected an http or https URL with a host"}
+                "reason": "invalid ntfy_url: expected an http or https URL with a host",
+                "status": None, "error": None, "retry_after": None}
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return {"ok": False,
-                "reason": "invalid ntfy_url: expected an http or https URL with a host"}
+                "reason": "invalid ntfy_url: expected an http or https URL with a host",
+                "status": None, "error": None, "retry_after": None}
     base_path = (parts.path or "").rstrip("/")
     target = f"{base_path}/{topic}"
     headers = {
@@ -357,7 +369,8 @@ def publish(base_url: str, topic: str, title: str, message: str,
         port = parts.port or (443 if parts.scheme == "https" else 80)
         wait = remaining()
         if wait <= 0:
-            return {"ok": False, "reason": _TIMEOUT_REASON}
+            return {"ok": False, "reason": _TIMEOUT_REASON,
+                    "status": None, "error": "timeout", "retry_after": None}
         conn_cls = (http.client.HTTPSConnection if parts.scheme == "https"
                     else http.client.HTTPConnection)
         # The connection object itself does no I/O, so building it here is
@@ -365,7 +378,7 @@ def publish(base_url: str, topic: str, title: str, message: str,
         # and body — runs on the worker below.
         conn = conn_cls(host, port, timeout=max(0.1, wait))
         box: dict = {}
-        worker = threading.Thread(target=_exchange,
+        worker = threading.Thread(target=_exchange_full,
                                   args=(conn, target, body, headers, box),
                                   daemon=True)
         worker.start()
@@ -376,13 +389,16 @@ def publish(base_url: str, topic: str, title: str, message: str,
         if worker.is_alive():
             _abandon(conn)
             conn = None
-            return {"ok": False, "reason": _TIMEOUT_REASON}
+            return {"ok": False, "reason": _TIMEOUT_REASON,
+                    "status": None, "error": "timeout", "retry_after": None}
         if "status" in box:
             status = box["status"]
         elif box.get("error") == "timeout":
-            return {"ok": False, "reason": _TIMEOUT_REASON}
+            return {"ok": False, "reason": _TIMEOUT_REASON,
+                    "status": None, "error": "timeout", "retry_after": None}
         else:
-            return {"ok": False, "reason": _NETWORK_REASON}
+            return {"ok": False, "reason": _NETWORK_REASON,
+                    "status": None, "error": "network", "retry_after": None}
     finally:
         try:
             if conn is not None:
@@ -392,11 +408,34 @@ def publish(base_url: str, topic: str, title: str, message: str,
     if 300 <= status < 400:
         return {"ok": False,
                 "reason": (f"redirect (http {status}): redirects are never "
-                           f"followed, so the message was not sent")}
+                           f"followed, so the message was not sent"),
+                "status": status, "error": None,
+                "retry_after": box.get("retry_after")}
     if 200 <= status < 300:
-        return {"ok": True, "note": "accepted by the ntfy server"}
+        return {"ok": True, "note": "accepted by the ntfy server",
+                "status": status, "error": None,
+                "retry_after": box.get("retry_after")}
     return {"ok": False,
-            "reason": f"ntfy server refused the message: http {status}"}
+            "reason": f"ntfy server refused the message: http {status}",
+            "status": status, "error": None,
+            "retry_after": box.get("retry_after")}
+
+
+def publish(base_url: str, topic: str, title: str, message: str,
+            priority: str = "default", tags: list[str] | None = None,
+            token: str | None = None,
+            bound: float = SEND_BOUND_SECONDS) -> dict:
+    """Publish one message; never raises, never follows redirects (NT-R2).
+
+    Returns `{"ok": True, ...}` when the server accepted the message, else
+    `{"ok": False, "reason": ...}` with a distinct reason per failure kind.
+    The whole attempt — connection, response and cleanup — fits in `bound`.
+    """
+    result = publish_detailed(base_url, topic, title, message, priority, tags,
+                              token, bound)
+    if result.get("ok") is True:
+        return {"ok": True, "note": "accepted by the ntfy server"}
+    return {"ok": False, "reason": result.get("reason", "failed")}
 
 
 def send(notify_cfg: Any, title: Any, message: Any,

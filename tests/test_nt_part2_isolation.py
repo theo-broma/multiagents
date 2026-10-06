@@ -155,8 +155,10 @@ def log_lines_about_the_failure(w):
             text += "\n" + path.read_text(errors="replace")
         except OSError:
             pass
+    # The `scheduler start` wrapper prints the scheduler_status JSON; that is not a log line.
     return [ln for ln in text.splitlines()
-            if re.search(r"ntfy|notif", ln, re.I) and re.search(r"fail|error|50\d|unreach|refus", ln, re.I)
+            if not ln.lstrip().startswith("{")
+            and re.search(r"ntfy|notif", ln, re.I) and re.search(r"fail|error|50\d|unreach|refus", ln, re.I)
             and not re.search(r"recover|resum|restor", ln, re.I)]
 
 

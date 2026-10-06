@@ -147,6 +147,7 @@ def test_nt_r3_only_the_listed_kinds_send(make, listed):
     w = make(events=[listed])
     ids = {}
     w.start_scheduler()
+    assert w.got(1), "no activation summary"      # events before activation belong to the summary
     ids["question"] = w.question()
     ids["held"] = w.held_node()
     ids["done"] = w.done_node()

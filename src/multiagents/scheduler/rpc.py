@@ -623,8 +623,9 @@ class Service:
                         # announced once known (finish_cancel).
                         child.update(state="held", hold={"reason": "termination_unconfirmed"},
                                      revision=child["revision"] + 1)
-                        if id in unconfirmed:
-                            self.store.transition(db, "held", id, child["hold"])
+                        # NT-R3: one notification per hold, keyed on the seq of
+                        # its `held` transition, whichever branch took it.
+                        self.store.transition(db, "held", id, child["hold"])
                     else:
                         child.update(state="cancelled", hold=None, outcome=None,
                                      revision=child["revision"] + 1)
@@ -681,7 +682,11 @@ class Service:
                         self.store.transition(db, "cancelled", id)
                     else:
                         unconfirmed.append(id)
-                        self.store.transition(db, "held", id, child["hold"])
+                        # The node stays under the hold the request already
+                        # placed, at the same revision: nothing became held a
+                        # second time, so this is the fact that the stop did not
+                        # confirm death, not another hold (NT-R3).
+                        self.store.transition(db, "termination_unconfirmed", id, child["hold"])
                 shown = nodes[unconfirmed[0]] if unconfirmed else nodes[pending["target"]]
                 reply = {**reply, "result": self.view(shown, int(self.store.meta(db, "plan_revision")))}
                 db.execute("UPDATE requests SET reply=? WHERE subject=? AND request_id=?",

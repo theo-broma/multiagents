@@ -3363,15 +3363,16 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_notify(args: argparse.Namespace) -> int:
-    """`multiagents notify test|status` (NT-R8, first round).
+    """`multiagents notify test|status` (NT-R8).
 
     `test` sends one message with the project's config and exits 0 when the
-    server accepts it, non-zero with the reason otherwise. `status` prints
-    the sending state — the pending count — and never publishes. Clearing
-    the NT-R4 pause on a successful test belongs to the scheduler sender
-    (part 2); there is no pause store yet, so there is nothing to clear.
+    server accepts it, non-zero with the reason otherwise; its success clears
+    an NT-R4 pause. `status` prints the sending state — the pending count,
+    the last accepted message and the current failure — and never publishes.
     """
     from . import notify as notify_mod
+    from . import notify_sender
+    from .scheduler.store import Store
 
     paths = _resolve(args.path)
     action = getattr(args, "notify_command", "")
@@ -3381,13 +3382,23 @@ def cmd_notify(args: argparse.Namespace) -> int:
         print(f"notify {action}: invalid config: {exc}")
         return 1
     section = (config.project or {}).get("notify")
+
+    def sending_state() -> dict:
+        try:
+            return notify_sender.snapshot(Store(paths.root))
+        except Exception:
+            return {"pending": 0, "last_accepted_at": None, "failure": None}
     if action == "status":
         if section is None:
             print("notify: not configured")
         else:
             print(f"notify: {section.get('ntfy_url')}, topic {section.get('topic')}")
-        # Part 1 keeps no outbox: nothing is ever pending yet.
-        print("pending: 0")
+        state = sending_state()
+        print(f"pending: {state.get('pending', 0)}")
+        last = state.get("last_accepted_at")
+        print(f"last accepted: {last if last else 'never'}")
+        failure = state.get("failure")
+        print(f"failure: {failure if failure else 'none'}")
         return 0
     if action == "test":
         if section is None:
@@ -3399,6 +3410,15 @@ def cmd_notify(args: argparse.Namespace) -> int:
         if result.get("ok") is True:
             print(f"notify test: accepted by {section.get('ntfy_url')} "
                   f"(topic {section.get('topic')})")
+            # NT-R8: success clears an NT-R4 pause; the scheduler's sender
+            # notices the cleared flag on its next poll. A pause that cannot
+            # be cleared is a failure, not a success (round-2 fix 6).
+            try:
+                notify_sender.clear_pause(Store(paths.root))
+            except Exception as exc:
+                print(f"notify test: the server accepted the message but the "
+                      f"sending pause could not be cleared: {exc}")
+                return 1
             return 0
         print(f"notify test: {result.get('reason', 'failed')}")
         return 1
