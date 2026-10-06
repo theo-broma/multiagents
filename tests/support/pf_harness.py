@@ -79,6 +79,7 @@ CODEX_SESSION_ID = "0199c5a4-7e3b-7c10-8a52-3f6d2b9e41aa"
 
 def session_id_for(kind: str) -> str:
     """The session id the fake native of `kind` emits."""
+    kind = SHIPPED_PROVIDERS.get(kind, (kind,))[0]      # a route's id is its fake's family
     return CODEX_SESSION_ID if kind == "codex" else "S-" + kind
 
 
@@ -187,7 +188,8 @@ SHIPPED_PROVIDERS = {
     "claude": ("claude", "sonnet"),
     "codex": ("codex", "gpt-5"),
     "agy": ("agy", "gemini-3.8-flash-low"),
-    "opencode": ("opencode", "opencode-go/test-model"),
+    "opencode": ("opencode", "opencode-go/test-model"),     # the CLI base: no route of its own
+    "opencode-go": ("opencode", "opencode-go/test-model"),
     # `extends` variants
     "opencode-zai": ("opencode", "zai-coding-plan/glm"),
     "opencode-deepinfra": ("opencode", "deepinfra/test-model"),

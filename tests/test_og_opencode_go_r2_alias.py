@@ -376,8 +376,9 @@ def test_og_r2_mcp_node_pin_provider_opencode_is_stored_as_opencode_go_and_warns
 # Clarifications (2026-10-06): channel, fallback_chain, CLI-only block, collision
 # ===========================================================================
 
-def test_og_r2c_the_warning_is_on_stderr_and_in_config_warnings(tmp_path, capsys, caplog):
-    """Clarified channel: stderr and `Config.warnings` (both, not either)."""
+def test_og_r2c_the_warning_is_on_stderr_only_not_in_config_warnings(tmp_path, capsys, caplog):
+    """Decision 2026-10-06: stderr only. `doctor` already prints
+    `Config.warnings`, so a second channel would always show two lines."""
     import logging
 
     from multiagents import config as config_mod
@@ -387,10 +388,11 @@ def test_og_r2c_the_warning_is_on_stderr_and_in_config_warnings(tmp_path, capsys
     capsys.readouterr()
     cfg = config_mod.load(p.paths)
     captured = capsys.readouterr()
-    assert len(deprecations(captured.err, about=agents)) == 1, captured.err
+    on_stderr = deprecations(captured.err, about=agents)
+    assert len(on_stderr) == 1, captured.err
+    assert named_line(on_stderr[0], agents) == line_of(agents, f"provider: {OLD}")
     in_config = deprecations("\n".join(str(w) for w in cfg.warnings), about=agents)
-    assert len(in_config) == 1, cfg.warnings
-    assert named_line(in_config[0], agents) == line_of(agents, f"provider: {OLD}")
+    assert in_config == [], cfg.warnings
 
 
 def _project_yaml(chain_lines: str) -> str:

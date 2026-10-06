@@ -6545,8 +6545,8 @@ def test_providers_are_counted_separately(tmp_path):
     tree = _tree(tmp_path)
     for _ in range(3):
         tree.note_run_outcome("claude", ok=False, threshold=3)
-    assert tree.note_run_outcome("opencode", ok=False, threshold=3) is None
-    assert tree.provider_health()["opencode"]["consecutive_failures"] == 1
+    assert tree.note_run_outcome("opencode-go", ok=False, threshold=3) is None
+    assert tree.provider_health()["opencode-go"]["consecutive_failures"] == 1
 
 
 def test_a_model_override_from_another_provider_is_refused(tmp_path):
@@ -6969,11 +6969,11 @@ def test_r7_an_unrouted_run_resumes_exactly_as_it_does_today(tmp_path):
     from multiagents.tree import Node
 
     probe = tmp_path / "argv.txt"
-    spec = AgentSpec("worker", "opencode", "opencode-go/qwen3.7-plus",
+    spec = AgentSpec("worker", "opencode-go", "opencode-go/qwen3.7-plus",
                      effort="high")
     r = _runner(tmp_path, {"worker": spec},
-                {"opencode": _recording_provider("opencode", probe)})
-    r.tree.add(Node(id="ag-1", agent="worker", provider="opencode",
+                {"opencode-go": _recording_provider("opencode-go", probe)})
+    r.tree.add(Node(id="ag-1", agent="worker", provider="opencode-go",
                     model="opencode-go/qwen3.7-plus", parent=None, depth=1,
                     status="running", session_id="s-1", worktree=str(_node_worktree(r, "ag-1"))))
 
@@ -6981,7 +6981,7 @@ def test_r7_an_unrouted_run_resumes_exactly_as_it_does_today(tmp_path):
 
     assert probe.exists(), f"nothing was respawned: {result}"
     argv = _recorded_argv(probe)
-    assert _flag(argv, "--provider") == "opencode"
+    assert _flag(argv, "--provider") == "opencode-go"
     assert _flag(argv, "--model") == "opencode-go/qwen3.7-plus"
     assert _flag(argv, "--effort") == "high", (
         f"nothing disagreed here, so nothing should have been dropped: {argv}")

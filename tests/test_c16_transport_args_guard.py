@@ -526,7 +526,7 @@ def test_tg_r4_the_argv_opt_in_is_not_mistaken_for_a_mismatch_by_doctor(
 # TG-R5: no regression — shipped providers launch as today
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("provider", ["claude", "opencode", "agy", "codex"])
+@pytest.mark.parametrize("provider", ["claude", "opencode-go", "agy", "codex"])
 def test_tg_r5_shipped_providers_with_no_override_still_launch_and_doctor_is_quiet(
         tmp_path, monkeypatch, capsys, provider):
     # a layer that only repoints `bin` at the fake: transport and args stay shipped
@@ -542,7 +542,10 @@ def test_tg_r5_shipped_providers_with_no_override_still_launch_and_doctor_is_qui
     assert not _refusal(result), result
     calls = lay.calls(provider)
     assert calls, "nothing was spawned"
-    _no_empty_argv(calls, pf.shipped_blocks()[provider]["spawn"]["args"].count(""))
+    blocks = pf.shipped_blocks()
+    block = blocks[provider]
+    spawn = block.get("spawn") or blocks[block["extends"]]["spawn"]     # a route extends its CLI base
+    _no_empty_argv(calls, spawn["args"].count(""))
     assert any(b"hello shipped" in pf.delivered_anywhere(c, provider) for c in calls)
     _rc, out = lay.doctor(capsys)
     assert "{prompt" not in out, out

@@ -147,11 +147,11 @@ def test_fo_r1_a_bool_option_is_not_rendered_as_python_true(tmp_path, monkeypatc
 
 def test_fo_r3a_a_provider_key_is_reported_even_when_the_provider_declares_it(tmp_path):
     providers = {"custom": {
-        "extends": "opencode", "bin": "custom",
+        "extends": "opencode-go", "bin": "custom",
         "spawn": {"args": ["--x"],
                   "optional": {"provider": ["--provider", "{provider}"]}}}}
     config = _load(tmp_path, {"fo-r5-provider-key": {
-        "provider": "opencode", "model": "opencode-go/x",
+        "provider": "opencode-go", "model": "opencode-go/x",
         "models": {"custom": {"model": "opencode-go/m", "provider": "other"}}}},
         providers=providers)
 
@@ -162,4 +162,4 @@ def test_fo_r3a_a_provider_key_is_reported_even_when_the_provider_declares_it(tm
 
     # and it never moves the run.
     routed = config.agents["fo-r5-provider-key"].routed("custom")
-    assert routed.provider == "opencode", routed.provider
+    assert routed.provider == "opencode-go", routed.provider

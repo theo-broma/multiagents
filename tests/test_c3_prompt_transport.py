@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent / "support"))
 import pf_harness as pf  # noqa: E402
 
 EXECUTORS = ["local", "docker"]
-CORE = ["claude", "codex", "agy", "opencode"]
+CORE = ["claude", "codex", "agy", "opencode-go"]
 VARIANTS = ["opencode-zai", "opencode-deepinfra", "agy-partner"]
 KIB = 1024
 
@@ -199,7 +199,7 @@ def test_pf_r2_consult_resume_reaches_the_native_whole(tmp_path, monkeypatch, pr
 
 
 @pytest.mark.parametrize("executor", EXECUTORS)
-@pytest.mark.parametrize("provider", ["claude", "agy", "opencode"])   # codex's adapter
+@pytest.mark.parametrize("provider", ["claude", "agy", "opencode-go"])   # codex's adapter
 # always reports a failed turn in-band, so its death is never "silent"
 def test_pf_r2_free_retry_reaches_the_native_by_stdin_too(
         tmp_path, monkeypatch, provider, executor):
@@ -283,10 +283,10 @@ def test_pf_r1a_agy_stdin_is_stream_json_whose_content_is_the_prompt(
 
 def test_pf_r1a_opencode_prompt_is_the_message_text_never_a_file_attachment(
         tmp_path, monkeypatch):
-    rig = pf.Rig(tmp_path, monkeypatch, names=("opencode",))
+    rig = pf.Rig(tmp_path, monkeypatch, names=("opencode-go",))
     marker = _marker("ocfile")
-    agent_id = _ok(rig, rig.start("opencode", marker + "\n" + pf.big_text()))
-    (call,) = rig.natives["opencode"].calls()
+    agent_id = _ok(rig, rig.start("opencode-go", marker + "\n" + pf.big_text()))
+    (call,) = rig.natives["opencode-go"].calls()
     assert "--file" not in call["argv"] and "-f" not in call["argv"], call["argv"]
     assert call["files"] == {}, "the native was handed a file path (an attachment)"
     assert call["stdin"] == rig.prompt_md(agent_id)
@@ -338,7 +338,7 @@ def test_pf_r6_session_id_prompt_md_and_resume_still_work(tmp_path, monkeypatch,
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("executor,provider", [
-    ("local", "claude"), ("docker", "claude"), ("local", "agy"), ("local", "opencode")])
+    ("local", "claude"), ("docker", "claude"), ("local", "agy"), ("local", "opencode-go")])
 def test_pf_r7_a_failed_steer_turn_is_retried_with_the_steers_text(
         tmp_path, monkeypatch, provider, executor):
     rig = pf.Rig(tmp_path, monkeypatch, executor=executor, names=(provider,))
