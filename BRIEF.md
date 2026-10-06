@@ -4657,3 +4657,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   2. **NT review:** nd-cea601ed is open and blocked on admission. It launches by itself when claude clears.
   3. **Git rehearsal:** redo with the nd-dd4c9be4 task. /var/tmp in the container is NOT visible on the host, so the agent must COMMIT `rewrite.sh` (generic, no private terms) on its own branch. I then read it with `git show` and run it on the host with ~/.config/multiagents/sensitive-patterns.
   - **Rule:** do not use claude-b for agents; it belongs to the orchestrator.
+- 2026-10-06 ~20:30 **Resumed after the pause.** Nodes now in flight:
+  - OG round 5: nd-0ec148cf (opus), with reviewer nd-a229bcbe after it. nd-3211b4a6 is cancelled.
+  - NT2 review: nd-cea601ed.
+  - Git rehearsal: nd-bb03aee5 (Bunny); it commits rewrite.sh on its branch.
+
+  **Tooling bug (d), diagnosed by researcher ag-ecaecb.** `_half_open` (runner.py:1232-1274) calls `claim_trial` for EVERY tripped provider in `budgets` on every real start, not just for the provider it routes to. Starts on other providers therefore keep consuming claude's half-open trial, and the admission probe sees `trial_pending` (runner.py:1275-1277) and refuses claude forever. events.jsonl shows 91/91 cycles. Fix: claim only for the routed provider. Workaround: `uv run --frozen multiagents doctor --clear <provider>`.
