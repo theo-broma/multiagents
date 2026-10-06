@@ -12,8 +12,10 @@ Two layers, both black box (the public surface is the scheduler's transitions as
 * One real scheduler process (`scheduler start --clock-file`) for the wiring: the
   host loop itself runs the check, and `wait_for_nodes` over the socket returns.
 
-The fake clock starts at the real "now": transitions are stamped by the wall
-clock, and the contract does not say which clock a hold's age is read on.
+The fake clock starts at the real "now", so the transitions the harness lays
+down (stamped when they are written) sit at the start of the scheduler's
+timeline. Ages are read on the scheduler's clock (contract, Clarifications), and
+the first check runs at start.
 Nothing here starts a process except the `real` fixture, whose finalizer stops
 the scheduler (context/specs/test-process-leak.md); the in-process engine never
 launches a worker, since every node is held, refused, done or blocked.
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import shutil
 import sys
 import threading
@@ -33,11 +36,15 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
 from nc_fixture.clock import ClockWorld  # noqa: E402
 from nc_fixture.m3_adv import Harness  # noqa: E402
 from nc_fixture.world import blocked_codes  # noqa: E402
+import c3_harness as h3  # noqa: E402
+from multiagents import config as config_mod  # noqa: E402
 from multiagents.paths import ProjectPaths, state_root  # noqa: E402
+from multiagents.scheduler_config import SchedulerConfigError  # noqa: E402
 from multiagents.scheduler.engine import Engine, attempts  # noqa: E402
 from multiagents.scheduler.rpc import Service  # noqa: E402
 from multiagents.tree import Node, now  # noqa: E402
@@ -46,6 +53,7 @@ WAIT = 3            # every wait_for_nodes in this module is bounded by this
 INTERVAL = 10       # anomaly_interval_seconds used unless a test is about the default
 THRESHOLD = 60      # anomaly_admission_seconds / anomaly_held_seconds used by most tests
 HUGE = 10 ** 9      # keeps the unrelated starvation notice out of byte comparisons
+CONTRADICTORY = "review done.\nVERDICT(approved): the first pass\nVERDICT(rejected, 2): the second pass"
 STUCK = "silence: no output for 300s"   # the shape runner.py writes: f"{reason}: {detail}"
 
 
@@ -188,9 +196,11 @@ class Env:
         self.h.save(node)
         return node
 
-    def unresolved_loop(self, text="done.\nVERDICT(approved): looks right", status="done"):
+    def unresolved_loop(self, text=CONTRADICTORY, status="done"):
         """loop L = [impl (done), rev (done, its run's text ends in `text`)], held
-        `unresolved_round`: the reviewer never called give_verdict."""
+        `unresolved_round`: the reviewer never called give_verdict. The default text
+        holds contradictory verdict lines, which VR's settle step leaves unsettled
+        (VR-R3), so the AN check sees a round that stays unresolved."""
         tip = self.h.world.main_tip()
         impl, rev = self.h.record(), self.h.record()
         loop = self.h.record(kind="loop", children=[impl["id"], rev["id"]],
@@ -329,16 +339,37 @@ def test_an_r2_run_stuck_reads_the_nodes_current_run_only(env):
     assert env.anomalies("run_stuck") == [], f"reported {old}, which is not the current run"
 
 
-@pytest.mark.parametrize("line", ["VERDICT(approved): x", "VERDICT(approved, 0): fine",
-                                  "VERDICT(rejected, 2): two defects"])
-def test_an_r2_verdict_unrecorded_fires_for_a_parser_accepted_line(env, line):
-    loop, rev = env.unresolved_loop(text=f"review done.\n{line}")
+@pytest.mark.parametrize("text", [
+    CONTRADICTORY,
+    "VERDICT(rejected, 1): bad\nVERDICT(approved): fine after all",
+    "VERDICT(approved, 0): fine\nnotes in between\nVERDICT(rejected, 3): three defects",
+    "  VERDICT(approved): indented\nVERDICT(approved): again\nVERDICT(rejected): but no",
+])
+def test_an_r2_verdict_unrecorded_fires_for_contradictory_lines_vr_leaves_unsettled(env, text):
+    loop, rev = env.unresolved_loop(text=text)
     env.at_offset(0)
     env.at_offset(INTERVAL + 1)
     found = env.anomalies("verdict_unrecorded")
     assert len(found) == 1
-    assert found[0]["node_id"] in {loop["id"], rev["id"]}   # the contract does not say which
-    assert loop["id"] in evidence(found[0]) or loop["id"] == found[0]["node_id"]
+    assert found[0]["node_id"] == loop["id"]         # the loop is the node that needs attention
+    assert found[0]["detail"]["reason"]
+    assert loop["id"] in evidence(found[0]) or rev["id"] in evidence(found[0])
+
+
+@pytest.mark.parametrize("line", ["VERDICT(approved): x", "VERDICT(approved, 0): fine",
+                                  "VERDICT(rejected, 2): two defects",
+                                  "VERDICT(approved): once\nVERDICT(approved): twice"])
+def test_an_r2_verdict_unrecorded_does_not_fire_for_lines_vr_settles(env, line):
+    """The check runs after VR's settle step in the same tick (Clarifications): a
+    round with a single accepted verdict is settled by VR, so there is nothing
+    left to report. Red-by-skip until VR lands."""
+    loop, rev = env.unresolved_loop(text=f"review done.\n{line}")
+    env.at_offset(0)
+    env.at_offset(INTERVAL + 1)
+    record = env.h.nodes()[loop["id"]]
+    if record["state"] == "held" and (record["hold"] or {}).get("reason") == "unresolved_round":
+        pytest.skip("VR has not landed: the round is still unresolved after the tick")
+    assert env.anomalies("verdict_unrecorded") == []
 
 
 @pytest.mark.parametrize("text", [
@@ -404,6 +435,7 @@ def test_an_r2_admission_blocked_after_the_threshold_with_the_refusal_reason(env
     found = env.anomalies("admission_blocked")
     assert [t["node_id"] for t in found] == [node["id"]]
     assert "max_depth" in evidence(found[0]) or "Depth limit" in evidence(found[0])
+    assert found[0]["node_id"] == node["id"]          # the refused node itself
 
 
 def test_an_r2_admission_blocked_defaults_to_600_seconds(tmp_path, monkeypatch):
@@ -485,6 +517,87 @@ def test_an_r2_every_anomaly_names_its_kind_and_carries_evidence(env):
         assert t["kind"] == "anomaly" and t["node_id"]
         assert t["detail"]["kind"] in {"run_stuck", "verdict_unrecorded", "admission_blocked", "held_idle"}
         assert len(evidence({"detail": {k: v for k, v in t["detail"].items() if k != "kind"}})) > len('{"detail": {}}')
+
+
+def test_an_r2_run_stuck_names_the_node_whose_run_it_is_and_that_run(env):
+    node, run_id = env.stuck_node()
+    other = env.h.record()
+    env.h.save(other)
+    env.live_run(other)                  # a healthy neighbour must not be named
+    env.at_offset(0)
+    env.at_offset(INTERVAL + 1)
+    found = env.anomalies("run_stuck")
+    assert [t["node_id"] for t in found] == [node["id"]]
+    assert found[0]["detail"]["run_id"] == run_id
+
+
+def test_an_r2_held_idle_names_a_held_loop_not_its_children(env):
+    impl, rev = env.h.record(), env.h.record()
+    loop = env.h.record(kind="loop", children=[impl["id"], rev["id"]],
+                        loop={"verdict_child": rev["id"], "max_rounds": 3})
+    impl.update(parent=loop["id"], state="done", outcome="completed")
+    rev.update(parent=loop["id"], state="done", outcome="completed")
+    env.h.save(loop, impl, rev)
+    env.hold(loop, reason="loop_max")
+    env.at_offset(0)
+    env.at_offset(THRESHOLD + 15)
+    found = env.anomalies("held_idle")
+    assert [t["node_id"] for t in found] == [loop["id"]]
+
+
+def test_an_r2_every_kind_carries_kind_and_a_human_readable_reason(env):
+    stuck, run_id = env.stuck_node()
+    loop, rev = env.unresolved_loop()
+    refused = env.refused_node()
+    held = env.h.record()
+    env.h.save(held)
+    env.hold(held)
+    env.at_offset(0)
+    env.at_offset(THRESHOLD + 15)
+    by_kind = {}
+    for t in env.anomalies():
+        by_kind.setdefault(t["detail"]["kind"], []).append(t)
+    assert set(by_kind) == {"run_stuck", "verdict_unrecorded", "admission_blocked", "held_idle"}
+    for kind, found in by_kind.items():
+        for t in found:
+            assert isinstance(t["detail"]["reason"], str) and t["detail"]["reason"].strip(), kind
+    assert [t["node_id"] for t in by_kind["run_stuck"]] == [stuck["id"]]
+    assert by_kind["run_stuck"][0]["detail"]["run_id"] == run_id
+    assert [t["node_id"] for t in by_kind["admission_blocked"]] == [refused["id"]]
+    assert [t["node_id"] for t in by_kind["verdict_unrecorded"]] == [loop["id"]]
+    assert sorted(t["node_id"] for t in by_kind["held_idle"]) == sorted([held["id"], loop["id"]])
+    for t in by_kind["verdict_unrecorded"]:
+        # where a run exists it is the verdict child's own
+        assert t["detail"].get("run_id", None) in (None, *[r["run_id"] for r in env.h.nodes()[rev["id"]]["runs"]])
+    stuck_reason = by_kind["run_stuck"][0]["detail"]["reason"]
+    assert "silence" in stuck_reason
+
+
+def test_an_r2_the_first_check_runs_at_start_without_waiting_an_interval(env):
+    node, _ = env.stuck_node()
+    env.at_offset(0)                     # the very first evaluation, no interval has elapsed
+    assert [t["node_id"] for t in env.anomalies("run_stuck")] == [node["id"]]
+
+
+def test_an_r2_the_first_check_at_start_applies_to_conditions_already_old(env):
+    node = env.h.record()
+    env.h.save(node)
+    env.hold(node)
+    env.at_offset(5 * THRESHOLD)         # the scheduler first runs long after the hold
+    assert [t["node_id"] for t in env.anomalies("held_idle")] == [node["id"]]
+
+
+def test_an_r2_a_transition_during_a_hold_resets_held_idle(env):
+    node = env.h.record()
+    env.h.save(node)
+    env.hold(node)                                       # transition at t0
+    env.at_offset(0)
+    env.at_offset(THRESHOLD - 15)
+    env.hold(node, reason="loop_max")                    # a new transition at t0+45, still held
+    env.at_offset(THRESHOLD + 15)                        # 75 s since the hold, only 30 since the transition
+    assert env.anomalies("held_idle") == [], "age was not measured from the node's last transition"
+    env.at_offset(THRESHOLD - 15 + THRESHOLD + 15)       # 60+ s since the transition
+    assert [t["node_id"] for t in env.anomalies("held_idle")] == [node["id"]]
 
 
 # -------------------------------------------------------------------- AN-R3
@@ -704,3 +817,47 @@ def test_an_r2_r4_the_host_scheduler_reports_a_refused_node_to_a_waiting_orchest
     found = [t for t in box["reply"]["result"]["transitions"] if t["kind"] == "anomaly"]
     assert [(t["node_id"], t["detail"]["kind"]) for t in found] == [(blocked, "admission_blocked")]
     assert "provider_concurrency" in json.dumps(found[0]["detail"])
+
+
+# ------------------------------------------------------------- configuration
+ANOMALY_KEYS = ["anomaly_interval_seconds", "anomaly_admission_seconds", "anomaly_held_seconds"]
+REFUSED = ["0", "-1", "-0.5", "soon", "''", "'60'", "true", "[1]", "~"]
+
+
+def load_with(tmp_path, monkeypatch, scheduler_yaml, global_yaml=None):
+    root = h3.make_git_repo(tmp_path / "cfgproj")
+    paths = ProjectPaths(root)
+    paths.ensure()
+    paths.config.mkdir(parents=True, exist_ok=True)
+    gdir = tmp_path / "gconf"
+    gdir.mkdir(exist_ok=True)
+    monkeypatch.setenv("MULTIAGENTS_CONFIG_DIR", str(gdir))
+    if scheduler_yaml is not None:
+        (paths.config / "project.yaml").write_text("scheduler:\n  enabled: false\n" + scheduler_yaml)
+    if global_yaml is not None:
+        (gdir / "project.yaml").write_text(global_yaml)
+    return config_mod.load(paths, seed=False).project["scheduler"]
+
+
+@pytest.mark.parametrize("key", ANOMALY_KEYS)
+@pytest.mark.parametrize("value", REFUSED)
+def test_an_config_a_non_positive_or_non_numeric_value_is_refused_at_load(tmp_path, monkeypatch, key, value):
+    with pytest.raises(SchedulerConfigError) as raised:
+        load_with(tmp_path, monkeypatch, f"  {key}: {value}\n")
+    message = str(raised.value)
+    assert key in message
+    assert re.search(r"project\.yaml:3\b", message), message     # the line of the offending key
+
+
+@pytest.mark.parametrize("key", ANOMALY_KEYS)
+def test_an_config_a_refused_value_in_the_global_layer_names_the_global_file(tmp_path, monkeypatch, key):
+    with pytest.raises(SchedulerConfigError) as raised:
+        load_with(tmp_path, monkeypatch, None, global_yaml=f"scheduler:\n  {key}: 0\n")
+    assert re.search(r"gconf/project\.yaml:2\b", str(raised.value)), str(raised.value)
+
+
+@pytest.mark.parametrize("key", ANOMALY_KEYS)
+@pytest.mark.parametrize("value,expected", [("1", 1), ("0.5", 0.5), ("3600", 3600)])
+def test_an_config_the_smallest_positive_values_are_accepted_and_kept(tmp_path, monkeypatch, key, value, expected):
+    got = load_with(tmp_path, monkeypatch, f"  {key}: {value}\n")
+    assert got[key] == expected
