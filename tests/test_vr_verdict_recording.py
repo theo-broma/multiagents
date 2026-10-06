@@ -37,8 +37,8 @@ from nc_fixture.m4_world import M4World, commit_entry, finding, verdict_entry  #
 
 WAIT = 8            # one launch / one transition
 WAIT_ROUNDS = 15    # several activations in a row
-QUIET = 2.5         # how long "stays held / launches nothing" is observed
-TICK = 0.2
+QUIET = 1.0         # how long "stays held / launches nothing" is observed: ten ticks
+TICK = 0.1
 
 
 def make_world(root: Path, monkeypatch) -> M4World:
@@ -201,12 +201,15 @@ def test_vr_r1_the_verdict_is_bound_to_the_commit_the_reviewer_finished_on(w):
 def test_vr_r1_a_written_verdict_has_the_same_effect_as_the_equivalent_give_verdict(worlds, scenario):
     _, work_q, tool_q, text_q, max_rounds = scenario
 
-    def run(name: str, reviews: list) -> dict:
+    def launch(name: str, reviews: list):
         w = worlds(name)
         w.fxw.queue(*work_q)
         w.fxr.queue(*reviews)
         w.start_scheduler()
-        loop, wk, rv = w.mkloop(max_rounds)
+        return w, w.mkloop(max_rounds)
+
+    def collect(w, ids) -> dict:
+        loop, wk, rv = ids
         w.until(lambda: w.get(loop)["state"] == "done" or (w.get(loop)["state"] == "held" and unresolved(w, loop) is None),
                 WAIT_ROUNDS, what="the loop to settle", give_up=lambda: unresolved(w, loop))
         node = w.get(loop)
@@ -218,8 +221,11 @@ def test_vr_r1_a_written_verdict_has_the_same_effect_as_the_equivalent_give_verd
                 "spawns": (w.fxw.spawns(), w.fxr.spawns()),
                 "kinds": w.transitions(loop)}
 
-    by_tool = run("tool", tool_q)
-    by_text = run("text", text_q)
+    # the two worlds are independent: run them side by side
+    w_tool, ids_tool = launch("tool", tool_q)
+    w_text, ids_text = launch("text", text_q)
+    by_tool = collect(w_tool, ids_tool)
+    by_text = collect(w_text, ids_text)
     assert by_text == by_tool
 
 
@@ -508,9 +514,9 @@ def test_vr_r5_the_settle_happens_once_not_at_every_tick_or_restart(w):
     set_parsed_verdict(w, run_id, "rejected", defects=1)
     w.start_scheduler()
     settled(w, loop, WAIT, "loop_max", early=False)
-    w.quiet(1.5)                                    # several ticks
+    w.quiet(0.8)                                    # several ticks
     w.restart_scheduler()
-    w.quiet(1.5)
+    w.quiet(0.8)
     kinds = w.transitions(loop)
     assert kinds.count("verdict") == 1 and kinds.count("round_rejected") == 1, kinds
     assert w.get(loop)["loop"]["rounds_rejected"] == 1

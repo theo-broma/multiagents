@@ -50,6 +50,8 @@ from multiagents.scheduler.rpc import Service  # noqa: E402
 from multiagents.tree import Node, now  # noqa: E402
 
 WAIT = 3            # every wait_for_nodes in this module is bounded by this
+SHORT_WAIT = 1.5    # the in-flight waits: an anomaly must end them within a tick or two; red runs to this bound
+HOST_TICK = 0.2     # the host scheduler's tick_seconds in the real-process test (clock moves are seen within a tick)
 INTERVAL = 10       # anomaly_interval_seconds used unless a test is about the default
 THRESHOLD = 60      # anomaly_admission_seconds / anomaly_held_seconds used by most tests
 HUGE = 10 ** 9      # keeps the unrelated starvation notice out of byte comparisons
@@ -699,19 +701,19 @@ def test_an_r4_a_wait_in_flight_returns_on_an_anomaly(env):
 
     def wait():
         started = time.monotonic()
-        box["reply"] = env.request("wait_for_nodes", {"timeout": WAIT, "cursor": cursor})
+        box["reply"] = env.request("wait_for_nodes", {"timeout": SHORT_WAIT, "cursor": cursor})
         box["took"] = time.monotonic() - started
 
     thread = threading.Thread(target=wait, daemon=True)
     thread.start()
-    time.sleep(0.3)
+    time.sleep(0.15)
     assert thread.is_alive(), "the wait returned with nothing to deliver"
     env.at_offset(INTERVAL + 1)
-    thread.join(WAIT + 2)
+    thread.join(SHORT_WAIT + 2)
     assert not thread.is_alive()
     kinds = [(t["kind"], t["node_id"]) for t in box["reply"]["result"]["transitions"]]
     assert ("anomaly", node["id"]) in kinds
-    assert box["took"] < WAIT - 0.5, "the wait ran to its timeout instead of returning on the anomaly"
+    assert box["took"] < SHORT_WAIT - 0.5, "the wait ran to its timeout instead of returning on the anomaly"
 
 
 def test_an_r4_the_anomaly_survives_a_restart_of_the_service(env, tmp_path):
@@ -783,7 +785,7 @@ def test_an_r5_repeated_checks_keep_state_identical(env):
 @pytest.fixture
 def real(tmp_path, monkeypatch):
     forget_stale_state(tmp_path / "proj")
-    world = ClockWorld(tmp_path, monkeypatch, now=datetime.now(timezone.utc),
+    world = ClockWorld(tmp_path, monkeypatch, now=datetime.now(timezone.utc), tick_seconds=HOST_TICK,
                        scheduler={"anomaly_interval_seconds": 5, "anomaly_admission_seconds": 30,
                                   "anomaly_held_seconds": 30, "starvation_after_seconds": HUGE})
     world.pc = world.provider("pcfx", max_concurrent=1)
@@ -807,12 +809,12 @@ def test_an_r2_r4_the_host_scheduler_reports_a_refused_node_to_a_waiting_orchest
     box = {}
 
     def wait():
-        box["reply"] = real.rpc("wait_for_nodes", {"timeout": WAIT, "cursor": cursor})
+        box["reply"] = real.rpc("wait_for_nodes", {"timeout": SHORT_WAIT, "cursor": cursor})
 
     thread = threading.Thread(target=wait, daemon=True)
     thread.start()
     real.advance(seconds=60)                           # past anomaly_admission_seconds
-    thread.join(WAIT + 6)
+    thread.join(SHORT_WAIT + 6)
     assert not thread.is_alive()
     found = [t for t in box["reply"]["result"]["transitions"] if t["kind"] == "anomaly"]
     assert [(t["node_id"], t["detail"]["kind"]) for t in found] == [(blocked, "admission_blocked")]
