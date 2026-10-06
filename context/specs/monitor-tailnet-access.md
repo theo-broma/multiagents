@@ -81,3 +81,8 @@ Verified by: the existing monitor tests, unchanged and green.
   used.
 - A config-file key for these options. Use the CLI flags only.
 - The TUI front end.
+
+## Clarifications (2026-10-06, answering tester ag-01b831)
+- MT-R2 covers POST `/api/action` too, which today never checks Origin. A request carrying an Origin that fails the rule is refused on every POST route. A request with no Origin keeps today's behaviour.
+- MT-R2 matching: the Origin's host must be the same name as the request's Host, compared case-insensitively. That name must be loopback or an allowed name. For an allowed name, the scheme may be http or https and the ports are not compared, because a proxy terminates TLS on another port. Loopback keeps today's exact rule.
+- MT-R4: a refused stored token exits with a non-zero code. A plain start (without `--persistent-token`) ignores the stored file, even a corrupt one, and leaves it untouched. "Minted length" is the length of a token the monitor mints today.
