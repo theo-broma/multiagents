@@ -4676,3 +4676,13 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - `runner.steer` compares the raw name (harmless).
 
   dev-advisor still returns `forbidden` to implementer-deep.
+- 2026-10-06 ~21:30 **OG merged** (38001c2, rounds 1–7; round 7 is ag-7b6cfd, approved by ag-b3a5af). 233 targeted tests are green on main.
+  - Local untracked config is switched to `opencode-go`: project.yaml fallback_chain, and agents.yaml lines 94-662 and 682/746. Backups are in the scratchpad.
+  - The global ~/.config/multiagents files are left for the user: project.yaml:176 fallback_chain, and providers.yaml `opencode` override, whose `models_include` lists both `opencode/*` and `opencode-go/*`.
+
+  OG follow-ups (minor, not scheduled):
+  - tests missing for runner `_model_refusal` on the route, qh:706 `target_spec`, `_take_over_hold` dual-name `token_for`, and the consult transport check;
+  - `steer(provider=<old>)` MCP argument is not aliased;
+  - agent-level `reserved_instance` is not aliased;
+  - `startup.json` is not migrated (decided: reading both keys is enough);
+  - `doctor` prints each deprecation warning 4 times (OG-R2 says once per load).
