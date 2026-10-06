@@ -85,3 +85,19 @@ Verified by: review.
   - Scheduler attempt and history records stay as they are, because they are history. Only live routing keys move: node pins, aliases and deferred tasks.
 - **`doctor`.** It may list the base `opencode` as the CLI (binary, auth tool), but never as a route with a budget row or models.
 - **Superseded tests.** The 20 tests listed by ag-b79b07, which pin `opencode` as the go route, are updated deliberately by a tester.
+
+## Decisions after implementer ag-302e01 (2026-10-06)
+- **Warning channel: stderr only.** This replaces the earlier "stderr and `Config.warnings`". Several tests count exactly one warning across every channel, and `doctor` already prints `Config.warnings` twice, so two channels always show two lines. stderr reaches every surface that loads a config, `doctor` included. A tester adjusts `test_og_r2c_the_warning_is_on_stderr_and_in_config_warnings` deliberately.
+- **The kernel stays provider-agnostic (phase-0 invariant `test_p0_r8_invariant_no_provider_or_transcript_vocabulary_added`).** No file under `src/multiagents/*.py` or `executor/*.py` may gain a provider name.
+  - The rename is declared as data, in the shipped `providers.yaml`, for example a key on the `opencode-go` block such as `renamed_from: [opencode]`.
+  - The kernel implements a generic mechanism driven by that declaration, for any provider:
+    - OG-R2: read the old name as the new route, with the warning;
+    - OG-R2: refuse a collision;
+    - OG-R2: refuse naming a non-routable base as a route (a generic `routable: false`, or whatever the shipped block declares);
+    - OG-R3: the one-time state migration and its merge rules.
+  - Provider names appear only in shipped YAML, provider scripts and docs.
+- **Pre-rename fixtures.** These tests still pin `opencode` as a route, so a tester updates them deliberately to `opencode-go`, keeping their intent:
+  - `tests/test_core.py::test_providers_are_counted_separately`
+  - `tests/test_core.py::test_r7_an_unrouted_run_resumes_exactly_as_it_does_today`
+  - `tests/test_c3_prompt_transport.py::test_pf_r2_consult_resume_reaches_the_native_whole[opencode]`, together with `CORE` and `tests/support/pf_harness.py::SHIPPED_PROVIDERS`
+  - `tests/test_fo_round5.py::test_fo_r3a_a_provider_key_is_reported_even_when_the_provider_declares_it`
