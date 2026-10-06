@@ -521,7 +521,7 @@ budget:
   wait_for_reset_seconds: 1800
   # Consulted in order when an agent's provider is exhausted or cooling down.
   fallback_chain:
-    - opencode
+    - opencode-go
     - agy
     - defer
   # A budget reading older than this routes as UNKNOWN instead of as the

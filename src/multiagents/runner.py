@@ -1373,6 +1373,8 @@ class Runner(QuotaHandover):
             name = node.get("provider") or ""
             if not name:
                 continue
+            # OG-R3: a run recorded under a pre-rename name loads its route.
+            name = self.tree.renames.canonical(name)
             started = float(node.get("started_at") or node.get("created_at") or 0)
             last[name] = max(last.get(name, 0.0), started)
             if node.get("status") in ("running", "starting"):
@@ -1771,13 +1773,17 @@ class Runner(QuotaHandover):
         check) frees its slot in every process's view at once."""
         out: dict[str, list[str]] = {}
         for key, raw in self._occupying(nodes, exclude, snapshot):
-            out.setdefault(str(raw.get("provider") or ""), []).append(key)
+            # OG-R3: a run recorded under a pre-rename name holds its route's slot.
+            name = str(raw.get("provider") or "")
+            out.setdefault(self.tree.renames.canonical(name) if name else name,
+                           []).append(key)
         return out
 
     def _pc_limit(self, provider: str) -> int | None:
         """PC-R1: the provider's `max_concurrent` as loaded now (re-read on
-        every config change, so a new value applies at the next admission)."""
-        here = self.providers.get(provider)
+        every config change, so a new value applies at the next admission).
+        OG-R3: a run recorded under a pre-rename name is limited by its route."""
+        here = self.providers.get(self.tree.renames.canonical(provider))
         return here.max_concurrent if here is not None else None
 
     @staticmethod
@@ -1819,6 +1825,9 @@ class Runner(QuotaHandover):
         Transactional callers must supply a snapshot taken before locking.
         Read-only routing callers can observe their copied data here.
         """
+        # OG-R3: a run recorded under a pre-rename name is admitted on its
+        # route — its holders, its limit and its queue, all keyed by the route.
+        provider = self.tree.renames.canonical(provider)
         if snapshot is None:
             snapshot = self._slot_snapshot(data)
         limit = self._pc_limit(provider)
@@ -2035,7 +2044,9 @@ class Runner(QuotaHandover):
         return self.ledger.charge(
             key=entry["key"], provider=entry["provider"], model=entry["model"],
             agent=entry["agent"], node=entry["node"], usd=entry["usd"],
-            at=entry["at"], caps=self._caps(entry["provider"], entry["model"]),
+            at=entry["at"],
+            # OG-R3: a charge held under a renamed provider is capped on its route.
+            caps=self._caps(self.tree.renames.canonical(entry["provider"]), entry["model"]),
             account=entry.get("account"))
 
     def _hold_charges(self, entries: list[dict]) -> bool:
@@ -2071,9 +2082,12 @@ class Runner(QuotaHandover):
             return []
         self.__dict__["_pending_checked"] = now()
         self.__dict__["_pending_seen"] = bool(held)
+        # OG-R3: a charge held under a renamed provider is held on its route.
+        canonical = self.tree.renames.canonical
+        wanted = None if provider is None else canonical(provider)
         return [e for e in held if isinstance(e, dict) and isinstance(e.get("key"), str)
                 and (node is None or e.get("node") == node)
-                and (provider is None or e.get("provider") == provider)]
+                and (wanted is None or canonical(e.get("provider")) == wanted)]
 
     def _flush_pending(self, *, node: str | None = None, provider: str | None = None,
                        fresh: bool = False) -> bool:
@@ -2106,7 +2120,11 @@ class Runner(QuotaHandover):
 
     def _on_scope(self, provider: str, model: str, node_provider: str,
                   node_model: str) -> bool:
-        return node_provider == provider and (not model or node_model == model)
+        # OG-R3: a node recorded under a renamed provider draws on the new
+        # name's caps.
+        canonical = self.tree.renames.canonical
+        return (canonical(node_provider) == canonical(provider)
+                and (not model or node_model == model))
 
     def _scope_agents(self, provider: str, model: str) -> list[str]:
         return sorted(
@@ -2447,7 +2465,8 @@ class Runner(QuotaHandover):
             raise full
         if not held and active < max_concurrent:
             if queued_id:
-                self._pc_dequeued(queued_id, node.provider, node.id, "consult")
+                self._pc_dequeued(queued_id, self.tree.renames.canonical(node.provider),
+                                  node.id, "consult")
             return
         # The refusal is recorded OUTSIDE the transaction: `_refused` writes
         # a notice, and holding the tree's flock while it does would ask the
@@ -3586,12 +3605,23 @@ class Runner(QuotaHandover):
         """
         if not self._claim(node_id):
             return
-        provider = str(raw.get("provider") or "")
+        recorded = str(raw.get("provider") or "")
+        # OG-R3: a run recorded under a pre-rename name holds its claim on the
+        # route when this code launched it (a resume, a steer), and under the
+        # name it ran under when the code before the rename did: startup
+        # claims are host records the tree's migration never moves. The hold
+        # keeps whichever name the claim is under, so its release finds it.
+        provider = self.tree.renames.canonical(recorded) if recorded else ""
         try:
             # RM-R1e: a claim read that failed is unknown, never "no claim".
-            token = (self.startup.token_for(provider, node_id, strict=True)
-                     if provider and (not held.get("steer_cleanup")
-                                      or held["steer_cleanup"].get("foreign")) else "")
+            token = ""
+            if provider and (not held.get("steer_cleanup")
+                             or held["steer_cleanup"].get("foreign")):
+                for name in dict.fromkeys((provider, recorded)):
+                    token = self.startup.token_for(name, node_id, strict=True)
+                    if token:
+                        provider = name
+                        break
         except Exception:
             self._release(node_id)
             return
@@ -4605,7 +4635,9 @@ class Runner(QuotaHandover):
 
     def _family_of(self, name: str) -> str:
         """PS-R7a: a provider's family; an unknown name is its own family of
-        one, so a destination that has since left the map is a change."""
+        one, so a destination that has since left the map is a change.
+        OG-R3: a recorded provider that has been renamed is its route's family."""
+        name = self.tree.renames.canonical(name)
         provider = self.providers.get(name)
         return (getattr(provider, "family", "") or name) if provider else name
 
@@ -7536,28 +7568,33 @@ class Runner(QuotaHandover):
         """The spec and provider a node is running as, rebuilt from the node
         the same way `start()` built them: a run routed to a fallback carries
         the fallback's model and options, not the configured ones."""
+        # OG-R3: a node recorded under a pre-rename name resumes on the route
+        # that name became — never on the base it left behind.
+        recorded = self.tree.renames.canonical(node.provider)
         spec = self.config.agent(node.agent)
         frozen = self.launch_limits.spec(node.id)
         if frozen:
-            current = spec.routed(node.provider)
+            if frozen.get("provider"):
+                frozen["provider"] = self.tree.renames.canonical(frozen["provider"])
+            current = spec.routed(recorded)
             limits = {"timeout", "silence_timeout", "max_steps"}
             frozen.update({key: getattr(current, key) for key in limits})
             frozen["set_fields"] = (frozenset(frozen.get("set_fields") or ()) - limits
                                     | (frozenset(current.set_fields or ()) & limits))
-            return AgentSpec(**frozen), self.providers[node.provider]
+            return AgentSpec(**frozen), self.providers[recorded]
         if node.model_pinned:
             # FO-R1: the pin keeps its model, but the destination's `models:`
             # entry still contributes its options to the relaunch.
-            spec = spec.routed(node.provider, pinned_model=node.model)
-            spec = spec.replace(provider=node.provider)
+            spec = spec.routed(recorded, pinned_model=node.model)
+            spec = spec.replace(provider=recorded)
         else:
             # FS-R2: a recorded session is resumed where it lives, even on an
             # unlisted sibling — it is never moved (legacy clause).
-            routed = self._usable_spec(spec, node.provider, resume=True)
+            routed = self._usable_spec(spec, recorded, resume=True)
             if routed is None:
                 # Followed as it was launched; only a relaunch needs a model, and
                 # steer refuses that first (RT-R2).
-                alternative, overrides = spec.fallback_for(node.provider)
+                alternative, overrides = spec.fallback_for(recorded)
                 routed = spec.replace(model=alternative, **overrides)
             # PS-R7 (review ag-2f0d3e, finding 5): the session is the RECORDED
             # model's. A roster edit since must not substitute another model
@@ -7572,7 +7609,7 @@ class Runner(QuotaHandover):
         # one, and the normalised spec is what is persisted.
         if node.effort and spec.effort != node.effort:
             spec = spec.replace(effort=node.effort)
-        return spec, self.providers[node.provider]
+        return spec, self.providers[recorded]
 
     # ------------------------------------------------------------- survival --
 
@@ -8436,7 +8473,10 @@ class Runner(QuotaHandover):
             return {"agent_id": agent_id, "error": "scheduler-managed runs have a frozen provider binding"}
         if provider is not None and node:
             self.tree.update(agent_id, pinned=provider != "auto")
-        if provider is not None and node and (provider != node.provider or provider == "auto"):
+        # OG-R3: a run recorded under a pre-rename name already runs on its
+        # route; steering it there is a plain steer, not a switch.
+        if provider is not None and node and (
+                provider != self.tree.renames.canonical(node.provider) or provider == "auto"):
             active = self.__dict__.setdefault("_steering_nodes", set())
             if agent_id in active:
                 return {"agent_id": agent_id, "error": "a steer is in progress"}
@@ -8542,12 +8582,15 @@ class Runner(QuotaHandover):
         # from the live node the same way `start()` built it in the first
         # place.
         run = self.runs.get(agent_id)
+        # OG-R3: a run recorded under a pre-rename name lives on the route that
+        # name became; every check below asks about the route.
+        recorded = self.tree.renames.canonical(node.provider)
         # SR-R3: refuse a stale or missing configuration before stopping the
         # predecessor. Only limits are fresh; the launch's route stays frozen.
         try:
             if getattr(self, "config_error", ""):
                 raise ValueError(self.config_error)
-            current = self.config.agent(node.agent).routed(node.provider)
+            current = self.config.agent(node.agent).routed(recorded)
         except (KeyError, ValueError) as exc:
             return {"agent_id": agent_id, "steered": False,
                     "error": f"refusing to steer: current config is unavailable: {exc}"}
@@ -8562,12 +8605,12 @@ class Runner(QuotaHandover):
             # new work.
             configured = self.config.agent(node.agent)
             if not self.launch_limits.spec(node.id) and not node.model_pinned and self._usable_spec(
-                    configured, node.provider, resume=True) is None:
+                    configured, recorded, resume=True) is None:
                 return {
                     "agent_id": agent_id, "steered": False,
                     "error": f"agent {node.agent!r} has no model for provider "
-                             f"{node.provider!r}, where this run's session "
-                             f"lives: `models.{node.provider}` is missing or "
+                             f"{recorded!r}, where this run's session "
+                             f"lives: `models.{recorded}` is missing or "
                              f"names no model in agents.yaml. Add it to steer "
                              f"this run, or start a fresh one.",
                 }
@@ -9147,8 +9190,12 @@ class Runner(QuotaHandover):
         listed is still resumed there (`resume=True`) — the session lives on
         that provider, and replacing it would strand context the user can no
         longer reach. It is never chosen for new work.
+
+        OG-R3: a conversation recorded under a pre-rename name lives on the
+        route that name became, so the roster is asked about the route.
         """
-        return self._usable_spec(spec, node.provider, resume=True)
+        return self._usable_spec(spec, self.tree.renames.canonical(node.provider),
+                                 resume=True)
 
     def _usable_spec(self, spec: AgentSpec, provider: str,
                      pinned_model: str = "",
@@ -9558,11 +9605,14 @@ class Runner(QuotaHandover):
         ticket, waiter: str = "", deadline: float | None = None,
     ) -> dict[str, Any]:
         node = self._find_conversation(agent_name)
+        # OG-R3: the route a conversation recorded under a pre-rename name
+        # lives on, read once for the checks below.
+        recorded = self.tree.renames.canonical(node.provider) if node is not None else ""
         destination = spec.provider
         if node is not None and node.reason != "session_lost" \
                 and self._conversation_route(spec, node) is not None:
             run = self.runs.get(node.id)
-            destination = run.provider if run is not None else node.provider
+            destination = run.provider if run is not None else recorded
         transport_error = self._transport_refusal(destination)
         if transport_error:
             return self._consult_result(agent_name, node.id if node else None, None,
@@ -9582,7 +9632,7 @@ class Runner(QuotaHandover):
             # which would otherwise quietly replace it with a new
             # conversation (review ag-a50515, finding 5). The node keeps its
             # session, status and turn count, and nothing is launched.
-            refusal = self._model_refusal(node.provider, node.model)
+            refusal = self._model_refusal(recorded, node.model)
             if refusal:
                 raise ValueError(
                     f"refusing to resume {agent_name!r}'s conversation "
@@ -9720,7 +9770,7 @@ class Runner(QuotaHandover):
                     spec = spec.replace(effort=node.effort)
                 if provider is None or not provider.available():
                     self._release_reserved_slot(node_id)
-                    raise FileNotFoundError(f"provider {node.provider!r} is unavailable")
+                    raise FileNotFoundError(f"provider {recorded!r} is unavailable")
                 # A conversation outlives its worktree: `clean` prunes worktrees,
                 # and a standing advisor keeps its idle node and its session id
                 # across all of that. Resuming into a directory that is gone made
@@ -9955,7 +10005,9 @@ class Runner(QuotaHandover):
                              f"decision included in the task."}
 
         run = self.runs.get(agent_id)
-        transport_error = self._transport_refusal(run.provider if run else node.provider)
+        # OG-R3: a session recorded under a pre-rename name resumes on its route.
+        transport_error = self._transport_refusal(
+            run.provider if run else self.tree.renames.canonical(node.provider))
         if transport_error:
             return {"question_id": question_id, "agent_id": agent_id,
                     "resumed": False, "error": transport_error}
@@ -10081,7 +10133,8 @@ class Runner(QuotaHandover):
         out: dict[str, dict[str, Any]] = {}
         for name, here in self.providers.items():
             queue = pc_waiting(data["deferred"], name)
-            cleanup = any(raw.get("provider") == name and raw.get("cleanup_hold")
+            cleanup = any(self.tree.renames.canonical(raw.get("provider") or "") == name
+                          and raw.get("cleanup_hold")
                           for raw in data["nodes"].values())
             if here.max_concurrent is None and not queue and not cleanup:
                 continue

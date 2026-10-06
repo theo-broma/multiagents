@@ -944,6 +944,13 @@ def probe_opencode() -> dict[str, Any] | None:
 
 
 def read_opencode(spent: dict[str, int] | None = None) -> Budget:
+    """The capacity of the subscription this CLI reads.
+
+    The reading names the CLI rather than a route: the block this reader is
+    registered under is a CLI base, and every caller relabels what it gets back
+    with the provider it asked about (`_builtin_budget`), so this literal is
+    never what a user sees.
+    """
     probed = probe_opencode()
     if probed:                              # pragma: no cover - future path
         return Budget(provider="opencode", known=True, source="probe", **probed)
@@ -978,13 +985,17 @@ def read_agy(spent: dict[str, int] | None = None) -> Budget:
 
 # --------------------------------------------------------------------------
 
-
 # Built-in readers, used only when a provider's script does not implement the
 # `budget` action. Claude's quota lives in an undocumented internal cache with
 # several bucket shapes, staleness to account for and an overage block; parsing
 # that defensively in shell would be worse code in two places. A provider with
 # no built-in and no script action is simply reported as unknown — which is the
 # honest answer, and is what a newly added provider gets until it implements it.
+#
+# One entry per CLI, under the block that declares the integration. A provider
+# reaches a reader through `extends`, and `_builtin_budget` decides what that
+# means: an instance of a base is pointed at its own account, and the base's
+# account is never relabelled as the instance's (OG-R1).
 _BUILTIN = {"claude": read_claude, "opencode": read_opencode, "agy": read_agy}
 
 
@@ -1042,6 +1053,11 @@ def _builtin_budget(owner: str, name: str, reader: Any, provider: Any,
     account's reading: it is pointed at ITS OWN credentials — the directory its
     inherited `budget_profile_env` variable holds — and where that cannot be
     resolved it is reported unknown, naming what is missing.
+
+    One exception, and it is declared rather than recognised: a provider whose
+    block declares `renamed_from: [<the base it extends>]` IS that base under a
+    new name (OG-R1). The CLI's reading is therefore its own reading, and the
+    only one it could ever have had.
     """
     if reader is None:
         return Budget(provider=name, known=False, source="none",
@@ -1075,8 +1091,17 @@ def _builtin_budget(owner: str, name: str, reader: Any, provider: Any,
         return replace(usable[best], provider=name, windows=windows,
                        note=f"vault account {best}")
     if owner == name:
-        return _call_reader(reader, project_config=project_config,
-                            force=force, limits=limits)
+        # The reader hard-codes the provider it belongs to; the caller's name is
+        # the one to report under, whatever the reader wrote.
+        return replace(_call_reader(reader, project_config=project_config,
+                                    force=force, limits=limits), provider=name)
+    if owner in (getattr(provider, "renamed_from", None) or ()):
+        # OG-R1: this provider declares that it is what the base it extends used
+        # to be called. There is no second account to read — the base's reading
+        # is this route's reading — so the check below, which is about pointing
+        # an instance at ITS OWN credentials, has nothing to do here.
+        return replace(_call_reader(reader, project_config=project_config,
+                                    force=force, limits=limits), provider=name)
     if not reader_takes_profile(reader):
         # The instance inherits this reader but the reader has no profile to
         # point at, so there is no way to read the INSTANCE's account. Running
@@ -1643,6 +1668,13 @@ def read_all(providers: dict[str, Any] | None = None,
     groups: dict[str, list[tuple[str, Any]]] = {}
     for name, provider in providers.items():
         if provider is not None and not getattr(provider, "enabled", True):
+            continue
+        # OG-R1: a provider that is not a route is a CLI, not a budget.
+        # Reporting a capacity for it would put a row in `budget` and `doctor`
+        # that no agent can ever be routed to, and the only reading it could
+        # offer is one of its routes'. `routable` is the loaded provider's
+        # answer, so a project decides it too.
+        if not getattr(provider, "routable", True):
             continue
         source = getattr(provider, "budget_from", "") or name
         groups.setdefault(source, []).append((name, provider))

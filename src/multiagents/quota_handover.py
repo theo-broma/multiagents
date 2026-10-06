@@ -336,6 +336,25 @@ class QuotaHandover:
     def _qh_reserved(self):
         return self._qh_settings()["reserved_instance"]
 
+    def _qh_route(self, name):
+        """OG-R3: the route a recorded provider name is. A node, its attempt
+        and its promotion keep the name they were written under; everything
+        that compares or looks one up reads it through the rename."""
+        return self.tree.renames.canonical(name or "")
+
+    def _qh_keys(self, recorded, name):
+        """OG-R3: the keys of a node's per-provider record (`quota_stops`,
+        `quota_stop_readings`) that are `name`'s route, the route's own first.
+        Earlier code keyed them by the recorded name."""
+        route = self._qh_route(name)
+        return sorted((key for key in recorded if self._qh_route(key) == route),
+                      key=lambda key: key != route)
+
+    def _qh_stop(self, node, name):
+        """When `name`'s quota stop for this run ends; 0 when it has none."""
+        return max((node.quota_stops[key] for key in self._qh_keys(node.quota_stops, name)),
+                   default=0)
+
     def _qh_above_floor(self, entry):
         if entry is None or not entry.known or entry.headroom is None:
             return True
@@ -396,7 +415,7 @@ class QuotaHandover:
                 or self._transport_refusal(provider) or self.startup.availability(name)
                 or self._cap_refusal(name, spec.model)):
             return False
-        if node and node.quota_stops.get(name, 0) > self._qh_now():
+        if node and self._qh_stop(node, name) > self._qh_now():
             return False
         cooldown = data.get("cooldowns", {}).get(name) or {}
         until = cooldown.get("until", 0) if isinstance(cooldown, dict) else cooldown
@@ -504,7 +523,7 @@ class QuotaHandover:
         node = self.tree.get(run.node_id)
         attempt = node.handover_attempt if node else None
         if (not attempt or attempt.get("state") not in ("launching", "launched")
-                or attempt.get("to") != run.provider.name or not session_id
+                or self._qh_route(attempt.get("to")) != run.provider.name or not session_id
                 or (attempt.get("resume") and session_id != attempt.get("target_session_id", attempt.get("session_id")))):
             return
         # A provider's session event verifies the handover. The remainder of
@@ -544,7 +563,7 @@ class QuotaHandover:
                          segments=segments, provider=provider.name, model=spec.model,
                          effort=spec.effort or "", segment_usage_base=base)
         attempt = node.handover_attempt or {}
-        if attempt.get("state") == "failed" and attempt.get("from") == provider.name:
+        if attempt.get("state") == "failed" and self._qh_route(attempt.get("from")) == provider.name:
             # A new source turn is a new quota-stop episode. Failed candidates
             # were tried once for the old stop, not banned for the whole run.
             self.tree.update(node_id, handover_attempt=dict(attempt, tried=[]))
@@ -575,13 +594,14 @@ class QuotaHandover:
         roster = self.config.agent(node.agent)
         reserved = self._qh_reserved()
         candidates = []
+        source_route = self._qh_route(node.provider)
         for name in self._qh_priority_names(roster, readings):
-            if name == node.provider:
+            if name == source_route:
                 continue
             prior = node.handover_attempt or {}
-            if (prior.get("from") == node.provider
+            if (self._qh_route(prior.get("from")) == source_route
                     and prior.get("segment") == len(node.segments) + 1
-                    and name in prior.get("tried", [])):
+                    and name in map(self._qh_route, prior.get("tried", []))):
                 continue
             routed = self._usable_spec(roster, name)
             if routed is None:
@@ -606,7 +626,7 @@ class QuotaHandover:
                 while pool:
                     chosen = budget.pick_instance([c[1] for c in pool], readings, 0,
                                                   set(), load, last_used,
-                                                  **self._instance_strategy(node.provider))
+                                                  **self._instance_strategy(source_route))
                     candidate = next((c for c in pool if c[1] == chosen), pool[0])
                     result.append(candidate)
                     pool.remove(candidate)
@@ -631,6 +651,10 @@ class QuotaHandover:
 
     async def _qh_switch(self, node, spec, target, tier, resume, *, run=None, message="", attempt=None,
                          promotion=None, target_session_id=None, target_spec=None, promotion_rollback=None):
+        # OG-R3: a target read back from a promotion or an attempt (a rollback
+        # to `from`, a recovery to `to`) may be a pre-rename name. It becomes
+        # the route here, once, before anything launches on or looks it up.
+        target = self._qh_route(target)
         # Same-session migration preserves the complete frozen launch spec;
         # a continuation remaps only destination options, never ownership.
         if resume:
@@ -647,14 +671,15 @@ class QuotaHandover:
             target_session_id = attempt.get("target_session_id", target_session_id)
         launch_session = target_session_id if target_session_id is not None else node.session_id
         provider = self.providers[target]
+        source_route = self._qh_route(node.provider)
         if attempt is None:
             prior = node.handover_attempt or {}
             tried = prior.get("tried", []) if (
-                prior.get("from") == node.provider
+                self._qh_route(prior.get("from")) == source_route
                 and prior.get("segment") == len(node.segments) + 1) else []
             attempt = {"from": node.provider, "to": target, "tier": tier,
-                       "segment": len(node.segments) + (target != node.provider),
-                       "new_segment": target != node.provider,
+                       "segment": len(node.segments) + (target != source_route),
+                       "new_segment": target != source_route,
                        "attempt": int(prior.get("attempt", 0)) + 1,
                        "session_id": node.session_id, "resume": resume,
                        "state": "prepared", "reason": "priority" if promotion else "quota" if not message else "explicit steer",
@@ -676,7 +701,9 @@ class QuotaHandover:
             self.tree.update(node.id, handover_attempt=attempt)
             self._qh_event(node, "handover_started", attempt)
         if attempt.get("target_spec"):
-            routed = AgentSpec(**attempt["target_spec"])
+            # As for a passed-in `target_spec`: a spec recorded before a rename
+            # names the old provider, and it runs as the route `target` is.
+            routed = AgentSpec(**attempt["target_spec"]).replace(provider=target)
             launch_session = attempt["target_session_id"]
         prior_status = node.status
         try:
@@ -688,7 +715,7 @@ class QuotaHandover:
                 opened_source = None
                 if (resume and self._family_of(attempt["from"]) == self._family_of(target)
                         and provider.handover_mode.get(self.executor(spec).kind, "none") == "copy"):
-                    source_provider = self.providers[attempt["from"]]
+                    source_provider = self.providers[self._qh_route(attempt["from"])]
                     source, target_path = transfer_paths(source_provider, provider,
                         Path(node.worktree), attempt["session_id"], self.executor(spec), self.executor(routed))
                     profile = None
@@ -716,7 +743,7 @@ class QuotaHandover:
             prompt = self._qh_prompt(node, message, resume=resume, promotion=bool(attempt.get("promotion")))
             segments = copy.deepcopy(node.segments)
             if segments and not resume and (node.handover_attempt or {}).get("state") != "failed":
-                fingerprint = await asyncio.to_thread(self._qh_session_fingerprint, node.provider, spec,
+                fingerprint = await asyncio.to_thread(self._qh_session_fingerprint, source_route, spec,
                                                      Path(node.worktree), node.session_id)
                 segments[-1]["session_fingerprint"] = fingerprint
                 segments[-1]["spec"] = asdict(spec)
@@ -783,7 +810,7 @@ class QuotaHandover:
         attempt = node.handover_attempt or {}
         promotion = attempt.get("promotion")
         if (promotion and attempt.get("state") in ("launching", "launched")
-                and attempt.get("to") == run.provider.name):
+                and self._qh_route(attempt.get("to")) == run.provider.name):
             requested = attempt.get("target_session_id", attempt["session_id"])
             if (status in ("unauthenticated", "refused", "failed", "session_lost")
                     or run.requested_session or attempt.get("resume") and session_id != requested):
@@ -798,7 +825,8 @@ class QuotaHandover:
                 self._qh_restore_launch(node.id, attempt)
                 return await self._qh_promotion_failed(node.id, promotion, source_spec, run,
                                                        failed["error"])
-        if attempt.get("state") in ("launching", "launched", "completed") and attempt.get("to") == run.provider.name:
+        if (attempt.get("state") in ("launching", "launched", "completed")
+                and self._qh_route(attempt.get("to")) == run.provider.name):
             if (attempt.get("resume") and (not session_id
                     or session_id != attempt.get("target_session_id", attempt["session_id"])
                     or run.requested_session or status == "unauthenticated")):
@@ -817,17 +845,17 @@ class QuotaHandover:
                 node = self.tree.get(node.id)
                 readings = await self._qh_budgets(source_spec)
                 for tier, target, resume in await self._qh_candidates(node, source_spec, readings):
-                    if target != attempt["to"] and await self._qh_switch(
+                    if target != self._qh_route(attempt["to"]) and await self._qh_switch(
                             node, source_spec, target, tier, resume, run=run):
                         return True
                 # Normal steer uses the in-memory Run when it survives. Keep
                 # it and the host-owned frozen spec on the retained source,
                 # as well as the node; otherwise a later steer picks the
                 # rejected target again despite the source bookkeeping.
-                run.spec, run.provider = source_spec, self.providers[attempt["from"]]
+                run.spec, run.provider = source_spec, self.providers[self._qh_route(attempt["from"])]
                 return {"session_id": attempt["session_id"],
                         "limited": {"reason": "target resume rejected; source session is preserved",
-                                    "until": node.quota_stops.get(node.provider) or self._qh_now()},
+                                    "until": self._qh_stop(node, node.provider) or self._qh_now()},
                         "usage": node.segments[-1].get("usage", {}) if node.segments else {}}
             if session_id and attempt.get("state") != "completed":
                 completed = dict(attempt, state="completed")
@@ -843,7 +871,8 @@ class QuotaHandover:
         # immediately. Reading every provider's quota here would delay slot
         # release after a killed run even though no switch can be attempted.
         roster = self.config.agent(node.agent)
-        if not any(name != node.provider for name in self._qh_names(roster)):
+        source_route = self._qh_route(node.provider)
+        if not any(name != source_route for name in self._qh_names(roster)):
             return False
         stop_time = self._qh_now()
         busy = self.__dict__.setdefault("_qh_busy", set())
@@ -861,18 +890,22 @@ class QuotaHandover:
                 return False
             busy.add(node.id)
         try:
-            stops = dict(node.quota_stops)
-            stops[node.provider] = (limited or {}).get("until") or stop_time + float(
+            # The stop is the route's, under the route's name: one key per
+            # route, whichever name an earlier stop was recorded under.
+            source_route = self._qh_route(node.provider)
+            stops = {k: v for k, v in node.quota_stops.items() if self._qh_route(k) != source_route}
+            stops[source_route] = (limited or {}).get("until") or stop_time + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900))
             self.tree.update(node.id, quota_stops=stops, session_id=session_id)
             node = self.tree.get(node.id)
             readings = await self._qh_budgets(run.spec)
-            stamps = dict(node.quota_stop_readings)
-            stamp = readings[node.provider].read_at if node.provider in readings else None
+            stamps = {k: v for k, v in node.quota_stop_readings.items()
+                      if self._qh_route(k) != source_route}
+            stamp = readings[source_route].read_at if source_route in readings else None
             # budget._from_script preserves the provider script's clock.
             # Compare its stamps with each other; only an unstamped stop uses
             # our local stop time, marked as such (QH-R30.5, _qh_refreshed).
-            stamps[node.provider] = stamp if stamp is not None else {"local": stop_time}
+            stamps[source_route] = stamp if stamp is not None else {"local": stop_time}
             self.tree.update(node.id, quota_stop_readings=stamps)
             for tier, target, resume in await self._qh_candidates(node, run.spec, readings):
                 if self.tree.get(node.id).status == "cancelled":
@@ -1082,9 +1115,9 @@ class QuotaHandover:
             if not self._qh_promotion_eligible(node):
                 continue
             names = self._qh_priority_names(roster, readings)
-            if node.provider not in names:
+            if self._qh_route(node.provider) not in names:
                 continue
-            rank = names.index(node.provider)
+            rank = names.index(self._qh_route(node.provider))
             self.tree.update(node.id, rank=rank)
             if rank == 0:
                 continue
@@ -1096,21 +1129,24 @@ class QuotaHandover:
             for target in names[:rank]:
                 entry = readings.get(target)
                 stamp = entry.read_at if entry else None
-                if target in node.promotion_refusals:
-                    old = node.promotion_refusals[target]
-                    if stamp is None or old is not None and stamp <= old:
-                        continue
+                refused = [node.promotion_refusals[key]
+                           for key in self._qh_keys(node.promotion_refusals, target)]
+                if refused and (stamp is None or any(old is not None and stamp <= old
+                                                     for old in refused)):
+                    continue
                 # Only a fresh quota reading ends the stop episode. Expiry of
                 # its blind cooldown is not a refresh: a wedged script would
                 # otherwise resurrect the exhausted instance (QH-R30.5).
                 stops = dict(node.quota_stops)
-                if target in stops and not self._qh_refreshed(node, target, stamp):
+                held = self._qh_keys(stops, target)
+                if held and not self._qh_refreshed(node, target, stamp):
                     continue
                 headroom = self._qh_short_headroom(entry)
                 if headroom is None or headroom + 1e-12 < settings.get("promote_min_headroom", .10):
                     continue
-                if target in stops:
-                    stops.pop(target)
+                if held:
+                    for key in held:
+                        stops.pop(key)
                     cooldown = self.tree.read().get("cooldowns", {}).get(target) or {}
                     if isinstance(cooldown, dict) and cooldown.get("cause") == "quota":
                         self.tree.clear_quota({target})
@@ -1121,7 +1157,7 @@ class QuotaHandover:
                 source_spec, _ = self._spec_of(node)
                 if (routed and self._family_of(target) == self._family_of(node.provider)
                         and routed.model != source_spec.model):
-                    gap = (node.id, node.provider, source_spec.model, target, routed.model)
+                    gap = (node.id, self._qh_route(node.provider), source_spec.model, target, routed.model)
                     gaps = self.__dict__.setdefault("_qh_promotion_gaps", set())
                     if gap not in gaps:
                         gaps.add(gap)
@@ -1166,7 +1202,9 @@ class QuotaHandover:
         baseline too, so a provider clock behind ours refreshes on its next
         reading rather than never. Unstamped re-reads cannot show they are new.
         """
-        baseline = node.quota_stop_readings.get(name)
+        keys = self._qh_keys(node.quota_stop_readings, name)
+        key = keys[0] if keys else self._qh_route(name)
+        baseline = node.quota_stop_readings.get(key)
         if stamp is None:
             # Accepted: a never-stamping provider is not promoted back to this run.
             return False
@@ -1176,7 +1214,7 @@ class QuotaHandover:
             return True
         if "anchor" not in baseline:
             stamps = dict(node.quota_stop_readings)
-            stamps[name] = dict(baseline, anchor=stamp)
+            stamps[key] = dict(baseline, anchor=stamp)
             self.tree.update(node.id, quota_stop_readings=stamps)
         return False
 
@@ -1215,7 +1253,7 @@ class QuotaHandover:
                 segments[-1].update(ended_at=self._qh_now(), end_reason="promoted")
                 self.tree.update(node_id, segments=segments)
                 node = self.tree.get(node_id)
-            target = promotion["to"]
+            target = self._qh_route(promotion["to"])
             sibling = self._family_of(target) == self._family_of(node.provider)
             mode = self.providers[target].handover_mode.get(self.executor(spec).kind, "none")
             routed = self._usable_spec(self.config.agent(node.agent), target)
@@ -1282,10 +1320,14 @@ class QuotaHandover:
         node = self.tree.get(node_id)
         if not node or node.status == "cancelled":
             return False
-        refusals = dict(node.promotion_refusals)
-        reported = (not node.promotion and promotion["to"] in refusals
-                    and refusals[promotion["to"]] == promotion["read_at"])
-        refusals[promotion["to"]] = promotion["read_at"]
+        # One key per route, as for `quota_stops`: a refusal written under a
+        # pre-rename name is the route's refusal.
+        route = self._qh_route(promotion["to"])
+        held = self._qh_keys(node.promotion_refusals, route)
+        reported = (not node.promotion and bool(held)
+                    and node.promotion_refusals[held[0]] == promotion["read_at"])
+        refusals = {k: v for k, v in node.promotion_refusals.items() if self._qh_route(k) != route}
+        refusals[route] = promotion["read_at"]
         self.tree.update(node_id, promotion=None, promotion_refusals=refusals,
                          promotion_dwell_at=max(node.promotion_dwell_at or 0,
                                                 promotion.get("triggered_at", 0)))
@@ -1416,7 +1458,7 @@ class QuotaHandover:
         # Raw nodes: this runs inside a tree transaction.
         node = nodes.get(request.get("dispatched_id") or "") or {}
         return (node.get("reserve_request") == request["id"]
-                and node.get("provider") == self._qh_reserved()
+                and self._qh_route(node.get("provider")) == self._qh_reserved()
                 and node.get("status") in ("running", "stuck", "detached", "awaiting_user"))
 
     def _qh_requeue(self, request_id):
@@ -1492,7 +1534,10 @@ class QuotaHandover:
                 continue
             if state == "vetoed":
                 fresh = self._qh_reading_keys(roster, readings)
-                old = request["readings"]
+                # A veto recorded before a rename keyed its readings by the
+                # old name; `fresh` is keyed by the route.
+                old = {self._qh_route(n): v for n, v in sorted(
+                    request["readings"].items(), key=lambda item: self._qh_route(item[0]) == item[0])}
                 if not any(n in old and fresh[n][0] is not None and
                            (old[n][0] is None or fresh[n][0] > old[n][0]) for n in fresh):
                     continue

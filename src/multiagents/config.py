@@ -22,6 +22,7 @@ import json
 import math
 import re
 import shutil
+import sys
 import threading
 from collections.abc import Sequence
 from contextvars import ContextVar
@@ -36,6 +37,7 @@ import yaml
 from .paths import ProjectPaths, global_config_dir, shipped_defaults_dir
 from .providers import load_providers
 from .instance_strategy import InstanceStrategyError, validate_strategy
+from .renames import Renames, shipped as shipped_renames
 
 # The heading that marks the half of a brief addressed to whoever CALLS the
 # agent, rather than to the agent itself. It is authored in the agent's own file
@@ -1038,6 +1040,164 @@ def layer_dirs(paths: ProjectPaths | None) -> list[Path]:
     return layers
 
 
+# OG-R2: the provider-block keys that make a block a ROUTE — something an agent
+# can be pinned to and spend against — rather than a CLI's plumbing. An override
+# block named for a provider's pre-rename spelling is split by exactly this list:
+# a route key means whoever wrote it meant the route that name became, so it
+# moves there with a deprecation warning; a CLI key means they were retuning the
+# CLI the route inherits, which is still a legitimate use of the old name and is
+# left silent.
+ROUTE_KEYS = frozenset({
+    "auth_from", "billing", "budget_from", "budget_profile_env", "budget_windows",
+    "container_account", "enabled", "env", "family", "home_account_executor",
+    "instance_strategy", "max_concurrent", "models", "models_exclude",
+    "models_include", "refusal_markers", "spend_cap", "truncation_markers",
+})
+
+
+def _line_at(path: Path, parts: list[str]) -> int | None:
+    """The line a dotted key was written on in one config file, or None.
+
+    `notices` is imported here rather than at module scope: it reaches the tree,
+    which reaches config, and a load must work from any entry point.
+    """
+    from .notices import _node_at
+
+    location = _node_at(path, parts)
+    return location[0] if location else None
+
+
+def _lines_of(path: Path, parts: list[str]) -> list[tuple[int, Any]]:
+    """`(line, value)` per element of the sequence `parts` addresses."""
+    from .notices import _items_at
+
+    return _items_at(path, parts)
+
+
+def _where(path: Path, line: int | None = None) -> str:
+    """`file:line` for a warning, or the file alone when the line is unknown.
+
+    A warning that cannot name a line is still worth printing: the file alone
+    says which of the three layers the old name was written in, which is the
+    part a user cannot work out on their own.
+    """
+    return f"{path}:{line}" if line else str(path)
+
+
+def _alias_agents(data: dict, path: Path, renames: Renames,
+                  warnings: list[str]) -> None:
+    """OG-R2: `provider: <old name>` and `<old name>:` in a `models:` chain.
+
+    The alias is applied BEFORE the roster is validated, so a model the route
+    does not allow is refused naming the route it now means. A chain naming both
+    spellings is refused rather than resolved: the two entries say the same
+    thing, and which model was meant is not something to guess.
+    """
+    roster = data.get("agents")
+    if not isinstance(roster, dict):
+        return
+    for agent, spec in roster.items():
+        if not isinstance(spec, dict):
+            continue
+        if renames.is_alias(spec.get("provider")):
+            warnings.append(renames.warning(
+                spec["provider"],
+                _where(path, _line_at(path, ["agents", agent, "provider"]))))
+            spec["provider"] = renames.canonical(spec["provider"])
+        chain = spec.get("models")
+        if not isinstance(chain, dict):
+            continue
+        for name in [n for n in chain if renames.is_alias(n)]:
+            route = renames.canonical(name)
+            if route in chain:
+                raise ValueError(
+                    f"agent {agent!r}: models names both {name!r} and "
+                    f"{route!r}, which are the same provider: the old name "
+                    f"is a deprecated alias. Keep one entry and write {route!r}.")
+            warnings.append(renames.warning(
+                name, _where(path, _line_at(path, ["agents", agent, "models", name]))))
+            chain[route] = chain.pop(name)
+
+
+def _alias_fallback_chain(data: dict, path: Path, renames: Renames,
+                          warnings: list[str]) -> None:
+    """OG-R2: a `fallback_chain` entry naming a pre-rename route.
+
+    Read in the same slot, so the rest of the chain and its order stand.
+    """
+    budget = data.get("budget")
+    chain = budget.get("fallback_chain") if isinstance(budget, dict) else None
+    if not isinstance(chain, list):
+        return
+    lines = _lines_of(path, ["budget", "fallback_chain"])
+    for index, name in enumerate(chain):
+        if not renames.is_alias(name):
+            continue
+        line = lines[index][0] if index < len(lines) else None
+        warnings.append(renames.warning(name, _where(path, line)))
+        chain[index] = renames.canonical(name)
+
+
+def _alias_reserved_instance(data: dict, path: Path, renames: Renames,
+                             warnings: list[str]) -> None:
+    """OG-R2: `quota_handover.reserved_instance` naming a pre-rename route.
+
+    The reservation protects a route; read as the name it was, it would point
+    at the CLI base, which no run is ever on.
+    """
+    handover = data.get("quota_handover")
+    if not isinstance(handover, dict) or not renames.is_alias(handover.get("reserved_instance")):
+        return
+    name = handover["reserved_instance"]
+    warnings.append(renames.warning(
+        name, _where(path, _line_at(path, ["quota_handover", "reserved_instance"]))))
+    handover["reserved_instance"] = renames.canonical(name)
+
+
+def _alias_provider_block(data: dict, path: Path, renames: Renames,
+                          warnings: list[str]) -> None:
+    """OG-R2: a `providers:` block named for a pre-rename route.
+
+    Its route-level keys move to the route's own block; the CLI-level ones stay
+    on the name that is now the CLI base, which is what a CLI key was always
+    for. An explicit block for the new name wins for the keys it sets — a name
+    somebody has already migrated is not overruled by one they have not.
+    """
+    providers = data.get("providers")
+    if not isinstance(providers, dict):
+        return
+    for old, route in renames.aliases.items():
+        block = providers.get(old)
+        if not isinstance(block, dict):
+            continue
+        route_keys = sorted(key for key in block if key in ROUTE_KEYS)
+        if not route_keys:
+            continue
+        target = providers.get(route)
+        if not isinstance(target, dict):
+            target = {}
+            providers[route] = target
+        warnings.append(renames.warning(
+            old, _where(path, _line_at(path, ["providers", old, route_keys[0]]))))
+        for key in route_keys:
+            if key not in target:
+                target[key] = block.pop(key)
+            else:
+                block.pop(key)
+
+
+def _alias_layer(data: dict, path: Path, file_name: str, renames: Renames,
+                 warnings: list[str]) -> None:
+    """OG-R2: read every pre-rename provider name in one config file."""
+    if file_name == "agents.yaml":
+        _alias_agents(data, path, renames, warnings)
+    elif file_name == "project.yaml":
+        _alias_fallback_chain(data, path, renames, warnings)
+        _alias_reserved_instance(data, path, renames, warnings)
+    elif file_name == "providers.yaml":
+        _alias_provider_block(data, path, renames, warnings)
+
+
 def source_version(paths: ProjectPaths | None) -> tuple:
     """Cheap staleness check for consumers retaining a validated Config."""
     versions = []
@@ -1117,6 +1277,11 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
 
     merged: dict[str, dict] = {name: {} for name in CONFIG_FILES}
     provider_sources: dict[str, dict[str, str]] = {}
+    alias_warnings: list[str] = []
+    # OG-R2: the renames this install declares. Read from the shipped defaults,
+    # the one place a rename is declared, and the same table the tree and the
+    # ledger migrate with.
+    renames = shipped_renames()
     from .notices import _node_at
     # BP-R1: through the shared parse cache and, inside a budget read, that
     # read's snapshot — so the read's helpers and this load see one version
@@ -1128,6 +1293,10 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
             for name in CONFIG_FILES:
                 data = (read_project_layer(layer, scheduler_errors) if name == "project.yaml"
                         else read_yaml_cached(layer / name, strict=True))
+                # OG-R2: before anything validates or reports on these names, and
+                # per layer, so the warning names the file the name was written
+                # in rather than the merged result.
+                _alias_layer(data, layer / name, name, renames, alias_warnings)
                 strategy_blocks = []
                 if name == "project.yaml":
                     strategy_blocks = [(data.get("budget") or {}, ["budget"], False)]
@@ -1209,6 +1378,20 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
             priority_entries(spec, providers)
     _validate_routes(agents_raw, providers)
     warnings: list[str] = []
+    # OG-R2: the deprecation is PRINTED on stderr, once per occurrence per load.
+    #
+    # Deliberately not filed in `Config.warnings`, even though OG-R2's
+    # Clarifications ask for both channels. `doctor` prints that list twice —
+    # once at the top of its output and once more through `validate_agent_models`
+    # in the agents section — so a warning filed there reaches the user twice
+    # per occurrence, and one warning per occurrence is the whole point. The
+    # suite sees the same arithmetic: with both channels every test measuring
+    # "exactly one deprecation line across all the channels a user could see it
+    # on" fails — nine in the OG-R2 file plus doctor's. Deleting the print below
+    # and adding `warnings.extend(alias_warnings)` instead flips it, at the cost
+    # of those ten.
+    for text in alias_warnings:
+        print(f"warning: {text}", file=sys.stderr)
     _warn_unknown_entry_keys(agents_raw, providers, warnings)
     executor = (merged["project.yaml"].get("executor") or {}).get("kind", "local")
     from .providers import expand_env_value
@@ -1285,6 +1468,15 @@ def _validate_routes(agents_raw: dict, providers: dict) -> None:
         for route_provider, model in routes:
             if not model or route_provider not in providers:
                 continue
+            # OG-R1: a provider that is not a route — a CLI, whether it declares
+            # `routable: false` or has been renamed away — cannot be pinned.
+            # Refused here, where a bad roster is reported, so it is not left
+            # to fail as an unexplained launch later.
+            if not providers[route_provider].routable:
+                raise ValueError(
+                    f"agent {name!r}: route {route_provider} is not a route — "
+                    f"that provider block declares `routable: false`, so no "
+                    f"agent can be pinned to it. Fix agents.yaml: name a route.")
             if providers[route_provider].allows_model(model):
                 continue
             acceptors = sorted(

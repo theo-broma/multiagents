@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from .renames import shipped as shipped_renames
+
 PERIODS = ("day", "week", "month")
 CAUSE = "spend_cap"
 UNREADABLE = "spend_cap_unreadable"
@@ -218,6 +220,9 @@ class Ledger:
     def __init__(self, path: Path):
         self.path = path
         self.lock_path = path.with_name(path.name + ".lock")
+        # OG-R3: the rename table charges are read with, resolved here and never
+        # under the lock — reading it may read the shipped providers file.
+        self.renames = shipped_renames()
         self._reset()
 
     def _reset(self) -> None:
@@ -259,12 +264,16 @@ class Ledger:
                     or not isinstance(usd, (int, float)) or key in self.keys):
                 return
             self.keys[key] = ts
-            self.charges.append(Charge(ts, str(record.get("provider") or ""),
+            # OG-R3: the ledger is append-only and is never rewritten, so a
+            # charge filed under the pre-rename provider name stays on disk
+            # under it. It is READ as the route it meant, here and only here —
+            # one place, so every aggregation of the same key agrees.
+            self.charges.append(Charge(ts, self.renames.canonical(record.get("provider")),
                                        str(record.get("model") or ""), float(usd)))
         elif kind == "crossing":
             try:
-                ident = (str(record["scope"]), float(record["period_start"]),
-                         float(record["cap"]))
+                ident = (self._scope(str(record["scope"])),
+                         float(record["period_start"]), float(record["cap"]))
             except (KeyError, TypeError, ValueError):
                 return
             self.crossings.setdefault(ident, record)
@@ -275,6 +284,19 @@ class Ledger:
             nodes = self.stops.setdefault(record["id"], [])
             if record["node"] not in nodes:
                 nodes.append(record["node"])
+
+    def _scope(self, scope: str) -> str:
+        """OG-R3: a crossing's scope with its provider read as the route it
+        meant, so a crossing recorded under the pre-rename name and a cap on
+        the new one are one scope. The record itself keeps what it wrote."""
+        kind, _, rest = scope.partition(":")
+        if kind == "provider":
+            return f"provider:{self.renames.canonical(rest)}"
+        if kind == "model":
+            provider, sep, model = rest.partition(":")
+            if sep:
+                return f"model:{self.renames.canonical(provider)}:{model}"
+        return scope
 
     def _refresh(self) -> None:
         """Read what was appended since the last look. Caller holds the lock."""
@@ -416,8 +438,12 @@ class Ledger:
                 state = self._describe(cap, at)
                 if not state["reached"]:
                     continue
-                ident = (cap.scope, state["period_start"], cap.usd)
-                cid = crossing_id(cap.scope, state["period_start"], cap.usd)
+                ident = (self._scope(cap.scope), state["period_start"], cap.usd)
+                # A crossing already claimed is named by its own id, which may
+                # carry the provider's pre-rename name (OG-R3).
+                claimed = self.crossings.get(ident)
+                cid = ((claimed.get("id") or crossing_id(str(claimed["scope"]), *ident[1:]))
+                       if claimed else crossing_id(cap.scope, state["period_start"], cap.usd))
                 # SC-R4b: a charge from a period that has ended (a held one,
                 # retried late) crosses that period's cap and stops nothing.
                 current = period_start(time.time(), cap.period) == state["period_start"]
@@ -477,8 +503,9 @@ class Ledger:
         the one the crossing process used (#1). A run launched after the
         crossing was admitted under the cap as it then stood (raised, or a
         new value) and is not stopped by it."""
+        wanted = self.renames.canonical(provider)
         for record in self.crossings.values():
-            if (record.get("provider") != provider
+            if (self.renames.canonical(record.get("provider")) != wanted
                     or (record.get("model") and record.get("model") != model)):
                 continue
             period, ts = record.get("period"), record.get("ts")
@@ -493,7 +520,7 @@ class Ledger:
         claimed before `before` (SC-R4a, #13)."""
         out = []
         for (scope, start, cap), record in self.crossings.items():
-            ident = record.get("id") or crossing_id(scope, start, cap)
+            ident = record.get("id") or crossing_id(str(record.get("scope", scope)), start, cap)
             ts = record.get("ts")
             if ident not in self.announced and isinstance(ts, (int, float)) and ts < before:
                 out.append(dict(record, id=ident))
@@ -542,11 +569,17 @@ class Ledger:
 
     def spend(self, provider: str, model: str, period: str, at: float) -> float:
         """Spend on `provider` (on one `model` of it when given) in the period
-        containing `at`. Reads what is in memory: `refresh` first."""
+        containing `at`. Reads what is in memory: `refresh` first.
+
+        OG-R3: `provider` is read through the same alias as a recorded charge,
+        so asking about either spelling of the Go subscription is the same
+        question and its answer.
+        """
         start, end = period_start(at, period), period_end(at, period)
+        wanted = self.renames.canonical(provider)
         # `fsum`: the exactly rounded sum, so 0.7 + 0.1 + 0.2 reaches 1.0.
         return math.fsum(c.usd for c in self.charges
-                   if c.provider == provider and (not model or c.model == model)
+                   if c.provider == wanted and (not model or c.model == model)
                    and start <= c.ts < end)
 
     def _describe(self, cap: Cap, at: float) -> dict:
@@ -566,7 +599,8 @@ class Ledger:
     def crossed(self, cap: Cap, at: float) -> dict | None:
         """The live stop request for `cap`: its crossing in the current period
         at the current cap value, or None."""
-        return self.crossings.get((cap.scope, period_start(at, cap.period), cap.usd))
+        return self.crossings.get((self._scope(cap.scope), period_start(at, cap.period),
+                                   cap.usd))
 
     def partial(self, period: str, at: float) -> bool:
         """SC-R2: a period that began before the ledger existed is partial."""

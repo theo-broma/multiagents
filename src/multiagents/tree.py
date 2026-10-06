@@ -27,6 +27,7 @@ from typing import Any, Iterable, Iterator
 
 from . import gitops
 from .redact import depersonalise, scrub
+from .renames import Renames, shipped as shipped_renames
 
 # Terminal states never transition again.
 # "limited" is terminal and is NOT "failed": the provider stopped the run, the
@@ -170,6 +171,203 @@ def deferred_malformed(entry: Any) -> bool:
                               or not isinstance(claim.get("pid"), int)):
         return True
     return False
+
+
+# --------------------------------------------------------------------------
+# OG-R3: state keyed by a provider's pre-rename name
+# --------------------------------------------------------------------------
+#
+# When a provider is renamed, the code that ran before it wrote that route's
+# durable state under the old name. It moves to the new key the first time this
+# code loads the tree, driven by the `renamed_from` the shipped providers.yaml
+# declares (see `multiagents.renames`), and the move is a MERGE wherever a
+# record already exists under the new name — a project that ran the new code
+# before its old state was migrated has both, and overwriting either loses
+# something:
+#
+#   * breaker failure counts take the LARGER value: the two counters each
+#     counted consecutive failures, and the larger is the more recent truth
+#     about how badly the route is doing.
+#   * a cooldown ends at the LATER of the two ends, never at their sum and never
+#     at "now plus the longer": the later end is the later promise.
+#   * samples and claim timestamps are united, de-duplicated and kept in time
+#     order — a burn-rate window and a concurrency window are both read as a
+#     series, so order is the whole of their meaning.
+#   * a concurrency sequence takes the larger, since it allocates and a lower
+#     one has already been handed out.
+#
+# Pure dict work, called while the tree's own lock is held and before anything
+# reads a record: no git, no subprocess, no file I/O. Idempotent — after the
+# first pass no old key is left, so a second pass finds nothing to do.
+
+
+def _later(first: Any, second: Any) -> Any:
+    """The later of two optional timestamps, or whichever exists."""
+    have = [v for v in (first, second) if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return max(have) if have else None
+
+
+def _failures(record: dict) -> float:
+    value = record.get("consecutive_failures")
+    return _number(value)
+
+
+def _breaker_rank(record: dict) -> tuple:
+    """Which breaker history is the more recent one: more failures, then the
+    later trip, then the later success."""
+    return (_failures(record), _number(record.get("tripped")),
+            _number(record.get("last_success")))
+
+
+def _merge_breaker(current: Any, legacy: Any) -> dict:
+    a, b = dict(current or {}), dict(legacy or {})
+    primary, other = (a, b) if _breaker_rank(a) >= _breaker_rank(b) else (b, a)
+    merged = {**other, **primary}
+    failures = a if _failures(a) >= _failures(b) else b
+    merged["consecutive_failures"] = failures.get("consecutive_failures", 0)
+    for key in ("tripped", "last_success"):
+        later = _later(a.get(key), b.get(key))
+        if later is not None:
+            merged[key] = later
+    return merged
+
+
+def _later_block(current: Any, legacy: Any) -> dict:
+    """The record that ends later, carrying the other's extra keys with it."""
+    a, b = dict(current or {}), dict(legacy or {})
+    if not a:
+        return b
+    if not b:
+        return a
+    primary, other = (a, b) if _number(a.get("until")) >= _number(b.get("until")) else (b, a)
+    return {**other, **primary}
+
+
+def _merge_cooldown(current: Any, legacy: Any) -> dict:
+    """A cooldown record of any shape, merged with the later of the two ends.
+
+    A composite record (per-account auth blocks plus a non-auth block) is split
+    and merged part by part — each auth context takes the later expiry — and
+    recomposed against a clock of 0, so nothing is pruned for being past: this
+    runs on a load, not on a probe.
+    """
+    a, b = dict(current or {}), dict(legacy or {})
+    if not ("auth" in a or a.get("cause") == "auth"
+            or "auth" in b or b.get("cause") == "auth"):
+        return _later_block(a, b)
+    auth_a, other_a = _split_cooldown(a)
+    auth_b, other_b = _split_cooldown(b)
+    auth = dict(auth_b)
+    for context, block in auth_a.items():
+        previous = auth.get(context) or {}
+        auth[context] = block if _number(block.get("until")) >= _number(previous.get("until")) \
+            else previous
+    merged = _compose_cooldown(auth, _later_block(other_a, other_b), 0.0)
+    return merged if merged is not None else _later_block(a, b)
+
+
+def _sample_key(sample: Any) -> str:
+    return json.dumps(sample, sort_keys=True, default=str)
+
+
+def _merge_samples(current: Any, legacy: Any) -> list:
+    """Two series of samples, united, de-duplicated and in time order."""
+    out: list = []
+    seen: set[str] = set()
+    for sample in list(current or []) + list(legacy or []):
+        key = _sample_key(sample)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(sample)
+    return sorted(out, key=lambda s: (_number(s[0]) if isinstance(s, list) and s else 0.0,
+                                      _sample_key(s)))
+
+
+def _merge_claims(current: Any, legacy: Any) -> list:
+    """Two sets of claim timestamps, united, de-duplicated and in time order."""
+    return sorted({*_numbers(current), *_numbers(legacy)})
+
+
+def _numbers(value: Any) -> list:
+    return [v for v in (value or []) if isinstance(v, (int, float)) and not isinstance(v, bool)]
+
+
+def _migrate_provider_key(key: str, current: Any, legacy: Any) -> Any:
+    if key == "provider_health":
+        return _merge_breaker(current, legacy)
+    if key == "cooldowns":
+        return _merge_cooldown(current, legacy)
+    if key == "headroom":
+        return _merge_samples(current, legacy)
+    if key == "claims":
+        return _merge_claims(current, legacy)
+    if key == "pc_seq":                       # a sequence: it allocates
+        return max(_number(current), _number(legacy))
+    return legacy
+
+
+def migrate_provider_names(data: dict, renames: Renames) -> bool:
+    """OG-R3: move this tree's live state off every pre-rename provider name.
+
+    One pass per declared rename, in the order the providers file declares
+    them. Every provider-keyed record and every live routing key moves: the
+    breaker, the cooldowns, the headroom series, the concurrency claims and
+    their sequence, the pause's provider list, and each deferred task's
+    `spec.provider`. A node's `provider` and its segments' are NOT moved: they
+    are the record of where a run ran, under the name it ran under, and a
+    reader that aggregates by provider maps them with `renames.canonical`.
+
+    `renames` is passed in rather than read here, because this runs under the
+    tree's lock and the declaration lives in a file: the caller resolves it
+    before taking the lock.
+    """
+    changed = False
+    for old, new in renames.aliases.items():
+        changed |= _migrate_one_provider(data, renames, old, new)
+    return changed
+
+
+def _migrate_one_provider(data: dict, renames: Renames, old: str, new: str) -> bool:
+    changed = False
+    for key in ("provider_health", "cooldowns", "headroom", "claims", "pc_seq"):
+        block = data.get(key)
+        if not isinstance(block, dict) or old not in block:
+            continue
+        legacy = block.pop(old)
+        block[new] = (_migrate_provider_key(key, block[new], legacy)
+                      if new in block else legacy)
+        changed = True
+
+    pause = data.get("pause")
+    if isinstance(pause, dict) and isinstance(pause.get("providers"), list) \
+            and any(renames.is_alias(name) for name in pause["providers"]):
+        pause["providers"] = list(dict.fromkeys(renames.canonical(name)
+                                                for name in pause["providers"]))
+        pause["until"] = _later_pause_end(pause, data.get("cooldowns") or {})
+        changed = True
+
+    for entry in data.get("deferred") or []:
+        spec = entry.get("spec") if isinstance(entry, dict) else None
+        if isinstance(spec, dict) and spec.get("provider") == old:
+            spec["provider"] = new
+            changed = True
+    return changed
+
+
+def _later_pause_end(pause: dict, cooldowns: dict) -> Any:
+    """A pause outlives the cooldowns it names, so its end is the later one.
+
+    The pause is lifted when it expires; shortening it because a provider's own
+    cooldown ended sooner would lift it early, while lengthening it past every
+    provider's would strand the project on a wait nothing needs.
+    """
+    ends = [_number(pause.get("until"))]
+    for provider in pause.get("providers") or []:
+        record = cooldowns.get(provider)
+        if isinstance(record, dict):
+            ends.append(_number(record.get("until")))
+    return max(ends)
 
 
 def find_deferred(entries: Iterable[Any], deferred_id: str) -> dict | None:
@@ -458,11 +656,15 @@ def _put_cooldown(cooldowns: dict, provider: str, auth: dict[str, dict],
 class Tree:
     """Read/modify/write access to ``tree.json`` under an exclusive lock."""
 
-    def __init__(self, tree_file: Path, events_file: Path):
+    def __init__(self, tree_file: Path, events_file: Path,
+                 renames: Renames | None = None):
         self.path = tree_file
         self.events_path = events_file
         self.backup_path = tree_file.with_name(tree_file.name + ".bak")
         self.lock_path = tree_file.with_suffix(".lock")
+        # OG-R3: the rename table every load migrates with, resolved here and
+        # never under the lock — reading it may read the shipped providers file.
+        self.renames = shipped_renames() if renames is None else renames
 
     # ------------------------------------------------------------------ io --
 
@@ -535,6 +737,11 @@ class Tree:
                               *_split_cooldown(record), moment)
         data.setdefault("questions", [])
         data.setdefault("tickets", [])
+        # OG-R3: a renamed route's live state moves to its new key on the way
+        # in, under the lock that read it, with the table resolved before it.
+        # A read-only caller sees it moved; the next write makes the move
+        # durable, and a second load finds nothing to do.
+        migrate_provider_names(data, self.renames)
         return data
 
     def _recover(self) -> dict | None:
@@ -918,7 +1125,8 @@ class Tree:
             usage = node.get("usage") or {}
             if not usage:
                 continue
-            key = (node.get("provider") or "?", node.get("model") or "?")
+            # A run recorded under a pre-rename name is the renamed route's spend.
+            key = (self.renames.canonical(node.get("provider") or "?"), node.get("model") or "?")
             row = rows.setdefault(key, {
                 "provider": key[0], "model": key[1], "runs": 0,
                 "tokens": 0, "cost_usd": 0.0, "agents": set(),

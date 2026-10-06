@@ -55,6 +55,7 @@ from .executor import executor_for
 from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
 from .providers import billed_rows
+from .renames import shipped as shipped_renames
 from .quota_handover import quota_handover_settings
 from .redact import scrub
 from .runner import Runner
@@ -497,12 +498,21 @@ def list_models(provider: str = "") -> dict:
     """
     run = runner()
     models = run.config.models
+    # OG-R2: a pre-rename spelling names the route it meant, and says so in the
+    # answer rather than answering about a provider that lists nothing.
+    warnings = []
+    renames = shipped_renames()
+    if renames.is_alias(provider):
+        warnings.append(renames.warning(provider))
+        print(f"warning: {warnings[0]}", file=sys.stderr)
+        provider = renames.canonical(provider)
     if provider:
         models = {provider: models.get(provider, [])}
     return _ok({
         "models": models,
         "counts": {k: len(v or []) for k, v in models.items()},
         "hint": "empty means models.yaml has not been generated yet — call refresh_model_list",
+        **({"warnings": warnings} if warnings else {}),
     })
 
 

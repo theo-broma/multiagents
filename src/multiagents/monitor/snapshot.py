@@ -450,7 +450,8 @@ def spend_by_provider(tree: Tree) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {}
     for node in tree.read().get("nodes", {}).values():
         usage = node.get("usage") or {}
-        bucket = out.setdefault(node.get("provider") or "?", {})
+        # OG-R3: a run recorded under a pre-rename name is its route's spend.
+        bucket = out.setdefault(tree.renames.canonical(node.get("provider") or "?"), {})
         bucket["total"] = bucket.get("total", 0) + token_count(usage)
         if cost_of(usage):
             bucket["cost_usd"] = round(bucket.get("cost_usd", 0) + cost_of(usage), 4)

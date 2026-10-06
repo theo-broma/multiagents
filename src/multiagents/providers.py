@@ -27,6 +27,7 @@ from typing import Any, Iterable
 
 from . import spendcap
 from .spendcap import SpendCap
+from .renames import Renames, shipped as shipped_renames
 from .instance_strategy import validate_strategy
 
 # Normalised event kinds the rest of the system understands.
@@ -302,6 +303,15 @@ class Provider:
     # no second instance at all.
     extends: str = ""
     family: str = ""
+    # OG-R1/OG-R2: the two declarations that say a block is not, or no longer,
+    # a route. Both are read from the RAW block, never through `extends:` —
+    # `routable: false` on a base would otherwise make every provider that
+    # extends it unroutable, and `renamed_from` would rename the whole
+    # family's history. `renamed_from` names the provider(s) this one was
+    # called before; `multiagents.renames` is what reads it, and the name never
+    # appears in this module.
+    routable: bool = True
+    renamed_from: list[str] = field(default_factory=list)
     instance_strategy: str | None = None
     handover_mode: dict[str, str] = field(default_factory=dict)
     session_store: dict[str, str] = field(default_factory=dict)
@@ -899,6 +909,7 @@ def resolve_spawn_sources(raw: dict[str, Any],
 
 def load_providers(raw: dict[str, Any],
                    sources: dict[str, dict[str, str]] | None = None) -> dict[str, Provider]:
+    renames = shipped_renames()
     resolved = resolve_inheritance(raw)
     providers = {name: Provider.from_dict(name, data or {})
                  for name, data in resolved.items()}
@@ -914,7 +925,47 @@ def load_providers(raw: dict[str, Any],
                                             provider.models_include)
         provider.budget_builtin = _builtin_owner(name, raw)
         _validate_budget_profile(name, provider, raw)
+        block = raw.get(name) or {}
+        # OG-R1/OG-R2: from the RAW block, for the same reason `max_concurrent`
+        # is — these two are about what this provider IS, and folding
+        # `extends:` would state the base's answer for every dependent.
+        provider.routable = _routable(name, block, renames)
+        provider.renamed_from = _renamed_from(name, block)
     return providers
+
+
+def _routable(name: str, block: dict[str, Any], renames: Renames) -> bool:
+    """May an agent be pinned to this provider? (OG-R1)
+
+    Absent, the answer is yes: a provider is a route unless it says otherwise.
+    Two things say otherwise — the block's own `routable: false`, and a name the
+    shipped providers have renamed away (see `multiagents.renames`). A non-
+    boolean is refused rather than read as either value, because the two
+    readings here are opposite — one invents a row no agent can reach, the
+    other silences a provider that works.
+    """
+    value = block.get("routable", True)
+    if not isinstance(value, bool):
+        raise ValueError(f"provider {name!r}: routable must be a boolean, got {value!r}")
+    return value and renames.is_route(name)
+
+
+def _renamed_from(name: str, block: dict[str, Any]) -> list[str]:
+    """The provider names this block was called before (OG-R2).
+
+    A scalar is accepted as well as a list, and a wrongly typed value is
+    refused rather than ignored: a rename quietly dropped is a rename that never
+    happens, and the old name then names a route that no longer exists.
+    """
+    value = block.get("renamed_from")
+    if value is None:
+        return []
+    names = [value] if isinstance(value, str) else value
+    if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
+        raise ValueError(
+            f"provider {name!r}: renamed_from must be a provider name or a "
+            f"list of them, got {value!r}")
+    return names
 
 
 def _validate_budget_profile(name: str, provider: "Provider",

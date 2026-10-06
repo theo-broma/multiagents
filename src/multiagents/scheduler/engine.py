@@ -18,6 +18,7 @@ import time
 import uuid
 
 from .. import procs
+from ..renames import shipped as shipped_renames
 from ..runner import LaunchContext, Runner, VERDICT, admission_block
 from ..tree import now
 from ..tree import ACTIVE, PAUSED
@@ -113,11 +114,12 @@ class Engine:
         # failing evaluation cannot starve every node ordered behind it.
         self.evaluating = None
         self.evaluation_failures = {}
-        # VR-R5: the one sweep that settles the rounds an older engine held
+# VR-R5: the one sweep that settles the rounds an older engine held
         # `unresolved_round` although their reviewer had answered in writing.
-        # Once per engine, at the first tick: a settled round is no longer
-        # held, so a restart finds nothing to do and nothing is settled twice.
+        # Once per engine, at the first tick: a settled round is no longer held,
+        # so a restart finds nothing to do and nothing is settled twice.
         self.settle_held_once = True
+        self.migrate_provider_names()
         self.migrate()
         with self.store.transaction(write=False) as db:
             window_nodes = self.store.nodes(db)
@@ -138,6 +140,38 @@ class Engine:
                 raise ValueError("scheduler clock must have a timezone")
             return value.timestamp()
         return now()
+
+    def migrate_provider_names(self):
+        """OG-R3: the plan's live routing keys move to the route's own name.
+
+        A node's `pins.provider` and a session binding's `provider`/`account`
+        are read on every tick, so a plan written before the rename would keep
+        launching on a name no provider answers to. Attempt and history records
+        are left exactly as written: they are a record of what happened under
+        the name that happened.
+
+        Once per engine, before the queue is drained into nodes, and idempotent
+        — after the first pass no old name is left. Driven by the renames the
+        shipped providers declare, so no provider is named here. Pure sqlite
+        and json: no git, no subprocess, no file I/O inside the transaction.
+        """
+        renames = shipped_renames()
+        with self.store.transaction() as db:
+            for record in self.store.nodes(db).values():
+                pins = record.get("pins")
+                if isinstance(pins, dict) and renames.is_alias(pins.get("provider")):
+                    record["pins"] = {**pins,
+                                      "provider": renames.canonical(pins["provider"])}
+                    self.store.save_node(db, record)
+            for binding_id, raw in list(db.execute("SELECT id, record FROM aliases")):
+                binding = json.loads(raw)
+                moved = {key: renames.canonical(value)
+                         for key, value in binding.items()
+                         if key in ("provider", "account") and renames.is_alias(value)}
+                if not moved:
+                    continue
+                db.execute("UPDATE aliases SET record=? WHERE id=?",
+                           (encode({**binding, **moved}), binding_id))
 
     def migrate(self):
         # Store first, queue second: a crash between them replays the entry's

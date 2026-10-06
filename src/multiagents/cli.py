@@ -40,6 +40,7 @@ from .models import refresh_models, validate_agent_models
 from .paths import (ProjectPaths, find_project_root, global_config_dir,
                     known_projects, register_project, state_root)
 from .providers import billed_rows, load_providers
+from .renames import shipped as shipped_renames
 from .runner import Runner, reap_pending_branches
 from .authority import HostAuthority
 from .tree import ACTIVE, Tree
@@ -2422,15 +2423,32 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _alias_provider_arg(name: str) -> str:
+    """OG-R2: a provider named on the command line in its pre-rename spelling.
+
+    An argument has no file to point at, so the warning says the sentence
+    without one; it is printed on stderr, where every other CLI complaint goes,
+    and the caller carries on with the route it meant.
+    """
+    renames = shipped_renames()
+    if not renames.is_alias(name):
+        return name
+    print(f"warning: {renames.warning(name)}", file=sys.stderr)
+    return renames.canonical(name)
+
+
 def cmd_auth(args: argparse.Namespace) -> int:
     paths = _resolve_if_project(args.path)
     config = load_config(paths)
     providers = load_providers(config.providers)
     project_config = paths.config if paths else None
     executor_of = executor_for(paths, config, providers)
+    # `status` lists every provider, but the name was still given, and a
+    # pre-rename spelling is worth saying so about whichever action it was.
+    given = _alias_provider_arg(getattr(args, "provider", "") or "")
 
     if args.action == "login":
-        name = args.provider
+        name = given
         provider = providers.get(name)
         if provider is None:
             print(f"unknown provider {name!r}; known: {sorted(providers)}", file=sys.stderr)
@@ -2711,7 +2729,8 @@ def cmd_refresh_quota(args: argparse.Namespace) -> int:
     paths = _resolve(args.path)
     config = load_config(paths)
     providers = load_providers(config.providers)
-    names = list(args.providers) if args.providers else sorted(providers)
+    names = ([_alias_provider_arg(n) for n in args.providers]
+             if args.providers else sorted(providers))
     unknown = [n for n in names if n not in providers]
     if unknown:
         print(f"unknown provider(s): {', '.join(unknown)}")

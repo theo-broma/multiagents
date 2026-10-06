@@ -64,9 +64,13 @@ def _composed(path: str, mtime_ns: int, size: int) -> yaml.Node | None:
         return None
 
 
-def _node_at(path: Path, parts: list[str]) -> tuple[int, Any] | None:
-    """`(1-based line of the key, its scalar value)` for a dotted key in one
-    yaml file, or None when that file does not set it."""
+def _located(path: Path, parts: list[str]) -> tuple[int, yaml.Node] | None:
+    """`(1-based line of the key, the node it addresses)`, or None.
+
+    Composing rather than loading, because only the node tree keeps line
+    numbers; a key written twice keeps the first one's line, which is the one
+    the layer merge would read first too.
+    """
     try:
         stat = path.stat()
     except OSError:
@@ -84,10 +88,37 @@ def _node_at(path: Path, parts: list[str]) -> tuple[int, Any] | None:
             return None
     if line is None:
         return None
+    return line, node
+
+
+def _node_at(path: Path, parts: list[str]) -> tuple[int, Any] | None:
+    """`(1-based line of the key, its scalar value)` for a dotted key in one
+    yaml file, or None when that file does not set it."""
+    located = _located(path, parts)
+    if located is None:
+        return None
+    line, node = located
     raw = None
     if isinstance(node, yaml.ScalarNode):
         raw = node.value if node.style else yaml.safe_load(node.value)
     return line, raw
+
+
+def _items_at(path: Path, parts: list[str]) -> list[tuple[int, Any]]:
+    """`(1-based line, scalar value)` per element of the SEQUENCE `parts`
+    addresses, in the order the list is written.
+
+    A list has no keys, so naming one of its entries needs its own position
+    rather than a dotted path: the deprecation warning for a pre-rename
+    `fallback_chain` entry points at that entry, not at the chain.
+    """
+    located = _located(path, parts)
+    if located is None:
+        return []
+    _, node = located
+    return [(item.start_mark.line + 1,
+             item.value if isinstance(item, yaml.ScalarNode) else None)
+            for item in (getattr(node, "value", None) or [])]
 
 
 def _same(raw: Any, value: Any) -> bool:

@@ -4,6 +4,55 @@ One script per provider, implementing a single contract so that every CLI is
 checked, repaired and measured the same way. Adding a provider means adding a block to
 `providers.yaml` and a script here — no Python in the package.
 
+## One CLI, several billing surfaces: the opencode family
+
+`opencode` here is the **CLI base and nothing else**: which binary, how to build
+its command line, how to parse the stream it prints, how it is handed the MCP
+server, and which home paths to link. It is not a route. No agent may name it,
+routing never selects it, `models.yaml` lists no models for it, and `budget`
+reports no capacity for it.
+
+The billing surfaces that CLI serves are providers of their own, each a few lines
+because they all `extends: opencode`:
+
+| provider | what it is | ships |
+|---|---|---|
+| `opencode-go` | the Go subscription — `family: opencode-go`, `models_include: [opencode-go/*]` | enabled |
+| `opencode-zen` | the free tier — `models_include: [opencode/*]` | disabled |
+| `opencode-zai` | the Z.AI GLM Coding Plan — `models_include: [zai-coding-plan/*]` | disabled |
+| `opencode-deepinfra` | DeepInfra — `models_include: [deepinfra/*]` | disabled |
+
+They share ONE script, `opencode.sh`, because one script serves the whole CLI:
+which billing surface a run is on is decided by `MULTIAGENTS_OPENCODE_PLAN`
+(zen / zai-coding-plan / deepinfra), and the Go subscription is the default,
+which is what leaving it unset means. The script's file name stays `opencode.sh`
+for the same reason — it is the CLI's script, not one route's.
+
+Their families are separate on purpose: one outage took the Go subscription down
+while the free tier of the very same model kept answering, and because both
+lived in one provider the single breaker tripped by Go then refused Zen too —
+the one thing that could still serve the request.
+
+A config written before the split named `opencode` where it meant the Go
+subscription. It still works: the name is read as `opencode-go`, with one
+deprecation warning per occurrence naming the file and line to change. That
+includes a `providers:` override block named `opencode` — its route-level keys
+(`enabled`, `models_include`, `env`, the budget keys) apply to `opencode-go`,
+while a CLI-level key (`bin`, `bin_search`, `spawn`, `mcp`, `stream`, …) still
+applies to the base and therefore to every opencode provider.
+
+The rename is declared, not implemented: `opencode-go` carries
+`renamed_from: [opencode]`, and `multiagents.renames` reads that — for any
+provider — into the alias, the warning, and the one-time move of durable state
+keyed by the old name. Two consequences worth knowing before you add a block of
+your own:
+
+- a name that has been renamed away is **not a route**, so `models.yaml`,
+  `budget` and `doctor` report nothing for it and a roster pinning it is
+  refused. Declare `routable: false` on a block that was never a route at all.
+- neither `routable` nor `renamed_from` is inherited through `extends:` — a
+  base's answers would otherwise become every dependent's.
+
 ## It does not have to be a shell script
 
 The contract is a filename, an argument, an exit code and some environment

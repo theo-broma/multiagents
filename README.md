@@ -141,7 +141,7 @@ rather than spawned:
 
 ```yaml
   orchestrator:
-    provider: claude       # or opencode, or agy
+    provider: claude       # or opencode-go, or agy
     model: sonnet
     launch: true
     role: orchestrator
@@ -990,7 +990,7 @@ One command covers all of them:
 $ multiagents auth
   ok agy        [container] container token present (…/antigravity-oauth-token)
   ok claude     [host     ] logged in as you@example.com
-  ok opencode   [host     ] 1 stored credential(s)
+  ok opencode-go [host   ] 1 stored credential(s)
 
 all providers authenticated
 ```
@@ -1118,9 +1118,39 @@ anything gitignored — all of `.multiagents/` — does not exist for them.
 `enabled: false` on a provider is *intent*; availability stays detected, never
 stored, because a stored fact goes stale and lies.
 
+`opencode` is the CLI and only the CLI: bin, spawn arguments, the stream
+grammar, the MCP hand-over and the home links. It is not a route — no agent may
+name it, routing never selects it, and it has no models, budget or family of its
+own. The billing surfaces that CLI serves are providers in their own right:
+
+| provider | what it is |
+|---|---|
+| `opencode` | **the CLI base** — no route, no models, no budget; `opencode-zen`, `opencode-zai`, `opencode-deepinfra` and `opencode-go` all `extends:` it |
+| `opencode-go` | the Go subscription — `family: opencode-go`, `models_include: [opencode-go/*]` |
+| `opencode-zen` | the free tier — `models_include: [opencode/*]`, ships disabled |
+| `opencode-zai` | the Z.AI GLM plan — `models_include: [zai-coding-plan/*]`, ships disabled |
+| `opencode-deepinfra` | DeepInfra — `models_include: [deepinfra/*]`, ships disabled |
+
+A config written before that split named `opencode` where it meant the Go
+subscription. It still works — the name is read as `opencode-go`, with one
+deprecation warning per occurrence naming the file and line to change. That
+includes a `providers:` override block named `opencode`: its route-level keys
+(`enabled`, `models_include`, `env`, the budget keys) apply to `opencode-go`,
+while a CLI-level key (`bin`, `spawn`, `mcp`, …) still applies to the base and
+therefore to every opencode provider.
+
+The rename itself is data, not code: `opencode-go` declares
+`renamed_from: [opencode]`, and one generic mechanism in `multiagents.renames`
+reads that declaration for every surface — the config, the CLI and MCP
+arguments, the generated models list, `budget` and `doctor`, and the durable
+state that moves to the new key on the first load. A name that has been renamed
+away is no longer a route, which is what keeps `opencode` out of every
+per-route figure. Renaming a provider is a `renamed_from` line, not a change to
+the package.
+
 `models_include` in `providers.yaml` decides which model namespaces get
 recorded, and each opencode billing surface is its own provider with its own
-allowlist: `opencode` takes `opencode-go/*` (the subscription), `opencode-zen`
+allowlist: `opencode-go` takes `opencode-go/*` (the subscription), `opencode-zen`
 takes `opencode/*` (the free tier), `opencode-deepinfra` takes `deepinfra/*`.
 The split is by namespace and not by model name, because the same model is
 served under two of them — `opencode/space-bunny-free` and
@@ -1540,7 +1570,8 @@ than by a migration.
 ### Each provider shows its own usage
 
 A quota's shape differs per provider and there is no honest common denominator:
-claude has two rolling windows and a credit pool, opencode serves three windows,
+claude has two rolling windows and a credit pool, opencode-go serves three
+windows,
 agy exposes nothing at all. Flattening those into one bar would invent precision
 for two of the three.
 
@@ -1555,7 +1586,7 @@ claude     ████████░░  78% of the tightest window
            credits 86.03 of 85.00 — spent
            nothing carries a session past a full window
 
-opencode   rolling  ░░░░░░░░░░   0%  2026-09-09 19:57
+opencode-go rolling  ░░░░░░░░░░   0%  2026-09-09 19:57
            weekly   ████████░░  86%  2026-09-14 00:00
            monthly  ██████░░░░  65%  2026-10-05 13:11
 ```
@@ -2522,7 +2553,7 @@ A model id belongs to its provider's namespace, so failing over without one
 would run `agy --model opencode-go/glm-5.3-flash`. Named, a constrained provider
 costs you a model rather than an agent.
 
-### The opencode spend tier
+### The opencode-go spend tier
 
 Every `opencode-go/*` pin in the shipped roster is on a model with a **$60
 monthly limit**. The subscription meters each model against its own ceiling, and
@@ -2532,7 +2563,8 @@ an exhausted model *stops* its agent rather than degrading it.
 
 That costs something real, and it is worth being plain about it: the strongest
 models opencode offers — `kimi-k3`, `deepseek-v4-pro`, `grok-4.6`,
-`qwen3.8-max` — are all $15 and are deliberately not used. What still spends opencode — `implementer-quick`, `adversary`, `researcher`,
+`qwen3.8-max` — are all $15 and are deliberately not used. What still spends
+the Go subscription — `implementer-quick`, `adversary`, `researcher`,
 `bug-reporter`, and several fallbacks — runs on `glm-5.3-flash`,
 `qwen3.7-plus`, `kimi-k2.6`, `minimax-m3` and `qwen3.6-plus` instead. It is a
 budget decision, not a capability one.
@@ -2559,8 +2591,8 @@ cheaper providers on volume:
 | `tester`, `implementer-deep` | claude / **opus** |
 | `implementer` | claude / **sonnet** |
 | `advisor`, `reviewer` | agy / gemini-3.1-pro-high |
-| `implementer-quick`, `researcher`, `bug-reporter` | opencode / glm-5.3-flash |
-| `adversary` | opencode / qwen3.7-plus |
+| `implementer-quick`, `researcher`, `bug-reporter` | opencode-go / glm-5.3-flash |
+| `adversary` | opencode-go / qwen3.7-plus |
 
 Two consequences worth knowing before you run it.
 
@@ -2641,7 +2673,7 @@ honestly rather than inventing a number:
 Budget is read through each provider's own `budget` action, so a newly added
 provider gets an entry with no Python change.
 
-- **opencode** — a Go subscription serves real headroom over HTTP:
+- **opencode-go** — the Go subscription serves real headroom over HTTP:
   `GET opencode.ai/zen/go/v1/usage`, bearer token from opencode's own
   `auth.json`, returning percent-used and a reset for three windows — rolling,
   weekly and monthly. `headroom` is the **worst** of the three, because the
@@ -2654,7 +2686,7 @@ provider gets an entry with no Python change.
   process list, and it is never printed. `doctor` shows the breakdown:
 
 ```
-  opencode     27.0% used, resets 2026-10-05T13:11:17
+  opencode-go  27.0% used, resets 2026-10-05T13:11:17
                  monthly   27.0%  resets 2026-10-05T13:11:17
                  rolling   25.0%  resets 2026-09-07T11:29:26
                  weekly    10.0%  resets 2026-09-14T00:00:00
@@ -2668,7 +2700,7 @@ below. That reserve exists for one narrow reason — an orchestrator with nothin
 left cannot read the results of the agents it started, and a stalled
 orchestrator stops the tree rather than one agent.
 
-Applied to *every* provider, it did something else entirely. opencode reports
+Applied to *every* provider, it did something else entirely. opencode-go reports
 the worst of its three windows, so at **86% of a weekly window** — with the
 five-hour window it actually runs against sitting empty — headroom read 0.14,
 fell under the reserve, and every implementer silently ran on the fallback
@@ -2724,15 +2756,16 @@ That check used to happen *after* the choice. The chooser returned the first
 usable entry in the chain, the caller looked for a model for it, found none —
 and **reverted to the provider it had just ruled out**. Measured, in a real
 session: claude's token was revoked, the breaker cooled it down, the chain was
-`[opencode, agy]`, and `flutter-tester` named a model for agy only. Every spawn
-picked opencode, failed the model check, and ran on cooling-down claude anyway.
+`[opencode-go, agy]`, and `flutter-tester` named a model for agy only. Every
+spawn picked opencode-go, failed the model check, and ran on cooling-down claude
+anyway.
 Five runs into an authentication wall with a working fallback one place further
 down the list.
 
 So the chooser is now told which providers the agent can use and offers no
 other. When none of them can take the work, the answer is to **defer** — the
 task waits and the tree pauses — rather than to run into the wall we just
-identified. The reason names what to add: *"no model named for opencode, agy —
+identified. The reason names what to add: *"no model named for opencode-go, agy —
 add one under `models:` to allow failover there."*
 
 The breaker had a matching fault. It latched: once `tripped` was set it never
@@ -2778,7 +2811,7 @@ Three smaller faults, all found in the same review:
 **And the routing now says so.** The decision computed a reason and threw it
 away, so an implementer on the wrong model could only be explained by reading
 `choose_provider`. The node records `routed_from` and `routed_why`, a `routed`
-event is emitted, the monitor's agent card shows *"↳ meant for opencode — …"*,
+event is emitted, the monitor's agent card shows *"↳ meant for opencode-go — …"*,
 and a provider sitting below the reserve raises a warning that says work is
 being sent elsewhere.
 
@@ -2908,7 +2941,7 @@ every number above it:
 
 | provider | `usage_mode` | meaning |
 |---|---|---|
-| opencode | `delta` | per-step amounts, summed |
+| opencode / opencode-go | `delta` | per-step amounts, summed |
 | agy | `cumulative` | running totals, taken at maximum |
 | claude | `cumulative` | one result event carries the run total |
 

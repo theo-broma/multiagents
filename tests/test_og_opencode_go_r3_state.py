@@ -115,13 +115,11 @@ def tree(tmp_path):
 
 
 def _providers_in(data: dict) -> set[str]:
-    """Every provider name a record in `data` is filed under."""
+    """Every provider name a live, provider-keyed record is filed under.
+    Node and segment `provider` fields are history and stay as written."""
     found = set(data.get("provider_health", {})) | set(data.get("cooldowns", {}))
     found |= set(data.get("headroom", {})) | set(data.get("claims", {}))
     found |= set(data.get("pc_seq", {})) | set((data.get("pause") or {}).get("providers", []))
-    for node in data["nodes"].values():
-        found.add(node.get("provider"))
-        found |= {s.get("provider") for s in node.get("segments") or []}
     found |= {(d.get("spec") or {}).get("provider") for d in data["deferred"]}
     found.discard(None)
     return found

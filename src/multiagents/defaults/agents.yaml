@@ -93,7 +93,7 @@ agents:
     model: gemini-3.1-pro-high
     instructions: team/advisor.md
     models:
-      opencode: opencode-go/qwen3.6-plus
+      opencode-go: opencode-go/qwen3.6-plus
     description: >-
       Consultative second opinion. Reads the code and advises; decides and
       changes nothing.
@@ -118,7 +118,7 @@ agents:
   #
   # It checks nobody's work, so it carries no model-family constraint.
   researcher:
-    provider: opencode
+    provider: opencode-go
     model: opencode-go/glm-5.3-flash
     instructions: team/researcher.md
     models:
@@ -151,7 +151,7 @@ agents:
       # Deliberately NOT agy here. With claude gone, the two implementers that
       # fall back land on agy; sending the tester there too would put the
       # contract and the code it holds on one provider at the worst moment.
-      opencode: opencode-go/kimi-k2.6
+      opencode-go: opencode-go/kimi-k2.6
     description: >-
       Writes the black-box behavioural test suite that defines done, before the
       implementation exists. Red is success.
@@ -192,7 +192,7 @@ agents:
   # low max_steps so a task that turns out to need thinking stops cheaply
   # instead of flailing at 120 steps.
   implementer-quick:
-    provider: opencode
+    provider: opencode-go
     model: opencode-go/glm-5.3-flash
     instructions: team/implementer.md
     models:
@@ -289,7 +289,7 @@ agents:
     model: gemini-3.1-pro-high
     instructions: team/dev-advisor.md
     models:
-      opencode: opencode-go/kimi-k2.7-code
+      opencode-go: opencode-go/kimi-k2.7-code
     description: >-
       Second opinion for the deep implementer, mid-task. Names the problem,
       suggests an approach, never writes the implementation.
@@ -316,7 +316,7 @@ agents:
   # part that matters. It was `deepseek-v4-pro` until the opencode pins were
   # held to the $60 monthly tier — see the note at the bottom of this file.
   adversary:
-    provider: opencode
+    provider: opencode-go
     model: opencode-go/qwen3.7-plus
     instructions: team/adversary.md
     models:
@@ -365,7 +365,7 @@ agents:
     model: gemini-3.1-pro-high
     instructions: team/reviewer.md
     models:
-      opencode: opencode-go/minimax-m3
+      opencode-go: opencode-go/minimax-m3
     description: Reviews a diff for correctness and reports findings. No writes.
     writes: false
     permission: readonly
@@ -393,7 +393,7 @@ agents:
     model: gemini-3.1-pro-high
     instructions: team/cartographer.md
     models:
-      opencode: opencode-go/qwen3.6-plus
+      opencode-go: opencode-go/qwen3.6-plus
     description: >-
       Maps a codebase into at most seven ranked, budgeted bounded contexts.
       Writes context/review/MAP.md. No findings, no fixes.
@@ -433,13 +433,13 @@ agents:
   # run in parallel and must not fight over shared fixtures, and none of them
   # may quietly adjust the system it is measuring.
   characterizer:
-    provider: opencode
+    provider: opencode-go
     model: opencode-go/kimi-k2.7-code
     instructions: team/characterizer.md
-    models:
-      # NOT gemini-3.1-pro-high, which is where the auditor lands: the auditor
-      # partly judges what this agent chose to pin, and with opencode down they
-      # would have collapsed onto one model at the moment nobody is watching.
+    # No `models:` entry at all, deliberately. NOT gemini-3.1-pro-high, which is
+    # where the auditor lands: the auditor partly judges what this agent chose
+    # to pin, and with opencode down they would have collapsed onto one model at
+    # the moment nobody is watching.
     description: >-
       Writes characterization tests pinning a context's current behaviour, and
       flags every behaviour it had to pin that looks wrong.
@@ -463,7 +463,7 @@ agents:
     model: gemini-3.1-pro-high
     instructions: team/auditor.md
     models:
-      opencode: opencode-go/qwen3.6-plus
+      opencode-go: opencode-go/qwen3.6-plus
     description: >-
       Audits existing code and writes numbered findings with an evidence tier,
       severity and disposition. Fixes nothing.
@@ -483,7 +483,7 @@ agents:
   # because the auditor recorded the reasoning precisely so this agent does not
   # have to think about it.
   reporter:
-    provider: opencode
+    provider: opencode-go
     model: opencode-go/qwen3.7-plus
     instructions: team/reporter.md
     models:
@@ -507,7 +507,7 @@ agents:
   # environment block so it does not have to discover (or invent) facts about
   # the machine it runs on.
   bug-reporter:
-    provider: opencode
+    provider: opencode-go
     model: opencode-go/glm-5.3-flash
     role: bug-reporter
     instructions: bug-reporter.md
@@ -531,7 +531,7 @@ agents:
   # name. Its brief is now agents/team/advisor.md.
   critic:
     disabled: true
-    provider: opencode
+    provider: opencode-go
     # Repinned to the $60 tier even though it never runs: a disabled entry is a
     # template someone re-enables, and it should not carry a pin the rest of
     # the file forbids.

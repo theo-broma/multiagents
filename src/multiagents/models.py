@@ -88,6 +88,12 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
         if not provider.enabled:
             problems[name] = "disabled in providers.yaml"
             continue
+        # OG-R1: a provider that is not a route lists no models of its own.
+        # Its CLI's models belong to the providers that extend it, each under
+        # its own namespace — listing them here would publish the whole CLI's
+        # catalogue as if one provider served all of them.
+        if not getattr(provider, "routable", True):
+            continue
 
         # A static list is the answer for a CLI with no way to enumerate its
         # models — claude has no `models` subcommand. Previously such providers

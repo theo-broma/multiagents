@@ -15,6 +15,7 @@ import uuid
 
 from ..config import load, source_version
 from ..paths import ProjectPaths
+from ..renames import shipped as shipped_renames
 from . import model, effects, windows
 from .model import Refused, invalid
 from .store import Store, encode, token_hash
@@ -25,6 +26,22 @@ OPS = {"create_node", "update_node", "cancel_node", "get_node", "list_nodes",
        "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_agent", "steer_run", "steer_result", "stop_run", "admit_window_resume"}
 MUTATING = OPS - {"get_node", "list_nodes", "list_templates", "wait_for_nodes", "scheduler_status", "admit_agent", "steer_result", "admit_window_resume"}
 ROOT_ONLY = {"register_template", "ack_nodes", "relaunch_node", "close_node", "merge_node", "dispose_node", "admit_window_resume"}
+
+
+def _alias_pins(args: dict) -> list[str]:
+    """OG-R2: a `pins.provider` in its pre-rename spelling.
+
+    Rewritten in place, so the record that is stored, validated and read back
+    all name the route the caller meant. The warning has no file to point at —
+    a pin came in over the wire — and rides back in the reply beside the node.
+    """
+    pins = args.get("pins")
+    name = pins.get("provider") if isinstance(pins, dict) else None
+    renames = shipped_renames()
+    if not renames.is_alias(name):
+        return []
+    pins["provider"] = renames.canonical(name)
+    return [renames.warning(name)]
 
 
 def validate_wire_value(value):
@@ -516,6 +533,10 @@ class Service:
             raise Refused("active")
         original = copy.deepcopy(nodes)
         reply_node = None
+        # OG-R2: a pin naming the pre-rename provider is stored as the route it
+        # meant, and the caller is told. Applied to the arguments, before the
+        # record is built, so the stored pin and every later read of it agree.
+        aliased = _alias_pins(args)
         if op == "create_node":
             model.check_fields(args, model.CREATABLE, {"plan_revision"})
             if args.get("kind") == "simple" and "children" in args:
@@ -634,7 +655,10 @@ class Service:
         if transition:
             self.store.transition(db, transition, node["id"])
         self.store.set_meta(db, "plan_revision", plan_revision)
-        return self.view(reply_node or node, plan_revision)
+        result = self.view(reply_node or node, plan_revision)
+        if aliased:
+            return {**result, "warnings": aliased}
+        return result
 
     def finish_cancel(self, principal, request_id, reply, pending):
         # Phase two of cancel_node: the request is durable and committed, so

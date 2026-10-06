@@ -63,6 +63,30 @@
 # This selects provider instances, not accounts inside the claude sidecar vault.
 providers:
 
+    # The opencode CLI, and NOTHING else (OG-R1). How to build its command
+  # line, how to read the stream it prints, where its credentials live and
+  # which home paths to link — the integration every opencode provider below
+  # inherits through `extends:`.
+  #
+# It is deliberately not a route: it has no `family` and no `models_include`
+   # either, so it has nothing to spend against, and no agent can be pinned to
+   # it (OG-R1). That is stated by `renamed_from` on the route below rather than
+   # by a key here, because `extends:` copies a whole block: a key on a CLI
+   # base is inherited by every integration built on it, so a new provider
+   # would be born with the base's flags. `multiagents.renames` reads a name
+   # that has been renamed away as no longer being a route, which is what it
+   # means once every mention of it is read as the route that replaced it.
+   # One CLI serves several unrelated billing surfaces and each is a provider of
+   # its own: the Go subscription is `opencode-go`, the free tier
+   # `opencode-zen`, the Z.AI plan `opencode-zai`, DeepInfra
+   # `opencode-deepinfra`.
+   #
+   # `renamed_from` on the block that took the name over is the other half of
+   # the split, and both halves are read by `multiagents.renames` — one generic
+   # mechanism, no provider named in Python. A config, a CLI argument, an MCP
+   # tool argument or durable state written under the old name is read as the
+   # route that renamed it, with a deprecation warning naming the file and line
+   # (OG-R2), and its durable state moves once, merging what it finds (OG-R3).
   opencode:
     bin: opencode
     bin_search: ["~/.opencode/bin"]
@@ -106,16 +130,6 @@ providers:
     usage_mode: delta
     models_cmd: ["opencode", "models"]
     models_parse: lines
-    # Which model namespaces `refresh-models` records as available: the Go
-    # subscription's `opencode-go/*`, and nothing else. The same CLI serves two
-    # unrelated billing surfaces, and each is a provider of its own (see
-    # `opencode-zen` and `opencode-deepinfra` below), so this list names only
-    # what the Go subscription pays for: a go route never launches a zen model
-    # id, and vice versa. The two can serve models of the SAME name under their
-    # own prefixes (`opencode/space-bunny-free` and `opencode-go/space-bunny-
-    # free`), which is why the split is by namespace and not by model name.
-    models_include:
-      - "opencode-go/*"
     home_links:
       - ".local/share/opencode"
       - ".config/opencode"
@@ -152,6 +166,40 @@ providers:
         - match: {type: "step_start"}
           as: step
           fields: {}
+
+  # OpenCode Go — the subscription. Four lines, because everything above is the
+  # CLI and is inherited: what makes this a provider of its own is the family
+  # (so the breaker, the cooldowns, the headroom and the spend are the Go
+  # subscription's alone) and the namespace it will launch models from.
+  #
+  # `models_include` names the Go subscription's `opencode-go/*` and nothing
+  # else. The same CLI serves unrelated billing surfaces, each a provider of its
+  # own (see `opencode-zen` and `opencode-deepinfra` below), so this list is
+  # what keeps a go route from launching a zen model id and the reverse. The two
+  # can serve models of the SAME name under their own prefixes
+  # (`opencode/space-bunny-free` and `opencode-go/space-bunny-free`), which is
+  # why the split is by namespace and not by model name.
+  #
+  # No `MULTIAGENTS_OPENCODE_PLAN`: that variable is how the siblings below pick
+  # their billing surface, and the Go subscription is the CLI's default, which
+  # is what leaving it unset says.
+  #
+  # `renamed_from` records that this route is what the block above used to be:
+  # before the split, the one block was both the CLI integration and the route
+  # for this subscription, and configs, CLI arguments and durable state were
+  # all written under that single name. It is the only declaration the kernel
+  # needs: `multiagents.renames` reads it and nothing else, for any provider,
+  # and it is what tells the rest of the package that the old name is a CLI
+  # integration rather than a route.
+  opencode-go:
+    extends: opencode
+    family: opencode-go
+    # OG-R2/OG-R3. Read from the RAW block, never through `extends:`, so a
+    # sibling that extends a renamed provider is not itself renamed.
+    renamed_from:
+      - opencode
+    models_include:
+      - "opencode-go/*"
 
   # OpenCode Zen — the free tier served by the SAME CLI as the Go subscription
   # above, and a provider of its own rather than part of `opencode`. One outage
