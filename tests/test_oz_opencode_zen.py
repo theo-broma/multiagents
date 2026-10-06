@@ -51,7 +51,7 @@ import c3_harness as h3  # noqa: E402
 
 DEFAULTS = shipped_defaults_dir()
 SCRIPT = DEFAULTS / "providers" / "opencode.sh"
-GO = "opencode"
+GO = "opencode-go"
 ZEN = "opencode-zen"
 PLAN = "zen"
 GO_URL = "opencode.ai/zen/go/v1/usage"
@@ -232,7 +232,7 @@ def test_oz_r1_shipped_file_defines_the_provider_disabled_with_family_and_includ
 
 def test_oz_r1_extends_opencode_so_it_inherits_spawn_stream_script_and_usage_mode():
     ps = _load(_shipped_raw())
-    z, o = ps.get(ZEN), ps[GO]
+    z, o = ps.get(ZEN), ps["opencode"]
     assert z is not None, "no `opencode-zen` provider"
     assert z.spawn == o.spawn and z.spawn.get("args")
     assert z.stream == o.stream and z.stream.get("rules")
@@ -310,7 +310,7 @@ def _models_for(tmp_path, monkeypatch, listing, *, zen=True, go=True):
     from multiagents.models import refresh_models
     raw = _shipped_raw()
     assert ZEN in raw, "no `opencode-zen` provider in the shipped file"
-    raw = {k: raw[k] for k in (GO, ZEN)}
+    raw = {k: raw[k] for k in ("opencode", GO, ZEN)}
     raw[ZEN]["enabled"] = zen
     raw[GO]["enabled"] = go
     bindir = tmp_path / "bin"

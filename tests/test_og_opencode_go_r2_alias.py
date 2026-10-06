@@ -370,3 +370,105 @@ def test_og_r2_mcp_node_pin_provider_opencode_is_stored_as_opencode_go_and_warns
         assert len(deprecations(seen)) >= 1, seen
     finally:
         sched.close()
+
+
+# ===========================================================================
+# Clarifications (2026-10-06): channel, fallback_chain, CLI-only block, collision
+# ===========================================================================
+
+def test_og_r2c_the_warning_is_on_stderr_and_in_config_warnings(tmp_path, capsys, caplog):
+    """Clarified channel: stderr and `Config.warnings` (both, not either)."""
+    import logging
+
+    from multiagents import config as config_mod
+    p = Project(tmp_path)
+    agents = p.write("agents.yaml", _agents_text())
+    caplog.set_level(logging.DEBUG)
+    capsys.readouterr()
+    cfg = config_mod.load(p.paths)
+    captured = capsys.readouterr()
+    assert len(deprecations(captured.err, about=agents)) == 1, captured.err
+    in_config = deprecations("\n".join(str(w) for w in cfg.warnings), about=agents)
+    assert len(in_config) == 1, cfg.warnings
+    assert named_line(in_config[0], agents) == line_of(agents, f"provider: {OLD}")
+
+
+def _project_yaml(chain_lines: str) -> str:
+    return f"budget:\n  fallback_chain:\n{chain_lines}"
+
+
+def test_og_r2c_fallback_chain_entry_opencode_is_read_as_opencode_go_with_one_warning(
+        tmp_path, capsys, caplog):
+    p = Project(tmp_path)
+    project = p.write("project.yaml",
+                      _project_yaml(f"    - {OLD}\n    - agy\n    - defer\n"))
+    cfg, text = load(p, capsys, caplog)
+    chain = cfg.project["budget"]["fallback_chain"]
+    assert chain == [NEW, "agy", "defer"], chain             # same slot, others untouched
+    warning = _only_one(text, project)
+    assert named_line(warning, project) == line_of(project, f"- {OLD}")
+
+
+def test_og_r2c_fallback_chain_opencode_go_is_silent(tmp_path, capsys, caplog):
+    p = Project(tmp_path)
+    project = p.write("project.yaml",
+                      _project_yaml(f"    - {NEW}\n    - agy\n    - defer\n"))
+    cfg, text = load(p, capsys, caplog)
+    assert cfg.project["budget"]["fallback_chain"] == [NEW, "agy", "defer"]
+    assert deprecations(text, about=project) == []
+
+
+@pytest.mark.parametrize("sibling", sorted(SIBLINGS))
+def test_og_r2c_fallback_chain_alias_is_the_exact_name_not_a_prefix(
+        tmp_path, capsys, caplog, sibling):
+    p = Project(tmp_path)
+    project = p.write("project.yaml", _project_yaml(f"    - {sibling}\n    - defer\n"))
+    cfg, text = load(p, capsys, caplog)
+    assert cfg.project["budget"]["fallback_chain"] == [sibling, "defer"]
+    assert deprecations(text, about=project) == []
+
+
+def test_og_r2c_cli_level_only_override_applies_to_the_base_with_no_warning(
+        tmp_path, capsys, caplog):
+    p = Project(tmp_path)
+    providers = p.write(
+        "providers.yaml",
+        "providers:\n"
+        f"  {OLD}:\n"
+        f"    bin: {FAKE_BIN}\n"
+        "    bin_search: [\"/opt/example.invalid/bin\"]\n")
+    cfg, text = load(p, capsys, caplog)
+    ps = providers_of(cfg)
+    assert ps[OLD].bin == FAKE_BIN
+    for child in (NEW, "opencode-zen", "opencode-zai", "opencode-deepinfra"):
+        assert ps[child].bin == FAKE_BIN, child
+    assert deprecations(text, about=providers) == [], text
+    assert deprecations("\n".join(str(w) for w in cfg.warnings)) == []
+
+
+@pytest.mark.parametrize("order", [(OLD, NEW), (NEW, OLD)])
+def test_og_r2c_a_models_chain_naming_both_opencode_and_opencode_go_is_refused(
+        tmp_path, capsys, caplog, order):
+    p = Project(tmp_path)
+    lines = "".join(f"      {name}: {GO_MODEL}\n" for name in order)
+    p.write("agents.yaml",
+            "agents:\n  helper:\n    description: x\n"
+            "    provider: claude\n    model: sonnet\n"
+            f"    models:\n{lines}")
+    with pytest.raises(ValueError) as err:
+        load(p, capsys, caplog)
+    message = str(err.value)
+    assert OLD in message and NEW in message, message
+    assert "helper" in message, message
+
+
+def test_og_r2c_models_chain_with_opencode_go_alone_still_loads_silently(
+        tmp_path, capsys, caplog):
+    p = Project(tmp_path)
+    agents = p.write("agents.yaml",
+                     "agents:\n  helper:\n    description: x\n"
+                     "    provider: claude\n    model: sonnet\n"
+                     f"    models:\n      {NEW}: {GO_MODEL}\n      claude: sonnet\n")
+    cfg, text = load(p, capsys, caplog)
+    assert NEW in cfg.agents["helper"].models
+    assert deprecations(text, about=agents) == []

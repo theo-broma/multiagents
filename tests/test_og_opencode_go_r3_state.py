@@ -443,3 +443,199 @@ def test_og_r3_scheduler_pins_move_once_and_nothing_else_in_the_plan_changes(sch
     s.restart()                                           # loaded a second time
     assert s.snapshot() == first
     assert OLD not in [p.get("provider") for p in _stored_pins(s).values()]
+
+
+# ===========================================================================
+# Clarified merge rules (2026-10-06), where records exist under both keys:
+#   breaker failures -> the larger value; cooldown/pause -> the later end;
+#   samples and history -> united, de-duplicated, in time order.
+# These are exact, unlike the range checks above.
+# ===========================================================================
+
+def test_og_r3c_merged_breaker_failures_are_the_larger_not_the_sum(tree):
+    data = pre_rename()                                  # old side: 2 failures
+    data["provider_health"][NEW] = {"consecutive_failures": 1, "last_reason": "newer"}
+    assert tree(data).provider_health()[NEW]["consecutive_failures"] == 2
+
+
+def test_og_r3c_merged_breaker_failures_take_the_larger_when_it_is_the_new_side(tree):
+    data = pre_rename()
+    data["provider_health"][NEW] = {"consecutive_failures": 5, "last_reason": "newer"}
+    health = tree(data).provider_health()
+    assert health[NEW]["consecutive_failures"] == 5 and OLD not in health
+
+
+def test_og_r3c_merged_breaker_failures_when_equal_stay_equal(tree):
+    data = pre_rename()
+    data["provider_health"][NEW] = {"consecutive_failures": 2, "last_reason": "same"}
+    assert tree(data).provider_health()[NEW]["consecutive_failures"] == 2
+
+
+def test_og_r3c_merged_cooldown_ends_at_the_later_when_the_new_side_is_later(tree):
+    t = tree(merge_case())                               # old: FUTURE, new: FUTURE + 600
+    assert t.cooldown(NEW)["until"] == pytest.approx(FUTURE + 600)
+
+
+def test_og_r3c_merged_cooldown_ends_at_the_later_when_the_old_side_is_later(tree):
+    data = merge_case()
+    data["cooldowns"][NEW] = {"until": FUTURE - 3000, "reason": "shorter", "cause": "quota"}
+    t = tree(data)
+    assert t.cooldown(NEW)["until"] == pytest.approx(FUTURE)
+    assert t.cooldown(OLD) is None
+
+
+def test_og_r3c_merged_cooldown_is_not_extended_beyond_the_later_end(tree):
+    """Not the sum, not now + the longer: the later of the two ends."""
+    t = tree(merge_case())
+    t.read()
+    assert _persisted(t)["cooldowns"][NEW]["until"] == pytest.approx(FUTURE + 600)
+
+
+def test_og_r3c_merged_pause_ends_at_the_later_of_the_two_ends(tree):
+    data = merge_case()
+    data["pause"]["providers"] = ["claude", OLD]
+    data["pause"]["until"] = FUTURE
+    for ends in (FUTURE + 900, FUTURE - 900):
+        d = copy.deepcopy(data)
+        d["cooldowns"][NEW] = {"until": ends, "reason": "x", "cause": "quota"}
+        pause = tree(d).read()["pause"]
+        assert pause["until"] >= FUTURE - 1
+        assert sorted(pause["providers"]) == sorted(["claude", NEW])
+
+
+def test_og_r3c_merged_headroom_deduplicates_a_sample_present_under_both_keys(tree):
+    data = pre_rename()
+    shared = data["headroom"][OLD][1]                    # also recorded under the new name
+    data["headroom"][NEW] = [[T0 - 350, 0.95, 0.5], shared, [T0 - 50, 0.6, 4.0]]
+    series = tree(data).read()["headroom"][NEW]
+    assert series == [[T0 - 350, 0.95, 0.5], [T0 - 300, 0.90, 1.0], [T0 - 200, 0.80, 2.0],
+                      [T0 - 100, 0.70, 3.0], [T0 - 50, 0.6, 4.0]]
+    assert len([s for s in series if s == shared]) == 1
+
+
+def test_og_r3c_merged_claims_are_united_deduplicated_and_in_time_order(tree):
+    data = pre_rename()
+    data["claims"][NEW] = [T0 - 25, T0 - 10, T0 - 5]     # T0 - 10 is also under the old key
+    claims = tree(data).read()["claims"][NEW]
+    assert claims == [T0 - 25, T0 - 20, T0 - 10, T0 - 5]
+
+
+def test_og_r3c_merging_twice_adds_nothing(tree):
+    data = pre_rename()
+    shared = data["headroom"][OLD][1]
+    data["headroom"][NEW] = [shared]
+    t = tree(data)
+    once = _persisted(t)
+    twice = _persisted(Tree(t.path, t.events_path))
+    assert once == twice
+    assert len(twice["headroom"][NEW]) == 3
+
+
+# ===========================================================================
+# What is NOT migrated: the spend ledger and the scheduler's history
+# ===========================================================================
+
+LEDGER_AT = 1_773_576_000.0          # 2026-03-15 12:00 UTC, mid-month, fixed
+
+
+def _ledger_line(key: str, provider: str, usd: float, ts: float = LEDGER_AT) -> str:
+    return json.dumps({"kind": "charge", "ts": ts, "key": key, "provider": provider,
+                       "model": GO_MODEL, "agent": "worker", "node": "n1", "usd": usd},
+                      sort_keys=True) + "\n"
+
+
+def _write_ledger(tmp_path: Path) -> Path:
+    path = tmp_path / ".multiagents" / "spend-ledger.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"kind": "created", "ts": LEDGER_AT - 86400 * 40}) + "\n"
+        + _ledger_line("k1", OLD, 1.25)
+        + _ledger_line("k2", NEW, 0.5)
+        + _ledger_line("k3", "claude", 4.0))
+    return path
+
+
+def test_og_r3c_ledger_readers_count_old_entries_as_opencode_go(tmp_path):
+    from multiagents.spendcap import Ledger
+    ledger = Ledger(_write_ledger(tmp_path))
+    ledger.refresh()
+    assert ledger.spend(NEW, "", "month", LEDGER_AT) == pytest.approx(1.75)
+    assert ledger.spend(NEW, GO_MODEL, "month", LEDGER_AT) == pytest.approx(1.75)
+    assert ledger.spend("claude", "", "month", LEDGER_AT) == pytest.approx(4.0)
+    assert ledger.providers_seen() == {NEW, "claude"}, ledger.providers_seen()
+
+
+def test_og_r3c_ledger_file_is_byte_unchanged_by_reading_it(tmp_path):
+    from multiagents.spendcap import Ledger
+    path = _write_ledger(tmp_path)
+    before = path.read_bytes()
+    ledger = Ledger(path)
+    ledger.refresh()
+    ledger.poll()
+    ledger.spend(NEW, "", "month", LEDGER_AT)
+    ledger.providers_seen()
+    assert path.read_bytes() == before
+    assert OLD.encode() in before and b'"provider": "opencode"' in before   # still there
+
+
+def test_og_r3c_ledger_stays_append_only_when_a_charge_is_added(tmp_path):
+    from multiagents.spendcap import Cap, Ledger
+    path = _write_ledger(tmp_path)
+    before = path.read_bytes()
+    ledger = Ledger(path)
+    ledger.charge(key="k4", provider=NEW, model=GO_MODEL, agent="worker", node="n2",
+                  usd=0.25, caps=[Cap(NEW, "", 100.0, "month")], at=LEDGER_AT + 60)
+    after = path.read_bytes()
+    assert after.startswith(before), "an existing ledger line was rewritten"
+    assert len(after) > len(before)
+    fresh = Ledger(path)
+    fresh.refresh()
+    assert fresh.spend(NEW, "", "month", LEDGER_AT + 60) == pytest.approx(2.0)
+
+
+def test_og_r3c_an_old_entry_counts_toward_a_cap_on_opencode_go(tmp_path):
+    from multiagents.spendcap import Cap, Ledger
+    ledger = Ledger(_write_ledger(tmp_path))
+    ledger.refresh()
+    state = ledger.describe(Cap(NEW, "", 1.5, "month"), LEDGER_AT)
+    assert state["spend"] == pytest.approx(1.75) and state["reached"] is True
+
+
+def test_og_r3c_a_charge_is_not_double_counted_when_both_names_carry_one_key(tmp_path):
+    from multiagents.spendcap import Ledger
+    path = tmp_path / ".multiagents" / "spend-ledger.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(_ledger_line("same", OLD, 1.0) + _ledger_line("same", NEW, 1.0))
+    ledger = Ledger(path)
+    ledger.refresh()
+    assert ledger.spend(NEW, "", "month", LEDGER_AT) == pytest.approx(1.0)
+
+
+def test_og_r3c_scheduler_attempt_and_history_records_keep_the_old_name(scheduler):
+    """Only live routing keys move. An attempt record in the plan database is
+    history: it is read back exactly as written."""
+    s = scheduler
+    s.start()
+    a = s.create(task="has history")
+    s.stop()
+    db = sqlite3.connect(_plan_db(s), timeout=30)
+    try:
+        (raw,) = db.execute("SELECT record FROM nodes WHERE id=?", (a["id"],)).fetchone()
+        record = json.loads(raw)
+        record["pins"] = {"provider": OLD, "model": GO_MODEL}
+        record["attempts"] = [{"n": 1, "provider": OLD, "model": GO_MODEL, "outcome": "failed"}]
+        db.execute("UPDATE nodes SET record=? WHERE id=?",
+                   (json.dumps(record, sort_keys=True, separators=(",", ":")), a["id"]))
+        db.commit()
+    finally:
+        db.close()
+    s.start()
+    db = sqlite3.connect(_plan_db(s), timeout=30)
+    try:
+        (raw,) = db.execute("SELECT record FROM nodes WHERE id=?", (a["id"],)).fetchone()
+    finally:
+        db.close()
+    stored = json.loads(raw)
+    assert stored["pins"]["provider"] == NEW                      # live routing key moved
+    assert stored["attempts"] == [{"n": 1, "provider": OLD, "model": GO_MODEL,
+                                   "outcome": "failed"}]          # history did not

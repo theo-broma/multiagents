@@ -249,13 +249,13 @@ def test_za_r1_failover_between_go_and_zai_is_never_implicit():
     from multiagents.providers import families
     fam = families(_load(_shipped_raw()))
     assert "opencode-zai" in fam and fam["opencode-zai"] == ["opencode-zai"], fam
-    assert "opencode-zai" not in fam.get("opencode", []), fam
+    assert "opencode-zai" not in fam.get("opencode-go", []), fam
 
 
 def test_za_r1_opencode_itself_is_unchanged():
-    o = _load(_shipped_raw())["opencode"]
+    o = _load(_shipped_raw())["opencode-go"]            # OG-R1: the go route is `opencode-go`
     assert list(o.models_include) == ["opencode-go/*"]      # OZ-R4: zen is its own provider
-    assert o.family == "opencode"
+    assert o.family == "opencode-go"
     assert o.enabled is not False
     assert "MULTIAGENTS_OPENCODE_PLAN" not in (o.env or {})
 
@@ -272,7 +272,7 @@ def test_za_r1_refresh_models_splits_the_namespaces(tmp_path, monkeypatch):
     from multiagents.models import refresh_models
     raw = _shipped_raw()
     assert "opencode-zai" in raw, "no `opencode-zai` instance in the shipped file"
-    raw = {k: raw[k] for k in ("opencode", "opencode-zai")}
+    raw = {k: raw[k] for k in ("opencode", "opencode-go", "opencode-zai")}
     raw["opencode-zai"]["enabled"] = True      # ships disabled; enable for the test
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -288,7 +288,7 @@ def test_za_r1_refresh_models_splits_the_namespaces(tmp_path, monkeypatch):
     ids = lambda n: sorted(m["id"] for m in models.get(n) or [])   # noqa: E731
     assert ids("opencode-zai") == ["zai-coding-plan/glm-4.7", "zai-coding-plan/glm-5.3-flash"], (
         models, out)
-    assert ids("opencode") == ["opencode-go/glm-5.1", "opencode-go/kimi-k2"], models   # OZ-R4
+    assert ids("opencode-go") == ["opencode-go/glm-5.1", "opencode-go/kimi-k2"], models   # OZ-R4
 
 
 def test_za_r1_disabled_instance_is_not_refreshed(tmp_path, monkeypatch):

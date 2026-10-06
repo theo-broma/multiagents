@@ -210,3 +210,31 @@ def test_og_r4_doctor_of_an_old_config_shows_opencode_go_and_the_deprecation(
     found = og.deprecations(text, about=agents)
     assert len(found) == 1, text
     assert og.named_line(found[0], agents) == og.line_of(agents, f"provider: {OLD}")
+
+
+def test_og_r4c_doctor_never_shows_the_base_as_a_route(tmp_path, capsys, monkeypatch):
+    """Clarified: the base may be listed as the CLI (providers, auth), but has
+    no budget row, no models, and is not an agent's route."""
+    _hermetic_path(tmp_path, monkeypatch)
+    p = Project(tmp_path)
+    p.write("project.yaml", 'team: ""\n')
+    p.write("agents.yaml", _agents())
+    text = _doctor(p, capsys, monkeypatch)
+    for title in ("budget", "agents"):
+        rows = [line.split()[0] for line in _section(text, title) if line.strip()]
+        assert OLD not in rows, f"`{OLD}` appears as a row of `{title}`: {rows}"
+    roster = "\n".join(_section(text, "agents"))
+    assert not re.search(rf"(?<![\w-]){OLD}/{OLD}-go/", roster), roster
+    assert not re.search(rf"\b{OLD}\s+\S*{OLD}-go/\*", text), text   # no models_include shown
+
+
+def test_og_r4c_doctor_with_an_old_config_still_shows_no_base_route(
+        tmp_path, capsys, monkeypatch):
+    _hermetic_path(tmp_path, monkeypatch)
+    p = Project(tmp_path)
+    p.write("project.yaml", 'team: ""\n')
+    p.write("agents.yaml", _agents(OLD))
+    text = _doctor(p, capsys, monkeypatch)
+    for title in ("budget", "agents"):
+        rows = [line.split()[0] for line in _section(text, title) if line.strip()]
+        assert OLD not in rows, f"`{OLD}` appears as a row of `{title}`: {rows}"

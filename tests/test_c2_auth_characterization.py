@@ -613,13 +613,15 @@ def test_opencode_sh_check_missing_binary_reports_could_not_run(tmp_path):
 # Config folding — load_providers / resolve_inheritance / families
 # ---------------------------------------------------------------------------
 
-def test_load_providers_builds_the_eight_real_shipped_providers():
+def test_load_providers_builds_the_nine_real_shipped_providers():
     # CX-D1: codex ships as a default provider; ZA-R1: so does opencode-zai
     # (disabled by default).
     providers = h.shipped_providers()
-    # PS-R8: agy-partner is the sixth; OZ-R1: opencode-zen is the eighth.
-    assert set(providers) == {"claude", "opencode", "agy", "codex", "opencode-zai",
-                              "agy-partner", "opencode-deepinfra", "opencode-zen"}
+    # PS-R8: agy-partner is the sixth; OZ-R1: opencode-zen is the eighth;
+    # OG-R1: opencode-go is the ninth (`opencode` stays as the CLI base).
+    assert set(providers) == {"claude", "opencode", "opencode-go", "agy", "codex",
+                              "opencode-zai", "agy-partner", "opencode-deepinfra",
+                              "opencode-zen"}
     assert providers["opencode-zai"].enabled is False
     assert providers["claude"].script_name == "claude.sh"
     assert providers["claude"].bin == "claude"
@@ -752,13 +754,14 @@ def test_families_sorts_provider_names_within_each_group():
     assert h.families(providers)["fam"] == ["a-instance", "z-instance"]
 
 
-def test_shipped_providers_yaml_folds_into_eight_independent_families():
+def test_shipped_providers_yaml_folds_into_nine_independent_families():
     # CX-D1: codex ships in its own family; ZA-R1: so does opencode-zai, which
     # extends opencode but is NOT folded into opencode's family.
     providers = h.shipped_providers()
     families = h.families(providers)
     assert families == {"claude": ["claude"], "agy": ["agy"],
-                        "opencode": ["opencode"], "codex": ["codex"],
+                        "opencode": ["opencode"], "opencode-go": ["opencode-go"],
+                        "codex": ["codex"],
                         "opencode-zai": ["opencode-zai"],
                         "agy-partner": ["agy-partner"],
                         "opencode-deepinfra": ["opencode-deepinfra"],
