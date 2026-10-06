@@ -4479,7 +4479,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 | task | run | model | duration | review verdict | rework rounds |
 |---|---|---|---|---|---|
 | VR continuation | ag-ac9706 | bunny | 59 min (mostly a 32-min full suite) | rejected 1 (ag-4952e9: _with_spec KeyError on taskless node) | 1 → fix nd-029f8408 (quick, bunny, 3 min) approved by ag-9eee51 |
-| OZ impl | ag-36f162 | bunny | | | |
+| OZ impl | ag-36f162 | bunny | 98 min (several full suites) | pending | 44 superseded tests → tester nd-20eaa394 (not the impl's fault) |
 | breaker-trial fix | ag-aa6122 | bunny | | | |
 
 ### 2026-10-06 — monitor over Tailscale (MT)
@@ -4504,3 +4504,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - Proposed to the user, awaiting OK: a deterministic pre-push hook (patterns from an untracked ~/.config/multiagents/sensitive-patterns) plus a `git` roster agent (claude sonnet; audits every push, does the heavy git tasks, never pushes itself).
 - 11:2x MT follow-up tests merged (6c8a9e7). VR reviewer ag-4952e9 rejected 1 (_with_spec, templates.py:141), and said the settle-held-rounds risk is fine. Fix nd-029f8408 (implementer-quick, bunny: a continuation) on top of efa962b; it counts as finishing in-flight work. Breaker fix ag-aa6122 hit the 3600 s wall clock while still running a suite, with commit f166658; let it finish. OZ ag-36f162 is still running.
 - 11:5x VR MERGED (0ebd883, via nd-029f8408; the superseded nd-f0bf4a1e stays unmerged). The host scheduler (pid 1969063) must be restarted at the quiet point to load VR; VR-R5 then settles the 4 held loops on its first tick. AN implementer next, but it waits for the pause (the user's quiet-moment rewrite) to lift.
+
+### 2026-10-06 — git agent and git guard (GG)
+- User approved: a `git` roster agent (project config: agents.yaml plus .multiagents/config/agents/team/git.md, claude sonnet; it audits pushes, never pushes, never moves project refs) and the deterministic guard spec context/specs/git-guard.md (GG-R1..R6, cc362ad): `git.coauthor_orchestrator` (default true), `git-guard scan`/`install`, push_branch refuses on findings, and a library `git` agent.
+- The private patterns file was created at the user's request, outside the repo (in the user's config dir, mode 0600). It is not visible inside agent containers, so the deterministic scan runs on the host.
+- Order (user): build the guard first, then the history rewrite once GG is merged and nothing is running. Until then only GG and finishing work run; AN, NT and MT implementers stay paused.
+- In flight: GG tester nd-2f300881; OZ superseded-tests tester nd-20eaa394 (cherry-picks OZ 19af7e8+3cc08d0; then OZ reviewer); breaker fix ag-aa6122 (still running).
