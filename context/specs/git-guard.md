@@ -196,3 +196,16 @@ unmasked match appears in no output.
 Verified by: a `push_branch` test asserting the fingerprint field; a brief
 composition test asserting the reporting rule; and a library test asserting the
 rule in `git.md`.
+
+### Clarifications to GG-R7..R9 (2026-10-06, answering tester ag-c205a7)
+- **Key encoding.** The format of the `guard-key` file is the developer's choice.
+- **Unset `XDG_STATE_HOME`.** It defaults to `~/.local/state`, as in MT-R4.
+- **Key directory.** If `multiagents/` already exists with group or other permissions, or the key file is readable by group or others, the scan refuses with exit 2 and a message. It never silently changes modes.
+- **When the key is created.** It may be created by any scan, including a clean one.
+- **Host exemption.**
+  - A bare `example.ts.net` is exempt.
+  - The match ignores case, so `Phone.EXAMPLE.ts.net` is exempt too.
+- **CIDR exemption.** Only the exact text `100.64.0.0/10` is exempt. Any other prefix length is not.
+- **Fingerprints.**
+  - A fingerprint is 16 lowercase hex characters.
+  - An `allow_fingerprints` entry of any other shape is refused at load, as other invalid settings are.
