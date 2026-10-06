@@ -122,3 +122,19 @@ no address outside the placeholders above.
   agent, outside this spec.
 - Scanning branches that are never pushed.
 - A server-side GitHub check.
+
+## Clarifications (2026-10-06, answering tester ag-da44e5)
+- **Remote.** `git.remote` may be a remote name or a path/URL; both are supported.
+  - With a name, the default range and the "already published" set come from its remote-tracking refs.
+  - With a path or URL, they come from the remote's refs as `git ls-remote` reports them.
+- **Committer.** A finding in the committer identity is labelled `committer`.
+- **Edge cases.**
+  - An invalid `re:` line in the patterns file makes the scan exit 2 with a message naming the line number, without printing the pattern.
+  - The `Co-Authored-By` keyword matches case-insensitively.
+  - A finding in a binary file is located as `path:bin`.
+- **Hook.**
+  - `install` writes a hook that invokes the same multiagents installation by absolute path, and works under the environment git passes it.
+  - A refused `install` exits 1.
+  - `uninstall` with no hook of ours exits 0 with "nothing to remove". After `install --force`, `uninstall` restores `pre-push.local` as `pre-push`.
+- **`push_branch`.** A refusal returns `{"ok": false, "reason": "guard", "findings": [...]}`, and `pushed` is never true. A success keeps today's fields and adds `"ok": true`.
+- **Library tests.** `tests/test_core.py::test_every_library_agent_ships_a_brief_and_a_pasteable_block` and `test_every_library_brief_is_listed_in_the_readme` pin four library agents. GG-R6 makes it five, so they are updated deliberately by a tester.
