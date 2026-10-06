@@ -138,3 +138,7 @@ no address outside the placeholders above.
   - `uninstall` with no hook of ours exits 0 with "nothing to remove". After `install --force`, `uninstall` restores `pre-push.local` as `pre-push`.
 - **`push_branch`.** A refusal returns `{"ok": false, "reason": "guard", "findings": [...]}`, and `pushed` is never true. A success keeps today's fields and adds `"ok": true`.
 - **Library tests.** `tests/test_core.py::test_every_library_agent_ships_a_brief_and_a_pasteable_block` and `test_every_library_brief_is_listed_in_the_readme` pin four library agents. GG-R6 makes it five, so they are updated deliberately by a tester.
+
+## Decisions after review ag-7957dd (2026-10-06)
+- **Email exemptions stay exactly as GG-R3 lists them.** The implementation exempted the whole `.invalid` TLD; that is withdrawn, because `first.last@example.invalid` would leak a name. Existing fixtures that commit as `t@example.invalid` (the h1 and h3 tests) are changed deliberately by a tester to an exempt address (`…@example.invalid`).
+- **Line-wrapped secrets are out of scope.** Detection is per line by design. A private key is caught by its `BEGIN` line, and a token split across lines is not usable as written. Recorded as a known limit.
