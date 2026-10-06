@@ -1308,7 +1308,17 @@ class QuotaHandover:
             "running", "pending", "stuck", "awaiting_user", "detached") for n in self._qh_nodes())
 
     def _qh_nodes(self):
-        return [node for key in self.tree.read()["nodes"] if (node := self.tree.get(key)) is not None]
+        """Every node in `tree.json`, from one parse of it.
+
+        This used to read the tree once and then call `tree.get` per key, and
+        every one of those re-reads and re-parses the whole file: at 938 nodes
+        a single pass cost 18.65s of CPU against 0.018s for one read. It runs
+        on the adoption pass every five seconds, which is what had two servers
+        burning a core each. `Tree._nodes` builds them from one read instead,
+        and — unlike `tree.get` — leaves a malformed entry out with a
+        `malformed_entry` event rather than raising it out of the pass.
+        """
+        return self.tree._nodes(bool, self.tree.read()["nodes"].items(), "quota_handover")
 
     def _qh_request(self, agent, task, *, node=None, kwargs=None):
         with self.tree.transaction() as data:
