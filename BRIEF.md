@@ -4585,3 +4585,11 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - TOOLING BUG to fix in-house: a steer on a node run that is busy in a long bash call can SIGTERM it, and the scheduler then records failed without publishing the commits to the node branch.
   - Also: an opencode silence during a long bash call trips silence_timeout (expected), but twice the provider really dropped the turn (MT, OG); steering resumed it.
   OG bunny ag-302e01: steered after a silence.
+- 19:3x AN MERGED (057958d; round 2 approved by ag-48b5fd). MT test fixes merged (a2d5b26). In flight:
+  - MT reviewer ag-d9d5d9 (nd-f9d43d83) on nd-d6c18433;
+  - OG ag-302e01;
+  - NT part-2 tester nd-302ce7b8.
+  Remaining before the history rewrite:
+  - merge MT, OG and NT2;
+  - the user's allow-list decision;
+  - the rewrite itself (git agent; it must remove fingerprint 60d01c970f424abb from a3a244c).
