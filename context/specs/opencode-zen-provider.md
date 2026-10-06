@@ -53,3 +53,17 @@ Verified by: a routing test for each direction.
 
 ## Out of scope
 - Paid zen models and spend caps.
+
+## Clarifications (2026-10-06, answering tester ag-20506e)
+1. Zen's credential is the `opencode` entry of opencode's auth store; go's is `opencode-go`.
+2. Unknown capacity uses the existing form, as in opencode-deepinfra: exit 0 and `{"known": false, "headroom": null, "windows": {}, "note": "..."}`.
+3–5. Free zen models work without a credential, so `check` under `zen` never answers "not logged in" (exit 10) because a credential is missing:
+   - no `opencode` entry, including a go-only store → exit 20 (unknown);
+   - an entry present → exit 0, with a message saying the entry is present.
+6. `usage` under `zen` declines (exit 64) and makes no network call.
+- Existing tests that pin the old go model set or the plan variable are superseded by OZ-R1/R4 and are updated deliberately by the tester:
+  - `test_di_r1_opencode_and_opencode_zai_are_unchanged`
+  - `test_di_r1_refresh_models_splits_the_namespaces_keeping_two_slash_ids`
+  - `test_di_r6_other_shipped_providers_are_not_given_the_plan_variable`
+  - `test_za_r1_opencode_itself_is_unchanged`
+  - `test_za_r1_refresh_models_splits_the_namespaces`
