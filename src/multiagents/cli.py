@@ -1991,7 +1991,10 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         from .monitor import tui
         return tui.run(paths)
     from .monitor import server
-    return server.serve(paths, port=args.port, open_browser=args.browser)
+    return server.serve(paths, port=args.port, open_browser=args.browser,
+                        allow_hosts=args.allow_host,
+                        persistent_token=args.persistent_token,
+                        rotate_token=args.rotate_token)
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -3521,6 +3524,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="port for the local page (default 8787)")
     p.add_argument("--no-browser", dest="browser", action="store_false", default=True,
                    help="print the URL instead of opening it")
+    p.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                   help="also serve this Host, for a reverse proxy that keeps the "
+                        "public one (repeatable; a plain name, never an IP — the "
+                        "bind stays on 127.0.0.1)")
+    p.add_argument("--persistent-token", action="store_true",
+                   help="reuse one token across starts, stored in the user's state "
+                        "directory, so a bookmark on another device keeps working")
+    p.add_argument("--rotate-token", action="store_true",
+                   help="replace that stored token and serve the new one "
+                        "(implies --persistent-token; an old bookmark stops working)")
     p.set_defaults(func=cmd_monitor)
 
     p = sub.add_parser("probe", help="verify a provider's stream parsing rules")

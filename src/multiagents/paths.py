@@ -38,6 +38,16 @@ def global_config_dir() -> Path:
     return _xdg("XDG_CONFIG_HOME", ".config") / "multiagents"
 
 
+def xdg_state_dir() -> Path:
+    """`$XDG_STATE_HOME/multiagents/`: what the user keeps between runs.
+
+    Not `state_root()`: that is this project's own namespace of worktrees and
+    homes under `~/.multiagents`, while this is the user's directory by the
+    XDG convention, shared by every project and not tied to a checkout at all.
+    """
+    return _xdg("XDG_STATE_HOME", ".local/state") / "multiagents"
+
+
 def state_root() -> Path:
     """Machine-wide state: worktrees and per-agent homes."""
     env = os.environ.get("MULTIAGENTS_STATE_DIR")
