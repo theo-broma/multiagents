@@ -235,3 +235,17 @@ Verified by: CLI tests against the fake server.
 - **Decisions after implementer ag-2deb41 (2026-10-06).**
   - `held_idle` anomalies are NOT notified. They only remind of a hold that the `held` event already announced. All other anomaly kinds are notified.
   - `test_nt_r6_a_failure_is_logged_once_per_outage_per_process` counts the printed `scheduler_status` JSON of the `scheduler start` wrapper as a log line. A tester fixes it deliberately so that it counts only the scheduler's log lines.
+
+## Decisions after review ag-5532e6 (2026-10-06, NT part 2 rejected)
+Fix in round 2, each with a failing test first:
+1. **One notification per hold.** The "already announced" mark is keyed on the hold itself, for example the seq of its `held` transition, not on the node revision. Raising `loop.max_rounds` on a node that stays held sends nothing new.
+2. **`done` on disposal.** A top-level node that becomes `cancelled` through disposal sends `done`, like any other terminal top-level node.
+3. **Once per outage.** An outage runs from the first failed send to the next accepted one. One log line is written per outage, whatever mix of reasons occurs within it.
+4. **Retry-After.** A non-finite or unparsable value is treated as absent, so the normal backoff applies.
+5. **Re-adding `notify:`.** Removing the section and adding it back counts as an activation, so a summary is sent. Events that happened while the section was absent are covered by that summary and are never announced one by one.
+6. **`notify test` and a pause.** If clearing the pause fails, `notify test` reports the failure and exits non-zero.
+7. **(minor) A quiet tick writes nothing**, and that includes the case where `notify:` is absent.
+8. **(minor) Bounded meta.** The per-question and per-hold marks are removed once the question is closed or the node is terminal.
+
+Jitter: zero satisfies "at most ±10 %". It stays as it is.
+Test race: `test_nt_r3_only_the_listed_kinds_send[*]` raises its event before the activation summary has gone out. A tester changes it to wait for the summary first. The sender behaves correctly, because the spec puts events that happen before activation into the summary.
