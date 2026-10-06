@@ -4558,3 +4558,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 5. **Optional, offered to the user and not started:** a faster VR fixture world (an in-process worker) to get VR tests under 2 s.
 
 **Muse vs Bunny so far:** Muse is fast but rejected twice on GG; Bunny is thorough but slow and rejected once on VR and on the breaker. No clear winner yet; keep drawing at random.
+- 16:4x GG round 3 reviewer ag-c94684 REJECTED 1: the `diff --git` header was split on the first " b/", so a path containing " b/" was garbled and the binary scan crashed (fail-closed). Under the round-3 rule, round 4 went to implementer-deep on opus: ag-cc46b7 (node nd-e00fb6e6, verifies ag-c94684). It takes paths from -z git output only, with tests in tests/test_gg_path_edge_cases.py. Next: a reviewer with verifies=ag-cc46b7; if approved, merge_node nd-e00fb6e6 (supersedes nd-0698c087, nd-2308f437, nd-2be8cada). The rest of the handoff is unchanged.
