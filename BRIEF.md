@@ -207,7 +207,7 @@ default, so work can proceed):
          (opencode), which re-pauses the tree.
   - 2026-09-29, around 07:50 UTC: **claude in the container is still 401**
     ("OAuth access token has expired") after all of the following:
-    - `a` and `b` re-logged from two browsers, confirmed on REDACTED;
+    - `a` and `b` re-logged from two browsers, confirmed on the host machine;
     - a workspace recreate;
     - an auth sidecar recreate;
     - the user clearing the claude cooldown and pause in `tree.json`.
@@ -835,8 +835,8 @@ finished, and nothing new goes there.
   NOT change the vault, which is still the old account (`vault/.claude.json`
   mtime 15:41). Container agents got 429 `rate_limit` (ag-72497d, ag-14a3e5).
 - **Resolved at 16:43 UTC.** The login had been run on another machine
-  (`REDACTED`). Redone on `REDACTED`, it put account b
-  (`claudeai.REDACTED`) in `vault/accounts/b`, and ag-72497d resumed its
+  (a second workstation). Redone on the host machine, it put account b
+  in `vault/accounts/b`, and ag-72497d resumed its
   session on it. That confirms a session resumes across an account change.
   - Note: once `accounts/` exists, `authproxy.Accounts.labels()` lists only
     `accounts/*`, so the old top-level credential ("default") is no longer
@@ -889,7 +889,7 @@ finished, and nothing new goes there.
   - the versions root, read-only;
   - the adapter, read-only.
 - **Live checks L1..L8 are blocked on the user:**
-  - `multiagents auth login codex` on `REDACTED`;
+  - `multiagents auth login codex` on the host machine;
   - a roster decision: a codex-pinned probe agent is needed to run agents on
     codex at all. The roles planned in CX-D4 wait for CX-R11.
 
