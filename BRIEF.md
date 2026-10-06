@@ -4692,3 +4692,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 
   Avoid steering node runs: prefer a fresh node.
 - **Git rehearsal ag-5702d4** committed rewrite.sh on `agents/git/5702d4` (54b560e, 6b90c51). It was steered to wrap up.
+- 2026-10-07 ~00:05 **PAUSE: opencode-zen outage.** A host probe (`opencode run -m opencode/<bunny|muse> "ok"`) hangs for 90 s with no reply on both models. Runs ag-7cd60f (NT round-3 cherry-pick) and ag-998ae3 (git rehearsal on Muse) produced zero output and are stopped; reviewer nd-07edc3be is cancelled. Per the user rule, we wait: no claude fallback for implementers. A background probe re-tests every 10 min. **On recovery, recreate:**
+  1. NT round 3: the same task as nd-f805d594 (cherry-pick 2e67e14, 807cafc and 659448c from `agents/implementer-deep/5fc11f` onto inputs nd-e0060d42), then an opus reviewer with the nd-07edc3be task;
+  2. git rehearsal: the same task as nd-cd00c466 (cherry-pick 54b560e and 6b90c51; rehearse empty and dummy patterns; report).
+- The user said "oui" to the global ~/.config changes (fallback_chain → opencode-go; drop the `opencode` override's `models_include`), but the auto-mode classifier refused my edit, so the user applies it. Backups are in the scratchpad.
