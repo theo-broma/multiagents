@@ -4822,3 +4822,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Decision: the leak tests require an inner exit code of 0 or 1 and a parsed passed count > 0. They do not fail on unrelated reds, because SL-R5 is checked separately.
   - The gate tester nd-36e0e084 was already running, so the fixes go to a follow-up tester, nd-f38f2794, which takes nd-36e0e084 as input.
   - I read the final diff, then merge_node nd-f38f2794.
+- SL MERGED as f0c77a96: the world.py worker reap, the SL tests, the MULTIAGENTS_SL_FULL opt-in gate, the review fixes (decoy finalizers, inner exit code 0 or 1 with a parsed passed count) and the AGENTS.md line. Only EV is left in the salvage.
