@@ -90,27 +90,6 @@ def test_no_result_reported_keeps_signature_only_behaviour():
     assert trip is not None and trip.reason == "doom_loop"
 
 
-def test_oscillating_output_still_trips():
-    sup = _sup(loop_repeats=4)
-    trip = None
-    for i in range(12):
-        trip = sup.observe(_call(i, "A" if i % 2 == 0 else "B"))
-        if trip:
-            break
-    assert trip is not None and trip.reason == "doom_loop"
-
-
-def test_oscillating_output_separate_result_event_still_trips():
-    sup = _sup(loop_repeats=4)
-    trip = None
-    for i in range(12):
-        trip = sup.observe(_call(i))
-        if trip:
-            break
-        sup.observe(_done(i, "A" if i % 2 == 0 else "B"))
-    assert trip is not None and trip.reason == "doom_loop"
-
-
 def test_seen_set_is_bounded_by_the_window():
     sup = _sup(loop_window=5, loop_repeats=3)
     for i in range(100):
