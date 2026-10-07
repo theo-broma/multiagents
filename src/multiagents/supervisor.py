@@ -386,7 +386,8 @@ class Supervisor:
 
 _QUOTA_MARKERS = (
     "resource_exhausted", "rate limit", "rate_limit", "quota", "429",
-    "too many requests", "usage limit", "insufficient credit", "out of credit",
+    "too many requests", "usage limit", "spend limit", "insufficient credit",
+    "out of credit",
 )
 
 

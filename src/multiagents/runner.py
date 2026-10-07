@@ -518,6 +518,40 @@ TICKET = re.compile(r"(?im)^[ \t]*TICKET\((blocking|minor)\)[ \t]*:[ \t]*(.+)$")
 # judgement, which is the judgement the whole arrangement already relies on.
 VERDICT = re.compile(
     r"(?im)^[ \t]*VERDICT\((approved|rejected)(?:[ \t]*,[ \t]*(\d+))?\)[ \t]*:[ \t]*(.*)$")
+
+
+def _text_verdict(text: str) -> re.Match | None:
+    """The last agreeing verdict; contradictory lines remain unjudged."""
+    verdicts = list(VERDICT.finditer(text or ""))
+    if verdicts and len({v.group(1).lower() for v in verdicts}) == 1:
+        return verdicts[-1]
+    return None
+
+
+def _result_detail(event: Event) -> str:
+    """Keep the provider's error payload without repeating its response.
+
+    The response can precede the error in a very large result. Omit it before
+    bounding the detail, so it cannot push the provider's explanation out.
+    No provider-specific error path is needed.
+    """
+    def details(value, path=""):
+        if isinstance(value, str) and event.text and value == event.text:
+            return []
+        if isinstance(value, dict):
+            return [part for k, v in value.items()
+                    for part in details(v, f"{path}.{k}" if path else str(k))]
+        if isinstance(value, list):
+            return [part for i, v in enumerate(value)
+                    for part in details(v, f"{path}[{i}]")]
+        # These strings go into a human-readable warning, not another JSON
+        # document: encoding them here would leave quotes escaped in tools.
+        detail = value if isinstance(value, str) else json.dumps(value, default=str)
+        return [f"{path}: {detail}" if path else detail]
+
+    return scrub("\n".join(details(event.raw)))[:4000] if event.raw else ""
+
+
 # A line that IS the marker: bare, with a colon, or as a Markdown heading.
 PROPOSED_FIX = re.compile(r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?PROPOSED_FIX[ \t]*:?[ \t]*$")
 FENCE_LINE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
@@ -703,6 +737,8 @@ class Run:
     # {"source", "pattern", "excerpt"} — so result.json can carry it verbatim.
     refusal: dict | None = None
     final_status: str = ""
+    final_result_detail: str = ""    # RV-R2: error payload apart from the response
+    verdict_after_error: bool = False
     requested_session: str = ""     # adapter explicitly reported a resume mismatch
     startup_token: str = ""
     startup_progress: bool = False
@@ -5870,6 +5906,8 @@ class Runner(QuotaHandover):
                     if (not trailing_result_error
                             and run.final_status.upper() not in {"REFUSED", "TRUNCATED"}):
                         run.final_status = event.status
+                        if event.kind == "result":
+                            run.final_result_detail = _result_detail(event) if unhappy_result else ""
                         if event.status.upper() in {"REFUSED", "TRUNCATED"}:
                             signal = next((f"{path}={get_path(event.raw, path)}"
                                            for rule in provider.stream.get("rules", [])
@@ -6391,6 +6429,11 @@ class Runner(QuotaHandover):
             "turn_started_at": run.launched_at, "usage": usage, "text": text, "stderr_tail": stderr,
         }
         warnings = [event["warning"] for event in run.events if event.get("warning")]
+        if status == "done" and run.verdict_after_error:
+            detail = run.final_result_detail or scrub(stderr)
+            warnings.append(scrub(
+                f"{run.provider.name} reported {run.final_status} after a complete "
+                f"verdict; retaining the verdict" + (f": {detail}" if detail else "")))
         if warnings:
             record["warnings"] = warnings
         if fix_error:
@@ -6420,14 +6463,12 @@ class Runner(QuotaHandover):
         # so the run stays unjudged rather than judged on the last word
         # (VR-R3). Repeated agreeing lines qualify, the last one is the one
         # kept.
-        verdicts = list(VERDICT.finditer(text or ""))
-        if verdicts and not run.awaiting:
-            found = verdicts[-1]
-            agreeing = len({v.group(1).lower() for v in verdicts}) == 1
+        if VERDICT.search(text or "") and not run.awaiting:
+            found = _text_verdict(text)
             self.tree.update(
                 node_id,
-                verdict=found.group(1).lower() if agreeing else "",
-                defects=int(found.group(2) or 0) if agreeing else 0,
+                verdict=found.group(1).lower() if found else "",
+                defects=int(found.group(2) or 0) if found else 0,
             )
 
         filed = self._file_tickets(node_id, text) if not run.awaiting else []
@@ -6834,7 +6875,7 @@ class Runner(QuotaHandover):
         # tripped the breaker, whose `check` then reported the provider
         # perfectly authenticated — true, useless, and the reason the day's
         # account of itself was "claude is unreliable" when claude was full.
-        if status == "failed":
+        if status == "failed" or (status == "done" and run.verdict_after_error):
             limited = await asyncio.to_thread(
                 self._limit_verdict, run.provider, run.text_parts)
             if limited:
@@ -7166,6 +7207,7 @@ class Runner(QuotaHandover):
         return ""
 
     def _classify(self, run: Run, code: int, text: str, stderr: str) -> str:
+        run.verdict_after_error = False
         # Before everything, including the clean-exit shortcut below. A CLI that
         # cut its own turn short exits 0 with a stream that parses perfectly, so
         # every other signal here says it finished. Only its stderr disagrees.
@@ -7198,6 +7240,14 @@ class Runner(QuotaHandover):
         # model that simply said nothing, and the fix is entirely different.
         if looks_like_auth_failure(run.final_status, stderr):
             return "unauthenticated"
+        # RV-R1/R4/R5: a complete reviewer product survives a trailing
+        # transport error, using exactly the parser that records its verdict.
+        # Quota, auth, refusal and truncation above still outrank it; a nonzero
+        # process exit still fails below. Health also checks transcript limits
+        # before counting this as a success (RV-R3).
+        if code == 0 and run.final_status and _text_verdict(text) is not None:
+            run.verdict_after_error = True
+            return "done"
         # RC-R2: the two `failed` verdicts a non-zero exit can reach. Stderr
         # markers are consulted here and nowhere earlier — a structured
         # refusal, a truncation, quota and auth all keep their verdicts.
@@ -7424,6 +7474,8 @@ class Runner(QuotaHandover):
         result.update(home_provider=node.home_provider or node.provider,
                       current_provider=node.provider, segments=node.segments,
                       **self._qh_position(node))
+        if node.warnings:
+            result["warnings"] = node.warnings
         if node.reason == "session_lost":
             result["requested_session"] = node.requested_session
         result.update(self._no_commits_note(node))
