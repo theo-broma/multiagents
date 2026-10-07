@@ -4940,3 +4940,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - ~22:20Z W2 impl reviewer ag-26ba52 REJECTED round 1 (attention.json: I/O inside store txn store.py:169; swallowed exception store.py:174) -> loop round 2. W2 alias pre-cleaned.
 - ~22:30Z post-merge tester ag-44a803: TB2-R6 tests fixed (.gitignore restored), NC-R62 test_nc_r62_a_dirty_alias_checkout_holds_the_next_activation_and_deletes_nothing spawns 1->2 (superseded by TB2-R6 cleanup run); 101 passed. Merged as ee71ea50. Remaining: W2 impl round 2.
 - ~22:50Z W2 impl round 2 ag-b93d01: 3a257d9f (mirror I/O outside txn under host lock, write failures propagate); 2,693 passed + known R4. Reviewer round 2 next.
+- ~23:00Z W2 reviewer round 2 ag-8de45b REJECTED (server.py:1114 wait_for_agents hold-return advances _wait_cursor to top, dropping transitions) -> round 3 (last). If rejected again: escalate per rule.
