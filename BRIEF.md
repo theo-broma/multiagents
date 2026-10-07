@@ -4760,7 +4760,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **AU:** a tester node applies 0003. Then implementer-deep (codex), with the tester node as input, cherry-picks c466d0c1 (AU-R4, src only, from `node-results/29830d50e58a4070be2cd77188a5442d`; post-rewrite, OK to use) and does AU-R1..R3/R5. Do NOT take ab6235d0 (the readonly restore). Then an agy reviewer. The old nd-81387189 failed and nd-fe6a285d is cancelled.
 - Patches: /home/theobroma/projects/multiagents/.multiagents/salvage-tests/000{1..5}*.patch, passed by ABSOLUTE path; the 0003 name contains `AU-R1.R4` with a dot.
 
-**LongCat verdict:** 2 good short tasks (NT round 3, git rehearsal). 3 of 5 long runs died on "Upstream request failed: Endpoint is unavailable" at 13-18 min (ag-9f5d71, ag-a35ae0, ag-cac9c3). It is not reliable for long tasks: tell the user and propose another model for quick/default; meanwhile, escalate to implementer-deep (codex), as the rule allows.
+**Implementers: all tiers back on codex gpt-6.1-sol (user, 2026-10-07).** LongCat verdict: 2 good short tasks (NT round 3, git rehearsal). 3 of 5 long runs died on "Upstream request failed: Endpoint is unavailable" at 13-18 min (ag-9f5d71, ag-a35ae0, ag-cac9c3). It is not reliable for long tasks: tell the user and propose another model for quick/default; meanwhile, escalate to implementer-deep (codex), as the rule allows.
 
 **Next, after those merge, with nothing running:**
 1. Strip `sys` from history (decision recorded above). The user force-pushes.
