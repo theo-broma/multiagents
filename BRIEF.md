@@ -4962,3 +4962,42 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - SC impl round 1 (ag-893f45, e1cd4087): all 200 test_sc_* green; full suite 10,055 passed / 90 failed (72 phase2 + 16 also red on base + 2 load flakes nc_r17/nt_r4 that pass on retry). NEED_INFO answered (flakes accepted), confirm-only relaunch; SC impl reviewer nd-95410abd task updated (added test file allowed, known reds listed).
 - Researcher ag-ba5a7a on main's non-phase2 reds: (1) test_tb_a_wait_unlaunched x7 deterministic, TB-R3 regressed after TB merge (green at c084c83a), suspect TB2 wait changes in server.py -> review-loop nd-fbdd42ac (implementer-deep + reviewer); (2) test_phase0_agent_guidance x5: stale GOLDEN after deliberate PREAMBLE NEED_INFO lines (77eb8cb6) -> tester nd-52819965 regenerates it; (3) test_zai_provider x2: latent opencode.sh sed bug (count at line start, since 853a240b) -> review-loop nd-b6b90957 (implementer-quick + reviewer). nc_m1_adv3 / nc_r21 / sr_r5: load-flaky, no action. Reviewer tasks in both loops rewritten with specifics (template review task is generic).
 - phase0 GOLDEN regenerated (tester ag-243ce1, e08e9df0, only the 2 NEED_INFO lines; diff read) MERGED as 20df628c; tests/test_phase0_agent_guidance.py 21 passed on main. TOOLING DEFECT (minor, work unaffected): merge_node returned {error: scheduler_unavailable} twice while the publish DID land on main (RPC timeout under load, likely scheduler/__init__.py call() raising OSError after the server committed). To fix in-house later: merge RPC should be idempotent/report success, or the client should re-check the node's published state before reporting unavailable.
+
+## HANDOFF 2026-10-08 ~01:10 local (orchestrator context wind-down): resume from here
+**Done this session (on main):**
+- scheduler restarted on TB2 (user);
+- specs SL-R6..R10 + SC-R1..R3 (bcc7d17d) with decisions aa4f3b84, 3b918b02, 23ac2cd2;
+- phase0 GOLDEN regenerated, merged 20df628c (21 passed);
+- TB2-R2 follow-up closed; advisor-behind follow-up closed.
+
+**In flight (scheduler; poll via scratchpad poll.sh + collect_agent):**
+- **SC = sequence nd-5212b614.**
+  - Tests approved. Impl e1cd4087 (all 200 test_sc_* green; full suite = 72 phase2 + 16 base reds + 2 load flakes) confirmed.
+  - Impl reviewer nd-95410abd running/next.
+  - On approval: read the diff against context/specs/scheduler-idle-cost.md, then merge_node nd-5212b614.
+  - Afterwards the user restarts the scheduler, so the daemon CPU fix is live.
+- **SL = sequence nd-4d426b24.**
+  - Tests approved round 5 (0ad31358: tests + wiring in tests/**).
+  - Impl nd-a723337c (implementer-deep) running: it writes src/multiagents/scheduler/owner.py. Then reviewer nd-2b76751e.
+  - Before merge, check the impl reports MULTIAGENTS_SL_FULL=1 counts.
+  - SC and SL may both touch scheduler/engine.py. Merge the first; if the second conflicts, steer its implementer to rebase onto main. Never chain via inputs.
+- **TB-R3 regression = review-loop nd-fbdd42ac** (implementer-deep nd-ce8ceba8, reviewer nd-7773f761).
+  - Problem: 7 reds in tests/test_tb_a_wait_unlaunched.py on main. They were green at c084c83a; suspect the TB2 wait changes in server.py.
+  - On approval: merge_node nd-fbdd42ac.
+- **opencode count = review-loop nd-b6b90957: DO NOT MERGE.**
+  - The implementer-quick fix 51dae89c widened the count pattern. That contradicts AU-R2 (decision in context/specs/auth-checks-uncertain.md ~:33: a digit opening the line stays unknown) and tests/test_c2_auth_characterization.py ~:560.
+  - So the 2 reds in tests/test_zai_provider.py (~:343, ~:815) are the STALE ones.
+  - NEXT: once its reviewer finishes, close_node nd-b6b90957 failed (it refused 'active_runs' now). Then start a tester to update those 2 zai tests to AU-R2 (digit-first output → exit 20 unknown, or use a prefixed shape), no src change, and merge it.
+
+**Known on main, no action:** ~72 tests/test_phase2_* (by design); nc_m1_adv3 / nc_r21 / sr_r5 / nc_r17 / nt_r4 are load-flaky.
+
+**Tooling defects to fix in-house (minor):**
+1. merge_node returned scheduler_unavailable twice while the publish landed (RPC timeout under load).
+2. A child relaunched by relaunch_node launches within ~15 s, before update_node can change its task. Workaround: closed window on the loop → relaunch → update → clear the window.
+3. A review-loop's reviewer task is generic; always rewrite it with specifics.
+4. The tester brief makes it refuse harness wiring under tests/; say explicitly in the task that tests/** harness and conftest are its job.
+
+**After all merges:**
+- tell the user to restart the scheduler (SC live) and say what was merged;
+- import plan 2026-10-05 Next phase (48 open findings triage + phase 7 part 2 → for init-agent with the user);
+- hand back.
