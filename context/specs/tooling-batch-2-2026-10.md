@@ -76,3 +76,7 @@ a dependent only once its task is final.
 
 ## Decision after implementer ag-b8c156 (2026-10-07)
 - TB2-R2 stands as written: output alternating between two values does NOT count as a repetition (each differs from the previous one), as the approved test `test_tb2_r2_codex_output_alternating_between_two_values_does_not_trip` asserts. The two older assertions requiring oscillation to trip (`tests/test_doom_loop_result_changes.py::test_oscillating_output_still_trips` and `::test_oscillating_output_separate_result_event_still_trips`, ticket bug-2e68e4) are withdrawn by the tester, not weakened by the implementer. Rationale: a genuine oscillating loop is still stopped by the runaway-steps watchdog; a false stuck alert on a polling agent is the defect TB2-R2 exists to remove.
+
+## Decision after tests review ag-fc01fb (2026-10-07)
+- TB2-R6 needs a tracked diff in the cleanup message and the archive, so the existing defect where `git diff HEAD` in `check_clean` fails with "external diff died" (gitops passes `-c diff.external=` with an empty value), holding `reseat_failed` instead of `dirty_worktree`, is IN SCOPE for the TB2-R6 implementation. Tests that hit it stay as written and are red for that reason until the implementation fixes it.
+- `cleanup_requested` names the waiting node, the alias and the cleanup run id (as TB2-R6 says); tests assert all three.
