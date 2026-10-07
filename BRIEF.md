@@ -4791,3 +4791,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tooling: a node run that ends with NEED_INFO is treated as a success, so the reviewer depending on it launched. Add this to the batch.
 - Fixture repair MERGED as f3a5e17b. Reviewer agy ag-81218c APPROVED and its guard scan came back clean.
   - Tooling note: agy's run_command sends any command longer than 10 s to the background, which conflicts with the reviewer brief's "run in the foreground" rule. Add this to the batch.
+- EV: the implementer ag-d618ee committed 7d19c9f3. Its own EV tests pass, 83 of 83, but the change breaks 124 tests elsewhere: their fixtures feed FAKE_*/RENEW_LOG values to fake CLIs through the ambient environment, which EV-R1 now drops. That violates EV-R2, so EV is NOT merged.
+  - Reviewer ag-5a8460 REJECTED with 6 findings. I declined all of them: each is an artefact of a two-dot diff against a main that had moved on. The real `main...` diff is 5 EV files and matches the contract.
+  - Next in the chain: tester nd-03fa6e40 migrates the fixtures to provider `env:` blocks or the `extra` overlay (no src change, nothing test-only on the allowlist) → agy reviewer nd-5bfdfb4d. merge_node nd-5bfdfb4d.
+  - Every reviewer task now tells the agent to diff with three dots. The SL and AU reviewer nodes were updated to say so.
+  - Before merging EV or AU, require a full-suite comparison against the manifests, because the scripts change affects suites outside the feature's own files.
