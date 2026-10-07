@@ -41,6 +41,10 @@ A and C run in parallel.
 - `merge_node` refuses a held node as it does today (`not_done`, force or
   not).
 - Recovery: `relaunch_node` (TB-R2) or `close_node`.
+- Shapes (decided after tester ag-a159e8): the node's `hold` is
+  `{"reason": "needs_info", "markers": [<text>, ...]}`; the `needs_info`
+  transition carries the node id and the same `markers` list. A bullet
+  prefix (`- NEED_INFO(`) counts as a line start, as for NEED_DECISION.
 - `NEED_INFO` mid-run keeps its current non-blocking meaning; only the
   final result is inspected.
 - Agent-facing docs that describe NEED_INFO say that a NEED_INFO as the run's
@@ -56,7 +60,9 @@ A and C run in parallel.
   `max_rounds` or `retry` for a simple node is still refused, with an error
   naming the parameter.
 - Applies to simple nodes that are held (including TB-R1's `needs_info`) or
-  done with a non-approved outcome; relaunching a running node is refused.
+  done with any outcome (a simple node has no approved outcome, so
+  `completed` and `failed` alike); relaunching a running or open node is
+  refused. Commits of the earlier generation stay on the branch.
 - Verified by: tests relaunching a held simple node and a failed simple node,
   and the refusal with round controls.
 
@@ -67,7 +73,7 @@ A and C run in parallel.
 - It returns when any covered item finishes, parks (`awaiting_user`, held),
   or is cancelled. A launch alone does not return it.
 - On timeout it returns as today and also lists the snapshot nodes still
-  pending, by node id, with their `blocked` reason.
+  pending under `pending_nodes`: `[{"node_id": ..., "blocked": ...}]`.
 - Verified by: tests with an open node that launches and finishes during the
   wait, one cancelled during the wait, and a timeout.
 
