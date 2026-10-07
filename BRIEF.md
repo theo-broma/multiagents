@@ -4736,3 +4736,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - It reported a broken test: `test_rv_r2_collect_shows_the_error_in_both_modes` looks for a literal containing quotes inside `json.dumps`, so it can never match.
   - Its draft implementation was left uncommitted.
   - Reviewer nd-84f659b2 is cancelled. The chain is now: tester fix nd-fb2b11ce → codex nd-a3c5bf15 (the monthly-spend quota case of RV-R4 was still open) → agy reviewer nd-e169d892.
+- 2026-10-07 ~10:30 RV round 2: codex ag-3bf9e5 committed 5a7de682. RV and admission tests: 58 passed; p0_r8: 40 passed. agy reviewer nd-e169d892 is running.
+  - **REGRESSION caused by the rewrite:** it replaced token, email, host and IP literals in the tests too, so tests that need realistic shapes fail. Example: test_core.py::test_redaction_masks_shapes_keys_and_literals now receives `sk-<redacted>`.
+  - Codex also saw 2 flaky breaker-admission failures in its recheck (3 launches instead of 4).
+  - Repair: tester nd-427cb00d runs the full suite against context/ts/manifests, fixes the fixtures by assembling values at runtime, and lists the SHA-citing tests and the non-rewrite failures; then agy reviewer nd-2a7ef478.
