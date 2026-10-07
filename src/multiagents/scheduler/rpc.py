@@ -621,11 +621,13 @@ class Service:
                         # nothing admits it or its subtree, and a run reaped
                         # meanwhile cannot mark it done. The stop's outcome is
                         # announced once known (finish_cancel).
+                        already_held = child["state"] == "held"
                         child.update(state="held", hold={"reason": "termination_unconfirmed"},
                                      revision=child["revision"] + 1)
-                        # NT-R3: one notification per hold, keyed on the seq of
-                        # its `held` transition, whichever branch took it.
-                        self.store.transition(db, "held", id, child["hold"])
+                        # NT-R3: changing a held node's reason keeps the same
+                        # hold episode. Only entering held writes a new mark.
+                        if not already_held:
+                            self.store.transition(db, "held", id, child["hold"])
                     else:
                         child.update(state="cancelled", hold=None, outcome=None,
                                      revision=child["revision"] + 1)

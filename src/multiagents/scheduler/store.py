@@ -122,8 +122,9 @@ class Store:
         list, so this is one index lookup per id and never a walk of the plan."""
         out: dict[str, dict] = {}
         wanted = [id for id in dict.fromkeys(ids) if isinstance(id, str)]
-        for start in range(0, len(wanted), 400):        # SQLite's bound-parameter limit
-            chunk = wanted[start:start + 400]
+        batch_size = min(400, db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+        for start in range(0, len(wanted), batch_size):
+            chunk = wanted[start:start + batch_size]
             for id, record in db.execute(
                     "SELECT id, record FROM nodes WHERE id IN (%s)" % ",".join("?" * len(chunk)),
                     chunk):

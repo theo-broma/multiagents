@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
@@ -163,27 +164,29 @@ def _held_seqs(db, node_ids) -> dict[str, int]:
     there; `_hold_mark`'s revision is the fallback for a hold that predates the
     change. The read is bounded twice over: only the ids it is given, and through
     the `notifications_by_node` index, so no id means no query and no call ever
-    walks the history.
+    walks the history. Batches respect this connection's variable limit; a
+    failed lookup propagates so the caller retries without changing the outbox
+    or the seen-marks (NT-R4).
     """
     ids = [id for id in dict.fromkeys(node_ids) if isinstance(id, str)]
     if not ids:
         return {}
-    try:
+    seqs: dict[str, int] = {}
+    batch_size = min(400, db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+    for start in range(0, len(ids), batch_size):
+        chunk = ids[start:start + batch_size]
         pairs = db.execute(
             "SELECT json_extract(record, '$.node_id'), MAX(seq) FROM notifications"
             " WHERE json_extract(record, '$.kind') = 'held'"
             " AND json_extract(record, '$.node_id') IN (%s) GROUP BY 1"
-            % ",".join("?" * len(ids)), ids).fetchall()
-    except Exception:
-        return {}
-    seqs: dict[str, int] = {}
-    for nid, seq in pairs:
-        if not isinstance(nid, str):
-            continue
-        try:
-            seqs[nid] = int(seq)
-        except (TypeError, ValueError):
-            continue
+            % ",".join("?" * len(chunk)), chunk).fetchall()
+        for nid, seq in pairs:
+            if not isinstance(nid, str):
+                continue
+            try:
+                seqs[nid] = int(seq)
+            except (TypeError, ValueError):
+                continue
     return seqs
 
 
@@ -576,12 +579,14 @@ class Sender(threading.Thread):
             return None
         return (info.st_mtime_ns, info.st_size)
 
-    def _remember(self, meta, now: float) -> None:
+    def _remember(self, meta, stamp: tuple | None) -> None:
         """Keep what the store said about the pause and the backoff, so the next
-        poll can decide without opening a transaction."""
+        poll can decide without opening a transaction. The stamp precedes the
+        read: a concurrent commit during or after it must trigger a new read,
+        rather than pair that commit's stamp with an older snapshot (NT-R4/R8)."""
         self._paused = meta.get("notify_paused") == "1"
         self._retry_at = self._float(meta.get("notify_next_retry"))
-        self._store_stamp = self._stamp()
+        self._store_stamp = stamp
 
     def _waiting(self, now: float) -> bool:
         """Whether the last thing the store said stops this sender from sending."""
@@ -602,7 +607,8 @@ class Sender(threading.Thread):
         # Round 3, decision 2: a paused or backing-off sender reads nothing.
         # The store changed is the only thing that can lift the pause from
         # outside this process, and that is a stat of the store file.
-        if self._waiting(now) and self._store_stamp == self._stamp():
+        stamp = self._stamp()
+        if self._waiting(now) and stamp is not None and self._store_stamp == stamp:
             return
         try:
             with self.store.transaction(write=False) as db:
@@ -612,7 +618,7 @@ class Sender(threading.Thread):
         except Exception:
             log.exception("ntfy sender: store snapshot failed")
             return
-        self._remember(meta, now)
+        self._remember(meta, stamp)
         if not rows:
             return
         # NT-R4 and NT-R5 come before any staleness read (round 3, decision 2):
@@ -729,10 +735,11 @@ class Sender(threading.Thread):
                     _meta_set(db, "notify_next_retry", now + delay)
         except Exception:
             log.exception("ntfy sender: failure record failed")
-        # The gate is remembered even when the record failed: the next poll must
-        # not open a transaction to learn what this one already knows.
+        # Keep the gate, but invalidate the snapshot stamp. A post-commit stat
+        # could include another process's clear_pause without reflecting it in
+        # this gate. The next poll reads a committed snapshot before caching it.
         self._paused, self._retry_at = pause, None if pause else now + (delay or 0.0)
-        self._store_stamp = self._stamp()
+        self._store_stamp = None
         if not self._in_outage:
             # NT-R6: one log line per outage per scheduler process.
             log.error("ntfy notification failed: %s", reason)
@@ -760,7 +767,7 @@ class Sender(threading.Thread):
             # open whatever it was before this send.
             self._in_outage = False
             self._paused, self._retry_at = False, None
-            self._store_stamp = self._stamp()
+            self._store_stamp = None
             return
         status = result.get("status")
         reason = result.get("reason") or "the ntfy server could not be reached"
