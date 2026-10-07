@@ -4711,3 +4711,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - the source refs are unchanged.
   The user force-pushed `main` themselves (436dfed → 4315804; the classifier refused my push). The local main is aligned, and the old main is kept in the private local tag `backup-pre-push` (= de174c8). Branches and node refs created before the rewrite are on the old history, so new work starts from the new main.
   - Open for the user: GitHub warned of a 61.7 MB file `sys` in history (a stray ImageMagick screenshot added in b7291762, removed in 231be37d). The guard does not scan images; removing it needs another rewrite and force-push. The user decides.
+- 2026-10-07 ~08:15 **Decision (user: "Oui, on retire le fichier sys du repo"):** remove the 64.7 MB stray screenshot `sys` from history. It is the only blob over 5 MB; it was added in b7291762 and removed in 231be37d, which becomes empty and is pruned.
+  - When: once the breaker fix (nd-25072acb, then reviewer nd-26469547) is merged and no agent is running.
+  - How: `git filter-repo --invert-paths --path sys` on a `--no-local` clone. Then run the same checks as rewrite.sh: commit count -1, private-term verify, guard scan with no allow entries, `git-guard scan main`, and source refs unchanged.
+  - The user force-pushes with `--force-with-lease`. Afterwards, tag the old main as private `backup-pre-sys` and align the local main.
