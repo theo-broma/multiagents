@@ -80,10 +80,18 @@ A and C run in parallel.
 - Writing agents keep today's behaviour.
 - A non-writing run's worktree with no commits is dropped as today; its
   scratch files go with it.
+- Applies to every `writes=False` run, conversational agents (advisor,
+  dev-advisor) and steered runs included.
 - Verified by: tests that a non-writing run leaving an untracked file
   produces no commit on its branch, and that a writing run still does.
 
-**TB-R6. Provider options in a fallback entry apply on every fallback path.**
+**TB-R6 — withdrawn: already holds.** Tester ag-f2aace found every reachable
+fallback path (automatic chain, explicit fallback model, steer) already
+applies the entry's options, through FO-R1's `routed()`; there is no run-level
+option pin to give precedence to. Its tests in
+tests/test_tb_c_fallback_options.py stay as regression guards. Original text:
+
+**TB-R6 (withdrawn). Provider options in a fallback entry apply on every fallback path.**
 - Options declared for a provider in a fallback map (such as `variant`) are
   applied whenever that fallback is used: automatic fallback selection and an
   explicitly chosen fallback model alike.
@@ -100,6 +108,11 @@ A and C run in parallel.
   fingerprint, a fresh session is started instead of resuming, and a
   `conversation_replaced` event records the old and new values. Same
   fingerprint: resumed as today.
+- The fingerprint compared is that of the route the consult would launch on
+  now (the agent's own provider or a `models:` fallback route), against the
+  one recorded for the standing session.
+- The event carries `old_fingerprint` and `new_fingerprint`, each an object
+  with `provider`, `model`, `effort` and `options`, plus the replaced run id.
 - The comparison happens under the existing conversation lock, before any
   launch side effect.
 - An explicit `steer_agent` on a run keeps today's semantics: it resumes
