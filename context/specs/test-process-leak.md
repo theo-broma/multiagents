@@ -40,6 +40,8 @@ running) still leaves no process behind.
 Verified by: a test using a deliberately failing inner test (e.g. via pytester)
 or an equivalent mechanism.
 
+Decision (orchestrator, 2026-10-07): the whole-scope SL-R3 test runs the scoped suite in an inner pytest and takes about 805 s. That is too costly for every full-suite run, given that up to six agents share the machine. It therefore runs only when `MULTIAGENTS_SL_FULL=1` is set and is skipped otherwise, with a skip reason naming the variable. The single-module SL-R3 test (`..._the_migration_module_alone_...`, about 45 s) stays on by default as the always-on guard. Run the whole-scope test before merging any change to the nc/c23/pc fixtures. (Run ag-9e4522.)
+
 **SL-R5.** The fix does not change the per-id outcomes of the scoped suite
 (1555 passed, 1 skipped on main @ 436dfed) and does not lengthen it by more than
 10 %.
