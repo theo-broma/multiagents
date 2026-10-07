@@ -86,7 +86,8 @@ def launched(tmp_path, monkeypatch):
     fake = ch.FakeProvider(paths.config, tmp_path)
     fake.control(turns=[{"exit": 0}])
     (paths.config / "providers.yaml").write_text(yaml.safe_dump({"providers": {
-        "fakeprov": {"bin": "true", "script": fake.name, "spawn": {"args": ["x"]}}}}))
+        "fakeprov": {"bin": "true", "script": fake.name, "spawn": {"args": ["x"]},
+                     "env": fake.env}}}))
     (paths.config / "agents.yaml").write_text(yaml.safe_dump({"agents": {
         ROLE: {"provider": "fakeprov", "model": "m", "launch": True, "role": ROLE}}}))
     monkeypatch.setenv("FAKE_LOG", str(fake.log))

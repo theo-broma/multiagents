@@ -210,8 +210,11 @@ class Session:
         monkeypatch.chdir(self.root)
 
         self.transcript = tmp_path / "tx" / ch.slug(self.root) / f"{SID}.jsonl"
+        # EV-R2: the fake's control files reach it through the provider's own
+        # `env:` block; the ambient environment no longer crosses to scripts.
         data: dict = {"bin": "true", "script": self.script.name,
-                      "spawn": {"args": ["x"]}}
+                      "spawn": {"args": ["x"]},
+                      "env": {"FAKE_LOG": str(self.log), "FAKE_CTL": str(self.ctl)}}
         if transcript_block:
             block = ch.claude_transcript_block(tmp_path / "tx")
             if limit_markers:

@@ -462,20 +462,16 @@ def test_build_env_extra_overrides_everything_including_providers_env_block(tmp_
     assert env["X"] == "from-extra"
 
 
-def test_build_env_copies_the_full_ambient_process_environment(tmp_path, monkeypatch):
-    """F112 — `build_env` starts from `env = dict(os.environ)`, the real
-    ambient environment of whatever process is calling it, with no
-    allowlist or scrubbing. Anything sensitive already in that process's
-    environment (this test suite's own harness has to work around exactly
-    this for `run_shipped_script`, stripping a fixed key list before every
-    call — see `c2_harness.py`'s `_SCRIPT_ENV_KEYS`) is handed to the
-    provider's script verbatim, including a script sourced from
-    `project_config` — i.e., from inside the project being orchestrated,
-    not from the user's own trusted global config."""
-    monkeypatch.setenv("MULTIAGENTS_SEAM_TEST_AMBIENT_SECRET", "should-not-leak-but-does")
+def test_ev_r1_build_env_does_not_copy_the_full_ambient_process_environment(tmp_path, monkeypatch):
+    """EV-R1 (F112, inverted from the characterization that pinned
+    `dict(os.environ)`): an ambient variable that is neither allowlisted nor
+    one of the keys `build_env` computes never reaches a provider script."""
+    monkeypatch.setenv("MULTIAGENTS_SEAM_TEST_AMBIENT_SECRET", "should-not-leak")
+    monkeypatch.setenv("SEAM_TEST_AMBIENT_API_TOKEN", "should-not-leak")
     provider = h.make_provider("p")
     env = h.build_env("p", provider, h.FakeExecutor())
-    assert env["MULTIAGENTS_SEAM_TEST_AMBIENT_SECRET"] == "should-not-leak-but-does"
+    assert "MULTIAGENTS_SEAM_TEST_AMBIENT_SECRET" not in env
+    assert "SEAM_TEST_AMBIENT_API_TOKEN" not in env
 
 
 # ---------------------------------------------------------------------------

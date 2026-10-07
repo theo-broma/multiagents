@@ -573,6 +573,8 @@ def build_env(
 
     env: dict[str, str] = {}
     for key in BASE_ENV_KEYS:
+        if key in blocked:
+            continue
         value = os.environ.get(key)
         if value is not None:
             env[key] = value

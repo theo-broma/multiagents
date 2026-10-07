@@ -233,6 +233,12 @@ class FakeProvider:
         self.ctl = scratch / "fake-provider.ctl.json"
         self.name = name
 
+    @property
+    def env(self) -> dict[str, str]:
+        """The provider's `env:` block that points the fake at its files (EV-R2:
+        the ambient environment no longer reaches a provider script)."""
+        return {"FAKE_LOG": str(self.log), "FAKE_CTL": str(self.ctl)}
+
     def control(self, **ctl: Any) -> None:
         self.ctl.write_text(json.dumps(ctl))
 

@@ -232,12 +232,19 @@ class World:
             (profile / ".gemini" / "fake-quota").write_text(str(quota))
 
 
+# EV-R2: the fakes' control variables reach a provider script only through the
+# provider's `env:` block; `world` fills this in for its own test.
+_FAKE_ENV: dict[str, str] = {}
+
+
 def _provider_blocks(second_home: str = SECOND_HOME_SPEC) -> dict:
     raw = c2.raw_shipped_providers()
+    for name in ("agy", "agy-partner"):
+        raw[name] = {**raw[name], "env": {**(raw[name].get("env") or {}), **_FAKE_ENV}}
     raw["agy-b"] = {
         "extends": "agy",
         "family": "agy",
-        "env": {"HOME": second_home},
+        "env": {"HOME": second_home, **_FAKE_ENV},
         "container_private_home": [SECOND_PRIVATE],
     }
     return raw
@@ -256,6 +263,8 @@ def world(tmp_path, monkeypatch) -> World:
     monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
     monkeypatch.setenv("FAKE_LOG", str(log))
     monkeypatch.setenv("FAKE_CONTAINER_HOME", str(home))
+    monkeypatch.setattr(sys.modules[__name__], "_FAKE_ENV",
+                        {"FAKE_LOG": str(log), "FAKE_CONTAINER_HOME": str(home)})
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     second_home = home / ".multiagents" / "profiles" / "agy-b"
@@ -420,7 +429,7 @@ def _launch_home(world: World, monkeypatch, tmp_path) -> str:
     fake.control(turns=[{"exit": 0}])
     (paths.config / "providers.yaml").write_text(yaml.safe_dump({"providers": {
         "fakeprov": {"bin": "true", "script": fake.name,
-                     "env": {"HOME": SECOND_HOME_SPEC},
+                     "env": {"HOME": SECOND_HOME_SPEC, **fake.env},
                      "spawn": {"args": ["x"]}}}}))
     (paths.config / "agents.yaml").write_text(yaml.safe_dump({"agents": {
         "orchestrator": {"provider": "fakeprov", "model": "m", "launch": True,
@@ -501,6 +510,8 @@ def test_ab_r2_every_agy_family_read_runs_inside_the_container(world):
 def test_ab_r2_a_failed_container_read_is_unknown_never_host_usage(world, monkeypatch):
     world.login(world.second_home, "valid", SECOND)
     monkeypatch.setenv("FAKE_DOCKER_DOWN", "1")
+    for provider in world.providers.values():
+        provider.env["FAKE_DOCKER_DOWN"] = "1"
 
     for name in ("agy", "agy-partner", "agy-b"):
         budget = read(world, name)

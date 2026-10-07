@@ -1,0 +1,31 @@
+# EV-R1 (F112): named ambient inputs forwarded to provider scripts.
+# One variable per line, with its reason after #. No wildcard entries:
+# scripts.build_env additionally forwards the LC_* locale family in code.
+# Missing or unreadable data is an error; it never enables ambient passthrough.
+PATH # Find CLI binaries and subprocess tools.
+HOME # Locate user configuration and credentials.
+USER # Preserve the process user's name.
+LOGNAME # Preserve the process login name.
+SHELL # Preserve the user's shell selection.
+TERM # Describe terminal capabilities to interactive CLIs.
+LANG # Supply the default process locale.
+TZ # Preserve timezone selection.
+TMPDIR # Locate temporary files on the configured filesystem.
+CLAUDE_CONFIG_DIR # claude.sh:127,198 selects the CLI configuration directory.
+XDG_DATA_HOME # opencode.sh:30 locates the CLI's data directory.
+XDG_CONFIG_HOME # Locate CLI configuration under the XDG layout.
+XDG_RUNTIME_DIR # Locate desktop runtime services for keyring login.
+DBUS_SESSION_BUS_ADDRESS # agy login connects to the desktop keyring session.
+HTTP_PROXY # Route HTTP requests through the configured proxy.
+HTTPS_PROXY # Route HTTPS requests through the configured proxy.
+NO_PROXY # Exclude configured destinations from proxy routing.
+http_proxy # Preserve the lowercase HTTP proxy convention.
+https_proxy # Preserve the lowercase HTTPS proxy convention.
+no_proxy # Preserve the lowercase proxy exclusion convention.
+SSL_CERT_FILE # Locate the trusted TLS certificate bundle.
+SSL_CERT_DIR # Locate the trusted TLS certificate directory.
+REQUESTS_CA_BUNDLE # Locate the certificate bundle used by Python requests.
+NODE_EXTRA_CA_CERTS # Locate additional trusted certificates for Node CLIs.
+MULTIAGENTS_CODEX_PROFILE # codex.py:70 selects the host login profile.
+MULTIAGENTS_OPENCODE_PLAN # opencode.sh:23-24 selects subscription routing.
+MULTIAGENTS_ZAI_ORIGIN # opencode.sh:73 selects the Z.ai subscription endpoint.

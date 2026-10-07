@@ -46,7 +46,10 @@ data['claudeAiOauth']['expiresAt'] = int((time.time() + 7200) * 1000)
     raw = {
         "claude": {"bin": str(binary), "script": "claude.sh",
                    "container_private_home": [".claude"],
-                   "budget_profile_env": "CLAUDE_CONFIG_DIR"},
+                   "budget_profile_env": "CLAUDE_CONFIG_DIR",
+                   # EV-R2: the fake CLI's log path comes from the provider's
+                   # `env:`; the ambient environment no longer reaches it.
+                   "env": {"RENEW_LOG": str(tmp_path / "renewed")}},
         "second": {"extends": "claude", "container_account": "b",
                    "env": {"CLAUDE_CONFIG_DIR": str(home / "second")}},
         "borrowed": {"auth_from": "claude", "container_account": "b"},

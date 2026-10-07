@@ -237,8 +237,9 @@ def test_p0_r8f_11_an_interrupted_action_leaves_no_process_of_its_group(
     (config_dir / "providers").mkdir(parents=True)
     (config_dir / "providers" / "slow.sh").write_text(SLOW_ACTION)
     pidfile = tmp_path / "action.pid"
-    monkeypatch.setenv("SLOW_PIDFILE", str(pidfile))
-    provider = types.SimpleNamespace(script_name="slow.sh", env={})
+    # EV-R2: through the provider's `env:` block, not the ambient environment.
+    provider = types.SimpleNamespace(script_name="slow.sh",
+                                     env={"SLOW_PIDFILE": str(pidfile)})
     raised = exc_type("interrupted while waiting for the provider script")
 
     def interrupt(*_):

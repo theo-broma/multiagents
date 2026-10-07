@@ -454,13 +454,11 @@ def test_build_env_starts_from_nothing_unlisted_vars_never_appear(monkeypatch):
     assert "SOME_RANDOM_SECRET_LOOKING_VAR" not in env
 
 
-def test_build_env_base_keys_are_forwarded_even_if_named_in_blocked(monkeypatch):
-    # WIDEN finding candidate: the BASE_ENV_KEYS loop in build_env has no
-    # `blocked` check at all — only the `passthrough` loop checks `blocked`.
-    # Naming a base key like PATH in `blocked` does not stop it being forwarded.
+def test_ev_r3_build_env_base_keys_named_in_blocked_are_not_forwarded(monkeypatch):
+    # EV-R3 (F33, inverted): blocking a base key such as PATH is honoured.
     monkeypatch.setenv("PATH", "/fake/bin")
     env = h.build_env(passthrough=[], blocked=["PATH"], home=None, identity={})
-    assert env["PATH"] == "/fake/bin"
+    assert "PATH" not in env
 
 
 def test_build_env_passthrough_bare_name_forwards_current_process_value(monkeypatch):

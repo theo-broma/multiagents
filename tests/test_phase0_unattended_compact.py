@@ -63,7 +63,8 @@ class Loop:
         monkeypatch.chdir(self.root)
 
         self.transcript = tmp_path / "tx" / ch.slug(self.root) / f"{SID}.jsonl"
-        data: dict = {"bin": "true", "script": self.fake.name, "spawn": {"args": ["x"]}}
+        data: dict = {"bin": "true", "script": self.fake.name, "spawn": {"args": ["x"]},
+                      "env": self.fake.env}   # EV-R2: not the ambient environment
         if transcript:
             block = ch.claude_transcript_block(tmp_path / "tx")
             if limit_markers:

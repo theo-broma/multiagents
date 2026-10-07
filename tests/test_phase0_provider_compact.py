@@ -302,6 +302,7 @@ def test_p0_r8e_1_the_key_reaches_argv_from_agents_yaml(tmp_path, monkeypatch):
     shipped = yaml.safe_load((ch.SHIPPED / "providers.yaml").read_text())["providers"]["claude"]
     block = {k: v for k, v in shipped.items() if k in ("spawn", "stream", "transcript")}
     block["bin"] = str(sc.fake)
+    block["env"] = {"FAKE_LOG": str(sc.log), "FAKE_MODE": "nothing"}   # EV-R2
     (cfg / "providers.yaml").write_text(yaml.safe_dump({"providers": {"fakeclaude": block}}))
     # No team: the roster check is not under test, the argv is.
     (cfg / "project.yaml").write_text(yaml.safe_dump({"team": ""}))
@@ -374,7 +375,8 @@ def _launch_env(tmp_path, monkeypatch, entry_extra: dict) -> dict:
     fake = ch.FakeProvider(paths.config, tmp_path)
     fake.control(turns=[{"exit": 0}])
     (paths.config / "providers.yaml").write_text(yaml.safe_dump({"providers": {
-        "fakeprov": {"bin": "true", "script": fake.name, "spawn": {"args": ["x"]}}}}))
+        "fakeprov": {"bin": "true", "script": fake.name, "spawn": {"args": ["x"]},
+                     "env": fake.env}}}))
     role = {"provider": "fakeprov", "model": "m", "launch": True, **entry_extra}
     (paths.config / "agents.yaml").write_text(yaml.safe_dump({"agents": {
         "orchestrator": {**role, "role": "orchestrator"}}}))

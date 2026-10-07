@@ -70,6 +70,15 @@ AUTHENTICATED = 0
 NOT_AUTHENTICATED = 10
 UNIMPLEMENTED = 64
 
+# Ambient inputs provider scripts and their CLIs need. LC_* is the only
+# family allowed; credentials and action selectors require explicit overlays.
+# A missing or unreadable packaged allowlist must fail rather than widen access.
+SCRIPT_ENV_KEYS = frozenset(
+    key for line in (Path(__file__).parent / "defaults" / "script-env.txt")
+    .read_text(encoding="utf-8").splitlines()
+    if (key := line.partition("#")[0].strip())
+)
+
 
 def script_dirs(config_dir: Path, project_config: Path | None) -> list[Path]:
     """Search path, lowest priority first.
@@ -101,8 +110,9 @@ def find_script(name: str, config_dir: Path,
 
 def build_env(provider_name: str, provider: Any, executor: Any,
               extra: dict[str, str] | None = None) -> dict[str, str]:
-    """The situation, handed to the script through the environment."""
-    env = dict(os.environ)
+    """Allowlisted ambient inputs, computed state, then provider/action overlays."""
+    env = {key: value for key, value in os.environ.items()
+           if key in SCRIPT_ENV_KEYS or key.startswith("LC_")}
     env.update({
         "MULTIAGENTS_PROVIDER": provider_name,
         "MULTIAGENTS_EXECUTOR": getattr(executor, "kind", "local"),
