@@ -1099,6 +1099,7 @@ def _alias_agents(data: dict, path: Path, renames: Renames,
     for agent, spec in roster.items():
         if not isinstance(spec, dict):
             continue
+        _alias_reserved_instance(spec, path, renames, warnings, ["agents", agent])
         if renames.is_alias(spec.get("provider")):
             warnings.append(renames.warning(
                 spec["provider"],
@@ -1139,7 +1140,7 @@ def _alias_fallback_chain(data: dict, path: Path, renames: Renames,
 
 
 def _alias_reserved_instance(data: dict, path: Path, renames: Renames,
-                             warnings: list[str]) -> None:
+                             warnings: list[str], parts: list[str] | None = None) -> None:
     """OG-R2: `quota_handover.reserved_instance` naming a pre-rename route.
 
     The reservation protects a route; read as the name it was, it would point
@@ -1150,7 +1151,7 @@ def _alias_reserved_instance(data: dict, path: Path, renames: Renames,
         return
     name = handover["reserved_instance"]
     warnings.append(renames.warning(
-        name, _where(path, _line_at(path, ["quota_handover", "reserved_instance"]))))
+        name, _where(path, _line_at(path, (parts or []) + ["quota_handover", "reserved_instance"]))))
     handover["reserved_instance"] = renames.canonical(name)
 
 

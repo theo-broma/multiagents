@@ -55,7 +55,7 @@ from .executor import executor_for
 from .models import refresh_models
 from .paths import ProjectPaths, find_project_root, global_config_dir
 from .providers import billed_rows
-from .renames import shipped as shipped_renames
+from .renames import Renames, shipped as shipped_renames
 from .quota_handover import quota_handover_settings
 from .redact import scrub
 from .runner import Runner
@@ -1107,6 +1107,16 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
         return _ok({"error": str(exc)})
 
 
+def _canonical_provider(provider: str, renames: Renames | None = None) -> str:
+    """Read an MCP provider argument through the declared renames, loudly."""
+    if renames is None:
+        renames = shipped_renames()
+    if renames.is_alias(provider):
+        print(f"warning: {renames.warning(provider)}", file=sys.stderr)
+        return renames.canonical(provider)
+    return provider
+
+
 @_tool()
 async def steer_agent(agent_id: str, message: str, provider: str | None = None) -> dict:
     """Redirect a running or stuck agent without losing its context.
@@ -1120,6 +1130,8 @@ async def steer_agent(agent_id: str, message: str, provider: str | None = None) 
     refused = await asyncio.to_thread(_node_id_refusal, run, agent_id)
     if refused:
         return _ok(refused)
+    if provider is not None:
+        provider = _canonical_provider(provider, run.tree.renames)
     try:
         return _ok(await run.steer(agent_id, message, **({"provider": provider} if provider is not None else {})))
     except KeyError as exc:
@@ -1401,6 +1413,7 @@ def check_model_catalog(provider: str = "opencode-go") -> dict:
     the new baseline is update_model_catalog.
     """
     run = runner()
+    provider = _canonical_provider(provider)
     result = catalog_mod.check(
         global_config_dir(), provider, run.config.agents,
     )
@@ -1417,6 +1430,7 @@ def update_model_catalog(provider: str = "opencode-go") -> dict:
     denied = _root_only("update_model_catalog")
     if denied:
         return _ok({"error": denied})
+    provider = _canonical_provider(provider)
     return _ok(catalog_mod.apply(global_config_dir(), provider))
 
 
@@ -1900,6 +1914,10 @@ def _node_rpc(op: str, args: dict, ctx=None) -> dict:
             request_id = f"mcp:{_node_rpc_namespace}:{ctx.request_id}"
         except (ValueError, RuntimeError):
             pass  # SDK calls made outside a request have an empty context.
+    if op in {"create_node", "update_node", "relaunch_node"}:
+        pins = args.get("pins")
+        if isinstance(pins, dict) and isinstance(pins.get("provider"), str):
+            args = {**args, "pins": {**pins, "provider": _canonical_provider(pins["provider"])}}
     try:
         reply = scheduler.call(paths.root, op, args, token, request_id=request_id)
         return reply["result"] if reply.get("ok") else reply["error"]
