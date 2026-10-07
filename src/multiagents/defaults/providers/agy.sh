@@ -43,10 +43,11 @@ identity)
     ;;
 check)
     if [ "$EXECUTOR" = "docker" ] && [ -n "${MULTIAGENTS_PRIVATE_BACKING:-}" ]; then
-        # The container's own token is a plain file, so this is a free check.
+        # The opaque token file only answers "was a login attempted";
+        # its presence cannot verify whether the account is usable.
         backing="${MULTIAGENTS_PRIVATE_BACKING%/.gemini}"
         if [ -s "$backing/$TOKEN_REL" ]; then
-            echo "container token present ($backing/$TOKEN_REL)"; exit 0
+            echo "container token present (not verified) ($backing/$TOKEN_REL)"; exit 0
         fi
         echo "no container token; agy has not been logged in inside the container"
         exit 10

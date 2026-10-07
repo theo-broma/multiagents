@@ -361,36 +361,33 @@ def test_claude_sh_check_treats_an_empty_oauth_block_as_logged_in(tmp_path):
     assert "container profile is logged in" in result.stdout
 
 
-def test_claude_sh_check_unparseable_json_is_also_reported_as_logged_in(tmp_path):
-    """F130: a genuinely CORRUPT credentials file — not merely missing a
-    field, but invalid JSON that the embedded python cannot parse at all —
-    hits the same `except Exception: sys.exit(0)` in the expiry-reading
-    heredoc, prints nothing, and the shell script falls through to the same
-    unconditional "container profile is logged in" / exit 0. A corrupt file
-    is treated identically to a genuinely valid one."""
+def test_au_r1_claude_sh_check_unparseable_json_is_unknown_not_logged_in(tmp_path):
+    """AU-R1 (F130), inverted: a genuinely CORRUPT credentials file used to
+    fall through to "container profile is logged in" / exit 0. The state is
+    unknown: exit 20, and the message says it is unparseable."""
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / ".credentials.json").write_text("not json at all {{{")
     result = h.run_shipped_script("claude", "check", _claude_docker_env(profile))
-    assert result.returncode == 0
-    assert "container profile is logged in" in result.stdout
+    assert result.returncode == 20
+    assert "logged in" not in result.stdout
+    assert "unknown" in result.stdout.lower()
+    assert "unparseable" in result.stdout.lower()
 
 
-def test_claude_sh_check_an_access_token_with_no_expiresat_is_also_logged_in(tmp_path):
-    """F130 (same root cause as the two tests above): a credentials file that
-    HAS an accessToken but no `expiresAt` key at all is, again, silently
-    unreadable by the clock-extraction loop (`if not block.get('expiresAt'):
-    continue`) and falls through to the same "logged in" default. There is no
-    code path in this script that ever reports "present but unparseable" or
-    "present but incomplete" — every failure to read a clock collapses into
-    success."""
+def test_au_r1_claude_sh_check_an_access_token_with_no_expiresat_is_unknown(tmp_path):
+    """AU-R1 (F130), inverted: an accessToken with no `expiresAt` used to
+    collapse into "logged in". No expiry can be read, so: exit 20, message
+    says the state is unknown and that there is no expiry."""
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / ".credentials.json").write_text(
         json.dumps({"claudeAiOauth": {"accessToken": "abc"}}))
     result = h.run_shipped_script("claude", "check", _claude_docker_env(profile))
-    assert result.returncode == 0
-    assert "container profile is logged in" in result.stdout
+    assert result.returncode == 20
+    assert "logged in" not in result.stdout
+    assert "unknown" in result.stdout.lower()
+    assert "no expiry" in result.stdout.lower()
 
 
 def test_claude_sh_check_expired_access_with_no_refresh_token_reports_not_authenticated(tmp_path):
@@ -490,8 +487,9 @@ def test_agy_sh_check_docker_no_token_file_reports_not_authenticated(tmp_path):
     assert "not been logged in inside the container" in result.stdout
 
 
-def test_agy_sh_check_docker_treats_any_non_empty_token_file_as_present(tmp_path):
-    """F131: unlike claude.sh, agy.sh's container branch does not parse the
+def test_au_r3_agy_sh_check_docker_treats_any_non_empty_token_file_as_present_but_says_not_verified(tmp_path):
+    """AU-R3 (F131): the exit code is unchanged, the message now says the token
+    was found and not verified. Original finding: unlike claude.sh, agy.sh's container branch does not parse the
     token at all — `[ -s "$backing/$TOKEN_REL" ]` only asks "is this file
     non-empty", so ANY content, however invalid, reports "container token
     present" with exit 0. There is no expiry, no format check, nothing —
@@ -506,7 +504,7 @@ def test_agy_sh_check_docker_treats_any_non_empty_token_file_as_present(tmp_path
         {"MULTIAGENTS_EXECUTOR": "docker", "MULTIAGENTS_PRIVATE_BACKING": str(gemini_dir),
          "MULTIAGENTS_BIN": "true"})
     assert result.returncode == 0
-    assert "container token present" in result.stdout
+    assert "container token present (not verified)" in result.stdout
 
 
 def test_agy_sh_check_host_path_with_no_binary_reports_unclear_not_authenticated(tmp_path):
@@ -559,47 +557,50 @@ def test_opencode_sh_check_extracts_the_reported_credential_count(tmp_path):
     assert "3 stored credential(s)" in result.stdout
 
 
-def test_opencode_sh_check_count_extraction_fails_when_the_digit_opens_the_line(tmp_path):
-    """F135: the extraction sed is `s/.*[^0-9]\\(...\\) credential.*/\\1/p` —
-    it requires a NON-DIGIT character immediately before the count. When the
-    CLI's own line starts directly with the digits (no leading word or
-    space), `[^0-9]` has nothing to match before the first digit and the
-    whole substitution fails silently, `n` stays empty, and `${n:-1}`
-    reports exactly "1" regardless of the real count. Moving the same
-    sentence one word earlier (see the test above) makes extraction work —
-    this is purely a property of the CLI's own phrasing, invisible from this
-    script's contract."""
+def test_au_r2_opencode_sh_check_digit_opening_the_line_is_unknown_not_a_guessed_count(tmp_path):
+    """F135/F132, AU-R2 inverted: the positive-count pattern needs a non-digit
+    before the count, so "3 credentials stored" matches neither it nor the
+    "0 credentials" case. That output is unknown (exit 20), never the guessed
+    default "1 stored credential(s)" with exit 0. The pattern is deliberately
+    not widened to accept it."""
     fake_bin = tmp_path / "opencode"
     fake_bin.write_text('#!/bin/sh\necho "3 credentials stored"\n')
     fake_bin.chmod(0o755)
     result = h.run_shipped_script("opencode", "check", {"MULTIAGENTS_BIN": str(fake_bin)})
-    assert result.returncode == 0
-    assert "1 stored credential(s)" in result.stdout
+    assert result.returncode == 20
+    assert "unknown" in result.stdout.lower()
+    assert "1 stored credential(s)" not in result.stdout
+    assert "stored credential(s)" not in result.stdout
 
 
-def test_opencode_sh_check_defaults_to_one_credential_on_any_unmatched_output(tmp_path):
+def test_au_r2_opencode_sh_check_unrecognised_output_is_unknown_not_one_credential(tmp_path):
     """F132: the count-extraction `sed` only fires when the CLI's own output
     contains the literal word "credential"; anything else that is non-empty,
     does not say "0 credentials", and exits 0 falls to `${n:-1}` — reporting
     exactly "1 stored credential(s)" regardless of what the CLI actually
     printed. There is no credential file this script ever reads on its own;
-    it trusts `$BIN providers list`'s exit code and a fixed default entirely."""
+    it trusts `$BIN providers list`'s exit code and a fixed default entirely.
+
+    AU-R2, inverted: output matching neither pattern is unknown (exit 20)."""
     fake_bin = tmp_path / "opencode"
     fake_bin.write_text(
         '#!/bin/sh\necho "some unrelated informational message, not about credentials"\n')
     fake_bin.chmod(0o755)
     result = h.run_shipped_script("opencode", "check", {"MULTIAGENTS_BIN": str(fake_bin)})
-    assert result.returncode == 0
-    assert "1 stored credential(s)" in result.stdout
+    assert result.returncode == 20
+    assert "stored credential(s)" not in result.stdout
+    assert "unknown" in result.stdout.lower()
 
 
-def test_opencode_sh_check_defaults_to_one_credential_even_on_silent_success(tmp_path):
+def test_au_r2_opencode_sh_check_silent_success_is_unknown_not_one_credential(tmp_path):
     """Same root cause as the test above, pushed to its most surprising
     case: a binary that runs, exits 0, and prints NOTHING is still reported
-    as one stored credential and exit 0 (authenticated)."""
+    as one stored credential and exit 0 (authenticated). AU-R2, inverted:
+    empty output with exit 0 is unknown (exit 20)."""
     result = h.run_shipped_script("opencode", "check", {"MULTIAGENTS_BIN": "true"})
-    assert result.returncode == 0
-    assert "1 stored credential(s)" in result.stdout
+    assert result.returncode == 20
+    assert "stored credential(s)" not in result.stdout
+    assert "unknown" in result.stdout.lower()
 
 
 def test_opencode_sh_check_missing_binary_reports_could_not_run(tmp_path):

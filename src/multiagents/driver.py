@@ -1222,7 +1222,7 @@ def _auth_problem(paths, config, spec) -> str:
                            global_config_dir(), paths.config,
                            profile=auth_mod.HOST)
     if state.status != "not_authenticated":
-        return ""                             # authenticated, or it would not say
+        return ""                             # unknown and no_script also permit launch
     return (f"{spec.provider} is not authenticated on this machine, where the "
             f"orchestrator runs — {state.detail}. Run `{state.fix}`.")
 

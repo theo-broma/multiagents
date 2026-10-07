@@ -507,12 +507,21 @@ def _claude_token(config_dir: Path | None = None) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     token = oauth.get("accessToken")
-    expires_ms = oauth.get("expiresAt")
     if not isinstance(token, str) or not token:
         return None
-    if isinstance(expires_ms, (int, float)) and expires_ms / 1000.0 <= time.time():
-        return None                       # expired; refreshing is the CLI's job
     register_literal(token)
+    if "expiresAt" in oauth:
+        expires_ms = oauth["expiresAt"]
+        # Present but not a finite number of milliseconds — a string (numeric
+        # or not), a boolean, NaN, infinity, null — means the expiry cannot be
+        # read at all, and a token whose expiry cannot be read is unusable: the
+        # same answer as an expired one, never a silent pass (F140).
+        if (isinstance(expires_ms, bool)
+                or not isinstance(expires_ms, (int, float))
+                or (isinstance(expires_ms, float) and not math.isfinite(expires_ms))):
+            return None
+        if expires_ms / 1000.0 <= time.time():
+            return None                   # expired; refreshing is the CLI's job
     return token
 
 

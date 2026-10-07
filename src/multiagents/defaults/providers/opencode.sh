@@ -276,7 +276,10 @@ check)
             echo "no stored credentials (free tier / env keys only)"; exit 10 ;;
         *)
             n=$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) credential.*/\1/p' | head -1)
-            echo "${n:-1} stored credential(s)"; exit 0 ;;
+            if [ -n "$n" ]; then
+                echo "$n stored credential(s)"; exit 0
+            fi
+            echo "unknown: could not parse the stored credential count"; exit 20 ;;
     esac
     ;;
 login)

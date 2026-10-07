@@ -288,7 +288,7 @@ labels = sys.argv[4].splitlines()
 if not labels and not pin:
     labels = ['default']
 labels = [pin] if pin else [label for label in labels if label not in reserved]
-statuses, usable = {}, []
+statuses, usable, unknown = {}, [], {}
 for label in labels:
     path = root if label == 'default' else root / 'accounts' / label
     status = 'missing'
@@ -297,6 +297,10 @@ for label in labels:
         for block in data.values():
             if not isinstance(block, dict) or not block.get('accessToken'):
                 continue
+            if block.get('expiresAt') is None:
+                status = 'unknown'
+                unknown[label] = 'no expiry for the access token'
+                break
             access = float(block.get('expiresAt', 0)) / 1000
             refresh = float(block.get('refreshTokenExpiresAt', 0)) / 1000
             renewable = bool(block.get('refreshToken')) and (not refresh or refresh > time.time())
@@ -304,15 +308,24 @@ for label in labels:
             if refresh and refresh <= time.time():
                 status = 'expired'
             break
-    except (OSError, ValueError, TypeError, AttributeError):
+    except FileNotFoundError:
         pass
+    except OSError:
+        status = 'unknown'
+        unknown[label] = 'could not read credentials'
+    except (ValueError, TypeError, AttributeError):
+        status = 'unknown'
+        unknown[label] = 'unparseable credentials or expiry'
     statuses[label] = status
     if status == 'ok':
         usable.append(label)
-print('accounts: ' + json.dumps(statuses, sort_keys=True) +
-      ('; authenticated' if usable else '; no usable account; run `multiagents auth login ' +
-       __import__('os').environ.get('MULTIAGENTS_PROVIDER', 'claude') + '`'))
-sys.exit(0 if usable else 10)
+note = '; unknown: ' + json.dumps(unknown, sort_keys=True) if unknown else ''
+if usable:
+    note += '; authenticated'
+elif not unknown:
+    note += '; no usable account; run `multiagents auth login ' + __import__('os').environ.get('MULTIAGENTS_PROVIDER', 'claude') + '`'
+print('accounts: ' + json.dumps(statuses, sort_keys=True) + note)
+sys.exit(0 if usable else 20 if unknown else 10)
 PY
             exit $?
         fi
@@ -362,27 +375,43 @@ PY
         SOURCE="$PROFILE"
         [ -n "$VAULT" ] && [ -s "$VAULT/.credentials.json" ] && SOURCE="$VAULT"
         if [ -s "$SOURCE/.credentials.json" ]; then
-            clocks=$(python3 -c "
+            clocks=$(python3 - "$SOURCE/.credentials.json" <<'PY'
 import json, sys
 try:
-    d = json.load(open('$SOURCE/.credentials.json'))
-except Exception:
-    sys.exit(0)                      # unreadable: fall through to 'present'
+    d = json.load(open(sys.argv[1]))
+    if not isinstance(d, dict):
+        raise ValueError
+except (OSError, ValueError):
+    print('unknown: unparseable credentials')
+    sys.exit(0)
 for block in d.values():
-    if not isinstance(block, dict) or not block.get('expiresAt'):
+    if not isinstance(block, dict):
         continue
-    access = int(block['expiresAt']) // 1000
-    refresh = block.get('refreshTokenExpiresAt')
-    if refresh:
-        refresh = int(refresh) // 1000
-    elif block.get('refreshToken'):
-        refresh = 'unknown'          # present but undated: cannot tell, so do
+    if block.get('accessToken') and block.get('expiresAt') is None:
+        print('unknown: no expiry for the access token')
+        break
+    if block.get('expiresAt') is None:
+        continue
+    try:
+        access = int(block['expiresAt']) // 1000
+        refresh = block.get('refreshTokenExpiresAt')
+        if refresh:
+            refresh = int(refresh) // 1000
+        elif block.get('refreshToken'):
+            refresh = 'unknown'      # present but undated: cannot tell, so do
                                      # not invent a verdict from its absence
-    else:
-        refresh = access             # nothing to renew with: access is all
+        else:
+            refresh = access         # nothing to renew with: access is all
+    except (ValueError, TypeError, OverflowError):
+        print('unknown: unparseable expiry')
+        break
     print(access, refresh)
     break
-" 2>/dev/null)
+PY
+)
+            case "$clocks" in
+                unknown:*) echo "$clocks"; exit 20 ;;
+            esac
             now=$(date +%s)
             access=${clocks%% *}
             refresh=${clocks##* }
