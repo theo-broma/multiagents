@@ -4715,3 +4715,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - When: once the breaker fix (nd-25072acb, then reviewer nd-26469547) is merged and no agent is running.
   - How: `git filter-repo --invert-paths --path sys` on a `--no-local` clone. Then run the same checks as rewrite.sh: commit count -1, private-term verify, guard scan with no allow entries, `git-guard scan main`, and source refs unchanged.
   - The user force-pushes with `--force-with-lease`. Afterwards, tag the old main as private `backup-pre-sys` and align the local main.
+- 2026-10-07 ~08:30 **Salvage of the retired loops (user: "oui").** The test commits were taken from the CLEANED clone /var/tmp/rewrite-final, mapped through filter-repo's commit-map, never from the old objects, and exported as patches to /var/tmp/salvage-tests/0001..0005. Nodes, all on LongCat implementers with codex gpt-6.1-sol reviewers:
+  - SL: nd-91bb9c63, then reviewer nd-6567c15f;
+  - EV: nd-f5253094, then reviewer nd-2aa46a09;
+  - AU: nd-c048f031, then reviewer nd-3c94e756;
+  - RV (patches 0004 and 0005): starts after the breaker fix merges, because it touches the same runner and breaker code.
+  - Breaker fix: the first run, ag-9f5d71, died on a provider 500. Re-run as nd-25072acb (ag-a35ae0), with reviewer nd-26469547 re-pointed to it.
+  - The sys strip runs at the next quiet point, after these merge.
