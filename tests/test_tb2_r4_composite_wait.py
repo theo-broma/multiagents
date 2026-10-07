@@ -162,6 +162,8 @@ def test_tb2_r4_a_child_that_moved_before_the_cursor_does_not_wake_the_wait(w):
 
 def test_tb2_r4_wait_for_agents_given_a_composite_id_wakes_on_a_child(w):
     seq, a, b = sequence(w)
+    # acknowledge the setup transitions: a wait returns unacknowledged ones at once
+    call_tool(w, "ack_nodes", cursor=cursor_now(w))
     wait = InFlight(lambda: call_tool(w, "wait_for_agents", [seq], timeout=WAIT_TIMEOUT))
     assert not wait.returned(HOLD), "a composite id was answered at once: nothing had moved"
     w.gate("ga")
