@@ -129,3 +129,9 @@ Verified by: review.
   - `quota_handover.py:704`'s recorded `target_spec`, made consistent with line 668;
   - `quota_handover.reserved_instance` naming the old name, aliased with the OG-R2 warning.
 - The round-6 reviewer listed no other class. If round 7's reviewer finds only minor items, they are recorded and OG merges.
+
+## Decisions after tester ag-e0c52f (2026-10-07)
+- An agent-level `quota_handover.reserved_instance` in agents.yaml is a supported key (AgentSpec carries it) and is aliased exactly like the project-level one: read as `opencode-go`, one OG-R2 warning naming the file and line.
+- The `provider` argument of `steer_agent` (and any other MCP argument naming a provider) is canonicalised before it is checked against the agent's allowed list, so `provider="opencode"` behaves as `opencode-go`.
+- "One load" means one `config.load`; another subsystem re-reading the file in the same process is a separate load. The warning goes to stderr.
+- The "doctor prints each warning 4 times" report did not reproduce on main (d65296b3); tests/test_og_r2_gaps.py keeps it as a guard.

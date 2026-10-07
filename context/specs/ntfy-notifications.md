@@ -269,3 +269,8 @@ Items 2–8 are accepted. Round 3 fixes the items below, each with a failing reg
    - The staleness and scan queries are bounded: they cover only the outbox's node ids, or use an index, or both. The developer chooses.
    - No read transaction is opened while the sender is paused or backing off.
 3. **(minor)** An accepted `notify test` clears `notify_failure`.
+
+## Decisions after tester ag-1cffd7 (2026-10-07)
+- A state change written by another process (e.g. `clear_pause`) between the sender's read and its stamp must not be absorbed: the sender notices it on its next pass (NT-R4, NT-R8). tests/test_nt_review_followups.py items 1.
+- The held-node lookup must work for any number of held nodes, whatever the SQLite variable limit. A lookup that fails is not "nothing held": the sender neither drops pending holds as stale nor re-announces holds already announced; it retries on a later pass (NT-R3, NT-R4).
+- A node already held stays in the same hold episode when a cancel changes its hold reason (e.g. to `termination_unconfirmed`): the hold reason is updated in place, with no second `held` transition and no second notification. NT-R3's "a later hold is a new event" means a hold after the node left the held state.
