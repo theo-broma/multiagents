@@ -4811,3 +4811,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Decision recorded in the spec (1022a325): the whole-scope SL-R3 test, about 805 s, is opt-in with MULTIAGENTS_SL_FULL=1.
   - Chain: agy reviewer nd-b56e63a0 → tester nd-36e0e084 adds the gate and an AGENTS.md line. Then I read that small diff and run merge_node nd-36e0e084.
 - Researcher nd-912c6a95 is diagnosing the 4 reds on main: nc_r13 (5 node tools not in the registry), nc_r26 (an extra held state on cancel) and nc_r76 (StopIteration).
+- Researcher ag-3c9b5e: all 4 reds on main are test defects.
+  - nc_r13 and nc_r76 read the MCP registry at import, under the agent's `MULTIAGENTS_NODE_PERMISSIONS=read`; the cause is 16fa7a57f. They pass when the orchestrator runs them.
+  - nc_r26 expects the old sequence; the interim `held` comes from NT-R3 round 3, 3316e4054.
+  - The fix is tester nd-520dbea7, with no reviewer needed since it touches tests only. Read the diff, then merge_node.
