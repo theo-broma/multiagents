@@ -4872,3 +4872,21 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - OG-R2 gaps MERGED 9dd15b65 (nd-73539912; round 2 approved by agy ag-c3798e): agent-level reserved_instance, steer provider, node pins, check/update_model_catalog all canonicalised with a stderr warning (shared `_canonical_provider` in server.py). NT implementer-deep c4134a52 (466 passed vs 5 failed on main) under review: nd-9e1ad195; on approval merge_node nd-f7d7a05a.
 - NT review follow-ups MERGED b49009ab (nd-f7d7a05a, agy ag-0945a6 approved): stamp before read, batched held lookup under the connection limit with retry on failure, cancel keeps an already-held child's hold episode. 17/17 targeted green on main. The host scheduler must be restarted to load the NT sender/rpc.py and OG pins changes (user runs it).
 - §4 trial report: researcher nd (inventory of what worked / awkward / defects) → I write the report section here, then import the plan's Next phase and hand back.
+
+## §4 Scheduler trial report (plan 2026-10-05-scheduler-first-real-use, 2026-10-07)
+Inventory by researcher ag-f02c6b (nd-7890cb6b); BRIEF line refs there.
+
+**Worked.** Simple nodes and chains gated on `depends_on: success`, node branches keeping commits, `merge_node` publishing (AU df5a8ec6, SL f0c77a96, TB A/B/C, OG 9dd15b65, NT b49009ab), verdict recording from the VERDICT line (VR), explicit-id waits, TB-R1..R5/R7 (NEED_INFO holds, relaunch on simple nodes, wait sees unlaunched nodes, rate-limit resume, no WIP commit for read-only runs, conversation fingerprint).
+
+**Loops (templates `implement`, `implement-reviewed`) have NOT been shown to work.** The only real use (SL/AU/RV/EV, 2026-10-06) ended with all four loops held (run_failed with no recovery; unresolved_round because verdicts were only taken from `give_verdict`), then retired by the history rewrite; their tests were salvaged by hand. The blocking causes are fixed since (VR, RV, TB-R2), but no loop has run since. Since then every feature ran as hand-made simple chains (tester → implementer → reviewer, a new chain per rejected round), with tests read by the orchestrator only and no shared reviewer session.
+
+**Awkward in the node tools.** merge_node needs a clean main tree; template reviewer tasks ignore `spec_path`; instantiate echoes the definition twice (~4k tokens); session aliases cannot be re-pinned per node; merge_agent refuses node runs (use merge_node); create_node has no `verifies`.
+
+**Defects still open:**
+1. collect_agent reports `no_commits` for node runs (reads agents/<agent>/<id>, not nodes/<node>) — every node collect today.
+2. Doom-loop watchdog flags an agent tailing a growing log as unchanged (ag-89e3a7 twice today; earlier fix 5c5a75e/63a2ca9 incomplete for codex `command_execution`).
+3. wait_for_nodes returns empty `capacity`.
+4. A child depending on an already-finished node launches at once (by design? needs a decision).
+5. Waiting on a composite does not wake for child transitions.
+6. scheduler_status / waits keep a `windows` entry for every node ever created (cosmetic, grows).
+Per the plan, these are fixed before phase 7 part 2 is specified.
