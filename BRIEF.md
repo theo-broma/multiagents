@@ -4823,3 +4823,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The gate tester nd-36e0e084 was already running, so the fixes go to a follow-up tester, nd-f38f2794, which takes nd-36e0e084 as input.
   - I read the final diff, then merge_node nd-f38f2794.
 - SL MERGED as f0c77a96: the world.py worker reap, the SL tests, the MULTIAGENTS_SL_FULL opt-in gate, the review fixes (decoy finalizers, inner exit code 0 or 1 with a parsed passed count) and the AGENTS.md line. Only EV is left in the salvage.
+- EV-R2 migration done: tester ag-a8fed6, commit 8b702c7e, tests only. Full suite went from 403 failures to 84.
+  - Of the 84: 72 are the phase2 reds; 9 predate EV and are fixed on main since (f3a5e17b, 66e193f1); 2 are known flakes.
+  - The 1 that EV causes is the P0-R8 vocabulary invariant. Allowlist names such as CLAUDE_CONFIG_DIR count, because the test matches case-insensitively.
+  - Decision recorded in the EV spec (7996d97b): move the allowlist into a data file under defaults/; the invariant is not relaxed.
+  - Chain: agy reviewer nd-5bfdfb4d (ag-84f329) is reviewing the migration; implementer nd-436e1265 moves the allowlist; agy reviewer nd-29e68ce5 reviews only the move.
+  - When both reviewers approve, merge_node nd-436e1265, the implementer node, NOT a reviewer node, because of possible WIP junk. Then set F112 and F33 to fixed.
+- Note: the P0-R8 test's BASE = "e00b7de" is a pre-rewrite SHA. After the sys strip it will skip. Remap it, along with the other SHA-citing tests.
