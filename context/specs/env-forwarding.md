@@ -46,6 +46,8 @@ provider-specific, to that provider's `env:` block. Adding a broad pattern
 Verified by: the existing script/auth/budget suites green; review of each
 addition.
 
+Decision (orchestrator, 2026-10-07): the EV-R1 allowlist must not live in a `.py` file under src/multiagents/. The P0-R8 invariant (tests/test_phase0_context_window.py::test_p0_r8_invariant_no_provider_or_transcript_vocabulary_added, case-insensitive) forbids adding provider names there, and allowlist entries such as `CLAUDE_CONFIG_DIR` and `MULTIAGENTS_OPENCODE_PLAN` trip it by name alone. The list therefore moves to a documented data file beside the provider scripts, under `src/multiagents/defaults/`; the developer chooses the name and format. scripts.py loads it, and the one-line reason for each entry lives in that file. The P0-R8 test is not relaxed. (Raised by run ag-a8fed6.)
+
 **EV-R3 (F33).** In the executor's `build_env`, a key named in `blocked` is
 never forwarded, whether it comes from the always-on base keys or from
 `passthrough`. (Blocking `PATH` is the operator's choice and is honoured.)
