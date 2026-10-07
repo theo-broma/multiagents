@@ -4749,7 +4749,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - History rewrite published; the old main is kept in the private local tags `backup-pre-push` and `backup-before-rewrite`.
 
 **In flight (wait with explicit run ids; get them via get_node):**
-- RV: reviewer agy nd-e169d892 on codex nd-a3c5bf15 (5a7de682). If APPROVED, merge_node nd-a3c5bf15.
+- RV: MERGED f11b4444 (agy ag-ed5b1b APPROVED, 0 defects). Test file is new, so the readonly restore did not touch it.
   - Codex's NEED_INFO: test_core.py::test_redaction_masks_shapes_keys_and_literals fails because the rewrite turned its fake `sk-…` into `sk-<redacted>`. It is covered by the next item.
 - Rewrite-damaged fixtures: tester nd-427cb00d (full suite against context/ts/manifests; fix by runtime assembly; list the SHA-citing tests and the non-rewrite failures), then agy reviewer nd-2a7ef478. If APPROVED, merge.
 - Codex saw 2 flaky breaker-admission tests (3 launches instead of 4). Look again after the fixture repair report.
