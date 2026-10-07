@@ -31,6 +31,9 @@ Use `scripts/test-chunk.sh --list K N` to print a chunk's test-file list.
 If this worktree's `.venv` lacks pytest, run:
 `PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider $(scripts/test-chunk.sh --list K N)`.
 
+Changes to the nc/c23/pc fixtures must be checked with `MULTIAGENTS_SL_FULL=1`
+(whole-scope leak test SL-R3, about 13 min) before merging.
+
 About 72 reds in `tests/test_phase2_*` are known and by design, pending the
 deferred phase 2 review; they are not regressions. Never `pkill` pytest by
 pattern: other agents run suites concurrently on this machine.

@@ -258,6 +258,44 @@ class World:
                         os.kill(pid, signal.SIGKILL)
                     except OSError:
                         pass
+        self._reap_workers()
+
+    def _reap_workers(self) -> None:
+        """SL-R2: a `scheduler.worker` of this world's project outlives the
+        scheduler's stop when its run is parked on a question. Kill each by
+        exact pid (the project root is its argument), children first."""
+        root = str(self.root)
+        end = time.monotonic() + TEARDOWN_GRACE
+        while True:
+            procs = {}
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                try:
+                    raw = Path("/proc", entry, "cmdline").read_bytes()
+                    stat = Path("/proc", entry, "stat").read_text()
+                except OSError:
+                    continue
+                argv = raw.decode(errors="replace").split("\0")
+                procs[int(entry)] = (argv, int(stat.rsplit(")", 1)[1].split()[1]))
+            victims = {pid for pid, (argv, _) in procs.items()
+                       if "multiagents.scheduler.worker" in argv and root in argv}
+            if not victims:
+                return
+            doomed = set(victims)
+            grew = True
+            while grew:
+                kids = {pid for pid, (_, ppid) in procs.items() if ppid in doomed}
+                grew = not kids <= doomed
+                doomed |= kids
+            for pid in sorted(doomed - victims) + sorted(victims):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            if time.monotonic() >= end:
+                return
+            time.sleep(0.05)
 
     # ------------------------------------------------------------------ rpc
     def raw(self, op: str, token: str | None, args: dict | None = None,
