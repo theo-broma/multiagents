@@ -229,6 +229,10 @@ def _merge_breaker(current: Any, legacy: Any) -> dict:
         later = _later(a.get(key), b.get(key))
         if later is not None:
             merged[key] = later
+    # A trial's release token belongs to its timestamp, never to a different
+    # claim inherited from the other history.
+    if "trial_at" in primary and "trial_token" not in primary:
+        merged.pop("trial_token", None)
     return merged
 
 
@@ -1385,6 +1389,7 @@ class Tree:
                 health["last_success"] = now()
                 health.pop("tripped", None)
                 health.pop("trial_at", None)
+                health.pop("trial_token", None)
                 health.pop("last_kind", None)
                 # The health record is not what routing reads. Leaving the
                 # cooldown behind kept a working provider out of the pool for
@@ -1953,7 +1958,8 @@ class Tree:
         health = (self.read().get("provider_health") or {}).get(provider) or {}
         return now() - float(health.get("trial_at") or 0) < window
 
-    def claim_trial(self, provider: str, window: float = 120.0) -> bool:
+    def claim_trial(self, provider: str, window: float = 120.0,
+                    token: str = "") -> bool:
         """Take the single retry allowed when a cooldown has just lapsed.
 
         "One trial at a time" was a comment rather than a fact: when the timer
@@ -1969,6 +1975,27 @@ class Tree:
             if now() - float(health.get("trial_at") or 0) < window:
                 return False
             health["trial_at"] = now()
+            if token:
+                health["trial_token"] = token
+            else:
+                health.pop("trial_token", None)
+        return True
+
+    def release_trial(self, provider: str, token: str) -> bool:
+        """Return this start's trial when it launched nothing.
+
+        The breaker stays tripped: no run proved recovery. Compare the token
+        under the same lock as the claim, so a late refusal cannot release a
+        newer trial that took over after the probe window elapsed.
+        """
+        if not token:
+            return False
+        with self.transaction() as data:
+            health = data["provider_health"].get(provider) or {}
+            if health.get("trial_token") != token:
+                return False
+            health.pop("trial_at", None)
+            health.pop("trial_token", None)
         return True
 
     # -------------------------------------------------------------- display --

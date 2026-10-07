@@ -4752,7 +4752,7 @@ class Runner(QuotaHandover):
             return None
         return await self._pin_health(spec)
 
-    def _take_half_open_trial(self, provider_name: str) -> str:
+    def _take_half_open_trial(self, provider_name: str, token: str = "") -> str:
         """Take the single trial a lapsed cooldown allows, for the run about
         to launch on `provider_name`. Returns `"free"` when the run may
         proceed and `"held"` when somebody else holds the trial.
@@ -4764,8 +4764,9 @@ class Runner(QuotaHandover):
         elsewhere, and the next admission probe saw `trial_pending` and
         refused the tripped provider for another minute — for as long as
         other starts kept happening. So the pass only observes, and the run
-        claims here, once routing has chosen and every check that could still
-        refuse has passed (bug-521be6's discipline, as in `_claim_trial`).
+        claims here, once routing and startup admission have chosen. Setup
+        and the final spawn guards still follow; `start()` returns its own
+        token on an exit that launches nothing.
         """
         state = self.tree.read()
         live = (state.get("cooldowns") or {}).get(provider_name) or {}
@@ -4779,12 +4780,16 @@ class Runner(QuotaHandover):
         if live.get("until", 0) > now() and not live.get("needs_login"):
             return "free"
         probe_every = float(self.config.limits.get("provider_probe_seconds", 120))
-        if not self.tree.claim_trial(provider_name, window=probe_every):
+        if not self.tree.claim_trial(provider_name, window=probe_every, token=token):
             return "held"                     # somebody else is trying
-        if live.get("until", 0) <= now():
-            # This run IS the trial, so the tally of what went wrong before
-            # it starts again — as `_half_open` does with its own claim.
-            self.tree.begin_trial(provider_name)
+        try:
+            if live.get("until", 0) <= now():
+                # This run IS the trial, so the tally of what went wrong before
+                # it starts again — as `_half_open` does with its own claim.
+                self.tree.begin_trial(provider_name)
+        except BaseException:
+            self.tree.release_trial(provider_name, token)
+            raise
         return "free"
 
     def _instance_strategy(self, preferred: str) -> dict[str, Any]:
@@ -5421,15 +5426,20 @@ class Runner(QuotaHandover):
                 unclaimable.add(provider.name)
                 continue
             # The half-open trial belongs to the run that launches on this
-            # provider — and to nothing else. It is claimed here, after every
-            # check that could still refuse (bug-521be6's discipline) and
-            # after the startup claim, so losing the race holds no claim of
-            # any kind once the release below runs. A pinned start that loses
+            # provider. Claim after routing and the startup claim; setup and
+            # spawn guards can still refuse, so a start that launches nothing
+            # returns its own trial token below. A pinned start that loses
             # it gets the PS-R6 refusal; an unpinned one routes again with
             # this provider cooled, exactly as PS-R5b handles the startup
             # race (siblings and fallbacks are tried, and deferral applies
             # when none is left).
-            if self._take_half_open_trial(provider.name) == "held":
+            trial_token = os.urandom(16).hex()
+            try:
+                trial = self._take_half_open_trial(provider.name, trial_token)
+            except BaseException:
+                self._startup_finish(provider.name, node_id, startup_token)
+                raise
+            if trial == "held":
                 self._startup_finish(provider.name, node_id, startup_token)
                 startup_token = ""
                 if model:
@@ -5524,6 +5534,7 @@ class Runner(QuotaHandover):
                 # taken for this attempt goes back first.
                 self._startup_finish(provider.name, node_id, startup_token)
                 startup_token = ""
+                self.tree.release_trial(provider.name, trial_token)
                 return await self.start(
                     agent_name, task, workdir=workdir, timeout=timeout, model=model,
                     verifies=verifies, budget_tag=budget_tag,
@@ -5583,6 +5594,7 @@ class Runner(QuotaHandover):
                                 "retry_after": exc.refusal["until"], "refused_node": node_id}
                     self._startup_finish(provider.name, node_id, startup_token)
                     startup_token = ""
+                    self.tree.release_trial(provider.name, trial_token)
                     if _cap_raced:
                         # Raced twice: admission and the spawn keep disagreeing
                         # (a cap flapping). Deferred on this route, no further
@@ -5624,6 +5636,10 @@ class Runner(QuotaHandover):
         finally:
             if not launched:
                 self._startup_finish(provider.name, node_id, startup_token)
+                # Setup, admission races and spawn refusals launch no trial.
+                # Keep a claim while cleanup still owns an unconfirmed process.
+                if not self._held(node_id):
+                    self.tree.release_trial(provider.name, trial_token)
 
     def _pc_queue_start(self, refused: tuple[ProviderFull, str], agent_name: str,
                         task: str, *, model: str | None, timeout: int | None,
