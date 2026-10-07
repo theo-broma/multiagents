@@ -47,6 +47,74 @@ Decision (orchestrator, 2026-10-07): the whole-scope SL-R3 test runs the scoped 
 10 %.
 Verified by: full scoped run with `-n 4`.
 
+## Part 2: the owner dies (2026-10-07)
+
+Observed after part 1 merged: about 91 `scheduler start --foreground` and
+`scheduler.worker` processes in the agents' container, reparented to
+docker-init, up to 2 days old. Part 1 teardown runs only when pytest runs its
+finalizers. Agents' suites are often killed by a timeout (SIGTERM/SIGKILL),
+and then the daemon and its workers survive. Both run in their own session
+(`scheduler/__init__.py:84-92`, `engine.py:1110-1114`), and the daemon has no
+exit condition of its own. Separately, `tests/support/nc_harness.py`
+`Sched.close` never reaps workers (researcher ag-08622e; advisor ag-aed397).
+
+Scope widens to every test module that starts a real scheduler daemon:
+nc_fixture `World`/`ClockWorld`, `tests/support/nc_harness.py`,
+`tests/support/nt_part2_harness.py`, and their callers. Production code IS in
+scope for SL-R6..R8, opt-in only.
+
+**SL-R6.** A test harness that launches a real scheduler daemon marks it with
+an owner. The owner is the pytest process that runs the test: the xdist
+worker, not the controller or the CLI wrapper. The marker identifies the
+owner by pid and process start time, so pid reuse cannot impersonate it, and
+it carries the fixture's project path. The daemon passes the marker to every
+worker it spawns. Without the marker, production behaviour is unchanged
+(workers still outlive a daemon stop and are adopted on restart).
+Verified by: a test that launches a marked daemon and a worker and inspects
+what they carry; a test that an unmarked daemon behaves as before.
+
+**SL-R7.** A marked daemon or worker whose owner has died, or become a
+zombie, exits within 10 s of real (monotonic) time. ClockWorld's simulated
+clock has no effect on this. The check also runs while startup or admission
+is blocked, not only between ticks. Before exiting:
+- the daemon launches nothing more;
+- each worker ends its own run and that run's wrapper descendants, without
+  relying on the daemon (which may already have been SIGKILLed);
+- shutdown is bounded: TERM, then KILL after a grace period; each target's
+  identity is checked again just before it is signalled; directly owned
+  children are waited for.
+While the owner lives, stopping or killing the daemon still leaves workers
+running and adoptable, exactly as today.
+Verified by: an inner owner process that starts a marked daemon with a running
+worker and is then SIGKILLed; after 10 s no process carrying that owner's
+marker remains. Plus the same check for a SIGTERMed owner.
+
+**SL-R8.** Ordinary fixture teardown kills its own daemon and workers,
+including in `nc_harness.Sched.close`. All harnesses share one helper that
+selects processes by marker and project path. A teardown never touches
+processes of another fixture owned by the same pytest process, nor anything
+unmarked.
+Verified by: two fixtures under one owner; closing one leaves the other's
+daemon and worker alive. A `Sched` teardown after a worker launched leaves no
+worker.
+
+**SL-R9.** At session start (once per xdist worker is fine; concurrent sweeps
+must be harmless and idempotent), the suite kills marked scheduler and worker
+processes whose owner is dead, along with their verified descendants.
+Nothing is killed on any other basis:
+- a malformed marker, an unreadable `/proc` entry or a different uid gives no
+  authority to kill;
+- an unmarked process is never killed, so orphans from before this change
+  stay manual;
+- a process whose owner is alive, such as another agent's running suite, is
+  never killed.
+Verified by: planted marked processes with a dead owner, a live owner, a
+malformed marker and no marker; only the first kind dies.
+
+**SL-R10.** SL-R5 holds for the widened scope: no per-id outcome changes, and
+the runtime does not grow by more than 10 %.
+Verified by: full suite with `-n 4`, compared with main.
+
 ## Out of scope
 - Processes leaked by tests outside the scope above (report them if seen).
 - Killing processes by name pattern: never `pkill` by pattern, other agents run
