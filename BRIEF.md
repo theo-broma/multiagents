@@ -4836,3 +4836,6 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - On main, 1081 tests pass across the EV, AU, core and migrated files.
   - Ledger: F112 and F33 set to fixed.
 - **Salvage complete: SL, EV, AU and RV are all on main.** Next per the handoff: strip `sys` from history once nothing is running, then remap the SHA-citing tests.
+- **sys STRIPPED from history (2026-10-07).** The user force-pushed with lease: origin main 4315804 → a8431c0b, 1665 → 1664 commits, tip tree identical, no blob over 5 MB. Old main tagged private `backup-pre-sys` (a1f5b35f, never pushed); local main reset to a8431c0b.
+  - Guard scan before push: only the user's own commit identity (one email fingerprint), already on the published history; no allow entry added, reported to the user.
+  - Next: remap the SHA-citing tests through both commit-maps (rewrite-final, then sys-strip), routed to the tester.
