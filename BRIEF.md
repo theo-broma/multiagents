@@ -4800,3 +4800,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Reviewer ag-627a75 REJECTED with 1 finding: claude.sh:393, a falsy expiresAt (0 or "") still reports logged in.
   - Round 2 goes to implementer-deep nd-54d3164d. It fixes that defect and the AU-R4 gap codex reported itself: a rejected token is not registered for redaction. The new tests go in tests/test_au_round2.py.
   - Then agy reviewer nd-96d7d4ba. merge_node nd-96d7d4ba if it approves, after a full-suite check.
+- AU MERGED as df5a8ec6, through merge_node on the implementer node nd-54d3164d. Its reviewer nd-96d7d4ba (ag-7ab477) APPROVED.
+  - I did not merge the reviewer node: its auto "work in progress" commit 9ea65599 had captured a stray `diff.patch` (685 lines) the reviewer wrote.
+  - Tooling: an auto WIP commit picks up a reviewer's scratch files. Add this to the batch.
+  - On main, 114 of the AU, c2 and redaction tests pass.
+  - Ledger: F130, F131, F132 and F140 set to fixed.

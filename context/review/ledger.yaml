@@ -498,8 +498,14 @@ findings:
         file it cannot read a clock from.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'AU-R1 merged df5a8ec6 (f0402e24, ee0e9c36): claude check reports unknown
+        (exit 20) on unparseable credentials or missing expiry, falsy expiry handled.
+        Reviewed by agy ag-7ab477, approved.'
+      sha: df5a8ec67fd45044caced27e9493794332e7a3c0
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`claude.sh check` reports "logged in" for a credentials file that is
       corrupt, or present but missing the one field it reads'
   F131:
@@ -540,8 +546,14 @@ findings:
         fix is to say "cannot verify" rather than "authenticated".'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'AU-R3 merged df5a8ec6 (f0402e24): agy.sh says "container token present
+        (not verified)" and documents that the check answers "was a login attempted".
+        Reviewed ag-7ab477.'
+      sha: df5a8ec67fd45044caced27e9493794332e7a3c0
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`agy.sh check` (container branch) authenticates on ANY non-empty token
       file, with no format or expiry check at all'
   F132:
@@ -560,8 +572,14 @@ findings:
         in the permissive direction. Fix F135 in the same pass; it is the same extraction.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'AU-R2 merged df5a8ec6 (f0402e24, test ea8f0537): opencode.sh check exits
+        20 on unmatched output, never defaults to 1 credential; count pattern deliberately
+        not widened (spec decision 2095c564). Reviewed ag-7ab477.'
+      sha: df5a8ec67fd45044caced27e9493794332e7a3c0
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`opencode.sh check` defaults to "1 stored credential(s)" (authenticated)
       for ANY CLI output it cannot parse, including no output at all'
   F133:
@@ -666,8 +684,14 @@ findings:
         but non-numeric, so the token is returned as valid.
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'AU-R4 merged df5a8ec6 (2cd7c8ba from c466d0c1, ee0e9c36): _claude_token
+        rejects non-finite/non-numeric expiresAt and registers every token read for
+        redaction, including rejected ones. Reviewed ag-7ab477.'
+      sha: df5a8ec67fd45044caced27e9493794332e7a3c0
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`_claude_token` returns a token as valid when `expiresAt` is present
       but non-numeric, because the `isinstance` guard skips the expiry check entirely'
   F141:
