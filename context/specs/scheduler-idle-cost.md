@@ -40,6 +40,18 @@ wake-on-completion latency, window and rate-limit evaluation, attention.json
 content, notifications and anomaly scans.
 Verified by: full suite with `-n 4`, per-id outcomes unchanged against main.
 
+Decisions (orchestrator, 2026-10-07, on tester ag-1a3151's questions):
+- "Idle tick" means a steady-state tick. The first tick after daemon start
+  may read all history once, for example to build a cache. Later ticks may
+  not.
+- SC-R1's bound is at most 3 attempt-record decodes per active attempt, plus
+  a constant 5 for the `tree.json` read.
+- "Same transitions, holds, attention.json and notifications": this suite
+  compares ticks within the suite and across history sizes. The per-id
+  comparison against main is SC-R3's full-suite check.
+- Counting every `json.loads` in the process is an acceptable proxy, since
+  the fixture keeps `tree.json` small.
+
 ## Out of scope
 - `runner._worktree_state` walking the whole worktree, including `.venv`, on
   each progress sample of an active run. It costs only while runs are
