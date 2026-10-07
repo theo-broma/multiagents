@@ -42,3 +42,8 @@ a dependent only once its task is final.
 - `scheduler_status` and wait replies list window entries only for nodes that
   are not final (open, running, held, pending resume).
 - Verified by: 50 done nodes and 1 open node with a window: one entry.
+
+## Decisions after tester ag-c964ae (2026-10-07)
+- `commits` is the integer count, as for runs outside the scheduler. A relaunched node counts only the latest run's commits (input commit → generation commit).
+- "Grew" means a file in the worktree is larger than at the previous repetition (tracked or untracked).
+- Evidence for the real R2 trip: ag-89e3a7 ran `tail -n 2 nt-baseline.log` three times; the codex `item.completed` events carry three different `result` digests (output.ndjson items 30/31/33, copy in .multiagents/tb2-evidence/codex-tail-ag-89e3a7.ndjson), yet the run was flagged `doom_loop`. In stream.jsonl the matching `step` events have no result. TB2-R2 is therefore not met for the real codex event sequence; a test must replay that sequence through the real adapter and supervisor.
