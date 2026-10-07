@@ -4732,3 +4732,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The patches are now in `.multiagents/salvage-tests/` (gitignored), passed by absolute path; check that this path is visible to the container. The tasks forbid reconstructing tests or reading old commits.
   - New nodes, implementer then agy reviewer: SL nd-7ea0863c → nd-7b197730; EV nd-b66a6f44 → nd-c714a0a0; AU nd-81387189 → nd-fe6a285d; RV (codex) nd-5a9ab2aa → nd-84f659b2. SL is confirmed to apply its patch.
   - Lesson: hand files to agents through the project tree, never through the host's /var/tmp.
+- 2026-10-07 ~10:10 RV: codex ag-bed946 (nd-5a9ab2aa) applied both patches, giving a red baseline of 22 failed and 16 passed.
+  - It reported a broken test: `test_rv_r2_collect_shows_the_error_in_both_modes` looks for a literal containing quotes inside `json.dumps`, so it can never match.
+  - Its draft implementation was left uncommitted.
+  - Reviewer nd-84f659b2 is cancelled. The chain is now: tester fix nd-fb2b11ce → codex nd-a3c5bf15 (the monthly-spend quota case of RV-R4 was still open) → agy reviewer nd-e169d892.
