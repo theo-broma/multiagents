@@ -4866,3 +4866,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - OG-R2 gaps (reserved_instance qh + agent-level, steer provider alias, doctor warning once): tester nd-b5f68db5 → tests/test_og_r2_gaps.py; then implementer → agy reviewer; merge the implementer node.
   - RV_IMPLEMENTED flip: tester nd-f926418c (tests only); read result, merge_node if only test fixes; src gaps → implementer.
   - NT review follow-ups (sender stamp-after-read, _held_seqs swallow/chunk, cancel re-holds held child): tester nd-4e2c96d9 → tests/test_nt_review_followups.py; then implementer → reviewer.
+- RV flip MERGED 03e32362 (42/42 VR green; RV-R1 holds, no src gap). OG gap tests 0a2f8079 (2 red: agent-level reserved_instance, steer provider arg; doctor ×4 did not reproduce → guard). NT follow-up tests ad76efcf (5 red). Decisions d71cf7ae (cancel on held child updates the reason in place, no second `held`).
+  - Implementers: OG implementer nd-9b6bfe3b; NT implementer-deep nd-f7d7a05a. Then an agy reviewer each (diff main...HEAD, verifies the implementer run); merge the implementer node.
