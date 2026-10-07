@@ -4805,3 +4805,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tooling: an auto WIP commit picks up a reviewer's scratch files. Add this to the batch.
   - On main, 114 of the AU, c2 and redaction tests pass.
   - Ledger: F130, F131, F132 and F140 set to fixed.
+- SL: tester ag-9e4522 fixed the leak in tests/nc_fixture/world.py (6f9324df). Workers of runs parked on a question survived `close()`; they are now killed by exact pid, and only those under the world's own project root.
+  - SL-R3 and SL-R4 are green.
+  - SL-R5 scoped run: 1551 passed and 4 failed. Those 4 also fail without the change; they are the same nc_r13/r26/r76 reds as on main.
+  - Decision recorded in the spec (1022a325): the whole-scope SL-R3 test, about 805 s, is opt-in with MULTIAGENTS_SL_FULL=1.
+  - Chain: agy reviewer nd-b56e63a0 → tester nd-36e0e084 adds the gate and an AGENTS.md line. Then I read that small diff and run merge_node nd-36e0e084.
+- Researcher nd-912c6a95 is diagnosing the 4 reds on main: nc_r13 (5 node tools not in the registry), nc_r26 (an extra held state on cancel) and nc_r76 (StopIteration).
