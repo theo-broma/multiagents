@@ -115,6 +115,18 @@ malformed marker and no marker; only the first kind dies.
 the runtime does not grow by more than 10 %.
 Verified by: full suite with `-n 4`, compared with main.
 
+Decisions (orchestrator, 2026-10-07, on tester ag-850b7f's questions):
+- SL-R7 "launches nothing more": the daemon checks that the owner is alive
+  immediately before every launch. Any launch that starts after the owner
+  has died is a violation; the tester's default stands.
+- SL-R9: a zombie owner counts as dead, as in SL-R7. The sweep must kill
+  processes whose owner is a zombie, and that case is tested.
+- SL-R9 selection: the sweep picks processes by the marker in their
+  environment, never by argv. A marked process with a dead owner is killed
+  whatever its command line, so planted processes shaped like a worker or a
+  daemon are valid fixtures. The sweep must not require a process to be a
+  real child of a daemon. Its verified descendants are killed with it.
+
 ## Out of scope
 - Processes leaked by tests outside the scope above (report them if seen).
 - Killing processes by name pattern: never `pkill` by pattern, other agents run
