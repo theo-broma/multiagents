@@ -1,4 +1,4 @@
-"""Adversary tests for the D1 limit-notice fixes (942df35).
+"""Adversary tests for the D1 limit-notice fixes (872ab89).
 
 Contract: `context/specs/d1-limit-notices-contract.md` (LN-C2..C5), and the
 properties the fixes themselves claim in `notices.py` / `occupancy.py`:
@@ -6,7 +6,7 @@ the host-owned notice state is the only authority, `tree.json` is a display
 mirror a container agent can write, a corrupt state fails safe, and
 occupancy is judged over the run's whole life.
 
-Every test here was red against 942df35 when written.
+Every test here was red against 872ab89 when written.
 """
 from __future__ import annotations
 
@@ -306,7 +306,7 @@ def test_adv_occupancy_with_a_malformed_entry_fails_closed_without_raising(tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Coverage guards. These PASS on 942df35; each kills a mutation the existing
+# Coverage guards. These PASS on 872ab89; each kills a mutation the existing
 # D1 suite let survive (see the adversary report).
 
 

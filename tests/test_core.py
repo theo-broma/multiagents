@@ -4142,7 +4142,7 @@ def test_every_working_agent_names_a_cross_provider_fallback():
     """Without one an agent cannot fail over — a model id belongs to its own
     provider's namespace, so `agy --model opencode-go/...` is meaningless.
 
-    Except where waiting is the point. The user's standing decision (fc01d27):
+    Except where waiting is the point. The user's standing decision (1441c9f):
     an agent never runs on a claude model through the agy provider; it defers
     instead. The only cross-provider fallback these four had was exactly that,
     so they now have none, and that is correct rather than an omission. Every
@@ -4191,7 +4191,7 @@ def test_a_checking_pair_never_collapses_onto_one_model():
 
     def defers(spec, down):
         # An agent with no fallback at all waits out its provider's outage
-        # (fc01d27) rather than running anything, so it cannot collapse.
+        # (1441c9f) rather than running anything, so it cannot collapse.
         return spec["provider"] == down and not spec.get("models")
 
     # Every family the roster names, as a primary or as a fallback, taken down

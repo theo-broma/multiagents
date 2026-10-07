@@ -1,7 +1,7 @@
 """Adversarial tests attacking privilege boundaries and isolation in tooling defect 6.
 
 Contract: context/specs/subagent-mcp.md (SM-R1..SM-R5).
-Commit under attack: 2a39b13.
+Commit under attack: 9818b99.
 """
 
 from __future__ import annotations

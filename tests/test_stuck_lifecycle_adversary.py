@@ -1,4 +1,4 @@
-"""Adversary tests attacking the bug-2cebea fix (commit 904e7f0).
+"""Adversary tests attacking the bug-2cebea fix (commit 39327a4).
 
 Contract: context/specs/stuck-lifecycle.md (SL-R1..SL-R7).
 These tests demonstrate defects in:

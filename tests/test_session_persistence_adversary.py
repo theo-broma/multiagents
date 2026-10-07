@@ -1,7 +1,7 @@
 """Adversary tests for session-persistence (SP-R1..SP-R5).
 
 Contract: context/specs/session-persistence.md.
-Attacks the implementation merged in b6610ca against edge cases, boundary inputs,
+Attacks the implementation merged in cc00870 against edge cases, boundary inputs,
 stale states, path traversals, and concurrency.
 """
 

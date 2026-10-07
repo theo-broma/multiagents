@@ -21,7 +21,7 @@ the host. That is the module's standing rule ("every bind mount here uses
 satisfy the read-only/writable split while breaking everything else.
 
 The last Decisions section ("after testers ag-2e9add … and ag-4c3dd4",
-5b9e633) adds protected paths: `.git/config.worktree`, `.git/modules`,
+d35c052) adds protected paths: `.git/config.worktree`, `.git/modules`,
 `.git/refs/heads` and `.git/refs/tags` (with `.git/refs/heads/agents`, the
 agent-branch namespace, writable inside them), and the base branch — the one
 checked out in the main checkout — as a loose ref file, unpacked from

@@ -1,4 +1,4 @@
-"""Codex provider contract: the adapter review at 4f3f185 (CX-C21..CX-C26).
+"""Codex provider contract: the adapter review at 8bf298b (CX-C21..CX-C26).
 
 Black box, as the rest of the codex suite: the adapter runs as an executable
 with an explicit environment, the native CLI is the fake of
@@ -11,7 +11,7 @@ black-box trigger; and the cleanup items of the review, which the spec marks
 "not tested".
 
 CX-C25 covers only its URL half. Its env allowlist was withdrawn (spec, last
-section, def4854): the multiagents entry's `env` reaches Codex through `-c`
+section, 288f685): the multiagents entry's `env` reaches Codex through `-c`
 by design, and test_codex_provider_edges.py::test_cx_c10_hostile_mcp_env_values_inject_no_config_keys
 requires it verbatim there.
 """

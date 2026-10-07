@@ -2,7 +2,7 @@
 
 Contract: `context/specs/subagent-mcp.md`, SM-R1.
 
-99be9d6 and 5afd545 got `consult` as far as actually starting a child inside
+e347e9e and a46ae76 got `consult` as far as actually starting a child inside
 the container. The live check then failed one layer further in: ag-37349e's
 `dev-advisor` (agy, launched via `DockerExecutor._start_inside`) failed
 immediately with `Eligibility check failed: ... dial tcp: lookup

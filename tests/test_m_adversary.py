@@ -2,7 +2,7 @@
 
 Each test states the contract clause it holds the code to. Tests marked
 "guard" pass today and pin a fail-safe behaviour the review probed; the rest
-fail on 28eb8a6 and demonstrate a defect.
+fail on 784cc20 and demonstrate a defect.
 
 Reuses the black-box seams of tests/test_m_routing_fixes.py: real fake-CLI
 subprocesses, budget readings injected via `budget.read_all` or a real

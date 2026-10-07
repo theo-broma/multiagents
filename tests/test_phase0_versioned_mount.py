@@ -15,10 +15,10 @@ root (the project root is mounted, read-only since SG-R2, and would otherwise
     host/.local/share/fakecli/versions/   (the versions directory)
     host/.local/share/fakecli/settings    (a bystander outside the versions dir)
 
-Versioned launcher, as amended 2026-09-22 (47698b3): a symlink whose resolved
+Versioned launcher, as amended 2026-09-22 (4694b9d): a symlink whose resolved
 target is a FILE in a directory other than the launcher's own; that directory
 is the versions directory whatever its name, even with a single entry.
-Tightened by P0-R1.8 (d12ef43): the target's file name must also differ from
+Tightened by P0-R1.8 (2056cac): the target's file name must also differ from
 the launcher's, so a target nested as `versions/1.0.0/bin/fakecli` is not
 versioned and keeps today's behaviour (tested at the end).
 
@@ -340,7 +340,7 @@ def test_p0_r1_3_docker_up_keeps_the_container_across_a_cli_update(
 
 def test_p0_r1_3_a_real_mount_addition_is_still_refused_after_a_retarget(
         tmp_path, layout, fake_docker):
-    # f963ba3 behaviour kept: a mount the container lacks is still reported,
+    # 538149b behaviour kept: a mount the container lacks is still reported,
     # even when a CLI update happened at the same time.
     ex = _executor(tmp_path)
     fake_docker(ex, ex.mounts())
@@ -503,7 +503,7 @@ def test_p0_r1_6_a_versions_directory_inside_the_launchers_directory_does_not_wi
 # ===========================================================================
 
 # Occurrences, case-insensitive, of the three provider names in
-# src/multiagents/executor/*.py at cf10484 (before P0-R1): base.py 6,
+# src/multiagents/executor/*.py at e1e605a (before P0-R1): base.py 6,
 # docker.py 9, __init__.py 2, local.py 0.
 PROVIDER_NAMES_IN_EXECUTOR_TODAY = 17
 

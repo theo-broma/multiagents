@@ -101,7 +101,7 @@ def test_run_action_decodes_non_utf8_output_with_replacement_and_never_raises(tm
     fourth way for a child to misbehave too.
 
     Inverted deliberately: this pinned F110 (`UnicodeDecodeError` straight out
-    of `run_action`), fixed in d4ae4ec under
+    of `run_action`), fixed in 9216305 under
     context/specs/phase0-context-and-team.md, P0-R8c attack finding 1 and the
     "Decided, from the implementer's read (ag-829577)" block. The driver-level
     consequence is covered by
@@ -142,7 +142,7 @@ def test_run_action_timeout_kills_a_backgrounded_grandchild_too(tmp_path):
     call returns at the timeout rather than when the grandchild would finish.
 
     Inverted deliberately: this pinned F111 (the grandchild was reparented and
-    ran to completion), fixed in d4ae4ec under
+    ran to completion), fixed in 9216305 under
     context/specs/phase0-context-and-team.md, P0-R8c attack finding 3 and the
     "Decided, from the implementer's read (ag-829577)" block ("on timeout the
     whole process group is killed. This holds for every captured action").

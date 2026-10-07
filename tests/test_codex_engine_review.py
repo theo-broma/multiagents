@@ -1,6 +1,6 @@
-"""Codex provider contract, engine review of be92256 — CX-C16..C20.
+"""Codex provider contract, engine review of 9f532d3 — CX-C16..C20.
 
-`context/specs/codex-provider.md`, section "Engine review of be92256":
+`context/specs/codex-provider.md`, section "Engine review of 9f532d3":
 
 - CX-C16  the executor learns WHICH provider a run belongs to from the runner,
           never by guessing from argv[0]'s file name. An `extends:` instance

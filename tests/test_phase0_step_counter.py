@@ -1,6 +1,6 @@
 """Phase 0, group B — the step counter counts model turns, not stream lines.
 Contract: `context/specs/phase0-runtime-repairs.md`, P0-R4.1–R4.5
-(R4.2 as amended in b8b8819).
+(R4.2 as amended in 9e12929).
 
 Fixtures:
   claude-stream-turns.jsonl  a REAL `claude -p --output-format stream-json

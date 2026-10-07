@@ -22,7 +22,7 @@ Fixture:
                                        shortening one Bash command/output.
 
 Regression being guarded against: P0-R4's turn-based counting
-(75bbd44) was correct in the shipped defaults from the day it landed, but a
+(4faa975) was correct in the shipped defaults from the day it landed, but a
 project- or global-level providers.yaml copy predating that fix silently
 shadows it — config layering replaces the `stream.rules` list wholesale
 rather than merging entry-by-entry, so a stale copy with no `turn:` field

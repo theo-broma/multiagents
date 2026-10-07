@@ -3,7 +3,7 @@
 Contract: `context/specs/phase0-runtime-repairs.md` § P0-R6. `still_running`
 is settled as a list of agent id STRINGS on every path (changed, timeout,
 pause, nothing to wait on) — the orchestrator's ruling on the open question,
-recorded in the contract at 47698b3.
+recorded in the contract at 4694b9d.
 
 The agents are tree nodes with no process behind them: `wait_for_any` watches
 the shared tree (a nested server's agents are only visible that way), so a

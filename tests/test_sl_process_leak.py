@@ -239,7 +239,7 @@ def test_sl_r4_a_test_that_errors_in_its_body_with_a_running_scheduler_and_a_run
 
 def test_sl_r3_the_migration_module_alone_leaves_no_scheduler_or_worker_process(session):
     """Fast subset of the check below: the module that leaked `scheduler.worker`
-    processes (test_nc_r19_*) on main @ bff6ab5."""
+    processes (test_nc_r19_*) on main @ f59af01."""
     res = run_inner(session, ["tests/test_nc_m2_migration.py", "-n", "2"], SMALL_RUN_TIMEOUT)
     assert_inner_ran(res)
     assert_no_leaks(session, "tests/test_nc_m2_migration.py")

@@ -1,4 +1,4 @@
-"""OG round 3, readers of history (orchestrator decision, recorded on main as 60c76ea).
+"""OG round 3, readers of history (orchestrator decision, recorded on main as fb64467).
 
 History stays as written: a past node's `provider` keeps `opencode`. Code that
 ACTS on a recorded provider — rather than only displaying it — maps it through

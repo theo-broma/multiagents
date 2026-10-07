@@ -203,7 +203,7 @@ def test_r3_1_an_unrouted_run_through_start_carries_its_providers_guidance(
 # P0-R3.2: absent or empty key -> byte-for-byte today's prompt
 # ---------------------------------------------------------------------------
 
-# Captured from `compose_prompt` at cf10484, before P0-R3 existed, for a
+# Captured from `compose_prompt` at e1e605a, before P0-R3 existed, for a
 # provider without the key (fixed id, branch, workdir, brief and task). If the
 # PREAMBLE is changed deliberately by another contract, regenerate this and
 # say so in that commit. It must never change as a side effect of P0-R3.

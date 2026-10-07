@@ -634,7 +634,7 @@ def test_p0_r8b_1_the_section_is_in_the_shared_brief(tmp_path):
 
 # ------------------------------------------------------------ invariant --
 
-BASE = "e00b7de"
+BASE = "f5b58cf"
 WORDS = ("claude", "agy", "opencode", "compact_boundary", "compactMetadata", "/compact")
 
 

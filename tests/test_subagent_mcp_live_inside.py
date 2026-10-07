@@ -2,7 +2,7 @@
 
 Contract: `context/specs/subagent-mcp.md`, SM-R1.
 
-99be9d6 fixed the first live failure (config unwritable inside the
+e347e9e fixed the first live failure (config unwritable inside the
 container). The live check then failed one layer further in: an
 `implementer` run (ag-48a3d2) called `consult("dev-advisor", ...)` from
 inside its own container and got back `"error": "docker is not on PATH"`.
@@ -248,7 +248,7 @@ def test_sm_r1_a_consult_style_spawn_starts_inside_without_docker(
 def test_tool_failed_never_raises_even_if_tree_emit_does(tmp_path, monkeypatch):
     """`_tool_failed`'s docstring says "Never raises" and guards its log
     write with `except OSError`, but left its `Tree(...).emit(...)` call
-    bare (99be9d6). `Tree.emit` itself claims the same and normally holds to
+    bare (e347e9e). `Tree.emit` itself claims the same and normally holds to
     it, but `_tool_failed` runs precisely when something is already broken
     — it must not depend on that claim holding for it to keep its own."""
     monkeypatch.setenv("MULTIAGENTS_PROJECT", str(tmp_path))

@@ -205,7 +205,7 @@ def test_dq_r2a_the_paused_drain_without_refusals_carries_no_total(p):
 # ---------------------------------------------------------------------------
 
 def test_phase0_the_iso_stamp_comment_names_no_provider():
-    """Leftover of the invariant budget.py's comment was held to (0a29de1)."""
+    """Leftover of the invariant budget.py's comment was held to (9ceede2)."""
     text = (ROOT / "src" / "multiagents" / "monitor" / "snapshot.py").read_text()
     lines = text.splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("ISO_STAMP"))

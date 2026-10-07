@@ -1,7 +1,7 @@
-"""Phase 0, contract B — P0-R8f.10 to P0-R8f.13, from the review of d4ae4ec.
+"""Phase 0, contract B — P0-R8f.10 to P0-R8f.13, from the review of 9216305.
 
 Contract: `context/specs/phase0-context-and-team.md` § P0-R8f, "Added from the
-review of d4ae4ec (reviewer ag-e8565d, 2026-09-23)", read with the "Decided,
+review of 9216305 (reviewer ag-e8565d, 2026-09-23)", read with the "Decided,
 from the implementer's read (ag-829577)" block above it (malformed limits fall
 back to the shipped default, not to off).
 

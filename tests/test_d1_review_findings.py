@@ -2,7 +2,7 @@
 
 Contract: `context/specs/d1-limit-notices-contract.md` (LN-C1..C7). Each test
 is named `test_d1_f<N>_…` after the review finding it turns into a check, and
-cites the clause it is grounded in. Written red against db187f7.
+cites the clause it is grounded in. Written red against af6d413.
 
 Harness patterns are those of `test_d1_limit_notices.py`: a loaded project, real
 `Runner` instances over the same `.multiagents/`, a fake provider CLI, the
