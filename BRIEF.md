@@ -4796,3 +4796,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Next in the chain: tester nd-03fa6e40 migrates the fixtures to provider `env:` blocks or the `extra` overlay (no src change, nothing test-only on the allowlist) → agy reviewer nd-5bfdfb4d. merge_node nd-5bfdfb4d.
   - Every reviewer task now tells the agent to diff with three dots. The SL and AU reviewer nodes were updated to say so.
   - Before merging EV or AU, require a full-suite comparison against the manifests, because the scripts change affects suites outside the feature's own files.
+- AU round 1: implementer-deep ag-d95c4e committed f0402e24. The AU tests pass 98 of 98; a broader run gave 2959 passed and the 2 known failures.
+  - Reviewer ag-627a75 REJECTED with 1 finding: claude.sh:393, a falsy expiresAt (0 or "") still reports logged in.
+  - Round 2 goes to implementer-deep nd-54d3164d. It fixes that defect and the AU-R4 gap codex reported itself: a rejected token is not registered for redaction. The new tests go in tests/test_au_round2.py.
+  - Then agy reviewer nd-96d7d4ba. merge_node nd-96d7d4ba if it approves, after a full-suite check.
