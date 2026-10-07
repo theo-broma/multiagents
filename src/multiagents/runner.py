@@ -4264,6 +4264,7 @@ class Runner(QuotaHandover):
                 if run.stop_requested:
                     raise RuntimeError("handover was stopped")
             self.tree.update(node_id,
+                             launch_fingerprint=self._launch_fingerprint(spec, provider),
                              follow={"turn": run.turn_start, "offset": run.turn_start,
                                      "log": _size(run_dir / "stream.jsonl")},
                              adopted_at=None, turn_started_at=launched_at,
@@ -6337,14 +6338,15 @@ class Runner(QuotaHandover):
                 session_id, usage = handover["session_id"], handover["usage"]
                 session_lost = False
 
-        # Commit anything the agent left uncommitted so no work is stranded on
-        # an unreferenced worktree. Skipped while parked on a question: the
-        # agent is mid-thought and will resume in the same worktree, and a
+        # Commit anything a writing agent left uncommitted so no work is
+        # stranded on an unreferenced worktree (TB-R5). Skipped while parked
+        # on a question: the agent will resume in the same worktree, and a
         # commit per question would both add noise and change what
         # _drop_if_empty decides for every later run.
         node = self.tree.get(node_id)
         from .scheduler.sessions import retains_checkout
-        if (node and node.branch and Path(node.worktree).is_dir() and not run.awaiting
+        if (run.spec.writes and node and node.branch and Path(node.worktree).is_dir()
+                and not run.awaiting
                 and not retains_checkout(self.paths, node)):
             # CI-R7: off the event loop — a git hook is the agent's code, and
             # nothing it does may freeze every other run this server supervises.
@@ -6363,7 +6365,8 @@ class Runner(QuotaHandover):
         # is still reported below, as CI-R2 would.
         fix_attempts = 0
         fix_error = ""
-        if (commit_result is not None and not commit_result.ok and commit_result.hook
+        if (run.spec.writes and commit_result is not None and not commit_result.ok
+                and commit_result.hook
                 and not stopped_elsewhere and not session_lost
                 and status not in ("limited", "quota", "unauthenticated", "refused")
                 and session_id and run.provider.spawn.get("resume")):
@@ -9265,6 +9268,18 @@ class Runner(QuotaHandover):
         return self._usable_spec(spec, self.tree.renames.canonical(node.provider),
                                  resume=True)
 
+    @staticmethod
+    def _launch_fingerprint(spec: AgentSpec, provider: Provider) -> dict[str, Any]:
+        """TB-R7: the effective model, effort and scalar launch options."""
+        effort = spec.effort or ""
+        implied = provider.implied_effort(spec.model)
+        if implied is not None and effort and effort != implied:
+            effort = implied
+        return {"provider": provider.name, "model": spec.model, "effort": effort,
+                "options": {key: value for key, value in spec.extra.items()
+                            if value is not None and value != ""
+                            and isinstance(value, (str, int, float))}}
+
     def _usable_spec(self, spec: AgentSpec, provider: str,
                      pinned_model: str = "",
                      resume: bool = False) -> AgentSpec | None:
@@ -9676,11 +9691,27 @@ class Runner(QuotaHandover):
         # OG-R3: the route a conversation recorded under a pre-rename name
         # lives on, read once for the checks below.
         recorded = self.tree.renames.canonical(node.provider) if node is not None else ""
-        destination = spec.provider
-        if node is not None and node.reason != "session_lost" \
-                and self._conversation_route(spec, node) is not None:
-            run = self.runs.get(node.id)
-            destination = run.provider if run is not None else recorded
+        route = self._conversation_route(spec, node) if node is not None else None
+        destination = (recorded if route is not None and node.reason != "session_lost"
+                       else spec.provider)
+        current_spec = (route if destination == recorded and route is not None
+                        else spec.routed(spec.provider)).replace(provider=destination)
+        current_provider = self.providers.get(destination)
+        new_fingerprint = (self._launch_fingerprint(current_spec, current_provider)
+                           if current_provider is not None else None)
+        old_fingerprint = None
+        fingerprint_changed = False
+        if node is not None:
+            old_fingerprint = node.launch_fingerprint or {
+                "provider": recorded, "model": node.model,
+                "effort": node.effort, "options": {}}
+            old_fingerprint = {**old_fingerprint, "provider": recorded}
+            if node.launch_fingerprint is None:
+                fingerprint_changed = (new_fingerprint is not None and any(
+                    old_fingerprint[key] != new_fingerprint[key]
+                    for key in ("provider", "model")))
+            else:
+                fingerprint_changed = old_fingerprint != new_fingerprint
         transport_error = self._transport_refusal(destination)
         if transport_error:
             return self._consult_result(agent_name, node.id if node else None, None,
@@ -9707,10 +9738,9 @@ class Runner(QuotaHandover):
                     f"{node.id}: {refusal} Nothing was launched and nothing "
                     f"was changed. To start a new conversation, stop this one "
                     f"(stop_agent {node.id}) and consult again.")
-            if node.reason == "session_lost" or self._conversation_route(spec, node) is None:
-                # Not resumed anywhere: not on the provider the roster dropped,
-                # and its session means nothing to any other. A new
-                # conversation on the current roster takes its place.
+            if node.reason == "session_lost" or route is None or fingerprint_changed:
+                # TB-R7/CX-C28: a lost session or changed effective launch
+                # starts fresh on the route the current roster resolves.
                 replaced = node
                 node = None
 
@@ -9720,9 +9750,9 @@ class Runner(QuotaHandover):
         # belongs to its run and is left alone.
         reserved = ""
         if node is None:
-            # FO-R1: a new conversation runs on the agent's own provider, and
-            # that provider's `models:` entry still applies.
-            spec = spec.routed(spec.provider)
+            # FO-R1/TB-R7: a new conversation uses the resolved route,
+            # including that provider's `models:` entry.
+            spec = current_spec
             provider = self.providers.get(spec.provider)
             if provider is None or not provider.available():
                 raise FileNotFoundError(f"provider {spec.provider!r} is unavailable")
@@ -9766,12 +9796,14 @@ class Runner(QuotaHandover):
             prompt = self.compose_prompt(spec, message, node, worktree_path)
             session_id = None
             if replaced is not None:
-                reason = (f"replaced by {node_id}: the roster no longer runs "
-                          f"{agent_name} on {replaced.provider}")
+                reason = (f"replaced by {node_id}: {agent_name}'s launch "
+                          f"configuration changed")
                 if replaced.status == "idle":
                     self.tree.set_status(replaced.id, "cancelled", reason)
                 self.tree.emit(node_id, "conversation_replaced",
                                old_agent_id=replaced.id,
+                               old_fingerprint=old_fingerprint,
+                               new_fingerprint=self._launch_fingerprint(spec, provider),
                                old_provider=replaced.provider,
                                provider=provider.name,
                                **({"reason": "session_lost",
@@ -10001,7 +10033,7 @@ class Runner(QuotaHandover):
         # itself must say the memory it expected is not there (CX-C28).
         # Prefixed after truncation, so a long reply cannot cut it off.
         notice = "" if replaced is None else (
-            f"[system] {agent_name} was moved off {replaced.provider}, so this "
+            f"[system] {agent_name}'s launch configuration changed, so this "
             f"is a new conversation ({node_id}, replacing {replaced.id}); "
             f"nothing said earlier was carried over.\n")
         replacement = {}

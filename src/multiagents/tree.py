@@ -498,6 +498,8 @@ class Node:
     # steer and a consult resume reuse the normalised value instead of
     # re-deriving the contradicted one from the static config.
     effort: str = ""
+    # TB-R7: effective session configuration; None on legacy records.
+    launch_fingerprint: dict[str, Any] | None = None
     # LM-R1/R2: this run's timeout, max_children and silence_timeout as
     # `{value, source}`, resolved when it started. The cap its own children
     # are counted against is read from here, so a roster edit after launch
