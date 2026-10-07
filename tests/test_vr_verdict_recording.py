@@ -390,10 +390,6 @@ def test_vr_r3_an_earlier_rounds_text_is_not_reused_for_a_later_round(w):
 # VR-R3 after RV-R1 (context/specs/verdict-after-transport-error.md): a run whose
 # final provider status is ERROR but whose text holds a complete verdict is
 # classified `done`, so it qualifies for the text fallback.
-RV_IMPLEMENTED = False    # flip to True when RV-R1 lands on main
-RV_SKIP = ("RV-R1 (a complete verdict survives a transport error) is not implemented on main: "
-           "runner._classify still maps any non-success final status to `failed`")
-
 
 def erroring_reviewer(w: M4World, name: str = "fxe"):
     """A provider whose every run ends with a `result`-style status ERROR: the
@@ -407,7 +403,6 @@ def erroring_reviewer(w: M4World, name: str = "fxe"):
     return fx
 
 
-@pytest.mark.skipif(not RV_IMPLEMENTED, reason=RV_SKIP)
 @pytest.mark.parametrize("line,outcome", [("VERDICT(approved, 0): fine", "approved"),
                                           ("VERDICT(rejected, 2): two defects", "rejected")])
 def test_vr_r3_rv_r1_a_reviewer_with_status_error_and_a_complete_verdict_qualifies(w, line, outcome):
