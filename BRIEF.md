@@ -4815,3 +4815,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - nc_r13 and nc_r76 read the MCP registry at import, under the agent's `MULTIAGENTS_NODE_PERMISSIONS=read`; the cause is 16fa7a57f. They pass when the orchestrator runs them.
   - nc_r26 expects the old sequence; the interim `held` comes from NT-R3 round 3, 3316e4054.
   - The fix is tester nd-520dbea7, with no reviewer needed since it touches tests only. Read the diff, then merge_node.
+- Base reds fixed, MERGED as 66e193f1 (tester ag-271c58, tests only). 52 of 52 pass, both inside an agent environment and outside one.
