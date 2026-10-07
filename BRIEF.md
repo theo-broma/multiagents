@@ -4816,3 +4816,9 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - nc_r26 expects the old sequence; the interim `held` comes from NT-R3 round 3, 3316e4054.
   - The fix is tester nd-520dbea7, with no reviewer needed since it touches tests only. Read the diff, then merge_node.
 - Base reds fixed, MERGED as 66e193f1 (tester ag-271c58, tests only). 52 of 52 pass, both inside an agent environment and outside one.
+- SL review: agy ag-952ff7 REJECTED with 2 findings, both valid.
+  - A decoy cleanup is skipped if the second decoy fails to start.
+  - The inner-pytest check only looks for the substring " passed".
+  - Decision: the leak tests require an inner exit code of 0 or 1 and a parsed passed count > 0. They do not fail on unrelated reds, because SL-R5 is checked separately.
+  - The gate tester nd-36e0e084 was already running, so the fixes go to a follow-up tester, nd-f38f2794, which takes nd-36e0e084 as input.
+  - I read the final diff, then merge_node nd-f38f2794.
