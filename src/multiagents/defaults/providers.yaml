@@ -851,7 +851,7 @@ providers:
         - match: {kind: "tool"}
           as: tool
           fields: {name: "name", args: "args", state: "state", turn: "turn",
-                   tool_id: "tool_id"}
+                   tool_id: "tool_id", result: "result"}
         - match: {kind: "result"}
           as: result
           fields: {status: "status", text: "text", tokens: "tokens", turn: "turn"}

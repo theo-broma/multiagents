@@ -194,7 +194,29 @@ def _worktree_state(worktree: Path, root: Path) -> str:
         return ""
     if not result.ok:
         return ""
-    return hashlib.sha1(result.out.encode()).hexdigest()[:12]
+    digest = hashlib.sha1(result.out.encode())
+    # Porcelain only lists an untracked file's name: an append to that file
+    # (or an ignored log) must also count as progress. Never follow links.
+    try:
+        fd = gitops._open_beneath(*gitops.beneath(worktree))
+        try:
+            for directory, dirs, files, directory_fd in os.fwalk(".", dir_fd=fd):
+                dirs[:] = sorted(name for name in dirs if name != ".git")
+                for name in sorted(files):
+                    if name == ".git":
+                        continue
+                    try:
+                        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(info.st_mode):
+                        digest.update(repr((directory, name, info.st_size,
+                                            info.st_mtime_ns)).encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        return ""
+    return digest.hexdigest()[:12]
 
 
 def _size(path: Path) -> int:
@@ -7667,11 +7689,11 @@ class Runner(QuotaHandover):
                 payload["truncated"] = True
                 payload["hint"] = f"full transcript: {run_dir}/result.json, or collect(mode='full')"
         if node.branch and gitops.is_repo(self.paths.root):
-            base = self.config.base_branch or gitops.current_branch(self.paths.root)
             root = self.paths.root
             try:
-                payload["commits"] = gitops.commits_on(root, node.branch, base, root=root)
-                payload["diff_stat"] = gitops.diff_stat(root, node.branch, base,
+                base, tip = self._commit_range(node)
+                payload["commits"] = gitops.commits_on(root, tip, base, root=root)
+                payload["diff_stat"] = gitops.diff_stat(root, tip, base,
                                                         root=root)[:2000]
                 # Surfaced HERE as well as at the merge gate, so the
                 # orchestrator learns about it while it is still deciding
@@ -7696,6 +7718,24 @@ class Runner(QuotaHandover):
                 )
         return payload
 
+    def _commit_range(self, node: Node) -> tuple[str, str]:
+        """TB2-R1: managed runs use immutable input and generation commits."""
+        if not node.node_id:
+            return (self.config.base_branch or gitops.current_branch(self.paths.root),
+                    node.branch)
+        from .scheduler.store import Store
+        store = Store(self.paths.root)
+        with store.transaction(write=False) as db:
+            planned = store.some_nodes(db, [node.node_id]).get(node.node_id, {})
+        run = next((r for r in planned.get("runs", []) if r["run_id"] == node.id), {})
+        generation = next((g for g in planned.get("generations", [])
+                           if g["run_id"] == node.id), {})
+        base = run.get("input_commit")
+        if not base:
+            raise gitops.GitError("managed run has no recorded input commit")
+        # Until capture finishes there is no published work to report.
+        return base, generation.get("commit", base)
+
     def _no_commits_note(self, node: Node, text: str | None = None) -> dict[str, Any]:
         spec = self.config.agents.get(node.agent)
         if (node.status != "done" or not node.branch or spec is None
@@ -7709,9 +7749,9 @@ class Runner(QuotaHandover):
         text = text or ""
         if "NEED_INFO(" in text or NEED_DECISION.search(text):
             return {}
-        base = self.config.base_branch or gitops.current_branch(self.paths.root)
         try:
-            if gitops.commits_on(self.paths.root, node.branch, base, root=self.paths.root):
+            base, tip = self._commit_range(node)
+            if gitops.commits_on(self.paths.root, tip, base, root=self.paths.root):
                 return {}
         except gitops.GitError:
             return {}

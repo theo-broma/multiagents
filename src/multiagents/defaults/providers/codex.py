@@ -329,7 +329,7 @@ class Normalizer:
                     else:
                         args = {"query": item.get("query", "")}
                     out.update(kind="tool", name=name, args=args if isinstance(args, dict) else {"_": args})
-                elif kind == "item.completed":
+                if ident is not None and kind == "item.completed":
                     # bug-2e68e4: a digest of the output, never the output
                     # itself (CX-C26), so the doom-loop watchdog can tell a
                     # poll that returned something new from a true repeat.
