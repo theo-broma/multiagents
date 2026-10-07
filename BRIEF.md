@@ -4727,3 +4727,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Tests: 18 cases in tests/test_breaker_lapsed_admission.py. Review is agy nd-26469547.
   - **NEW issue from the rewrite:** tests that cite pre-rewrite commit SHAs (at least tests/test_phase0_context_window.py, p0_r8) pass locally only because the old objects remain, and fail on a fresh clone. To fix after the sys strip (SHAs change again): map them through the filter-repo commit-maps.
 - 2026-10-07 ~09:45 Breaker fix MERGED as ca0b43b5 (agy ag-46c72b APPROVED, no defects). Meanwhile agy hit the same stale-trial refusal and was unblocked with `doctor --clear agy`. RV started on codex: nd-e0f68c2a (patches 0004 and 0005), then agy reviewer nd-fd0d7aeb.
+- 2026-10-07 ~10:00 **Salvage restarted (my mistake):** the agents' container has its own /var/tmp, so the patches under the host's /var/tmp were invisible to them.
+  - What the first runs did: SL ag-fe4e1c ran `git show --stat` on an OLD pre-rewrite commit; AU ag-7a0437 seemed to write its own 0003 patch; RV ag-f463c8 rightly stopped with NEED_INFO. All were stopped, and their nodes and reviewers cancelled.
+  - The patches are now in `.multiagents/salvage-tests/` (gitignored), passed by absolute path; check that this path is visible to the container. The tasks forbid reconstructing tests or reading old commits.
+  - New nodes, implementer then agy reviewer: SL nd-7ea0863c → nd-7b197730; EV nd-b66a6f44 → nd-c714a0a0; AU nd-81387189 → nd-fe6a285d; RV (codex) nd-5a9ab2aa → nd-84f659b2. SL is confirmed to apply its patch.
+  - Lesson: hand files to agents through the project tree, never through the host's /var/tmp.
