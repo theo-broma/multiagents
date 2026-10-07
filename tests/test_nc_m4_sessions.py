@@ -120,12 +120,13 @@ def test_nc_r62_a_dirty_alias_checkout_holds_the_next_activation_and_deletes_not
                 verdict_entry("approved"))
     top, wk, rv = start(w)
     held = w.wait_held(rv, "dirty_worktree", timeout=WAIT_ROUNDS)
-    assert w.fxr.spawns() == 1, "the reviewer was activated on a dirty checkout"
+    # TB2-R6: one resumed cleanup run is allowed; the waiting node itself never runs dirty
+    assert w.fxr.spawns() == 2, "expected exactly the one cleanup run, no reviewer activation on a dirty checkout"
     leftover = Path(w.fxr.calls()[0]["cwd"]) / "scratch.txt"
     assert leftover.read_text() == "left behind\n", "the leftover file was deleted"
     assert "dirty_worktree" in json.dumps(held["hold"])
     w.quiet(2)
-    assert w.fxr.spawns() == 1 and w.get(rv)["state"] == "held"
+    assert w.fxr.spawns() == 2 and w.get(rv)["state"] == "held"
 
 
 # ----------------------------------------------------------------- NC-R32

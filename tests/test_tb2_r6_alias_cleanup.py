@@ -247,7 +247,8 @@ def test_tb2_r6_cleanup_message_names_the_dirty_files_and_carries_no_untracked_c
 
 def test_tb2_r6_cleanup_message_carries_the_tracked_diff_inline_but_no_untracked_contents(w):
     worker_two_rounds(w)
-    w.fxr.queue(dirtying(tracked="# " + TRACKED + "\n"), cleaner(), approve())
+    w.fxr.queue(dirtying(tracked="# " + TRACKED + "\n"),
+                cleaner(write={".gitignore": GITIGNORE}), approve())
     top, wk, rv = start(w)
     finish(w, top, rv)
     prompt = w.fxr.calls()[1]["prompt"]
@@ -257,7 +258,8 @@ def test_tb2_r6_cleanup_message_carries_the_tracked_diff_inline_but_no_untracked
 
 def test_tb2_r6_archive_holds_the_tracked_diff_before_the_cleanup_runs(w):
     worker_two_rounds(w)
-    w.fxr.queue(dirtying(tracked="# " + TRACKED + "\n"), cleaner(gate="c1"), approve())
+    w.fxr.queue(dirtying(tracked="# " + TRACKED + "\n"),
+                cleaner(gate="c1", write={".gitignore": GITIGNORE}), approve())
     top, wk, rv = start(w)
     cleanup_started(w, rv)
     assert archive_holds(w, TRACKED), "the tracked diff is not archived before the cleanup"
