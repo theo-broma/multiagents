@@ -127,6 +127,29 @@ Decisions (orchestrator, 2026-10-07, on tester ag-850b7f's questions):
   daemon are valid fixtures. The sweep must not require a process to be a
   real child of a daemon. Its verified descendants are killed with it.
 
+Decision (orchestrator, 2026-10-07): who writes what. `tests/**` is read-only
+for implementers (`limits.readonly_paths`), yet SL-R6, R8 and R9 need harness
+changes. So:
+- The logic lives in production code, in a module
+  `multiagents.scheduler.owner`, inert unless used:
+  - `mark_env(owner_pid, owner_start, project, *, malformed=False) -> dict`;
+  - `unmarked_env(env=None) -> dict`;
+  - `marked_processes(owner_pid, project=None) -> set[int]`;
+  - `sweep_dead_owners() -> None`;
+  - `reap(owner_pid, project) -> None`, the shared teardown helper of SL-R8.
+  The implementer writes it.
+- The test-side wiring is written by the tester:
+  - `tests/support/scheduler_owner.py` re-exports these names;
+  - `World`/`ClockWorld`, `nc_harness.Sched` and the `nt_part2` harness
+    launch their daemon with `mark_env(os.getpid(), <own start time>,
+    project)` and call `reap(os.getpid(), project)` in their teardown;
+  - a session-start hook calls `sweep_dead_owners()`;
+  - `World._reap_workers` stops selecting by argv.
+- Until the module exists, an `ImportError` must not break collection of
+  unrelated tests. The wiring falls back to today's behaviour (no marker,
+  existing teardown, no sweep), and the SL tests fail on their assertions.
+  The fallback applies to `ImportError` only.
+
 ## Out of scope
 - Processes leaked by tests outside the scope above (report them if seen).
 - Killing processes by name pattern: never `pkill` by pattern, other agents run
