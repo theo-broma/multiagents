@@ -1,9 +1,55 @@
+# One work task followed by review, repeated until approved or held.
+# Choose review-loop for a single deliverable. Choose implement or
+# implement-reviewed when tests must be approved before implementation starts.
+#
+# Parameters substitute whole values: {param: x} uses the value of x.
+# There is no interpolation inside strings. Supply complete task texts; agent
+# parameters name agents in the configured roster.
+# register_template stores a scheduler-DB definition that overrides the shipped
+# file of the same name. Registration needs a strictly higher version than the
+# currently resolved definition; existing instances keep their definition.
+#
+# A loop runs its children in order: work, then the designated verdict_child.
+# After successful review completion, approval ends the loop. Rejection increments
+# rounds_rejected and relaunches both children for another round, attaching the
+# reviewer's structured findings to the work child's prompt.
+# max_rounds limits rejected rounds, including the first round. At the limit the
+# loop is held as loop_max. The orchestrator decides: relaunch_node with a higher
+# max_rounds to continue, or close_node with approved, failed or exhausted.
+#
+# The verdict_child judges the current work generation. It can call give_verdict
+# with approved/rejected and structured findings, or write a final-text line:
+# VERDICT(approved): ... or VERDICT(rejected, 2): ... . A text verdict counts only
+# from a successfully finished reviewer run; contradictory text verdicts do not
+# count. If both paths are used, the tool verdict wins and disagreement is recorded.
+# Text-only rejection supplies no structured findings: neither prose nor the
+# number in the verdict line populates the findings list.
+# With neither verdict, the loop is held unresolved_round. relaunch_node then
+# defaults to retrying only the verdict child; retry: round repeats both children.
+#
+# A real NEED_INFO(topic): question in a child's final response, with no verdict,
+# holds the child as needs_info and its loop as child_held. The orchestrator answers
+# and uses relaunch_node on the held child; the loop can then continue.
+#
+# session: B resumes the reviewer conversation across rounds. Today aliases are
+# scoped to the template instance (instance ID plus alias), not globally: concurrent
+# instances have separate B conversations. Within one instance, nodes sharing an
+# alias share its conversation and serialize while it is busy.
+# session: A likewise resumes the worker conversation across rounds.
+# When this top-level loop is done/approved, call merge_node on its instance
+# node ID to publish the result.
+# The fixed review task below asks for both paths; a tool call is not required today.
+
 template: review-loop
 version: 1
 params:
+  # Complete work task; required, no default.
   task: {type: text}
+  # Work agent; required, no default.
   worker: {type: agent}
+  # Review agent; required, no default.
   reviewer: {type: agent}
+  # Maximum rejected rounds; default 3, positive integer.
   rounds: {type: int, default: 3}
 root:
   key: loop
