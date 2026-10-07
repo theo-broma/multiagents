@@ -30,6 +30,7 @@ defaults to "1 stored credential(s)". A parsed positive count and the
 "0 credentials" case keep their current outcome.
 Verified by: the silent-success characterization test inverted; tests for
 unrecognised wording and for the two recognised cases.
+Decision (orchestrator, 2026-10-07): the positive-count pattern is NOT widened. Output it does not match, such as "3 credentials stored" with the digit opening the line, is unknown (exit 20). The characterization test `test_opencode_sh_check_count_extraction_fails_when_the_digit_opens_the_line` is inverted accordingly. The question came from implementer run ag-0299a2.
 
 **AU-R3 (F131) — a message change, not a parsing change.** The agy container token
 file has no documented format and agents may not read real credential files, so

@@ -4785,3 +4785,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   | AU | tester nd-da061947 → implementer-deep (codex) nd-a9ce8aaf, which cherry-picks c466d0c1 only → agy reviewer nd-4294d438 |
 
   On each approval: read the diff against the spec, merge_node the LAST node of the chain, then set_finding_status (EV: F112 and F33 fixed; AU: F130, F131, F132 and F140 fixed).
+- AU: implementer-deep ag-0299a2 stopped with a NEED_INFO after the cherry-pick (2cd7c8ba). `test_c2_auth_characterization.py:559` pinned the guessed "1 stored credential(s)" result. The decision to treat such output as unknown, with no wider pattern, is recorded in the AU spec.
+  - The old reviewer nd-4294d438 is cancelled. It is held as termination_unconfirmed, with no run.
+  - The new AU chain is tester nd-baa17a24 (inverts the test) → implementer-deep nd-921b0115 → agy reviewer nd-14e1ba3a. merge_node the reviewer node once it approves.
+  - Tooling: a node run that ends with NEED_INFO is treated as a success, so the reviewer depending on it launched. Add this to the batch.
