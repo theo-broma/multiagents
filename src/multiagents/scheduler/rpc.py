@@ -722,12 +722,19 @@ class Service:
                     scope = model.subtree(nodes, principal["node_id"])
                     transitions = [t for t in transitions if t["node_id"] in scope]
                 if "node_ids" in args:
-                    transitions = [t for t in transitions if t["node_id"] in args["node_ids"]]
+                    selected = set()
+                    for id in args["node_ids"]:
+                        selected.update(model.subtree(nodes, id))
+                    transitions = [t for t in transitions if t["node_id"] in selected]
                 top = db.execute("SELECT coalesce(max(seq), 0) FROM notifications").fetchone()[0]
             remaining = end - time.monotonic()
             if transitions or remaining <= 0 or self.stopping:
+                capacity = (self.engine.runner._idle_capacity_note() if self.engine else
+                            {"capacity": {"running": 0,
+                                          "max_concurrent": self.configuration().limits.get("max_concurrent", 4),
+                                          "free_slots": self.configuration().limits.get("max_concurrent", 4)}})
                 return {"transitions": transitions, "next_cursor": max(after, top),
-                        "capacity": {}, "scheduler": self.status(nodes, scope=None if principal["root"] else scope)}
+                        **capacity, "scheduler": self.status(nodes, scope=None if principal["root"] else scope)}
             if self.changed.acquire(timeout=min(remaining, 0.5)):
                 try:
                     self.changed.wait(min(max(0, end - time.monotonic()), 0.5))

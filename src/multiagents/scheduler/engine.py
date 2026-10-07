@@ -342,7 +342,8 @@ class Engine:
                           for a in journal.values() if a["state"] in {"claimed", "launched"}
                           for name in a.get("locks", [])], "aliases": self.alias_status(db),
                 "windows": [{"node_id": n["id"], **{k: v for k, v in self.window(n, nodes, at).items()
-                             if k in {"open", "next_open", "next_close"}}} for n in nodes.values()],
+                             if k in {"open", "next_open", "next_close"}}} for n in nodes.values()
+                            if n["state"] not in {"done", "cancelled"}],
                 "starving": self.starving(nodes, at)}
         # NT-R6: the state of sending — pending count, last accepted message
         # and current failure — read from the store only, so it never stalls
