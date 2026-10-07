@@ -228,6 +228,14 @@ class GitResult:
 
 def run(repo: Path, *args: str, check: bool = False, timeout: int = 120,
         env: dict[str, str] | None = None, strip: bool = True) -> GitResult:
+    # An empty diff.external still asks Git to execute an external program.
+    # Explicitly select its internal diff, including for pinned reads whose
+    # arguments begin with config overrides.
+    command = 0
+    while command < len(args) and args[command] == "-c":
+        command += 2
+    if command < len(args) and args[command] == "diff":
+        args = (*args[:command + 1], "--no-ext-diff", "--no-textconv", *args[command + 1:])
     host = _host_context.get()
     if host:
         prefix, host_env = host

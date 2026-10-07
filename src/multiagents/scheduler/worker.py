@@ -58,12 +58,25 @@ async def supervise(root, attempt_id, lock_fd=None):
             preflight_failure = None
             if checked_binding:
                 try:
-                    if sessions.unavailable(checked_binding, runner):
+                    route = checked_attempt.get("binding", checked_binding) if checked_attempt.get("cleanup") else checked_binding
+                    if sessions.unavailable(route, runner):
                         raise Refused("session_unavailable", detail=checked_binding["provider"])
-                    sessions.check_clean(paths, checked_binding, runner.authority)
-                except (Refused, gitops.GitError, OSError, ValueError) as exc:
+                    if checked_attempt.get("cleanup"):
+                        previous = runner.tree.get(checked_attempt["cleanup_previous_run"])
+                        if previous is None or previous.session_id != checked_attempt["session_id"]:
+                            raise Refused("dirty_worktree", detail=checked_attempt["cleanup_archive"])
+                        spec, provider = runner._spec_of(previous)
+                        if not provider.spawn.get("resume") or runner._missing_session(previous, spec, provider, Path(checked_binding["worktree"])):
+                            raise Refused("dirty_worktree", detail=checked_attempt["cleanup_archive"])
+                    else:
+                        sessions.check_clean(paths, checked_binding, runner.authority)
+                except (Refused, gitops.GitError, OSError, ValueError, KeyError, RuntimeError) as exc:
                     preflight_failure = (exc.result if isinstance(exc, Refused)
                                          else {"error": "reseat_failed", "detail": str(exc)})
+            cleanup = None
+            cleanup_task = (sessions.cleanup_message(preflight_failure["detail"])
+                            if preflight_failure and preflight_failure["error"] == "dirty_worktree"
+                            and not checked_attempt.get("cleanup") else None)
             with store.transaction() as db:
                 attempt = attempts(db)[attempt_id]
                 node = store.nodes(db)[attempt["node_id"]]
@@ -80,7 +93,12 @@ async def supervise(root, attempt_id, lock_fd=None):
                     return
                 if preflight_failure:
                     detail = preflight_failure
-                    if detail["error"] != "session_unavailable":
+                    if attempt.get("cleanup"):
+                        detail = {"error": "dirty_worktree", "detail": attempt["cleanup_archive"]}
+                    elif detail["error"] == "dirty_worktree":
+                        cleanup = sessions.request_cleanup(store, db, node, checked_binding, runner,
+                                                           detail["detail"], cleanup_task, replacing=attempt_id)
+                    if not cleanup and detail["error"] != "session_unavailable":
                         node.update(state="held", hold={"reason": detail["error"], "detail": detail.get("detail", "")},
                                     revision=node["revision"] + 1)
                         store.save_node(db, node)
@@ -90,26 +108,32 @@ async def supervise(root, attempt_id, lock_fd=None):
                         # pair), so a preflight hold is announced exactly once
                         # however often the node is edited or resumed.
                         store.transition(db, "held", node["id"], node["hold"])
-                    attempt.update(state="abandoned", refusal=detail, ended_at=now())
+                    if not cleanup:
+                        attempt.update(state="abandoned", refusal=detail, ended_at=now())
+                        save_attempt(db, attempt)
+                        db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
+                        return
+                else:
+                    attempt["launch_in_progress"] = True
                     save_attempt(db, attempt)
-                    db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
-                    return
-                attempt["launch_in_progress"] = True
-                save_attempt(db, attempt)
+            if cleanup:
+                store.mirror()
+                await supervise(root, cleanup["attempt_id"])
+                return
             parent = node.get("run_parent", None if node["created_by"] == "root" else node["created_by"])
             creator = runner.tree.get(parent) if parent else None
             context = LaunchContext(caller=node.get("launch_caller", parent), run_parent=parent,
                                     depth=node.get("depth") or (creator.depth + 1 if creator else 1),
                                     node_id=node["id"], attempt_id=attempt_id, run_id=attempt["run_id"],
                                     provider=attempt.get("binding", {}).get("provider", node["pins"].get("provider", "")),
-                                    effort=node["pins"].get("effort", ""))
+                                    effort=attempt.get("cleanup_effort", node["pins"].get("effort", "")))
             try:
-                task = node["task"]
+                task = attempt.get("cleanup_task", node["task"])
                 if node.get("rate_limit_fresh_from"):
                     old = node["rate_limit_fresh_from"]
                     task += (f"\n\nThe rate-limited session could not be resumed. Read the prior run "
                              f"{old['run_id']} in {old['run_dir']} before continuing the task.")
-                result = await runner.start(node["agent"], task, launch_context=context,
+                result = await runner.start(attempt.get("cleanup_agent", node["agent"]), task, launch_context=context,
                                             model=attempt.get("binding", {}).get("model", node["pins"].get("model")), **node.get("launch", {}))
             except BaseException:
                 with store.transaction() as db:
@@ -179,9 +203,14 @@ async def supervise(root, attempt_id, lock_fd=None):
             live = runner.runs.get(attempt["run_id"])
             if live is None or live.done.is_set():
                 tree_run = runner.tree.get(attempt["run_id"])
-                if tree_run and tree_run.status in ACTIVE | PAUSED | {"quota_paused"}:
+                if tree_run and tree_run.status in (ACTIVE if current.get("cleanup") else ACTIVE | PAUSED | {"quota_paused"}):
                     await asyncio.sleep(0.05)
                     continue
+                if current.get("cleanup") and tree_run:
+                    if not await runner._steer_predecessor_dead(runner._steer_predecessor(tree_run.id)):
+                        await asyncio.sleep(0.05)
+                        continue
+                    sessions.finish_cleanup(store, runner, current, tree_run)
                 with store.transaction() as db:
                     db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
                 break

@@ -54,6 +54,8 @@ def record_launch(store, db, attempt, run):
         return False
     current["state"] = "launched"
     save_attempt(db, current)
+    if current.get("cleanup"):
+        return True
     node = store.nodes(db)[attempt["node_id"]]
     if not any(r["attempt_id"] == attempt["attempt_id"] for r in node["runs"]):
         node["runs"].append({"run_id": run.id, "attempt_id": attempt["attempt_id"],
@@ -489,14 +491,23 @@ class Engine:
             if any(a["node_id"] == node["id"] and a["state"] in {"claimed", "launched"} for a in journal.values()):
                 self.admission_refusals.pop(node["id"], None)
                 continue
+            failed_cleanup = next((a for a in journal.values() if a.get("cleanup")
+                                   and a["node_id"] == node["id"]
+                                   and a["activation_id"] == node.get("activation_id")
+                                   and a["state"] in {"abandoned", "recorded"}
+                                   and not a.get("cleanup_succeeded")), None)
+            if failed_cleanup:
+                with self.service.changed, self.store.transaction() as db:
+                    current = self.store.nodes(db)[node["id"]]
+                    if current["state"] == "open" and current["revision"] == node["revision"]:
+                        self.hold(db, current, "dirty_worktree", failed_cleanup["cleanup_archive"])
+                continue
             if self.lock_blockers(node, nodes, journal):
                 self.admission_refusals.pop(node["id"], None)
                 continue
             session_blocked = self.session_blockers(node, nodes, journal)
-            if session_blocked:
+            if session_blocked and session_blocked[0]["code"] == "session_busy":
                 self.reasons[node["id"]] = session_blocked
-                if session_blocked[0]["code"] == "session_unavailable":
-                    self.session_notice(node["id"], session_blocked[0])
                 self.admission_refusals.pop(node["id"], None)
                 continue
             with self.store.transaction(write=False) as db:
@@ -504,6 +515,44 @@ class Engine:
                 checked_binding = sessions.aliases(db).get(alias_key)
                 checked_attempts = {id: a for id, a in attempts(db).items()
                                     if alias_key and a.get("alias_id") == alias_key}
+            clean_failure = None
+            try:
+                if checked_binding:
+                    sessions.check_clean(self.paths, checked_binding, self.runner.authority)
+            except model.Refused as exc:
+                clean_failure = (exc.result["error"], exc.result.get("detail", exc.result.get("problems", "")))
+            except (gitops.GitError, OSError, ValueError) as exc:
+                clean_failure = ("reseat_failed", str(exc))
+            if clean_failure and clean_failure[0] == "dirty_worktree":
+                cleanup = None
+                task = sessions.cleanup_message(clean_failure[1])
+                with self.service.changed, self.store.transaction() as db:
+                    current_nodes = self.store.nodes(db)
+                    current = current_nodes[node["id"]]
+                    blockers = self.session_blockers(current, current_nodes, attempts(db), db)
+                    if (current["state"] != "open" or current["revision"] != node["revision"]
+                            or sessions.aliases(db).get(alias_key) != checked_binding
+                            or (blockers and blockers[0]["code"] == "session_busy")):
+                        continue
+                    cleanup = sessions.request_cleanup(self.store, db, current, checked_binding,
+                                                       self.runner, clean_failure[1], task)
+                    if cleanup:
+                        cleanup.update(locks=sorted(self.lock_set(current, current_nodes)),
+                                       lock_owners=self.lock_owners(current, current_nodes))
+                        save_attempt(db, cleanup)
+                    else:
+                        self.hold(db, current, *clean_failure)
+                if cleanup:
+                    self.store.mirror()
+                    self.spawn(cleanup)
+                with self.store.transaction(write=False) as db:
+                    nodes, journal = self.store.nodes(db), attempts(db)
+                continue
+            if session_blocked:
+                self.reasons[node["id"]] = session_blocked
+                self.session_notice(node["id"], session_blocked[0])
+                self.admission_refusals.pop(node["id"], None)
+                continue
             binding = checked_binding
             probe = self.context(node, probe=True)
             if binding and binding.get("renew"):
@@ -535,14 +584,6 @@ class Engine:
                     self.admission_refusals.pop(node["id"], None)
                 continue
             self.admission_refusals.pop(node["id"], None)
-            clean_failure = None
-            try:
-                if checked_binding:
-                    sessions.check_clean(self.paths, checked_binding, self.runner.authority)
-            except model.Refused as exc:
-                clean_failure = (exc.result["error"], exc.result.get("detail", exc.result.get("problems", "")))
-            except (gitops.GitError, OSError, ValueError) as exc:
-                clean_failure = ("reseat_failed", str(exc))
             with self.store.transaction(write=False) as db:
                 preparation_nodes = self.store.nodes(db)
             prospective = preparation_nodes[node["id"]]
@@ -1114,6 +1155,11 @@ class Engine:
                 self.spawn(attempt)
                 if attempt["state"] == "claimed":
                     self.launched(attempt, run)
+                if attempt.get("cleanup") and run.status in PAUSED | {"quota_paused"}:
+                    predecessor = self.runner._steer_predecessor(run.id)
+                    if await self.runner._steer_predecessor_dead(predecessor):
+                        self.finished(attempt, SimpleNamespace(id=run.id, status="failed", session_id=run.session_id))
+                    continue
                 pending = attempt.get("resume_pending")
                 if pending and run.turn_started_at > attempt.get("previous_turn", 0):
                     with self.service.changed, self.store.transaction() as db:
@@ -1165,8 +1211,8 @@ class Engine:
                                 # keep its locks until death is positively proved.
                                 if node["state"] not in {"held", "cancelled", "done"}:
                                     prior = node["state"]
-                                    node.update(state="held", hold={"reason": "termination_unconfirmed",
-                                                "detail": str(evidence), "since": now()},
+                                    node.update(state="held", hold={"reason": "dirty_worktree" if current.get("cleanup") else "termination_unconfirmed",
+                                                "detail": current.get("cleanup_archive", str(evidence)), "since": now()},
                                                 revision=node["revision"] + 1)
                                     self.store.save_node(db, node)
                                     # NT-R3: the per-hold mark is the seq of
@@ -1331,6 +1377,9 @@ class Engine:
         The launched attempt retains ownership until its capture outcome is
         durable. Reconcile resumes either the intent or the captured result.
         """
+        if attempt.get("cleanup"):
+            self.finished_cleanup(attempt, run)
+            return
         from . import suspension
         config = self.service.configuration()
         own_result = suspension.natural_result(self.paths, run) if hasattr(run, "turn_started_at") else None
@@ -1412,6 +1461,11 @@ class Engine:
             self.store.transition(db, "run_finished", node["id"], {"run_id": run.id, "status": result["status"], **({"failure": result["failure"]} if result.get("failure") else {})})
             self.service.changed.notify_all()
         self.integrate(current)
+
+    def finished_cleanup(self, attempt, run):
+        sessions.finish_cleanup(self.store, self.runner, attempt, run)
+        with self.service.changed:
+            self.service.changed.notify_all()
 
     def integrate(self, attempt):
         with effects.serialized(self.store):

@@ -4605,6 +4605,9 @@ class Runner(QuotaHandover):
         moment of asking — a window reset — which lets a genuinely new drain
         ask again.
         """
+        from .scheduler.sessions import cleanup_run
+        if cleanup_run(self.paths, self.tree.get(node_id)):
+            return
         interval = float(self.config.limits.get("wind_down_poll_seconds", 60))
         budget_cfg = self.config.project.get("budget") or {}
         min_span = budget_number(budget_cfg, "burn_min_span_seconds", zero_ok=True)
@@ -5588,6 +5591,11 @@ class Runner(QuotaHandover):
                         activation = attempts(db)[context.attempt_id]
                     worktree_path = Path(activation.get("alias_worktree", worktree_path))
                 branch = gitops.unique_branch(repo, desired)
+                if context and activation.get("cleanup"):
+                    bound = activation["binding"]
+                    if (provider.name, spec.model) != (bound["provider"], bound["model"]):
+                        raise RuntimeError("session_unavailable: cleanup route changed")
+                    branch = activation["cleanup_branch"]
 
             node = Node(
                 id=node_id, agent=agent_name, provider=provider.name, model=spec.model,
@@ -5650,7 +5658,8 @@ class Runner(QuotaHandover):
                                                          "model": spec.model,
                                                          "reason": routed_why})
 
-                prompt = self.compose_prompt(spec, task, node, worktree_path)
+                prompt = (task if context and activation.get("cleanup")
+                          else self.compose_prompt(spec, task, node, worktree_path))
                 if context:
                     prompt += f"\nworking directory: {worktree_path}\nnode: {context.node_id}\n"
                     if activation.get("findings"):
@@ -6401,7 +6410,8 @@ class Runner(QuotaHandover):
         # commit per question would both add noise and change what
         # _drop_if_empty decides for every later run.
         node = self.tree.get(node_id)
-        from .scheduler.sessions import retains_checkout
+        from .scheduler.sessions import retains_checkout, cleanup_run
+        cleanup = cleanup_run(self.paths, node)
         if (run.spec.writes and node and node.branch and Path(node.worktree).is_dir()
                 and not run.awaiting
                 and not retains_checkout(self.paths, node)):
@@ -6532,7 +6542,7 @@ class Runner(QuotaHandover):
         # so the run stays unjudged rather than judged on the last word
         # (VR-R3). Repeated agreeing lines qualify, the last one is the one
         # kept.
-        if VERDICT.search(text or "") and not run.awaiting and status != "rate_limited":
+        if VERDICT.search(text or "") and not run.awaiting and status != "rate_limited" and not cleanup:
             found = _text_verdict(text)
             self.tree.update(
                 node_id,
@@ -6581,7 +6591,7 @@ class Runner(QuotaHandover):
             self.tree.set_status(node_id, "failed", self._with_trip(prior_stuck, "quota exhausted"))
         elif session_lost:
             self.tree.set_status(node_id, "failed", "session_lost")
-        elif run.spec.conversational and status == "done":
+        elif run.spec.conversational and status == "done" and not cleanup:
             # A conversation is not finished just because a turn is. Park it as
             # idle so the session stays resumable for the next question.
             self.tree.set_status(node_id, "idle", self._with_trip(prior_stuck, ""))
