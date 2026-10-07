@@ -4789,3 +4789,5 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The old reviewer nd-4294d438 is cancelled. It is held as termination_unconfirmed, with no run.
   - The new AU chain is tester nd-baa17a24 (inverts the test) → implementer-deep nd-921b0115 → agy reviewer nd-14e1ba3a. merge_node the reviewer node once it approves.
   - Tooling: a node run that ends with NEED_INFO is treated as a success, so the reviewer depending on it launched. Add this to the batch.
+- Fixture repair MERGED as f3a5e17b. Reviewer agy ag-81218c APPROVED and its guard scan came back clean.
+  - Tooling note: agy's run_command sends any command longer than 10 s to the background, which conflicts with the reviewer brief's "run in the foreground" rule. Add this to the batch.
