@@ -507,6 +507,8 @@ class _Hold:
 # optionally with a list bullet, so prose and inline-code examples do not count.
 NEED_DECISION = re.compile(
     r"(?m)^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?NEED_DECISION\(([^)]{0,80})\)\s*:\s*(.+)")
+NEED_INFO = re.compile(
+    r"(?m)^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?NEED_INFO\(([^)\n]*)\)[ \t]*:[ \t]*(.+)$")
 PROPOSED_DEFAULT = re.compile(r"(?im)^\s*DEFAULT\s*:\s*(.+)$")
 # A bug in multiagents itself, written up for publication. Parsed from the
 # finished message rather than mid-stream like NEED_DECISION: a ticket is the
@@ -583,6 +585,8 @@ How this works:
 
   `NEED_INFO(<topic>): <question>` — for something another agent or your parent
   could tell you. Non-blocking: state your assumption and carry on. Prefer this.
+  A NEED_INFO in your final message holds a scheduled node until your parent
+  answers and relaunches it, or closes it.
 
   `NEED_DECISION(<topic>): <question>` — for a choice that changes what
   "correct" means, where guessing wrong wastes everything built on it. This
@@ -2984,6 +2988,25 @@ class Runner(QuotaHandover):
         if opened is not None:
             ranges.append((opened[0], len(text)))
         return ranges
+
+    @staticmethod
+    def need_info(text: str) -> list[str]:
+        """Final information requests, with the decision marker's anchoring.
+
+        Markdown examples are not requests, including inline code that wraps
+        across lines. Use the same fence and backtick rules as ticket parsing.
+        """
+        text = text or ""
+        fenced = Runner._fenced_ranges(text)
+        masked = list(text)
+        for a, b in fenced:
+            masked[a:b] = ["." if c != "\n" else c for c in text[a:b]]
+        spans = list(fenced)
+        for para in re.finditer(r"(?:[^\n]+\n?)+", "".join(masked)):
+            spans += [(para.start() + m.start(), para.start() + m.end())
+                      for m in INLINE_CODE.finditer(para.group())]
+        return [m.group().strip() for m in NEED_INFO.finditer(text)
+                if not any(a <= m.start() < b for a, b in spans)]
 
     def _file_tickets(self, node_id: str, text: str) -> list[dict]:
         """Turn a finished bug-reporter message into queued tickets.
@@ -6430,6 +6453,7 @@ class Runner(QuotaHandover):
         record = {
             "status": status, "exit_code": code, "session_id": session_id,
             "turn_started_at": run.launched_at, "usage": usage, "text": text, "stderr_tail": stderr,
+            "final_text": run.final_assistant_message,
         }
         warnings = [event["warning"] for event in run.events if event.get("warning")]
         if status == "done" and run.verdict_after_error:
@@ -7559,7 +7583,7 @@ class Runner(QuotaHandover):
             "elapsed_seconds": round(node.turn_elapsed()),
             "node_elapsed_seconds": round(node.elapsed()),
             "log_dir": str(run_dir),
-            "need_info": [ln for ln in text.splitlines() if ln.strip().startswith("NEED_INFO")],
+            "need_info": self.need_info(data.get("final_text", text)),
         }
         payload.update(home_provider=node.home_provider or node.provider,
                        current_provider=node.provider, segments=node.segments,

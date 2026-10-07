@@ -19,7 +19,7 @@ import uuid
 
 from .. import procs
 from ..renames import shipped as shipped_renames
-from ..runner import LaunchContext, Runner, VERDICT, admission_block
+from ..runner import LaunchContext, Runner, VERDICT, admission_block, _run_read
 from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
@@ -1196,9 +1196,12 @@ class Engine:
             if record_launch(self.store, db, attempt, run):
                 self.service.changed.notify_all()
 
-    def hold(self, db, node, reason, detail=""):
-        node.update(state="held", hold={"reason": reason, "detail": detail},
+    def hold(self, db, node, reason, detail="", *, markers=None):
+        hold = {"reason": reason, "detail": detail} if markers is None else {"reason": reason, "markers": markers}
+        node.update(state="held", hold=hold,
                     revision=node["revision"] + 1)
+        if markers is not None:
+            node["outcome"] = None
         self.store.save_node(db, node)
         self.store.transition(db, reason, node["id"], node["hold"])
         held = self.store.transition(db, "held", node["id"], node["hold"])
@@ -1284,6 +1287,13 @@ class Engine:
         from . import suspension
         config = self.service.configuration()
         own_result = suspension.natural_result(self.paths, run) if hasattr(run, "turn_started_at") else None
+        try:
+            message = json.loads(_run_read(self.paths.run_dir(run.id), "result.json"))
+        except (OSError, ValueError):
+            message = {}
+        if not isinstance(message, dict):
+            message = {}
+        markers = Runner.need_info(message.get("final_text", message.get("text", "")))
         with self.service.changed, self.store.transaction() as db:
             current = attempts(db)[attempt["attempt_id"]]
             if (current.get("window_resumed_at") != attempt.get("window_resumed_at")
@@ -1298,8 +1308,9 @@ class Engine:
                     or current.get("window_resumed_at") != attempt.get("window_resumed_at")
                     or (current["state"] == "abandoned" and current.get("cancel_requested") and current.get("window_suspended_at"))):
                 return
-            current.setdefault("capture_intent", current.get("window_completion") or
-                               {"id": run.id, "status": run.status, "session_id": run.session_id})
+            current.setdefault("capture_intent", {**(current.get("window_completion") or
+                               {"id": run.id, "status": run.status, "session_id": run.session_id}),
+                               "need_info": markers})
             save_attempt(db, current)
             db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
         run = SimpleNamespace(**current["capture_intent"])
@@ -1309,12 +1320,12 @@ class Engine:
             self.runner._settle_holds()
             self.runner.tree.update(run.id, status=run.status, reason="", session_id=run.session_id)
             self.runner._release(run.id)
-        result = {"status": run.status, "session_id": run.session_id,
+        result = {"status": run.status, "session_id": run.session_id, "need_info": getattr(run, "need_info", []),
                   "run_dir": str(self.paths.run_dir(run.id))}
         if "input_commit" in current:
             from .results import MissingCheckout
             try:
-                result = Results(self.paths, config).capture(run, current, self.runner.authority)
+                result.update(Results(self.paths, config).capture(run, current, self.runner.authority))
             except MissingCheckout as exc:
                 result.update(status="failed", failure="missing_tree", detail=str(exc))
             except (gitops.GitError, OSError, ValueError) as exc:
@@ -1473,6 +1484,12 @@ class Engine:
                         bound["commit"] = result.get("checkout_commit", result["commit"])
                     bound["last_run"] = current["run_id"]
                     sessions.save_alias(db, bound)
+                tree_run = self.runner.tree.get(current["run_id"])
+                # TB-R1: hold in the settlement transaction, before any node
+                # can see this attempt as a successful dependency.
+                if (node["state"] not in {"cancelled", "held"} and result.get("need_info")
+                        and not verdict and not (tree_run and tree_run.verdict)):
+                    self.hold(db, node, "needs_info", markers=result["need_info"])
                 if node["state"] not in {"cancelled", "held"}:
                     loop = nodes.get(node.get("parent"))
                     while loop and loop["kind"] != "loop":
@@ -1498,7 +1515,6 @@ class Engine:
                         self.store.transition(db, "done", node["id"], {"outcome": node["outcome"]})
                         if result["status"] != "done" and loop and loop["state"] not in {"held", "cancelled", "done"}:
                             self.hold(db, loop, "run_failed", node["id"])
-                tree_run = self.runner.tree.get(current["run_id"])
                 if current.get("alias_id") and tree_run and tree_run.reason == "session_lost":
                     self.hold(db, node, "session_lost", current["run_id"])
                 self.store.save_node(db, node)

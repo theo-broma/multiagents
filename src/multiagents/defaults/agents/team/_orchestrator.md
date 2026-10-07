@@ -86,6 +86,8 @@ stop with `NEED_INFO(...)` instead, and you will see that in `collect_agent`.
 When the question is a design or approach question rather than something you can
 answer from here, put it to the advisor and pass the answer back with
 `steer_agent`. Relay the substance; do not paste the whole reply.
+For a scheduled node, a NEED_INFO in its final message holds the node. Answer
+and use `relaunch_node` to run it again, or settle it with `close_node`.
 
 The exception is `implementer` and `implementer-deep`, which consult
 **`dev-advisor`** directly — a second conversational agent, on a different model

@@ -886,6 +886,148 @@ def check_agent(agent_id: str, since: int = 0) -> dict:
         return _ok({"error": str(exc)})
 
 
+async def _wait_for_agents_and_nodes(run: Runner, snapshot: dict, timeout: float) -> dict:
+    """Follow run-less nodes alongside the legacy run wait, without launching."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    covered_runs = {n.id for n in run.tree.active()}
+    waiting = asyncio.create_task(run.wait_for_any(None, timeout))
+    run_waits = {waiting}
+    tasks = {waiting}
+    watched_runs = set()
+    node_wait = None
+    node_result = None
+    cursor, backoff = 0, 1.0
+    latest = snapshot
+
+    def pending():
+        return [{"node_id": id, "blocked": n.get("blocked", [])}
+                for id, n in latest.items() if n["state"] == "open" and not n.get("runs")]
+
+    def launched():
+        return {id: n["runs"][-1]["run_id"] for id, n in latest.items() if n.get("runs")}
+
+    def reported(result):
+        # Native run waits advance the caller's notice cursor too. Keep every
+        # notice collected by either wait when handing the combined reply back.
+        original = waiting.result() if waiting.done() else {}
+        notices = original.get("limit_notices", []) + (node_result or {}).get("limit_notices", [])
+        for task in run_waits:
+            if task is not waiting and task.done() and not task.cancelled():
+                notices += task.result().get("limit_notices", [])
+        if notices:
+            result["limit_notices"] = notices
+        return result
+
+    async def refresh_nodes():
+        listed = await asyncio.to_thread(_node_rpc, "list_nodes", {})
+        latest.update({n["id"]: n for n in listed.get("nodes", []) if n["id"] in snapshot})
+
+    async def node_changes():
+        nonlocal cursor, backoff
+        started = loop.time()
+        remaining = max(0, deadline - started)
+        # Bound the blocking RPC: cancelling to_thread cannot interrupt its
+        # socket read when a run finishes first. Never acknowledge this cursor;
+        # wait_for_nodes still owns delivery to the orchestrator.
+        reply = await asyncio.to_thread(_node_rpc, "wait_for_nodes", {
+            "cursor": cursor, "node_ids": list(snapshot), "timeout": min(5, remaining)})
+        if "next_cursor" in reply and "transitions" in reply:
+            cursor = reply["next_cursor"]
+            if reply["transitions"]:
+                backoff = 1.0
+                await refresh_nodes()
+                return
+            # A stopped scheduler can answer an empty wait immediately. Keep
+            # even that path from spinning, without polling the node list.
+            delay = max(0, min(backoff, remaining) - (loop.time() - started))
+            await asyncio.sleep(delay)
+            backoff = min(5, backoff * 2)
+            return
+        # Older/unavailable notification services can only be polled. Start
+        # at one second and back off to five, keeping the same overall deadline.
+        await asyncio.sleep(min(backoff, max(0, deadline - loop.time())))
+        backoff = min(5, backoff * 2)
+        if loop.time() < deadline:
+            await refresh_nodes()
+
+    try:
+        while True:
+            for task in list(run_waits):
+                if not task.done():
+                    continue
+                run_waits.remove(task)
+                result = task.result()
+                if task is not waiting:
+                    # A run can finish before the scheduler has settled its
+                    # node. Refresh once on this wake, then follow journal
+                    # notifications until the node is done/held/cancelled.
+                    notices = (node_result or {}).get("limit_notices", [])
+                    node_result = {**(node_result or {}), **result}
+                    if notices:
+                        node_result["limit_notices"] = notices + result.get("limit_notices", [])
+                    await refresh_nodes()
+                    continue
+                if result.get("reason") != "no active agents":
+                    if result.get("timed_out"):
+                        await refresh_nodes()
+                        result["pending_nodes"] = pending()
+                        result["node_runs"] = launched()
+                        result["still_running"] = list(dict.fromkeys(
+                            result.get("still_running", []) + list(launched().values())))
+                    return reported(result)
+            changes = []
+            node_runs = launched()
+            for id, node in latest.items():
+                run_id = node_runs.get(id)
+                tree_run = run.tree.get(run_id) if run_id else None
+                if (node["state"] in {"done", "held", "cancelled"}
+                        or (tree_run and tree_run.status == "awaiting_user")):
+                    changes.append({"node_id": id, "state": node["state"], "hold": node.get("hold"),
+                                    **({"agent_id": run_id, "status": tree_run.status}
+                                       if tree_run else {})})
+            if changes:
+                result = {**(waiting.result() if waiting.done() else
+                             {"capacity": run.capacity(), "still_running": []}),
+                          **(node_result or {})}
+                result.pop("reason", None)
+                result.update(changed=changes, node_runs=node_runs,
+                              still_running=[n.id for n in run.tree.active()
+                                             if n.id in covered_runs or n.id in node_runs.values()])
+                return reported(result)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                result = await waiting
+                await refresh_nodes()
+                result.pop("reason", None)
+                result.update(changed=[], timed_out=True, pending_nodes=pending(), node_runs=launched())
+                result["still_running"] = list(dict.fromkeys(
+                    result.get("still_running", []) + list(launched().values())))
+                return reported(result)
+            # The initial no-id run wait has a fixed run snapshot. Runs that
+            # launch from our node snapshot therefore need their own native
+            # waits, even when the initial wait answered "no active agents".
+            for run_id in node_runs.values():
+                if run_id not in watched_runs and run.tree.get(run_id) is not None:
+                    task = asyncio.create_task(run.wait_for_any([run_id], remaining))
+                    watched_runs.add(run_id)
+                    run_waits.add(task)
+                    tasks.add(task)
+            if node_wait is None:
+                node_wait = asyncio.create_task(node_changes())
+                tasks.add(node_wait)
+            await asyncio.wait({node_wait, *run_waits}, timeout=remaining,
+                               return_when=asyncio.FIRST_COMPLETED)
+            if node_wait.done():
+                node_wait.result()
+                tasks.remove(node_wait)
+                node_wait = None
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @_tool()
 async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300) -> dict:
     """Block until any of these agents finishes or gets stuck.
@@ -897,7 +1039,8 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
 
     Far better than polling in a loop: returns the moment something changes, and
     costs one tool call rather than one per check. With no ids, waits on every
-    active agent.
+    active agent and the caller's open nodes that have no run yet. The node
+    snapshot is taken at call time; a launch alone does not return the wait.
     """
     run = runner()
     # NC-R21: a node id waits for that node's current run, never a later one
@@ -920,7 +1063,13 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
                         "note": "no run has started for these nodes yet; "
                                 "wait_for_nodes follows a node, not a run"})
         agent_ids = list(dict.fromkeys(ids))
-    result = await run.wait_for_any(agent_ids, float(timeout))
+    snapshot = {}
+    if not agent_ids:
+        listed = await asyncio.to_thread(_node_rpc, "list_nodes", {"state": "open"})
+        snapshot = {n["id"]: n for n in listed.get("nodes", [])
+                    if n["created_by"] == (run.self_id() or "root") and not n.get("runs")}
+    result = (await _wait_for_agents_and_nodes(run, snapshot, float(timeout)) if snapshot
+              else await run.wait_for_any(agent_ids, float(timeout)))
     if nodes:
         result["node_runs"] = nodes
     if no_run:
@@ -938,7 +1087,9 @@ def collect_agent(agent_id: str, mode: str = "summary") -> dict:
     dumped into your context — that isolation is the point of delegating.
 
     Check `need_info`: any NEED_INFO lines mean the agent was blocked on
-    something only you or another agent knows. Answer with steer_agent.
+    something only you or another agent knows. Answer with steer_agent for a
+    standalone run. A final NEED_INFO holds a scheduled node: answer and use
+    relaunch_node, or settle it with close_node.
 
     Check `readonly_violations` too. It lists files the agent changed that it
     may not modify — for the coder tiers, the test suite. They are reverted
@@ -1920,11 +2071,11 @@ def give_verdict(node_id: str, generation_seq: int, commit: str, verdict: str,
 @_tool()
 def relaunch_node(id: str, revision: int, max_rounds: int | None = None,
                   pins: dict | None = None, new_session: list[str] | None = None,
-                  retry: str = "verdict_child", ctx: _ToolContext = None) -> dict:
+                  retry: str | None = None, ctx: _ToolContext = None) -> dict:
     """Reopen a held or finished node (available in M4)."""
-    args = dict(id=id, revision=revision, retry=retry)
+    args = dict(id=id, revision=revision)
     args.update({k: v for k, v in dict(max_rounds=max_rounds, pins=pins,
-                 new_session=new_session).items() if v is not None})
+                 new_session=new_session, retry=retry).items() if v is not None})
     return _node_rpc("relaunch_node", args, ctx)
 
 

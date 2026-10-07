@@ -52,6 +52,10 @@ def decide(service, db, op, args, nodes, config=None):
     if not isinstance(new, list) or any(not isinstance(id, str) or id not in scope or not nodes[id]["session"] for id in new):
         invalid("new_session: expected aliased child ids")
     new_keys = {sessions.alias_id(nodes[id], nodes) for id in new}
+    if node["kind"] == "simple":
+        key = sessions.alias_id(node, nodes)
+        if key:
+            new_keys.add(key)
     for id, values in targets.items():
         if not isinstance(values, dict) or set(values) - {"model", "provider", "effort"}:
             invalid("pins: expected model, provider and effort")
