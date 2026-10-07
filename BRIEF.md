@@ -4850,3 +4850,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - TB package C MERGED as d9a09fe2 (implementer ag-d8a885; agy reviewer ag-bf4335 APPROVED). TB-R5, TB-R7 done; R6 withdrawn. 61 tests green on main (tb_c + conversation_provider_change).
 - TB package A: implementer-deep ag-e0091b done (37255caa; 1298 passed / 1 skipped incl. scheduler neighbours); agy reviewer nd-eb74b450 runs. Package B tester nd-c1bdf29e started early (tests only); its implementer waits for A's merge.
 - TB A review ag-c77b16 REJECTED (1): no-id wait polls list_nodes at 4 Hz (server.py ~930). Round 2: implementer-deep nd-98f8be05 (inputs nd-716fbf10) → agy reviewer nd-5b30036f. On approval merge_node nd-98f8be05.
+- TB B tester ag-744bbe done (3d76249c, 19 red / 2 guards). Decisions 9000f463. Implementer B (implementer-deep, inputs nd-c1bdf29e) starts once A merges.
