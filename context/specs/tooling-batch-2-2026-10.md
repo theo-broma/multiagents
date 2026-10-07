@@ -87,3 +87,6 @@ a dependent only once its task is final.
 - A new hold on the same node after relaunch_node is a new hold and is signalled again. A hold that has already cleared when the driver looks is not signalled.
 - Acknowledgement is `ack_nodes(cursor)`. A wait returning a hold does not acknowledge it.
 - The interactive (attached) driver path must deliver the same message; the tests may cover only the unattended `_supervise` path when the attached path has no observable seam.
+
+## Decision after TB2-R6 implementer ag-88dfd4 (2026-10-07)
+- `test_tb2_r6_cleanup_message_carries_the_tracked_diff_inline_but_no_untracked_contents` and `test_tb2_r6_archive_holds_the_tracked_diff_before_the_cleanup_runs` are wrong: their scripted cleanup removes only `diff.patch` and leaves the tracked `.gitignore` edit, yet they expect the waiting node to finish. TB2-R6 says the node is then held `dirty_worktree`. The implementation follows the spec; the tester corrects these two tests on main right after the TB2-R6 merge (the cleanup also restores `.gitignore`).
