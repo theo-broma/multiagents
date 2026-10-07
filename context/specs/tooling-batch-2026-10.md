@@ -159,6 +159,13 @@ tests/test_tb_c_fallback_options.py stay as regression guards. Original text:
     carries `pending_resume: {"at": <epoch>, "attempt": <n>}`; the run's
     record has `cause: "rate_limited"`.
   - A fresh relaunch's prompt names the old run id and its run directory.
+- Decisions after review ag-e2ca36:
+  - A provider "model at capacity" refusal (e.g. codex "Selected model is at
+    capacity") is a rate-limit signal, handled exactly as a 429. It cut
+    attempt ag-f65efe of this very package.
+  - A bare `429` in stderr is not a signal: it must appear as an HTTP status
+    (e.g. "429 Too Many Requests", "status 429", "HTTP 429") or come with
+    rate-limit wording; a traceback mentioning line 429 is an ordinary crash.
 - Verified by: tests with a fake provider returning a 429 mid-run, with and
   without Retry-After, a repeated 429, a cancel while pending, and a restart
   while pending.
