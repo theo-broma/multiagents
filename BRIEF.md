@@ -4862,3 +4862,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - The running scheduler (pid 1969063, started 2026-10-06) still runs pre-TB code. It must be restarted (`multiagents scheduler stop` then `start`, when nothing runs) for TB-R1/R2/R4 to take effect. Left to the user.
   - Not addressed (dropped at triage): agy backgrounding commands >10 s; repeated doctor warning. Cosmetic: scheduler_status lists a window entry for every node ever created.
 - 2026-10-07 ~16:39 UTC: the user restarted the scheduler (new pid 3100078); TB-R1/R2/R4 are now live. Nothing running.
+- 2026-10-07 (user: "continue en autonomie"): backlog resumed without TI-R7 (needs the user) and §4. Three testers in parallel:
+  - OG-R2 gaps (reserved_instance qh + agent-level, steer provider alias, doctor warning once): tester nd-b5f68db5 → tests/test_og_r2_gaps.py; then implementer → agy reviewer; merge the implementer node.
+  - RV_IMPLEMENTED flip: tester nd-f926418c (tests only); read result, merge_node if only test fixes; src gaps → implementer.
+  - NT review follow-ups (sender stamp-after-read, _held_seqs swallow/chunk, cancel re-holds held child): tester nd-4e2c96d9 → tests/test_nt_review_followups.py; then implementer → reviewer.
