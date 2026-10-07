@@ -4766,3 +4766,22 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 1. Strip `sys` from history (decision recorded above). The user force-pushes.
 2. Fix the tests citing pre-rewrite SHAs (list from nd-427cb00d), using the commit-maps (/var/tmp/rewrite-final/filter-repo/commit-map, then the sys strip's own map).
 3. Then the older backlog (see the earlier sections).
+
+**~11:35 (after compaction):**
+- Fixture repair: tester nd-427cb00d finished. Commit 876676b3 touches 4 files: test_core, test_c19_review_fixes, test_c19_quota_details_page and test_c19_adversarial. The agy reviewer nd-2a7ef478 is running; merge if it approves.
+- The tester reports these failures as NOT caused by the rewrite. They exist on main before and after its fix; triage them after the salvage merges:
+  - `test_nc_m1_tools.py::test_nc_r13_every_node_tool_is_registered_with_the_mcp_server`: `cancel_node`, `register_template`, `update_node`, `ack_nodes` and `create_node` are not registered;
+  - `test_nc_m2_round4_guards.py::test_nc_r26_cancel_stops_runs_without_holding_the_write_lock[True/False]`: an extra `held` state;
+  - `test_nc_m1_hardening.py::test_nc_r76_…window_tool_schema…`: StopIteration;
+  - flaky: `test_nc_m1_adv3_concurrency` (adv3 interleave), `test_c19_adversarial` (many reveals), `test_breaker_lapsed_admission` (refused scheduler activation; this matches the race codex reported).
+- SHA-citing tests: the list is in `.multiagents/runs/ag-627543/result.json`. `tests/test_phase0_context_window.py:637` `BASE = "e00b7de"` may feed a git call.
+- Tooling: ag-627543 ran 5102 s against a 2700 s timeout with no stuck status. Add it to the tooling-bug batch.
+- Salvage re-launched. Each chain is gated on the previous node's success and takes it as input:
+
+  | Feature | Chain |
+  |---|---|
+  | SL | tester nd-ba368722 → agy reviewer nd-b56e63a0 |
+  | EV | tester nd-4f2c4846 → implementer (codex) nd-a9e75a4e → agy reviewer nd-290597e0 |
+  | AU | tester nd-da061947 → implementer-deep (codex) nd-a9ce8aaf, which cherry-picks c466d0c1 only → agy reviewer nd-4294d438 |
+
+  On each approval: read the diff against the spec, merge_node the LAST node of the chain, then set_finding_status (EV: F112 and F33 fixed; AU: F130, F131, F132 and F140 fixed).
