@@ -206,7 +206,7 @@ def test_r3_1_an_unrouted_run_through_start_carries_its_providers_guidance(
 # Captured from `compose_prompt` at e1e605a, before P0-R3 existed, for a
 # provider without the key (fixed id, branch, workdir, brief and task). If the
 # PREAMBLE is changed deliberately by another contract, regenerate this and
-# say so in that commit. It must never change as a side effect of P0-R3.
+# say so in that commit. (Regenerated for 77eb8cb6: two NEED_INFO-hold lines.) It must never change as a side effect of P0-R3.
 GOLDEN = (
     'You are an autonomous subagent in a delegated agent tree. This block is\n'
     'generated — it tells you where you stand.\n'
@@ -225,6 +225,8 @@ GOLDEN = (
     '\n'
     '  `NEED_INFO(<topic>): <question>` — for something another agent or your parent\n'
     '  could tell you. Non-blocking: state your assumption and carry on. Prefer this.\n'
+    '  A NEED_INFO in your final message holds a scheduled node until your parent\n'
+    '  answers and relaunches it, or closes it.\n'
     '\n'
     '  `NEED_DECISION(<topic>): <question>` — for a choice that changes what\n'
     '  "correct" means, where guessing wrong wastes everything built on it. This\n'
