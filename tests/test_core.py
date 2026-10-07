@@ -224,16 +224,17 @@ def test_quota_failure_classification():
 
 
 def test_redaction_masks_shapes_keys_and_literals():
+    shaped = "sk-" + "A" * 24
     register_literal("hunter2-super-secret-value")
     out = scrub({
         "access_token": "abc123",                       # secret key name
-        "note": "bearer sk-<redacted>",   # recognisable shape
+        "note": "bearer " + shaped,      # recognisable shape
         "leak": "hunter2-super-secret-value",           # registered literal
         "nested": [{"refresh_token": "zzz"}],
         "safe": "ordinary text",
     })
     assert out["access_token"] == MASK
-    assert "sk-<redacted>" not in out["note"]
+    assert shaped not in out["note"]
     assert out["leak"] == MASK
     assert out["nested"][0]["refresh_token"] == MASK
     assert out["safe"] == "ordinary text"
@@ -816,7 +817,7 @@ def test_an_agents_token_authenticates_nothing_and_names_who_is_calling(tmp_path
     assert authproxy.read_token("mxa_ag-evil_" + "0" * 32, secret) == "", \
         "a forged name must not be served"
     assert authproxy.read_token(tag, "a-different-secret") == ""
-    assert authproxy.read_token("sk-ant-<redacted>", secret) == ""
+    assert authproxy.read_token("sk-ant-" + "B" * 24, secret) == ""
     assert authproxy.read_token("", secret) == ""
 
     # The secret is generated once and kept, or every restart would invalidate

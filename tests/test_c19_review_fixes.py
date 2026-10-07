@@ -134,18 +134,23 @@ def round3_identity(tmp_path, provider, email, extra, *, credentials=False):
     return codex(tmp_path, profile)
 
 
+# Short on purpose (under the 16 characters a credential must reach to hide an
+# identity), built from parts so no email-shaped literal sits in the source.
+SHORT_EMAIL = "admin" + "@" + "a.test"
+
+
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 @pytest.mark.parametrize("key,value", [
     ("type", "admin"),
-    ("opaque", "admin@example.invalid"),
+    ("opaque", SHORT_EMAIL),
     ("secret", "admin"),
-    ("api_key", "admin@example.invalid"),
-    ("secret", "admin@example.invalid "),
+    ("api_key", SHORT_EMAIL),
+    ("secret", SHORT_EMAIL + " "),
 ])
 def test_qd_r4a_noncredential_and_short_values_do_not_hide_identity(tmp_path, provider, key, value):
-    done = round3_identity(tmp_path, provider, "admin@example.invalid", {key: value})
+    done = round3_identity(tmp_path, provider, SHORT_EMAIL, {key: value})
     assert done.returncode == 0, done.stderr
-    assert json.loads(done.stdout)["identity"] == "admin@example.invalid"
+    assert json.loads(done.stdout)["identity"] == SHORT_EMAIL
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])

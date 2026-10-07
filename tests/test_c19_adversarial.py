@@ -166,7 +166,7 @@ def test_adv_claude_extra_secret_fields_in_oauth_account_stay_inside(tmp_path):
     home = tmp_path / "home"
     claude_profile(home, "dana@example.invalid")
     doc = json.loads((home / ".claude.json").read_text())
-    doc["oauthAccount"].update({"accessToken": TOKEN_SECRET, "apiKey": "sk-ant-<redacted>",
+    doc["oauthAccount"].update({"accessToken": TOKEN_SECRET, "apiKey": "sk-ant-" + "C19APIKEY0123456789abcdef",
                                 "sessionKey": "C19SESSIONKEY"})
     (home / ".claude.json").write_text(json.dumps(doc))
     done = run_script("claude.sh", "identity",

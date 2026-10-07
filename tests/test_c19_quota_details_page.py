@@ -61,7 +61,7 @@ pytestmark = pytest.mark.real_providers   # providers_view itself is under test
 
 PROVIDERS_DIR = shipped_defaults_dir() / "providers"
 MASK = "*****"
-TOKEN_SECRET = "sk-ant-<redacted>"
+TOKEN_SECRET = "sk-ant-" + "C19TOKENSECRET0123456789abcd"
 REFRESH_SECRET = "rt-C19REFRESHSECRET-1a2b3c4d5e6f"
 _ids = itertools.count()
 
