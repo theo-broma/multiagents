@@ -4839,3 +4839,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **sys STRIPPED from history (2026-10-07).** The user force-pushed with lease: origin main 4315804 → a8431c0b, 1665 → 1664 commits, tip tree identical, no blob over 5 MB. Old main tagged private `backup-pre-sys` (a1f5b35f, never pushed); local main reset to a8431c0b.
   - Guard scan before push: only the user's own commit identity (one email fingerprint), already on the published history; no allow entry added, reported to the user.
   - Next: remap the SHA-citing tests through both commit-maps (rewrite-final, then sys-strip), routed to the tester.
+  - SHA remap queued: tester nd-07e342f8 → agy reviewer nd-55a62c3e. Commit-maps copied to .multiagents/sha-remap/ (gitignored). On approval, merge_node nd-07e342f8, the tester node, not the reviewer node.
