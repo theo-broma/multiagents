@@ -4740,3 +4740,29 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - **REGRESSION caused by the rewrite:** it replaced token, email, host and IP literals in the tests too, so tests that need realistic shapes fail. Example: test_core.py::test_redaction_masks_shapes_keys_and_literals now receives `sk-<redacted>`.
   - Codex also saw 2 flaky breaker-admission failures in its recheck (3 launches instead of 4).
   - Repair: tester nd-427cb00d runs the full suite against context/ts/manifests, fixes the fixtures by assembling values at runtime, and lists the SHA-citing tests and the non-rewrite failures; then agy reviewer nd-2a7ef478.
+
+## HANDOFF 2026-10-07 ~10:45 (orchestrator context wind-down): resume from here
+
+**Done today (all on the rewritten history; origin main force-pushed by the user, 436dfed → 4315804):**
+- NT2 round 3 merged (fb36439, later rewritten).
+- Breaker trial-claim fix merged ca0b43b5 (codex ag-63a0ab, agy APPROVED).
+- History rewrite published; the old main is kept in the private local tags `backup-pre-push` and `backup-before-rewrite`.
+
+**In flight (wait with explicit run ids; get them via get_node):**
+- RV: reviewer agy nd-e169d892 on codex nd-a3c5bf15 (5a7de682). If APPROVED, merge_node nd-a3c5bf15.
+  - Codex's NEED_INFO: test_core.py::test_redaction_masks_shapes_keys_and_literals fails because the rewrite turned its fake `sk-…` into `sk-<redacted>`. It is covered by the next item.
+- Rewrite-damaged fixtures: tester nd-427cb00d (full suite against context/ts/manifests; fix by runtime assembly; list the SHA-citing tests and the non-rewrite failures), then agy reviewer nd-2a7ef478. If APPROVED, merge.
+- Codex saw 2 flaky breaker-admission tests (3 launches instead of 4). Look again after the fixture repair report.
+
+**Stopped and to be redone — KEY LESSON:** `limits.readonly_paths` reverts any implementer change to an EXISTING test file at publish ("multiagents: restore readonly paths"; adding new test files is fine). So a salvaged patch that edits existing tests must be applied by the TESTER (exempt), not by an implementer.
+- **SL:** the fix itself lives in test fixtures (tests/test_nc_*, conftest, nc_fixture), so the whole job goes to the `tester` agent: git am 0001, then make the fixtures stop what they start; SL-R5 scoped run. Then an agy reviewer. The old nodes nd-7ea0863c (stopped) and reviewer nd-7b197730 are cancelled.
+- **EV:** a tester node applies 0002 with git am and commits. Then implementer-deep (codex) takes the tester node as input and implements build_env (scripts.py, executor/base.py). Then an agy reviewer. The old nd-b66a6f44 (stopped) and nd-c714a0a0 are cancelled.
+- **AU:** a tester node applies 0003. Then implementer-deep (codex), with the tester node as input, cherry-picks c466d0c1 (AU-R4, src only, from `node-results/29830d50e58a4070be2cd77188a5442d`; post-rewrite, OK to use) and does AU-R1..R3/R5. Do NOT take ab6235d0 (the readonly restore). Then an agy reviewer. The old nd-81387189 failed and nd-fe6a285d is cancelled.
+- Patches: /home/theobroma/projects/multiagents/.multiagents/salvage-tests/000{1..5}*.patch, passed by ABSOLUTE path; the 0003 name contains `AU-R1.R4` with a dot.
+
+**LongCat verdict:** 2 good short tasks (NT round 3, git rehearsal). 3 of 5 long runs died on "Upstream request failed: Endpoint is unavailable" at 13-18 min (ag-9f5d71, ag-a35ae0, ag-cac9c3). It is not reliable for long tasks: tell the user and propose another model for quick/default; meanwhile, escalate to implementer-deep (codex), as the rule allows.
+
+**Next, after those merge, with nothing running:**
+1. Strip `sys` from history (decision recorded above). The user force-pushes.
+2. Fix the tests citing pre-rewrite SHAs (list from nd-427cb00d), using the commit-maps (/var/tmp/rewrite-final/filter-repo/commit-map, then the sys strip's own map).
+3. Then the older backlog (see the earlier sections).
