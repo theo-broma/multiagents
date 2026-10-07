@@ -4936,3 +4936,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - ~21:05Z W2 tests APPROVED round 1 (ag-c2ce6f); W2 impl (implementer-deep, nd-9194cc8b) starts. W2 alias = alias-f70eb2e5…, pre-cleaned.
 - ~21:45Z W2 impl ag-738a68 done (07b26563, 5eb9f417); NEED_INFO re R4 test (already fixed on main 2e78c19f) answered, nd-9194cc8b relaunched.
 - ~22:00Z Z impl ag-13b47a done (43150556, 668e8aeb); also reports an older NC-R62 single-spawn assertion superseded by TB2-R6 -> Z reviewer told to judge it; if superseded, add it to the post-merge tester fix. W2 impl confirmed ag-d5cd59 (no change). Both reviewers next; alias worktrees clean.
+- ~22:10Z Z (TB2-R6) reviewer ag-c4d18a APPROVED; merged nd-7df9be4d as 53b7614d. Post-merge tester nd-c3b95adf on main: fix the 2 TB2-R6 tests + the NC-R62 single-spawn assertion (superseded only for a dirty alias with a resumable session; else NEED_INFO). W2 reviewer next.
