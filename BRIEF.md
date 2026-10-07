@@ -4840,3 +4840,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Guard scan before push: only the user's own commit identity (one email fingerprint), already on the published history; no allow entry added, reported to the user.
   - Next: remap the SHA-citing tests through both commit-maps (rewrite-final, then sys-strip), routed to the tester.
   - SHA remap queued: tester nd-07e342f8 → agy reviewer nd-55a62c3e. Commit-maps copied to .multiagents/sha-remap/ (gitignored). On approval, merge_node nd-07e342f8, the tester node, not the reviewer node.
+- SHA remap MERGED as 892515cb (tester nd-07e342f8, ag-9d408a; agy reviewer ag-788bb3 APPROVED). 35 citations in 23 test files remapped; the P0-R8 BASE (e00b7de → f5b58cf) runs and passes in a fresh clone. 8 docstring citations name commits that were never on main (sf_review r1–r6, doom_loop, nc_m1_adv2/adv3); left as is, nothing to map them to.
