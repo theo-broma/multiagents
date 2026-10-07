@@ -80,3 +80,10 @@ a dependent only once its task is final.
 ## Decision after tests review ag-fc01fb (2026-10-07)
 - TB2-R6 needs a tracked diff in the cleanup message and the archive, so the existing defect where `git diff HEAD` in `check_clean` fails with "external diff died" (gitops passes `-c diff.external=` with an empty value), holding `reseat_failed` instead of `dirty_worktree`, is IN SCOPE for the TB2-R6 implementation. Tests that hit it stay as written and are red for that reason until the implementation fixes it.
 - `cleanup_requested` names the waiting node, the alias and the cleanup run id (as TB2-R6 says); tests assert all three.
+
+## Decisions after TB2-R7 tester ag-555396 (2026-10-07)
+- `attention.json` lists leaf holds only, never an ancestor's `child_held`; its shape beyond "valid JSON naming each node, its reason and detail" is the implementer's choice.
+- Signalled: every hold except those the root caused itself (`stopped_by_orchestrator`) and those the scheduler clears by itself (`child_held`; a window-origin `termination_unconfirmed` while its suspension is still being confirmed). `rate_limited`, `disposal_failed`, `admission:refused`, `integration_conflict`, `result_capture_failed`, `run_failed`, `session_lost` and every other reason are signalled.
+- A new hold on the same node after relaunch_node is a new hold and is signalled again. A hold that has already cleared when the driver looks is not signalled.
+- Acknowledgement is `ack_nodes(cursor)`. A wait returning a hold does not acknowledge it.
+- The interactive (attached) driver path must deliver the same message; the tests may cover only the unattended `_supervise` path when the attached path has no observable seam.
