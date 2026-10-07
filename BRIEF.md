@@ -4722,3 +4722,7 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - RV (patches 0004 and 0005): starts after the breaker fix merges, because it touches the same runner and breaker code.
   - Breaker fix: the first run, ag-9f5d71, died on a provider 500. Re-run as nd-25072acb (ag-a35ae0), with reviewer nd-26469547 re-pointed to it.
   - The sys strip runs at the next quiet point, after these merge.
+- 2026-10-07 ~09:20 **Breaker fix done by codex** (nd-82422adc, run ag-63a0ab, 14 min). The two LongCat runs on it, ag-9f5d71 and ag-a35ae0, both died on provider 500s after about 18 min.
+  - Root cause: `Runner.start` claims the half-open trial (runner.py:5438) before setup. A setup refusal released only the startup claim, leaving `trial_at` set with 0 failures, so every waiting pin was refused. The fix releases the trial claim with an ownership token.
+  - Tests: 18 cases in tests/test_breaker_lapsed_admission.py. Review is agy nd-26469547.
+  - **NEW issue from the rewrite:** tests that cite pre-rewrite commit SHAs (at least tests/test_phase0_context_window.py, p0_r8) pass locally only because the old objects remain, and fail on a fresh clone. To fix after the sys strip (SHAs change again): map them through the filter-repo commit-maps.
