@@ -4861,3 +4861,4 @@ These were steered back to ag-074735, with a monotonic clock suggested.
 - **TB batch DONE.** Package B MERGED as c084c83a (implementer-deep nd-adb5ef5c, ag-0e1f32; round-2 reviewer ag-b4b639 APPROVED). All TB tests on main: 234 passed. TB-R1..R5, R7 implemented; R6 withdrawn (already held).
   - The running scheduler (pid 1969063, started 2026-10-06) still runs pre-TB code. It must be restarted (`multiagents scheduler stop` then `start`, when nothing runs) for TB-R1/R2/R4 to take effect. Left to the user.
   - Not addressed (dropped at triage): agy backgrounding commands >10 s; repeated doctor warning. Cosmetic: scheduler_status lists a window entry for every node ever created.
+- 2026-10-07 ~16:39 UTC: the user restarted the scheduler (new pid 3100078); TB-R1/R2/R4 are now live. Nothing running.
