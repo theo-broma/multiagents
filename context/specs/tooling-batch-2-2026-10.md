@@ -57,6 +57,18 @@ a dependent only once its task is final.
   - an alias worktree with an untracked `diff.patch`: one cleanup run on the previous session, its message names `diff.patch`, `cleanup_requested` is emitted, no generation is recorded, the archive holds the file, and the waiting node then launches;
   - a cleanup that leaves the file in place: held `dirty_worktree`, with no second cleanup.
 
+**TB2-R7. Every hold that waits for the orchestrator is signalled to it.**
+(User request 2026-10-07: "every scheduler block without a solution must send a signal to the orchestrator". Today every hold writes a durable `held` transition, but nothing pushes it to the orchestrator session: ntfy reaches the user's phone, `wait_for_agents([node])` returns `no_run_yet` at once for a node with no run, and no driver path injects scheduler events. Mapping by researcher ag-1d8c49.)
+- Scope: every hold that needs a root action, i.e. every hold reason except those the scheduler clears by itself. The signal is about the originating hold (the leaf), not each ancestor's `child_held`.
+- Injected message: when the root orchestrator runs under `multiagents run`, the driver sends a message into its session naming the node, the hold reason, its detail and the expected action (relaunch_node, close_node, answer_question, ...). If the orchestrator is in the middle of a turn, the message is delivered when the turn ends. Holds arriving close together are grouped into one message. A given hold is signalled once.
+- Waits: `wait_for_agents` (with or without ids, including a node with no run yet) and `wait_for_nodes` return at once on a new, unacknowledged hold of a node the caller owns.
+- File: a durable `.multiagents/attention.json` lists the current holds that wait for the root, for shell pollers. It is updated when a hold appears and when it clears.
+- Verified by:
+  - a pre-launch `dirty_worktree` hold while the orchestrator is idle: exactly one injected message;
+  - `wait_for_agents([node with no run])` returns on that hold;
+  - a leaf hold under two nested loops: one signal, not three;
+  - `attention.json` lists the hold, then drops it after relaunch_node.
+
 ## Decisions after tester ag-c964ae (2026-10-07)
 - `commits` is the integer count, as for runs outside the scheduler. A relaunched node counts only the latest run's commits (input commit → generation commit).
 - "Grew" means a file in the worktree is larger than at the previous repetition (tracked or untracked).
