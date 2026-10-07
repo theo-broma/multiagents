@@ -5009,3 +5009,12 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The archive was taken first (~/.multiagents/scheduler/multiagents-3e439ff1/dirty-7708d9cd…-o_4saneb/tracked.diff), so nothing is lost.
   - Copied to .multiagents/recovered/tb-r3-tracked.diff (gitignored); nd-ce8ceba8 task updated (rev 4) to re-apply it first and commit early.
   - To fix in-house: for a WORKER (non-reviewer) session, an uncommitted dirty worktree after an interrupted run should be resumed/committed, not cleaned. The cleanup message should say "commit or stash your own work" rather than invite discarding. At least, the cleanup run's prompt must not read as "discard".
+- ~01:35 SC impl round 2 (ag-167fe7) changed NOTHING. Its task still carried my earlier "change nothing, confirm only" answer, which overrode the reviewer's deepcopy finding. MY MISTAKE: a confirm-only answer must not stay in a loop child's task.
+  - Plan: let rounds 2 and 3 exhaust; the reviewers will reject again.
+  - At loop_max on nd-a6f0f488 (no race, since a held loop launches nothing):
+    1. closed window on the loop;
+    2. relaunch_node with max_rounds 4;
+    3. rewrite impl child nd-2aea66eb's task: remove the confirm-only line, include the ag-f04488 deepcopy finding (store.nodes()/attempts() lazy=False deepcopy every record → live paths scale with history; fix live paths so they do not copy history), and ask for a cost proxy assertion in its report;
+    4. pin claude/opus (round-3 escalation rule);
+    5. clear the window.
+- nd-74628b22 (impl child of the closed opencode loop) still shows held needs_info: harmless, its loop is done/failed.
