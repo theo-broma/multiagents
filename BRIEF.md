@@ -5001,3 +5001,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - tell the user to restart the scheduler (SC live) and say what was merged;
 - import plan 2026-10-05 Next phase (48 open findings triage + phase 7 part 2 → for init-agent with the user);
 - hand back.
+- ~01:08 opencode loop nd-b6b90957 CLOSED failed (51dae89c not merged, contradicts AU-R2). NEXT (not started, context wind-down): tester updates tests/test_zai_provider.py ~:343/~:815 to AU-R2 (digit-first count output = exit 20 unknown, or use a prefixed shape), no src change; then merge. Note: under load (~11) MCP node RPCs return scheduler_unavailable intermittently while the CLI 'scheduler status' answers; retry works.
