@@ -81,7 +81,7 @@ def test_nc_r26_cancel_stops_runs_without_holding_the_write_lock(local, monkeypa
     assert reply["result"]["state"] == final
     nodes, _ = read(engine)
     assert nodes[node["id"]]["state"] == final
-    assert transitions(engine, node["id"]) == [final]
+    assert transitions(engine, node["id"]) == ["held", "cancelled" if confirmed else "termination_unconfirmed"]
     # A replay returns the outcome, not the interim hold.
     assert cancel(engine, world, node, request_id) == reply
 

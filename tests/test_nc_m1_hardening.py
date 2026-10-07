@@ -1,7 +1,9 @@
 """Additional NC contracts at the client and capability boundaries."""
 from __future__ import annotations
 
-import asyncio
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +13,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 from nc_harness import code, live, nc, tool  # noqa: E402,F401
 from multiagents import config, server  # noqa: E402
 from multiagents.paths import ProjectPaths, global_config_dir  # noqa: E402
+
+
+SRC = str(Path(__file__).resolve().parents[1] / "src")
+LISTING = (
+    "import asyncio, json, sys; sys.path.insert(0, sys.argv[1]);"
+    "from multiagents import server;"
+    "print(json.dumps([t.model_dump(by_alias=True) for t in asyncio.run(server.mcp.list_tools())],"
+    " default=str))"
+)
+LIST_TIMEOUT = 60
+
+
+def root_tool_infos(tmp_path) -> list[dict]:
+    """The root orchestrator's tool list. The registry is fixed when the server
+    module is imported, from the environment, so list it in a fresh interpreter
+    that carries no agent identity or permissions."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(("MULTIAGENTS_", "CLAUDE_"))}
+    clean["HOME"] = str(tmp_path)
+    run = subprocess.run([sys.executable, "-c", LISTING, SRC], cwd=tmp_path, env=clean,
+                         capture_output=True, text=True, timeout=LIST_TIMEOUT)
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout.strip().splitlines()[-1])
 
 
 def test_nc_r60_run_update_replay_survives_a_later_cancellation(live):
@@ -54,9 +78,8 @@ def test_nc_r76_partial_tool_edits_preserve_a_window_and_null_clears_it(live):
     assert reply["error"] == "invalid"
 
 
-def test_nc_r76_the_window_tool_schema_accepts_only_an_object_or_null():
-    tools = asyncio.run(server.mcp.list_tools())
-    info = next(t.model_dump(by_alias=True) for t in tools if t.name == "update_node")
+def test_nc_r76_the_window_tool_schema_accepts_only_an_object_or_null(tmp_path):
+    info = next(t for t in root_tool_infos(tmp_path) if t["name"] == "update_node")
     schema = info.get("inputSchema", info.get("input_schema"))
     window = schema["properties"]["window"]
     assert {choice["type"] for choice in window["anyOf"]} == {"object", "null"}

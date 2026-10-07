@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,8 +51,30 @@ def calls(plan_revision=0):
     }
 
 
-def registered_tools() -> set[str]:
-    return {t.name for t in asyncio.run(server.mcp.list_tools())}
+SRC = str(Path(__file__).resolve().parents[1] / "src")
+LISTING = (
+    "import asyncio, json, sys; sys.path.insert(0, sys.argv[1]);"
+    "from multiagents import server;"
+    "print(json.dumps([t.model_dump(by_alias=True) for t in asyncio.run(server.mcp.list_tools())],"
+    " default=str))"
+)
+LIST_TIMEOUT = 60
+
+
+def root_tool_infos(tmp_path) -> list[dict]:
+    """The root orchestrator's tool list. The registry is fixed when the server
+    module is imported, from the environment, so list it in a fresh interpreter
+    that carries no agent identity or permissions."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(("MULTIAGENTS_", "CLAUDE_"))}
+    clean["HOME"] = str(tmp_path)
+    run = subprocess.run([sys.executable, "-c", LISTING, SRC], cwd=tmp_path, env=clean,
+                         capture_output=True, text=True, timeout=LIST_TIMEOUT)
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout.strip().splitlines()[-1])
+
+
+def registered_tools(tmp_path) -> set[str]:
+    return {t["name"] for t in root_tool_infos(tmp_path)}
 
 
 def disk_footprint(sched) -> list[Path]:
@@ -59,8 +83,8 @@ def disk_footprint(sched) -> list[Path]:
 
 # ================================================================== the tools exist
 
-def test_nc_r13_every_node_tool_is_registered_with_the_mcp_server():
-    assert set(TOOLS) <= registered_tools()
+def test_nc_r13_every_node_tool_is_registered_with_the_mcp_server(tmp_path):
+    assert set(TOOLS) <= registered_tools(tmp_path)
 
 
 # ================================================================== NC-R1: gate off
