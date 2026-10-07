@@ -4704,3 +4704,10 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - Git rehearsal ag-258317 (nd-eab3e1e2): APPROVED by its own report. Both rehearsals exit 0, the guard scan is clean with no allow entries, and the source repo is untouched; rewrite.sh is at cb7db84 on `nodes/nd-eab3e1e2`. Origin carries only `main` (checked with ls-remote), so the origin-branch findings concern local refs only. Not merged: rewrite.sh is a one-off tool, and it holds a home path.
   - NT round 3 ag-4619fc (nd-71f841ca): APPROVED by opus ag-b3103b, MERGED as fb36439. On main, 343 NT and p0_r8 tests pass. Minor follow-ups from the review: the sender stamps the store file after its read (notify_sender.py:584/735/763), so a pause clear can be absorbed; `_held_seqs` swallows exceptions and does not chunk its ids (:177); a cancel re-holds an already-held child (rpc.py:619).
   - Host run of rewrite.sh with the real patterns: the first try failed in `comm` because of the host's French locale collation. Rerunning with `LC_ALL=C` into /var/tmp/rewrite-real2.
+- 2026-10-07 ~07:40 **History rewrite DONE and published.** rewrite.sh (cb7db84 on `nodes/nd-eab3e1e2`) was run on the host with `LC_ALL=C` and the real patterns file into /var/tmp/rewrite-final, and exited 0:
+  - 1631 commits before and after;
+  - 0 private terms left;
+  - the guard scan finds nothing on 1864 commits, with no allow entries;
+  - the source refs are unchanged.
+  The user force-pushed `main` themselves (436dfed → 4315804; the classifier refused my push). The local main is aligned, and the old main is kept in the private local tag `backup-pre-push` (= de174c8). Branches and node refs created before the rewrite are on the old history, so new work starts from the new main.
+  - Open for the user: GitHub warned of a 61.7 MB file `sys` in history (a stray ImageMagick screenshot added in b7291762, removed in 231be37d). The guard does not scan images; removing it needs another rewrite and force-push. The user decides.
