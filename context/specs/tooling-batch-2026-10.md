@@ -145,6 +145,20 @@ tests/test_tb_c_fallback_options.py stay as regression guards. Original text:
 - Survives a host restart: a pending resume is journaled.
 - Cancelling the node cancels the pending resume.
 - Usage from the interrupted run is still counted.
+- Decisions after tester ag-744bbe:
+  - The default cooldown is `limits.rate_limit_cooldown_seconds` in
+    project.yaml, default 60. Backoff doubles on each consecutive rate limit
+    of the same node, capped at 900 s. After 6 consecutive rate limits the
+    node is `held` with `hold.reason = "rate_limited"` for the orchestrator.
+  - Retry-After is honoured as seconds or as an HTTP date; a malformed value
+    falls back to the cooldown.
+  - The rate limit affects only the node that hit it: it does not put the
+    provider on cooldown, and other nodes keep launching (the existing quota
+    breakers still apply on their own signals).
+  - While a resume is pending the node is not final, has no outcome, and
+    carries `pending_resume: {"at": <epoch>, "attempt": <n>}`; the run's
+    record has `cause: "rate_limited"`.
+  - A fresh relaunch's prompt names the old run id and its run directory.
 - Verified by: tests with a fake provider returning a 429 mid-run, with and
   without Retry-After, a repeated 429, a cancel while pending, and a restart
   while pending.
