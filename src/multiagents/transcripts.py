@@ -477,6 +477,44 @@ def session_transcript(provider: Any, cwd: Path, session_id: str,
     return found
 
 
+def session_at_prompt(provider: Any, cwd: Path, session_id: str,
+                      executor: Any = None) -> bool:
+    """A declared closed turn, never silence inferred from a slow tool call.
+
+    Unknown or incomplete transcript tails cannot authorize an attached stop.
+    Providers declare their record shapes, as they do for usage extraction.
+    """
+    from .providers import get_path
+
+    rules = (provider.transcript or {}).get("turn_state", [])
+    if not rules:
+        return False
+    path = session_transcript(provider, cwd, session_id, executor)
+    if path is None:
+        return False
+    try:
+        with path.open("rb") as file:
+            file.seek(0, 2)
+            size = file.tell()
+            file.seek(max(0, size - 1024 * 1024))
+            tail = file.read()
+        if not tail.endswith(b"\n"):
+            return False
+        lines = tail.splitlines()
+        if size > 1024 * 1024:
+            lines = lines[1:]
+        for line in reversed(lines):
+            record = json.loads(line)
+            for rule in rules:
+                when = rule.get("when")
+                if isinstance(when, dict) and when and all(get_path(record, key) == value
+                                                        for key, value in when.items()):
+                    return rule.get("idle") is True
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return False
+
+
 def session_context(provider: Any, cwd: Path, session_id: str,
                     executor: Any = None) -> int | None:
     """Tokens the most recent request of this session carried, or None.

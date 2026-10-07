@@ -517,6 +517,13 @@ providers:
     transcript:
       dir: "~/.claude/projects/{slug}"
       glob: "*.jsonl"
+      # Closed turns may be resumed by the driver's scheduler hold signal.
+      # First matching rule on the last relevant transcript record wins.
+      turn_state:
+        - {when: {type: system, subtype: turn_duration}, idle: true}
+        - {when: {type: assistant, message.stop_reason: end_turn}, idle: true}
+        - {when: {type: assistant}, idle: false}
+        - {when: {type: user}, idle: false}
       # Context reading: dot-separated usage object path and token fields summed.
       # Both are required; no declaration leaves context size unknown.
       usage_path: "message.usage"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import signal
 import socket
@@ -151,6 +152,15 @@ def serve(project_root: Path, clock_file=None) -> None:
         signal.signal(signal.SIGINT, lambda *_: stopped.set())
         record = store.directory / "process.json"
         record.write_text(encode({"pid": os.getpid(), "pid_start": procs.start_time(os.getpid()), "since": since}))
+
+        def mirror():
+            try:
+                store.mirror()
+            except Exception:
+                # Keep serving the authoritative plan while the required
+                # attention file is unavailable; retry every second below.
+                logging.getLogger(__name__).exception("scheduler attention snapshot failed; will retry")
+
         try:
             with Server(str(sock), Handler) as server:
                 server.service = service
@@ -158,20 +168,20 @@ def serve(project_root: Path, clock_file=None) -> None:
                 sock.chmod(0o600)
                 with store.transaction() as db:
                     store.transition(db, "scheduler_started")
-                store.mirror()
+                mirror()
                 service.engine.start()
                 retry_at = time.monotonic() + 1
                 while not stopped.is_set():
                     server.handle_request()
                     if time.monotonic() >= retry_at:
-                        store.mirror()
+                        mirror()
                         retry_at = time.monotonic() + 1
                 service.engine.stop()
                 with service.changed:
                     service.stopping = True
                     with store.transaction() as db:
                         store.transition(db, "scheduler_stopped")
-                    store.mirror()
+                    mirror()
                     service.changed.notify_all()
         finally:
             sock.unlink(missing_ok=True)

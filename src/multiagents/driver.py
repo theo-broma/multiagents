@@ -36,7 +36,7 @@ from .executor import executor_for
 from .executor.local import LocalExecutor
 from .paths import global_config_dir
 from .providers import load_providers, option_text
-from .transcripts import session_context, session_transcript
+from .transcripts import session_at_prompt, session_context, session_transcript
 from .tree import Node, Tree, now as tree_now
 
 
@@ -922,13 +922,30 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
 
     compaction = _AttachedCompaction(paths, config, spec, provider, executor,
                                      context)
+    signals = _HoldSignals(paths, config, role)
+    signal_stop = []
+    delivery = []
+
+    def _signal_delivered(code=None):
+        if delivery and _delivered(delivery[0][1], _transcript_mark(
+                paths, provider, context.get("MULTIAGENTS_SESSION_ID", "")), code):
+            signals.delivered(delivery[0][0])
+            delivery.clear()
 
     def _stalled() -> bool:
+        _signal_delivered()
         if _limit_hit():
             return True
         if warned:
             compaction.limit_pending()
             return False                 # a pending limit wins (R8f.2.4)
+        holds, _ = signals.peek()
+        if holds and not delivery and session_at_prompt(
+                provider, paths.root, context.get("MULTIAGENTS_SESSION_ID", ""), _own_transcripts()):
+            state = compaction._state()
+            if state is not None and compaction._reach_safe_point(state):
+                signal_stop.append(True)
+                return True
         return compaction.due()
 
     stopped_by_driver: list = []          # last _attached() call: did WE stop it?
@@ -946,6 +963,12 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         something was.
         """
         while True:
+            holds, message = signals.peek()
+            if message:
+                run_env = {**run_env, "MULTIAGENTS_RESUME_PROMPT": "\n\n".join(
+                    p for p in (run_env.get("MULTIAGENTS_RESUME_PROMPT", ""), message) if p)}
+                delivery[:] = [(holds, _transcript_mark(
+                    paths, provider, context.get("MULTIAGENTS_SESSION_ID", "")))]
             began = time.monotonic()
             compaction.launched()
             stopped: list = []
@@ -955,7 +978,15 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                 code = _run_attached(argv, run_env, stalled=_stalled)
             finally:
                 compaction.detached()
+            _signal_delivered(code)
             stopped_by_driver[:] = stopped
+            if signal_stop and stopped:
+                signal_stop.clear()
+                compaction.release()
+                run_env = {k: v for k, v in run_env.items() if k != "MULTIAGENTS_RESUME_PROMPT"}
+                run_env["MULTIAGENTS_RESUME"] = "1"
+                continue
+            signal_stop.clear()
             if compaction.requested is None or not stopped:
                 # The user's own exit wins over a compaction that was due
                 # (R8f.12): only a CLI we stopped for it is compacted.
@@ -1288,6 +1319,7 @@ def _supervise(paths, config, role, spec, provider, executor,
     limit_waits = 0
     # Set once the provider says it cannot compact; not asked again this run.
     compact_unsupported: list = []
+    signals = _HoldSignals(paths, config, role)
 
     for turn in range(1, max_turns + 1):
         held = _orchestrator_hold(paths, config)
@@ -1304,9 +1336,11 @@ def _supervise(paths, config, role, spec, provider, executor,
         # lost before that.
         session = context.get("MULTIAGENTS_SESSION_ID", "")
         note = _peek_return_message(paths, role, session, tree)
-        mark = _transcript_mark(paths, provider, session) if note else None
+        holds, signal_message = signals.peek()
+        prompt = "\n\n".join(p for p in (note, signal_message, NUDGE) if p)
+        mark = _transcript_mark(paths, provider, session) if note or holds else None
         turn_env = {**context, "MULTIAGENTS_UNATTENDED": "1",
-                    "MULTIAGENTS_NUDGE": f"{note}\n\n{NUDGE}" if note else NUDGE,
+                    "MULTIAGENTS_NUDGE": prompt,
                     # After the first turn there is certainly a session to
                     # resume, whatever the launch marker said going in.
                     "MULTIAGENTS_RESUME": "1" if turn > 1 else context["MULTIAGENTS_RESUME"]}
@@ -1341,6 +1375,9 @@ def _supervise(paths, config, role, spec, provider, executor,
                         break
             _clear_pid(paths, f"{role}-turn")
         except KeyboardInterrupt:
+            if holds and child is not None and _delivered(
+                    mark, _transcript_mark(paths, provider, session), None):
+                signals.delivered(holds)
             if note and child is not None and _delivered(
                     mark, _transcript_mark(paths, provider, session), None):
                 _drop_return_message(paths, role)
@@ -1349,6 +1386,8 @@ def _supervise(paths, config, role, spec, provider, executor,
         if note and _delivered(mark, _transcript_mark(paths, provider, session),
                                code):
             _drop_return_message(paths, role)
+        if holds and _delivered(mark, _transcript_mark(paths, provider, session), code):
+            signals.delivered(holds)
 
         limit = watchdog.limit_reached(provider, paths.root)
         if limit:
@@ -1394,6 +1433,9 @@ def _supervise(paths, config, role, spec, provider, executor,
         _compact_if_due(paths, config, spec, provider, executor, context, tree,
                         compact_unsupported, role)
         if idle:
+            if signals.peek()[0]:
+                idle_turns = 0
+                continue
             idle_turns += 1
             print(f"\n(turn {turn} changed nothing in the tree"
                   f"{' — second in a row' if idle_turns > 1 else ''})")
@@ -1405,6 +1447,29 @@ def _supervise(paths, config, role, spec, provider, executor,
 
     print(f"\nreached the {max_turns}-turn limit; stopping.")
     return 0
+
+
+class _HoldSignals:
+    """Driver delivery marks live in the host store, independently of waits."""
+
+    def __init__(self, paths, config, role):
+        from .scheduler.store import Store
+        self.store = Store(paths.root)
+        self.enabled = role == "orchestrator" and getattr(config, "project", {}).get("scheduler", {}).get("enabled")
+
+    def peek(self):
+        from .scheduler import attention
+        if not self.enabled:
+            return [], ""
+        try:
+            holds = attention.pending(self.store)
+            return holds, attention.message(holds)
+        except (OSError, ValueError):
+            return [], ""
+
+    def delivered(self, holds):
+        from .scheduler import attention
+        attention.delivered(self.store, holds)
 
 
 def _limit_number(config, key: str, zero_ok: bool = False) -> float:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -155,52 +156,70 @@ class Store:
             db.close()
 
     def mirror(self) -> None:
-        """Append the host outbox without reading the container-writable log.
+        """Publish attention and append the host outbox without reading the log.
 
         Progress and the last destination identity live in the host database.
         A replaced/truncated destination gets the complete host history. A
         crash between append and checkpoint may duplicate a diagnostic event;
         the authoritative transitions and RPC effects remain exactly once.
+        Attention failures propagate; a retry publishes the current plan.
         """
+        # Serialize mirrors, not plan mutations. The lock is host-only: a
+        # container must not be able to suppress publication with a flock.
+        # Take each snapshot after locking so a delayed older writer cannot
+        # overwrite a newer mirror. No SQLite transaction spans file I/O.
+        with (self.directory / "mirror.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self._mirror_attention()
+            self._mirror_events()
+
+    def _mirror_attention(self) -> None:
+        from . import attention
+        with self.transaction(write=False) as db:
+            content = (encode({"holds": attention.current(self, db)}) + "\n").encode()
+        self.paths.data.mkdir(parents=True, exist_ok=True)
+        if gitops._read_beneath(self.paths.data, (), "attention.json", 16 * 1024 * 1024) != content:
+            # Unlike the diagnostic log, attention is a required signal.
+            # Report failures to the caller; the daemon retries current state.
+            gitops._write_beneath(self.paths.data, (), "attention.json", content, create=True)
+
+    def _mirror_events(self) -> None:
         try:
             with self.transaction(write=False) as db:
-                pending = db.execute("""SELECT 1 FROM notifications WHERE seq >
-                    coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key='mirror_seq'), 0)
-                    LIMIT 1""").fetchone()
-                if pending is None:
-                    return
-            with self.transaction() as db:
                 rows = dict(db.execute("SELECT key, value FROM meta WHERE key LIKE 'mirror_%'"))
                 after = int(rows.get("mirror_seq", "0"))
                 records = list(db.execute("SELECT seq, record FROM notifications WHERE seq>? ORDER BY seq", (after,)))
-                if not records:
-                    return
-                self.paths.data.mkdir(parents=True, exist_ok=True)
-                fd = gitops._open_file_beneath(
-                    self.paths.data, (), self.paths.events_file.name,
-                    os.O_WRONLY | os.O_APPEND | os.O_CREAT, replace=True)
-                with os.fdopen(fd, "ab") as events:
-                    stat = os.fstat(events.fileno())
-                    identity = encode([stat.st_dev, stat.st_ino])
-                    if (identity != rows.get("mirror_file")
-                            or stat.st_size < int(rows.get("mirror_size", "0"))):
+            if not records:
+                return
+            self.paths.data.mkdir(parents=True, exist_ok=True)
+            fd = gitops._open_file_beneath(
+                self.paths.data, (), self.paths.events_file.name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT, replace=True)
+            with os.fdopen(fd, "ab") as events:
+                stat = os.fstat(events.fileno())
+                identity = encode([stat.st_dev, stat.st_ino])
+                if (identity != rows.get("mirror_file")
+                        or stat.st_size < int(rows.get("mirror_size", "0"))):
+                    with self.transaction(write=False) as db:
                         records = list(db.execute("SELECT seq, record FROM notifications ORDER BY seq"))
-                    # A hostile writer can leave a partial line. Separate our
-                    # append without interpreting any bytes supplied by it.
-                    for seq, raw in records:
-                        record = json.loads(raw)
-                        record.update(kind="node." + record["kind"], t=record["at"],
-                                      agent=record["node_id"] or "root", scheduler_seq=seq,
-                                      scheduler_project=self.paths.slug)
-                        # Each line is one O_APPEND write. Advisory locks on
-                        # this container-writable file cannot suppress events.
-                        line = ("\n" + encode(record) + "\n").encode()
-                        if os.write(events.fileno(), line) != len(line):
-                            raise OSError("short scheduler event append")
-                    os.fsync(events.fileno())
-                    self.set_meta(db, "mirror_seq", records[-1][0])
-                    self.set_meta(db, "mirror_file", identity)
-                    self.set_meta(db, "mirror_size", os.fstat(events.fileno()).st_size)
+                # A hostile writer can leave a partial line. Separate our
+                # append without interpreting any bytes supplied by it.
+                for seq, raw in records:
+                    record = json.loads(raw)
+                    record.update(kind="node." + record["kind"], t=record["at"],
+                                  agent=record["node_id"] or "root", scheduler_seq=seq,
+                                  scheduler_project=self.paths.slug)
+                    # Each line is one O_APPEND write. Advisory locks on
+                    # this container-writable file cannot suppress events.
+                    line = ("\n" + encode(record) + "\n").encode()
+                    if os.write(events.fileno(), line) != len(line):
+                        raise OSError("short scheduler event append")
+                os.fsync(events.fileno())
+                size = os.fstat(events.fileno()).st_size
+            with self.transaction() as db:
+                self.set_meta(db, "mirror_seq", records[-1][0])
+                self.set_meta(db, "mirror_file", identity)
+                self.set_meta(db, "mirror_size", size)
         except Exception:
             # The public log is diagnostic. Its failure must never change a
             # committed reply; the next append or daemon retry repairs it.

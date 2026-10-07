@@ -16,7 +16,7 @@ import uuid
 from ..config import load, source_version
 from ..paths import ProjectPaths
 from ..renames import shipped as shipped_renames
-from . import model, effects, windows
+from . import model, effects, windows, attention
 from .model import Refused, invalid
 from .store import Store, encode, token_hash
 
@@ -280,8 +280,10 @@ class Service:
                 if op == "wait_for_nodes":
                     reply.update(ok=True, result=self.wait(request, principal, args))
                 elif op in MUTATING:
-                    self.store.mirror()
-                    self.changed.notify_all()
+                    try:
+                        self.store.mirror()
+                    finally:
+                        self.changed.notify_all()
             if self.engine and op in MUTATING:
                 effects.finish_completions(self.engine)
                 effects.finish_operations(self.engine)
@@ -693,8 +695,10 @@ class Service:
                 reply = {**reply, "result": self.view(shown, int(self.store.meta(db, "plan_revision")))}
                 db.execute("UPDATE requests SET reply=? WHERE subject=? AND request_id=?",
                            (encode(reply), principal["subject"], request_id))
-            self.store.mirror()
-            self.changed.notify_all()
+            try:
+                self.store.mirror()
+            finally:
+                self.changed.notify_all()
         return reply
 
     def wait(self, request, principal, args):
@@ -727,13 +731,18 @@ class Service:
                         selected.update(model.subtree(nodes, id))
                     transitions = [t for t in transitions if t["node_id"] in selected]
                 top = db.execute("SELECT coalesce(max(seq), 0) FROM notifications").fetchone()[0]
+                visible = nodes if principal["root"] else {id: nodes[id] for id in scope}
+                holds = attention.current(self.store, db, visible,
+                                          subject=None if principal["root"] else principal["subject"],
+                                          unacknowledged=True)
             remaining = end - time.monotonic()
-            if transitions or remaining <= 0 or self.stopping:
+            if transitions or holds or remaining <= 0 or self.stopping:
                 capacity = (self.engine.runner._idle_capacity_note() if self.engine else
                             {"capacity": {"running": 0,
                                           "max_concurrent": self.configuration().limits.get("max_concurrent", 4),
                                           "free_slots": self.configuration().limits.get("max_concurrent", 4)}})
                 return {"transitions": transitions, "next_cursor": max(after, top),
+                        "holds": holds,
                         **capacity, "scheduler": self.status(nodes, scope=None if principal["root"] else scope)}
             if self.changed.acquire(timeout=min(remaining, 0.5)):
                 try:
