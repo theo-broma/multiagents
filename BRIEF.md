@@ -4831,3 +4831,8 @@ These were steered back to ag-074735, with a monotonic clock suggested.
   - When both reviewers approve, merge_node nd-436e1265, the implementer node, NOT a reviewer node, because of possible WIP junk. Then set F112 and F33 to fixed.
 - Note: the P0-R8 test's BASE = "e00b7de" is a pre-rewrite SHA. After the sys strip it will skip. Remap it, along with the other SHA-citing tests.
 - EV migration review ag-84f329: REJECTED (1): leftover `monkeypatch.setenv` FAKE_* calls after the migration, "dead code". DECLINED by the orchestrator: they are redundant at worst, not wrong, and the executor's agent-launch env path (not filtered by EV-R1) may still read them; removing them risks breakage for cosmetics. The reviewer confirmed the allowlist, EV-R3 and the fixtures as sound. Waiting on the move reviewer nd-29e68ce5.
+- EV MERGED as fdff3f32 (implementer node nd-436e1265). It contains the EV tests, the implementation 7d19c9f3, the fixture migration 8b702c7e and the allowlist moved to defaults/script-env.txt (dd54dc94).
+  - The move reviewer ag-b09567 APPROVED.
+  - On main, 1081 tests pass across the EV, AU, core and migrated files.
+  - Ledger: F112 and F33 set to fixed.
+- **Salvage complete: SL, EV, AU and RV are all on main.** Next per the handoff: strip `sys` from history once nothing is running, then remap the SHA-citing tests.

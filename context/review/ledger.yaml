@@ -270,8 +270,15 @@ findings:
         does not enforce the boundary its own contract claims.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'EV-R1 merged fdff3f32 (7d19c9f3, dd54dc94): scripts.build_env forwards
+        only the allowlist in defaults/script-env.txt plus LC_*, no longer the whole
+        ambient env. Fixtures migrated (8b702c7e). Reviewed agy ag-84f329/ag-b09567.
+        1081 passed on main across affected files.'
+      sha: fdff3f32c3cf15448e6fd1af71ffd28cf626ed59
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`build_env` copies the full ambient process environment into every provider
       script invocation'
   F113:
@@ -1227,8 +1234,13 @@ findings:
         and forwarding a variable the configuration blocked is the security reading.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'EV-R3 merged fdff3f32 (7d19c9f3): executor build_env skips base keys
+        named in `blocked`. Reviewed agy ag-84f329.'
+      sha: fdff3f32c3cf15448e6fd1af71ffd28cf626ed59
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: '`build_env`''s `blocked` list only guards the `passthrough` loop; the
       always-on base environment (`PATH`, `USER`, `TERM`, ...) is forwarded regardless'
   F34:
