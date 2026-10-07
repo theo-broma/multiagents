@@ -75,7 +75,7 @@ def natural_result(paths, run):
             # Pre-NC-R40 artifacts have no turn id. Their mtime is read from
             # the same descriptor as the result, never from a replacement.
             fresh = bool(turn and timestamp >= turn) if recorded_turn is None else recorded_turn == turn
-            if fresh and result.get("status") in {"done", "failed"}:
+            if fresh and result.get("status") in {"done", "failed", "rate_limited"}:
                 return {"id": run.id, "status": result["status"],
                         "session_id": result.get("session_id") or run.session_id,
                         "turn_started_at": turn}

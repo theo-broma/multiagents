@@ -20,6 +20,7 @@ killing on suspicion throws away work that was often nearly finished.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -385,10 +386,27 @@ class Supervisor:
 # --------------------------------------------------------------------------
 
 _QUOTA_MARKERS = (
-    "resource_exhausted", "rate limit", "rate_limit", "quota", "429",
+    "resource_exhausted", "rate limit", "rate_limit", "quota",
     "too many requests", "usage limit", "spend limit", "insufficient credit",
     "out of credit",
 )
+
+
+def looks_like_rate_limit(status: str, stderr: str) -> bool:
+    """TB-R4: provider failure channels reporting a retryable rate limit.
+
+    A number in a traceback or request id is not an HTTP status. Keep this
+    test shared with quota detection so rejecting a bare 429 here cannot
+    turn the same ordinary crash into a provider-wide quota cooldown.
+    """
+    blob = f"{status}\n{stderr}"
+    rate_word = re.search(r"\brate[ _-]limit(?:ed|ing|s)?\b", blob, re.IGNORECASE)
+    return bool(
+        re.search(r"\b(?:HTTP(?:/\d+(?:\.\d+)?)?|status(?:[ _-]code)?|code)"
+                  r"[\"']?\s*[:=]?\s*429\b|\b429\s+Too\s+Many\s+Requests\b"
+                  r"|\bmodel(?:\s+is)?\s+at\s+capacity\b", blob, re.IGNORECASE)
+        or (rate_word and (re.search(r"\b429\b", blob)
+                           or re.search(r"\bwill be retried\b", blob, re.IGNORECASE))))
 
 
 def looks_like_quota_failure(status: str, stderr: str) -> bool:
@@ -402,4 +420,5 @@ def looks_like_quota_failure(status: str, stderr: str) -> bool:
     evidence about the run that produced it.
     """
     blob = f"{status}\n{stderr}".lower()
-    return any(marker in blob for marker in _QUOTA_MARKERS)
+    return (any(marker in blob for marker in _QUOTA_MARKERS)
+            or looks_like_rate_limit(status, stderr))

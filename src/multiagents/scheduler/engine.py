@@ -464,6 +464,7 @@ class Engine:
         await self.runner.adopt(exclude=managed)
         await self.evaluate_windows()
         await self.reconcile()
+        self.evaluate_rate_limits()
         self.composites()
         # Mirror recorded results before admission awaits launches, so a
         # client that sees a node done finds its transitions in the log.
@@ -695,7 +696,7 @@ class Engine:
             if attempt.get("window_stop"):
                 self.spawn(attempt)
                 continue
-            if attempt["state"] != "suspended":
+            if attempt["state"] != "suspended" or attempt.get("rate_limit_pending"):
                 continue
             node = nodes[attempt["node_id"]]
             if node["state"] != "suspended" or self.window_blockers(node, nodes):
@@ -727,6 +728,48 @@ class Engine:
                                window_resume={"previous_turn": run.turn_started_at,
                                               "previous_pid": (current.get("launch_evidence") or {}).get("pid"),
                                               "message": message})
+                save_attempt(db, current)
+            self.spawn(current)
+
+    def evaluate_rate_limits(self):
+        with self.store.transaction(write=False) as db:
+            nodes, journal = self.store.nodes(db), attempts(db)
+        for attempt in journal.values():
+            node = nodes[attempt["node_id"]]
+            pending = node.get("pending_resume")
+            if (attempt["state"] != "suspended" or not attempt.get("rate_limit_pending")
+                    or node["state"] != "running" or not pending or pending["at"] > now()
+                    or self.window_blockers(node, nodes)):
+                continue
+            admission = self.resume_admission(attempt["run_id"])
+            self.reasons[node["id"]] = admission.get("blocked", [])
+            if not admission.get("admitted"):
+                continue
+            run = self.runner.tree.get(attempt["run_id"])
+            if not run:
+                continue
+            with self.service.changed, self.store.transaction() as db:
+                current_nodes, current_journal = self.store.nodes(db), attempts(db)
+                current = current_journal[attempt["attempt_id"]]
+                own = current_nodes[node["id"]]
+                if (current != attempt or own != node or current.get("cancel_requested")
+                        or self.window_blockers(own, current_nodes)
+                        or self.lock_blockers(own, current_nodes, current_journal)):
+                    continue
+                message = ("Resume your task after the provider rate limit.\n\n" + run.task
+                           + f"\n\nworking directory: {run.worktree}\nnode: {node['id']}")
+                if current.get("review"):
+                    review = current["review"]
+                    message += (f"\nreview: node_id={review['node_id']} generation_seq={review['generation_seq']}"
+                                f" commit={review['commit']}")
+                for key in ("capture_intent", "result", "integration", "window_completion"):
+                    current.pop(key, None)
+                current.update(state="launched", launch_in_progress=True,
+                               locks=sorted(self.lock_set(own, current_nodes)),
+                               lock_owners=self.lock_owners(own, current_nodes),
+                               rate_limit_resume={"previous_turn": run.turn_started_at,
+                                                  "previous_pid": (current.get("launch_evidence") or {}).get("pid"),
+                                                  "message": message})
                 save_attempt(db, current)
             self.spawn(current)
 
@@ -1040,6 +1083,9 @@ class Engine:
                 continue
             if attempt["state"] not in {"claimed", "launched"}:
                 continue
+            if attempt.get("rate_limit_resume"):
+                self.spawn(attempt)
+                continue
             if attempt.get("window_stop") or attempt.get("window_stop_started") or attempt.get("window_resume"):
                 run = self.runner.tree.get(attempt["run_id"])
                 from . import suspension
@@ -1308,6 +1354,24 @@ class Engine:
                     or current.get("window_resumed_at") != attempt.get("window_resumed_at")
                     or (current["state"] == "abandoned" and current.get("cancel_requested") and current.get("window_suspended_at"))):
                 return
+            if current.get("rate_limit_resume"):
+                return
+            from . import rate_limits
+            if message.get("cause") == "rate_limited" and message.get("turn_started_at") == getattr(run, "turn_started_at", None):
+                db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
+                node = self.store.nodes(db)[current["node_id"]]
+                rate_limits.interrupted(self, db, current, node, message)
+                self.service.changed.notify_all()
+                return
+            tree_run = self.runner.tree.get(run.id)
+            if (current.get("rate_limit_recovery") and tree_run and
+                    (tree_run.reason == "session_lost" or (message.get("status") == "failed"
+                     and Runner._session_resume_failure(message.get("stderr_tail", ""))))):
+                node = self.store.nodes(db)[current["node_id"]]
+                rate_limits.fresh(self.store, db, current, node, self.paths)
+                db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
+                self.service.changed.notify_all()
+                return
             current.setdefault("capture_intent", {**(current.get("window_completion") or
                                {"id": run.id, "status": run.status, "session_id": run.session_id}),
                                "need_info": markers})
@@ -1485,6 +1549,8 @@ class Engine:
                     bound["last_run"] = current["run_id"]
                     sessions.save_alias(db, bound)
                 tree_run = self.runner.tree.get(current["run_id"])
+                node.pop("rate_limit_attempts", None)
+                node.pop("rate_limit_fresh_from", None)
                 # TB-R1: hold in the settlement transaction, before any node
                 # can see this attempt as a successful dependency.
                 if (node["state"] not in {"cancelled", "held"} and result.get("need_info")
@@ -1670,7 +1736,7 @@ class Engine:
                 results[attempt["node_id"]] = result.get("predecessor_death_confirmed", False)
         return results
 
-    def request_cancel(self, ids, db):
+    def request_cancel(self, ids, db, nodes=None):
         """Record cancellation durably; return what is decided now and what needs a stop.
 
         Stopping takes seconds, so it never runs inside this write
@@ -1678,6 +1744,11 @@ class Engine:
         a claim carrying this request and stops a handle that arrives later.
         """
         decided, stops = {}, {}
+        nodes = nodes if nodes is not None else self.store.nodes(db)
+        for node_id in ids:
+            node = nodes[node_id]
+            if node.pop("pending_resume", None) is not None:
+                self.store.save_node(db, node)
         for attempt in attempts(db).values():
             if attempt["node_id"] in ids and attempt["state"] == "suspended":
                 attempt.update(state="abandoned", cancel_requested=True, cancel_confirmed=True)
@@ -1685,7 +1756,7 @@ class Engine:
                 decided[attempt["node_id"]] = True
             if attempt["node_id"] in ids and attempt["state"] in {"claimed", "launched"}:
                 attempt["cancel_requested"] = True
-                if attempt.get("window_resume") or attempt.get("window_stop"):
+                if attempt.get("window_resume") or attempt.get("window_stop") or attempt.get("rate_limit_resume"):
                     attempt["cancel_kind"] = "node"
                 save_attempt(db, attempt)
                 if attempt.get("launch_in_progress"):

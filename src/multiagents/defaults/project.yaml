@@ -476,6 +476,9 @@ limits:
   # run's may already be spent.
   commit_fix_timeout: 300
 
+  # TB-R4: node-local cooldown before resuming a rate-limited session.
+  rate_limit_cooldown_seconds: 60
+
   provider_failure_threshold: 3
   provider_down_cooldown_seconds: 1800
 

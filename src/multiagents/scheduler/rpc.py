@@ -610,7 +610,7 @@ class Service:
                 if any(nodes[id]["kind"] == "simple" and nodes[id]["state"] in {"running", "suspended"} and id not in managed
                        for id in descendants):
                     raise Refused("not_implemented")
-                decided, stops = self.engine.request_cancel(descendants, db) if self.engine else ({}, {})
+                decided, stops = self.engine.request_cancel(descendants, db, nodes) if self.engine else ({}, {})
                 unconfirmed = [id for id, dead in decided.items() if not dead]
                 for id in descendants:
                     child = nodes[id]

@@ -12,7 +12,7 @@ from ..paths import ProjectPaths
 from ..runner import LaunchContext, Runner
 from ..tree import now, ACTIVE, PAUSED
 from .engine import attempts, record_launch, save_attempt
-from . import sessions, suspension, windows
+from . import rate_limits, sessions, suspension, windows
 from .model import Refused
 from .. import gitops
 from .store import Store
@@ -43,7 +43,7 @@ async def supervise(root, attempt_id, lock_fd=None):
             window_nodes = store.nodes(db)
         windows.prepare(window_timezone, window_nodes)
         existing = runner.tree.get(attempt["run_id"])
-        if existing and not (attempt.get("window_stop") or attempt.get("window_resume") or attempt["state"] == "suspended"):
+        if existing and not (attempt.get("window_stop") or attempt.get("window_resume") or attempt.get("rate_limit_resume") or attempt["state"] == "suspended"):
             # A supervisor died after writing launch evidence. Adoption reads
             # the recorded wrapper, session and run directory, never relaunches.
             await runner.adopt(exclude={n.id for n in runner.tree.active() if n.id != attempt["run_id"]})
@@ -104,7 +104,12 @@ async def supervise(root, attempt_id, lock_fd=None):
                                     provider=attempt.get("binding", {}).get("provider", node["pins"].get("provider", "")),
                                     effort=node["pins"].get("effort", ""))
             try:
-                result = await runner.start(node["agent"], node["task"], launch_context=context,
+                task = node["task"]
+                if node.get("rate_limit_fresh_from"):
+                    old = node["rate_limit_fresh_from"]
+                    task += (f"\n\nThe rate-limited session could not be resumed. Read the prior run "
+                             f"{old['run_id']} in {old['run_dir']} before continuing the task.")
+                result = await runner.start(node["agent"], task, launch_context=context,
                                             model=attempt.get("binding", {}).get("model", node["pins"].get("model")), **node.get("launch", {}))
             except BaseException:
                 with store.transaction() as db:
@@ -126,7 +131,7 @@ async def supervise(root, attempt_id, lock_fd=None):
         if run:
             with store.transaction() as db:
                 current = attempts(db)[attempt_id]
-                if not current.get("window_resume"):
+                if not current.get("window_resume") and not current.get("rate_limit_resume"):
                     current.pop("launch_in_progress", None)
                 save_attempt(db, current)
                 record_launch(store, db, attempt, run)
@@ -134,6 +139,13 @@ async def supervise(root, attempt_id, lock_fd=None):
         while True:
             with store.transaction(write=False) as db:
                 current = attempts(db)[attempt_id]
+            if await rate_limits.command(store, runner, current):
+                with store.transaction(write=False) as db:
+                    settled = attempts(db)[attempt_id]
+                if settled["state"] in {"suspended", "abandoned", "recorded"}:
+                    break
+                await asyncio.sleep(0.05)
+                continue
             if await suspension.command(store, runner, current):
                 with store.transaction(write=False) as db:
                     settled = attempts(db)[attempt_id]

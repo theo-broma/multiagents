@@ -39,7 +39,7 @@ from .renames import Renames, shipped as shipped_renames
 # branch is real but unfinished. It must never be merged as done, and it says
 # nothing about the provider's health.
 TERMINAL = {"done", "failed", "cancelled", "discarded", "merged", "orphaned",
-            "limited", "truncated", "refused"}
+            "limited", "rate_limited", "truncated", "refused"}
 # "detached": still running, left by a root server that exited (SV-R3), and
 # waiting for the next one to adopt it (SV-R6). Work in flight, so ACTIVE.
 ACTIVE = {"pending", "running", "stuck", "detached"}
@@ -395,6 +395,8 @@ class Node:
     task: str = ""
     status: str = "pending"
     reason: str = ""
+    cause: str = ""
+    rate_limit_usage_base: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     branch: str = ""
     worktree: str = ""
@@ -1036,7 +1038,9 @@ class Tree:
             if steps is not None:
                 node["steps"] = steps
             if usage:
-                node["usage"] = usage
+                base = node.get("rate_limit_usage_base") or {}
+                node["usage"] = ({**sum_usage([{"usage": base}, {"usage": usage}]),
+                                  "interrupted": base} if base else usage)
                 segments = node.get("segments") or []
                 if segments:
                     base = node.get("segment_usage_base") or {}

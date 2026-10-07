@@ -24,6 +24,7 @@ from contextvars import ContextVar
 import copy
 import fcntl
 import functools
+import math
 import signal
 import hashlib
 import json
@@ -37,6 +38,7 @@ import textwrap
 import time
 import traceback
 from dataclasses import asdict, dataclass, field, replace
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +66,7 @@ from .authority import HostAuthority
 from .launch_limits import LaunchLimits
 from .occupancy import ContainerOccupancy
 from .executor.docker import DockerExecutor
-from .supervisor import Supervisor, looks_like_quota_failure
+from .supervisor import Supervisor, looks_like_quota_failure, looks_like_rate_limit
 from .tree import (ACTIVE, PAUSED, DRIVER_ROLES, PC_CAUSE, TERMINAL, Node, Tree,
                    deferred_malformed, find_deferred, new_id, node_from_raw,
                    now, pc_waiting)
@@ -743,6 +745,7 @@ class Run:
     final_status: str = ""
     final_result_detail: str = ""    # RV-R2: error payload apart from the response
     verdict_after_error: bool = False
+    rate_limit_resume: bool = False
     requested_session: str = ""     # adapter explicitly reported a resume mismatch
     startup_token: str = ""
     startup_progress: bool = False
@@ -3903,6 +3906,7 @@ class Runner(QuotaHandover):
         preserved_limits: dict | None = None,
         handover_attempt: int | None = None,
         window_resume: bool = False,
+        rate_limit_resume: bool = False,
     ) -> Run:
         """Build the environment and command for one turn and start the process.
 
@@ -4270,7 +4274,7 @@ class Runner(QuotaHandover):
             supervisor=supervisor,
             turn_start=getattr(handle, "offset", 0), limits=limits,
             startup_token=startup_token, launched_at=launched_at,
-            prompt_file=prompt_name,
+            prompt_file=prompt_name, rate_limit_resume=rate_limit_resume,
             # #2: charges an earlier turn of this node could not commit
             # anywhere stay with the node's next turn, never dropped.
             pending_charges=list(getattr(self.runs.get(node_id), "pending_charges", None) or []),
@@ -4280,6 +4284,8 @@ class Runner(QuotaHandover):
             run.capability_hash = hashlib.sha256(env["MULTIAGENTS_RPC_TOKEN"].encode()).hexdigest()
         self.runs[node_id] = run
         try:
+            previous = self.tree.get(node_id)
+            self.tree.update(node_id, rate_limit_usage_base=(previous.usage if previous and rate_limit_resume else {}))
             self._qh_launched(node_id, spec, provider, session_id)
             await self._track_container_run(run, executor)
             if handover_attempt is not None:
@@ -4294,6 +4300,10 @@ class Runner(QuotaHandover):
                              turn_ended_at=None)
             self.tree.set_status(node_id, "running")
             run.slot_token = self._launch_slot_owner(node_id, provider.name)
+            if rate_limit_resume:
+                from .scheduler.rate_limits import resumed
+                from .scheduler.store import Store
+                resumed(Store(self.paths.root), node_id)
             if window_resume:
                 from .scheduler.suspension import resumed
                 from .scheduler.store import Store
@@ -6344,6 +6354,8 @@ class Runner(QuotaHandover):
         else:
             limited = None
 
+        if status == "failed" and getattr(run, "rate_limit_resume", False) and self._session_resume_failure(stderr):
+            run.requested_session = stuck_before.session_id if stuck_before else ""
         session_lost = (status == "failed" and bool(run.requested_session))
         if session_lost:
             session_id = ""
@@ -6391,7 +6403,7 @@ class Runner(QuotaHandover):
         if (run.spec.writes and commit_result is not None and not commit_result.ok
                 and commit_result.hook
                 and not stopped_elsewhere and not session_lost
-                and status not in ("limited", "quota", "unauthenticated", "refused")
+                and status not in ("limited", "quota", "rate_limited", "unauthenticated", "refused")
                 and session_id and run.provider.spawn.get("resume")):
             commit_result, fix_attempts, ended_by, fix_usage, fix_cut = \
                 await self._commit_fix_loop(run, node, commit_result, session_id)
@@ -6422,7 +6434,7 @@ class Runner(QuotaHandover):
 
         # A run that ends with nothing to say still ended for a reason.
         said_nothing = not text.strip()
-        if status not in ("done", "merged", "awaiting_user") and said_nothing:
+        if status not in ("done", "merged", "awaiting_user", "rate_limited") and said_nothing:
             text = self._no_output_summary(run, code)
 
         # CI-R2: a failed end-of-run commit must never be a silent no-op —
@@ -6455,6 +6467,8 @@ class Runner(QuotaHandover):
             "turn_started_at": run.launched_at, "usage": usage, "text": text, "stderr_tail": stderr,
             "final_text": run.final_assistant_message,
         }
+        if status == "rate_limited":
+            record.update(cause="rate_limited", retry_after=self._retry_after(stderr))
         warnings = [event["warning"] for event in run.events if event.get("warning")]
         if status == "done" and run.verdict_after_error:
             detail = run.final_result_detail or scrub(stderr)
@@ -6478,7 +6492,13 @@ class Runner(QuotaHandover):
             record["refusal"] = run.refusal
         _run_write(run_dir, "result.json", json.dumps(scrub(record), indent=2))
 
-        self.tree.update(node_id, usage=self._qh_total_usage(node_id, usage), session_id=session_id, summary=summary[:2000],
+        total_usage = self._qh_total_usage(node_id, usage)
+        usage_node = self.tree.get(node_id)
+        if usage_node and usage_node.rate_limit_usage_base and not usage_node.segments:
+            from .tree import sum_usage
+            total_usage = {**sum_usage([{"usage": usage_node.rate_limit_usage_base}, {"usage": usage}]),
+                           "interrupted": usage_node.rate_limit_usage_base}
+        self.tree.update(node_id, usage=total_usage, session_id=session_id, summary=summary[:2000],
                          requested_session=run.requested_session if session_lost else "",
                          warnings=warnings)
         # Filed even when the run failed: a partial write-up of a real defect is
@@ -6490,7 +6510,7 @@ class Runner(QuotaHandover):
         # so the run stays unjudged rather than judged on the last word
         # (VR-R3). Repeated agreeing lines qualify, the last one is the one
         # kept.
-        if VERDICT.search(text or "") and not run.awaiting:
+        if VERDICT.search(text or "") and not run.awaiting and status != "rate_limited":
             found = _text_verdict(text)
             self.tree.update(
                 node_id,
@@ -6525,6 +6545,11 @@ class Runner(QuotaHandover):
                     f"run: multiagents auth login {run.provider.name}"),
             )
             self.tree.emit(node_id, "unauthenticated", provider=run.provider.name)
+        elif status == "rate_limited":
+            self.tree.update(node_id, cause="rate_limited")
+            self.tree.set_status(node_id, "rate_limited", "rate_limited")
+            self.tree.emit(node_id, "rate_limited", provider=run.provider.name,
+                           retry_after=record.get("retry_after"))
         elif status == "quota":
             cooldown = now() + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
@@ -6798,7 +6823,7 @@ class Runner(QuotaHandover):
                 return result, attempt, "stopped", usage, None
             if verdict.get("requested_session"):
                 return result, attempt, "", usage, verdict
-            if verdict["status"] in ("limited", "quota", "unauthenticated"):
+            if verdict["status"] in ("limited", "quota", "rate_limited", "unauthenticated"):
                 return result, attempt, "", usage, verdict   # cannot be resumed again
             if verdict["status"] == "refused":
                 # RC-R3 (bug-1213a0, review ag-997df9 finding 1): a refusal is
@@ -6882,6 +6907,35 @@ class Runner(QuotaHandover):
             run.fix_verdict["requested_session"] = run.requested_session
         return True
 
+    @staticmethod
+    def _rate_limit_signal(status: str, stderr: str) -> bool:
+        # Provider failure channels only: an answer discussing limits is not
+        # evidence that the turn was interrupted (TB-R4).
+        return looks_like_rate_limit(status, stderr)
+
+    @staticmethod
+    def _session_resume_failure(stderr: str) -> bool:
+        return bool(re.search(r"session[^\n]*(?:not found|does not exist|unavailable|cannot be resumed)"
+                              r"|(?:unknown|missing|invalid) session", stderr or "", re.IGNORECASE))
+
+    @staticmethod
+    def _retry_after(stderr: str) -> float | None:
+        match = re.search(r"^\s*Retry-After\s*:\s*(.*?)\s*$", stderr or "", re.IGNORECASE | re.MULTILINE)
+        if not match:
+            return None
+        value = match.group(1)
+        try:
+            seconds = float(value)
+            return seconds if math.isfinite(seconds) and seconds >= 0 else None
+        except ValueError:
+            try:
+                date = parsedate_to_datetime(value)
+                if date.tzinfo is None:
+                    return None
+                return max(0.0, date.timestamp() - now())
+            except (ValueError, TypeError, OverflowError):
+                return None
+
     async def _provider_health_after(self, run: Run, status: str, text: str,
                                      stderr: str) -> tuple[str, dict | None]:
         """What this run's outcome says about its provider, recorded.
@@ -6894,6 +6948,8 @@ class Runner(QuotaHandover):
         """
         node_id = run.node_id
         limited = None
+        if status == "failed" and getattr(run, "rate_limit_resume", False) and self._session_resume_failure(stderr):
+            return status, None
         # A run the PROVIDER stopped is not a run that failed. The CLI says so
         # in its own hardcoded words, and until now it said them into an agent's
         # output where nothing was listening: two agents did 42,000 tokens of
@@ -6916,7 +6972,7 @@ class Runner(QuotaHandover):
         # failed is broken whatever the reason, and that is knowable without
         # reading a word of what the agent said — which is the part this
         # project has already got wrong once.
-        if status not in ("awaiting_user", "limited", "truncated", "refused"):
+        if status not in ("awaiting_user", "limited", "rate_limited", "truncated", "refused"):
             trip = self.tree.note_run_outcome(
                 run.provider.name, ok=status in ("done", "merged"),
                 threshold=int(self.config.limits.get("provider_failure_threshold", 3)),
@@ -7244,6 +7300,15 @@ class Runner(QuotaHandover):
             return "truncated"
         if run.final_status.upper() == "TRUNCATED":
             return "truncated"
+        succeeded = code == 0 and (
+            not run.final_status
+            or run.final_status.upper() in {"SUCCESS", "OK", "COMPLETED"}
+        )
+        # A capacity refusal is retryable even if the provider reports REFUSED.
+        # A completed answer still outranks a stale stderr signal (TB-R4).
+        if ((not succeeded or not text.strip())
+                and self._rate_limit_signal(run.final_status, stderr)):
+            return "rate_limited"
         if run.final_status.upper() == "REFUSED":
             return "refused"
         message = getattr(run, "final_assistant_message", "").strip()
@@ -7251,10 +7316,6 @@ class Runner(QuotaHandover):
             if re.fullmatch(pattern, message, re.IGNORECASE):
                 self._record_refusal(run, "assistant message", pattern, message)
                 return "refused"
-        succeeded = code == 0 and (
-            not run.final_status
-            or run.final_status.upper() in {"SUCCESS", "OK", "COMPLETED"}
-        )
         # A run that exited cleanly cannot have failed on quota or auth,
         # whatever words appear anywhere. Checked before the sniffers so no
         # marker can override the CLI's own verdict.
@@ -8629,7 +8690,8 @@ class Runner(QuotaHandover):
             active.discard(agent_id)
 
     async def _steer(self, agent_id: str, message: str,
-                     queued: dict | None = None, *, window_resume: bool = False) -> dict[str, Any]:
+                     queued: dict | None = None, *, window_resume: bool = False,
+                     rate_limit_resume: bool = False) -> dict[str, Any]:
         """Redirect a running agent.
 
         A subprocess cannot be injected into mid-run, so the honest equivalent
@@ -8930,7 +8992,7 @@ class Runner(QuotaHandover):
                 reserved_from = self._pc_reserve_resume(spec, current, provider.name,
                                                         queued_id)
             except ProviderFull as full:
-                if queued_id or window_resume:
+                if queued_id or window_resume or rate_limit_resume:
                     return {"agent_id": agent_id, "steered": False, "pc_full": True,
                             "gone": full.gone, "reason": str(full)}
                 entry = self.tree.enqueue(
@@ -9053,7 +9115,7 @@ class Runner(QuotaHandover):
                 # SF-R3 (review r2 finding 1): a steer's inherited lock may
                 # still have a live predecessor under it; `_steer_release`
                 # decides its fate.
-                release_lock=False, window_resume=window_resume,
+                release_lock=False, window_resume=window_resume, rate_limit_resume=rate_limit_resume,
             )
         except SpendCapRefused as exc:
             # SC-R3a/R3b: a crossing landed since the check above; the
@@ -9266,7 +9328,7 @@ class Runner(QuotaHandover):
         # Only the newest conversation may be resumed or announced as lost;
         # an older eligible one must not displace a newer failed/cancelled one.
         if best and (best.reason == "session_lost" or
-                     (best.status in {"idle", "running", "stuck", "refused"}
+                     (best.status in {"idle", "running", "stuck", "refused", "rate_limited"}
                       and best.session_id)):
             return best
         return None
