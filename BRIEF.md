@@ -4890,3 +4890,7 @@ Inventory by researcher ag-f02c6b (nd-7890cb6b); BRIEF line refs there.
 5. Waiting on a composite does not wake for child transitions.
 6. scheduler_status / waits keep a `windows` entry for every node ever created (cosmetic, grows).
 Per the plan, these are fixed before phase 7 part 2 is specified.
+- 2026-10-07 ~17:25 Scheduler restarted by the user (pid 3314660; TB/NT/OG live). TB2 spec approved and committed 8fd0c6c7. LOOP VALIDATION: template `implement-reviewed` v3 registered (no pins; reviewer tasks are params; spec_path on every node; tester/reviewer/implementer default agents). Instances:
+  - X = TB2-R1/R2: sequence nd-5aa26768 (loops nd-65a9f839 tests, nd-625aa6ff impl).
+  - Y = TB2-R3/R4/R5: sequence nd-117fdd94 (loops nd-9ec74c01 tests, nd-cf2d9805 impl).
+  On `done/approved`: read diff vs spec, merge_node the SEQUENCE (check that it carries the implementation, not only the reviewer's WIP). Log every loop defect in the §4 report. Watch: are the two `session: B` aliases scoped per instance? instantiate still echoes the definition twice.
