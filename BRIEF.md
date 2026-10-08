@@ -5018,3 +5018,32 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     4. pin claude/opus (round-3 escalation rule);
     5. clear the window.
 - nd-74628b22 (impl child of the closed opencode loop) still shows held needs_info: harmless, its loop is done/failed.
+
+## RESUME 2026-10-08 ~03:00 CEST (after the orchestrator quota outage)
+**What happened:** the orchestrator ran on claude-b, whose weekly quota is at 100% (resets Oct 9 14:00). It stopped at 01:13 and was not switched to claude. The user ran `multiagents stop` at about 02:24, which stopped ag-50c298. The scheduler (pid 500466) is still alive.
+
+**Since 01:13:**
+- SC: impl round 3 (ag-33454b) again changed nothing, because its task still said "confirm only". Reviewer ag-a60cfe rejected for the same deepcopy reason. The loop nd-a6f0f488 is at loop_max.
+- TB-R3: implementer ag-390f01 committed 6 commits (bb77a5d6 "fix wait regression introduced by 6df131c0" … d74671f6), then hit the codex 5h quota (resets 04:55 CEST). Loop nd-fbdd42ac is held on run_failed. Commits are pinned at ref rescue/tb-r3-390f01.
+- SL: ag-ef8361 hit the codex quota. The fallback ag-50c298 on codex-b made 3 commits (a3b6570a, bab5642e, e76e90dd) and was validating when stopped. Commits are pinned at ref rescue/sl-impl-50c298. Child nd-a723337c was relaunched with task rev 9 (cherry-pick from the rescue ref) and pinned to codex-b, but loop nd-941c69b2 STAYS held on run_failed.
+- opencode: nd-b6b90957 closed failed (its child nd-74628b22 still shows needs_info; harmless).
+
+**TOOLING DEFECT (blocking):** a loop held with reason `run_failed` cannot be resumed.
+- relaunch_node on the loop is refused: "requires loop_max, unresolved_round or a done loop".
+- Relaunching the child reopens it, but the loop hold remains.
+- Affects nd-941c69b2 (SL) and nd-fbdd42ac (TB-R3). To investigate and fix in-house.
+- Workaround to try: close and re-create, or a sequence-level relaunch (check that it does not redo the tests).
+
+**SC NEXT:**
+1. Closed window on nd-a6f0f488.
+2. relaunch_node with max_rounds 4 and pins {nd-2aea66eb: claude/opus}.
+3. Rewrite nd-2aea66eb's task: remove the confirm-only line; fix the deepcopy finding (live paths must not copy history); add a deepcopy/alloc cost proxy note.
+4. Clear the window.
+
+**User issue under investigation:** researcher nd-35d023f1. The orchestrator seems always launched with the host's claude login whatever agents.yaml says, while multiagents assumes the agents.yaml provider. No switch happens on exhaustion.
+
+**Quotas at 02:55:**
+- claude 56% headroom.
+- codex 99% used (resets 04:55 CEST).
+- codex-b 15% used.
+- claude-b weekly 100% used.
