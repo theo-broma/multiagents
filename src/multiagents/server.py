@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import functools
 import inspect
+import json
 import os
 import signal
 import stat
@@ -1112,6 +1113,45 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
     if not run.config.project.get("scheduler", {}).get("enabled"):
         return await _wait_for_agents(run, agent_ids, timeout)
 
+    caller = (run.self_id() if hasattr(run, "self_id") else None) or "root"
+    tree = getattr(run, "tree", None)
+    seen = (tree.read().get("wait_hold_marks", {}).get(caller, {}) if tree else {})
+
+    def mark(hold):
+        return hold.get("mark") or json.dumps(hold, sort_keys=True)
+
+    def unseen(hold, seen):
+        previous, current = seen.get(hold["node_id"]), mark(hold)
+        # Host hold marks are journal sequence numbers. A delayed older
+        # response must not rewind delivery after a newer episode was seen.
+        if (isinstance(previous, str) and isinstance(current, str)
+                and previous.isdecimal() and current.isdecimal()):
+            return int(current) > int(previous)
+        return previous != current
+
+    def fresh(reply):
+        return [hold for hold in reply.get("holds", [])
+                if unseen(hold, seen)]
+
+    def delivered(reply):
+        # Seeing an episode in this wait is separate from acknowledging the
+        # journal. A hold-only wake must leave unread transitions available.
+        # Persist before returning, as for limit-notice delivery. The tree's
+        # transaction serialises concurrent servers for this caller without
+        # advancing the scheduler's acknowledgement cursor.
+        if tree and any(h in reply.get("holds", []) for h in reply.get("changed", [])):
+            with tree.transaction() as data:
+                seen = data.setdefault("wait_hold_marks", {}).setdefault(caller, {})
+                changes = []
+                for hold in reply.get("changed", []):
+                    if hold in reply.get("holds", []):
+                        if not unseen(hold, seen):
+                            continue
+                        seen[hold["node_id"]] = mark(hold)
+                    changes.append(hold)
+                reply["changed"] = changes
+        return reply
+
     async def current_holds(wait_timeout):
         reply = await asyncio.to_thread(_node_rpc, "wait_for_nodes", {
             "node_ids": [], "timeout": wait_timeout})
@@ -1120,8 +1160,10 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         return {k: v for k, v in reply.items() if k not in {"transitions", "next_cursor"}}
 
     initial = await current_holds(0)
-    if initial.get("holds"):
-        return {**initial, "changed": initial["holds"], "timed_out": False}
+    if fresh(initial):
+        result = delivered({**initial, "changed": fresh(initial), "timed_out": False})
+        if result["changed"]:
+            return result
     if "holds" not in initial:
         return await _wait_for_agents(run, agent_ids, timeout)
     deadline = asyncio.get_running_loop().time() + timeout
@@ -1130,15 +1172,24 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         while True:
             remaining = max(0, deadline - asyncio.get_running_loop().time())
             reply = await current_holds(min(0.5, remaining))
-            if reply.get("holds") or "error" in reply or remaining <= 0:
-                return {**reply, "changed": reply.get("holds", []),
-                        "timed_out": not bool(reply.get("holds"))}
+            changes = fresh(reply)
+            if changes or "error" in reply or remaining <= 0:
+                return {**reply, "changed": changes,
+                        "timed_out": not bool(changes)}
             await asyncio.sleep(min(0.1, max(0, deadline - asyncio.get_running_loop().time())))
 
     tasks = [asyncio.create_task(holds()),
              asyncio.create_task(_wait_for_agents(run, agent_ids, max(0, deadline - asyncio.get_running_loop().time())))]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if tasks[0] in done:
+            observed = tasks[0].result()
+            if (observed.get("timed_out") and not observed.get("changed")
+                    and "error" not in observed):
+                # Only a new hold interrupts the native wait. At timeout it
+                # still owns the run results and any transition cursor.
+                await tasks[1]
+                done.add(tasks[1])
         results = [t.result() for t in tasks if t in done]
         error = next((r for r in results if "error" in r), None)
         if error is not None:
@@ -1156,7 +1207,6 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         notices = [n for r in results for n in r.get("limit_notices", [])]
         if notices:
             result["limit_notices"] = notices
-        return result
     finally:
         for task in tasks:
             task.cancel()
@@ -1164,6 +1214,19 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         for outcome in outcomes:
             if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                 raise outcome
+    result = delivered(result)
+    if (not result.get("changed") and "error" not in result
+            and tasks[1] in done and tasks[1].result().get("timed_out")):
+        # A concurrent delivery claim can remove the hold that woke us.
+        result["timed_out"] = True
+    if (not result.get("changed") and not result.get("timed_out")
+            and "error" not in result and not any("holds" not in r for r in results)):
+        # Another wait claimed the same episode while this one was waking.
+        # Keep waiting with the original deadline instead of reporting a
+        # transition that has already reached this caller.
+        return await _wait_with_holds(run, agent_ids, max(
+            0, deadline - asyncio.get_running_loop().time()))
+    return result
 
 
 async def _wait_for_agents(run: Runner, agent_ids, timeout: float) -> dict:
