@@ -5281,3 +5281,11 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Tester ag-c9ba59 asked what budget_status shows for the root. Decided in the spec: a `root {role, provider}` entry, tested; spend and context stay reviewer checks. A fresh tester was relaunched. SC loop relaunched on opus after the user re-authenticated claude (the default account had been quarantined by authproxy after an upstream 401).
 - OA tests: tester ag-d215ed (nd-f7bc5e10) added the root tests for budget_status. 53 known reds (switching not implemented), 11 passes. Reviewer **nd-6e72d14b** is next. If it approves: merge nodes/nd-f7bc5e10, then the OA impl standalone.
 - **OA tests approved** by ag-de2fbb, which observed 57 fail and 11 pass. Merged as 4a6f51ed. The old sequence nd-79583ed0 is cancelled. OA impl runs standalone on implementer-deep **nd-8792faba**; a reviewer comes next. Minor tooling note: a standalone reviewer's prompt asks for give_verdict, but the tool is absent outside a loop. Add it to MK/small items.
+- **2026-10-08 evening, runs dying outside the work.**
+  - SL ag-e22c1e was cancelled at 18:21Z ("server exited"). Its work is at f4ab1b92.
+  - ag-6dc8b2 (OA impl) and ag-d1134f (TB-R3 integration) both got SIGUSR1 at 19:49:51Z. Their work is at 963fbe47 and b42fcada.
+  - A relaunch starts from the input commit, so the node branch_tip does not include the dead run's commits. update_node did not reach a launch 2 s later (stale task). Terminal nodes cannot be edited.
+  - Resume nodes, each with a `merge --ff-only` of the dead run's commit: OA **nd-c815661d**, TB-R3 **nd-90eaf8df** (both relaunched after a transient codex "workspace routing discovery failed"), SL **nd-ea422382**.
+  - SC impl ag-357a82 (opus) ran about 2 h, then got a 401 again at 20:39Z. The SC loop nd-a6f0f488 was relaunched on 2026-10-09 around 22:55Z to test claude.
+  - Researcher **nd-9a88ab19** is investigating: who sends SIGUSR1, why a server exit cancels node runs, relaunch carrying the dead run's commits, and the update_node snapshot.
+  - Note: I missed SL's cancellation for 4 h, because the poller only wakes on result.json and on failed or held events, not on cancelled ones. Add "cancelled" to poll.sh.
