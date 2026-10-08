@@ -5097,3 +5097,11 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - tester nd-fff482f6 changes 4 tests: H3, 2 pins, breaker fixture;
     - implementer-deep nd-4e0c20c1 fixes src for the 3 findings. Its `verifies` was mistakenly set to ag-5e7de9; it should have been ag-a9dd0b.
   - After both: a reviewer (agy, standalone) on the combined result, then merge both branches (tests first). The old loop nd-d4a0bfbe and its sequence nd-cde7f1d8 are then closed (superseded).
+- 2026-10-08 ~08:15Z: **standing rule from the user.** Whenever the orchestrator has to step in by hand on a scheduler or tooling defect, it also sends a researcher, or consults the advisor, to find an automated handling for next time. Proposals are recorded here and fixed in-house.
+  - Researchers started:
+    - nd-bc7dcb57: loops held `run_failed` after a transient provider failure (the 4 overnight 429 loops). Where could an automatic retry or fallback hook in?
+    - nd-15bb758a: a session alias overrides pins, is bound to an exhausted provider, and leaves a dirty worktree. What would detect it and handle it automatically?
+  - Queued for the same treatment:
+    - a false hold on any `NEED_INFO(` text in a report;
+    - the child-launch race (the closed-window trick);
+    - `update_node` applying a stale revision.
