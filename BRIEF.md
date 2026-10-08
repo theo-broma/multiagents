@@ -5265,3 +5265,12 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Researcher **nd-f5b62849** is tracing the bug. **Tooling items:** AL (the alias renew path) and RF (repeated identical launch failures must hold, with the exception in the detail).
   - **Plan if the OA tests are approved:** the loop's verdict child cannot run, so cancel the OA sequence nd-79583ed0. Then merge the tests branch by hand or as a standalone node, and run the OA impl standalone (implementer-deep), followed by a reviewer.
 - Running: SC impl ag-e5a69c (claude/opus), TB-R3 integration nd-7853f777 (ag-d1134f), SL ag-e22c1e, researcher nd-b34d6701 (LR2).
+- ~18:20Z:
+  - **LR2 researcher ag-3d4158 answered.** The pre-LR direct child relaunch reset only the child (control.py:122-126). It left the loop's `run_failed` hold stale, and composites self-release only `child_held` (engine.py:1711-1718).
+    - The loop relaunch refusal is at control.py:53-60: the named child must be done/failed in the current round.
+    - The child relaunch refusal is at control.py:38-39: only `held` or `done` simple nodes and loops qualify. `cancelled` is excluded, and cancel clears `outcome` (rpc.py:634-635).
+    - **Proposed LR2:** the engine repairs a `run_failed` loop hold whose named current-round child is open or running and has no active attempt, with an explicit repair transition; a relaunch of such a loop performs the same repair. Making cancelled nodes relaunchable is optional and risky.
+  - **SC impl ag-e5a69c (claude/opus) failed with `401 no usable account remains`.** The claude vault authentication is broken for agents. That is the user's to fix (credentials).
+    - SC loop nd-a6f0f488 is held `run_failed` again (round 4 of 4).
+    - Not relaunched. Waiting for the user, or for a decision to route the round-4 fix to codex implementer-deep.
+  - The researcher on `previous_commit` (nd-f5b62849) hit codex "workspace routing discovery failed" again (transient, RF). Relaunched.
