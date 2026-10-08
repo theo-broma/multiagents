@@ -5047,3 +5047,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - codex 99% used (resets 04:55 CEST).
 - codex-b 15% used.
 - claude-b weekly 100% used.
+- 03:05 SC relaunched properly: window trick, max_rounds 4, impl nd-2aea66eb pinned claude/opus, task rev 16 = fix the deepcopy finding + measure copies. SL (nd-941c69b2) and TB-R3 (nd-fbdd42ac) still stuck on the run_failed loop hold (see defect above).
