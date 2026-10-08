@@ -5083,3 +5083,6 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - 2026-10-08 LR impl ag-a9dd0b: R4 marks made durable (ae342f78, 2f461653). Full suite 10,005 passed / 98 failed / 50 errors; the extra reds are 120 s `init` timeouts under load.
   - It parked NEED_INFO on the repeated-failure fixture. Decision 37c1f9a8: the provider breaker holds. test_lr_r1_a_rerun_that_fails_again_... is a known red, and the tester raises provider_failure_threshold to 4 after merge (same run as the pin tests).
   - Child relaunched (rev 8, short close-out, no code change). Reviewer task rev 4 lists the new known red and checks the marks for growth and races.
+- 2026-10-08 ~07:45Z after the claude limit pause:
+  - The LR reviewer on agy-b was rate_limited (agy-b weekly ~99%). Relaunched pinned to agy/gemini-3.1-pro-high, and the LR loop resumed.
+  - SC impl ag-9c831b died on a claude 429, so SC loop nd-a6f0f488 is held run_failed. Like SL, TB-R3 and OA, it is resumed with relaunch_node only after LR merges.
