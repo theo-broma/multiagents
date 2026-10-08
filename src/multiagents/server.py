@@ -1112,6 +1112,24 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
     if not run.config.project.get("scheduler", {}).get("enabled"):
         return await _wait_for_agents(run, agent_ids, timeout)
 
+    caller = run.self_id() if hasattr(run, "self_id") else None
+    seen = run.__dict__.setdefault("_wait_hold_marks", {}).setdefault(caller, {})
+
+    def mark(hold):
+        return hold.get("mark") or json.dumps(hold, sort_keys=True)
+
+    def fresh(reply):
+        return [hold for hold in reply.get("holds", [])
+                if seen.get(hold["node_id"]) != mark(hold)]
+
+    def delivered(reply):
+        # Seeing an episode in this wait is separate from acknowledging the
+        # journal. A hold-only wake must leave unread transitions available.
+        for hold in reply.get("changed", []):
+            if hold in reply.get("holds", []):
+                seen[hold["node_id"]] = mark(hold)
+        return reply
+
     async def current_holds(wait_timeout):
         reply = await asyncio.to_thread(_node_rpc, "wait_for_nodes", {
             "node_ids": [], "timeout": wait_timeout})
@@ -1120,8 +1138,8 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         return {k: v for k, v in reply.items() if k not in {"transitions", "next_cursor"}}
 
     initial = await current_holds(0)
-    if initial.get("holds"):
-        return {**initial, "changed": initial["holds"], "timed_out": False}
+    if fresh(initial):
+        return delivered({**initial, "changed": fresh(initial), "timed_out": False})
     if "holds" not in initial:
         return await _wait_for_agents(run, agent_ids, timeout)
     deadline = asyncio.get_running_loop().time() + timeout
@@ -1130,9 +1148,10 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         while True:
             remaining = max(0, deadline - asyncio.get_running_loop().time())
             reply = await current_holds(min(0.5, remaining))
-            if reply.get("holds") or "error" in reply or remaining <= 0:
-                return {**reply, "changed": reply.get("holds", []),
-                        "timed_out": not bool(reply.get("holds"))}
+            changes = fresh(reply)
+            if changes or "error" in reply or remaining <= 0:
+                return {**reply, "changed": changes,
+                        "timed_out": not bool(changes)}
             await asyncio.sleep(min(0.1, max(0, deadline - asyncio.get_running_loop().time())))
 
     tasks = [asyncio.create_task(holds()),
@@ -1156,7 +1175,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         notices = [n for r in results for n in r.get("limit_notices", [])]
         if notices:
             result["limit_notices"] = notices
-        return result
+        return delivered(result)
     finally:
         for task in tasks:
             task.cancel()
