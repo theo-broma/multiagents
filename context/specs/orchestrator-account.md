@@ -177,3 +177,29 @@ Verified by: a test that hashes both profiles' credential files and
 - Synchronising settings or hooks between host profiles.
 - Switching back automatically when an account resets. The next limit episode
   re-selects from the list.
+
+Decisions (orchestrator, 2026-10-08, on tester ag-063fb3's questions):
+- **OA-R8 observable.** R8 may be tested one level below the MCP server, at
+  the admission or pause decision the runner consults before spawning. The
+  observable: after the driver has handled a root limit on a host profile,
+  that decision does not refuse a run whose provider has the same name but
+  resolves to a different account (a vault account with headroom). The test
+  may call the public function that makes the decision; it must not patch it.
+- **OA-R6 reporting.** `multiagents status` gains one line naming the root's
+  role and the provider it currently runs on (no identity). That line is the
+  observable for "the provider reported for the root". "Spend counts each
+  profile's own usage" is checked by the reviewer, not by a test.
+- **OA-R5 companions.** The installation covers `<id>.jsonl` and, when
+  present, the same-named directory `<id>/` next to it. Nothing else.
+- **OA-R5 atomicity and serialisation.** A test seam is allowed: when the
+  environment variable `MULTIAGENTS_OA_INSTALL_PAUSE` names a path, the driver,
+  after taking the install lock and before making the install visible, waits
+  until that path exists. Tests use it to observe that nothing partial is
+  visible and that a second install waits.
+- **OA-R4 attached mode.** Unattended and `--no-supervise` are tested.
+  Attached supervision is checked by the reviewer reading the code, because
+  its stall poll is a real 60 s. "The configured provider after the list" is
+  tested in a fresh episode (after a wait).
+- **OA-R6 recovery.** After a crash mid-switch, either finishing or abandoning
+  the switch is acceptable, provided the session id is neither lost nor
+  forked, and no stale copy is launched.
