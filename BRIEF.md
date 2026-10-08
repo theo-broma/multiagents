@@ -5062,3 +5062,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - On LR approval: read diff vs spec, merge_node nd-cde7f1d8; user restarts scheduler; then relaunch SL loop nd-941c69b2 / TB-R3 loop nd-fbdd42ac per LR-R1 (rescue refs still there).
   - **OA chain = sequence nd-79583ed0** (implement-reviewed v3, implementer-deep, test_rounds 3), started in parallel (disjoint files). On approval: read diff vs spec, merge_node nd-79583ed0.
   - New defect captured as LR-R4: wait_for_agents with explicit ids returns at once, re-reporting standing holds in `changed`.
+- 2026-10-08 ~01:35Z User: continue autonomously; orchestrator may restart the scheduler itself when needed (after LR/SC merges) since the user may be away. Use `multiagents scheduler stop` + `start` only (never docker rm/down, never pkill); prefer a moment with no run mid-validation.
