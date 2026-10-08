@@ -93,15 +93,29 @@ def test_lr_r4_a_hold_returned_with_a_wait_error_is_not_reported_again(waits, mo
     # a fresh Tree object (a restarted server), not an in-memory cache.
     hold = episode(waits)
     waits.nodes[:] = [{"id": "nd-requested", "children": []}]
+    # The hold must appear after the wait began (an already-standing hold is
+    # returned before the native wait starts), so the first journal read is
+    # empty and the second carries the hold, as in the TB2-R7 test.
+    empty = {"holds": [], "next_cursor": 0, "transitions": []}
+    replies = [empty, copy.deepcopy(waits.snapshot)]
+
+    def rpc(op, args):
+        return replies.pop(0) if replies else waits.rpc(op, args)
+
+    async def inline_thread(fn, *args):
+        return fn(*args)
 
     async def failing_wait(*args):
         return {"error": "lost_connection"}
 
+    monkeypatch.setattr(asyncio, "to_thread", inline_thread)
+    monkeypatch.setattr(server, "_node_rpc", rpc)
     monkeypatch.setattr(server, "_wait_for_agents", failing_wait)
-    first = waits.wait(["nd-requested"])
+    first = asyncio.run(server._wait_with_holds(waits.run(), ["nd-requested"], 1))
     assert first["error"] == "lost_connection"
     assert hold in first["changed"]
     assert waits.tree.read()["wait_hold_marks"]["root"] == {hold["node_id"]: hold["mark"]}
+    monkeypatch.setattr(server, "_node_rpc", waits.rpc)
 
     async def quiet_wait(*args):
         return {"changed": [], "timed_out": True}
