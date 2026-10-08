@@ -5258,3 +5258,10 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - Relaunched; the run is ag-e22c1e.
   - **SC** loop nd-a6f0f488: impl ag-b9a9db (claude/opus) failed with a 429 "every account rate limited". Relaunched at 17:55Z after the claude reset (round 4 of 4).
   - Researcher nd-b34d6701 (LR2, the inconsistent run_failed hold) is running.
+- ~18:05Z: **the OA reviewer relaunch with pins agy caused a launch failure loop.**
+  - The error was `start did not launch: KeyError: 'previous_commit'` (scheduler/sessions.py:360). There were 8 attempts in 3 minutes with no hold.
+  - Stopped by a closed window on nd-1c3ce032 (rev 16).
+  - Standalone reviewer **nd-94dc087e** (agy) reviews the OA tests at dab99783 (branch nodes/nd-1640a5e0).
+  - Researcher **nd-f5b62849** is tracing the bug. **Tooling items:** AL (the alias renew path) and RF (repeated identical launch failures must hold, with the exception in the detail).
+  - **Plan if the OA tests are approved:** the loop's verdict child cannot run, so cancel the OA sequence nd-79583ed0. Then merge the tests branch by hand or as a standalone node, and run the OA impl standalone (implementer-deep), followed by a reviewer.
+- Running: SC impl ag-e5a69c (claude/opus), TB-R3 integration nd-7853f777 (ag-d1134f), SL ag-e22c1e, researcher nd-b34d6701 (LR2).
