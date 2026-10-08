@@ -5145,3 +5145,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - no final-section requirement, because that risks missing a genuine request.
   - Tests pinning today's behaviour: test_tb_a_needs_info_hold.py, test_tb_a_additional.py, test_core.py:2329/3473, test_vr_verdict_recording.py:287/307.
   - MK is small and goes after LR, with AL and RF.
+- ~08:50Z: LR tester round 2, ag-a242e5 (node nd-fff482f6), is DONE.
+  - It changed 4 tests and added 1 (identical-episode guard).
+  - Result: 25 pass, 1 red. The red one is the strict H3 test, red as expected until the implementer's fix.
+  - It left a gap: no test of a hold on a descendant of a composite id. The reviewer should check that path by reading.
+  - Started a tester on AU-R2 for the 2 stale tests in tests/test_zai_provider.py. No src change.
