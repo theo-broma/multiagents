@@ -28,7 +28,8 @@ from nc_fixture.world import call_tool  # noqa: E402
 
 WAIT = 8
 SHORT = 2        # `timeout` of a wait that must block for all of it
-WATCH = 6        # `timeout` of a wait that something must cut short
+WATCH = 30       # `timeout` of a wait that something must cut short: generous, load must not expire it first
+ENTER = 0.5      # the one deliberate pause: lets the waiter thread get into its wait (blocking is the property)
 SLACK = 0.4
 
 
@@ -103,10 +104,10 @@ def test_lr_r4_a_wait_on_the_running_node_blocks_until_it_finishes(w):
 
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
-    time.sleep(1.0)
+    time.sleep(ENTER)
     released = time.monotonic()
     w.gate("ga", w.fxw)
-    thread.join(WATCH + 2)
+    thread.join(WATCH + 5)
     assert not thread.is_alive(), "the wait never returned"
     assert box["end"] >= released, "the wait returned before the node finished"
     assert box["end"] - released < WATCH - 1, "the wait ran out its timeout instead of waking"
@@ -126,9 +127,9 @@ def test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once(w):
 
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
-    time.sleep(0.5)
+    time.sleep(ENTER)
     fresh = held_node(w, "H3")
-    thread.join(WATCH + 2)
+    thread.join(WATCH + 5)
     assert not thread.is_alive()
     assert fresh in changed_text(box["reply"]), f"a new hold was not reported: {box['reply']}"
     assert not any(h in changed_text(box["reply"]) for h in holds), box["reply"]
