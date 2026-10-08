@@ -5170,3 +5170,14 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - The alternative was a hold-until-confirmed mode. It is less simple: its blocking state must survive a restart.
   - **The `update_node` "wrong plan_revision applied" observation is NOT a bug.** Edits check the node `revision` (rpc.py:560-566), and `plan_revision` is not a precondition there (phase7-part1-contract.md:119-122). Removed from the defect list.
   - **Tooling items queued after LR:** AL (alias vs pins), RF (transient failure and launch retry), MK (marker masking), RL (atomic relaunch with child patches).
+- ~09:45Z: **LR implementer-deep ag-4b1071 (node nd-4e0c20c1) DONE.** Commits 1c2809f6 and e11c7e71.
+  - What it did:
+    - id filter in `changed`;
+    - marks pruned on clear, claimed once under concurrent waits;
+    - `reopened` on resume.
+  - Focused suite: 285 passed, 12 failed. The 12 are 4 tests on the tester branch, 6 known unlaunched-wait tests, and **2 TB2-R7 tests**: test_tb2_r7_hold_signal.py::…with_ids_returns_on_a_hold_of_another_owned_node and test_tb2_r7_delivery_edges.py::test_a_hold_and_a_simultaneous_wait_error_are_both_returned.
+  - Full suite: 95 failed and 40 errors. Chunk 2 has 32 errors; whether LR caused them is unverified.
+  - **Spec conflict found:** my strict-ids decision (6d1affcb, the H3 part of e573ee4a) contradicts the user-approved TB2-R7 ("wait with or without ids returns on a new unacknowledged hold of an owned node").
+  - **Intention:** withdraw strict ids, so TB2-R7 governs holds outside the ids, returned once per episode and never re-reported while standing. Then the tester restores the H3 test, ag-4b1071 drops the filter, and the reviewer runs.
+  - The advisor was consulted before deciding.
+  - The first advisor consult (ag-aed397) failed: codex exit -15, then provider "Unexpected server error". Retried. That is another transient failure with no automatic retry, so it goes into **RF** (consult retry).
