@@ -5134,3 +5134,14 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - persist the cause in the hold detail.
   - control.py:38 refusing a relaunch on `run_failed` is what LR-R1 fixes; the researcher read main without LR.
   - RF is to be specified after LR, with AL.
+- ~08:45Z: **researcher ag-0eabc5 (control markers) answered.**
+  - The info marker is already Markdown-aware (runner.py:534, 2998, 3018). Prose, inline code, `>` quotes and fences do not hold. A line-start or list-item marker does hold, by design.
+  - So the false holds came from reports that listed the marker as a bullet. The "do not write the token" advice stays as cheap insurance.
+  - **Real gaps:**
+    - `NEED_DECISION` is scanned live on text events with **no** Markdown masking: a fenced example stops the agent and opens a question (runner.py:532, 5828, 6057);
+    - `VERDICT` lines have no masking either (runner.py:545, 6545).
+  - **Proposed tooling item MK:**
+    - one shared "eligible control-line" iterator, reusing the info-marker masking, for decision and verdict parsing;
+    - no final-section requirement, because that risks missing a genuine request.
+  - Tests pinning today's behaviour: test_tb_a_needs_info_hold.py, test_tb_a_additional.py, test_core.py:2329/3473, test_vr_verdict_recording.py:287/307.
+  - MK is small and goes after LR, with AL and RF.
