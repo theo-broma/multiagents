@@ -30,13 +30,36 @@ CLEAR = 3
 FAIL = {"exit": 1}
 
 
-@pytest.fixture
-def w(tmp_path, monkeypatch):
+def make_world(tmp_path, monkeypatch, *, threshold=None, **provider_extra):
     world = M4World(tmp_path, monkeypatch)
-    world.fxw = world.provider("fxw")
-    world.fxr = world.provider("fxr")
+    if threshold is not None:
+        world.project["limits"]["provider_failure_threshold"] = threshold
+    world.fxw = world.provider("fxw", **provider_extra)
+    world.fxr = world.provider("fxr", **provider_extra)
     world.agent("wk", "fxw", writes=True)
     world.agent("rv", "fxr", writes=True)
+    return world
+
+
+@pytest.fixture
+def w(tmp_path, monkeypatch):
+    world = make_world(tmp_path, monkeypatch)
+    yield world
+    world.close()
+
+
+@pytest.fixture
+def wpin(tmp_path, monkeypatch):
+    """Providers that keep a session across a model change (NC-R32), so a pin is legitimate (LR-R1/R2)."""
+    world = make_world(tmp_path, monkeypatch, session_model_change=True)
+    yield world
+    world.close()
+
+
+@pytest.fixture
+def wbreaker(tmp_path, monkeypatch):
+    """Failure threshold 4: the original failure, its retry and a failed rerun do not trip the breaker."""
+    world = make_world(tmp_path, monkeypatch, threshold=4)
     yield world
     world.close()
 
@@ -200,14 +223,14 @@ def test_lr_r1_max_rounds_is_optional_and_applied_when_given(w):
     assert done["loop"]["max_rounds"] == 6 and done["loop"]["rounds_rejected"] == 1
 
 
-def test_lr_r1_pins_apply_to_the_failed_child(w):
-    loop, wk, rv = worker_failed(w)
-    w.fxw.queue(work(2))
-    w.fxr.queue(verdict_entry("approved"))
-    reply = relaunch_loop(w, loop, pins={wk: {"model": "fxw/m2"}})
+def test_lr_r1_pins_apply_to_the_failed_child(wpin):
+    loop, wk, rv = worker_failed(wpin)
+    wpin.fxw.queue(work(2))
+    wpin.fxr.queue(verdict_entry("approved"))
+    reply = relaunch_loop(wpin, loop, pins={wk: {"model": "fxw/m2"}})
     assert reply.get("ok") is True, reply
-    w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
-    models = [c["model"] for c in w.fxw.calls()]
+    wpin.wait_state(loop, "done", timeout=WAIT_ROUNDS)
+    models = [c["model"] for c in wpin.fxw.calls()]
     assert models[:2] == ["fxw/m1", "fxw/m1"] and models[2] == "fxw/m2", models
 
 
@@ -240,14 +263,14 @@ def test_lr_r1_a_repeated_relaunch_launches_one_rerun(w):
     w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
 
 
-def test_lr_r1_a_rerun_that_fails_again_holds_the_loop_again_and_can_be_relaunched(w):
-    loop, wk, rv = worker_failed(w)
-    w.fxw.queue(FAIL, work(2))        # the rerun fails; the scheduler's own retry is not repeated
-    w.fxr.queue(verdict_entry("approved"))
-    assert relaunch_loop(w, loop).get("ok") is True
-    w.wait_held(loop, "run_failed", timeout=WAIT_ROUNDS)
-    assert relaunch_loop(w, loop).get("ok") is True
-    done = w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
+def test_lr_r1_a_rerun_that_fails_again_holds_the_loop_again_and_can_be_relaunched(wbreaker):
+    loop, wk, rv = worker_failed(wbreaker)
+    wbreaker.fxw.queue(FAIL, work(2))        # the rerun fails; the scheduler's own retry is not repeated
+    wbreaker.fxr.queue(verdict_entry("approved"))
+    assert relaunch_loop(wbreaker, loop).get("ok") is True
+    wbreaker.wait_held(loop, "run_failed", timeout=WAIT_ROUNDS)
+    assert relaunch_loop(wbreaker, loop).get("ok") is True
+    done = wbreaker.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved" and done["loop"]["rounds_rejected"] == 0
 
 
@@ -298,17 +321,17 @@ def test_lr_r2_relaunching_the_failed_reviewer_keeps_the_worker_and_honours_the_
     assert w.fxr.calls()[-1]["resume"] == failed_session
 
 
-def test_lr_r2_pins_on_the_direct_child_relaunch_apply(w):
-    loop, wk, rv = worker_failed(w)
-    w.fxw.queue(work(2))
-    w.fxr.queue(verdict_entry("approved"))
-    reply = w.root_op("relaunch_node", wk, pins={"model": "fxw/m2"})
+def test_lr_r2_pins_on_the_direct_child_relaunch_apply(wpin):
+    loop, wk, rv = worker_failed(wpin)
+    wpin.fxw.queue(work(2))
+    wpin.fxr.queue(verdict_entry("approved"))
+    reply = wpin.root_op("relaunch_node", wk, pins={"model": "fxw/m2"})
     if reply.get("ok") is not True:      # spelling of a child's own pins is not pinned
-        reply = w.root_op("relaunch_node", wk, pins={wk: {"model": "fxw/m2"}})
+        reply = wpin.root_op("relaunch_node", wk, pins={wk: {"model": "fxw/m2"}})
     assert reply.get("ok") is True, reply
-    hold_clears(w, loop)
-    w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
-    assert w.fxw.calls()[-1]["model"] == "fxw/m2"
+    hold_clears(wpin, loop)
+    wpin.wait_state(loop, "done", timeout=WAIT_ROUNDS)
+    assert wpin.fxw.calls()[-1]["model"] == "fxw/m2"
 
 
 # ------------------------------------------------------------------ LR-R3
