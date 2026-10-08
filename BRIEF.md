@@ -5151,3 +5151,9 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - It left a gap: no test of a hold on a descendant of a composite id. The reviewer should check that path by reading.
   - Started a tester on AU-R2 for the 2 stale tests in tests/test_zai_provider.py. No src change.
 - ~09:00Z: AU-R2 zai tests done (ag-d8aff2: prefixed output shape for both, 142 pass) and published to main as bdd84cf0.
+- ~09:20Z: **another silent defect.** Researcher node nd-753d19e9 (run ag-ee43b0) ended `done/failed` with no result, no hold and no notification.
+  - Event: `start did not launch: OperationalError: database is locked`, a transient SQLite contention at launch.
+  - The scheduler treated it as a terminal failure, with no retry. Only get_node showed it.
+  - Added to tooling item **RF**: a launch-time infrastructure error (DB locked, spawn failure) must be retried, bounded, and never left as a silent `failed`.
+  - The researcher was restarted.
+  - The orchestrator poller now also wakes on failed status or outcome events and on node.held, needs_info, loop_max, unresolved_round and result_capture_failed.
