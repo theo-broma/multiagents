@@ -76,3 +76,9 @@ Decisions (orchestrator, 2026-10-08, on tester ag-d00ca8's questions):
   The tester fixes them after merge by enabling that capability in their
   fixture providers. Until then they are known reds, and the implementation
   must not bypass NC-R32.
+- Repeated-failure relaunch test (on implementer ag-a9dd0b's question): the
+  existing provider failure breaker (three failures, 1,800 s) still holds;
+  LR does not bypass it. The test's fixture is wrong to expect a 20 s
+  relaunch after three failures. The tester fixes it after merge by raising
+  `provider_failure_threshold` to 4 in that fixture. Until then it is a known
+  red.
