@@ -5157,3 +5157,16 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Added to tooling item **RF**: a launch-time infrastructure error (DB locked, spawn failure) must be retried, bounded, and never left as a silent `failed`.
   - The researcher was restarted.
   - The orchestrator poller now also wakes on failed status or outcome events and on node.held, needs_info, loop_max, unresolved_round and result_capture_failed.
+- ~09:30Z: **researcher ag-21147e (relaunch race, update_node revision) answered.**
+  - **The race is real.** `relaunch_node` opens the child in one transaction (control.py:83-95, engine.py:1767-1782). The next admission tick (engine.py:384-399, 452-675) can claim it before a later `update_node`. A revision re-check before the claim (engine.py:587-619) catches only updates committed before that point.
+  - **What `relaunch_node` already covers:**
+    - it accepts child `pins` and `new_session` in the same call (control.py:45-82), so those never needed a follow-up `update_node`;
+    - a task change applies only to a simple target (control.py:99-102);
+    - a loop child's task or session alias needs a separate update.
+  - **Proposed tooling item RL:**
+    - `relaunch_node` takes a per-child patch payload, each with its expected child revision;
+    - it validates everything, then applies it and reopens in one store transaction, all or nothing;
+    - this removes the closed-window workaround.
+    - The alternative was a hold-until-confirmed mode. It is less simple: its blocking state must survive a restart.
+  - **The `update_node` "wrong plan_revision applied" observation is NOT a bug.** Edits check the node `revision` (rpc.py:560-566), and `plan_revision` is not a precondition there (phase7-part1-contract.md:119-122). Removed from the defect list.
+  - **Tooling items queued after LR:** AL (alias vs pins), RF (transient failure and launch retry), MK (marker masking), RL (atomic relaunch with child patches).
