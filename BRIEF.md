@@ -5150,3 +5150,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Result: 25 pass, 1 red. The red one is the strict H3 test, red as expected until the implementer's fix.
   - It left a gap: no test of a hold on a descendant of a composite id. The reviewer should check that path by reading.
   - Started a tester on AU-R2 for the 2 stale tests in tests/test_zai_provider.py. No src change.
+- ~09:00Z: AU-R2 zai tests done (ag-d8aff2: prefixed output shape for both, 142 pass) and published to main as bdd84cf0.
