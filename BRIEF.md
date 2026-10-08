@@ -5230,3 +5230,19 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - CC: close settles idle descendants;
     - PB: publication with shared history;
     - plus the short get_node form and the reviewer test-evidence rule.
+- ~11:40Z: **LR fully on main** (3d3c1d58, test fix ag-8c22f5: the test was wrong, src fine). LR + TB2-R7 tests: 88 passed.
+  - **Scheduler restarted** by the orchestrator (stop, then start; new pid 2526569) with nothing active.
+  - **Relaunched under LR-R1:**
+    - SC loop nd-a6f0f488 (round 4 of 4, impl nd-2aea66eb claude/opus);
+    - OA tests loop nd-1640a5e0;
+    - TB-R3 loop nd-fbdd42ac. Note: its rescue work predates LR's server.py wait changes, so expect merge friction.
+  - **SL:**
+    - The loop nd-941c69b2 was inconsistent: held `run_failed` on child nd-a723337c, which an earlier relaunch had already reopened.
+    - Loop relaunch was refused ("must name a failed child in the current round"). Child relaunch was refused ("requires a settled simple node or loop"), even after cancel_node on the child.
+    - So the SL sequence nd-4d426b24 was cancelled, and SL resumes standalone as implementer-deep **nd-5e825702**, which merges rescue/sl-impl-50c298 (tests 0ad31358 plus 3 impl commits) and validates.
+    - Tooling item **LR2:** a loop held `run_failed` whose named child is no longer failed must be relaunchable, or self-heal; a cancelled simple node should be relaunchable. Researcher to send.
+  - **Next:**
+    1. reviewers (agy, standalone or loop) as each finishes;
+    2. SL: reviewer, then merge, using a true merge if it shares history (PB);
+    3. after LR and these, write the specs for the tooling items AL, RF, MK, RL, CC, PB and LR2, and **show them to the user before committing**.
+  - Other tooling notes: `budget_status`, `get_node` and `close_node` outputs are huge (several k tokens each); add a short form.
