@@ -1764,6 +1764,16 @@ class Engine:
         self.store.save_node(db, node)
         self.store.transition(db, "done", node["id"], {"outcome": outcome})
 
+    def resume_failed(self, db, loop, child):
+        # LR-R1/R2: this is a continuation of the current round. Preserve its
+        # crash retry allowance, sibling results, findings and alias bindings.
+        retry_round = child.get("crash_retry_round")
+        model.reset(child)
+        child["crash_retry_round"] = retry_round
+        self.store.save_node(db, child)
+        loop.update(state="running", outcome=None, hold=None, revision=loop["revision"] + 1)
+        self.store.save_node(db, loop)
+
     def reset_round(self, db, node, nodes, verdict_only=False):
         findings = node.get("findings", [])
         children = [node["loop"]["verdict_child"]] if verdict_only else node["children"]
