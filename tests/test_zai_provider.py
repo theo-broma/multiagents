@@ -338,7 +338,7 @@ def test_za_r2_check_missing_entry_exits_10_naming_entry_and_fix(env):
 
 def test_za_r2_check_go_only_store_is_10_for_plan_and_0_without_it(env):
     env.store({"opencode-go": {"type": "api", "key": GO_KEY}})
-    env.bin = _fake_bin(env.root, "echo '1 credentials'\n")
+    env.bin = _fake_bin(env.root, "echo 'found 1 credentials'\n")
     assert env.run("check").returncode == 10
     assert env.run("check", plan=None).returncode == 0
 
@@ -810,7 +810,7 @@ def test_za_r4_usage_sends_the_raw_key(env, zai):
 
 def test_za_r5_check_without_plan_ignores_the_store_and_uses_providers_list(env):
     env.store({"opencode-go": {"type": "api", "key": GO_KEY}})
-    env.bin = _fake_bin(env.root, "echo '1 credentials'\n")
+    env.bin = _fake_bin(env.root, "echo 'found 1 credentials'\n")
     cp = env.run("check", plan=None)
     assert (cp.returncode, cp.stdout) == (0, "1 stored credential(s)\n")
     assert_no_key(cp, GO_KEY)
