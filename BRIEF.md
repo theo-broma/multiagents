@@ -5072,3 +5072,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - `init` timeouts come from the environment; nc_r21 and the monitor reds also exist on base.
   - LR tester relaunch fell back to opencode-go/kimi (ag-ca8049) and exited at once with an UnknownError.
   - The claude session has since reset (1% used), so the scheduler retries should succeed. If either loop shows run_failed, resume it after LR merges (LR-R1).
+- 2026-10-08 ~03:00Z LR tests loop nd-e6c3c92a hit loop_max (reviewer ag-994294: 2 sleep-paced waits in tests/test_lr_wait.py). Relaunched with max_rounds 3. Tester task: event sync, 30 s wait timeout. Reviewer task: one deliberate pause allowed to prove blocking (orchestrator decision).
