@@ -76,13 +76,39 @@ def test_lr_r4_marks_do_not_accumulate_with_removed_nodes(waits):
         assert waits.tree.read()["wait_hold_marks"]["root"] == {current["node_id"]: str(seq)}
 
 
-def test_lr_r4_outside_holds_do_not_claim_delivery(waits):
+def test_lr_r4_an_outside_hold_delivered_once_is_not_delivered_again(waits):
+    # LR-R4 versus TB2-R7 (56d89703): a hold outside the requested ids is
+    # delivered once, then never again while it stands, with or without ids.
     outside = episode(waits)
     waits.nodes[:] = [{"id": "nd-requested", "children": []}]
-    result = waits.wait(["nd-requested"])
-    assert result["changed"] == []
-    assert waits.tree.read()["wait_hold_marks"]["root"] == {}
-    assert waits.wait()["changed"] == [outside]
+    assert waits.wait(["nd-requested"])["changed"] == [outside]
+    assert waits.tree.read()["wait_hold_marks"]["root"] == {outside["node_id"]: outside["mark"]}
+    assert waits.wait(["nd-requested"])["changed"] == []
+    assert waits.wait()["changed"] == []
+    assert waits.wait(["nd-requested"])["changed"] == []
+
+
+def test_lr_r4_a_hold_returned_with_a_wait_error_is_not_reported_again(waits, monkeypatch):
+    # TB2-R7 delivery edge: the hold still gets its durable mark, checked by
+    # a fresh Tree object (a restarted server), not an in-memory cache.
+    hold = episode(waits)
+    waits.nodes[:] = [{"id": "nd-requested", "children": []}]
+
+    async def failing_wait(*args):
+        return {"error": "lost_connection"}
+
+    monkeypatch.setattr(server, "_wait_for_agents", failing_wait)
+    first = waits.wait(["nd-requested"])
+    assert first["error"] == "lost_connection"
+    assert hold in first["changed"]
+    assert waits.tree.read()["wait_hold_marks"]["root"] == {hold["node_id"]: hold["mark"]}
+
+    async def quiet_wait(*args):
+        return {"changed": [], "timed_out": True}
+
+    monkeypatch.setattr(server, "_wait_for_agents", quiet_wait)
+    assert waits.wait(["nd-requested"])["changed"] == []
+    assert waits.wait()["changed"] == []
 
 
 def test_lr_r4_a_composite_wait_delivers_descendant_holds(waits):
@@ -98,12 +124,17 @@ def test_lr_r4_concurrent_callers_claim_a_hold_only_once(waits, monkeypatch):
     waits.nodes[:] = [{"id": "nd-held", "children": []}]
     barrier = threading.Barrier(2)
 
+    seen = set()
+
     def rpc(op, args):
-        if op == "list_nodes":
-            # Both callers have observed the unclaimed episode before either
-            # reaches its durable delivery transaction.
+        reply = waits.rpc(op, args)
+        if op == "wait_for_nodes" and threading.get_ident() not in seen:
+            # Both callers have fetched the unclaimed episode (each caller's
+            # first journal read) before either reaches its durable delivery
+            # transaction.
+            seen.add(threading.get_ident())
             barrier.wait(timeout=5)
-        return waits.rpc(op, args)
+        return reply
 
     monkeypatch.setattr(server, "_node_rpc", rpc)
 

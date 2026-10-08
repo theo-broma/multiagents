@@ -125,9 +125,11 @@ def gated_hold_node(w, tag: str, gate: str) -> str:
 
 
 def test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once(w):
+    # LR-R4 versus TB2-R7 (56d89703): a new hold of an owned node is reported
+    # once whether or not the node is among the requested ids.
     holds, running = world_with_holds(w)
     target = gated_hold_node(w, "T", "gb")
-    call_tool(w, "wait_for_agents", [target], timeout=1)
+    call_tool(w, "wait_for_agents", [target], timeout=1)    # H1 and H2 are new here: reported once
     box: dict = {}
 
     def waiter():
@@ -138,17 +140,16 @@ def test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once(w):
     thread.start()
     time.sleep(ENTER)
     outside = held_node(w, "H3")                 # appears during the wait, outside the requested ids
-    assert thread.is_alive(), f"a hold outside the requested ids woke the wait: {box.get('reply')}"
-    w.gate("gb", w.fxw)                          # the requested node now holds
     thread.join(WATCH + 5)
-    assert not thread.is_alive()
+    assert not thread.is_alive(), "the wait did not return on a new hold of an owned node"
+    assert box["reply"].get("timed_out") is not True, box["reply"]
     text = changed_text(box["reply"])
-    assert target in text, f"a new hold on the requested node was not reported: {box['reply']}"
-    assert outside not in text, f"a hold outside the requested ids is in changed: {box['reply']}"
-    assert not any(h in text for h in holds), box["reply"]
-    again = call_tool(w, "wait_for_agents", [target], timeout=1)    # the held node's run is finished: may return at once
-    assert target not in changed_text(again), f"the same hold was reported twice: {again}"
-    assert outside not in changed_text(again), again
+    assert outside in text, f"the new outside hold was not reported: {box['reply']}"
+    assert not any(h in text for h in holds), f"standing holds came back: {box['reply']}"
+    again, took = timed(lambda: call_tool(w, "wait_for_agents", [target], timeout=SHORT))
+    assert outside not in changed_text(again), f"the outside hold was reported twice: {again}"
+    assert not any(h in changed_text(again) for h in holds), again
+    assert took >= SHORT - SLACK, f"the second wait returned after {took:.1f}s with nothing new"
 
 
 def test_lr_r4_a_new_hold_episode_with_the_same_payload_is_reported_again_once(w):
