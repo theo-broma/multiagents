@@ -5195,3 +5195,18 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Next: an agy reviewer on both new branches combined, then merge (tests first), then close the old loop nd-d4a0bfbe and sequence nd-cde7f1d8.
 - ~10:20Z: LR tester round 3 ag-613956 (nd-45010752) DONE: H3 rewritten (reported once), outside-hold test replaced, hold+wait-error durable-mark test added, concurrency barrier moved to wait_for_nodes. 5 red vs current src, all from the id filter (incl. the 2 TB2-R7 tests). Waiting on implementer nd-5af85dac.
 - ~10:40Z: LR impl round 3 ag-2227be (nd-5af85dac) DONE, 077e364f: id filter removed, hold+wait-error metadata kept; both TB2-R7 tests green; full suite branch 95F/57E vs main 128F/57E, no introduced reds (57 E = CLI init timeouts under load). Reviewer nd-113824ce (agy) on nd-45010752+nd-5af85dac, verifies ag-2227be. On APPROVE: merge tests node nd-45010752 then src node nd-5af85dac (merge_node), close old LR loop/sequence, then scheduler restart + relaunch SC/OA/SL/TB-R3.
+- ~11:05Z: **LR review ag-55490b (agy) APPROVED.** But it did not observe its own test run: it removed its scratch worktree while pytest was still running.
+  - **LR MERGED to main by hand**, as true merges: 5cbe0962 (tests, nd-45010752) and 64d4a279 (src, nd-5af85dac). A squash merge_node of the two would have conflicted, because both branches contain the same earlier rounds. Audit: no personal data.
+  - On main: the LR and TB2-R7 tests give **87 passed, 1 red**: test_lr_review_delivery.py::test_lr_r4_a_hold_returned_with_a_wait_error_is_not_reported_again (KeyError 'error' at :102).
+    - Tester nd-816aa6c2 is deciding whether the test or the src is wrong, judged against the shape TB2-R7's test pins.
+  - The old LR sequence nd-cde7f1d8, loop nd-d4a0bfbe and reviewer nd-80076d96 are closed `exhausted`, each one by hand: closing the sequence did not close its held descendants. The dirty archive is left in place.
+  - **Tooling defects, with researchers started:**
+    - closing a composite does not settle its descendants (nd-dc8d4eb9);
+    - squash publishing of nodes that share history (nd-566b4e85).
+  - **Noted for later:**
+    - `get_node` and `close_node` echo the whole template definition, roughly 5k tokens per call; they need a short form;
+    - a reviewer approved without observed test results; the reviewer brief should require them.
+  - **Next:**
+    - when tester nd-816aa6c2 is done, merge its fix;
+    - restart the scheduler, which loads LR's control.py and engine changes;
+    - relaunch_node the 4 loops held run_failed: SC nd-a6f0f488, OA nd-1640a5e0, SL nd-941c69b2, TB-R3 nd-fbdd42ac.
