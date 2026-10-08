@@ -5074,3 +5074,9 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The claude session has since reset (1% used), so the scheduler retries should succeed. If either loop shows run_failed, resume it after LR merges (LR-R1).
 - 2026-10-08 ~03:00Z LR tests loop nd-e6c3c92a hit loop_max (reviewer ag-994294: 2 sleep-paced waits in tests/test_lr_wait.py). Relaunched with max_rounds 3. Tester task: event sync, 30 s wait timeout. Reviewer task: one deliberate pause allowed to prove blocking (orchestrator decision).
 - 2026-10-08 LR tests approved at round 3 (reviewer ag-0ec03d); implementation loop of nd-cde7f1d8 starting (implementer-deep).
+- 2026-10-08 LR impl nd-7d4de9d7, ag-379938:
+  - Partial work: 7b94d66e and 2b71b206, 17/25 tests green. It parked NEED_INFO(LR-pins).
+  - Decision fe35c5f5: NC-R32 holds, so the 2 LR pin tests are wrong. They are known reds now. AFTER the LR merge, a tester enables session_model_change in their fixtures.
+  - Impl relaunched rev 5 to: make the R4 marks durable, fix the repeated-failure timeout, run the full suite.
+  - Reviewer nd-80076d96 task rewritten (rev 3).
+  - Gotcha: update_node with a wrong revision on an OPEN node APPLIED instead of conflicting (task briefly "x"). Never probe revisions with junk content; use get_node.
