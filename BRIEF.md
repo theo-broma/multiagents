@@ -5060,5 +5060,5 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - 2026-10-08 ~01:30Z User approved specs LR (9c69db94, context/specs/loop-run-failed-resume.md) and OA (1c9c1626, context/specs/orchestrator-account.md, incl. OA-R9 "switch never touches host login/credentials"), LR first. Host-side auto switch judged feasible-with-caveats (researcher ag-34e6b6); run_failed defect located (ag-de186a). Advisor ag-aed397 gaps folded into OA before commit.
   - **LR chain = sequence nd-cde7f1d8** (implement-reviewed v3, implementer-deep). instantiate_template returned scheduler_unavailable but the instance landed (known RPC-under-load defect).
   - On LR approval: read diff vs spec, merge_node nd-cde7f1d8; user restarts scheduler; then relaunch SL loop nd-941c69b2 / TB-R3 loop nd-fbdd42ac per LR-R1 (rescue refs still there).
-  - OA chain: not started yet; start after LR tests are in (disjoint files: driver.py/budget.py vs scheduler/). Implementer tier: deep (cross-cutting, crash recovery).
+  - **OA chain = sequence nd-79583ed0** (implement-reviewed v3, implementer-deep, test_rounds 3), started in parallel (disjoint files). On approval: read diff vs spec, merge_node nd-79583ed0.
   - New defect captured as LR-R4: wait_for_agents with explicit ids returns at once, re-reporting standing holds in `changed`.
