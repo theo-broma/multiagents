@@ -5193,3 +5193,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - classifies every red in the full suite against main.
   - Both are marked as verifying ag-4b1071.
   - Next: an agy reviewer on both new branches combined, then merge (tests first), then close the old loop nd-d4a0bfbe and sequence nd-cde7f1d8.
+- ~10:20Z: LR tester round 3 ag-613956 (nd-45010752) DONE: H3 rewritten (reported once), outside-hold test replaced, hold+wait-error durable-mark test added, concurrency barrier moved to wait_for_nodes. 5 red vs current src, all from the id filter (incl. the 2 TB2-R7 tests). Waiting on implementer nd-5af85dac.
