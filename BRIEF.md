@@ -5080,3 +5080,6 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Impl relaunched rev 5 to: make the R4 marks durable, fix the repeated-failure timeout, run the full suite.
   - Reviewer nd-80076d96 task rewritten (rev 3).
   - Gotcha: update_node with a wrong revision on an OPEN node APPLIED instead of conflicting (task briefly "x"). Never probe revisions with junk content; use get_node.
+- 2026-10-08 LR impl ag-a9dd0b: R4 marks made durable (ae342f78, 2f461653). Full suite 10,005 passed / 98 failed / 50 errors; the extra reds are 120 s `init` timeouts under load.
+  - It parked NEED_INFO on the repeated-failure fixture. Decision 37c1f9a8: the provider breaker holds. test_lr_r1_a_rerun_that_fails_again_... is a known red, and the tester raises provider_failure_threshold to 4 after merge (same run as the pin tests).
+  - Child relaunched (rev 8, short close-out, no code change). Reviewer task rev 4 lists the new known red and checks the marks for growth and races.
