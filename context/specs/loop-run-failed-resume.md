@@ -68,3 +68,11 @@ Decisions (orchestrator, 2026-10-08, on tester ag-d00ca8's questions):
 - A hold of a requested node appears in `changed` once, then not again.
 - "Resumes its session" means the rerun resumes a session of an earlier run
   of that child. Which one, after a retry, is not specified.
+- LR-R1/R2 pins (on implementer ag-379938's question): NC-R32 still holds.
+  A pin that changes the model of an aliased session needs `new_session` or a
+  provider with `session_model_change: true`. The two pin tests
+  (test_lr_r1_pins_apply_to_the_failed_child and
+  test_lr_r2_pins_on_the_direct_child_relaunch_apply) are wrong as written.
+  The tester fixes them after merge by enabling that capability in their
+  fixture providers. Until then they are known reds, and the implementation
+  must not bypass NC-R32.
