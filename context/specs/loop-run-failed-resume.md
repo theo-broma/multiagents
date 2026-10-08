@@ -87,3 +87,12 @@ Decisions (orchestrator, 2026-10-08, on tester ag-d00ca8's questions):
   - The delivery marks for wait_for_agents must not grow without bound. A mark is dropped once its hold clears or its node is gone.
   - A new hold episode on the same node with an identical payload is a new hold and is reported once again.
   - Relaunch emits the existing `reopened` transition for every node whose state it changes: the reset failed child (LR-R1) and the loop whose hold a direct child relaunch clears (LR-R2).
+- LR-R4 versus TB2-R7 (orchestrator, 2026-10-08, after implementer ag-4b1071 and advisor ag-aa1387). **The strict-ids reading above is withdrawn**, along with the first point of the review decision before this one. It contradicted the user-approved TB2-R7 (context/specs/tooling-batch-2-2026-10.md): a wait, with or without ids, returns on a new, unacknowledged hold of any node the caller owns.
+  - **Holds outside the ids.** TB2-R7 governs them. Each hold episode of an owned node appears in `changed` once, then never again while it stands. This applies whether or not the node is among the requested ids.
+  - **What LR-R4 still forbids:** reporting a standing, already-delivered hold again.
+  - **Tests:**
+    - test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once returns to "the new outside hold is reported once, then not again";
+    - test_lr_r4_outside_holds_do_not_claim_delivery is replaced accordingly;
+    - the TB2-R7 tests stand unchanged.
+  - **Still in force:** mark cleanup on clear or when the node is gone, an identical new episode reported once again, and `reopened` on relaunch.
+  - **A hold and a wait error together.** When a hold and a native wait error are returned in the same reply, the hold still gets its durable delivery mark, and a second wait does not report it again (TB2-R7 delivery edge).
