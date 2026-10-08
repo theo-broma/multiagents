@@ -5210,3 +5210,23 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - when tester nd-816aa6c2 is done, merge its fix;
     - restart the scheduler, which loads LR's control.py and engine changes;
     - relaunch_node the 4 loops held run_failed: SC nd-a6f0f488, OA nd-1640a5e0, SL nd-941c69b2, TB-R3 nd-fbdd42ac.
+- ~11:20Z: **two researchers answered.**
+  - **ag-b731b3, close cascade:**
+    - `close_node` marks only its target done (control.py:9-33, engine.py:1747-1765). That is per contract: NC-R37 says close cancels nothing still running, and NC-R5 propagates holds upward only.
+    - `cancel_node` already walks the subtree (rpc.py:609-639) and revokes capabilities. **Practical rule for the orchestrator: use cancel_node to retire a whole subtree.**
+    - Proposed tooling item **CC:** `close_node` also settles descendants that are held or open with **no active attempt**, with the same outcome. This stays within NC-R37: nothing running is touched. Bindings and dirty archives are kept.
+  - **ag-4a6e6d, publish:**
+    - `merge_node` squash-publishes (one parent) through merge-tree and commit-tree (scheduler/results.py:197, 326). There is no shared-history detection.
+    - `merge_agent` squashes by default but supports `git.merge.style: no-ff` (gitops.py:1480).
+    - Proposed tooling item **PB:**
+      - detect publications whose node branches share commits that are not on the target, and publish them as true merges, or as one group;
+      - add a guarded "record external publication" action, which checks that a given commit on main contains the node's tree before setting `published`.
+      - Keep the readonly-path guard: publish relies on the capture-time reversion (results.py:300).
+  - **Tooling items queued after LR:**
+    - AL: alias vs pins;
+    - RF: transient failures, launch retry, consult retry;
+    - MK: marker masking;
+    - RL: atomic relaunch with child patches;
+    - CC: close settles idle descendants;
+    - PB: publication with shared history;
+    - plus the short get_node form and the reviewer test-evidence rule.
