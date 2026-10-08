@@ -5048,3 +5048,12 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - codex-b 15% used.
 - claude-b weekly 100% used.
 - 03:05 SC relaunched properly: window trick, max_rounds 4, impl nd-2aea66eb pinned claude/opus, task rev 16 = fix the deepcopy finding + measure copies. SL (nd-941c69b2) and TB-R3 (nd-fbdd42ac) still stuck on the run_failed loop hold (see defect above).
+- 03:15 Orchestrator-account diagnosis (researcher ag-677325; code-path analysis, plus a metadata-only check of the config):
+  - **Launch:** `multiagents run` launches the `launch: true, role: orchestrator` entry. agents.yaml says provider `claude`, so it runs with the host's DEFAULT Claude login (~/.claude); no CLAUDE_CONFIG_DIR is set. `claude-b` would set CLAUDE_CONFIG_DIR=~/.multiagents/profiles/claude-b (project providers.yaml:34-38).
+  - **Pre-launch quota check:** under the docker executor it reads the Docker VAULT accounts (budget.py:1479-1495, executor/docker.py:2292-2302; the account with the most headroom), NOT the host profile the orchestrator will actually use (driver.py:1679-1694). So the check and the launched process can concern different accounts.
+  - **Effect:** `claude` → "has quota" (vault default) while the host login may be another account. `claude-b` → "no quota" (vault b at 100%).
+  - **No orchestrator handover exists:** quota_handover covers spawned agent runs only (quota_handover.py:806-900). On root exhaustion the driver waits and relaunches the SAME provider and tells the user to switch by hand (driver.py:1784-1830).
+  - **Fix direction (to spec with the user):**
+    (a) the root pre-check reads the account the root will really use (the host profile for the launched provider), or the launch pins the vault account it checked;
+    (b) optional root handover policy on exhaustion, i.e. relaunch the orchestrator on the next claude provider with headroom, resuming via BRIEF.
+  - **Not done:** no agent started (context wind-down). NEXT: show the user, then write a spec only after the user's yes.
