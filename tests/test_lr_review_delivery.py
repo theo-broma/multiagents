@@ -9,6 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from multiagents import server
+from multiagents.scheduler.model import create_record
+from multiagents.scheduler.rpc import Service
+from multiagents.scheduler.store import issue_run_capability, root_capability
 from multiagents.tree import Tree
 
 
@@ -145,3 +148,59 @@ def test_lr_r4_a_delayed_hold_cannot_resurrect_a_cleared_episode(waits, monkeypa
     monkeypatch.setattr(server, "_node_rpc", rpc)
     assert waits.wait()["changed"] == []
     assert waits.tree.read()["wait_hold_marks"]["root"] == {}
+
+
+@pytest.fixture
+def service(tmp_path, monkeypatch):
+    service = Service(tmp_path, "now")
+    service.store.initialize()
+    monkeypatch.setattr(service, "configuration", lambda: SimpleNamespace(limits={}))
+    return service
+
+
+def save_hold(service, subject="root", parent=None):
+    node = create_record({"kind": "simple", "agent": "worker", "task": "work",
+                          "parent": parent}, subject)
+    node.update(state="held", hold={"reason": "run_failed", "detail": "retry"})
+    with service.store.transaction() as db:
+        service.store.save_node(db, node)
+        service.store.transition(db, "held", node["id"], node["hold"])
+    return node
+
+
+def test_lr_r4_acknowledgement_does_not_erase_a_current_hold_delivery(waits, service, tmp_path):
+    node = save_hold(service)
+    request = {"token": root_capability(tmp_path)}
+    args = {"node_ids": [], "timeout": 0, "include_held_ids": True}
+    before = service.wait(request, None, args)
+    waits.snapshot.update(before)
+    first = waits.wait()
+    assert first["changed"] == before["holds"]
+    assert "_held_node_ids" not in first
+    with service.store.transaction() as db:
+        service.store.set_meta(db, "ack", before["next_cursor"])
+    after = service.wait(request, None, args)
+    assert after["holds"] == []
+    assert after["_held_node_ids"] == [node["id"]]
+    assert after["next_cursor"] == before["next_cursor"]
+    waits.snapshot.update(after)
+    assert waits.wait()["changed"] == []
+    # An in-flight pre-ack response has the same journal head. Its episode
+    # was already delivered and must still be recognised across a reset.
+    waits.snapshot.update(before)
+    assert waits.wait()["changed"] == []
+    assert waits.tree.read()["wait_hold_marks"]["root"] == {node["id"]: before["holds"][0]["mark"]}
+
+
+def test_lr_r4_held_node_snapshot_does_not_leak_outside_the_callers_subtree(service, tmp_path):
+    parent = create_record({"kind": "group"}, "root")
+    mine = save_hold(service, "ag-owner", parent["id"])
+    outsider = save_hold(service, "ag-owner")
+    parent["children"] = [mine["id"]]
+    with service.store.transaction() as db:
+        service.store.save_node(db, parent)
+    token = issue_run_capability(tmp_path, "ag-owner", parent["id"], {"read"})
+    reply = service.wait({"token": token}, None, {
+        "node_ids": [], "timeout": 0, "include_held_ids": True})
+    assert reply["_held_node_ids"] == [mine["id"]]
+    assert outsider["id"] not in str(reply)

@@ -1174,8 +1174,9 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
     async def current_holds(wait_timeout):
         nonlocal seen
         reply = await asyncio.to_thread(_node_rpc, "wait_for_nodes", {
-            "node_ids": [], "timeout": wait_timeout})
+            "node_ids": [], "timeout": wait_timeout, "include_held_ids": True})
         cursor = reply.get("next_cursor")
+        held_ids = reply.pop("_held_node_ids", None)
         if tree and "holds" in reply:
             with tree.transaction() as data:
                 marks = data.setdefault("wait_hold_marks", {}).setdefault(caller, {})
@@ -1183,7 +1184,10 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
                 # A delayed snapshot must neither prune a newer claim nor
                 # resurrect an episode another wait already saw clear.
                 if cursor is None or cursor >= cursors.get(caller, 0):
-                    live = {h["node_id"] for h in reply["holds"]}
+                    # Acknowledgement hides a hold from delivery, but does
+                    # not clear it. Keep its mark against delayed replies.
+                    live = (set(held_ids) if held_ids is not None else
+                            {h["node_id"] for h in reply["holds"]})
                     for id in list(marks):
                         if id not in live:
                             del marks[id]

@@ -705,6 +705,8 @@ class Service:
         timeout = args.get("timeout", 0)
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
             invalid("timeout: expected non-negative seconds")
+        if "include_held_ids" in args and type(args["include_held_ids"]) is not bool:
+            invalid("include_held_ids: expected boolean")
         cursor = args.get("cursor")
         if "cursor" in args and (type(cursor) is not int or cursor < 0):
             invalid("cursor: expected non-negative integer")
@@ -732,6 +734,10 @@ class Service:
                     transitions = [t for t in transitions if t["node_id"] in selected]
                 top = db.execute("SELECT coalesce(max(seq), 0) FROM notifications").fetchone()[0]
                 visible = nodes if principal["root"] else {id: nodes[id] for id in scope}
+                # Delivery caches need current holds after acknowledgement
+                # too, in the same snapshot as the journal head.
+                held_ids = ([id for id, n in visible.items() if n["state"] == "held"]
+                            if args.get("include_held_ids") else None)
                 holds = attention.current(self.store, db, visible,
                                           subject=None if principal["root"] else principal["subject"],
                                           unacknowledged=True)
@@ -743,6 +749,7 @@ class Service:
                                           "free_slots": self.configuration().limits.get("max_concurrent", 4)}})
                 return {"transitions": transitions, "next_cursor": max(after, top),
                         "holds": holds,
+                        **({"_held_node_ids": held_ids} if held_ids is not None else {}),
                         **capacity, "scheduler": self.status(nodes, scope=None if principal["root"] else scope)}
             if self.changed.acquire(timeout=min(remaining, 0.5)):
                 try:
