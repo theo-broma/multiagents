@@ -5181,3 +5181,15 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **Intention:** withdraw strict ids, so TB2-R7 governs holds outside the ids, returned once per episode and never re-reported while standing. Then the tester restores the H3 test, ag-4b1071 drops the filter, and the reviewer runs.
   - The advisor was consulted before deciding.
   - The first advisor consult (ag-aed397) failed: codex exit -15, then provider "Unexpected server error". Retried. That is another transient failure with no automatic retry, so it goes into **RF** (consult retry).
+- ~10:00Z: **decision 56d89703 (LR spec):** strict ids withdrawn; TB2-R7 governs holds outside the ids. Each hold episode is delivered once and never re-reported. Advisor ag-aa1387 confirmed two points:
+  - the delivery marks do not depend on the filter;
+  - there is an extra edge in server.py ~1235-1258, where a hold and a wait error together lose the hold's mark.
+  - The advisor's session restarted at turn 1 after the failed consult (ag-aed397). Its earlier context is gone.
+- **LR round 3 runs in parallel.** Each agent first merges nodes/nd-4e0c20c1 and nodes/nd-fff482f6 into its own branch.
+  - Tester nd-45010752 rewrites the H3 test to "reported once", replaces the outside-holds test, and adds a test for the hold-and-error edge.
+  - implementer-deep nd-5af85dac:
+    - removes the id filter;
+    - fixes the hold-and-error edge;
+    - classifies every red in the full suite against main.
+  - Both are marked as verifying ag-4b1071.
+  - Next: an agy reviewer on both new branches combined, then merge (tests first), then close the old loop nd-d4a0bfbe and sequence nd-cde7f1d8.
