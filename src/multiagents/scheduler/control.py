@@ -38,8 +38,26 @@ def decide(service, db, op, args, nodes, config=None):
     if node["kind"] not in {"simple", "loop"} or node["state"] not in {"held", "done"}:
         invalid("state: relaunch requires a settled simple node or loop")
     if (node["kind"] == "loop" and node["state"] == "held"
-            and (node["hold"] or {}).get("reason") not in {"loop_max", "unresolved_round"}):
-        invalid("state: relaunch requires loop_max, unresolved_round or a done loop")
+            and (node["hold"] or {}).get("reason") not in {"loop_max", "unresolved_round", "run_failed"}):
+        invalid("state: relaunch requires loop_max, unresolved_round, run_failed or a done loop")
+    failed_loop = node if (node["kind"] == "loop" and node["state"] == "held"
+                          and (node["hold"] or {}).get("reason") == "run_failed") else None
+    if node["kind"] == "simple":
+        parent = nodes.get(node.get("parent"))
+        while parent and parent["kind"] != "loop":
+            parent = nodes.get(parent.get("parent"))
+        if (parent and parent["state"] == "held"
+                and (parent["hold"] or {}).get("reason") == "run_failed"
+                and parent["hold"].get("detail") == node["id"]):
+            failed_loop = parent
+    failed_child = None
+    if failed_loop:
+        failed_child = nodes.get(failed_loop["hold"].get("detail"))
+        if (not failed_child or failed_child["kind"] != "simple"
+                or failed_child["id"] not in model.subtree(nodes, failed_loop["id"])
+                or failed_child["state"] != "done" or failed_child["outcome"] != "failed"
+                or failed_child.get("crash_retry_round") != failed_loop["loop"]["rounds_rejected"]):
+            invalid("state: run_failed must name a failed child in the current round")
     config = config or service._config
     bindings = sessions.aliases(db)
     pins = args.get("pins", {})
@@ -52,7 +70,7 @@ def decide(service, db, op, args, nodes, config=None):
     if not isinstance(new, list) or any(not isinstance(id, str) or id not in scope or not nodes[id]["session"] for id in new):
         invalid("new_session: expected aliased child ids")
     new_keys = {sessions.alias_id(nodes[id], nodes) for id in new}
-    if node["kind"] == "simple":
+    if node["kind"] == "simple" and not failed_loop:
         key = sessions.alias_id(node, nodes)
         if key:
             new_keys.add(key)
@@ -92,14 +110,20 @@ def decide(service, db, op, args, nodes, config=None):
             invalid("retry: expected verdict_child or round")
         if retry == "verdict_child" and not node["generations"]:
             invalid("retry: no reviewed generation")
-        service.engine.reset_round(db, node, nodes, verdict_only=retry == "verdict_child")
+        if failed_loop:
+            service.engine.resume_failed(db, failed_loop, failed_child)
+        else:
+            service.engine.reset_round(db, node, nodes, verdict_only=retry == "verdict_child")
     else:
         if "max_rounds" in args or "loop" in args or "retry" in args:
             invalid("max_rounds/retry: only loops accept round controls")
         if "task" in args:
             node["task"] = args["task"]
-        model.reset(node)
-        service.store.save_node(db, node)
+        if failed_loop:
+            service.engine.resume_failed(db, failed_loop, node)
+        else:
+            model.reset(node)
+            service.store.save_node(db, node)
     model.validate(nodes, config, check_agents=set())
     for dependent in nodes.values():
         if any(ref["node"] == node["id"] for ref in dependent["depends_on"] + dependent["inputs"]) and dependent["runs"]:
