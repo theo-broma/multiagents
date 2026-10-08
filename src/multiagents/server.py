@@ -1115,14 +1115,23 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
 
     caller = (run.self_id() if hasattr(run, "self_id") else None) or "root"
     tree = getattr(run, "tree", None)
+    seen = (tree.read().get("wait_hold_marks", {}).get(caller, {}) if tree else {})
 
     def mark(hold):
         return hold.get("mark") or json.dumps(hold, sort_keys=True)
 
+    def unseen(hold, seen):
+        previous, current = seen.get(hold["node_id"]), mark(hold)
+        # Host hold marks are journal sequence numbers. A delayed older
+        # response must not rewind delivery after a newer episode was seen.
+        if (isinstance(previous, str) and isinstance(current, str)
+                and previous.isdecimal() and current.isdecimal()):
+            return int(current) > int(previous)
+        return previous != current
+
     def fresh(reply):
-        seen = (tree.read().get("wait_hold_marks", {}).get(caller, {}) if tree else {})
         return [hold for hold in reply.get("holds", [])
-                if seen.get(hold["node_id"]) != mark(hold)]
+                if unseen(hold, seen)]
 
     def delivered(reply):
         # Seeing an episode in this wait is separate from acknowledging the
@@ -1136,7 +1145,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
                 changes = []
                 for hold in reply.get("changed", []):
                     if hold in reply.get("holds", []):
-                        if seen.get(hold["node_id"]) == mark(hold):
+                        if not unseen(hold, seen):
                             continue
                         seen[hold["node_id"]] = mark(hold)
                     changes.append(hold)
@@ -1173,6 +1182,14 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
              asyncio.create_task(_wait_for_agents(run, agent_ids, max(0, deadline - asyncio.get_running_loop().time())))]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if tasks[0] in done:
+            observed = tasks[0].result()
+            if (observed.get("timed_out") and not observed.get("changed")
+                    and "error" not in observed):
+                # Only a new hold interrupts the native wait. At timeout it
+                # still owns the run results and any transition cursor.
+                await tasks[1]
+                done.add(tasks[1])
         results = [t.result() for t in tasks if t in done]
         error = next((r for r in results if "error" in r), None)
         if error is not None:
@@ -1198,6 +1215,10 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
             if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
                 raise outcome
     result = delivered(result)
+    if (not result.get("changed") and "error" not in result
+            and tasks[1] in done and tasks[1].result().get("timed_out")):
+        # A concurrent delivery claim can remove the hold that woke us.
+        result["timed_out"] = True
     if (not result.get("changed") and not result.get("timed_out")
             and "error" not in result and not any("holds" not in r for r in results)):
         # Another wait claimed the same episode while this one was waking.
