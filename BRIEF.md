@@ -5274,3 +5274,6 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - SC loop nd-a6f0f488 is held `run_failed` again (round 4 of 4).
     - Not relaunched. Waiting for the user, or for a decision to route the round-4 fix to codex implementer-deep.
   - The researcher on `previous_commit` (nd-f5b62849) hit codex "workspace routing discovery failed" again (transient, RF). Relaunched.
+- **AL / previous_commit, researcher ag-fc112d (codex).** A rate-limited first launch records no binding commit (rate_limits.py:16-21). A pin relaunch then sets renew (control.py:83-100), and freeze() keeps commit empty (sessions.py:101-116). engine.py:629-635 omits previous_commit, so the reseat path in create_checkout fails with KeyError (sessions.py:354-365). The worker re-raises without holding (worker.py:136-144), so the launch loops.
+  - Proposed fix: after input_commit is final (engine.py:645-652), set previous_commit from binding.commit or input_commit, and persist it on the binding before spawn. Do NOT make create_checkout fall back to input_commit, because it could hard-reset uncommitted alias work.
+  - RF addition: catch launch exceptions at the worker boundary and record a launch_failure fingerprint. After N identical failures, hold with the exception in the detail. Reset the count when pins, input, baseline or a successful launch change.
