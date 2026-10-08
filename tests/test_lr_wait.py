@@ -41,6 +41,7 @@ def w(tmp_path, monkeypatch):
     world.start_scheduler()
     yield world
     world.gate("ga", world.fxw)          # never leave a gated run behind
+    world.gate("gb", world.fxw)
     world.close()
 
 
@@ -116,23 +117,52 @@ def test_lr_r4_a_wait_on_the_running_node_blocks_until_it_finishes(w):
     w.wait_state(running, "done", timeout=WAIT)
 
 
+def gated_hold_node(w, tag: str, gate: str) -> str:
+    """A node that runs behind `gate` and, once released, holds `needs_info`."""
+    n = w.simple(tag, "wk", fx={"gate": gate, "text": f"NEED_INFO(q): QUESTION-{tag}?"})
+    w.wait_running(n, timeout=WAIT)
+    return n
+
+
 def test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once(w):
     holds, running = world_with_holds(w)
-    call_tool(w, "wait_for_agents", [running], timeout=1)
+    target = gated_hold_node(w, "T", "gb")
+    call_tool(w, "wait_for_agents", [target], timeout=1)
     box: dict = {}
 
     def waiter():
-        box["reply"] = call_tool(w, "wait_for_agents", [running], timeout=WATCH)
+        box["reply"] = call_tool(w, "wait_for_agents", [target], timeout=WATCH)
         box["end"] = time.monotonic()
 
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
     time.sleep(ENTER)
-    fresh = held_node(w, "H3")
+    outside = held_node(w, "H3")                 # appears during the wait, outside the requested ids
+    assert thread.is_alive(), f"a hold outside the requested ids woke the wait: {box.get('reply')}"
+    w.gate("gb", w.fxw)                          # the requested node now holds
     thread.join(WATCH + 5)
     assert not thread.is_alive()
-    assert fresh in changed_text(box["reply"]), f"a new hold was not reported: {box['reply']}"
-    assert not any(h in changed_text(box["reply"]) for h in holds), box["reply"]
-    again, took = timed(lambda: call_tool(w, "wait_for_agents", [running], timeout=1))
-    assert fresh not in changed_text(again), f"the same hold was reported twice: {again}"
-    assert took >= 1 - SLACK
+    text = changed_text(box["reply"])
+    assert target in text, f"a new hold on the requested node was not reported: {box['reply']}"
+    assert outside not in text, f"a hold outside the requested ids is in changed: {box['reply']}"
+    assert not any(h in text for h in holds), box["reply"]
+    again = call_tool(w, "wait_for_agents", [target], timeout=1)    # the held node's run is finished: may return at once
+    assert target not in changed_text(again), f"the same hold was reported twice: {again}"
+    assert outside not in changed_text(again), again
+
+
+def test_lr_r4_a_new_hold_episode_with_the_same_payload_is_reported_again_once(w):
+    target = gated_hold_node(w, "T", "gb")
+    w.gate("gb", w.fxw)
+    w.wait_held(target, "needs_info", timeout=WAIT)
+    first = call_tool(w, "wait_for_agents", [target], timeout=WATCH)
+    assert target in changed_text(first), first
+    quiet = call_tool(w, "wait_for_agents", [target], timeout=1)    # a finished run may return at once: only the hold matters
+    assert target not in changed_text(quiet), quiet
+    assert w.root_op("relaunch_node", target).get("ok") is True    # clears the hold; the rerun holds again, same text
+    w.until(lambda: w.get(target)["state"] != "held" or None, WAIT, what="the hold to clear")
+    w.wait_held(target, "needs_info", timeout=WAIT)                 # the second episode, same payload
+    second = call_tool(w, "wait_for_agents", [target], timeout=WAIT)
+    assert target in changed_text(second), f"the second hold episode was not reported: {second}"
+    third = call_tool(w, "wait_for_agents", [target], timeout=1)
+    assert target not in changed_text(third), f"the second episode was reported twice: {third}"
