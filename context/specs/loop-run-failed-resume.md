@@ -59,3 +59,12 @@ with the old holds in `changed`.
 - Resuming a sequence that became done/failed.
 - Automatic relaunch of a loop after a quota reset (it stays an orchestrator
   decision).
+
+Decisions (orchestrator, 2026-10-08, on tester ag-d00ca8's questions):
+- LR-R4, strict reading: a wait on explicit ids never lists in `changed` a
+  hold or transition of a node outside those ids (and their descendants for a
+  composite id), not even on the first call. Such holds may still appear
+  under `holds`.
+- A hold of a requested node appears in `changed` once, then not again.
+- "Resumes its session" means the rerun resumes a session of an earlier run
+  of that child. Which one, after a retry, is not specified.
