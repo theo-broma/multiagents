@@ -5086,3 +5086,9 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - 2026-10-08 ~07:45Z after the claude limit pause:
   - The LR reviewer on agy-b was rate_limited (agy-b weekly ~99%). Relaunched pinned to agy/gemini-3.1-pro-high, and the LR loop resumed.
   - SC impl ag-9c831b died on a claude 429, so SC loop nd-a6f0f488 is held run_failed. Like SL, TB-R3 and OA, it is resumed with relaunch_node only after LR merges.
+- 2026-10-08 ~07:55Z, LR review:
+  - The loop reviewer nd-80076d96 is unusable. Its session alias B is bound to agy-b (out of weekly quota, ~51 h) and its alias worktree holds a dirty_worktree hold. The dirty content equals the LR branch, so nothing unique is in it.
+  - TOOLING DEFECT: relaunch_node accepted pins {provider: agy}, yet both runs (ag-824ff2, ag-d6c490) ran on agy-b. The alias silently overrode the pin. A provider change was refused ("incompatible provider families"), and session null was refused ("already launched").
+  - The earlier note claiming "agy out of quota" was wrong. It was agy-b both times, and the user confirmed that agy has quota.
+  - Workaround: standalone reviewer node nd-67404c0f, run ag-5e7de9, on agy/gemini-3.1-pro-high, reviewing 2f461653 (verifies ag-a9dd0b).
+  - If it approves: merge the LR branch (merge_node nd-cde7f1d8 with force, after reading the verdict, or merge_agent on the impl run), then close the stale loop reviewer.
