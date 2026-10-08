@@ -5105,3 +5105,18 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - a false hold on any `NEED_INFO(` text in a report;
     - the child-launch race (the closed-window trick);
     - `update_node` applying a stale revision.
+- ~08:25Z: **researcher ag-6af0e5 (alias vs pins) answered.**
+  - Once an alias is bound, its binding overrides pins at admission (scheduler/engine.py:556).
+  - The runner then routes to a sibling of the same family, which is how `agy` became `agy-b` (runner.py:5028, 5185).
+  - `relaunch_node` stores the pins, but a provider change needs `new_session`, which only marks the binding `renew` (control.py:59, 73).
+  - The "incompatible families" refusal is plan validation across every alias peer (model.py:221). The null-session refusal is at rpc.py:580 and sessions.py:44.
+  - A binding on an exhausted provider should already give `session_unavailable` (sessions.py:59), but that did not happen. **Bug to confirm.**
+  - The dirty-worktree hold is deliberate preservation (sessions.py:260, 346).
+  - **Proposed automation:**
+    - at relaunch, resolve the pins for all alias peers;
+    - check that they share one family;
+    - preflight the renewed route;
+    - if the binding is unusable, either renew it and show the new provider, or return an explicit conflict. Never ignore it silently.
+    - Never discard a dirty checkout.
+  - To specify after LR (tooling item **AL**).
+  - Third researcher started: nd for false info-marker holds.
