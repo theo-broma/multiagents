@@ -5246,3 +5246,15 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     2. SL: reviewer, then merge, using a true merge if it shares history (PB);
     3. after LR and these, write the specs for the tooling items AL, RF, MK, RL, CC, PB and LR2, and **show them to the user before committing**.
   - Other tooling notes: `budget_status`, `get_node` and `close_node` outputs are huge (several k tokens each); add a short form.
+- 2026-10-08 ~18:00Z (status at wake-up):
+  - **TB-R3 loop nd-fbdd42ac: done, APPROVED.**
+    - impl ag-5c398a, commits 4df21220 and b636bb1e; the regressing commit was 6df131c0. Review ag-d91886.
+    - Its server.py **conflicts with LR on main**. The merge is delegated to implementer-deep **nd-7853f777**, which keeps both TB-R3 and LR-R4/TB2-R7, then a reviewer and merge.
+  - **OA tests:**
+    - tester ag-ae3355 done.
+    - Loop reviewer nd-1c3ce032 was held `rate_limited` on **agy-b** (the alias again, AL). Relaunched with pins agy/gemini-3.1-pro-high (rev 15). Check which provider it launches on. If it is agy-b again, use a standalone reviewer plus give_verdict.
+  - **SL** standalone nd-5e825702:
+    - first run ag-01d099 failed at startup: codex "workspace routing discovery failed", chatgpt.com MCP unreachable. Transient, so it goes into RF.
+    - Relaunched; the run is ag-e22c1e.
+  - **SC** loop nd-a6f0f488: impl ag-b9a9db (claude/opus) failed with a 429 "every account rate limited". Relaunched at 17:55Z after the claude reset (round 4 of 4).
+  - Researcher nd-b34d6701 (LR2, the inconsistent run_failed hold) is running.
