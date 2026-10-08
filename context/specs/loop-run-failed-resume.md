@@ -82,3 +82,8 @@ Decisions (orchestrator, 2026-10-08, on tester ag-d00ca8's questions):
   relaunch after three failures. The tester fixes it after merge by raising
   `provider_failure_threshold` to 4 in that fixture. Until then it is a known
   red.
+- LR-R4 review (reviewer ag-5e7de9), decided by the orchestrator:
+  - The strict reading above stands. test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once expects a hold on a node outside the requested ids (H3) in `changed`, and that test is wrong. The tester rewrites it so the new hold is on a requested node or one of its descendants. It also checks that an outside hold is NOT in `changed`.
+  - The delivery marks for wait_for_agents must not grow without bound. A mark is dropped once its hold clears or its node is gone.
+  - A new hold episode on the same node with an identical payload is a new hold and is reported once again.
+  - Relaunch emits the existing `reopened` transition for every node whose state it changes: the reset failed child (LR-R1) and the loop whose hold a direct child relaunch clears (LR-R2).
