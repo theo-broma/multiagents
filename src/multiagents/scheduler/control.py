@@ -128,5 +128,6 @@ def decide(service, db, op, args, nodes, config=None):
     for dependent in nodes.values():
         if any(ref["node"] == node["id"] for ref in dependent["depends_on"] + dependent["inputs"]) and dependent["runs"]:
             service.store.transition(db, "dependency_reopened", dependent["id"], {"node": node["id"]})
-    service.store.transition(db, "reopened", node["id"])
+    if not failed_loop:
+        service.store.transition(db, "reopened", node["id"])
     return node

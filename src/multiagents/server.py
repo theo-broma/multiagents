@@ -1104,7 +1104,7 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
 
 
 async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
-    """TB2-R7: an owned hold wakes every run wait, regardless of its filter.
+    """TB2-R7/LR-R4: deliver each relevant owned hold episode once.
 
     An empty transition filter follows only current unacknowledged holds;
     ordinary node transitions remain the responsibility of the existing waits.
@@ -1116,6 +1116,12 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
     caller = (run.self_id() if hasattr(run, "self_id") else None) or "root"
     tree = getattr(run, "tree", None)
     seen = (tree.read().get("wait_hold_marks", {}).get(caller, {}) if tree else {})
+    requested = None if not agent_ids else set(agent_ids)
+    if requested is not None and tree:
+        for id in agent_ids:
+            node = tree.get(id)
+            if node and node.node_id:
+                requested.add(node.node_id)
 
     def mark(hold):
         return hold.get("mark") or json.dumps(hold, sort_keys=True)
@@ -1129,9 +1135,20 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
             return int(current) > int(previous)
         return previous != current
 
-    def fresh(reply):
-        return [hold for hold in reply.get("holds", [])
-                if unseen(hold, seen)]
+    async def fresh(reply):
+        candidates = [hold for hold in reply.get("holds", []) if unseen(hold, seen)]
+        if requested is None or not candidates:
+            return candidates
+        selected = set(requested)
+        # Resolve descendants from the current plan, so children added while
+        # the wait is blocked are covered too. Run ids use their node binding.
+        if any(id.startswith("nd-") for id in requested):
+            from .scheduler.model import subtree
+            listed = await asyncio.to_thread(_node_rpc, "list_nodes", {})
+            nodes = {n["id"]: n for n in listed.get("nodes", [])}
+            for id in requested:
+                selected.update(subtree(nodes, id))
+        return [hold for hold in candidates if hold["node_id"] in selected]
 
     def delivered(reply):
         # Seeing an episode in this wait is separate from acknowledging the
@@ -1139,13 +1156,15 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         # Persist before returning, as for limit-notice delivery. The tree's
         # transaction serialises concurrent servers for this caller without
         # advancing the scheduler's acknowledgement cursor.
+        cursor = reply.pop("_wait_hold_cursor", None)
         if tree and any(h in reply.get("holds", []) for h in reply.get("changed", [])):
             with tree.transaction() as data:
                 seen = data.setdefault("wait_hold_marks", {}).setdefault(caller, {})
+                latest = data.get("wait_hold_cursors", {}).get(caller, 0)
                 changes = []
                 for hold in reply.get("changed", []):
                     if hold in reply.get("holds", []):
-                        if not unseen(hold, seen):
+                        if (cursor is not None and cursor < latest) or not unseen(hold, seen):
                             continue
                         seen[hold["node_id"]] = mark(hold)
                     changes.append(hold)
@@ -1153,15 +1172,33 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         return reply
 
     async def current_holds(wait_timeout):
+        nonlocal seen
         reply = await asyncio.to_thread(_node_rpc, "wait_for_nodes", {
             "node_ids": [], "timeout": wait_timeout})
+        cursor = reply.get("next_cursor")
+        if tree and "holds" in reply:
+            with tree.transaction() as data:
+                marks = data.setdefault("wait_hold_marks", {}).setdefault(caller, {})
+                cursors = data.setdefault("wait_hold_cursors", {})
+                # A delayed snapshot must neither prune a newer claim nor
+                # resurrect an episode another wait already saw clear.
+                if cursor is None or cursor >= cursors.get(caller, 0):
+                    live = {h["node_id"] for h in reply["holds"]}
+                    for id in list(marks):
+                        if id not in live:
+                            del marks[id]
+                    if cursor is not None:
+                        cursors[caller] = cursor
+                seen = dict(marks)
+        reply["_wait_hold_cursor"] = cursor
         # The empty filter reads no journal entries. Its cursor is the log
         # head, so returning it would let callers skip unseen transitions.
         return {k: v for k, v in reply.items() if k not in {"transitions", "next_cursor"}}
 
     initial = await current_holds(0)
-    if fresh(initial):
-        result = delivered({**initial, "changed": fresh(initial), "timed_out": False})
+    changes = await fresh(initial)
+    if changes:
+        result = delivered({**initial, "changed": changes, "timed_out": False})
         if result["changed"]:
             return result
     if "holds" not in initial:
@@ -1172,7 +1209,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         while True:
             remaining = max(0, deadline - asyncio.get_running_loop().time())
             reply = await current_holds(min(0.5, remaining))
-            changes = fresh(reply)
+            changes = await fresh(reply)
             if changes or "error" in reply or remaining <= 0:
                 return {**reply, "changed": changes,
                         "timed_out": not bool(changes)}

@@ -1773,6 +1773,8 @@ class Engine:
         self.store.save_node(db, child)
         loop.update(state="running", outcome=None, hold=None, revision=loop["revision"] + 1)
         self.store.save_node(db, loop)
+        self.store.transition(db, "reopened", child["id"])
+        self.store.transition(db, "reopened", loop["id"])
 
     def reset_round(self, db, node, nodes, verdict_only=False):
         findings = node.get("findings", [])
