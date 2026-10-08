@@ -1116,13 +1116,6 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
     caller = (run.self_id() if hasattr(run, "self_id") else None) or "root"
     tree = getattr(run, "tree", None)
     seen = (tree.read().get("wait_hold_marks", {}).get(caller, {}) if tree else {})
-    requested = None if not agent_ids else set(agent_ids)
-    if requested is not None and tree:
-        for id in agent_ids:
-            node = tree.get(id)
-            if node and node.node_id:
-                requested.add(node.node_id)
-
     def mark(hold):
         return hold.get("mark") or json.dumps(hold, sort_keys=True)
 
@@ -1135,20 +1128,8 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
             return int(current) > int(previous)
         return previous != current
 
-    async def fresh(reply):
-        candidates = [hold for hold in reply.get("holds", []) if unseen(hold, seen)]
-        if requested is None or not candidates:
-            return candidates
-        selected = set(requested)
-        # Resolve descendants from the current plan, so children added while
-        # the wait is blocked are covered too. Run ids use their node binding.
-        if any(id.startswith("nd-") for id in requested):
-            from .scheduler.model import subtree
-            listed = await asyncio.to_thread(_node_rpc, "list_nodes", {})
-            nodes = {n["id"]: n for n in listed.get("nodes", [])}
-            for id in requested:
-                selected.update(subtree(nodes, id))
-        return [hold for hold in candidates if hold["node_id"] in selected]
+    def fresh(reply):
+        return [hold for hold in reply.get("holds", []) if unseen(hold, seen)]
 
     def delivered(reply):
         # Seeing an episode in this wait is separate from acknowledging the
@@ -1200,7 +1181,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         return {k: v for k, v in reply.items() if k not in {"transitions", "next_cursor"}}
 
     initial = await current_holds(0)
-    changes = await fresh(initial)
+    changes = fresh(initial)
     if changes:
         result = delivered({**initial, "changed": changes, "timed_out": False})
         if result["changed"]:
@@ -1213,7 +1194,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         while True:
             remaining = max(0, deadline - asyncio.get_running_loop().time())
             reply = await current_holds(min(0.5, remaining))
-            changes = await fresh(reply)
+            changes = fresh(reply)
             if changes or "error" in reply or remaining <= 0:
                 return {**reply, "changed": changes,
                         "timed_out": not bool(changes)}
@@ -1233,15 +1214,18 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
                 done.add(tasks[1])
         results = [t.result() for t in tasks if t in done]
         error = next((r for r in results if "error" in r), None)
+        # Keep the hold snapshot and its delivery cursor even when the
+        # native wait fails in the same turn. Both paths need their cursors
+        # preserved so the returned changes can be marked durably.
+        result = {}
+        for r in reversed(results):
+            result.update(r)
         if error is not None:
-            result = dict(error)
+            result["error"] = error["error"]
         else:
             # Both may finish in the same turn. The wait's reply carries the
             # cursor for the transitions it returns; dropping it would hand
             # them back again on the next wait. The current holds win.
-            result = {}
-            for r in reversed(results):
-                result.update(r)
             if len(results) > 1:
                 result["timed_out"] = all(r.get("timed_out") for r in results)
         result["changed"] = [c for r in results for c in r.get("changed", [])]
