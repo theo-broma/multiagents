@@ -5120,3 +5120,17 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - Never discard a dirty checkout.
   - To specify after LR (tooling item **AL**).
   - Third researcher started: nd for false info-marker holds.
+- ~08:35Z: **researcher ag-d4633b (run_failed after a transient provider failure) answered.**
+  - **Today:**
+    - Only a structured HTTP 429 takes the automatic path: suspend, honour `retry_after` or back off, hold after 6 tries, then resume the same session (scheduler/rate_limits.py:9, engine.py:776, 1410).
+    - A generic `failed` or `quota` is cut down to `{status, session_id}` at capture (engine.py:1425). Cause, provider, reset and breaker count are lost.
+    - After one crash retry per round, the loop is held `run_failed` with only the child id (engine.py:1621, 1628, 1292).
+  - **Proposed automation (tooling item RF):**
+    - in `Engine.finished()` (engine.py:1407), recognise a durable transient or provider failure record before generic capture;
+    - same provider: reuse `rate_limits.interrupted()` and `evaluate_rate_limits()` to resume after the reset;
+    - otherwise reopen the node through normal admission, which already routes around cooldowns and breakers and uses the `models:` fallbacks (runner.py:5180, 5392);
+    - keep the retries bounded;
+    - never auto-retry unauthenticated runs, refusals, a missing checkout, capture failures, questions or spent caps;
+    - persist the cause in the hold detail.
+  - control.py:38 refusing a relaunch on `run_failed` is what LR-R1 fixes; the researcher read main without LR.
+  - RF is to be specified after LR, with AL.
