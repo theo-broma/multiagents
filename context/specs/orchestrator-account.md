@@ -203,3 +203,8 @@ Decisions (orchestrator, 2026-10-08, on tester ag-063fb3's questions):
 - **OA-R6 recovery.** After a crash mid-switch, either finishing or abandoning
   the switch is acceptable, provided the session id is neither lost nor
   forked, and no stale copy is launched.
+- **OA-R6 observables (orchestrator, 2026-10-08, on reviewer ag-3df409 and tester ag-c9ba59).**
+  - **The root in `budget_status`.** It gains a `root` entry `{role, provider}`, with no identity. It names the provider the root currently runs on, and follows the same rule as the status line: the source until the resume is confirmed, the target after. Tests cover it the same way as the status line.
+  - **Spend counted once.** This stays a reviewer check, as already decided above. The reviewer's request for a test is declined.
+  - **Context reading.** This is also a reviewer check, by reading the code. "Resume confirmed" has no observable moment in the fake world, and a test would have to invent one.
+  - **Recorded moment.** The resume is confirmed at the moment the driver records the switch phase `resumed` (OA-R6). Any test that needs that moment reads the durable switch record.
