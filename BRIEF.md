@@ -5092,3 +5092,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The earlier note claiming "agy out of quota" was wrong. It was agy-b both times, and the user confirmed that agy has quota.
   - Workaround: standalone reviewer node nd-67404c0f, run ag-5e7de9, on agy/gemini-3.1-pro-high, reviewing 2f461653 (verifies ag-a9dd0b).
   - If it approves: merge the LR branch (merge_node nd-cde7f1d8 with force, after reading the verdict, or merge_agent on the impl run), then close the stale loop reviewer.
+- 2026-10-08 ~08:05Z: LR review ag-5e7de9 (agy) REJECTED, 3 findings: outside-id holds in `changed`, unbounded marks, missing `reopened`. Decisions in e573ee4a: the strict reading holds, so the H3 test is wrong.
+  - Round 2 runs standalone, both after an authorized `git merge 2f461653` onto main (verified clean):
+    - tester nd-fff482f6 changes 4 tests: H3, 2 pins, breaker fixture;
+    - implementer-deep nd-4e0c20c1 fixes src for the 3 findings. Its `verifies` was mistakenly set to ag-5e7de9; it should have been ag-a9dd0b.
+  - After both: a reviewer (agy, standalone) on the combined result, then merge both branches (tests first). The old loop nd-d4a0bfbe and its sequence nd-cde7f1d8 are then closed (superseded).
