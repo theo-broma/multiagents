@@ -146,10 +146,9 @@ def test_lr_r4_a_hold_that_appears_during_the_wait_is_reported_once(w):
     assert target in text, f"a new hold on the requested node was not reported: {box['reply']}"
     assert outside not in text, f"a hold outside the requested ids is in changed: {box['reply']}"
     assert not any(h in text for h in holds), box["reply"]
-    again, took = timed(lambda: call_tool(w, "wait_for_agents", [target], timeout=1))
+    again = call_tool(w, "wait_for_agents", [target], timeout=1)    # the held node's run is finished: may return at once
     assert target not in changed_text(again), f"the same hold was reported twice: {again}"
     assert outside not in changed_text(again), again
-    assert took >= 1 - SLACK
 
 
 def test_lr_r4_a_new_hold_episode_with_the_same_payload_is_reported_again_once(w):
@@ -158,13 +157,12 @@ def test_lr_r4_a_new_hold_episode_with_the_same_payload_is_reported_again_once(w
     w.wait_held(target, "needs_info", timeout=WAIT)
     first = call_tool(w, "wait_for_agents", [target], timeout=WATCH)
     assert target in changed_text(first), first
-    quiet, took = timed(lambda: call_tool(w, "wait_for_agents", [target], timeout=1))
+    quiet = call_tool(w, "wait_for_agents", [target], timeout=1)    # a finished run may return at once: only the hold matters
     assert target not in changed_text(quiet), quiet
-    assert took >= 1 - SLACK
     assert w.root_op("relaunch_node", target).get("ok") is True    # clears the hold; the rerun holds again, same text
-    second = call_tool(w, "wait_for_agents", [target], timeout=WATCH)
+    w.until(lambda: w.get(target)["state"] != "held" or None, WAIT, what="the hold to clear")
+    w.wait_held(target, "needs_info", timeout=WAIT)                 # the second episode, same payload
+    second = call_tool(w, "wait_for_agents", [target], timeout=WAIT)
     assert target in changed_text(second), f"the second hold episode was not reported: {second}"
-    w.wait_held(target, "needs_info", timeout=WAIT)
-    third, took = timed(lambda: call_tool(w, "wait_for_agents", [target], timeout=1))
+    third = call_tool(w, "wait_for_agents", [target], timeout=1)
     assert target not in changed_text(third), f"the second episode was reported twice: {third}"
-    assert took >= 1 - SLACK
