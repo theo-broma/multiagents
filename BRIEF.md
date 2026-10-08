@@ -5066,3 +5066,9 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - 2026-10-08 ~02:45Z
   - LR tests round 2 = 02e7be40 (ag-59e74a, 25 tests, 21 red). Its tester node nd-b3e5d4c4 was held needs_info by a FALSE marker ("NEED_INFO(toolchain): none" in its report). Defect to fix later: marker parser should ignore "none"-style answers. Relaunched (rev 8) with a short task: drop the superseded round-1 tests/test_lr_resume.py if present, end with no marker.
   - OA tests: ag-063fb3 → 4a538c29 (52 tests). Its NEED_INFOs were answered in spec 6837af52, and the tester was relaunched (ag-01f724). That run died on claude 429 before committing, so **OA tests loop nd-1640a5e0 is held run_failed**. It can be resumed only once LR merges (LR-R1): relaunch_node nd-1640a5e0 then, which reruns tester nd-69683fc7 with its session (task rev 4 already has the decisions).
+- 2026-10-08 ~02:45Z, claude 429 wave:
+  - SC impl ag-21153f (opus, nd-2aea66eb) died on 429 mid-validation; its notes are in that run's result.
+    - Cause it found: a relative PYTHONPATH made daemon subprocesses import the other worktree; use an absolute path.
+    - `init` timeouts come from the environment; nc_r21 and the monitor reds also exist on base.
+  - LR tester relaunch fell back to opencode-go/kimi (ag-ca8049) and exited at once with an UnknownError.
+  - The claude session has since reset (1% used), so the scheduler retries should succeed. If either loop shows run_failed, resume it after LR merges (LR-R1).
