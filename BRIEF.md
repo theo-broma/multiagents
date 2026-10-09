@@ -5313,3 +5313,7 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **RD2, a relaunch loses committed work.** The activation pins input_commit (engine.py:657-670, runner.py:5021-5026), branch_tip only advances on integrated completion (results.py:245-322), and relaunch resets the node (control.py:120-126). Fix: on an interrupted exit, capture the worktree branch into a recovery ref and keep session_id. Then resume automatically, or via `relaunch_node(resume_run=...)`.
   - **RD3, update_node races the launch.** engine.py:562-565 calls runner.start with node["task"] before the claim (590-664). Fix: claim atomically first and store the task in the attempt.
   - **RD4, exit 138 or -6 with cause natural.** Classify these as infrastructure interruptions and resume with bounded retries (with RF).
+- **03:17Z: codex quota.** The 5 h window is at 100% and resets at 03:54Z; the weekly window is at 88%. codex-b is at 76% (5 h), resetting at 03:58Z. claude-b, the orchestrator account, is at 100% weekly until 12:00Z: keep the orchestrator minimal. claude (agents) is at 86% weekly.
+  - OA gap impl ag-1a3dad (nd-1cbda6c1) was stopped on quota with work at **c14a4d34**: 47fa43b1 is account-scoped admission and recovery, 99aa0580 a checkpoint.
+  - **Next after 03:55Z:** start a resume implementer-deep with `git merge --no-edit c14a4d34`, the same task as nd-1cbda6c1, and finish validation. Then a reviewer, then merge the chain.
+  - Also check SL nd-7866cea2 (codex) and the SC loop nd-a6f0f488.
