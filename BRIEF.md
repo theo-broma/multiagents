@@ -5409,3 +5409,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **OC:** reviewer nd-e39b6daa on nodes/nd-f43ef174 (f8d002ac).
   - **Effort:** implementer nd-75e23f9c merges 5cd00298 and finds the test_tb_r4 IndexError.
   - **SC:** loop relaunched with max_rounds 5. The worker task was updated before launch with the snapshot_lock/SQLite deadlock fix (store.py:265).
+- 18:24Z: codex-b hit its quota again. It resets around 19:06Z. Both the SC worker (ag-515978) and the effort implementer (ag-42ad63) stopped. ag-42ad63's early read: the test_tb_r4 IndexError is on the node's `runs` list, so a launch-recording race, probably not caused by the effort change. Check and relaunch at 19:10Z.
