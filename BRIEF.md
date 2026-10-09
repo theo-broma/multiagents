@@ -5298,3 +5298,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The run exposed its own scheduler RPC token in tool output; recorded in its report.
   - **SL** ag-632e68: codex hung for over an hour with no command running; 14 of 25 SL tests red after the merge. Stopped; nd-7866cea2 relaunched. A leaked orphan git-receive-pack (test_gg_r3_boundary_lengths) remains under docker-init; left alone.
 - OA older-tests tester: **nd-8e359878** (on top of ed3dfcac).
+- **TB-R3 merged onto main** as 3eb86b3d (nd-90eaf8df). Reviewer ag-a3a172 approved it, with 267 tests passing. TB-R3 is done.
