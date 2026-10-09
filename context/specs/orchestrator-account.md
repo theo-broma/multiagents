@@ -208,3 +208,12 @@ Decisions (orchestrator, 2026-10-08, on tester ag-063fb3's questions):
   - **Spend counted once.** This stays a reviewer check, as already decided above. The reviewer's request for a test is declined.
   - **Context reading.** This is also a reviewer check, by reading the code. "Resume confirmed" has no observable moment in the fake world, and a test would have to invent one.
   - **Recorded moment.** The resume is confirmed at the moment the driver records the switch phase `resumed` (OA-R6). Any test that needs that moment reads the durable switch record.
+- **Older contracts versus OA (orchestrator, 2026-10-09, on implementer ag-835719's validation report and advisor ag-aa1387).**
+  - **Account equivalence.** Two routes (the host profile, a vault label) are the same account when their identity actions return the same identity. The comparison happens in memory only and the identity is never persisted (OA-R3).
+    - If either identity is unknown, the routes count as the same account for pausing, which is the conservative side.
+    - They count as different for clearing: a reading never clears a pause on an account it cannot prove it is.
+  - **OA-R8, positive case.** A root limit pauses the agents whose route is the same account as the root. Agents on other accounts continue. Admission must honour this: a role-local marker that admission never reads does not count. Tested both ways.
+  - **QF-R6, narrowed.** A fresh, healthy root reading lifts an agent quota pause only on a proven same account. Recovery stays immediate in that case. A different or unknown account is not cleared, and its pause runs to its expiry or to an agent-account refresh. Tested both ways.
+  - **Stale fixtures (OA-R4/R7).** Older tests that wrote a limit marker before launch, or a record with a foreign session id, keep their intent. Only their fixtures change: they emit an own-session limit newer than the launch, and a new one on every relaunch where a test counts relaunches.
+  - **Provider-wide pause assertions** in older tests (test_core limit-known-not-to-reset, r8f_19/20) become account-scoped assertions under the rule above.
+  - **test_core two-drivers.** The obsolete seam (the root constructs the agents' executor) moves to LocalExecutor construction. Force-bypass, dead-pid acceptance and the live-driver clash guard all stay covered.
