@@ -5322,3 +5322,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - 04:17Z: **SL review rejected** (ag-021767; it could not run tests because uv hung on downloads).
   - Accepted: a TOCTOU in owner.py:174-180 `_signal`, between identity check and os.kill. The fix uses pidfd; implementer-deep **nd-ce7e73d4** merges 0fe4edaf. A reviewer comes next, then the SL merge.
   - Declined: swallowed exceptions in test teardown (nc_fixture/world.py:279, nc_harness.py:308, test_sl_owner_dies.py:185). Best-effort cleanup is acceptable there.
+- 04:38Z: SL pidfd fix is in 27ba90e9 (ag-c84510, nd-ce7e73d4). SL tests: 49 passed, 1 skipped; scheduler: 384 passed. Reviewer **nd-adc374ea**. Merge nd-ce7e73d4 if approved.
