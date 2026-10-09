@@ -5319,3 +5319,6 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Also check SL nd-7866cea2 (codex) and the SC loop nd-a6f0f488.
 - 03:57Z: OA gap resume **nd-e3986e0e** (merges c14a4d34). Reviewer next.
 - 04:06Z: **SL impl done** (ag-be913f, nd-7866cea2). SL tests 33 passed, 1 skipped. Full suite 141 failed versus 148 on main; whole-scope leak test passed in 15:04. The one branch-only red is nc_m1_adv3 (known load-flaky). Reviewer **nd-bce2a959**, then merge.
+- 04:17Z: **SL review rejected** (ag-021767; it could not run tests because uv hung on downloads).
+  - Accepted: a TOCTOU in owner.py:174-180 `_signal`, between identity check and os.kill. The fix uses pidfd; implementer-deep **nd-ce7e73d4** merges 0fe4edaf. A reviewer comes next, then the SL merge.
+  - Declined: swallowed exceptions in test teardown (nc_fixture/world.py:279, nc_harness.py:308, test_sl_owner_dies.py:185). Best-effort cleanup is acceptable there.
