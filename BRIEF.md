@@ -5411,3 +5411,11 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **SC:** loop relaunched with max_rounds 5. The worker task was updated before launch with the snapshot_lock/SQLite deadlock fix (store.py:265).
 - 18:24Z: codex-b hit its quota again. It resets around 19:06Z. Both the SC worker (ag-515978) and the effort implementer (ag-42ad63) stopped. ag-42ad63's early read: the test_tb_r4 IndexError is on the node's `runs` list, so a launch-recording race, probably not caused by the effort change. Check and relaunch at 19:10Z.
 - 18:35Z: at the user's request, the old `multiagents run` (pid 3052738, job-stopped in tmux) and its claude session were killed with SIGKILL, because SIGTERM had no effect on the stopped process. Only the new run (pid 2700173) remains.
+- 20:20Z (after a /compact; the 19:10Z wake-up was lost with it):
+  - **SC:** the scheduler resumed the loop by itself. Worker round 5 committed 522b5e7b; reviewer ag-6f4651 (nd-95410abd) is reviewing it.
+  - **OC:** reviewer ag-6b7f45 (nd-e39b6daa) gave `rejected, 3` without running tests (agy cannot wait on a long foreground command). Orchestrator reading of the findings:
+    - #1, "the harness was edited and the tests weakened": **false**. `git diff main...f8d002ac -- tests` only adds tests/test_oc_claude_receipt.py. The reviewer read main's later fix 790b60ee as a removal.
+    - #2, "the 11 PID fixes are hallucinated": unverified and not blocking.
+    - #3, `_settle_live()` is called twice on an in_session failure (driver.py ~958 and ~1050): **real**. Sent to implementer nd-2bee8f79 (codex-b), which merges f8d002ac into main, fixes it and runs the suite. Then a reviewer, then merge that node; nd-f43ef174 is superseded.
+  - **Effort:** nd-75e23f9c relaunched on codex-b with the same task.
+  - **Small item:** agy reviewers cannot run the suite in the foreground (anything over 10 s is backgrounded), so their verdicts carry no observed counts.
