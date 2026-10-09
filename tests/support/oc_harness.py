@@ -140,7 +140,7 @@ if action not in ("check", "prepare", "launch", "compact"):
     for k, v in os.environ.items():
         if k.startswith("MULTIAGENTS_") and os.path.isfile(v) and os.path.getsize(v) < 200000:
             try:
-                files[k] = open(v).read()
+                files[k] = open(v, encoding="utf-8", errors="ignore").read()
             except OSError:
                 pass
     payload["files"] = files
