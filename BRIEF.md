@@ -5346,3 +5346,7 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Until then, opus runs at the CLI default effort.
   - The orchestrator's own effort takes effect at the next driver (re)launch after the merge.
 - effort plumbing nd-0b457a17: first run ag-596b72 failed at launch with codex "workspace routing discovery failed" (RF item). Relaunched pinned to codex-b.
+- **OC tests v2.** Commit 467fcac9 (ag-9e63a1, nd-04d2fa51) adds D5, D6 and D8; 71 OC tests are red, with 0 errors.
+  - On the full suite the tester saw 58 CLI-init timeout errors and 16 unrelated failures in a 54-minute run. That looks like load; main was not rerun to compare.
+  - Re-review: nd-1caf15b2. Next: merge_node nd-04d2fa51, then implementer-deep.
+- 2026-10-09: the user set the orchestrator's own Claude Code effort to medium with /effort.
