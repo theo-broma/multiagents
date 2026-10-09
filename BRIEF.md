@@ -5356,3 +5356,10 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - a standalone reviewer's worktree is based on main, not on the branch it verifies;
     - `give_verdict` is absent for standalone reviewers;
     - agy reviewers cannot install dependencies (rpds-py download blocked) and so cannot run the suite. That is why reviewers keep approving without observed counts.
+- **SC.** Round 4, worker ag-6d765d on codex-b, did the real fix, committed through 14eb8a4f: zero terminal-history deepcopies at both 50 and 5,000 records, and 219 SC tests passing.
+  - The worker held needs_info on 5 phase0_agent_guidance golden mismatches. They are red on the baseline too, so they are not SC's concern.
+  - Released with relaunch_node. The relaunched run ag-fef27e starts from 14eb8a4f, so RD2 did not bite this time. Then update_node lost the race (RD3 again): the run got the old task text.
+  - Next: the loop reviewer nd-95410abd gives its verdict.
+  - The earlier "anomaly" is explained: generations 1-4 sat on e1cd4087 because those workers were told to confirm only and changed nothing.
+- **Effort plumbing.** ag-967f84 committed 4ff9509a and 404360de. Its NEED_INFO concerns test_core.py:4240, which asserts that claude has no effort flag. Tester nd-d8b3f4dd (ag-ef4123) merges 404360de and rewrites that test. Next: reviewer, then merge_node of the tester's node, which contains everything.
+  - Note: ag-967f84 says a process listing printed scheduler RPC token values into its own run log. That log is local and untracked.
