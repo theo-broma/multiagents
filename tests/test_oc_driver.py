@@ -299,7 +299,9 @@ def test_oc_r5_a_safe_point_that_is_not_reached_fails_the_request_and_leaves_the
     code, _ = s.go([{"life": 4.5, "appends": closes(0.5), "rogue_server": True}])
     request_id = box["value"]["request_id"]
     assert s.stops() == [], "the CLI was stopped without a safe point"
-    assert s.calls("compact") == [] and s.other() == []
+    assert s.calls("compact") == [], "a compaction ran without a safe point"
+    # OA-R3 requires startup identity; the harness logs it separately.
+    assert s.other() == [], "a control or delivery action ran without a safe point"
     assert len(s.calls("launch")) == 1 and code == 0
     got = s.status(request_id)
     assert got.get("status") == "failed", got

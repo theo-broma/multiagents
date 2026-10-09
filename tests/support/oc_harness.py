@@ -18,6 +18,7 @@ it teaches the fake script a few things:
 - every record logs its argv and pid (the pid tells a replaced CLI from the
   same one);
 - `compact` may answer differently per call (`compacts`);
+- startup `identity` actions (required by OA-R3) are logged as `identity`;
 - any action the contract has not named (`control`, `deliver`, ...) is
   logged as `other` with its whole payload — argv, MULTIAGENTS_* environment,
   stdin and the content of any file an environment value names — and may fail
@@ -149,7 +150,7 @@ if action not in ("check", "prepare", "launch", "compact"):
     carries = any(m in blob for m in marks)
     seen = sum(1 for l in log.read_text().splitlines()
                if l.strip() and json.loads(l)["action"] == "other" and json.loads(l).get("carries")) if log.is_file() else 0
-    record("other", name=action, payload=blob, carries=carries)
+    record("identity" if action == "identity" else "other", name=action, payload=blob, carries=carries)
     if carries and ctl.get("deliver_fail_first") and seen == 0:
         sys.exit(1)
     sys.exit(0)
