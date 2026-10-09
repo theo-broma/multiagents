@@ -5393,3 +5393,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **Tooling defect:** implementer-deep's `consult("dev-advisor")` returned `forbidden` (ag-027ec4). Add it to the small-items batch.
 - **OC R5 harness fix** merged as 790b60ee (96181e7e, nd-3dc051b9): `identity` is now logged apart from `other`. Merged unverified: the tester's runs stopped while downloading dependencies (hatchling, mcp), before pytest started. The OC implementer's validation, and then the reviewer's, will cover it.
 - **Watch:** dependency downloads are timing out inside agent worktrees, for ag-586aaa and ag-027ec4. If it persists, investigate the egress proxy or uv cache, and ask the user before any allowlist change.
+- **SC worker done** at 098fc269 (ag-ab504e). Terminal-record copies are 0 everywhere, and the worst cost ratio is 1.44×. 2 failures, also red on 14eb8a4f, and 32 CLI-init timeouts. The loop reviewer nd-95410abd is next.
