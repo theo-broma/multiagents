@@ -5387,3 +5387,7 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - claude.sh: request-id idempotency, durable receipt (D5);
     - the full suite.
 - OC harness fix merged as 791a0867 (99a59a16, nd-1c106d0d). With 939a1a8b it gives 68/71. New implementer-deep node **nd-5d7f0312** handles D10, the R5 identity call and claude.sh idempotency. nd-27019c40 (needs_info) is superseded.
+- **OC decision (orchestrator):** OA-R3 wins over the OC-R5 test's `s.other()==[]`. The startup `identity` call is legitimate.
+  - Tester nd-3dc051b9 narrows the harness.
+  - Implementer-deep nd-f43ef174, running in parallel, handles D10 and D5 on top of 939a1a8b.
+  - **Tooling defect:** implementer-deep's `consult("dev-advisor")` returned `forbidden` (ag-027ec4). Add it to the small-items batch.
