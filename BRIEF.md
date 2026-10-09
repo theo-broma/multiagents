@@ -5302,3 +5302,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - **OA older tests:** tester ag-66550b committed cc4b8143 on top of ed3dfcac. 1031 of 1046 pass. The 14 reds are the expected gaps: the same-account pause through admission, and same-account clearing at QF-R6 startup.
   - Tester assumptions accepted: the agents' route is the project executor's identity; the pause duration is read from the existing "clears in about" admission refusal.
   - Test reviewer **nd-701e3492**. Then implementer-deep on top of cc4b8143 closes the gaps, then a reviewer, then the whole chain (impl + tests) is merged.
+- OA older tests approved by ag-906395 (it observed 1031 pass, 14 fail, 1 skip). OA gap implementer **nd-1cbda6c1** runs on top of cc4b8143; a reviewer comes next, then the whole chain is merged.
