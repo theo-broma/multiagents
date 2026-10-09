@@ -24,7 +24,8 @@ def current(store, db, nodes=None, *, subject=None, unacknowledged=False):
     seqs = _held_seqs(db, [n["id"] for n in held])
     ack = int(store.meta(db, "ack")) if unacknowledged else -1
     return [{"node_id": n["id"], "seq": seqs.get(n["id"], 0),
-             "mark": _hold_mark(n, seqs.get(n["id"])), "hold": n.get("hold") or {}}
+             "mark": _hold_mark(n, seqs.get(n["id"])), "hold": n.get("hold") or {},
+             **({"agent_id": n["runs"][-1]["run_id"]} if n.get("runs") else {})}
             for n in held if seqs.get(n["id"], 0) > ack]
 
 

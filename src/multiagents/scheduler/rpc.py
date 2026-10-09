@@ -412,7 +412,17 @@ class Service:
             selected = [view(n) for id, n in nodes.items() if id in scope]
             selected = [n for n in selected if all(n.get(field) == args[field]
                          for field in ("state", "parent", "eligible") if field in args)]
-            return {"nodes": selected, "plan_revision": plan_revision}
+            result = {"nodes": selected, "plan_revision": plan_revision}
+            if args.get("include_holds"):
+                result["_wait_hold_cursor"] = db.execute(
+                    "SELECT coalesce(max(seq), 0) FROM notifications").fetchone()[0]
+                # Internal run/node waits need the hold episode associated
+                # with this exact state read, without consuming the journal.
+                result["holds"] = attention.current(self.store, db,
+                    {n["id"]: n for n in selected},
+                    subject=None if principal["root"] else principal["subject"],
+                    unacknowledged=True)
+            return result
         if op == "ack_nodes":
             cursor = args.get("cursor")
             top = db.execute("SELECT coalesce(max(seq), 0) FROM notifications").fetchone()[0]
