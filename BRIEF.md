@@ -5395,3 +5395,13 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - **Watch:** dependency downloads are timing out inside agent worktrees, for ag-586aaa and ag-027ec4. If it persists, investigate the egress proxy or uv cache, and ask the user before any allowlist change.
 - **SC worker done** at 098fc269 (ag-ab504e). Terminal-record copies are 0 everywhere, and the worst cost ratio is 1.44×. 2 failures, also red on 14eb8a4f, and 32 CLI-init timeouts. The loop reviewer nd-95410abd is next.
 - SC loop reviewer ag-8f5c27 (agy) ended its turn while its tests ran in the background, so there was no verdict. The scheduler retried on its own (ag-4aa4a7). **Small item:** agy needs the same agent_guidance as claude about background commands.
+- 18:15Z (new orchestrator session; the multiagents MCP server is disconnected, so no node tools):
+  - **SC loop nd-a6f0f488 is at loop_max.**
+    - Round-4 reviewer ag-4aa4a7 rejected it: in store.py:265, `records()` runs `db.execute` while it holds `snapshot_lock`, which deadlocks against a writer (test_adv3_rpc_creates... times out).
+    - SC tests themselves passed.
+    - Next: relaunch with max_rounds 5 and pass the deadlock finding to the worker.
+  - **OC impl nd-f43ef174 is done** at 6d3be0a8 (ag-a71588).
+    - 76 OC tests pass. The 2 R5 reds are fixed on main by 790b60ee.
+    - Full suite: 121 of 123 reds reproduce on main, and the other 2 are flaky.
+    - It also fixed 11 inherited startup/PID regressions. Next: reviewer, then merge.
+  - **Effort tester nd-d8b3f4dd is done** (ag-bbcc15) and rejects its own branch: `test_tb_r4_when_the_session_cannot_be_resumed_the_node_relaunches_fresh_and_reads_the_old_run` fails only on the branch, with an IndexError at line 504, twice. Next: an implementer investigates.
