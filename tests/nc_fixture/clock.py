@@ -99,7 +99,7 @@ class ClockWorld(World):
         proc = subprocess.Popen(
             [sys.executable, "-c", CLI, "--path", str(self.root), "scheduler", "start",
              "--clock-file", str(self.clock_file)],
-            cwd=self.root, env=self._env(), stdout=subprocess.PIPE,
+            cwd=self.root, env=self.daemon_env(), stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self._popen.append(proc)
         deadline = time.monotonic() + timeout

@@ -37,6 +37,7 @@ sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent / "support"))
 
 import c3_harness as h  # noqa: E402
+import scheduler_owner as owner_seam  # noqa: E402
 from multiagents.paths import ProjectPaths, state_root  # noqa: E402
 from multiagents.tree import Tree  # noqa: E402
 
@@ -158,6 +159,11 @@ class World:
     def _env(self) -> dict[str, str]:
         return dict(os.environ, MULTIAGENTS_PROJECT=str(self.root))
 
+    def daemon_env(self) -> dict[str, str]:
+        """The env the daemon is launched with: marked with this process as
+        owner and this world's project (SL-R6), once the owner module exists."""
+        return owner_seam.harness_env(self.root, self._env())
+
     def cli(self, *args: str, timeout: float = CLI_TIMEOUT) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, "-c", CLI, "--path", str(self.root), *args],
                               cwd=self.root, env=self._env(), capture_output=True,
@@ -173,7 +179,7 @@ class World:
         self.write_config()
         proc = subprocess.Popen(
             [sys.executable, "-c", CLI, "--path", str(self.root), "scheduler", "start"],
-            cwd=self.root, env=self._env(), stdout=subprocess.PIPE,
+            cwd=self.root, env=self.daemon_env(), stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self._popen.append(proc)
         deadline = time.monotonic() + timeout
@@ -262,8 +268,16 @@ class World:
 
     def _reap_workers(self) -> None:
         """SL-R2: a `scheduler.worker` of this world's project outlives the
-        scheduler's stop when its run is parked on a question. Kill each by
-        exact pid (the project root is its argument), children first."""
+        scheduler's stop when its run is parked on a question. SL-R8: with the
+        owner module, `reap(os.getpid(), project)` kills what this process
+        marked for this project, never selecting by argv. Without it, today's
+        fallback: kill each worker by exact pid (the project root is its
+        argument), children first."""
+        try:
+            if owner_seam.harness_reap(self.root):
+                return
+        except Exception:                                   # noqa: BLE001
+            return
         root = str(self.root)
         end = time.monotonic() + TEARDOWN_GRACE
         while True:

@@ -613,6 +613,8 @@ def build_env(
     _add_git_config_override(env, "gc.auto", "0")
     _add_git_config_override(env, "maintenance.auto", "false")
     env.update(identity)
+    from ..scheduler.owner import _forward_env
+    _forward_env(env)
     # CW-R2b: the safe-point key is never an agent's, even when passthrough
     # or the identity names it.
     from ..safepoint import strip_key

@@ -54,6 +54,7 @@ from ..providers import credential_owner
 from ..safepoint import strip_key
 from .. import gitops, procs
 from ..agentwrap import prompt_stdin
+from ..scheduler.owner import _check as owner_alive
 from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
 from .local import LocalExecutor, _turn_start
 
@@ -2941,6 +2942,8 @@ sys.exit(rc)
 
         source = prompt_stdin(prompt_env)
         try:
+            if not owner_alive():
+                raise asyncio.CancelledError("scheduler owner died")
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 limit=STREAM_LIMIT,
@@ -2989,6 +2992,8 @@ sys.exit(rc)
         _, flag, source, *rest = wrapper_argv("python3", self.container_path(run_dir), deadline,
                                               self.container_path(pid_file), argv, inline=True)
         command = command + ["sh", "-c", _WRAPPER_ENTRY.format(flag=flag), source, *rest]
+        if not owner_alive():
+            raise asyncio.CancelledError("scheduler owner died")
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                                 start_new_session=True)

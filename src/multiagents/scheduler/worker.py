@@ -33,6 +33,8 @@ async def supervise(root, attempt_id, lock_fd=None):
         with store.transaction(write=False) as db:
             attempt = attempts(db)[attempt_id]
             node = store.nodes(db)[attempt["node_id"]]
+        from .owner import _bind_run
+        _bind_run(attempt["run_id"])
         if attempt["state"] not in {"claimed", "launched", "suspended"} and not any("result" not in c for c in attempt.get("steer_commands", {}).values()):
             return
         configuration = load(paths, seed=False)
@@ -219,4 +221,6 @@ async def supervise(root, attempt_id, lock_fd=None):
 
 
 if __name__ == "__main__":
-    asyncio.run(supervise(Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else None))
+    from .owner import _watch
+    with _watch(run=True):
+        asyncio.run(supervise(Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else None))

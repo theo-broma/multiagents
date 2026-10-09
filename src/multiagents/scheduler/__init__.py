@@ -129,6 +129,12 @@ def stop(project_root: Path) -> dict:
 
 
 def serve(project_root: Path, clock_file=None) -> None:
+    from .owner import _watch
+    with _watch():
+        _serve(project_root, clock_file)
+
+
+def _serve(project_root: Path, clock_file=None) -> None:
     from .. import procs
     from .rpc import Handler, Server, Service
     os.umask(0o077)

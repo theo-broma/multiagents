@@ -38,7 +38,12 @@ def accepted_bodies(fake: FakeNtfy, since: int = 0) -> list[str]:
 
 
 class NtWorld(ClockWorld, GitWorld):
-    """A ClockWorld with a `notify:` section and helpers over the fake server."""
+    """A ClockWorld with a `notify:` section and helpers over the fake server.
+
+    SL-R6/R8: the daemon is launched by `ClockWorld.start_scheduler` with
+    `World.daemon_env()` (marked with this process as owner), and `World.close`
+    reaps through `scheduler_owner.harness_reap`. Do not override either
+    without keeping both."""
 
     def __init__(self, tmp_path, monkeypatch, fake: FakeNtfy, *, notify="default", events=None, scheduler=None, **kw):
         super().__init__(tmp_path, monkeypatch, now=datetime.now(timezone.utc),

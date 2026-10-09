@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import c3_harness as h  # noqa: E402
 import sc_harness as sc  # noqa: E402
+import scheduler_owner as owner_seam  # noqa: E402
 from multiagents.paths import ProjectPaths, state_root  # noqa: E402
 
 # Every wait is bounded by one of these: short by default, overridable per call.
@@ -216,7 +217,7 @@ class Sched:
             [sys.executable, "-m", "multiagents.cli", "--path", str(self.root),
              "scheduler", "start"],
             stdout=log, stderr=log, stdin=subprocess.DEVNULL, cwd=self.root,
-            start_new_session=True)
+            env=owner_seam.harness_env(self.root), start_new_session=True)
         self._procs.append(proc)
         deadline = time.time() + wait
         last: Exception | None = None
@@ -278,7 +279,8 @@ class Sched:
         self.start()
 
     def close(self) -> None:
-        """Finalizer: never raises, never signals a process it did not start."""
+        """Finalizer: never raises, never signals a process it did not start
+        (or, with the owner module, that this process did not mark: SL-R8)."""
         try:
             if self.sock.exists():
                 self.cli("scheduler", "stop", timeout=TEARDOWN_STOP)
@@ -301,6 +303,10 @@ class Sched:
                 proc.wait(timeout=REAP_TIMEOUT)
             except Exception:
                 pass
+        try:
+            owner_seam.harness_reap(self.root)      # SL-R8: what this process marked
+        except Exception:
+            pass
         try:
             self._reset_server()
         except Exception:

@@ -259,6 +259,19 @@ def _no_host_cli_budget(request, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(models, "subprocess", Subprocess())
 
 
+def pytest_sessionstart(session):
+    """SL-R9: kill the scheduler processes (and their workers) left marked by
+    an owner that died, before this session starts its own. Runs in the
+    controller and in every xdist worker; the sweep is idempotent and safe to
+    run concurrently. A no-op until `multiagents.scheduler.owner` exists."""
+    import sys
+    support = str(Path(__file__).resolve().parent / "support")
+    if support not in sys.path:
+        sys.path.append(support)            # last: shadows nothing
+    import scheduler_owner
+    scheduler_owner.session_sweep()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

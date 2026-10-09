@@ -1099,6 +1099,7 @@ class Engine:
             self.service.changed.notify_all()
 
     def spawn(self, attempt):
+        from .owner import _check, _worker_env
         with (self.store.directory / (attempt["attempt_id"] + ".lock")).open("a+") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1107,10 +1108,15 @@ class Engine:
             # Pass the locked open-file description through exec: ownership
             # spans Python boot, without a recovery gap before supervise().
             with (self.store.directory / "supervisors.log").open("ab") as log:
+                env = _worker_env(attempt.get("run_id"))
+                if not _check():
+                    self.stopped.set()
+                    return
                 proc = subprocess.Popen([sys.executable, "-m", "multiagents.scheduler.worker",
                                          str(self.paths.root), attempt["attempt_id"], str(lock.fileno())],
                                         stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                        pass_fds=(lock.fileno(),), cwd=self.paths.root, start_new_session=True)
+                                        pass_fds=(lock.fileno(),), cwd=self.paths.root, start_new_session=True,
+                                        **({"env": env} if env is not None else {}))
         self.children.append(proc)
 
     async def reconcile(self):

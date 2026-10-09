@@ -21,6 +21,7 @@ from typing import Any
 
 from .. import procs
 from ..agentwrap import prompt_stdin
+from ..scheduler.owner import _check as owner_alive
 from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
 
 
@@ -56,6 +57,8 @@ class LocalExecutor(Executor):
                                              pid_file or run_dir / "agent.pid")
         source = prompt_stdin(env)
         try:
+            if not owner_alive():
+                raise asyncio.CancelledError("scheduler owner died")
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 limit=STREAM_LIMIT,
@@ -94,6 +97,8 @@ class LocalExecutor(Executor):
         # its process when it is closed or collected, which is at the latest
         # when this server exits — exactly what must not happen (SV-R3).
         launched_at = time.time()
+        if not owner_alive():
+            raise asyncio.CancelledError("scheduler owner died")
         proc = subprocess.Popen(
             wrapper_argv(sys.executable, run_dir,
                          turn_deadline(env, deadline, launched_at), pid_file, argv),
