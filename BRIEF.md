@@ -5297,3 +5297,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **OA impl** (ag-835719, nd-c815661d): 68 OA tests green, about 35 older tests in conflict. Advisor ag-aa1387 found a gap: no same-account pause in admission, and QF-R6 clearing was removed. Decided in the spec ("Older contracts versus OA"). Next: a tester updates the older tests and adds the same-account cases on top of the OA branch, then implementer-deep closes the gaps, then a reviewer.
   - The run exposed its own scheduler RPC token in tool output; recorded in its report.
   - **SL** ag-632e68: codex hung for over an hour with no command running; 14 of 25 SL tests red after the merge. Stopped; nd-7866cea2 relaunched. A leaked orphan git-receive-pack (test_gg_r3_boundary_lengths) remains under docker-init; left alone.
+- OA older-tests tester: **nd-8e359878** (on top of ed3dfcac).
