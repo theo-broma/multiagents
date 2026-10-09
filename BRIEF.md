@@ -5381,3 +5381,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - Hold the node if the ref is missing, the commit is not a descendant of the input, or newer inputs conflict.
     - Escape hatch: `recover_wip: false`.
   - Both go into the RD batch spec.
+- **OC impl** ag-e769b1 (nd-27019c40) is at **939a1a8b**: 66/71 OC tests pass. It stopped on NEED_INFO because a harness bug blocks 4 tests: oc_harness.py:141 reads /usr/bin/true as UTF-8. Tester nd-1c106d0d fixes the harness.
+  - Then: merge the tester's node to main, and create a **new** implementer-deep node. It merges 939a1a8b, which is needed because of RD2 and RD5. It fixes the real gaps:
+    - D10: an old `compacted` event without request_id is emitted before the journal event;
+    - claude.sh: request-id idempotency, durable receipt (D5);
+    - the full suite.
