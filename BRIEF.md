@@ -5335,3 +5335,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The reviewer approved from static reading and did not report suite counts it observed itself.
   - The implementer's counts: 199 OA tests passing, 76 reds on the full suite, all reproduced on main.
   - This adds weight to the queued small item "reviewers report observed results".
+- **OC tests review.** Reviewer ag-d19e90 rejected the suite at 241bda33 for missing coverage of D5 (crash reconciliation), D6 (admission reopens after `in_session`) and D8 (initializer). It judged the harness's loose assumptions acceptable. It could not run the suite: uv timed out in its sandbox. Tester nd-04d2fa51, pinned to codex-b, adds the three. Next: re-review, then the implementer.
