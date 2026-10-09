@@ -5405,3 +5405,7 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - Full suite: 121 of 123 reds reproduce on main, and the other 2 are flaky.
     - It also fixed 11 inherited startup/PID regressions. Next: reviewer, then merge.
   - **Effort tester nd-d8b3f4dd is done** (ag-bbcc15) and rejects its own branch: `test_tb_r4_when_the_session_cannot_be_resumed_the_node_relaunches_fresh_and_reads_the_old_run` fails only on the branch, with an IndexError at line 504, twice. Next: an implementer investigates.
+- 18:22Z, MCP reconnected (this session now runs under a fresh `multiagents run`, pid 2700173; an older `multiagents run`, pid 3052738, 41 h old, is still alive):
+  - **OC:** reviewer nd-e39b6daa on nodes/nd-f43ef174 (f8d002ac).
+  - **Effort:** implementer nd-75e23f9c merges 5cd00298 and finds the test_tb_r4 IndexError.
+  - **SC:** loop relaunched with max_rounds 5. The worker task was updated before launch with the snapshot_lock/SQLite deadlock fix (store.py:265).
