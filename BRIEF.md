@@ -5304,3 +5304,7 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Test reviewer **nd-701e3492**. Then implementer-deep on top of cc4b8143 closes the gaps, then a reviewer, then the whole chain (impl + tests) is merged.
 - OA older tests approved by ag-906395 (it observed 1031 pass, 14 fail, 1 skip). OA gap implementer **nd-1cbda6c1** runs on top of cc4b8143; a reviewer comes next, then the whole chain is merged.
 - ~02:58Z: both researchers (ag-4415a8, ag-0a3a3c) had hung for about 4 h. As with SL ag-632e68 earlier, codex went silent right after a "step failed" item, with no command running. The "stuck" watchdog fired, but nothing acts on it. Both were stopped and relaunched (nd-3510c7f6, nd-9a88ab19). RF addition: a codex run silent for over 30 min with no child command should be stopped and resumed automatically. nd-8e359878 is cancelled (its tests at cc4b8143 are used by nd-1cbda6c1).
+- **Signal deaths, researcher ag-3101ca.** Nothing in src/ or tests/ sends SIGUSR1 or SIGABRT, and there is no faulthandler and no pytest-timeout. tests/conftest.py:77-96 isolates HOME and state per test. Conclusion, high confidence: external to the code, either the CLI runtime or the host.
+  - Proposal: the supervisor records the signal sender at death (/proc status, cgroup, ppid). RF classifies -SIGUSR1 and -SIGABRT as retryable.
+  - Hardening, not the cause: a TOCTOU between identity check and killpg at runner.py:8133-8136 and executor/base.py:101-115.
+  - SC loop nd-a6f0f488 relaunched (LR-R1).
