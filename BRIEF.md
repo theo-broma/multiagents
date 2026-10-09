@@ -5317,3 +5317,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - OA gap impl ag-1a3dad (nd-1cbda6c1) was stopped on quota with work at **c14a4d34**: 47fa43b1 is account-scoped admission and recovery, 99aa0580 a checkpoint.
   - **Next after 03:55Z:** start a resume implementer-deep with `git merge --no-edit c14a4d34`, the same task as nd-1cbda6c1, and finish validation. Then a reviewer, then merge the chain.
   - Also check SL nd-7866cea2 (codex) and the SC loop nd-a6f0f488.
+- 03:57Z: OA gap resume **nd-e3986e0e** (merges c14a4d34). Reviewer next.
