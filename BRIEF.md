@@ -5350,3 +5350,9 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - On the full suite the tester saw 58 CLI-init timeout errors and 16 unrelated failures in a 54-minute run. That looks like load; main was not rerun to compare.
   - Re-review: nd-1caf15b2. Next: merge_node nd-04d2fa51, then implementer-deep.
 - 2026-10-09: the user set the orchestrator's own Claude Code effort to medium with /effort.
+- **OC tests merged** as ea7368bc (nd-04d2fa51). Re-reviewer ag-9f4327 approved them.
+  - **Implementation:** implementer-deep nd-fb2d2d29, on codex-b. Its files overlap the effort-plumbing node nd-0b457a17 (driver.py, claude.sh, providers.yaml), so expect a small merge conflict.
+  - **Reviewer tooling gaps** to add to the MK/small-items batch:
+    - a standalone reviewer's worktree is based on main, not on the branch it verifies;
+    - `give_verdict` is absent for standalone reviewers;
+    - agy reviewers cannot install dependencies (rpds-py download blocked) and so cannot run the suite. That is why reviewers keep approving without observed counts.
