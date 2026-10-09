@@ -5331,3 +5331,7 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **OC:** tests are at 241bda33, branch of ag-c36362. That run stopped before its final suite run because claude is at 97% of its weekly quota, and its provider binding is frozen. Reviewer nd-b64ba791 checks the tests. The tester's open points are to be added to the spec afterwards: entry-point names, how the request id is passed, the status payload.
   - **SC:** worker nd-2aea66eb, round 4, died again on a claude 401 ("no usable account remains", 97% weekly until 10-12). The loop was relaunched with the worker pinned to codex-b gpt-6.1-sol, effort high.
   - **Anomaly to look into:** all 4 generations of SC show the same commit, e1cd4087.
+- **OA done.** Merged as cb9c3500 (nd-e3986e0e, ag-f07b4a). Reviewer ag-79f769 approved with no findings. The whole OA chain is now on main: ed3dfcac, cc4b8143 and the fix.
+  - The reviewer approved from static reading and did not report suite counts it observed itself.
+  - The implementer's counts: 199 OA tests passing, 76 reds on the full suite, all reproduced on main.
+  - This adds weight to the queued small item "reviewers report observed results".
