@@ -5369,3 +5369,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - claude is at 97% weekly (resets 10-12), codex at 88% weekly. Keep codex for small tasks only.
   - If OC is still dead at 14:05Z, relaunch nd-fb2d2d29. The SC loop resumes with its worker.
 - 12:27Z: SC worker retry ag-118817 hit the codex-b quota again, so the loop is held. Relaunch nd-a6f0f488 after 14:00Z.
+- 14:10Z, after the codex-b reset:
+  - **Effort tester** nd-d8b3f4dd: relaunched, and its task updated before launch to merge WIP 6419faca.
+  - **OC:** nd-fb2d2d29's relaunch ignored the `task` argument, and the run ag-e0d392 started from the old task without WIP 9b42307a. That run was stopped, and the node is terminal now. New node **nd-27019c40** (implementer-deep, codex-b) resumes from 9b42307a.
+  - **SC:** loop relaunched. Its worker task was updated before launch to merge WIP a6d56478 (admission deepcopy) and finish.
+  - **RD5 (new):** relaunch_node accepts `task` but ignores it. Researcher nd-de403912 is looking for the root cause and an automatic RD2 remedy: start a relaunch from the dead run's WIP tip.
