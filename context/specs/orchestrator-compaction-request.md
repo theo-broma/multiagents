@@ -125,3 +125,40 @@ Verified by:
   today, and the return prompt says to re-arm waits.
 - Writing the opencode v2 plugin itself. OC delivers the `in_session` mode
   and its test fixture; plugging in a real CLI is a separate item.
+
+## Decisions (orchestrator, 2026-10-09, on advisor ag-aa1387's reading of the contract)
+
+1. **Declaration.**
+   - A provider declares `compaction: {mode: restart|in_session}` in its providers.yaml entry. If the entry is absent, the provider is unsupported.
+   - The declaration is inherited through `extends`.
+   - The shipped claude provider declares `restart`.
+   - The `compact` entry point's exit 64 still means unsupported at run time, and it then fails the request (OC-R5).
+2. **in_session transport.** The plugin owns three things through its declared control entry point: addressing the live session, delivering the compaction command, and checking that compaction completed. It also delivers the return prompt. The core owns scheduling, the safe point and the timeouts, and it never injects keystrokes into a terminal.
+3. **Closed turn.** A request is honoured only after a fresh closed-turn observation, made after the turn boundary in which the request was recorded. The observation comes from the plugin's existing `transcript.turn_state` rules.
+   - An older idle record does not count.
+   - A user message sent after that observation invalidates it, and the closed-turn wait starts again (OC-R4).
+   - An unknown turn state never authorises compaction.
+4. **Storage.**
+   - Requests are written atomically in host-owned project state. That state is not the agent-writable `launch/`.
+   - They are keyed by root role and session id.
+   - A resume of the same session keeps them, and a fresh session never inherits them.
+   - A replacement driver can still authenticate them; it does not depend on the old driver's ephemeral key.
+5. **Exactly once.**
+   - `request_id` is passed to the plugin entry point, which must be idempotent for a given `request_id`.
+   - The phases `pending → executing → compacted → completed | failed` are persisted.
+   - After a crash in `executing`, the driver reconciles through the plugin, an idempotent re-call with the same id, before doing anything else. It never starts a second compaction under a new id.
+6. **Barrier in `in_session` mode.** The MCP servers survive, so after success or failure an authenticated settlement reopens admission on them.
+7. **Two separate phases.** A plugin exit of 0 certifies that compaction completed, not that the command was accepted. Delivering the return prompt is a separate, persisted phase. If delivery fails, only the delivery is retried, never the compaction.
+8. **Who may call.**
+   - Supervised orchestrator and initializer sessions qualify.
+   - A child agent gets `not_root`.
+   - A root session with no session binding, or whose driver is dead or does not match, gets `unsupported`.
+9. **Precedence.**
+   - An explicit request stays eligible even after an earlier failure has disabled automatic compaction.
+   - Concurrent calls while a request is pending or executing share one id and keep the first reason.
+   - The announcement and `compact_grace_seconds` are kept, so the user can still send a message (OC-R4).
+   - A limit stop or a deliberate user exit takes precedence. The request then stays `pending` for the next session of the same id, or `failed` with reason `session_ended` if there is none. It never completes silently.
+10. **Audit.**
+    - The driver records events for each phase: requested, started, compacted, completed and failed. Each event carries the request id, session, mode and a reason bounded to 500 characters.
+    - A read tool, `compaction_status(request_id: str = "")`, returns the latest request when no id is given, or the named one otherwise.
+    - A new request after a failure gets a new id. The failure detail is stored separately from the caller's reason.
