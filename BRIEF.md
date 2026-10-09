@@ -5308,3 +5308,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - Proposal: the supervisor records the signal sender at death (/proc status, cgroup, ppid). RF classifies -SIGUSR1 and -SIGABRT as retryable.
   - Hardening, not the cause: a TOCTOU between identity check and killpg at runner.py:8133-8136 and executor/base.py:101-115.
   - SC loop nd-a6f0f488 relaunched (LR-R1).
+- **Run-death findings, researcher ag-1f4c5c. These are new tooling items for the next spec batch.**
+  - **RD1, server exit kills node runs.** On transport exit, SIGTERM or HUP, server.py:2441-2467 calls `_runner.shutdown(detach=root)`. A nested server is not root, so runner.py:8064-8071 cancels the runs, which reaches handle.stop() and SIGTERM ("server exited", runner.py:6060-6110). Fix: always detach scheduler-owned runs and let the scheduler adopt them.
+  - **RD2, a relaunch loses committed work.** The activation pins input_commit (engine.py:657-670, runner.py:5021-5026), branch_tip only advances on integrated completion (results.py:245-322), and relaunch resets the node (control.py:120-126). Fix: on an interrupted exit, capture the worktree branch into a recovery ref and keep session_id. Then resume automatically, or via `relaunch_node(resume_run=...)`.
+  - **RD3, update_node races the launch.** engine.py:562-565 calls runner.start with node["task"] before the claim (590-664). Fix: claim atomically first and store the task in the attempt.
+  - **RD4, exit 138 or -6 with cause natural.** Classify these as infrastructure interruptions and resume with bounded retries (with RF).
