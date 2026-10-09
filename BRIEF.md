@@ -5386,3 +5386,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - D10: an old `compacted` event without request_id is emitted before the journal event;
     - claude.sh: request-id idempotency, durable receipt (D5);
     - the full suite.
+- OC harness fix merged as 791a0867 (99a59a16, nd-1c106d0d). With 939a1a8b it gives 68/71. New implementer-deep node **nd-5d7f0312** handles D10, the R5 identity call and claude.sh idempotency. nd-27019c40 (needs_info) is superseded.
