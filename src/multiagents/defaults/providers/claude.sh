@@ -8,6 +8,11 @@ require_bin() {
         exit 20
     fi
 }
+launch_action="${1:-check}"
+if [ "$launch_action" = "launch-command" ]; then
+    shift
+    set -- launch "$@"
+fi
 case "${1:-check}" in
     login|launch|compact|refresh) require_bin ;;
 esac
@@ -747,7 +752,11 @@ launch)
     if [ "${MULTIAGENTS_UNATTENDED:-0}" = "1" ]; then
         set -- "$@" --permission-mode bypassPermissions -p "${MULTIAGENTS_NUDGE:-continue}"
     fi
-    exec "$BIN" "$@"
+    if [ "$launch_action" = "launch-command" ]; then
+        python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$BIN" "$@"
+    else
+        exec "$BIN" "$@"
+    fi
     ;;
 compact)
     # Triggered from OUTSIDE the running session, between turns — see BRIEF

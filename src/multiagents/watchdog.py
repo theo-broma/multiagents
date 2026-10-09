@@ -65,6 +65,14 @@ def transcript_sources(provider: Any, cwd: Path,
     directory = _declared_dir(provider, home)
     if directory is None:
         return []
+    profile_root = (getattr(provider, "transcript", None) or {}).get("profile_root")
+    if (getattr(executor, "kind", "local") == "local"
+            and isinstance(profile_root, str) and profile_root
+            and directory.startswith(profile_root.rstrip("/") + "/")):
+        from .providers import resolved_profile
+        profile = resolved_profile(provider)
+        if profile:
+            directory = str(Path(profile)) + directory[len(profile_root.rstrip("/")):]
     cwd = Path(cwd)
     try:
         resolved = cwd.resolve()
@@ -270,7 +278,15 @@ def sample(paths, config, provider, role: str, pid: int | None,
     from .tree import Tree
 
     supported = provider is not None and transcript_source(provider, paths.root, executor) is not None
-    transcript = newest_transcript(provider, paths.root, executor) if provider else None
+    from .driver import _launch_read
+    from .transcripts import session_transcript
+    try:
+        observed = json.loads(_launch_read(paths, f"{role}.observation.json", 65536) or "{}")
+    except (ValueError, TypeError):
+        observed = {}
+    session = observed.get("session", "")
+    transcript = (session_transcript(provider, paths.root, session, executor) if session else
+                  newest_transcript(provider, paths.root, executor)) if provider else None
     quiet_for = None
     record = {}
     if transcript is not None:
@@ -287,7 +303,9 @@ def sample(paths, config, provider, role: str, pid: int | None,
     quota_known = bool(getattr(budget, "known", False))
     quota_left = getattr(budget, "headroom", None)
 
-    limit = limit_reached(provider, paths.root, executor) if provider is not None else None
+    limit = (limit_reached(provider, paths.root, executor, session_id=session,
+                           offset=observed.get("offset", 0)) if session else
+             limit_reached(provider, paths.root, executor)) if provider is not None else None
     state, detail = verdict(running=running, quiet_for=quiet_for,
                             quota_known=quota_known, quota_left=quota_left,
                             active_agents=active, supported=supported,
@@ -423,22 +441,27 @@ def supervise(paths, config, role: str, pid: int, interval: float = 20.0,
     spec = next((a for a in config.agents.values()
                  if a.launch and a.role == role), None)
     provider = providers.get(spec.provider) if spec else None
-    executor = (executor_for(paths, config, providers)(spec.provider)
-                if provider is not None else None)
+    from .executor.local import LocalExecutor
+    executor = LocalExecutor() if provider is not None else None
     started = time.time()
     budget = None
     last_quota = 0.0
 
     while True:
+        from .root_accounts import reported_root, host_budget
+        root = reported_root(paths, config)
+        if root and root["role"] == role:
+            selected = providers.get(root["provider"])
+            if selected is not provider:
+                provider = selected
+                last_quota = 0.0
         # Quota is the slow sample and the one that matters least often, so it
         # is read on its own, longer cadence rather than every pass.
         if provider is not None and time.time() - last_quota > 120:
             last_quota = time.time()
             try:
                 invalidate_cache()
-                budget = read_provider(provider.name, provider, None,
-                                       global_config_dir(), paths.config,
-                                       use_cache=False)
+                budget = host_budget(provider.name, provider, config)
             except Exception:
                 budget = None
 
@@ -505,7 +528,22 @@ def _typed_by_a_person(record: dict) -> bool:
         for block in content)
 
 
-def limit_reached(provider: Any, cwd: Path, executor: Any = None) -> dict | None:
+# A context-local binding preserves the public marker detector's call shape:
+# observers wrapping it still see the same two arguments and the same evidence.
+from contextvars import ContextVar
+_root_limit_scope = ContextVar("root_limit_scope", default=None)
+
+
+def root_limit_reached(provider, cwd, session, offset):
+    token = _root_limit_scope.set((session, offset))
+    try:
+        return limit_reached(provider, cwd)
+    finally:
+        _root_limit_scope.reset(token)
+
+
+def limit_reached(provider: Any, cwd: Path, executor: Any = None, *,
+                  session_id: str = "", offset: int = 0) -> dict | None:
     """The CLI's own "I have stopped" message, if it is the last thing said.
 
     Not a classifier over model prose. These strings are hardcoded by the CLI's
@@ -518,6 +556,9 @@ def limit_reached(provider: Any, cwd: Path, executor: Any = None) -> dict | None
     history, an agent quoting the string mid-conversation is not the CLI saying
     it, and a limit someone has already replied to is theirs, not ours.
     """
+    scope = _root_limit_scope.get()
+    if scope is not None:
+        session_id, offset = scope
     markers = (getattr(provider, "transcript", None) or {}).get("limit_markers") or []
     if not markers:
         return None
@@ -525,11 +566,17 @@ def limit_reached(provider: Any, cwd: Path, executor: Any = None) -> dict | None
     if executor is None:
         from .executor import LocalExecutor
         executor = LocalExecutor()
-    path = newest_transcript(provider, cwd, executor)
+    if session_id:
+        from .transcripts import session_transcript
+        path = session_transcript(provider, cwd, session_id, executor)
+    else:
+        path = newest_transcript(provider, cwd, executor)
     if path is None:
         return None
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            lines = handle.read().decode("utf-8", errors="replace").splitlines()
     except OSError:
         return None
 
@@ -539,6 +586,8 @@ def limit_reached(provider: Any, cwd: Path, executor: Any = None) -> dict | None
         try:
             record = json.loads(line)
         except ValueError:
+            continue
+        if session_id and record.get("sessionId", session_id) != session_id:
             continue
         # Someone spoke after it. Whatever the CLI said before that, a person is
         # here and has taken it from us — acting now would end a session while

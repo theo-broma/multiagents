@@ -28,6 +28,7 @@ from . import bugs
 from . import catalog as catalog_mod
 from . import driver
 from . import procs
+from . import root_accounts
 from .executor import executor_for
 from . import scripts
 from . import gitops
@@ -373,14 +374,14 @@ def cmd_init_agent(args: argparse.Namespace) -> int:
               "`multiagents build` first.")
         return 4
 
-    held = driver._orchestrator_hold(paths, config)
+    held = driver._orchestrator_hold(paths, config, None, "initializer")
     if held is not None:
         detail, resets_at = held
         print(f"\n{detail}")
         if not getattr(args, "wait", False):
             print("             `multiagents init-agent --wait` blocks until it resets")
             return 3
-        if not driver._wait_for_reset(paths, config, resets_at):
+        if not driver._wait_for_reset(paths, config, resets_at, role="initializer"):
             return 3
 
     print()
@@ -2746,6 +2747,11 @@ def cmd_refresh_quota(args: argparse.Namespace) -> int:
     usable = {n for n, b in budgets.items() if b is not None and b.known and b.usable}
     cleared = tree.clear_quota(usable) if usable else {"cooldowns": [], "pause": False}
     lifted_pause_for = prior_pause_providers if cleared.get("pause") else set()
+    root_lifted = root_accounts.clear_agent_limits(
+        paths, config, providers, usable, readings=budgets)
+    if root_lifted:
+        cleared["pause"] = True
+        lifted_pause_for |= root_lifted
 
     for name in names:
         print(_refresh_quota_line(name, budgets.get(name), cleared, lifted_pause_for))
@@ -2939,6 +2945,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     paths = _resolve(args.path)
     records = watchdog.read_all_status(paths)
+    from .root_accounts import reported_root
+    root = reported_root(paths, load_config(paths))
+    if root:
+        print(f"root {root['role']}: {root['provider']}")
     if not records:
         print("No supervisor has reported yet. `multiagents run` starts one.")
         return 0

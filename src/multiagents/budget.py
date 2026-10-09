@@ -169,6 +169,9 @@ class Budget:
     # for ROUTING it is unknown — it can no longer testify that a window is
     # full. The raw values above stay exactly as reported, for display.
     stale: bool = False
+    # Keep each vault route's proof in memory. Headroom on the best account
+    # cannot prove that another account's quota pause has recovered.
+    account_readings: dict[str, Budget] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def usable(self) -> bool:
@@ -1098,11 +1101,13 @@ def _builtin_budget(owner: str, name: str, reader: Any, provider: Any,
                         **window, "account": label,
                         "counted": label == best and window.get("counted", True)}
         return replace(usable[best], provider=name, windows=windows,
-                       note=f"vault account {best}")
+                       note=f"vault account {best}", account_readings=readings)
     if owner == name:
         # The reader hard-codes the provider it belongs to; the caller's name is
         # the one to report under, whatever the reader wrote.
+        profile = resolved_profile(provider)
         return replace(_call_reader(reader, project_config=project_config,
+                                    config_dir=Path(profile) if profile else None,
                                     force=force, limits=limits), provider=name)
     if owner in (getattr(provider, "renamed_from", None) or ()):
         # OG-R1: this provider declares that it is what the base it extends used
@@ -1162,7 +1167,8 @@ def reader_takes_profile(reader: Any) -> bool:
 def _call_reader(reader: Any, *, spent: dict[str, int] | None = None,
                  config_dir: Path | None = None,
                  project_config: Path | None = None, force: bool = False,
-                 limits: dict | None = None, vault_profile: bool = False) -> Budget:
+                 limits: dict | None = None, vault_profile: bool = False,
+                 fetch: bool | None = None) -> Budget:
     """Call a registered built-in reader with only what it accepts.
 
     The registry holds a reader per CLI and their signatures differ — one takes
@@ -1178,6 +1184,8 @@ def _call_reader(reader: Any, *, spent: dict[str, int] | None = None,
                "project_config": project_config, "force": force, "limits": limits}
     if vault_profile:
         offered["vault_profile"] = True
+    if fetch is not None:
+        offered["fetch"] = fetch
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return reader(**offered)
     return reader(**{key: value for key, value in offered.items()

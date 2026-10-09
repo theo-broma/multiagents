@@ -468,11 +468,21 @@ LIMIT_MARKERS = [{"match": "usage limit reached", "resets": True,
                   "detail": "usage window"}]
 
 
-def _limited(s: ic.Session) -> None:
-    """The session's transcript ends with the CLI's own usage-limit message,
-    so every launch is stopped for a limit that resets."""
-    ch.write_transcript(s.transcript, [ch.user("go"),
-                                       ch.limit_message("Claude usage limit reached.")])
+def _limited(s: ic.Session, text: str = "Claude usage limit reached.") -> None:
+    """Every launch that lives says the CLI's own usage-limit message in its
+    own session, after it started (OA-R4/OA-R7: a marker written before the
+    launch, or a record of another session, is not this root's limit). A new
+    record on every relaunch, so each launch is stopped for a limit that
+    resets."""
+    run = s.run
+
+    def limited_run(launches, **kwargs):
+        say = [0.0, [ch.limit_message(text, ic.SID)]]
+        return run([{**launch, "appends": [say, *(launch.get("appends") or [])]}
+                    if float(launch.get("life", 0)) > 0 else launch
+                    for launch in launches], **kwargs)
+
+    s.run = limited_run
 
 
 def _limit_session(session, value):

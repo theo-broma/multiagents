@@ -371,8 +371,11 @@ def _context_reading(run: Runner) -> int | None:
         return None
     from .driver import _launched_spec, _own_transcripts
 
-    spec = _launched_spec(run.config, os.environ.get("MULTIAGENTS_ROLE") or "orchestrator")
-    provider = run.providers.get(spec.provider) if spec is not None else None
+    role = os.environ.get("MULTIAGENTS_ROLE") or "orchestrator"
+    spec = _launched_spec(run.config, role)
+    from .root_accounts import reported_provider
+    name = reported_provider(run.paths, role, session, spec.provider if spec else "")
+    provider = run.providers.get(name)
     if provider is None:
         return None
     return session_context(provider, run.paths.root, session, _own_transcripts())
@@ -2084,7 +2087,9 @@ def budget_status() -> dict:
             advice.append(f"{name} is below the {reserve:.0%} reserve — delegate rather than run work yourself")
     # The reading is reported here, in `context`; the notice itself is left
     # for the next other tool call rather than spent on this one.
+    from .root_accounts import reported_root
     return _ok({
+        "root": reported_root(run.paths, run.config),
         "providers": {k: v.to_dict() for k, v in budgets.items()},
         "tree_usage": run.tree.rollup_usage(),
         "quota_handover": {"reserved_instance": handover["reserved_instance"],

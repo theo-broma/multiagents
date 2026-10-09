@@ -271,7 +271,7 @@ def test_p0_r8c_1_never_after_a_limited_turn(loop):
     lp = loop(limit_markers=[{"match": "spend cap reached", "resets": False,
                               "detail": "spend cap"}])
     lp.reading(OVER)
-    code = lp.run([{**PRODUCTIVE, "append": [ch.limit_message("You have a spend cap reached.")]}],
+    code = lp.run([{**PRODUCTIVE, "append": [ch.limit_message("You have a spend cap reached.", SID)]}],
                   max_turns=2)
     assert code == 3, "the shipped limit handling stops on a cap that does not reset"
     assert lp.actions() == [LAUNCH]

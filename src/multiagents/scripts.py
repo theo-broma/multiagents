@@ -35,6 +35,9 @@ Captured actions (``check``, ``budget``) are run and their output read. Handed-
 over actions (``login``, ``launch``) return an argv and environment for the
 caller to ``execvpe``, because they need the terminal.
 
+``launch-command`` optional, non-interactive. The launch argv as a JSON array,
+             for a surviving driver to start the CLI itself. Exit 64 retains
+             the script's existing launch action.
 Scripts resolve project-first, then global, then the shipped copies, so a
 project can override one provider's behaviour without touching the machine.
 

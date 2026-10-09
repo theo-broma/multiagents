@@ -7671,7 +7671,7 @@ def test_a_child_that_is_working_is_left_alone(monkeypatch):
     assert code == 7
 
 
-def test_a_limit_known_not_to_reset_stops_the_run(tmp_path, monkeypatch):
+def test_a_limit_known_not_to_reset_stops_the_run(tmp_path, monkeypatch, capsys):
     """Waiting cannot put money in an account. Nothing ships marked this way —
     see the marker test below — but the path has to exist and has to be right."""
     from multiagents import cli
@@ -7687,9 +7687,12 @@ def test_a_limit_known_not_to_reset_stops_the_run(tmp_path, monkeypatch):
                             "said": "You've hit your monthly spend limit"})
     assert code == 3
     assert slept == [], "it did not wait for something that never resets"
-    pause = Tree(paths.tree_file, paths.events_file).pause_state()
-    assert pause["providers"] == ["claude"]
-    assert "monthly spend limit" in pause["reason"]
+    # OA-R8: the limit belongs to the root's account, not to the provider name,
+    # so it must not pause the provider tree-wide. Pausing the agents that share
+    # the root's account (and only them) is checked through admission in
+    # test_oa_account_pause.py.
+    assert Tree(paths.tree_file, paths.events_file).pause_state() == {}
+    assert "monthly spend limit" in capsys.readouterr().out
 
 
 def test_a_window_that_resets_is_waited_out_and_then_retried(tmp_path, monkeypatch):
@@ -9863,7 +9866,7 @@ def test_two_drivers_do_not_run_at_once(tmp_path, monkeypatch, capsys):
     class _PastTheGuard(Exception):
         pass
 
-    def _executor_for(*args, **kwargs):
+    def _local_executor(*args, **kwargs):
         raise _PastTheGuard
 
     paths = _paths(tmp_path)
@@ -9872,7 +9875,9 @@ def test_two_drivers_do_not_run_at_once(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.driver, "_launched_spec",
                         lambda c, r, team="": AgentSpec("o", "p", "m"))
     monkeypatch.setattr(cli.driver, "load_providers", lambda *a, **k: {"p": _Available()})
-    monkeypatch.setattr(cli.driver, "executor_for", _executor_for)
+    # OA-R1: the root runs on the host, so the first thing past the guard is
+    # the construction of the host's LocalExecutor.
+    monkeypatch.setattr(cli.driver, "LocalExecutor", _local_executor)
 
     cli.driver._write_pid(paths, "orchestrator", os.getpid())     # alive, certainly
     assert cli.driver._launch_agent(paths, config, "orchestrator", resume=True) == 2

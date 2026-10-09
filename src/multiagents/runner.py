@@ -52,7 +52,7 @@ from .executor.base import (BASE_ENV_KEYS, FollowHandle, Handle, read_exit_statu
 from . import providers as providers_mod
 from . import notices
 from . import spendcap
-from . import procs
+from . import procs, root_accounts
 from . import scripts
 from . import paths as paths_mod
 from .paths import ProjectPaths, global_config_dir, state_root
@@ -2623,15 +2623,20 @@ class Runner(QuotaHandover):
         # merge and nothing to discard when one went wrong. Failing here is the
         # only honest answer; an explicit workdir override is the caller saying
         # they meant it.
-        paused = self.tree.pause_state()
-        if paused and not pinned:
+        options = {spec.provider} if pinned else {spec.provider, *(spec.models or {})}
+        tree_pause = self.tree.pause_state()
+        pauses = [tree_pause] if tree_pause and not pinned else []
+        pauses.extend(root_accounts.agent_limit_pauses(
+            self.paths, self.config, self.providers, options))
+        if pauses:
             # A pause names the providers that were exhausted. Refusing an agent
             # that still has a usable provider would be over-applying it: the
             # protection against unreviewed work is the orchestrator's own rule
             # about merging, not freezing agents that can still run.
-            out = set(paused.get("providers") or [])
-            options = {spec.provider, *(spec.models or {})}
+            out = {name for p in pauses for name in (p.get("providers") or [])}
             if out and not options - out:
+                paused = min((p for p in pauses if options.intersection(p.get("providers") or [])),
+                             key=lambda p: p.get("until", 0))
                 waiting = max(0, int(paused.get("until", 0) - now()))
                 raise RuntimeError(
                     f"Paused: {paused.get('reason', 'no provider available')}. "

@@ -19,8 +19,9 @@ which these extend.
   moment the limit is detected.
 - **R8f.20** — the remaining driver limits parse safely. Each malformed value
   is checked by the shipped default's observable effect: how long the provider
-  is paused for (`limit_wait_seconds`, `spend_limit_pause_hours`, read off the
-  tree's `paused` event), whether a fast crash is retried
+  is paused for (`limit_wait_seconds`, read off the driver's "Waiting N min"
+  line; `spend_limit_pause_hours`, read off the admission refusal of an agent on
+  the root's account, OA-R8), whether a fast crash is retried
   (`restart_min_runtime_seconds`), and how many headless turns run
   (`supervised_turns`).
 
@@ -32,8 +33,12 @@ which these extend.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+import os
 import re
+import subprocess
 import sys
 import time as _real_time
 from pathlib import Path
@@ -51,6 +56,8 @@ from test_phase0_provider_compact import SID as LAUNCH_SID, Scratch  # noqa: E40
 from test_phase0_r8f_review import ctrl_c_after  # noqa: E402,F401
 
 from multiagents import driver, watchdog  # noqa: E402
+from multiagents.config import AgentSpec  # noqa: E402
+from multiagents.runner import LaunchContext, Runner  # noqa: E402
 
 SHIPPED_LIMITS = yaml.safe_load((ch.SHIPPED / "project.yaml").read_text())["limits"]
 CLAUDE_SH = ch.PROVIDER_SCRIPTS / "claude.sh"
@@ -180,11 +187,10 @@ LIMIT_MARKERS = [{"match": "usage limit reached", "resets": True,
                   "detail": "usage window"}]
 SPEND_MARKERS = [{"match": "spend limit reached", "resets": False,
                   "detail": "spend cap"}]
-LIMIT_RECORD = ch.limit_message("Claude usage limit reached.")
+LIMIT_RECORD = ch.limit_message("Claude usage limit reached.", ic.SID)
 
 
-def _limited(s: ic.Session, text: str = "Claude usage limit reached.") -> None:
-    ch.write_transcript(s.transcript, [ch.user("go"), ch.limit_message(text)])
+_limited = rv._limited
 
 
 def _fake() -> str:
@@ -245,10 +251,50 @@ class _ExitOnDetection:
         return bool(mine) and rv._dead(mine[0]["pid"])
 
 
+def _admission(s: ic.Session) -> dict:
+    """The admission decision for an agent on the root's provider, called as the
+    runner makes it before spawning (OA-R8). The fake provider names no
+    identity, so its account is unknown, and an unknown identity counts as the
+    same account for pausing: a root limit must pause this agent."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_COMMITTER_NAME": "t",
+           "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    if not (s.root / ".git").exists():
+        subprocess.run(["git", "init", "-q", str(s.root)], check=True, env=env)
+        subprocess.run(["git", "-C", str(s.root), "commit", "-q", "--allow-empty",
+                        "-m", "init"], check=True, env=env)
+    s.config.agents["coder"] = AgentSpec("coder", "fakeprov", "m")
+    context = LaunchContext(caller=None, run_parent=None, depth=1, node_id="",
+                            attempt_id="", admission_only=True)
+    try:
+        return asyncio.run(Runner(s.paths, s.config).start(
+            "coder", "admission", launch_context=context))
+    except Exception as exc:                                  # noqa: BLE001
+        return {"raised": type(exc).__name__, "text": str(exc)}
+
+
+def _admits(decision: dict) -> bool:
+    return decision.get("admitted") is True
+
+
+def _refused_for(decision: dict) -> float:
+    """How long the admission refusal says the pause lasts, in seconds, read off
+    the runner's own "It clears in about XmYYs" wording."""
+    assert not _admits(decision), f"the agent was admitted: {decision}"
+    found = re.search(r"(\d+)m(\d\d)s", json.dumps(decision))
+    assert found, f"the refusal names no time to clear: {decision}"
+    return int(found.group(1)) * 60 + int(found.group(2))
+
+
 def _no_limit_wait(s: ic.Session, out: str) -> None:
-    assert s.events("paused") == [], (
-        f"the driver paused for the limit after the user's own exit:\n{out}")
     assert "Waiting" not in out, f"the driver waited out a window:\n{out}"
+    assert _admits(_admission(s)), (
+        "the root's account was paused after the user's own exit")
+
+
+def _waited_minutes(out: str) -> int:
+    found = re.search(r"Waiting (\d+) min", out)
+    assert found, f"the driver announced no wait:\n{out}"
+    return int(found.group(1))
 
 
 @pytest.mark.parametrize("nth", [1, 2], ids=["about_to_stop", "decided_to_stop"])
@@ -311,7 +357,7 @@ def test_p0_r8f_19_a_cli_the_driver_stopped_for_the_limit_is_waited_for_and_resu
     _limited(s)
     code, out = s.run([{"life": ic.STOPPED_BY}, {"life": 0}])
     assert len(s.stops()) == 1, f"the limited CLI was not stopped: {s.seq()}"
-    assert len(s.events("paused")) >= 1, f"no limit wait:\n{out}"
+    assert "Waiting" in out, f"no limit wait:\n{out}"
     assert len(s.calls("launch")) == 2, f"not relaunched after the wait: {s.seq()}"
     assert s.calls("launch")[1]["env"].get("MULTIAGENTS_RESUME") == "1"
     assert code == 0, out
@@ -327,16 +373,6 @@ def _run(s: ic.Session, launches: list[dict]) -> tuple[int, str]:
         return s.run(launches)
     except Exception as exc:                                  # noqa: BLE001
         pytest.fail(f"the driver crashed on a malformed limit: {exc!r}")
-
-
-def _paused_for(s: ic.Session) -> float:
-    """How long the first pause of the run was for, in seconds."""
-    paused = s.events("paused")
-    assert paused, "harness: the provider was never paused"
-    until = paused[0].get("until")
-    assert isinstance(until, (int, float)) and math.isfinite(until), (
-        f"the pause has no finite end: {until!r}")
-    return until - paused[0]["t"]
 
 
 def test_p0_r8f_20_the_defaults_this_section_relies_on_are_shipped():
@@ -368,7 +404,7 @@ def test_p0_r8f_20_an_explicit_limit_wait_is_honoured(session, ctrl_c_after):
     s = _wait_session(session, 120)
     ctrl_c_after(3.0)
     code, out = _run(s, [{"life": ic.STOPPED_BY}])
-    assert abs(_paused_for(s) - 120) < 5, out
+    assert _waited_minutes(out) == 2, out
     assert len(s.calls("launch")) == 1 and code == 0, out
 
 
@@ -381,7 +417,7 @@ def test_p0_r8f_20_a_malformed_limit_wait_is_the_default_900s(
     s = _wait_session(session, value)
     ctrl_c_after(3.0)
     code, out = _run(s, [{"life": ic.STOPPED_BY}, {"life": 0}])
-    assert abs(_paused_for(s) - 900) < 5, (
+    assert _waited_minutes(out) == 15, (
         f"a malformed limit_wait_seconds did not wait the default 900s:\n{out}")
     assert len(s.calls("launch")) == 1, (
         f"relaunched within 3s: the default wait was not kept ({s.seq()})")
@@ -402,7 +438,7 @@ def test_p0_r8f_20_an_explicit_spend_pause_is_honoured(session):
     stops the run with 3."""
     s = _spend_session(session, 2)
     code, out = _run(s, [{"life": ic.STOPPED_BY}])
-    assert abs(_paused_for(s) - 2 * 3600) < 60, out
+    assert abs(_refused_for(_admission(s)) - 2 * 3600) < 120, out
     assert code == 3, out
 
 
@@ -410,7 +446,7 @@ def test_p0_r8f_20_an_explicit_spend_pause_is_honoured(session):
 def test_p0_r8f_20_a_malformed_spend_pause_is_the_default_12h(session, value):
     s = _spend_session(session, value)
     code, out = _run(s, [{"life": ic.STOPPED_BY}])
-    assert abs(_paused_for(s) - 12 * 3600) < 60, (
+    assert abs(_refused_for(_admission(s)) - 12 * 3600) < 120, (
         f"a malformed spend_limit_pause_hours did not hold the default 12h:\n{out}")
     assert code == 3, out
     assert len(s.calls("launch")) == 1

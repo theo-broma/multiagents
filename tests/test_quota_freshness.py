@@ -657,8 +657,14 @@ def test_qf_r5_wait_keeps_waiting_while_there_is_no_room_and_does_not_storm(
 
 # ================================================================== QF-R6 ==
 
+ALICE = "alice@example.invalid"
+
+
 def test_qf_r6_run_startup_lifts_the_orchestrators_quota_pause(two, capsys):
+    """OA narrowing: on a proven same account (the agents' route and the root's
+    host profile name the same identity) recovery stays immediate."""
     h.seed_pause(two.tree, ["qfp"], two.now + 6 * HOUR, "qfp: usage limit", cause=h.QUOTA)
+    two.identity("qfp", ALICE)
     two.reading("qfp", two.room)
     code, out = two.cli(capsys, "run")
     assert code == 0 and two.launches, out
@@ -670,6 +676,11 @@ def test_qf_r6_wait_proceeding_lifts_the_quota_pause_before_the_first_spawn(
     """The runner's preflight refuses a spawn onto a provider the tree's pause
     names, so the pause must be gone by the time the orchestrator starts."""
     p = claude_project
+    # OA narrowing: lifted because the account is proven the same (the agents'
+    # route and the root's host profile name one identity).
+    (p.config / "providers" / "claude.sh").write_text(
+        f'#!/bin/sh\ncase "$1" in identity) echo \'{{"identity": "{ALICE}"}}\'; exit 0 ;;'
+        f' *) exit 64 ;; esac\n')
     _clock, _reset = _wait_scenario(p, monkeypatch, recovers=True)
     h.seed_pause(p.tree, ["claude"], time.time() + 6 * HOUR, "claude: usage limit",
                  cause=h.QUOTA)
@@ -677,6 +688,19 @@ def test_qf_r6_wait_proceeding_lifts_the_quota_pause_before_the_first_spawn(
     assert code == 0 and p.launches, out
     assert "claude" not in (p.launches[0]["pause"].get("providers") or []), \
         f"paused at launch: {p.launches[0]['pause']}"
+
+
+def test_qf_r6_a_pause_on_an_account_that_cannot_be_proven_the_same_survives(
+        two, capsys):
+    """An identity action that fails leaves the account unknown, and a reading
+    never clears a pause on an account it cannot prove it is. The pause runs to
+    its expiry."""
+    h.seed_pause(two.tree, ["qfp"], two.now + 6 * HOUR, "qfp: usage limit", cause=h.QUOTA)
+    two.identity("qfp", None)
+    two.reading("qfp", two.room)
+    code, out = two.cli(capsys, "run")
+    assert code == 0 and two.launches, out
+    assert h.paused_for(two.tree, "qfp"), out
 
 
 @pytest.mark.parametrize("kind", ["no_cause", "spend_limit"])
@@ -696,3 +720,58 @@ def test_qf_r6_a_quota_pause_on_another_provider_survives_run_startup(two, capsy
     code, out = two.cli(capsys, "run")
     assert code == 0, out
     assert h.paused_for(two.tree, "qfp2"), out
+
+
+# --- OA narrowing: a reading clears a pause only on a proven same account ----
+#
+# The agents' route is the docker vault's default account; the root's is the
+# host profile. Their identity actions decide. Fictional identities only.
+
+def _oa_world(tmp_path, host, vault):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from support.oa_world import World
+    import json as _json
+    from multiagents.paths import ProjectPaths
+    w = World(tmp_path)
+    w.project_set("", executor="docker")
+    w.make_profile("claude", identity=host, used=20)       # the root has room
+    w.make_vault(None, used=0)
+    state = w.vault_dir(None) / ".claude.json"
+    data = _json.loads(state.read_text())
+    data.pop("oauthAccount", None)
+    if vault:
+        data["oauthAccount"] = {"emailAddress": vault}
+    state.write_text(_json.dumps(data))
+    w.plan({"default": {"do": "ok"}})
+    tree = Tree(ProjectPaths(w.proj).tree_file, ProjectPaths(w.proj).events_file)
+    h.seed_pause(tree, ["claude"], time.time() + 6 * HOUR, "claude: usage limit",
+                 cause=h.QUOTA)
+    return w, tree
+
+
+from multiagents.tree import Tree  # noqa: E402
+
+
+def test_qf_r6_a_healthy_root_reading_lifts_the_pause_on_a_proven_same_account(tmp_path):
+    w, tree = _oa_world(tmp_path, ALICE, ALICE)
+    w.run(1)
+    assert w.launches(), "the root ran"
+    assert not h.paused_for(tree, "claude"), "recovery is immediate on the same account"
+
+
+def test_qf_r6_a_healthy_root_reading_does_not_lift_the_pause_on_a_different_account(
+        tmp_path):
+    w, tree = _oa_world(tmp_path, ALICE, "bob@example.invalid")
+    w.run(1)
+    assert w.launches(), "the root ran"
+    assert h.paused_for(tree, "claude"), "another account's pause runs to its expiry"
+
+
+@pytest.mark.parametrize("host,vault", [(ALICE, None), (None, ALICE), (None, None)],
+                         ids=["agent_unknown", "root_unknown", "both_unknown"])
+def test_qf_r6_a_healthy_root_reading_does_not_lift_a_pause_it_cannot_prove_is_its_own(
+        tmp_path, host, vault):
+    w, tree = _oa_world(tmp_path, host, vault)
+    w.run(1)
+    assert w.launches(), "the root ran"
+    assert h.paused_for(tree, "claude"), "an unknown account is not cleared by a reading"

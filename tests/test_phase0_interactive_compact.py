@@ -640,11 +640,10 @@ def test_p0_r8f_2_4_a_pending_usage_limit_wins(session):
     A cap that does not reset makes the limit path end the run (exit 3)."""
     s = session(limit_markers=[{"match": "spend cap reached", "resets": False,
                                 "detail": "spend cap"}])
-    ch.write_transcript(s.transcript, [ch.user("go"), ch.request(OVER),
-                                       ch.limit_message("You have a spend cap reached.")])
-    past = time.time() - 30
-    os.utime(s.transcript, (past, past))
-    code, _ = s.run([{"life": STOPPED_BY}])
+    s.reading(OVER)
+    # OA-R4/OA-R7: the limit is the launched session's own, said after launch.
+    code, _ = s.run([{"life": STOPPED_BY, "appends": [
+        [0.0, [ch.limit_message("You have a spend cap reached.", SID)]]]}])
     assert code == 3
     assert s.calls("compact") == []
     assert s.events("compact_scheduled") == []

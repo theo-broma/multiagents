@@ -237,6 +237,9 @@ budget)
     if [ -f "{code}" ]; then cat "{reading}"; exit "$(cat "{code}")"; fi
     cat "{reading}"; exit 0 ;;
 check) exit 0 ;;
+identity)
+    if [ -f "{identity}" ]; then printf '{{"identity": "%s"}}\\n' "$(cat "{identity}")"; exit 0; fi
+    exit 64 ;;
 *) exit 64 ;;
 esac
 """
@@ -274,7 +277,8 @@ class Project:
             lines += [f"  {name}:", "    bin: sh", f"    script: {name}.sh"]
             script = STUB_SCRIPT.format(calls=self.work / f"{name}.calls",
                                         reading=self.work / f"{name}.json",
-                                        code=self.work / f"{name}.code")
+                                        code=self.work / f"{name}.code",
+                                        identity=self.work / f"{name}.identity")
             path = self.config / "providers" / f"{name}.sh"
             path.write_text(script)
             path.chmod(0o755)
@@ -305,6 +309,15 @@ class Project:
             code_file.unlink(missing_ok=True)
         else:
             code_file.write_text(str(exit_code))
+
+    def identity(self, name: str, who: str | None) -> None:
+        """What the stub's `identity` action answers (None: it fails, so the
+        account is unknown). The stub answers the same for every route."""
+        path = self.work / f"{name}.identity"
+        if who is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(who)
 
     def script_calls(self, name: str) -> int:
         path = self.work / f"{name}.calls"

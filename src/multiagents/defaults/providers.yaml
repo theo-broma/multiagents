@@ -516,6 +516,8 @@ providers:
     # to process liveness and tree activity.
     transcript:
       dir: "~/.claude/projects/{slug}"
+      # A host profile replaces this root when budget_profile_env resolves.
+      profile_root: "~/.claude"
       glob: "*.jsonl"
       # Closed turns may be resumed by the driver's scheduler hold signal.
       # First matching rule on the last relevant transcript record wins.

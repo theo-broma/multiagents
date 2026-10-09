@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import compact_return, gitops, procs, safepoint, scripts
+from . import compact_return, gitops, procs, root_accounts, safepoint, scripts
 from .budget import read_all, reset_label
 from .config import limit_number, shipped_limits
 from .executor import executor_for
@@ -387,6 +387,58 @@ def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
     return _driver_running(paths, role, same_family=False)
 
 
+
+def _root_launch(name, provider, executor, action, config_dir, project_config, extra_env=None):
+    """Use the script's launch arguments, with the driver owning the CLI child.
+
+    An optional command action keeps argument construction in the provider
+    plugin and lets the parent observe the actual launch boundary. Overrides
+    predating the action keep their existing script launch.
+    """
+    built = scripts.exec_action(name, provider, executor, action, config_dir,
+                                project_config, extra_env=extra_env)
+    if built is None or not getattr(provider, "bin", ""):
+        return built
+    code, out, _ = scripts.run_action(name, provider, executor, "launch-command",
+                                      config_dir, project_config, timeout=60,
+                                      extra_env=extra_env)
+    if code == scripts.UNIMPLEMENTED:
+        return built
+    if code != 0:
+        raise RuntimeError(f"cannot build the root launch for {name} (exit {code})")
+    argv = json.loads(out)
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+        raise ValueError(f"invalid launch command for {name}")
+    return argv, built[1]
+
+
+
+def _pending_root_spec(paths, config, role, spec):
+    """Finish an interrupted switch before starting another manual run."""
+    if spec is None:
+        return None
+    state = root_accounts.record(paths, role)
+    if not state or state["phase"] == "resumed":
+        return spec
+    session = (_launch_read(paths, f"{role}.session", 4096) or "").strip()
+    if state["session"] != session or state["target"] not in (getattr(spec, "switch_to", []) or []):
+        return spec
+    providers = load_providers(config.providers)
+    candidate = providers.get(state["target"])
+    if candidate is None:
+        return spec
+    reading = root_accounts.host_budget(state["target"], candidate, config, fetch=False)
+    reserve = float(config.project.get("quota_handover", {}).get("reserve_fraction", 0.15))
+    if (reading is None or not reading.known or reading.stale or reading.headroom is None
+            or reading.headroom < reserve or reading.stale_seconds is None
+            or reading.stale_seconds > 900):
+        return spec
+    from . import auth
+    checked = auth.check(state["target"], candidate, LocalExecutor(),
+                         global_config_dir(), paths.config, profile=auth.HOST)
+    return replace(spec, provider=state["target"]) if checked.ok else spec
+
+
 def _launch_agent(paths, config, role: str, resume: bool,
                   unattended: int = 0, supervise: bool = True,
                   force: bool = False, unclean: bool = False) -> int:
@@ -399,7 +451,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
     """
     # The orchestrator's brief is team-dependent; the initializer's never is,
     # because it is the agent that decides which team comes next.
-    spec = _launched_spec(config, role, config.team)
+    spec = _pending_root_spec(paths, config, role, _launched_spec(config, role, config.team))
     if spec is None:
         print(f"No agent in agents.yaml is marked `launch: true, role: {role}`.",
               file=sys.stderr)
@@ -431,7 +483,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
         print(f"{role} provider {spec.provider!r} is unavailable", file=sys.stderr)
         return 2
 
-    executor = executor_for(paths, config, providers)(spec.provider)
+    executor = LocalExecutor()
     problem = _auth_problem(paths, config, spec)
     if problem:
         print(f"not ready: {problem}", file=sys.stderr)
@@ -457,8 +509,22 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # that already has a transcript would collide with the session it names.
     context["MULTIAGENTS_SESSION_ID"] = _role_session_id(
         paths, role, rotate=not resume)
+    if resume:
+        try:
+            root_accounts.recover(paths, providers, role, spec.provider,
+                                  context["MULTIAGENTS_SESSION_ID"])
+        except (OSError, ValueError):
+            print(f"{role}: cannot safely recover the newer session; not launching.", file=sys.stderr)
+            return 3
     _launch_write(paths, marker, str(time.time()))
-    _driver_node(paths, role, spec, context["MULTIAGENTS_SESSION_ID"])
+    interrupted = root_accounts.record(paths, role)
+    recovering = (interrupted and interrupted["phase"] != "resumed"
+                  and interrupted["target"] == spec.provider
+                  and interrupted["session"] == context["MULTIAGENTS_SESSION_ID"])
+    if not recovering:
+        _driver_node(paths, role, spec, context["MULTIAGENTS_SESSION_ID"])
+        root_accounts.write_record(paths, role, spec.provider, spec.provider,
+                                   context["MULTIAGENTS_SESSION_ID"], "resumed")
 
     code, out, err = scripts.run_action(
         spec.provider, provider, executor, "prepare",
@@ -471,7 +537,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
     if out.strip():
         print(f"prepare      {out.strip()}")
 
-    built = scripts.exec_action(spec.provider, provider, executor, "launch",
+    built = _root_launch(spec.provider, provider, executor, "launch",
                                 global_config_dir(), paths.config, extra_env=context)
     if built is None:
         print(f"no script for provider {spec.provider!r}", file=sys.stderr)
@@ -496,6 +562,10 @@ def _launch_agent(paths, config, role: str, resume: bool,
             return _supervise(paths, config, role, spec, provider, executor,
                               context, unattended)
         if not supervise:
+            root_accounts.launch_line(paths, config, spec, provider, supervised=False)
+            _launch_write(paths, f"{role}.observation.json", json.dumps({
+                "session": context["MULTIAGENTS_SESSION_ID"], "provider": spec.provider,
+                "offset": root_accounts.transcript_size(provider, paths, context["MULTIAGENTS_SESSION_ID"])}))
             # Exec: this process is replaced, so a separate watcher is the only
             # way anything can report on the session.
             _start_supervisor(paths, role, os.getpid())
@@ -900,9 +970,13 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     # decision can be made about it.
     limit: dict = {}
     warned: list = []
+    baseline = 0
+    handover = _RootHandover(paths, config, role, spec, context)
 
     def _limit_hit() -> bool:
-        found = watchdog.limit_reached(provider, paths.root)
+        handover.confirm(spec, provider, baseline)
+        found = watchdog.root_limit_reached(
+            provider, paths.root, context.get("MULTIAGENTS_SESSION_ID", ""), baseline)
         if found is None:
             warned.clear()
             return False
@@ -962,6 +1036,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         was in flight at the stop, and with the CW-R4 return message when
         something was.
         """
+        nonlocal baseline, argv
         while True:
             holds, message = signals.peek()
             if message:
@@ -969,6 +1044,13 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                     p for p in (run_env.get("MULTIAGENTS_RESUME_PROMPT", ""), message) if p)}
                 delivery[:] = [(holds, _transcript_mark(
                     paths, provider, context.get("MULTIAGENTS_SESSION_ID", "")))]
+            baseline = root_accounts.transcript_size(
+                provider, paths, context.get("MULTIAGENTS_SESSION_ID", ""))
+            root_accounts.launch_line(paths, config, spec, provider)
+            handover.launching()
+            _launch_write(paths, f"{role}.observation.json", json.dumps({
+                "session": context.get("MULTIAGENTS_SESSION_ID", ""),
+                "offset": baseline, "provider": getattr(spec, "provider", "")}))
             began = time.monotonic()
             compaction.launched()
             stopped: list = []
@@ -978,6 +1060,15 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                 code = _run_attached(argv, run_env, stalled=_stalled)
             finally:
                 compaction.detached()
+            refused = handover.confirm(spec, provider, baseline, code)
+            if refused:
+                launch = _root_launch(spec.provider, provider, executor, "launch",
+                    global_config_dir(), paths.config, extra_env=context)
+                argv, rebuilt = launch
+                run_env = {**rebuilt, **{k: v for k, v in run_env.items()
+                                        if k.startswith("MULTIAGENTS_SAFE")}}
+                compaction.release()
+                continue
             _signal_delivered(code)
             stopped_by_driver[:] = stopped
             if signal_stop and stopped:
@@ -1002,6 +1093,19 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                 run_env["MULTIAGENTS_RESUME_PROMPT"] = note
             sys.stdout.flush()
 
+    def _account_limit(attempt):
+        nonlocal spec, provider, executor, compaction, argv, env
+        stop, spec, provider, executor = handover.limit(spec, provider, limit, attempt)
+        if stop is None and handover.pending:
+            compaction = _AttachedCompaction(paths, config, spec, provider, executor, context)
+            argv, rebuilt = _root_launch(
+                spec.provider, provider, executor, "launch", global_config_dir(),
+                paths.config, extra_env=context)
+            env = {**rebuilt, **{k: v for k, v in env.items()
+                                if k.startswith("MULTIAGENTS_SAFE")}}
+            warned.clear()
+        return stop
+
     code, ran_for = _attached(env)
     if limit and not stopped_by_driver:
         # The user's own exit wins over a usage-limit stop too (R8f.19, the
@@ -1025,7 +1129,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     crash_override = False
     limit_waits_before_loop = 0
     if limit:
-        stop = _limit_stop(paths, config, spec, limit)
+        stop = _account_limit(1)
         if stop is not None:
             return stop
         limit_waits_before_loop = 1
@@ -1096,15 +1200,15 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                 print("\nstopped.")
                 return 0
 
-        held = _orchestrator_hold(paths, config)
+        held = _orchestrator_hold(paths, config, spec, role)
         if held is not None:
             detail, resets_at = held
             print(f"\n{detail}")
-            if not _wait_for_reset(paths, config, resets_at):
+            if not _wait_for_reset(paths, config, resets_at, spec=spec, role=role):
                 return 3
 
-        retry_env = {**env, "MULTIAGENTS_RESUME": "1",
-                     "MULTIAGENTS_RESUME_PROMPT": RESUME_PROMPT}
+        retry_env = {**env, "MULTIAGENTS_RESUME": "0" if handover.fresh else "1",
+                     "MULTIAGENTS_RESUME_PROMPT": QUOTA_RECOVERY_PROMPT if handover.fresh else RESUME_PROMPT}
         limit.clear()
         code, ran_for = _attached(retry_env)
         if limit and not stopped_by_driver:
@@ -1122,7 +1226,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                       f"{limit_waits - 1} waits; stopping. `multiagents run` "
                       f"picks it back up.")
                 return 3
-            stop = _limit_stop(paths, config, spec, limit, attempt=limit_waits)
+            stop = _account_limit(limit_waits)
             if stop is not None:
                 return stop
             crash = False
@@ -1248,7 +1352,7 @@ def _auth_problem(paths, config, spec) -> str:
     provider = providers.get(spec.provider)
     if provider is None:
         return ""                             # a different check already says so
-    executor = executor_for(paths, config, providers)(spec.provider)
+    executor = LocalExecutor()
     state = auth_mod.check(spec.provider, provider, executor,
                            global_config_dir(), paths.config,
                            profile=auth_mod.HOST)
@@ -1320,13 +1424,14 @@ def _supervise(paths, config, role, spec, provider, executor,
     # Set once the provider says it cannot compact; not asked again this run.
     compact_unsupported: list = []
     signals = _HoldSignals(paths, config, role)
+    handover = _RootHandover(paths, config, role, spec, context)
 
     for turn in range(1, max_turns + 1):
-        held = _orchestrator_hold(paths, config)
+        held = _orchestrator_hold(paths, config, spec, role)
         if held is not None:
             detail, resets_at = held
             print(f"\n{detail}")
-            if not _wait_for_reset(paths, config, resets_at):
+            if not _wait_for_reset(paths, config, resets_at, spec=spec, role=role):
                 return 3
 
         before = _activity_fingerprint(tree)
@@ -1337,20 +1442,26 @@ def _supervise(paths, config, role, spec, provider, executor,
         session = context.get("MULTIAGENTS_SESSION_ID", "")
         note = _peek_return_message(paths, role, session, tree)
         holds, signal_message = signals.peek()
-        prompt = "\n\n".join(p for p in (note, signal_message, NUDGE) if p)
+        prompt = "\n\n".join(p for p in (context.get("MULTIAGENTS_RESUME_PROMPT", ""),
+                                             note, signal_message, NUDGE) if p)
         mark = _transcript_mark(paths, provider, session) if note or holds else None
         turn_env = {**context, "MULTIAGENTS_UNATTENDED": "1",
                     "MULTIAGENTS_NUDGE": prompt,
                     # After the first turn there is certainly a session to
                     # resume, whatever the launch marker said going in.
-                    "MULTIAGENTS_RESUME": "1" if turn > 1 else context["MULTIAGENTS_RESUME"]}
-        built = scripts.exec_action(spec.provider, provider, executor, "launch",
+                    "MULTIAGENTS_RESUME": "1" if turn > 1 and not handover.fresh else context["MULTIAGENTS_RESUME"]}
+        built = _root_launch(spec.provider, provider, executor, "launch",
                                     global_config_dir(), paths.config,
                                     extra_env=turn_env)
         argv, env = built
         print(f"\n─── turn {turn}/{max_turns} "
               f"{time.strftime('%H:%M:%S')} " + "─" * 30)
         sys.stdout.flush()
+        root_accounts.launch_line(paths, config, spec, provider)
+        baseline = root_accounts.transcript_size(provider, paths, session)
+        handover.launching()
+        _launch_write(paths, f"{role}.observation.json", json.dumps({
+            "session": session, "offset": baseline, "provider": getattr(spec, "provider", "")}))
         child = None
         try:
             child = subprocess.Popen(argv, env=env)
@@ -1365,7 +1476,7 @@ def _supervise(paths, config, role, spec, provider, executor,
                     code = child.wait(timeout=STALL_POLL_SECONDS)
                     break
                 except subprocess.TimeoutExpired:
-                    if watchdog.limit_reached(provider, paths.root):
+                    if watchdog.root_limit_reached(provider, paths.root, session, baseline):
                         child.terminate()
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             child.wait(timeout=20)
@@ -1389,14 +1500,18 @@ def _supervise(paths, config, role, spec, provider, executor,
         if holds and _delivered(mark, _transcript_mark(paths, provider, session), code):
             signals.delivered(holds)
 
-        limit = watchdog.limit_reached(provider, paths.root)
+        if handover.confirm(spec, provider, baseline, code):
+            continue
+
+        limit = watchdog.root_limit_reached(provider, paths.root, session, baseline)
         if limit:
             limit_waits += 1
             if limit_waits > int(_limit_number(config, "limit_max_waits", zero_ok=True)):
                 print(f"\n{spec.provider} is still limited after "
                       f"{limit_waits - 1} waits; stopping.")
                 return 3
-            stop = _limit_stop(paths, config, spec, limit, attempt=limit_waits)
+            stop, spec, provider, executor = handover.limit(spec, provider, limit, limit_waits)
+            compact_unsupported.clear()
             if stop is not None:
                 return stop
             # Not a failed turn: nothing ran. `failures` counts a CLI that
@@ -1425,6 +1540,8 @@ def _supervise(paths, config, role, spec, provider, executor,
             continue
 
         failures = 0
+        handover.tried.clear()
+        handover.exhausted.clear()
         # Judged before compacting: the events a compaction writes are not
         # activity, and must not make an idle turn look productive.
         idle = _activity_fingerprint(tree) == before
@@ -1676,28 +1793,26 @@ def _activity_fingerprint(tree) -> tuple:
             sum(1 for n in nodes.values() if n.get("status") == "merged"),
             len(data.get("tickets", [])), len(data.get("questions", [])))
 
-def _orchestrator_hold(paths, config) -> tuple[str, float | None] | None:
+def _orchestrator_hold(paths, config, spec=None, role="orchestrator") -> tuple[str, float | None] | None:
     """Is the orchestrator's own provider out of headroom? `(why, until)`.
 
     Checked before launching rather than after failing, because a CLI that has
     run out of quota reports it as an ordinary error with no reset time in it,
     and the user is left guessing whether the install is broken.
     """
-    spec = _launched_spec(config, "orchestrator")
+    spec = spec or _pending_root_spec(paths, config, role, _launched_spec(config, role))
     if spec is None:
         return None
     providers = load_providers(config.providers)
     provider = providers.get(spec.provider)
     if provider is None:
         return None
-    executor_of = executor_for(paths, config, providers)
-    budgets = read_all({spec.provider: provider}, executor_of,
-                       global_config_dir(), paths.config, {}, {}, use_cache=False)
-    budget = budgets.get(spec.provider)
+    budget = root_accounts.host_budget(spec.provider, provider, config)
     if budget is None:
         return None
     if budget.usable:
-        Tree(paths.tree_file, paths.events_file).clear_quota({spec.provider})
+        if budget.known and not budget.stale:
+            root_accounts.clear_agent_quota(paths, config, providers, spec.provider)
         return None
     window = None
     if budget.windows:
@@ -1708,12 +1823,13 @@ def _orchestrator_hold(paths, config) -> tuple[str, float | None] | None:
               if budget.source and budget.stale_seconds is not None else
               f"; read via {budget.source}" if budget.source else "")
     return (f"paused       {spec.provider} has no headroom for the "
-            f"orchestrator{window_bit}{when}{age_bit}. "
+            f"{role}{window_bit}{when}{age_bit}. "
             f"Run `multiagents refresh-quota {spec.provider}` to re-check now.",
             budget.cooldown_until)
 
 
-def _wait_for_reset(paths, config, until: float | None, poll: int = 120) -> bool:
+def _wait_for_reset(paths, config, until: float | None, poll: int = 120, *,
+                    spec=None, role="orchestrator") -> bool:
     """Block until the orchestrator's provider has headroom again."""
     print("             waiting — Ctrl-C to stop\n")
     while True:
@@ -1724,7 +1840,7 @@ def _wait_for_reset(paths, config, until: float | None, poll: int = 120) -> bool
             return False
         from .budget import invalidate_cache
         invalidate_cache()
-        if _orchestrator_hold(paths, config) is None:
+        if _orchestrator_hold(paths, config, spec, role) is None:
             print("headroom is back; launching.\n")
             return True
         stamp = time.strftime("%H:%M:%S")
@@ -1745,6 +1861,7 @@ def _clear_limit_pause(paths, spec) -> None:
     """
     if not sys.stdin.isatty():
         return                  # no human here; the pause was not for a script
+    root_accounts.clear_limit(paths, spec.role or "orchestrator", spec.provider)
     tree = Tree(paths.tree_file, paths.events_file)
     state = tree.pause_state()
     if state and spec.provider in (state.get("providers") or []):
@@ -1760,11 +1877,8 @@ def _provider_reset_at(paths, config, provider_name: str) -> float | None:
         provider = providers.get(provider_name)
         if provider is None:
             return None
-        budgets = read_all({provider_name: provider},
-                           executor_for(paths, config, providers),
-                           global_config_dir(), paths.config, {}, {},
-                           use_cache=False)
-        stamp = getattr(budgets.get(provider_name), "resets_at", None)
+        reading = root_accounts.host_budget(provider_name, provider, config)
+        stamp = getattr(reading, "resets_at", None)
         if not stamp:
             return None
         from datetime import datetime
@@ -1777,20 +1891,19 @@ def _provider_reset_at(paths, config, provider_name: str) -> float | None:
 def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | None:
     """Act on a provider limit the CLI reported. `None` = worth trying again.
 
-    Two limits, two answers. A window that resets is a wait: the tree is paused
-    for that provider so nothing is spawned into a wall, and the caller retries
-    afterwards. A spend cap does not reset — no amount of waiting adds money to
+    Two limits, two answers. A window that resets is a wait on the root
+    profile; admission pauses only agents sharing that account. A spend cap
+    does not reset — no amount of waiting adds money to
     an account — so it stops the run loudly and leaves the reason on record
     rather than burning the restart budget rediscovering it.
     """
-    tree = Tree(paths.tree_file, paths.events_file)
     detail = limit.get("detail") or "the provider reported a limit"
     said = (limit.get("said") or "").strip()
 
     if not limit.get("resets", True):
         hours = _limit_number(config, "spend_limit_pause_hours")
-        tree.pause(tree_now() + hours * 3600,
-                   f"{spec.provider}: {detail}", [spec.provider], cause="spend_limit")
+        root_accounts.write_limit(paths, spec.role or "orchestrator", spec.provider,
+                                  detail, tree_now() + hours * 3600, "spend_limit")
         print(f"\n{spec.provider} has stopped: {detail}.")
         if said:
             print(f"  it said: {said}")
@@ -1813,7 +1926,8 @@ def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | Non
         wait = max(60.0, min(exact - time.time() + 30, 6 * 3600))
         print(f"\n{spec.provider} says its window resets at "
               f"{time.strftime('%H:%M', time.localtime(exact))}.")
-    tree.pause(tree_now() + wait, f"{spec.provider}: {detail}", [spec.provider], cause="quota")
+    root_accounts.write_limit(paths, spec.role or "orchestrator", spec.provider,
+                              detail, tree_now() + wait, "quota")
     print(f"\n{spec.provider} has stopped: {detail}.")
     if said:
         print(f"  it said: {said}")
@@ -1824,5 +1938,139 @@ def _limit_stop(paths, config, spec, limit: dict, attempt: int = 1) -> int | Non
     except KeyboardInterrupt:
         print("\nstopped waiting.")
         return 0
-    tree.resume("the usage window it was waiting for has passed")
+    while _orchestrator_hold(paths, config, spec, spec.role or "orchestrator"):
+        try:
+            time.sleep(120)
+        except KeyboardInterrupt:
+            print("\nstopped waiting.")
+            return 0
     return None
+
+
+QUOTA_RECOVERY_PROMPT = (
+    "This session moved for quota and starts fresh. Rebuild your state from "
+    "BRIEF.md, the agent tree, open questions and budget, then continue the work."
+)
+
+
+class _RootHandover:
+    """One root limit episode, shared by attached and unattended drivers."""
+
+    def __init__(self, paths, config, role, spec, context):
+        self.paths, self.config, self.role = paths, config, role
+        configured = (_launched_spec(config, role, getattr(config, "team", ""))
+                      if getattr(config, "agents", None) else None)
+        self.configured = configured or spec
+        self.context = context
+        self.providers = load_providers(getattr(config, "providers", {}))
+        self.tried = set()
+        self.exhausted = set()
+        state = root_accounts.record(paths, role)
+        self.pending = ((state["source"], state["target"], state["session"])
+                        if state and state["phase"] != "resumed"
+                        and state["target"] == getattr(spec, "provider", "")
+                        and state["session"] == context.get("MULTIAGENTS_SESSION_ID") else None)
+        self.fresh = False
+
+    def limit(self, spec, provider, limit, attempt):
+        if not limit.get("resets", True) or not getattr(self.configured, "switch_to", []):
+            stop = _limit_stop(self.paths, self.config, spec, limit, attempt)
+            return stop, spec, provider, LocalExecutor()
+        self.tried.add(spec.provider)
+        exact = _provider_reset_at(self.paths, self.config, spec.provider)
+        wait = (max(60.0, min(exact - time.time() + 30, 6 * 3600)) if exact else
+                _limit_number(self.config, "limit_wait_seconds") * min(attempt, 4))
+        root_accounts.write_limit(self.paths, self.role, spec.provider,
+                                  limit.get("detail") or "usage limit", tree_now() + wait, "quota")
+        who = root_accounts.identity(spec.provider, provider, self.paths)
+        if who:
+            self.exhausted.add(who.casefold())
+        names = list(dict.fromkeys([*self.configured.switch_to, self.configured.provider]))
+        reserve = float(self.config.project.get("quota_handover", {}).get("reserve_fraction", 0.15))
+        while True:
+            resets = []
+            for name in names:
+                candidate = self.providers[name]
+                reading = root_accounts.host_budget(name, candidate, self.config, fetch=False)
+                reset = _provider_reset_at(self.paths, self.config, name)
+                if reset is not None:
+                    resets.append(reset)
+                if name in self.tried or reading is None or not reading.known or reading.stale:
+                    continue
+                if reading.headroom is None or reading.headroom < reserve:
+                    continue
+                if reading.stale_seconds is None or reading.stale_seconds > 900:
+                    continue
+                from . import auth
+                state = auth.check(name, candidate, LocalExecutor(), global_config_dir(),
+                                   self.paths.config, profile=auth.HOST)
+                if state.status != "authenticated" or not candidate.available():
+                    continue
+                identity = root_accounts.identity(name, candidate, self.paths)
+                if identity and identity.casefold() in self.exhausted:
+                    continue
+                self.tried.add(name)
+                target = replace(self.configured, provider=name)
+                if name != spec.provider:
+                    self._install(spec, target, provider, candidate)
+                return None, target, candidate, LocalExecutor()
+            exact = min(resets) if resets else None
+            margin = _limit_number(self.config, "quota_reset_margin_seconds")
+            wait = (max(60.0, min(exact - time.time() + margin + 30, 6 * 3600)) if exact else
+                    _limit_number(self.config, "limit_wait_seconds") * min(attempt, 4))
+            print(f"\n{spec.provider} has stopped: {limit.get('detail', 'usage limit')}. "
+                  f"No root account qualifies; waiting {wait / 60:.0f} min — Ctrl-C to stop.")
+            sys.stdout.flush()
+            try:
+                time.sleep(wait)
+            except KeyboardInterrupt:
+                print("\nstopped waiting.")
+                return 0, spec, provider, LocalExecutor()
+            # A reset starts a fresh episode, but admission is always checked again.
+            self.tried.clear()
+            self.exhausted.clear()
+
+    def _install(self, source, target, source_provider, target_provider):
+        session = self.context["MULTIAGENTS_SESSION_ID"]
+        root_accounts.write_record(self.paths, self.role, source.provider,
+                                   target.provider, session, "installing")
+        self.fresh = False
+        try:
+            root_accounts.install(self.paths, source_provider, target_provider, session)
+            self.context["MULTIAGENTS_RESUME"] = "1"
+            print(f"{self.role}: moved for quota to {target.provider}; resuming session {session}.")
+        except (OSError, ValueError):
+            self._fresh(target_provider)
+            session = self.context["MULTIAGENTS_SESSION_ID"]
+        self.pending = (source.provider, target.provider, session)
+
+    def _fresh(self, provider):
+        self.context["MULTIAGENTS_SESSION_ID"] = _role_session_id(self.paths, self.role, rotate=True)
+        self.context["MULTIAGENTS_RESUME"] = "0"
+        self.context["MULTIAGENTS_RESUME_PROMPT"] = QUOTA_RECOVERY_PROMPT
+        self.fresh = True
+        root_accounts.safe_fresh_directory(self.paths, provider)
+        print(f"{self.role}: session moved for quota; starting a fresh session to rebuild state.")
+
+    def launching(self):
+        if self.pending:
+            source, target, _ = self.pending
+            self.pending = (source, target, self.context["MULTIAGENTS_SESSION_ID"])
+            root_accounts.write_record(self.paths, self.role, *self.pending, "launched")
+
+    def confirm(self, spec, provider, baseline, code=None):
+        if not self.pending:
+            return False
+        session = self.context["MULTIAGENTS_SESSION_ID"]
+        if root_accounts.transcript_size(provider, self.paths, session) > baseline:
+            root_accounts.write_record(self.paths, self.role, *self.pending, "resumed")
+            _driver_node(self.paths, self.role, spec, session)
+            self.pending = None
+            self.fresh = False
+            self.context.pop("MULTIAGENTS_RESUME_PROMPT", None)
+            return False
+        if code is not None and code != 0 and not self.fresh:
+            # No exchange reached a resumed session: the CLI refused the copy.
+            self._fresh(provider)
+            return True
+        return False

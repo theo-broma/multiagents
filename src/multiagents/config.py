@@ -569,6 +569,7 @@ class AgentSpec:
     priorities: list | None = None
     quota_handover: dict[str, Any] = field(default_factory=dict)
     launch: bool = False
+    switch_to: list[str] = field(default_factory=list)
     # Paths this agent may not MODIFY, as gitignore-style globs. Adding a new
     # file is always allowed; changing, deleting or renaming a matching one is
     # reverted before its branch merges. `None` means "use the project default"
@@ -1375,6 +1376,14 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
     }
     for spec in agents.values():
         validate_promotion_settings(spec.quota_handover)
+        if not isinstance(spec.switch_to, list):
+            raise ValueError(f"agent {spec.name}: switch_to must be a list")
+        for target in spec.switch_to:
+            if not isinstance(target, str) or target not in providers:
+                raise ValueError(f"agent {spec.name}: switch_to names unknown provider {target!r}")
+            source = providers.get(spec.provider)
+            if source is None or providers[target].bin != source.bin:
+                raise ValueError(f"agent {spec.name}: switch_to {target!r} must use the same CLI")
         if spec.priorities is not None:
             priority_entries(spec, providers)
     _validate_routes(agents_raw, providers)

@@ -259,12 +259,11 @@ def test_cw_r1_interactive_a_probe_that_says_no_still_stops_nothing_with_work_in
 
 def test_cw_r1_interactive_a_pending_usage_limit_still_wins_with_work_in_flight(cw):
     s = cw(limit_markers=LIMIT_CAP)
-    ch.write_transcript(s.transcript, [ch.user("go"), ch.request(OVER),
-                                       ch.limit_message("You have a spend cap reached.")])
-    past = time.time() - 30
-    os.utime(s.transcript, (past, past))
+    s.reading(OVER)
     s.node("running")
-    code, _ = s.run([{"life": STOPPED_BY}])
+    # OA-R4/OA-R7: the limit is the launched session's own, said after launch.
+    code, _ = s.run([{"life": STOPPED_BY, "appends": [
+        [0.0, [ch.limit_message("You have a spend cap reached.", ic.SID)]]]}])
     assert code == 3
     assert s.calls("compact") == []
     assert s.events("compact_scheduled") == []
@@ -376,7 +375,7 @@ def test_cw_r1_unattended_never_after_a_limited_turn_even_with_work_in_flight(lo
     lp.reading(uc.OVER)
     add_node(lp, "running")
     code = lp.run([{**uc.PRODUCTIVE,
-                    "append": [ch.limit_message("You have a spend cap reached.")]}],
+                    "append": [ch.limit_message("You have a spend cap reached.", uc.SID)]}],
                   max_turns=2)
     assert code == 3
     assert lp.actions() == [LAUNCH]
@@ -997,11 +996,10 @@ def test_cw_r6_a_failed_probe_is_reported_with_its_exit_once(cw, exit_code):
 
 def test_cw_r6_a_pending_usage_limit_is_reported_once(cw):
     s = cw(limit_markers=LIMIT_CAP)
-    ch.write_transcript(s.transcript, [ch.user("go"), ch.request(OVER),
-                                       ch.limit_message("You have a spend cap reached.")])
-    past = time.time() - 30
-    os.utime(s.transcript, (past, past))
-    code, _ = s.run([{"life": STOPPED_BY}])
+    s.reading(OVER)
+    # OA-R4/OA-R7: the limit is the launched session's own, said after launch.
+    code, _ = s.run([{"life": STOPPED_BY, "appends": [
+        [0.0, [ch.limit_message("You have a spend cap reached.", ic.SID)]]]}])
     assert code == 3
     events = s.events("compact_blocked")
     assert [e.get("reason") for e in events] == ["usage_limit_pending"], events
@@ -1014,7 +1012,7 @@ def test_cw_r6_the_usage_limit_outranks_disabled(cw):
     s = cw(limit_markers=LIMIT_CAP)
     s.reading(OVER)
     code, _ = s.run(stopped_then({"life": KEPT, "appends": [
-        [0.0, [ch.limit_message("You have a spend cap reached.")]]]}),
+        [0.0, [ch.limit_message("You have a spend cap reached.", ic.SID)]]]}),
         compact={"exit": 1, "stderr": "boom\n"})
     assert code == 3
     reasons = [e.get("reason") for e in s.events("compact_blocked")]
