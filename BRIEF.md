@@ -5374,3 +5374,10 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **OC:** nd-fb2d2d29's relaunch ignored the `task` argument, and the run ag-e0d392 started from the old task without WIP 9b42307a. That run was stopped, and the node is terminal now. New node **nd-27019c40** (implementer-deep, codex-b) resumes from 9b42307a.
   - **SC:** loop relaunched. Its worker task was updated before launch to merge WIP a6d56478 (admission deepcopy) and finish.
   - **RD5 (new):** relaunch_node accepts `task` but ignores it. Researcher nd-de403912 is looking for the root cause and an automatic RD2 remedy: start a relaunch from the dead run's WIP tip.
+- **RD5 root cause** (researcher ag-c6a142): the MCP wrapper `relaunch_node` in server.py:2388-2395 has no `task` parameter. control.py:120-126 would apply it, but the value never reaches it.
+  - Fix: add the parameter, and apply the task and pins in the same transaction as the reopen (control.py:63-132).
+  - **RD2 remedy:** a failed run's tip is already captured and validated as `refs/heads/node-results/<attempt>` (results.py:245-313), but only `done` results are integrated (engine.py:1499).
+    - On relaunch, record a one-shot `relaunch_input_commit` from the newest validated failed capture. At launch, override `input_commit` with it (engine.py:594-670).
+    - Hold the node if the ref is missing, the commit is not a descendant of the input, or newer inputs conflict.
+    - Escape hatch: `recover_wip: false`.
+  - Both go into the RD batch spec.
