@@ -5345,3 +5345,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The claude provider does not yet pass `--effort`, neither to spawns nor to the driver launch. Implementer nd-0b457a17 adds it. A reviewer follows, then merge.
   - Until then, opus runs at the CLI default effort.
   - The orchestrator's own effort takes effect at the next driver (re)launch after the merge.
+- effort plumbing nd-0b457a17: first run ag-596b72 failed at launch with codex "workspace routing discovery failed" (RF item). Relaunched pinned to codex-b.
