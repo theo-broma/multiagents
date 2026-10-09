@@ -5368,3 +5368,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - ag-fef27e had found one more live path, a deepcopy in admission preparation.
   - claude is at 97% weekly (resets 10-12), codex at 88% weekly. Keep codex for small tasks only.
   - If OC is still dead at 14:05Z, relaunch nd-fb2d2d29. The SC loop resumes with its worker.
+- 12:27Z: SC worker retry ag-118817 hit the codex-b quota again, so the loop is held. Relaunch nd-a6f0f488 after 14:00Z.
