@@ -5363,3 +5363,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The earlier "anomaly" is explained: generations 1-4 sat on e1cd4087 because those workers were told to confirm only and changed nothing.
 - **Effort plumbing.** ag-967f84 committed 4ff9509a and 404360de. Its NEED_INFO concerns test_core.py:4240, which asserts that claude has no effort flag. Tester nd-d8b3f4dd (ag-ef4123) merges 404360de and rewrites that test. Next: reviewer, then merge_node of the tester's node, which contains everything.
   - Note: ag-967f84 says a process listing printed scheduler RPC token values into its own run log. That log is local and untracked.
+- ~11:30Z: **codex-b quota is exhausted.** Its 5-hour window resets at 13:58Z; weekly it is at 65%.
+  - The OC implementation, ag-572429 (nd-fb2d2d29), and the SC finish, ag-fef27e, both stopped on it. The scheduler has not held them, so they should relaunch after the cooldown. Check after 14:00Z.
+  - ag-fef27e had found one more live path, a deepcopy in admission preparation.
+  - claude is at 97% weekly (resets 10-12), codex at 88% weekly. Keep codex for small tasks only.
+  - If OC is still dead at 14:05Z, relaunch nd-fb2d2d29. The SC loop resumes with its worker.
