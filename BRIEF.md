@@ -5299,3 +5299,6 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **SL** ag-632e68: codex hung for over an hour with no command running; 14 of 25 SL tests red after the merge. Stopped; nd-7866cea2 relaunched. A leaked orphan git-receive-pack (test_gg_r3_boundary_lengths) remains under docker-init; left alone.
 - OA older-tests tester: **nd-8e359878** (on top of ed3dfcac).
 - **TB-R3 merged onto main** as 3eb86b3d (nd-90eaf8df). Reviewer ag-a3a172 approved it, with 267 tests passing. TB-R3 is done.
+- **OA older tests:** tester ag-66550b committed cc4b8143 on top of ed3dfcac. 1031 of 1046 pass. The 14 reds are the expected gaps: the same-account pause through admission, and same-account clearing at QF-R6 startup.
+  - Tester assumptions accepted: the agents' route is the project executor's identity; the pause duration is read from the existing "clears in about" admission refusal.
+  - Test reviewer **nd-701e3492**. Then implementer-deep on top of cc4b8143 closes the gaps, then a reviewer, then the whole chain (impl + tests) is merged.
