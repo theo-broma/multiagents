@@ -5336,3 +5336,12 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - The implementer's counts: 199 OA tests passing, 76 reds on the full suite, all reproduced on main.
   - This adds weight to the queued small item "reviewers report observed results".
 - **OC tests review.** Reviewer ag-d19e90 rejected the suite at 241bda33 for missing coverage of D5 (crash reconciliation), D6 (admission reopens after `in_session`) and D8 (initializer). It judged the harness's loose assumptions acceptable. It could not run the suite: uv timed out in its sandbox. Tester nd-04d2fa51, pinned to codex-b, adds the three. Next: re-review, then the implementer.
+- 2026-10-09, user: **every opus agent, the orchestrator included, on effort medium.**
+  - Done in the untracked .multiagents/config/agents.yaml:
+    - initializer and orchestrator: `effort: medium`;
+    - cartographer: high to medium;
+    - implementer-deep and robustness-tester claude routes: `{model: opus, effort: medium}`;
+    - adversary was already medium.
+  - The claude provider does not yet pass `--effort`, neither to spawns nor to the driver launch. Implementer nd-0b457a17 adds it. A reviewer follows, then merge.
+  - Until then, opus runs at the CLI default effort.
+  - The orchestrator's own effort takes effect at the next driver (re)launch after the merge.
