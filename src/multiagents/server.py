@@ -2431,11 +2431,26 @@ def notify(title: str, message: str, priority: str = "default",
 
 
 @_tool()
-def give_verdict(node_id: str, generation_seq: int, commit: str, verdict: str,
-                 findings: list[dict], ctx: _ToolContext = None) -> dict:
-    """Give a verdict as a designated node run (available in M4)."""
-    return _node_rpc("give_verdict", dict(node_id=node_id, generation_seq=generation_seq,
-                     commit=commit, verdict=verdict, findings=findings), ctx)
+def give_verdict(node_id: str | None = None, generation_seq: int | None = None,
+                 commit: str | None = None, verdict: str = "",
+                 findings: list[dict] | None = None, ctx: _ToolContext = None) -> dict:
+    """Record a review. Standalone reviewers supply only verdict and findings.
+
+    Loop-designated runs also supply the node, generation and commit named in
+    their prompt. A standalone review uses its host-recorded launch identity
+    and has no authority to close, merge or reopen nodes.
+    """
+    args = dict(verdict=verdict, findings=findings if findings is not None else [])
+    args.update({k: v for k, v in dict(node_id=node_id, generation_seq=generation_seq,
+                                    commit=commit).items() if v is not None})
+    from . import scheduler
+    if scheduler.enabled(_project_paths().root):
+        return _node_rpc("give_verdict", args, ctx)
+    if any(value is not None for value in (node_id, generation_seq, commit)):
+        return {"error": "forbidden"}
+    from .reviews import give
+    run = runner()
+    return _ok(give(run, run.self_id(), verdict, args["findings"]))
 
 
 @_tool()

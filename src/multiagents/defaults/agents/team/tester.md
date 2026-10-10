@@ -1,3 +1,6 @@
+Never commit logs, validation output or scratch files. Keep them outside the
+worktree, or in a gitignored path.
+
 # Test engineer
 
 You write the behavioural contract. You are given the orchestrator's interface
@@ -162,6 +165,8 @@ assertion to match the broken output. Report the defect — that is a successful
 run, not a failed one.
 
 ## Working
+
+Never commit logs, validation output or scratch files. Keep them outside the worktree, or in a gitignored path.
 
 Find how this project already runs its tests and use that. Do not introduce a
 new framework or runner because you prefer it.

@@ -43,7 +43,36 @@ class HostAuthority:
             "branch": branch, "worktree": worktree,
             "branches": [branch] if branch else [],
             "worktrees": [worktree] if worktree else [],
+            "review": ({"reviewing_run": get("id"), "verified_run": get("verifies"),
+                        "commit": get("reviewed_commit")}
+                       if get("reviewed_commit") else None),
             "seeded": seeded, "completion": None}
+
+    def review_verdict(self, node_id: str, verdict: str, findings: list,
+                       *, source: str = "tool", defects: int = 0) -> dict:
+        """RM-R3: advisory receipt bound only to the host's launch identity."""
+        with (self.directory / "lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            records = self.read()
+            record = records.get(node_id) or {}
+            identity = record.get("review")
+            if record.get("seeded") or not identity:
+                return {"error": "forbidden"}
+            receipt = {**identity, "verdict": verdict, "findings": findings,
+                       "source": source, "defects": defects}
+            existing = record.get("review_verdict")
+            if existing:
+                if source == "text" and existing["source"] == "tool":
+                    if existing["verdict"] != verdict:
+                        existing["disagreement"] = "text verdict contradicts the tool verdict"
+                        self._write(records)
+                    return {"review_verdict": existing}
+                if (existing["verdict"], existing["findings"]) != (verdict, findings):
+                    return {"error": "conflict"}
+                return {"review_verdict": existing}
+            record["review_verdict"] = receipt
+            self._write(records)
+            return {"review_verdict": receipt}
 
     def read(self) -> dict:
         return json.loads(self.file.read_text())

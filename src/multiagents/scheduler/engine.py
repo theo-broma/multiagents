@@ -19,7 +19,7 @@ import uuid
 
 from .. import procs
 from ..renames import shipped as shipped_renames
-from ..runner import LaunchContext, Runner, VERDICT, admission_block, _run_read
+from ..runner import LaunchContext, Runner, VERDICT, admission_block, _run_read, _control_text
 from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
@@ -665,6 +665,8 @@ class Engine:
                 spec = config.agents[current["agent"]]
                 prepared["readonly_paths"] = list(config.readonly_paths_for(spec))
                 parent = current_nodes.get(current["parent"])
+                if current.get("launch", {}).get("_review_commit"):
+                    prepared["input_commit"] = current["launch"]["_review_commit"]
                 if parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == current["id"]:
                     if not parent["generations"]:
                         self.hold(db, current, "input_conflict", "the loop recorded no generation to review")
@@ -983,7 +985,7 @@ class Engine:
                 run_id = child_runs[-1]["run_id"] if child_runs else None
                 if run_id is not None:
                     verdicts = {match.group(1).lower() for match in
-                                VERDICT.finditer(self._anomaly_text(run_id, tree_nodes))}
+                                VERDICT.finditer(_control_text(self._anomaly_text(run_id, tree_nodes)))}
                     contradictory = "approved" in verdicts and "rejected" in verdicts
                 if contradictory:
                     # A hold (re)written during this very tick — composites

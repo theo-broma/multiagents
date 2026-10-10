@@ -474,6 +474,7 @@ class Node:
     # moment two checks run at once or a branch is reused, and the orchestrator
     # already knows the answer at the point of asking.
     verifies: str = ""
+    reviewed_commit: str = ""
     # A verifier's declared outcome: "approved" | "rejected" | "" (none given).
     verdict: str = ""
     defects: int = 0

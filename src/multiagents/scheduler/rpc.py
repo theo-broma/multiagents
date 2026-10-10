@@ -175,6 +175,10 @@ class Service:
         if op == "give_verdict":
             if "verdict" not in permissions:
                 raise Refused("forbidden")
+            recorded = self.engine.runner.authority.get(subject) if self.engine and self.engine.runner.authority else None
+            if recorded and not recorded.get("seeded") and recorded.get("review"):
+                model.check_fields(args, {"verdict", "findings"}, set())
+                return
             from .engine import attempts
             if db is None:
                 with self.store.transaction(write=False) as connection:
@@ -361,6 +365,21 @@ class Service:
         if op == "start_agent":
             allowed = {"agent", "task", "urgent", "model", "timeout", "workdir", "verifies", "budget_tag", "budget_tokens"}
             model.check_fields(args, allowed, set())
+            reviewed_commit = ""
+            if args.get("verifies"):
+                if args.get("workdir"):
+                    invalid("workdir cannot be overridden alongside verifies")
+                if not self.engine:
+                    invalid("review target cannot be resolved without the host runner")
+                from ..reviews import resolve
+                from ..gitops import GitError
+                try:
+                    reviewed_commit = resolve(self.engine.runner, args["verifies"],
+                                              caller=None if principal["root"] else principal["subject"],
+                                              visible_nodes=None if principal["root"] else model.subtree(nodes, principal["node_id"]),
+                                              db=db)
+                except (ValueError, PermissionError, GitError, OSError) as exc:
+                    invalid(f"cannot resolve review target: {exc}")
             fields = {"kind": "simple", "agent": args.get("agent"), "task": args.get("task"),
                       "urgent": args.get("urgent", False), "plan_revision": plan_revision}
             if args.get("model"):
@@ -368,6 +387,8 @@ class Service:
             made = self.dispatch(db, principal, "create_node", fields, nodes, config=config)
             node = nodes[made["id"]]
             node["launch"] = {k: v for k, v in args.items() if k in allowed - {"agent", "task", "urgent", "model"}}
+            if reviewed_commit:
+                node["launch"]["_review_commit"] = reviewed_commit
             self.store.save_node(db, node)
             return self.view(node, plan_revision + 1)
         if op == "scheduler_status":
@@ -445,6 +466,15 @@ class Service:
         if op in {"merge_node", "dispose_node", "give_verdict"}:
             from .engine import attempts
             from ..tree import now
+            if op == "give_verdict":
+                from ..reviews import give
+                record = self.engine.runner.authority.get(principal["subject"]) if self.engine and self.engine.runner.authority else None
+                if record and not record.get("seeded") and record.get("review"):
+                    model.check_fields(args, {"verdict", "findings"}, set())
+                    receipt = give(self.engine.runner, principal["subject"], args.get("verdict"), args.get("findings", []))
+                    if receipt.get("error"):
+                        raise Refused(receipt["error"], detail=receipt.get("detail", ""))
+                    return receipt
             node = nodes.get(args.get("node_id" if op == "give_verdict" else "id"))
             if node is None:
                 raise Refused("not_found")
@@ -457,15 +487,15 @@ class Service:
                     raise Refused("forbidden")
                 if any(args.get(k) != review[k] for k in ("node_id", "generation_seq", "commit")):
                     raise Refused("forbidden")
-                if not isinstance(args.get("verdict"), str) or args["verdict"] not in {"approved", "rejected"}:
-                    invalid("verdict: expected approved or rejected")
+                from ..reviews import validate_verdict
+                try:
+                    validate_verdict(args.get("verdict"), args.get("findings", []))
+                except ValueError as exc:
+                    invalid(str(exc))
                 if node.get("pending_verdict"):
                     raise Refused("conflict")
                 model.check_fields(args, {"node_id", "generation_seq", "commit", "verdict", "findings"}, set())
                 findings = args.get("findings", [])
-                if not isinstance(findings, list) or any(not isinstance(f, dict) or not isinstance(f.get("summary"), str)
-                        or not isinstance(f.get("severity"), str) for f in findings):
-                    invalid("findings: expected summary and severity records")
                 reviewed = next((g for g in node["generations"] if g["seq"] == review["generation_seq"] and g["commit"] == review["commit"]), None)
                 if reviewed is None:
                     raise Refused("forbidden")

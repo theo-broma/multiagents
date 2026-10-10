@@ -548,7 +548,8 @@ VERDICT = re.compile(
 
 def _text_verdict(text: str) -> re.Match | None:
     """The last agreeing verdict; contradictory lines remain unjudged."""
-    verdicts = list(VERDICT.finditer(text or ""))
+    text = text or ""
+    verdicts = [VERDICT.match(text, m.start()) for m in VERDICT.finditer(_control_text(text))]
     if verdicts and len({v.group(1).lower() for v in verdicts}) == 1:
         return verdicts[-1]
     return None
@@ -582,6 +583,51 @@ def _result_detail(event: Event) -> str:
 PROPOSED_FIX = re.compile(r"(?im)^[ \t]*(?:#{1,6}[ \t]+)?PROPOSED_FIX[ \t]*:?[ \t]*$")
 FENCE_LINE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
+
+
+def _control_text(text: str, *, streaming: bool = False) -> str:
+    """RM-R1: preserve offsets and lines, masking Markdown examples.
+
+    Streaming callers retain their text prefix, including open fences and
+    code spans. An unfinished inline span is masked until its paragraph ends
+    or a matching delimiter arrives; final scans use Markdown's paired spans.
+    """
+    text = text or ""
+    masked = list(text)
+
+    def hide(start, end):
+        masked[start:end] = ["." if c not in "\r\n" else c for c in text[start:end]]
+
+    opened, pos = None, 0
+    for line in text.splitlines(keepends=True):
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        if opened:
+            hide(pos, pos + len(line))
+            if (fence and fence[1][0] == opened[0] and len(fence[1]) >= len(opened)
+                    and not fence[2].strip()):
+                opened = None
+        elif fence and not (fence[1][0] == "`" and "`" in fence[2]):
+            opened = fence[1]
+            hide(pos, pos + len(line))
+        elif re.match(r"^(?: {4}| {0,3}\t| {0,3}>)", line):
+            hide(pos, pos + len(line))
+        pos += len(line)
+    # Fences, quotes and indented code cannot donate inline delimiters.
+    for para in re.finditer(r"(?:[^\n]+\n?)+", "".join(masked)):
+        value, offset = para.group(), 0
+        while delimiter := re.search(r"`+", value[offset:]):
+            start = offset + delimiter.start()
+            stop = offset + delimiter.end()
+            close = re.search(r"(?<!`)" + re.escape(delimiter.group()) + r"(?!`)", value[stop:])
+            if close:
+                end = stop + close.end()
+                hide(para.start() + start, para.start() + end)
+                offset = end
+            else:
+                if streaming and para.end() == len(text):
+                    hide(para.start() + start, para.end())
+                offset = stop
+    return "".join(masked)
 
 
 def _wrap_globs(patterns: list[str], limit: int = 12) -> str:
@@ -3021,22 +3067,9 @@ class Runner(QuotaHandover):
 
     @staticmethod
     def need_info(text: str) -> list[str]:
-        """Final information requests, with the decision marker's anchoring.
-
-        Markdown examples are not requests, including inline code that wraps
-        across lines. Use the same fence and backtick rules as ticket parsing.
-        """
+        """Final information requests outside Markdown examples (RM-R1)."""
         text = text or ""
-        fenced = Runner._fenced_ranges(text)
-        masked = list(text)
-        for a, b in fenced:
-            masked[a:b] = ["." if c != "\n" else c for c in text[a:b]]
-        spans = list(fenced)
-        for para in re.finditer(r"(?:[^\n]+\n?)+", "".join(masked)):
-            spans += [(para.start() + m.start(), para.start() + m.end())
-                      for m in INLINE_CODE.finditer(para.group())]
-        return [m.group().strip() for m in NEED_INFO.finditer(text)
-                if not any(a <= m.start() < b for a, b in spans)]
+        return [text[m.start():m.end()].strip() for m in NEED_INFO.finditer(_control_text(text))]
 
     def _file_tickets(self, node_id: str, text: str) -> list[dict]:
         """Turn a finished bug-reporter message into queued tickets.
@@ -4156,12 +4189,14 @@ class Runner(QuotaHandover):
                 composite = records.get(own["parent"])
                 if composite and composite["kind"] == "loop" and composite["loop"]["verdict_child"] == managed.node_id:
                     permissions.add("verdict")
+                if self.authority and (self.authority.get(node_id) or {}).get("review"):
+                    permissions.add("verdict")
                 env["MULTIAGENTS_RPC_TOKEN"] = issue_run_capability(
                     self.paths.root, node_id, managed.node_id, permissions)
                 env["MULTIAGENTS_RPC_SOCKET"] = str(transport_directory(self.paths.root) / "rpc.sock")
                 env["MULTIAGENTS_NODE_PERMISSIONS"] = ",".join(sorted(permissions))
             # Managed runs always have their scoped node server (NC-R58).
-            if spec.can_spawn or managed and managed.node_id:
+            if spec.can_spawn or managed and (managed.node_id or managed.reviewed_commit):
                 server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
                 argv += server_argv
                 env.update(server_env)
@@ -5015,6 +5050,7 @@ class Runner(QuotaHandover):
         queued: dict | None = None,
         _cap_raced: bool = False,
         _qh_floor_grant: str = "",
+        _review_commit: str = "",
     ) -> dict[str, Any]:
         """`queued` is a provider-concurrency entry being drained (PC-R3a):
         it runs on the provider it queued on and nowhere else, claims its
@@ -5024,6 +5060,11 @@ class Runner(QuotaHandover):
         floor_id, floor_request = (self._qh_take_floor_grant(_qh_floor_grant)
                                    if _qh_floor_grant else ("", ""))
         context = _launch_context.get()
+        if verifies and workdir:
+            raise ValueError("workdir cannot be overridden alongside verifies")
+        if verifies and not _review_commit:
+            from .reviews import resolve
+            _review_commit = await asyncio.to_thread(resolve, self, verifies, caller=self.self_id())
         if context and context.node_id and floor_request:
             return admission_block("scheduler-managed runs cannot use legacy floor admission")
         if context and context.node_id:
@@ -5586,7 +5627,7 @@ class Runner(QuotaHandover):
             worktree_path = Path(workdir).expanduser() if workdir else self.paths.root
             if not workdir:
                 # _preflight has already established that this is a repository.
-                base = self.config.base_branch or gitops.current_branch(repo)
+                base = _review_commit or self.config.base_branch or gitops.current_branch(repo)
                 desired = f"{self.config.branch_prefix}/{agent_name}/{node_id.removeprefix('ag-')}"
                 worktree_path = self.paths.worktree(node_id)
                 if context:
@@ -5607,6 +5648,7 @@ class Runner(QuotaHandover):
                 parent=parent, depth=depth, task=task[:500], branch=branch,
                 worktree=str(worktree_path), status="pending",
                 verifies=verifies if verifies in self.tree.read()["nodes"] else "",
+                reviewed_commit=_review_commit,
                 budget_tag=budget_tag,
                 # DQ-R11: written in the transaction that creates the node, so
                 # a drain that dies between start() returning and its own
@@ -5814,28 +5856,34 @@ class Runner(QuotaHandover):
                         and gitops.is_repo(Path(node.worktree)) else None)
         last_progress = 0.0
         decision_text = ""
+        decision_prefix = ""
         text_block = ""
         pending_decision: dict[str, str] | None = None
 
         def decision_pending(*, ended: bool = False) -> bool:
-            nonlocal decision_text, pending_decision
+            nonlocal decision_text, decision_prefix, pending_decision
             # Event boundaries are not line boundaries. After a marker,
             # wait for the following line too: its default may still be
             # streaming, and an incomplete default must not be recorded.
             end = len(decision_text) if ended else decision_text.rfind("\n") + 1
             complete, decision_text = decision_text[:end], decision_text[end:]
-            lines = complete.split("\n")
+            masked = _control_text(decision_prefix + complete + decision_text, streaming=not ended)
+            visible = masked[len(decision_prefix):len(decision_prefix) + len(complete)]
+            decision_prefix += complete
+            lines = visible.split("\n")
             if complete.endswith("\n") or not complete:
                 lines.pop()
-            for line in lines:
+            raw_lines = complete.split("\n")
+            for i, line in enumerate(lines):
                 if pending_decision is not None:
                     default = PROPOSED_DEFAULT.search(line)
                     if default:
-                        pending_decision["proposed"] = default.group(1).strip()
+                        pending_decision["proposed"] = PROPOSED_DEFAULT.search(raw_lines[i]).group(1).strip()
                     run.awaiting = pending_decision
                     return True
                 match = NEED_DECISION.search(line)
                 if match:
+                    match = NEED_DECISION.search(raw_lines[i])
                     pending_decision = {
                         "topic": match.group(1).strip(),
                         "question": match.group(2).strip(),
@@ -6352,7 +6400,7 @@ class Runner(QuotaHandover):
         prior_stuck = (stuck_before.reason
                       if stuck_before and stuck_before.status == "stuck" else "")
         run_dir = self.paths.run_dir(node_id)
-        text = "\n".join(run.text_parts).strip()
+        text = "\n".join(run.text_parts).rstrip()
         stderr = run.handle.stderr_tail if run.handle else ""
         # Checked first and unconditionally. Stopping the process makes wait()
         # return a signal code, which _classify would read as "failed"; and a
@@ -6487,7 +6535,7 @@ class Runner(QuotaHandover):
             # noisy hook can't bury the agent's own answer.
             detail_for_text = detail if len(detail) <= 500 else detail[:500] + " [truncated]"
             text = (f"{text}\n\nthe work-in-progress commit was refused: "
-                    f"{detail_for_text}").strip()
+                    f"{detail_for_text}").rstrip()
             if fix_attempts:
                 text += (f"\n(the agent was resumed {fix_attempts} time(s) to "
                          f"satisfy the git hook; it still refused the commit)")
@@ -6497,7 +6545,7 @@ class Runner(QuotaHandover):
                     f"it succeeded after {fix_attempts} fix attempt(s).").strip()
 
         if fix_error:
-            text = f"{text}\n\ncommit-fix resume refused: {fix_error}".strip()
+            text = f"{text}\n\ncommit-fix resume refused: {fix_error}".rstrip()
         summary = text[-MAX_SUMMARY_CHARS:] if text else ""
         record = {
             "status": status, "exit_code": code, "session_id": session_id,
@@ -6522,6 +6570,16 @@ class Runner(QuotaHandover):
         if finished_node:
             record.update(elapsed_seconds=round(finished_node.turn_elapsed()),
                           node_elapsed_seconds=round(finished_node.elapsed()))
+        # RM-R3: a standalone receipt is advisory and survives run failure.
+        if self.authority:
+            review_record = self.authority.get(node_id) or {}
+            if review_record.get("review"):
+                found = _text_verdict(text)
+                if found and not run.awaiting and status != "rate_limited" and not cleanup:
+                    self.authority.review_verdict(node_id, found.group(1).lower(), [],
+                                                 source="text", defects=int(found.group(2) or 0))
+                from .reviews import collected
+                record.update(collected(self, node_id))
         if run.refusal:
             # RC-R2 (review ag-997df9 finding 3): the verdict's evidence is in
             # the result artifact too, not only the reason and the events —
@@ -6547,12 +6605,13 @@ class Runner(QuotaHandover):
         # so the run stays unjudged rather than judged on the last word
         # (VR-R3). Repeated agreeing lines qualify, the last one is the one
         # kept.
-        if VERDICT.search(text or "") and not run.awaiting and status != "rate_limited" and not cleanup:
+        if VERDICT.search(_control_text(text)) and not run.awaiting and status != "rate_limited" and not cleanup:
             found = _text_verdict(text)
+            receipt = record.get("review_verdict")
             self.tree.update(
                 node_id,
-                verdict=found.group(1).lower() if found else "",
-                defects=int(found.group(2) or 0) if found else 0,
+                verdict=receipt["verdict"] if receipt else found.group(1).lower() if found else "",
+                defects=receipt["defects"] if receipt else int(found.group(2) or 0) if found else 0,
             )
 
         filed = self._file_tickets(node_id, text) if not run.awaiting else []
@@ -6910,7 +6969,7 @@ class Runner(QuotaHandover):
         Returns True: the run is not over, the loop that launched it is.
         """
         timed_out = run.fix_timed_out or bool(getattr(run.handle, "timed_out", False))
-        text = "\n".join(run.text_parts).strip()
+        text = "\n".join(run.text_parts).rstrip()
         stderr = run.handle.stderr_tail if run.handle else ""
         limited = None
         if run.awaiting:
@@ -7604,6 +7663,8 @@ class Runner(QuotaHandover):
         if node.reason == "session_lost":
             result["requested_session"] = node.requested_session
         result.update(self._no_commits_note(node))
+        from .reviews import collected
+        result.update(collected(self, agent_id))
         limits = run.limits if run else self.launch_limits.lookup(agent_id)
         if limits:
             result["effective_limits"] = limits
@@ -7691,6 +7752,8 @@ class Runner(QuotaHandover):
         if node.reason == "session_lost":
             payload["requested_session"] = node.requested_session
         payload.update(self._no_commits_note(node, text))
+        from .reviews import collected
+        payload.update(collected(self, agent_id))
         filed = [{k: t[k] for k in ("id", "severity", "title", "status")}
                  for t in self.tree.read()["tickets"] if t.get("agent") == agent_id]
         if filed:
@@ -7762,7 +7825,7 @@ class Runner(QuotaHandover):
             except (OSError, json.JSONDecodeError):
                 text = node.summary
         text = text or ""
-        if "NEED_INFO(" in text or NEED_DECISION.search(text):
+        if self.need_info(text) or NEED_DECISION.search(_control_text(text)):
             return {}
         try:
             base, tip = self._commit_range(node)
