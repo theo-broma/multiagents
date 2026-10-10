@@ -17,6 +17,10 @@ from .. import gitops
 from ..config import matches_any
 
 
+class RecoveryConflict(gitops.GitError):
+    """Captured WIP cannot safely be used with the current inputs."""
+
+
 class MissingCheckout(gitops.GitError):
     """The recorded checkout is absent, rather than present but unreadable."""
 
@@ -159,7 +163,8 @@ def input_generation(node, ref, nodes, consumer=None):
                for owner, other in mirrors):
             continue
         if (root_approved or generation["verdict"] == "approved" or (generation["verdict"] is None
-                and node["kind"] != "loop" and node["outcome"] in {"completed", "approved"})):
+                and node["kind"] != "loop" and node["outcome"] in {"completed", "approved"}
+                and not (node.get("closure") or {}).get("via"))):
             return generation
     return None
 
@@ -223,8 +228,28 @@ class Results:
             commit = inputs[0]["commit"]
             for generation in inputs[1:]:
                 commit = self.merge_commit(commit, generation["commit"], "multiagents: combined node inputs")
+        recovery = node.get("recovery")
+        if recovery and recovery.get("pending"):
+            # A reviewer resumes from the generation it currently reviews.
+            parent = nodes.get(node["parent"])
+            if (parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == node["id"]
+                    and parent["generations"]):
+                commit = parent["generations"][-1]["commit"]
+            try:
+                captured = recovery["commit"]
+                if self.tip("refs/heads/node-results/" + recovery["attempt"]) != captured:
+                    raise gitops.GitError("captured ref is missing or differs from the recorded commit")
+                if not self.git("merge-base", "--is-ancestor", recovery["input_commit"], captured).ok:
+                    raise gitops.GitError("captured commit does not descend from the attempt's input")
+                commit = self.merge_commit(commit, captured, "multiagents: recover " + node["id"])
+            except gitops.GitError as exc:
+                raise RecoveryConflict(str(exc)) from exc
         top.update(branch=branch, branch_tip=tip)
-        return {"input_commit": commit, "branch_node": top["id"]}
+        prepared = {"input_commit": commit, "branch_node": top["id"],
+                    "prepared_branch": branch, "prepared_tip": tip}
+        if recovery and recovery.get("pending"):
+            prepared["recovery_source"] = {k: recovery[k] for k in ("attempt", "commit")}
+        return prepared
 
     def ensure_branch(self, node):
         actual = self.tip(node["branch"])

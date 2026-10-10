@@ -2456,11 +2456,14 @@ def give_verdict(node_id: str | None = None, generation_seq: int | None = None,
 @_tool()
 def relaunch_node(id: str, revision: int, max_rounds: int | None = None,
                   pins: dict | None = None, new_session: list[str] | None = None,
-                  retry: str | None = None, ctx: _ToolContext = None) -> dict:
-    """Reopen a held or finished node (available in M4)."""
+                  retry: str | None = None, task: str | None = None,
+                  children: dict | None = None, recover_wip: bool = True,
+                  ctx: _ToolContext = None) -> dict:
+    """Reopen a node, optionally patching tasks and recovering captured work."""
     args = dict(id=id, revision=revision)
     args.update({k: v for k, v in dict(max_rounds=max_rounds, pins=pins,
-                 new_session=new_session, retry=retry).items() if v is not None})
+                 new_session=new_session, retry=retry, task=task, children=children,
+                 recover_wip=recover_wip).items() if v is not None})
     return _node_rpc("relaunch_node", args, ctx)
 
 
@@ -2602,6 +2605,8 @@ async def _serve() -> None:
             await asyncio.wait({serving, asyncio.create_task(signalled.wait())},
                                return_when=asyncio.FIRST_COMPLETED)
     finally:
+        if _runner is not None:
+            _runner._begin_shutdown()
         for task in (adopter, watcher):
             if task is not None:
                 task.cancel()

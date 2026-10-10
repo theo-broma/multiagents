@@ -24,7 +24,7 @@ from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
 from .store import encode, records, select_records, matching_records
-from .results import Results, input_generation, recording_loops, top_node
+from .results import Results, RecoveryConflict, input_generation, recording_loops, top_node
 from . import sessions, effects, windows
 from .. import notify_sender
 from .. import gitops
@@ -52,6 +52,41 @@ def save_attempt(db, record):
     db.execute("INSERT OR REPLACE INTO attempts VALUES (?, ?)", (record["attempt_id"], encode(record)))
 
 
+def consume_recovery(store, db, attempt):
+    """RR-R3: called only after the host has recorded an actual process launch."""
+    if attempt.get("cleanup"):
+        return
+    node = store.node_records(db)[attempt["node_id"]]
+    recovery = node.get("recovery")
+    source = attempt.get("recovery_source")
+    if (recovery and recovery.get("pending") and source
+            and all(recovery[k] == source[k] for k in ("attempt", "commit"))):
+        recovery.update(pending=False, consumed_by={"attempt": attempt["attempt_id"], "run_id": attempt["run_id"]})
+        node.setdefault("recovery_history", []).append(copy.deepcopy(recovery))
+        store.save_node(db, node)
+        attempt["recovery_consumed"] = True
+        save_attempt(db, attempt)
+
+
+def confirm_recovery_launch(store, paths, attempt):
+    """Replay actual launch evidence after a supervisor or setup failure."""
+    if not attempt.get("recovery_source") or attempt.get("recovery_consumed") or attempt.get("cleanup"):
+        return False
+    kind = (attempt.get("launch_evidence") or {}).get("executor", {}).get("kind")
+    if kind not in {"local", "docker"}:
+        return False
+    name = "container.pid" if kind == "docker" else "agent.pid"
+    try:
+        value = _run_read(paths.run_dir(attempt["run_id"]), name, 4096).split()
+    except OSError:
+        return False
+    if not value or not value[0].isdigit() or int(value[0]) <= 0:
+        return False
+    with store.transaction() as db:
+        consume_recovery(store, db, attempts(db)[attempt["attempt_id"]])
+    return True
+
+
 def record_launch(store, db, attempt, run):
     current = attempt_records(db)[attempt["attempt_id"]]
     if current["state"] != "claimed":
@@ -70,6 +105,11 @@ def record_launch(store, db, attempt, run):
         node.pop("starvation_notified", None)
     store.save_node(db, node)
     nodes = store.nodes(db)
+    top = nodes.get(current.get("branch_node"))
+    if top and "branch" not in top and current.get("prepared_branch"):
+        # Launches outside tick still checkpoint the prepared host intent.
+        top.update(branch=current["prepared_branch"], branch_tip=current["prepared_tip"])
+        store.save_node(db, top)
     parent = nodes.get(node["parent"])
     while parent:
         if parent["kind"] != "simple":
@@ -89,6 +129,7 @@ class Engine:
         self.paths = service.paths
         self.clock_file = Path(clock_file) if clock_file else None
         self.runner = Runner(self.paths, service.configuration())
+        self.runner._scheduler_supervisor = True
         self.reasons = {}
         self.last_tick = None
         # Read from the configuration at each tick, so status() can name the
@@ -618,7 +659,7 @@ class Engine:
                     with effects.serialized(self.store):
                         prepared = Results(self.paths, config).prepare(prepared_nodes[node["id"]], prepared_nodes)
                 except gitops.GitError as exc:
-                    preparation_failure = str(exc)
+                    preparation_failure = exc
             current_config = self.service.configuration()
             with self.service.changed, self.store.transaction() as db:
                 if current_config is not config:
@@ -643,7 +684,11 @@ class Engine:
                     self.hold(db, current, *clean_failure)
                     continue
                 if preparation_failure:
-                    self.hold(db, current, "input_conflict", preparation_failure)
+                    if isinstance(preparation_failure, RecoveryConflict):
+                        self.hold(db, current, "recovery_conflict", {
+                            "attempt": current["recovery"]["attempt"], "cause": str(preparation_failure)})
+                    else:
+                        self.hold(db, current, "input_conflict", str(preparation_failure))
                     continue
                 top = current_nodes[prepared["branch_node"]]
                 top.update(branch=prepared_nodes[top["id"]]["branch"], branch_tip=prepared_nodes[top["id"]]["branch_tip"])
@@ -673,7 +718,8 @@ class Engine:
                         continue
                     reviewed = parent["generations"][-1]
                     prepared["review"] = {"node_id": parent["id"], "generation_seq": reviewed["seq"], "commit": reviewed["commit"]}
-                    prepared["input_commit"] = reviewed["commit"]
+                    if not (current.get("recovery") or {}).get("pending"):
+                        prepared["input_commit"] = reviewed["commit"]
                 if current.get("findings"):
                     prepared["findings"] = current["findings"]
                 activation = current.get("activation_id") or uuid.uuid4().hex
@@ -1145,6 +1191,7 @@ class Engine:
             journal = attempt_records(db)
         settled = []
         for attempt in journal.selected("captured", "claimed", "launched"):
+            confirm_recovery_launch(self.store, self.paths, attempt)
             if attempt["state"] == "captured":
                 self.integrate(attempt)
                 continue
@@ -1405,6 +1452,7 @@ class Engine:
         if attempt.get("cleanup"):
             self.finished_cleanup(attempt, run)
             return
+        confirm_recovery_launch(self.store, self.paths, attempt)
         from . import suspension
         config = self.service.configuration()
         own_result = suspension.natural_result(self.paths, run) if hasattr(run, "turn_started_at") else None
@@ -1736,7 +1784,15 @@ class Engine:
                 children = [nodes[id] for id in node["children"]]
                 held = next((c for c in children if c["state"] == "held"), None)
                 if node["state"] == "held":
-                    if (node["hold"] or {}).get("reason") != "child_held" or held:
+                    reason = (node["hold"] or {}).get("reason")
+                    if reason == "run_failed" and node["kind"] == "loop":
+                        child = nodes.get(node["hold"].get("detail"))
+                        if (not child or child["id"] not in model.subtree(nodes, node["id"])
+                                or child["state"] not in {"open", "running"}
+                                or child.get("relaunch_rounds", {}).get(node["id"]) != node["loop"]["rounds_rejected"]):
+                            continue
+                        self.store.transition(db, "hold_repaired", node["id"], {"child": child["id"]})
+                    elif reason != "child_held" or held:
                         continue
                     node.update(state="running", hold=None, revision=node["revision"] + 1)
                     self.store.save_node(db, node)
@@ -1770,10 +1826,10 @@ class Engine:
         if effects.finish_completions(self):
             self.composites()
 
-    def complete(self, db, node, outcome):
+    def complete(self, db, node, outcome, *, approve_generation=True):
         if node.get("completion_pending"):
             return
-        if node["kind"] in {"sequence", "group"} and outcome == "approved":
+        if approve_generation and node["kind"] in {"sequence", "group"} and outcome == "approved":
             nodes = self.store.node_records(db)
             top = top_node(node, nodes)
             commit = top.get("branch_tip")

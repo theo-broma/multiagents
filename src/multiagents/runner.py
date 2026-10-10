@@ -1866,7 +1866,7 @@ class Runner(QuotaHandover):
 
     def _end_slot_claim(self, node_id: str, token: str) -> bool:
         """End the post-mortem claim `token` set, and no other."""
-        if not token:
+        if not token or self._shutdown_preserves(node_id):
             return False
         with self.tree.transaction() as data:
             entry = data["nodes"].get(node_id)
@@ -2342,6 +2342,8 @@ class Runner(QuotaHandover):
     def _stop_for_cap(self, run: Run, crossing: dict) -> None:
         """Stop `run` for a cap: its verdict from every cap of its own that
         binds, else from the crossing that stopped it."""
+        if self._shutdown_preserves(run.node_id):
+            return
         at = now()
         binding = [state for state in (self.ledger.describe(cap, at) for cap in
                                        self._caps(run.provider.name, run.spec.model or ""))
@@ -3385,6 +3387,8 @@ class Runner(QuotaHandover):
         nothing was started. If the tree cannot be written, the hold stays
         and `_settle_holds` lifts it later — counted a little longer, never
         released early."""
+        if self._shutdown_preserves(node_id):
+            return
         hold = self._holds.get(node_id)
         if hold is None:
             return
@@ -3425,6 +3429,11 @@ class Runner(QuotaHandover):
         self._persist_hold(node_id, hold)
 
         async def cleanup() -> bool:
+            if self._shutdown_preserves(node_id):
+                # The scheduler adopts from the durable launch evidence;
+                # keep the launch hold and occupancy until it does so.
+                self._release(node_id)
+                return False
             try:
                 await handle.stop()
             except BaseException:
@@ -3494,6 +3503,8 @@ class Runner(QuotaHandover):
         marked `confirmed`, and `_settle_holds` retries: the slot is held a
         little longer, never released early.
         """
+        if self._shutdown_preserves(node_id):
+            return
         hold = self._holds.get(node_id)
         if hold is None:
             return
@@ -3607,6 +3618,8 @@ class Runner(QuotaHandover):
         except Exception:
             nodes = {}
         for node_id, raw in nodes.items():
+            if self._shutdown_preserves(node_id):
+                continue
             held = raw.get("cleanup_hold") if isinstance(raw, dict) else None
             if not isinstance(held, dict) or node_id in self._holds:
                 continue
@@ -3625,6 +3638,8 @@ class Runner(QuotaHandover):
             with contextlib.suppress(Exception):
                 self._take_over_hold(node_id, raw, held)
         for node_id, hold in list(self._holds.items()):
+            if self._shutdown_preserves(node_id):
+                continue
             if hold.steer is not None:
                 self._settle_steer_cleanup(node_id, hold)
                 continue
@@ -4657,7 +4672,7 @@ class Runner(QuotaHandover):
         await asyncio.sleep(interval * (0.5 + random.random()))
         while True:
             run = self.runs.get(node_id)
-            if run is None or run.done.is_set() or run.awaiting:
+            if self._shutdown_preserves(node_id) or run is None or run.done.is_set() or run.awaiting:
                 return
             node = self.tree.get(node_id)
             if node is None:
@@ -4963,13 +4978,15 @@ class Runner(QuotaHandover):
         has confirmed the process dead (RM-R1c). Until then the status stays
         what it is: `pending` is also the slot's durable reservation should
         the hold itself not have reached the tree."""
+        if self._shutdown_preserves(node_id):
+            return
         if not self._defer_while_held(node_id, "failed", reason):
             self.tree.set_status(node_id, "failed", reason)
 
     def _startup_finish(self, provider: str, node_id: str, token: str,
                         failed: bool = False, error: str = "",
                         resolved: bool = False) -> None:
-        if not token:
+        if not token or self._shutdown_preserves(node_id):
             return
         hold = self._holds.get(node_id)
         if (hold is not None and hold.phase == "cleanup" and not hold.confirmed
@@ -4991,7 +5008,7 @@ class Runner(QuotaHandover):
         because nothing was launched and nothing was learnt about the
         provider. A claim a launch cleanup still owns is left to it, exactly
         as `_startup_finish` leaves it (RM-R1c)."""
-        if not token:
+        if not token or self._shutdown_preserves(node_id):
             return
         hold = self._holds.get(node_id)
         if (hold is not None and hold.phase == "cleanup" and not hold.confirmed
@@ -5028,7 +5045,8 @@ class Runner(QuotaHandover):
         storage recovers the claim cannot stay stuck while this server
         lives."""
         for provider, node_id, token in sorted(self._startup_release_pending):
-            self._retry_startup_release(provider, node_id, token)
+            if not self._shutdown_preserves(node_id):
+                self._retry_startup_release(provider, node_id, token)
 
     # ----------------------------------------------------------------- start --
 
@@ -5815,23 +5833,54 @@ class Runner(QuotaHandover):
 
     # --------------------------------------------------------------- consume --
 
+    async def _confirm_recovery_launch(self, run: Run) -> None:
+        # RR-R3: wrapper creation is not provider launch. Its pid file is
+        # written only after exec succeeds, including for a silent provider.
+        if not (self.paths.scheduler / "plan.sqlite3").is_file():
+            return
+        from .scheduler.store import Store, matching_records
+        from .scheduler.engine import attempts, confirm_recovery_launch
+        store = Store(self.paths.root)
+        with store.transaction(write=False) as db:
+            attempt = next(iter(matching_records(attempts(db), "run_id", run.node_id)), None)
+            if not attempt or not attempt.get("recovery_source") or attempt.get("cleanup"):
+                return
+            node = store.node_records(db)[attempt["node_id"]]
+            if not (node.get("recovery") or {}).get("pending"):
+                return
+        run_dir = self.paths.run_dir(run.node_id)
+        while True:
+            if confirm_recovery_launch(store, self.paths, attempt):
+                return
+            with contextlib.suppress(OSError):
+                if _run_read(run_dir, "exit_status", 4096).strip():
+                    return
+            await asyncio.sleep(.05)
+
     async def _supervise(self, run: Run) -> None:
         """`_consume`, and — whichever way it exits, its setup failing
         included — the end of the post-mortem claim the launch set
         (PC-R3f, round 3 finding 2). The usual end is inside, before the
         release kick; this one only catches what that never reached."""
+        confirmation = asyncio.create_task(self._confirm_recovery_launch(run))
         try:
             await self._consume(run)
         except asyncio.CancelledError:
             # A stop or a server going away: the claim ends, but nothing is
             # launched from a turn being torn down.
-            with contextlib.suppress(Exception):
-                self._end_slot_claim(run.node_id, run.slot_token)
+            if not self._shutdown_preserves(run.node_id):
+                with contextlib.suppress(Exception):
+                    self._end_slot_claim(run.node_id, run.slot_token)
             raise
         finally:
-            with contextlib.suppress(Exception):
-                if self._end_slot_claim(run.node_id, run.slot_token):
-                    self._pc_kick(run.provider.name)
+            if self._shutdown_preserves(run.node_id):
+                confirmation.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(confirmation, .1)
+            if not self._shutdown_preserves(run.node_id):
+                with contextlib.suppress(Exception):
+                    if self._end_slot_claim(run.node_id, run.slot_token):
+                        self._pc_kick(run.provider.name)
 
     async def _consume(self, run: Run) -> None:
         """Read the event stream, log it, supervise it, record the outcome."""
@@ -5922,6 +5971,8 @@ class Runner(QuotaHandover):
         self._flush_pending(node=node_id)
         try:
             async for line in handle.lines():
+                if self._shutdown_preserves(node_id):
+                    raise asyncio.CancelledError
                 line_start, line_end = line_end, getattr(handle, "offset", 0)
                 event = provider.parse_line(line)
                 if event is None:
@@ -6107,11 +6158,14 @@ class Runner(QuotaHandover):
                 elif run.trip_kind:
                     self._maybe_clear_stuck(run, node_id)
 
+            if self._shutdown_preserves(node_id):
+                raise asyncio.CancelledError
             if run.awaiting is None and decision_pending(ended=True):
                 await handle.stop()
             code = await handle.wait()
         except asyncio.CancelledError:
-            if run.detaching:
+            if run.detaching or self._shutdown_preserves(node_id):
+                run.detaching = True
                 # SV-R3: the server is going and the agent is not. What this
                 # server counted is written down with where it got to, and the
                 # process is left alone for the next server to follow.
@@ -7241,6 +7295,8 @@ class Runner(QuotaHandover):
                     _worktree_state, progress_dir, self.paths.root)
         while True:
             await asyncio.sleep(self.WATCH_POLL_SECONDS)
+            if self._shutdown_preserves(run.node_id):
+                return
             try:
                 # Only while the agent is quiet, and only if it has a tree of
                 # its own. The silence check needs a CURRENT reading to tell a
@@ -8105,13 +8161,34 @@ class Runner(QuotaHandover):
 
         return bool(wall) and bool(launched) and now() >= launched + wall
 
-    async def shutdown(self, *, detach: bool, preserve_status: bool = False) -> None:
-        """This server is going. SV-R3: a root server leaves its agents
-        running and says so; a nested one ends them, as it always has."""
+    def _shutdown_preserves(self, node_id: str) -> bool:
+        return node_id in self.__dict__.get("_shutdown_managed", set())
+
+    def _begin_shutdown(self) -> None:
+        # RR-R4: the host attempt journal owns launched, suspended and
+        # recovering runs. Fence cancellation before any server-owned task
+        # unwinds, including adoption and quota-handover cleanup.
+        if "_shutdown_managed" in self.__dict__:
+            return
+        managed = set()
+        if not getattr(self, "_scheduler_supervisor", False) and (self.paths.scheduler / "plan.sqlite3").is_file():
+            from .scheduler.store import Store
+            from .scheduler.engine import attempts
+            with Store(self.paths.root).transaction(write=False) as db:
+                managed = set(attempts(db).run_ids)
+        self.__dict__["_shutdown_managed"] = managed
+        for run in self.runs.values():
+            if run.node_id in managed:
+                run.detaching = True
         # PC (round 6, finding 3): no drain dispatches and no reconciliation
         # kicks from here on; the reconciliation task is ended BEFORE the
         # runs are captured, so nothing it confirms can launch work now.
         self.__dict__["_pc_shutting_down"] = True
+
+    async def shutdown(self, *, detach: bool, preserve_status: bool = False) -> None:
+        """Detach scheduler-owned work; stop this server's legacy work."""
+        self._begin_shutdown()
+        managed = self._shutdown_managed
         await self._qh_shutdown()
         for waiter in list(self.__dict__.get("_pc_waiters", ())):
             # Consults waiting for a slot wake to the flag and end.
@@ -8131,14 +8208,17 @@ class Runner(QuotaHandover):
                     await task
         runs = [run for run in self.runs.values() if run.task and not run.task.done()]
         for run in runs:
-            run.detaching = detach
+            run.detaching = detach or run.node_id in managed
             run.task.cancel()
         for run in runs:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await run.task
-        if not detach:
-            return
         for run in runs:
+            if run.node_id in managed:
+                self._release(run.node_id)
+                continue
+            if not detach:
+                continue
             node = self.tree.get(run.node_id)
             if not preserve_status and node and node.status in ("running", "stuck", "pending"):
                 self.tree.set_status(
@@ -8264,6 +8344,8 @@ class Runner(QuotaHandover):
         thing `stop_agent` ever asks for) still writes `cancelled` here.
         Automatic timeouts leave terminal unknown-liveness holds intact.
         """
+        if self._shutdown_preserves(agent_id):
+            return {"agent_id": agent_id, "detached": True}
         if not internal:
             node = self.tree.get(agent_id)
             if node and node.node_id and not getattr(self, "_scheduler_supervisor", False):
@@ -8481,6 +8563,8 @@ class Runner(QuotaHandover):
         writes leave their step owed; only positive death permits release.
         The steer's own resources are independent of predecessor liveness.
         """
+        if self._shutdown_preserves(node_id):
+            return
         cleanup = hold.steer
         if cleanup.get("operator_release"):
             hold.confirmed = True

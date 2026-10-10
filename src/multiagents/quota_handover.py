@@ -499,6 +499,8 @@ class QuotaHandover:
                         request["state"] = "cancelled"
 
     def _qh_check_switch(self, node_id, attempt_id=None):
+        if self._shutdown_preserves(node_id):
+            raise asyncio.CancelledError
         node = self.tree.get(node_id)
         if (not node or node.status == "cancelled"
                 or (node.handover_attempt or {}).get("state") == "failed"
@@ -1286,7 +1288,8 @@ class QuotaHandover:
             self.__dict__.setdefault("_qh_busy", set()).discard(node_id)
             self.__dict__.setdefault("_qh_promotions", {}).pop(node_id, None)
             node = self.tree.get(node_id)
-            if node and node.promotion and not (node.handover_attempt or {}).get("promotion"):
+            if (node and node.promotion and not (node.handover_attempt or {}).get("promotion")
+                    and not self._shutdown_preserves(node_id)):
                 self.tree.update(node_id, promotion=None)
 
     async def _qh_abort_pending_promotion(self, node_id, reason, *, pinned=None):

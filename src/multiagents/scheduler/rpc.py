@@ -63,11 +63,13 @@ def validate_wire_value(value):
                 invalid("request: strings must be valid UTF-8")
 
 
-def validate_arguments(args):
+def validate_arguments(args, *, op=None):
     for key in ("id", "node_id", "parent"):
         if key in args and args[key] is not None and not isinstance(args[key], str):
             invalid(f"{key}: expected a node id")
     for key in ("children", "node_ids"):
+        if key == "children" and op == "relaunch_node":
+            continue
         if key in args and (not isinstance(args[key], list)
                             or any(not isinstance(id, str) for id in args[key])):
             invalid(f"{key}: expected a list of node ids")
@@ -255,7 +257,7 @@ class Service:
                     principal = self.authenticate(db, request.get("token"))
                     if not isinstance(op, str) or not isinstance(args, dict):
                         invalid("request: expected op string and args object")
-                    validate_arguments(args)
+                    validate_arguments(args, op=op)
                     principal["request_id"] = request_id
                     principal["host_templates"] = host_templates
                     principal["window_template"] = window_template
