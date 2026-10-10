@@ -20,6 +20,8 @@ from nc_fixture.m4_world import M4World
     ("```text\nNEED_INFO(topic): which?", []),
     ("``example\nNEED_INFO(topic): which?\nend``", []),
     ("> NEED_INFO(topic): which?", []),
+    ("    NEED_INFO(topic): indented code?", []),
+    ("\tNEED_INFO(topic): tab code?", []),
 ])
 def test_tb_r1_markdown_examples_and_real_questions(text, expected):
     assert Runner.need_info(text) == expected

@@ -292,7 +292,11 @@ def test_vr_r3_a_run_that_did_not_finish_done_does_not_settle_the_round(w):
     "VERDICT(approved, two): not a number",
     "    quoted: `VERDICT(approved): x` inside a sentence, not a line of its own",
     "",
-], ids=["prose", "unknown-word", "no-parens", "no-colon", "bad-defects", "inline", "empty"])
+    "```text\nVERDICT(approved): example\n```",
+    "    VERDICT(approved): indented example",
+    "> VERDICT(approved): quoted example",
+], ids=["prose", "unknown-word", "no-parens", "no-colon", "bad-defects", "inline", "empty",
+        "fenced", "indented", "quoted"])
 def test_vr_r3_text_without_an_accepted_verdict_line_stays_unresolved(w, text):
     w.fxw.queue(work(1))
     w.fxr.queue(says(text))

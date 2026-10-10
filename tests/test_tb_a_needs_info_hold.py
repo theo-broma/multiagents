@@ -143,7 +143,6 @@ def test_tb_r1_a_needs_info_transition_with_the_text_reaches_wait_for_nodes(w):
 @pytest.mark.parametrize("text", [
     "NEED_INFO(x): bare?",
     "   NEED_INFO(x): indented?",
-    "\tNEED_INFO(x): tab-indented?",
     "- NEED_INFO(x): bulleted?",
     "work finished\n\n  NEED_INFO(x): after prose?\n",
 ])
@@ -154,6 +153,8 @@ def test_tb_r1_a_marker_at_line_start_holds(w, text):
 
 
 @pytest.mark.parametrize("text", [
+    "\tNEED_INFO(x): tab-indented code?",
+    "    NEED_INFO(x): four-space code?",
     "The marker NEED_INFO(x): is only an example here.",
     "Use `NEED_INFO(x): question` to ask.",
     "`NEED_INFO(x): question`",
@@ -166,7 +167,12 @@ def test_tb_r1_a_marker_at_line_start_holds(w, text):
 def test_tb_r1_quoted_midline_or_fenced_text_does_not_hold(w, text):
     w.start_scheduler()
     n = node_with_text(w, text)
-    done = w.wait_state(n, "done", timeout=WAIT)
+    # RM-R1: a wrong hold is already conclusive; do not wait out WAIT.
+    def completed():
+        got = w.get(n)
+        assert got["state"] != "held", got
+        return got if got["state"] == "done" else None
+    done = w.until(completed, WAIT, what="unmasked work completes")
     assert done["outcome"] == "completed"
     assert (done.get("hold") or {}).get("reason") != "needs_info"
 

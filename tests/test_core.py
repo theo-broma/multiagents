@@ -2326,20 +2326,18 @@ def test_orchestrator_entry_ships_and_is_marked_launch():
 # --------------------------------------------------------------------------
 
 
-def test_need_decision_matches_text_but_not_tool_arguments():
-    """An agent reading a file that mentions the marker must not park itself."""
-    from multiagents.runner import NEED_DECISION, PROPOSED_DEFAULT
-    text = "NEED_DECISION(store): Postgres or SQLite?\nDEFAULT: SQLite"
-    m = NEED_DECISION.search(text)
-    assert m and m.group(1) == "store"
-    assert m.group(2).strip() == "Postgres or SQLite?"
-    assert PROPOSED_DEFAULT.search(text).group(1).strip() == "SQLite"
-
-    # Detection is applied only to `text` events, so this shape never reaches it;
-    # assert the surrounding intent explicitly.
-    from multiagents.providers import Event
-    tool = Event(kind="tool", name="read", args={"q": "NEED_DECISION(x): y?"})
-    assert tool.kind != "text"
+def test_need_decision_matches_text_but_not_tool_arguments(tmp_path, monkeypatch):
+    """RM-R1: exercise the public stream surface, not a parser regex."""
+    from test_rm_markers import run_events
+    text = "NEED_DECISION(store): Postgres or SQLite?\nDEFAULT: SQLite\n"
+    check, _, _ = run_events(tmp_path, monkeypatch, [
+        {"type": "tool", "name": "read", "args": {"q": "NEED_DECISION(x): y?"}},
+        {"type": "text", "text": text},
+    ])
+    assert check["status"] == "awaiting_user"
+    assert check["question"]["topic"] == "store"
+    assert check["question"]["question"] == "Postgres or SQLite?"
+    assert check["question"]["proposed_default"] == "SQLite"
 
 
 def test_awaiting_user_is_neither_active_nor_terminal(tmp_path):
@@ -7393,25 +7391,31 @@ def test_a_check_records_what_it_checks(tmp_path):
     checks overlap or a branch is reused, and the orchestrator knows the answer
     at the point of asking."""
     import asyncio
+    from multiagents import gitops
     from multiagents.tree import Node
 
     r = _runner(tmp_path, {"reviewer": AgentSpec("reviewer", "p", "m")},
                 {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
     r.tree.add(Node(id="ag-work", agent="implementer", provider="p", model="m",
-                    parent=None, depth=1, status="merged"))
+                    parent=None, depth=1, status="merged",
+                    branch=gitops.current_branch(tmp_path)))
 
     out = asyncio.run(r.start("reviewer", "check it", verifies="ag-work"))
     assert r.tree.get(out["agent_id"]).verifies == "ag-work"
 
 
-def test_a_check_on_an_unknown_agent_is_not_recorded(tmp_path):
-    """A dangling id would make the graph lie about what was checked."""
+def test_a_check_on_an_unknown_agent_is_refused(tmp_path, monkeypatch):
+    """RM-R2: a dangling review target refuses instead of using the base."""
     import asyncio
+    import multiagents.server as server
 
     r = _runner(tmp_path, {"reviewer": AgentSpec("reviewer", "p", "m")},
                 {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
-    out = asyncio.run(r.start("reviewer", "check it", verifies="ag-nonexistent"))
-    assert r.tree.get(out["agent_id"]).verifies == ""
+    monkeypatch.setattr(server, "runner", lambda: r)
+    out = asyncio.run(server.start_agent("reviewer", "check it", verifies="ag-nonexistent"))
+    assert out.get("error"), out
+    assert "ag-nonexistent" in str(out["error"]), out
+    assert not out.get("agent_id"), out
 
 
 def test_the_checks_report_shows_the_graph_not_a_score(tmp_path, quiet_git,
@@ -7450,6 +7454,7 @@ def test_a_verifier_declares_its_verdict_structurally(tmp_path):
     declares it instead — which is the judgement the whole arrangement already
     relies on."""
     import asyncio
+    from multiagents import gitops
     from multiagents.tree import Node
 
     r = _runner(tmp_path, {"reviewer": AgentSpec("reviewer", "p", "m")},
@@ -7462,7 +7467,8 @@ def test_a_verifier_declares_its_verdict_structurally(tmp_path):
                                   "rules": [{"match": {"type": "text"}, "as": "text",
                                              "fields": {"text": "text"}}]}}})
     r.tree.add(Node(id="ag-work", agent="implementer", provider="p", model="m",
-                    parent=None, depth=1, status="merged"))
+                    parent=None, depth=1, status="merged",
+                    branch=gitops.current_branch(tmp_path)))
 
     async def scenario():
         out = await r.start("reviewer", "check it", verifies="ag-work")
