@@ -5424,3 +5424,11 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **SC:** loop reviewer ag-6f4651 (agy) again ended its turn while its tests ran in the background, so the loop is held (run_failed). Its predecessor ag-6747a2 did confirm the deadlock test now passes. Standalone reviewer **nd-f76f84d4** is on 522b5e7b. If approved, close_node nd-a6f0f488 as approved, then merge_node nd-5212b614.
   - **Effort:** nd-75e23f9c's NEED_INFO says the IndexError is a test race (it indexes `runs` before the launch is recorded), not caused by effort. Tester **nd-b58dba10** merges 5cd00298 and makes the test wait. Then a reviewer, then merge. Superseded: nd-75e23f9c and nd-0b457a17.
   - **Watch:** budget_status reports "vault account credentials are missing or expired" for both claude and claude-b.
+- 08:55Z:
+  - **SC merged** as 3ba88b65 (nd-5212b614). Standalone reviewer ag-02372a (nd-f76f84d4) approved it with 207 passed: no lock is held across SQLite, and the cache is invalidated by triggers. Loop nd-a6f0f488 closed as approved. SC is DONE. The running scheduler daemon is the installed uv tool, so the gain arrives with the next reinstall and restart.
+  - **OC:** reviewer ag-9a2b2a observed 84 passed and confirmed R6, D1, D4, D5, D6 and D10, but rejected with 2 findings:
+    - `_deliver_live` short-circuits on a delivery failure, leaving the request in `compacted` and the barrier closed;
+    - `recover()` drops the return prompt in in_session mode.
+    Implementer **nd-73e50d82** (codex-b) merges 270db2d5 and fixes both. Then a reviewer, then merge that node. nd-2bee8f79 and nd-f43ef174 are superseded.
+  - **Effort:** tester nd-b58dba10's first run ag-b28aa5 failed in 7 s on opencode-go kimi (UnknownError). Relaunched pinned to codex-b.
+  - **Small item:** standalone agy reviewers have no `give_verdict` tool; they say so and fall back to the text verdict.
