@@ -5432,3 +5432,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     Implementer **nd-73e50d82** (codex-b) merges 270db2d5 and fixes both. Then a reviewer, then merge that node. nd-2bee8f79 and nd-f43ef174 are superseded.
   - **Effort:** tester nd-b58dba10's first run ag-b28aa5 failed in 7 s on opencode-go kimi (UnknownError). Relaunched pinned to codex-b.
   - **Small item:** standalone agy reviewers have no `give_verdict` tool; they say so and fall back to the text verdict.
+- 08:57Z, at the user's request: the scheduler was restarted (`multiagents scheduler stop` then `start`). The new pid is 126052; the old one was 2526569. No reinstall was needed: the uv tool is an editable install of this repo, so SC is live from now on. The OC implementer nd-73e50d82 launched as ag-5058c6, and tester ag-b46d2a is still alive.
