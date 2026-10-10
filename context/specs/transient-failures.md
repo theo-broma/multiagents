@@ -161,6 +161,43 @@ Verified by:
 - a deadline reached during the retries, which returns at the deadline;
 - a lost session, where the reply notes the fresh session.
 
+## Interface (decided 2026-10-10, after tester ag-931be6)
+
+**Provider patterns.** In providers.yaml, each provider may declare:
+
+```yaml
+failures:
+  transient: ["<regex>", ...]   # matched against the provider's error text and stderr
+  quota:     ["<regex>", ...]   # usage-limit messages
+  reset:     ["<regex with a named group 'reset'>", ...]  # extracts the announced reset time
+```
+
+Matching is case-insensitive, and a pattern list that is absent means no
+match. Defaults ship for codex: "workspace routing discovery failed" as
+transient, "You've hit your usage limit" as quota, and its "try again at
+<time>" as reset.
+
+**Retry and recheck timing.** In project.yaml:
+
+```yaml
+scheduler:
+  retries:
+    budget: 3                       # TF-R2, total per activation
+    backoff_seconds: [30, 120, 600] # delay before retry 1, 2, 3; the last value repeats
+  quota_recheck_seconds: 1800       # TF-R3, recheck interval when no reset is known
+  hang_seconds: 1800                # reserved for spec 2b
+```
+
+**Where a reset time comes from.** In order:
+1. a structured reset in the provider's result;
+2. the provider's `reset` pattern;
+3. the account's usage window `resets_at` from the budget reading;
+4. otherwise unknown.
+
+**Clock.** Every backoff, recheck and deadline in this spec uses the
+scheduler's existing injectable clock, the one rate_limits uses. Tests drive
+it rather than wait in real time.
+
 ## Deferred to a later spec (2b)
 
 These belong to the same family but are each large enough to need their own
