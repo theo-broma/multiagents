@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import compact_return, gitops, procs, root_accounts, safepoint, scripts
+from . import compaction_requests, compact_return, gitops, procs, root_accounts, safepoint, scripts
 from .budget import read_all, reset_label
 from .config import limit_number, shipped_limits
 from .executor import executor_for
@@ -564,6 +564,8 @@ def _launch_agent(paths, config, role: str, resume: bool,
             return _supervise(paths, config, role, spec, provider, executor,
                               context, unattended)
         if not supervise:
+            compaction_requests.Requests(paths).bind(
+                role, os.getpid(), session=context["MULTIAGENTS_SESSION_ID"], supervised=False)
             root_accounts.launch_line(paths, config, spec, provider, supervised=False)
             _launch_write(paths, f"{role}.observation.json", json.dumps({
                 "session": context["MULTIAGENTS_SESSION_ID"], "provider": spec.provider,
@@ -638,6 +640,8 @@ class _AttachedCompaction:
         self.snapshot = None        # CW-R4: the state at the stop
         self.outcome = None         # CW-R4: what the compaction did
         self.committed = None       # CW-R2: the request the stop went ahead on
+        self.journal = compaction_requests.Requests(paths)
+        self.explicit = None        # OC: the durable request this sequence serves
 
     def launched(self) -> None:
         """A (re)launch: a fresh prompt is not a quiet one yet."""
@@ -653,6 +657,9 @@ class _AttachedCompaction:
         self.detached()
         self.granter = safepoint.Granter(
             self.paths, self.context.get("MULTIAGENTS_SESSION_ID", ""), pid).start()
+        if self.explicit and self.explicit["status"] == "compacted" \
+                and self.explicit["mode"] == "restart":
+            self.explicit = self.journal.update(self.explicit["request_id"], "completed")
 
     def detached(self) -> None:
         """The CLI has ended: nothing beneath it is granted any more."""
@@ -720,6 +727,9 @@ class _AttachedCompaction:
                   "proposed again once it is quiet.")
         sys.stdout.flush()
         self.tree.emit(self._who(), "compact_cancelled", reason=why)
+        if self.explicit and why != "session_in_use":
+            self.explicit = self.journal.update(self.explicit["request_id"], "failed",
+                                               failure_detail=why)
 
     def _safe_point_error(self, announced_for) -> bool:
         """Cancel for a handshake that could not be done. Not proposed again
@@ -767,6 +777,8 @@ class _AttachedCompaction:
         granter = getattr(self, "granter", None)
         if granter is not None:
             granter.hold()
+        self.live_released = False
+        self.live_settlement_written = None
         stopping = False
         try:
             stopping = self._safe_point_round(announced_for)
@@ -835,6 +847,11 @@ class _AttachedCompaction:
 
     def due(self) -> bool:
         """One poll. True means: stop the child now, for a compaction."""
+        record = self.journal.status(self.context.get("MULTIAGENTS_ROLE", self.spec.name),
+                                     self.context.get("MULTIAGENTS_SESSION_ID", ""))
+        if record["status"] in compaction_requests.ACTIVE:
+            return self._explicit_due(record)
+        self.explicit = None
         if self.threshold <= 0 or not sys.stdin.isatty():
             return False
         state = self._state()
@@ -911,15 +928,178 @@ class _AttachedCompaction:
         self.tree.emit(self._who(), "compact_scheduled", tokens=tokens, active=active)
         return False
 
+    def _explicit_due(self, record) -> bool:
+        """OC: only a fresh declared closed turn can start the grace period."""
+        if not self.explicit or self.explicit["request_id"] != record["request_id"]:
+            self.scheduled = None
+        self.explicit = record
+        if record["status"] == "compacted":
+            if record["mode"] == "in_session":
+                self._deliver_live()
+            return False
+        state = self._state()
+        if state is None or not sys.stdin.isatty():
+            return False
+        if self.scheduled:
+            announced_for, at, tokens = self.scheduled
+            if state != announced_for:
+                self._cancel()
+                return False
+            if time.monotonic() - at < self.grace:
+                return False
+            self.scheduled = None
+            if not self._reach_safe_point(announced_for):
+                return False
+            self.snapshot = compact_return.snapshot(self.tree, record["session"], tokens)
+            self.explicit = self.journal.update(record["request_id"], "executing",
+                                                snapshot=self.snapshot)
+            self.requested = tokens
+            if record["mode"] == "in_session":
+                self.compact()
+                if self.explicit["status"] == "compacted":
+                    self._deliver_live()
+                return False
+            return True
+        boundary = record.get("boundary")
+        # No readable transcript at request time: a subsequently written
+        # transcript must itself be newer than the request.
+        if boundary is None:
+            if state[1] / 1e9 <= record["requested_at"]:
+                return False
+            boundary = [state[0], 0, 0]
+        if not session_at_prompt(self.provider, self.paths.root, record["session"],
+                                 _own_transcripts(), after=boundary):
+            return False
+        tokens = self._tokens()
+        self.scheduled = (state, time.monotonic(), tokens if tokens is not None else 0)
+        active = len(self.tree.active())
+        bell = "\a" if self.bell else ""
+        print(f"\ncompacting this session in {self.grace:g}s (requested; {active} agents running) "
+              f"— send any message to cancel this attempt and delay until the next closed turn{bell}")
+        sys.stdout.flush()
+        self.tree.emit(self._who(), "compact_scheduled", request_id=record["request_id"], active=active)
+        return False
+
+    def _settle_live(self) -> bool:
+        """Reopen the surviving servers through an authenticated settlement."""
+        try:
+            if self.committed:
+                session, nonce = self.explicit["session"], self.committed
+                if getattr(self, "live_settlement_written", None) != nonce:
+                    if not safepoint.settle(self.paths, session, nonce, "settled"):
+                        return False
+                    self.live_settlement_written = nonce
+                deadline = time.monotonic() + self.safe_point
+                while time.monotonic() < deadline:
+                    servers = safepoint.servers(self.paths, session, self.cli)
+                    if not any(safepoint.acknowledged(self.paths, int(s["pid"]), nonce) for s in servers):
+                        break
+                    time.sleep(safepoint.POLL_SECONDS)
+                else:
+                    return False
+                self.committed = None
+            return True
+        except Exception:
+            return False
+        finally:
+            if getattr(self, "granter", None) is not None and not getattr(self, "live_released", False):
+                self.granter.release()
+                self.live_released = True
+
+    def _deliver_live(self) -> None:
+        # OC-D7: persist delivery attempts independently of compaction, so
+        # recovery never compacts again or repeats an acknowledged delivery.
+        record = self.explicit
+        detail = ""
+        settled = False
+        try:
+            while not record.get("delivery_done") and record.get("delivery_attempts", 0) < 3:
+                record = self.journal.update(record["request_id"], "compacted",
+                    delivery_attempts=record.get("delivery_attempts", 0) + 1)
+                self.explicit = record
+                try:
+                    code, _, error = scripts.run_action(
+                        self.spec.provider, self.provider, self.executor, "compact-deliver",
+                        global_config_dir(), self.paths.config,
+                        timeout=_limit_number(self.config, "compact_timeout_seconds"),
+                        extra_env={**self.context, "MULTIAGENTS_COMPACTION_REQUEST_ID": record["request_id"],
+                                   "MULTIAGENTS_RESUME_PROMPT": record["return_prompt"]}, cwd=self.paths.root)
+                except Exception as caught:
+                    code, error = 1, f"delivery error: {caught}"
+                detail = "" if code == 0 else (error or f"delivery plugin exit {code}")
+                record = self.journal.update(record["request_id"], "compacted",
+                    delivery_done=code == 0, delivery_failure=detail)
+                self.explicit = record
+        finally:
+            # Settlement is required even when delivery fails or raises.
+            for _ in range(3):
+                if self._settle_live():
+                    settled = True
+                    break
+        if record.get("delivery_done") and settled:
+            self.explicit = self.journal.update(record["request_id"], "completed")
+        else:
+            detail = record.get("delivery_failure") or detail
+            if not record.get("delivery_done") and not detail:
+                detail = "delivery attempts exhausted"
+            if not settled:
+                detail = "; ".join(p for p in ("admission settlement failed", detail) if p)
+            self.explicit = self.journal.update(record["request_id"], "failed", failure_detail=detail)
+        if not settled:
+            # A committed server latch cannot be cleared without authentication.
+            # End this driver so surviving servers can reopen on its death.
+            raise RuntimeError("compaction admission settlement failed")
+
+    def recover(self) -> str:
+        """Reconcile before launching anything after an interrupted execution."""
+        record = self.journal.status(self.context.get("MULTIAGENTS_ROLE", self.spec.name),
+                                     self.context.get("MULTIAGENTS_SESSION_ID", ""))
+        if record["status"] not in {"executing", "compacted"}:
+            return ""
+        self.explicit = record
+        self.snapshot = record.get("snapshot")
+        if record["status"] == "executing":
+            self.requested = (self.snapshot or {}).get("tokens", 0)
+            self.compact()
+        if record["mode"] == "restart":
+            return self.return_message()
+        if self.explicit["status"] == "compacted":
+            self._deliver_live()
+        return ""
+
     def compact(self) -> None:
         """The child has stopped for `due()`: compact, and settle the latches."""
         tokens, self.requested = self.requested, None
-        self.release()
+        if not self.explicit or self.explicit["mode"] == "restart":
+            self.release()
         outcome: dict = {}
         code = _compact_session(self.paths, self.config, self.spec, self.provider,
-                                self.executor, self.context, self.tree, tokens,
+                                self.executor, {**self.context, **({
+                                    "MULTIAGENTS_COMPACTION_REQUEST_ID": self.explicit["request_id"],
+                                    "MULTIAGENTS_COMPACT_RECEIPT": str(self.journal.directory / (
+                                        self.explicit["request_id"] + ".receipt.json")),
+                                } if self.explicit else {})}, self.tree, tokens,
                                 outcome)
         self.outcome = outcome
+        if self.explicit:
+            if code == 0:
+                note = compact_return.message(self.tree, self.explicit["session"],
+                    self.snapshot or self.explicit.get("snapshot") or {},
+                    {**outcome, "unsupported": scripts.UNIMPLEMENTED})
+                note = f"Compaction requested: {self.explicit['reason']}\n\n" + note
+                self.explicit = self.journal.update(self.explicit["request_id"], "compacted",
+                                                    return_prompt=note, outcome=outcome)
+            else:
+                settled = True
+                if self.explicit["mode"] == "in_session":
+                    settled = any(self._settle_live() for _ in range(3))
+                detail = outcome.get("detail") or f"plugin exit {code}"
+                if not settled:
+                    detail = "admission settlement failed; " + detail
+                self.explicit = self.journal.update(self.explicit["request_id"], "failed",
+                    failure_detail=detail, outcome=outcome)
+                if not settled:
+                    raise RuntimeError("compaction admission settlement failed")
         if code == 0:
             self.spent = True
         else:
@@ -938,6 +1118,8 @@ class _AttachedCompaction:
     def return_message(self) -> str:
         """CW-R4: the relaunch's prompt — "" when nothing was in flight at the
         stop, which keeps R8f.4.4's "no prompt"."""
+        if self.explicit and self.explicit["status"] == "compacted":
+            return self.explicit["return_prompt"]
         snap, self.snapshot = self.snapshot, None
         if not snap or not snap.get("in_flight"):
             return ""
@@ -998,6 +1180,12 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
 
     compaction = _AttachedCompaction(paths, config, spec, provider, executor,
                                      context)
+    recovered_note = ""
+    if context.get("MULTIAGENTS_SESSION_ID"):
+        compaction.journal.bind(role, os.getpid(), session=context["MULTIAGENTS_SESSION_ID"])
+        recovered_note = compaction.recover()
+    if recovered_note:
+        env = {**env, "MULTIAGENTS_RESUME": "1", "MULTIAGENTS_RESUME_PROMPT": recovered_note}
     signals = _HoldSignals(paths, config, role)
     signal_stop = []
     delivery = []
@@ -1377,6 +1565,10 @@ def _write_pid(paths, role: str, pid: int) -> None:
     """
     _launch_write(paths, _pid_file(paths, role).name,
                   f"{pid} {procs.start_time(pid)}".strip())
+    # Recording a PID needs only the launch directory. A durable request
+    # binding additionally needs the host's project identity (OC-D4/D8).
+    if getattr(paths, "slug", ""):
+        compaction_requests.Requests(paths).bind(role, pid)
 
 
 def _read_pid(paths, role: str) -> tuple[int, str] | None:
@@ -1395,6 +1587,8 @@ def _read_pid(paths, role: str) -> tuple[int, str] | None:
 def _clear_pid(paths, role: str) -> None:
     with contextlib.suppress(OSError):
         gitops._unlink_beneath(paths.data, ("launch",), _pid_file(paths, role).name)
+    if getattr(paths, "slug", ""):
+        compaction_requests.Requests(paths).unbind(role)
 
 
 def _role_alive(paths, role: str) -> bool:
@@ -1749,6 +1943,9 @@ def _compact_session(paths, config, spec, provider, executor, context: dict,
     given, receives the code and the line reported (CW-R4).
     """
     session = context.get("MULTIAGENTS_SESSION_ID", "")
+    # OC-D10: request phases are reported by the durable journal. Keep the
+    # older automatic-compaction events only for automatic calls.
+    requested = bool(context.get("MULTIAGENTS_COMPACTION_REQUEST_ID"))
     who = next((n.id for n in tree.drivers() if n.session == session), spec.name)
     timeout = _limit_number(config, "compact_timeout_seconds")
     # Never a probe, whatever this process inherited: a check-mode answer of 0
@@ -1763,18 +1960,21 @@ def _compact_session(paths, config, spec, provider, executor, context: dict,
     if code == 0:
         detail = next((line.strip() for line in out.splitlines() if line.strip()), "")
         print(f"\ncompacted    {detail[:500]}")
-        tree.emit(who, "compacted", tokens_before=tokens, detail=detail[:500])
+        if not requested:
+            tree.emit(who, "compacted", tokens_before=tokens, detail=detail[:500])
     elif code == scripts.UNIMPLEMENTED:
         print(f"\n{spec.provider} cannot compact a session from outside; "
               f"not asking again this run.")
-        tree.emit(who, "compact_unsupported", tokens_before=tokens)
+        if not requested:
+            tree.emit(who, "compact_unsupported", tokens_before=tokens)
     else:
         # A tail, and a bounded one: a CLI that dumps a response body onto
         # stderr can make its "last line" megabytes long.
         tail = " | ".join(line.strip() for line in err.strip().splitlines()[-3:])
         tail = tail if len(tail) <= 500 else "…" + tail[-500:]
         print(f"\ncompaction failed (exit {code}): {tail or 'no reason given'}")
-        tree.emit(who, "compact_failed", code=code, detail=tail)
+        if not requested:
+            tree.emit(who, "compact_failed", code=code, detail=tail)
         detail = tail
     if outcome is not None:
         outcome.update(code=code, detail=detail)

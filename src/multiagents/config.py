@@ -1319,6 +1319,15 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
                             raise
                         instance_strategy_errors.append(str(exc))
                         del block["instance_strategy"]
+                if name == "providers.yaml":
+                    for provider_name, block in (data.get("providers") or {}).items():
+                        old = (merged[name].get("providers") or {}).get(provider_name) or {}
+                        if isinstance(block, dict) and "script" in block and "compaction" not in block:
+                            old_script = old.get("script") or (old.get("auth") or {}).get("script")
+                            if old_script and block["script"] != old_script:
+                                # Capabilities belong to the action script. Replacing
+                                # it must not claim the previous plugin's capability.
+                                old.pop("compaction", None)
                 merged[name] = deep_merge(merged[name], data)
                 if name == "providers.yaml":
                     scope = ("shipped" if layer == layers[0] else

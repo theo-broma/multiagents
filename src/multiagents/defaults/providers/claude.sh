@@ -790,77 +790,151 @@ compact)
     if [ "${MULTIAGENTS_COMPACT_CHECK:-}" = "1" ]; then
         exit 0
     fi
-    # `wc -l` counts newlines, not lines: an unterminated last line (a writer
-    # killed mid-flush) is one line short. Left uncorrected, the python below
-    # slices from one line too early and hands an old, pre-existing record to
-    # a caller that appended nothing.
-    before=$(wc -l < "$transcript" 2>/dev/null || echo 0)
-    if [ -s "$transcript" ] && [ -n "$(tail -c1 "$transcript")" ]; then
-        before=$((before + 1))
-    fi
-    # CW-R8: what to keep, as the command's own argument — one argument,
-    # never re-parsed by a shell, cut to its bound rather than refused. The
-    # trailing x survives the command substitution's newline stripping.
-    prompt="/compact"
-    if [ -n "${MULTIAGENTS_COMPACT_FOCUS:-}" ]; then
-        focus=$(python3 -c 'import os, sys; sys.stdout.write(os.environ["MULTIAGENTS_COMPACT_FOCUS"][:1000])'; printf x)
-        focus=${focus%x}
-        [ -n "$focus" ] && prompt="/compact $focus"
-    fi
-    out=$("$BIN" -p "$prompt" --resume "$sid" --output-format json 2>&1)
-    code=$?
-    if [ "$code" -ne 0 ]; then
-        printf 'compact failed: %s\n' "$(printf '%s' "$out" | tail -1 | head -c 200)" >&2
-        exit 1
-    fi
-    # Only lines APPENDED by this call count — a compaction record already in
-    # the transcript, manual or automatic, was somebody else's and proves
-    # nothing about this invocation.
-    figures=$(python3 -c "
-import json, sys
-path, before = sys.argv[1], int(sys.argv[2])
-# errors='replace': a byte elsewhere in the session that is not valid UTF-8
-# (written long before this call) must not turn a real compaction into a
-# reported failure.
-with open(path, errors='replace') as fh:
-    lines = fh.readlines()
-for line in lines[before:]:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        record = json.loads(line)
-    except ValueError:
-        continue
-    if record.get('type') != 'system' or record.get('subtype') != 'compact_boundary':
-        continue
-    meta = record.get('compactMetadata')
-    if not isinstance(meta, dict) or meta.get('trigger') != 'manual':
-        continue
-    pre, post = meta.get('preTokens'), meta.get('postTokens')
-    if pre is not None and post is not None:
-        print('%s -> %s tokens' % (pre, post))
-        # P0-R8f.15: a compaction that left the context no smaller did not
-        # do its job, and reporting it as one would have the caller stop the
-        # session for it again at the next boundary. Figures that are not
-        # numbers cannot say so; the record itself is genuine, as before.
+    # OC-D5: the receipt records the transcript boundary BEFORE invocation.
+    # A replacement reconciles from that boundary, including when the CLI
+    # finished but this script died before writing its success receipt.
+    exec python3 - "$transcript" "$sid" <<'PYCOMPACT'
+import contextlib, fcntl, json, os, pathlib, subprocess, sys, tempfile
+
+path, sid = sys.argv[1:]
+request_id = os.environ.get('MULTIAGENTS_COMPACTION_REQUEST_ID', '')
+receipt_path = os.environ.get('MULTIAGENTS_COMPACT_RECEIPT', '')
+
+
+def figures(before):
+    # errors='replace': an old invalid byte cannot invalidate a new boundary.
+    with open(path, errors='replace') as fh:
+        lines = fh.readlines()
+    for line in lines[before:]:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get('type') != 'system' \
+                or record.get('subtype') != 'compact_boundary':
+            continue
+        meta = record.get('compactMetadata')
+        if not isinstance(meta, dict) or meta.get('trigger') != 'manual':
+            continue
+        pre, post = meta.get('preTokens'), meta.get('postTokens')
+        if pre is None or post is None:
+            continue
+        detail = '%s -> %s tokens' % (pre, post)
         try:
             shrank = float(post) < float(pre)
         except (TypeError, ValueError):
             shrank = True
         if not shrank:
-            print('the context did not shrink (%s -> %s tokens)' % (pre, post),
-                  file=sys.stderr)
-            sys.exit(3)
-        break
-" "$transcript" "$before")
-    [ $? -eq 3 ] && exit 1
-    if [ -z "$figures" ]; then
-        echo "the CLI exited 0 but no compaction was recorded" >&2
-        exit 1
-    fi
-    echo "$figures"
-    exit 0
+            return 1, detail, 'the context did not shrink (%s -> %s tokens)' % (pre, post)
+        return 0, detail, ''
+    return None
+
+
+def save(record):
+    parent = pathlib.Path(receipt_path).parent
+    fd, name = tempfile.mkstemp(prefix='.compact-', dir=parent)
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            json.dump(record, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(name, receipt_path)
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name)
+
+
+def finish(record, code, out='', err=''):
+    if request_id:
+        record.update(status='completed' if code == 0 else 'failed',
+                      code=code, stdout=out, stderr=err)
+        save(record)
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr)
+    return code
+
+
+def compact():
+    lock = None
+    try:
+        record = None
+        if request_id:
+            if not receipt_path:
+                raise ValueError('MULTIAGENTS_COMPACT_RECEIPT is required for a request')
+            lock = os.open(receipt_path + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                with open(receipt_path) as fh:
+                    record = json.load(fh)
+            except FileNotFoundError:
+                pass
+            if record is not None:
+                if record.get('request_id') != request_id or record.get('session') != sid \
+                        or record.get('transcript') != path:
+                    raise ValueError('compaction receipt does not match this request and session')
+                if record['status'] in ('completed', 'failed'):
+                    if record['stdout']:
+                        print(record['stdout'])
+                    if record['stderr']:
+                        print(record['stderr'], file=sys.stderr)
+                    return record['code']
+                if record['status'] != 'executing':
+                    raise ValueError('invalid compaction receipt phase')
+                recovered = figures(record['before'])
+                if recovered is not None:
+                    return finish(record, *recovered)
+        if record is None:
+            # readlines counts even an unterminated last line. It must not
+            # become an old boundary attributed to this invocation (P0-R8f).
+            with open(path, errors='replace') as fh:
+                before = sum(1 for _ in fh)
+            record = dict(request_id=request_id, session=sid, transcript=path,
+                          status='executing', before=before)
+            if request_id:
+                save(record)
+        if request_id:
+            # Retain a plugin-owned lock holder if the caller dies. Do not
+            # depend on a CLI runtime keeping unknown descriptors open.
+            worker = os.fork()
+            if worker:
+                _, status = os.waitpid(worker, 0)
+                return os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+        prompt = '/compact'
+        focus = os.environ.get('MULTIAGENTS_COMPACT_FOCUS', '')[:1000]
+        if focus:
+            prompt += ' ' + focus
+        # Keep the lock through CLI completion and the durable receipt. The
+        # CLI inherits it too, if the worker itself is interrupted.
+        result = subprocess.run([os.environ['MULTIAGENTS_BIN'], '-p', prompt,
+                                 '--resume', sid, '--output-format', 'json'],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors='replace',
+                                pass_fds=(lock,) if lock is not None else ())
+        if result.returncode != 0:
+            tail = result.stdout.splitlines()[-1][:200] if result.stdout else ''
+            return finish(record, 1, err='compact failed: ' + tail)
+        observed = figures(record['before'])
+        if observed is None:
+            return finish(record, 1, err='the CLI exited 0 but no compaction was recorded')
+        return finish(record, *observed)
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+try:
+    sys.exit(compact())
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    print('compact failed: %s' % exc, file=sys.stderr)
+    sys.exit(1)
+PYCOMPACT
     ;;
 *)  echo "usage: $0 check|login|refresh|budget|usage|prepare|launch|compact" >&2; exit 64 ;;
 esac

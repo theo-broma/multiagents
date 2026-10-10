@@ -357,6 +357,60 @@ def _project_paths() -> ProjectPaths:
     return ProjectPaths(root)
 
 
+@_tool()
+def request_compaction(reason: str = "") -> dict:
+    """Request compaction at the next fresh closed turn of this root session.
+
+    A sent message delays it until that message's reply closes. Text typed but
+    not sent is invisible to the driver. The announcement and grace period
+    still apply. Inspect compaction_status for completion or failure.
+    """
+    from .compaction_requests import Requests, mode
+    from .driver import _launched_spec, _own_transcripts
+    from .root_accounts import reported_provider
+    from .transcripts import session_transcript
+
+    if os.environ.get("MULTIAGENTS_AGENT_ID"):
+        return {"status": "not_root", "reason": "only root sessions may request compaction"}
+    run = runner()
+    role = os.environ.get("MULTIAGENTS_ROLE") or "orchestrator"
+    session = run.session()
+    journal = Requests(run.paths)
+    if role not in {"orchestrator", "initializer"} or not session:
+        return {"status": "unsupported", "reason": "no root session binding"}
+    if not journal.supported(role, session) or not any(
+            n.session == session and n.role == role for n in run.tree.drivers()):
+        return {"status": "unsupported", "reason": "no matching live supervised driver"}
+    spec = _launched_spec(run.config, role)
+    name = reported_provider(run.paths, role, session, spec.provider if spec else "")
+    provider = run.providers.get(name)
+    declared = mode(provider)
+    if declared is None:
+        return {"status": "unsupported", "reason": "provider has no supported compaction mode"}
+    path = session_transcript(provider, run.paths.root, session, _own_transcripts())
+    boundary = None
+    if path is not None:
+        try:
+            st = path.stat()
+            boundary = [st.st_ino, st.st_mtime_ns, st.st_size]
+        except OSError:
+            pass
+    record = journal.request(role, session, declared, reason, boundary)
+    return {"request_id": record["request_id"], "status": record["status"]}
+
+
+@_tool()
+def compaction_status(request_id: str = "") -> dict:
+    """Read the latest compaction request for this root session, or a named one."""
+    from .compaction_requests import Requests
+
+    if os.environ.get("MULTIAGENTS_AGENT_ID"):
+        return {"status": "not_root", "reason": "only root sessions may read compaction requests"}
+    run = runner()
+    return Requests(run.paths).status(os.environ.get("MULTIAGENTS_ROLE") or "orchestrator",
+                                     run.session(), request_id)
+
+
 def _context_reading(run: Runner) -> int | None:
     """The launched role's own context size, or None when it is not one.
 

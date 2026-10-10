@@ -281,6 +281,7 @@ class Provider:
     # watch from outside. Optional: a provider that keeps sessions in a database
     # or an opaque directory simply omits it.
     transcript: dict = field(default_factory=dict)
+    compaction: dict = field(default_factory=dict)
     auth: dict[str, Any] = field(default_factory=dict)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -439,6 +440,7 @@ class Provider:
             script=data.get("script", "") or (data.get("auth", {}) or {}).get("script", ""),
             enabled=bool(data.get("enabled", True)),
             transcript=dict(data.get("transcript", {}) or {}),
+            compaction=(dict(data["compaction"]) if isinstance(data.get("compaction"), dict) else {}),
             auth=data.get("auth", {}) or {},
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),

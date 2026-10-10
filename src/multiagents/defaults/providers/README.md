@@ -237,3 +237,36 @@ Scripts resolve **project → global → shipped**, so a project can override on
 provider's behaviour without touching the machine. The legacy `auth/` directory
 is still searched for installs predating the rename, but always loses to
 `providers/` in the same layer.
+
+### Requested root-session compaction (OC)
+
+Declare `compaction: {mode: restart}` or `compaction: {mode: in_session}` in
+providers.yaml. The declaration is inherited through `extends`; absent,
+missing or unknown modes are unsupported. Replacing an integration's action
+script in a config layer requires declaring that replacement's capability.
+
+The `compact` action receives `MULTIAGENTS_SESSION_ID` and
+`MULTIAGENTS_COMPACTION_REQUEST_ID` (the request_id). It must be idempotent for
+that request_id, including after interruption: re-calling reconciles the same
+operation. `MULTIAGENTS_COMPACT_RECEIPT` names a host-owned file available for
+its durable receipt. Exit 0 certifies completed compaction, never merely
+acceptance of a command; exit 64 means unsupported; other nonzero exits mean
+failure. The core enforces `limits.compact_timeout_seconds` for every action.
+
+The shipped Claude action requires that receipt path for a request. It saves
+the transcript boundary before invoking the CLI, locks concurrent calls for
+the same receipt, and durably saves the result. After an interrupted call it
+checks for a new manual compaction boundary before invoking the CLI again.
+A plugin worker retains the lock through completion even if its caller dies
+or the CLI closes inherited descriptors. Completed and failed receipts replay
+their saved result.
+
+In `restart` mode the core drains admissions, stops the CLI, invokes `compact`,
+and launches the same session with resume and `MULTIAGENTS_RESUME_PROMPT`.
+In `in_session` mode the CLI and its background processes stay alive. The
+plugin owns live-session addressing, commanding compaction, and verifying its
+completion. After exit 0, the separate `compact-deliver` action receives the
+same session and request_id and `MULTIAGENTS_RESUME_PROMPT` as the next input.
+It must deliver that input idempotently; only delivery is retried on failure.
+The core never sends terminal keystrokes. Authenticated barrier settlement
+reopens the surviving MCP servers after success or failure.

@@ -478,7 +478,7 @@ def session_transcript(provider: Any, cwd: Path, session_id: str,
 
 
 def session_at_prompt(provider: Any, cwd: Path, session_id: str,
-                      executor: Any = None) -> bool:
+                      executor: Any = None, *, after: list | tuple | None = None) -> bool:
     """A declared closed turn, never silence inferred from a slow tool call.
 
     Unknown or incomplete transcript tails cannot authorize an attached stop.
@@ -494,6 +494,7 @@ def session_at_prompt(provider: Any, cwd: Path, session_id: str,
         return False
     try:
         with path.open("rb") as file:
+            inode = os.fstat(file.fileno()).st_ino
             file.seek(0, 2)
             size = file.tell()
             file.seek(max(0, size - 1024 * 1024))
@@ -503,13 +504,16 @@ def session_at_prompt(provider: Any, cwd: Path, session_id: str,
         lines = tail.splitlines()
         if size > 1024 * 1024:
             lines = lines[1:]
+        end = size
         for line in reversed(lines):
             record = json.loads(line)
             for rule in rules:
                 when = rule.get("when")
                 if isinstance(when, dict) and when and all(get_path(record, key) == value
                                                         for key, value in when.items()):
-                    return rule.get("idle") is True
+                    fresh = after is None or (inode == after[0] and end > after[2])
+                    return rule.get("idle") is True and fresh
+            end -= len(line) + 1
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     return False

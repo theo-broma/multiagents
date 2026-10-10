@@ -356,7 +356,7 @@ def unregister(paths) -> None:
     _rmdir(paths)
 
 
-BARRIER_TYPES = ("request", "commit", "cancel")
+BARRIER_TYPES = ("request", "commit", "cancel", "settlement")
 
 
 def request_for(paths, session: str) -> dict | None:
@@ -526,7 +526,7 @@ def observe(paths, session: str, gate: Gate, acked: list, limit: float) -> None:
         if mine and kind == "commit":
             gate.committed = True
         # Only a cancellation of the current request, or its driver's death.
-        if (mine and kind == "cancel" and not gate.committed) \
+        if (mine and (kind == "settlement" or (kind == "cancel" and not gate.committed))) \
                 or not _alive(gate.requester):
             if withdraw(paths):
                 gate.reopen()
@@ -534,7 +534,7 @@ def observe(paths, session: str, gate: Gate, acked: list, limit: float) -> None:
         if acked[:1] != [gate.nonce] and acknowledge(paths, gate.nonce, session):
             acked[:] = [gate.nonce]
         return
-    if record is None or kind == "cancel" or not _alive(record.get("requester")):
+    if record is None or kind in ("cancel", "settlement") or not _alive(record.get("requester")):
         return
     committed = kind == "commit"
     if not _fresh(record, limit + (COMMITTED_GRACE_SECONDS if committed else 0)):
@@ -649,7 +649,7 @@ def settle(paths, session: str, nonce: str, state: str) -> bool:
     authenticated request: a newer one is left alone. False when it could not
     be written."""
     name = f"safepoint-barrier-{_key(session)}.json"
-    kind = "commit" if state == "commit" else "cancel"
+    kind = {"commit": "commit", "settled": "settlement"}.get(state, "cancel")
     try:
         record = _verified(_read(paths, name), *BARRIER_TYPES)
         if record is None or record.get("nonce") != nonce:
