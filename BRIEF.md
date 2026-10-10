@@ -5469,3 +5469,9 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   Both specs are uncommitted, awaiting the user's yes.
 - 16:25Z: The user approved specs 2 and 4; committed as 85fa32aa. Testers on codex gpt-6.1-sol (medium): **nd-b92e8c4c** (TF, tests/test_tf_*.py) and **nd-daa7686f** (PS2, tests/test_ps2_*.py). The scheduler was restarted so RR and RM are live: new pid 3143758, and old pid 126052 is gone. `scheduler stop` answered `{"stopped": false}` although the old daemon did exit; that is a small tooling oddity to look at. The full suite on f9ced621 is still running in the scratchpad worktree.
 - 16:40Z: The PS2 tests (tester ag-a244f0) are merged as d1f83f0a: 20 cases red. Updated deliberately: test_oc_delivery_recovery (2 cases) and conftest. Its NEED_INFO on PS2-R4 recovery is answered by Decision 3 in the spec. The PS2 implementation is **nd-4d3d6530** (implementer, codex medium). The TF tester nd-b92e8c4c is still running, and so is the full suite on f9ced621.
+- 16:50Z: TF tester round 1 (ag-931be6, nd-b92e8c4c, closed as failed) is at e5bcb3a2: 43 failed, 3 passed. It stopped on NEED_INFO(tf-interface). Answered in the spec as the section "Interface (decided 2026-10-10)" (da793260):
+  - providers.yaml `failures.{transient,quota,reset}` patterns, with codex defaults;
+  - project.yaml `scheduler.retries.{budget,backoff_seconds}` and `quota_recheck_seconds`;
+  - the order of reset sources;
+  - the injectable clock.
+  Round 2 is tester **nd-cd0e0e07**: it merges e5bcb3a2, adds the missing cases, drives timing through the clock, and reconciles the LR and RR fixtures. **Note:** this session's MCP server predates RR, so `relaunch_node` has no `task` parameter here. /mcp must be reconnected to use RR-R1.
