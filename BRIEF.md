@@ -5475,3 +5475,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - the order of reset sources;
   - the injectable clock.
   Round 2 is tester **nd-cd0e0e07**: it merges e5bcb3a2, adds the missing cases, drives timing through the clock, and reconciles the LR and RR fixtures. **Note:** this session's MCP server predates RR, so `relaunch_node` has no `task` parameter here. /mcp must be reconnected to use RR-R1.
+- 17:00Z: **codex's weekly quota is exhausted too**, until 10-14 08:22 CEST. Applying the user's rule:
+  - The PS2 implementation continues on **nd-2240af25** (opencode-zai glm-5.3, run ag-420a50), merging b5bbcac6, the commits of codex run ag-d68ab4.
+  - TF tester round 2, nd-cd0e0e07, was re-pinned with update_node to opencode-zai glm-5.3 effort high; it had been refused admission on codex.
+  - **Tooling gap:** an `effort` pin is not translated into opencode's `--variant`. ag-420a50 launched with no `--variant`, so glm-5.3 runs on its default variant, not low or high. Pins accept only model, provider and effort. To fix: map effort to variant for opencode providers, or accept `variant` in pins.
+  - The full suite on f9ced621 is still running.
