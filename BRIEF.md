@@ -5419,3 +5419,8 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
     - #3, `_settle_live()` is called twice on an in_session failure (driver.py ~958 and ~1050): **real**. Sent to implementer nd-2bee8f79 (codex-b), which merges f8d002ac into main, fixes it and runs the suite. Then a reviewer, then merge that node; nd-f43ef174 is superseded.
   - **Effort:** nd-75e23f9c relaunched on codex-b with the same task.
   - **Small item:** agy reviewers cannot run the suite in the foreground (anything over 10 s is backgrounded), so their verdicts carry no observed counts.
+- 2026-10-10 07:45Z (the session had stopped overnight, and its background wake-up died with it; resumed at the user's prompt):
+  - **OC:** implementer nd-2bee8f79 (ag-47abbc) is done at 270db2d5. c459782b fixes the double settlement and adds 6 cases. Observed: 84 OC tests pass; full suite 80 failed + 57 errors, and 136 of the 137 reds reproduce on main. Reviewer **nd-23fa4168** is on 270db2d5. If approved, merge_node nd-2bee8f79.
+  - **SC:** loop reviewer ag-6f4651 (agy) again ended its turn while its tests ran in the background, so the loop is held (run_failed). Its predecessor ag-6747a2 did confirm the deadlock test now passes. Standalone reviewer **nd-f76f84d4** is on 522b5e7b. If approved, close_node nd-a6f0f488 as approved, then merge_node nd-5212b614.
+  - **Effort:** nd-75e23f9c's NEED_INFO says the IndexError is a test race (it indexes `runs` before the launch is recorded), not caused by effort. Tester **nd-b58dba10** merges 5cd00298 and makes the test wait. Then a reviewer, then merge. Superseded: nd-75e23f9c and nd-0b457a17.
+  - **Watch:** budget_status reports "vault account credentials are missing or expired" for both claude and claude-b.
