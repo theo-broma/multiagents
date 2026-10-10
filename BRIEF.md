@@ -5489,3 +5489,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - 9 test_gg_r7_r9 and 2 test_oa_*, already red on 52c08a4b, the start of this session; environment-dependent, not from this session;
   - **2 new**: test_need_decision_quoted[\t] and test_need_decision_quoted_review[\t12) ]. Tab-indented NEED_DECISION markers are masked by RM-R1, as intended; the RM tester had missed these two files.
   Tester **nd-fe46d53e** (z.ai) updates them. **Baseline for comparison:** 87 reds = 72 phase2 + 11 gg/oa + 2 flaky + 2 RM-R1 test updates pending.
+- 17:30Z: The RM-R1 test updates (tester ag-7f4dad, nd-fe46d53e) are merged as 6da2b281: the tab cases moved to the masked side, with 2 masked counterparts added; 81 passed. The main baseline is now **85 reds**: 72 phase2, 11 gg/oa from the environment, 2 flaky. Still running on z.ai: TF tester nd-cd0e0e07 and PS2 impl nd-2240af25.
