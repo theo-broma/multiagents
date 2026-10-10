@@ -113,3 +113,7 @@ Reviewer inspection: no other test depends on ambient config.
 1. Consult admission rests on a host-written record, never on a mutable
    parent field (PS2-R5, advisor 2026-10-10).
 2. Publication and short outputs are split out of this batch (4b, 4c).
+3. PS2-R4's recovery-path exhaustion cannot be reached through the public
+   surface, because startup recovery has no committed settlement nonce
+   (tester ag-a244f0). Both real raise sites are covered through live
+   compaction, and that is enough.
