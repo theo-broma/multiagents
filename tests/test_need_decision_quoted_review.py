@@ -5,7 +5,7 @@ import pytest
 from test_need_decision_quoted import run_text
 
 
-@pytest.mark.parametrize("prefix", ["- ", "* ", "+ ", "1. ", "1) ", "  - \t", "\t12) "])
+@pytest.mark.parametrize("prefix", ["- ", "* ", "+ ", "1. ", "1) ", "  - \t"])
 def test_list_marker_parks_with_default(tmp_path, monkeypatch, prefix):
     runner, agent = run_text(
         tmp_path, monkeypatch,
@@ -17,6 +17,15 @@ def test_list_marker_parks_with_default(tmp_path, monkeypatch, prefix):
     assert questions[0]["topic"] == "store"
     assert questions[0]["question"] == "Postgres or SQLite?"
     assert questions[0]["proposed_default"] == "SQLite"
+
+
+def test_rm_r1_tab_indented_list_marker_does_not_park(tmp_path, monkeypatch):
+    runner, agent = run_text(
+        tmp_path, monkeypatch,
+        "\t12) NEED_DECISION(store): Postgres or SQLite?\nDEFAULT: SQLite",
+    )
+    assert runner.tree.get(agent).status == "done"
+    assert runner.tree.open_questions(agent) == []
 
 
 @pytest.mark.parametrize("text", [

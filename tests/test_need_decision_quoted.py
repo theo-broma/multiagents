@@ -21,7 +21,7 @@ def test_quoted_or_midline_marker_does_not_park(tmp_path, monkeypatch, text):
     assert runner.tree.open_questions(agent) == []
 
 
-@pytest.mark.parametrize("indent", ["", "  ", "\t"])
+@pytest.mark.parametrize("indent", ["", "  "])
 def test_line_start_marker_parks_with_default(tmp_path, monkeypatch, indent):
     text = ("I need a choice before continuing.\n"
             f"{indent}NEED_DECISION(store): Postgres or SQLite?\n"
@@ -33,6 +33,15 @@ def test_line_start_marker_parks_with_default(tmp_path, monkeypatch, indent):
     assert questions[0]["topic"] == "store"
     assert questions[0]["question"] == "Postgres or SQLite?"
     assert questions[0]["proposed_default"] == "SQLite"
+
+
+def test_rm_r1_tab_indented_marker_does_not_park(tmp_path, monkeypatch):
+    text = ("I need a choice before continuing.\n"
+            "\tNEED_DECISION(store): Postgres or SQLite?\n"
+            "DEFAULT: SQLite")
+    runner, agent = run_text(tmp_path, monkeypatch, text)
+    assert runner.tree.get(agent).status == "done"
+    assert runner.tree.open_questions(agent) == []
 
 
 def run_text(tmp_path, monkeypatch, text):
