@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from . import model, sessions
 from .engine import attempts
+from .store import select_records
 from .model import Refused, invalid
 
 
@@ -17,7 +18,7 @@ def decide(service, db, op, args, nodes, config=None):
     if any(nodes[id].get("completion_pending") or nodes[id].get("git_operation")
            or nodes[id].get("disposal_pending") for id in scope):
         raise Refused("active")
-    if any(a["node_id"] in scope and a["state"] in {"claimed", "launched", "captured"} for a in attempts(db).values()):
+    if any(a["node_id"] in scope and a["state"] in {"claimed", "launched", "captured"} for a in select_records(attempts(db), "claimed", "launched", "captured")):
         raise Refused("active_runs" if op == "close_node" else "active")
     if op == "close_node":
         if not isinstance(args.get("outcome"), str) or args["outcome"] not in {"approved", "failed", "exhausted"}:
@@ -89,7 +90,7 @@ def decide(service, db, op, args, nodes, config=None):
         child["pins"].update(values)
         service.store.save_node(db, child)
     for key in new_keys:
-        if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured"} for a in attempts(db).values()):
+        if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured"} for a in select_records(attempts(db), "claimed", "launched", "captured")):
             raise Refused("active_runs")
         # Keep the checkout and its dirty-file protection; only the provider
         # session/binding is renewed on its next launch.

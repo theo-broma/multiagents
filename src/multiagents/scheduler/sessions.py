@@ -15,7 +15,7 @@ import uuid
 from .. import gitops
 from ..tree import now
 from .model import Refused, invalid
-from .store import encode
+from .store import matching_records, select_records, encode
 
 
 def instance_node(node, nodes):
@@ -61,7 +61,7 @@ def blockers(node, nodes, journal, bindings, runner):
     if not key:
         return []
     if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured", "suspended"}
-           for a in journal.values()):
+           for a in select_records(journal, "claimed", "launched", "captured", "suspended")):
         return [{"code": "session_busy", "detail": node["session"]}]
     binding = bindings.get(key)
     if binding and not binding.get("renew"):
@@ -287,18 +287,18 @@ def request_cleanup(store, db, node, binding, runner, detail, task, *, replacing
     activation = node.setdefault("activation_id", uuid.uuid4().hex)
     journal = attempts(db)
     if any(a.get("cleanup") and a["node_id"] == node["id"] and a["activation_id"] == activation
-           for a in journal.values()):
+           for a in matching_records(journal, "node_id", node["id"])):
         return None
     previous = runner.tree.get(binding.get("last_run", ""))
     if not previous or not previous.session_id or not binding.get("commit"):
         return None
-    prior = next((a for a in journal.values() if a["run_id"] == previous.id), {})
+    prior = next((a for a in matching_records(journal, "run_id", previous.id) if a["run_id"] == previous.id), {})
     route = {"provider": previous.provider, "model": previous.model,
              "account": prior.get("binding", {}).get("account", binding["account"])}
     if unavailable(route, runner):
         return None
     if any(a.get("alias_id") == binding["id"] and a["state"] in {"claimed", "launched", "captured", "suspended"}
-           and a["attempt_id"] != replacing for a in journal.values()):
+           and a["attempt_id"] != replacing for a in select_records(journal, "claimed", "launched", "captured", "suspended")):
         return None
     attempt = {"attempt_id": uuid.uuid4().hex, "activation_id": activation,
                "node_id": node["id"], "run_id": "ag-" + uuid.uuid4().hex[:6],

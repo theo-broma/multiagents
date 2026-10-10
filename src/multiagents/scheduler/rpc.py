@@ -18,7 +18,7 @@ from ..paths import ProjectPaths
 from ..renames import shipped as shipped_renames
 from . import model, effects, windows, attention
 from .model import Refused, invalid
-from .store import Store, encode, token_hash
+from .store import RecordView, matching_records, select_records, Store, encode, token_hash
 
 OPS = {"create_node", "update_node", "cancel_node", "get_node", "list_nodes",
        "instantiate_template", "register_template", "list_templates", "wait_for_nodes",
@@ -113,8 +113,11 @@ class Service:
         if self.engine and db is None and at is None:
             at = self.engine.instant()
         counts = {s: 0 for s in ("open", "running", "suspended", "held", "done", "cancelled")}
-        for node in nodes.values():
-            counts[node["state"]] += 1
+        if isinstance(nodes, RecordView):
+            counts = nodes.state_counts(counts)
+        else:
+            for node in nodes.values():
+                counts[node["state"]] += 1
         extra = {}
         if self.engine:
             from .engine import attempts
@@ -159,7 +162,7 @@ class Service:
                     journal = attempts(connection)
             else:
                 journal = attempts(db)
-            target = next((a["node_id"] for a in journal.values()
+            target = next((a["node_id"] for a in matching_records(journal, "run_id", args.get("run_id"))
                            if a["run_id"] == args.get("run_id")), None)
             recorded = self.engine.runner.authority.get(run.id) if run and self.engine.runner.authority else None
             if target not in model.subtree(nodes, principal["node_id"]) and not (
@@ -178,7 +181,7 @@ class Service:
                     journal = attempts(connection)
             else:
                 journal = attempts(db)
-            activation = next((a for a in journal.values()
+            activation = next((a for a in matching_records(journal, "run_id", subject)
                                if a["run_id"] == subject and a["state"] in {"claimed", "launched"}), None)
             review = (activation or {}).get("review")
             if not review:
@@ -270,9 +273,10 @@ class Service:
                             raise Refused("request_id_reused")
                         reply = json.loads(previous[1])
                     elif op != "wait_for_nodes":
-                        before = set(nodes)
+                        before = set(nodes.added_ids) if isinstance(nodes, RecordView) else set(nodes)
                         result = self.dispatch(db, principal, op, args, nodes, after, clock, config)
-                        deposited = [id for id in nodes if id not in before]
+                        deposited = [id for id in (nodes.added_ids if isinstance(nodes, RecordView) else nodes)
+                                     if id not in before]
                         reply.update(ok=True, result=result)
                         if op in MUTATING:
                             db.execute("INSERT INTO requests VALUES (?, ?, ?, ?)",
@@ -326,7 +330,7 @@ class Service:
         if op in {"steer_run", "steer_result"}:
             from .engine import attempts, save_attempt
             model.check_fields(args, {"run_id", "message", "command_id"}, set())
-            attempt = next((a for a in attempts(db).values() if a["run_id"] == args.get("run_id")), None)
+            attempt = next((a for a in matching_records(attempts(db), "run_id", args.get("run_id")) if a["run_id"] == args.get("run_id")), None)
             if attempt is None:
                 raise Refused("not_found")
             if op == "steer_result":
@@ -446,7 +450,7 @@ class Service:
                 raise Refused("not_found")
             if op == "give_verdict":
                 journal = attempts(db)
-                active = next((a for a in journal.values() if a["run_id"] == principal["subject"]
+                active = next((a for a in matching_records(journal, "run_id", principal["subject"]) if a["run_id"] == principal["subject"]
                                and a["state"] in {"claimed", "launched"}), None)
                 review = (active or {}).get("review")
                 if not review or nodes[active["node_id"]]["parent"] != node["id"] or node["loop"]["verdict_child"] != active["node_id"]:
@@ -496,7 +500,7 @@ class Service:
                 model.revision(args.get("revision"), node["revision"])
                 scope = model.subtree(nodes, node["id"])
                 if any(a["node_id"] in scope and a["state"] in {"claimed", "launched", "captured"}
-                       for a in attempts(db).values()):
+                       for a in select_records(attempts(db), "claimed", "launched", "captured")):
                     raise Refused("active")
                 if op == "dispose_node":
                     from .sessions import alias_id

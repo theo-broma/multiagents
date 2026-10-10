@@ -63,8 +63,7 @@ def finish_completions(engine):
     changed = False
     with serialized(store):
         with store.transaction(write=False) as db:
-            pending = [(n["id"], n["completion_pending"]) for n in store.nodes(db).values()
-                       if n.get("completion_pending")]
+            pending = [(n["id"], n["completion_pending"]) for n in store.node_records(db).selected("field:completion_pending")]
         for id, intent in pending:
             results = Results(engine.paths, engine.service.configuration())
             generation = intent["generation"]
@@ -101,8 +100,7 @@ def finish_operations(engine):
     store = engine.store
     with serialized(store):
         with store.transaction(write=False) as db:
-            pending = [(n["id"], n["git_operation"]) for n in store.nodes(db).values()
-                       if n.get("git_operation")]
+            pending = [(n["id"], n["git_operation"]) for n in store.node_records(db).selected("field:git_operation")]
         for id, intent in pending:
             with store.transaction(write=False) as db:
                 nodes = store.nodes(db)

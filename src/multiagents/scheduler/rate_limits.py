@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ..tree import now
+from .store import matching_records
 from .engine import attempts, save_attempt
 from . import sessions, suspension
 
@@ -58,7 +59,7 @@ def fresh(store, db, current, node, paths):
 def resumed(store, run_id):
     """Acknowledge the new turn before the supervisor can consume its result."""
     with store.transaction() as db:
-        current = next((a for a in attempts(db).values() if a["run_id"] == run_id), None)
+        current = next((a for a in matching_records(attempts(db), "run_id", run_id) if a["run_id"] == run_id), None)
         if not current or not current.get("rate_limit_resume"):
             return
         current.pop("rate_limit_resume", None)

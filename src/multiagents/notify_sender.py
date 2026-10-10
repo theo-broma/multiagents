@@ -332,10 +332,12 @@ def scan(service, store, tree, project_name: str, now: float) -> None:
             cursor = _meta_int(db, "notify_seq")
             stored_dest = _meta_get(db, "notify_dest")
             stored_cfg = _meta_get(db, "notify_cfg")
-            nodes = store.nodes(db)
             fresh = [json.loads(raw) for (raw,) in
                      db.execute("SELECT record FROM notifications WHERE seq>? ORDER BY seq",
                                 (cursor,))] if section is not None else []
+            nodes = {n["id"]: n for n in store.node_records(db).selected("held")}
+            nodes.update(store.some_nodes(db, [event.get("node_id") for event in fresh
+                                              if event.get("kind") in {"done", "cancelled"}]))
             outbox_has = db.execute(
                 "SELECT 1 FROM notify_outbox LIMIT 1").fetchone() is not None
             pause_keys = db.execute(

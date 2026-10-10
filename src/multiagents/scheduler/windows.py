@@ -6,6 +6,8 @@ from functools import lru_cache
 import json
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .store import RecordView
+
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 ZONES = {}
 
@@ -15,7 +17,10 @@ def prepare(default_zone, records=()):
     names, pending = {default_zone}, [records]
     while pending:
         value = pending.pop()
-        if isinstance(value, dict):
+        if isinstance(value, RecordView):
+            names.update(value.indexes["timezones"])
+            pending.extend(value.local.values())
+        elif isinstance(value, dict):
             if isinstance(value.get("timezone"), str):
                 names.add(value["timezone"])
             pending.extend(value.values())

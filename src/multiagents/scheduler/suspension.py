@@ -10,6 +10,7 @@ from .. import gitops
 
 from ..tree import now, ACTIVE, PAUSED
 from . import windows, sessions
+from .store import matching_records
 from .engine import attempts, save_attempt
 
 
@@ -21,7 +22,7 @@ def instant(clock_file):
 
 def operator_stop(store, db, run_id):
     from .model import Refused
-    attempt = next((a for a in attempts(db).values() if a["run_id"] == run_id), None)
+    attempt = next((a for a in matching_records(attempts(db), "run_id", run_id) if a["run_id"] == run_id), None)
     if attempt is None:
         raise Refused("not_found")
     node = store.nodes(db)[attempt["node_id"]]
@@ -121,7 +122,7 @@ def record_completion(store, db, current, result):
 
 def completed(store, run_id, result):
     with store.transaction() as db:
-        current = next((a for a in attempts(db).values() if a["run_id"] == run_id), None)
+        current = next((a for a in matching_records(attempts(db), "run_id", run_id) if a["run_id"] == run_id), None)
         if not current or not record_completion(store, db, current, result):
             return False
     store.mirror()
@@ -131,7 +132,7 @@ def completed(store, run_id, result):
 def starting(store, run_id):
     """Reserve suspension before Runner can publish a finished tree entry."""
     with store.transaction() as db:
-        current = next((a for a in attempts(db).values() if a["run_id"] == run_id), None)
+        current = next((a for a in matching_records(attempts(db), "run_id", run_id) if a["run_id"] == run_id), None)
         if (not current or current["state"] not in {"launched", "suspended"}
                 or current.get("capture_intent") or current.get("window_completion")):
             return False
@@ -160,7 +161,7 @@ def record_suspension(store, db, current, stopped_run):
 
 def confirmed(store, run_id, stopped_run):
     with store.transaction() as db:
-        current = next((a for a in attempts(db).values() if a["run_id"] == run_id), None)
+        current = next((a for a in matching_records(attempts(db), "run_id", run_id) if a["run_id"] == run_id), None)
         if not current or not current.get("window_stop") or current.get("capture_intent"):
             return False
         record_suspension(store, db, current, stopped_run)
@@ -171,7 +172,7 @@ def confirmed(store, run_id, stopped_run):
 def resumed(store, run_id):
     """Publish confirmed launch before waiting for the provider response."""
     with store.transaction() as db:
-        current = next((a for a in attempts(db).values() if a["run_id"] == run_id), None)
+        current = next((a for a in matching_records(attempts(db), "run_id", run_id) if a["run_id"] == run_id), None)
         if not current or not current.get("window_resume"):
             return
         node = store.nodes(db)[current["node_id"]]

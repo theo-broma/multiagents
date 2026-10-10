@@ -23,7 +23,7 @@ from ..runner import LaunchContext, Runner, VERDICT, admission_block, _run_read
 from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
-from .store import encode
+from .store import encode, records, select_records, matching_records
 from .results import Results, input_generation, recording_loops, top_node
 from . import sessions, effects, windows
 from .. import notify_sender
@@ -41,7 +41,11 @@ VERDICTS = {"approved", "rejected"}
 
 
 def attempts(db):
-    return {id: json.loads(raw) for id, raw in db.execute("SELECT id, record FROM attempts")}
+    return records(db, "attempts", lazy=True)
+
+
+def attempt_records(db):
+    return records(db, "attempts", lazy=True)
 
 
 def save_attempt(db, record):
@@ -49,7 +53,7 @@ def save_attempt(db, record):
 
 
 def record_launch(store, db, attempt, run):
-    current = attempts(db)[attempt["attempt_id"]]
+    current = attempt_records(db)[attempt["attempt_id"]]
     if current["state"] != "claimed":
         return False
     current["state"] = "launched"
@@ -130,7 +134,7 @@ class Engine:
         self.migrate_provider_names()
         self.migrate()
         with self.store.transaction(write=False) as db:
-            window_nodes = self.store.nodes(db)
+            window_nodes = self.store.node_records(db)
         windows.prepare(self.runner.config.project["scheduler"].get("timezone", "Europe/Paris"), window_nodes)
         with self.store.transaction() as db:
             self.store.set_meta(db, "clock_file", str(self.clock_file) if self.clock_file else "")
@@ -165,7 +169,7 @@ class Engine:
         """
         renames = shipped_renames()
         with self.store.transaction() as db:
-            for record in self.store.nodes(db).values():
+            for record in self.store.node_records(db).values():
                 pins = record.get("pins")
                 if isinstance(pins, dict) and renames.is_alias(pins.get("provider")):
                     record["pins"] = {**pins,
@@ -187,7 +191,7 @@ class Engine:
         with self.runner.tree.transaction() as tree:
             entries = [e for e in tree["deferred"] if isinstance(e, dict) and e.get("id")]
             with self.store.transaction() as db:
-                nodes = self.store.nodes(db)
+                nodes = self.store.node_records(db)
                 migrated = {n.get("migration_id") for n in nodes.values()}
                 revision = int(self.store.meta(db, "plan_revision"))
                 for entry in entries:
@@ -299,12 +303,12 @@ class Engine:
     def lock_blockers(self, node, nodes, journal):
         wanted = self.lock_owners(node, nodes)
         overlap = set()
-        for attempt in journal.values():
+        for attempt in select_records(journal, "claimed", "launched", "captured"):
             if attempt["state"] not in {"claimed", "launched", "captured"} or attempt["node_id"] == node["id"]:
                 continue
             holders = attempt.get("lock_owners") or {name: attempt["node_id"] for name in attempt.get("locks", [])}
             overlap.update(name for name in wanted.keys() & holders.keys() if wanted[name] != holders[name])
-        for composite in nodes.values():
+        for composite in select_records(nodes, "open", "running", "suspended", "held"):
             if composite.get("lock_claimed") and composite["state"] not in {"done", "cancelled"}:
                 holders = self.lock_owners(composite, nodes)
                 overlap.update(name for name in wanted.keys() & holders.keys() if wanted[name] != holders[name])
@@ -323,7 +327,7 @@ class Engine:
         if node["state"] in {"open", "suspended"}:
             structural = self.window_blockers(node, nodes, instant) or structural
         ready = node["kind"] == "simple" and node["state"] == "open" and not structural
-        active = next((a["run_id"] for a in journal.values()
+        active = next((a["run_id"] for a in select_records(journal, "claimed", "launched", "suspended")
                        if a["node_id"] == node["id"] and a["state"] in {"claimed", "launched", "suspended"}), None)
         blocked = structural
         if ready:
@@ -339,12 +343,12 @@ class Engine:
 
     def status(self, nodes, journal, db=None, at=None):
         counts = {"last_tick": self.last_tick,
-                "held": [{"node_id": n["id"], "hold": n["hold"]} for n in nodes.values() if n["state"] == "held"],
+                "held": [{"node_id": n["id"], "hold": n["hold"]} for n in select_records(nodes, "held") if n["state"] == "held"],
                 "locks": [{"name": name, "holder_run": a["run_id"], "holder_node": a["node_id"]}
-                          for a in journal.values() if a["state"] in {"claimed", "launched"}
+                          for a in select_records(journal, "claimed", "launched") if a["state"] in {"claimed", "launched"}
                           for name in a.get("locks", [])], "aliases": self.alias_status(db),
                 "windows": [{"node_id": n["id"], **{k: v for k, v in self.window(n, nodes, at).items()
-                             if k in {"open", "next_open", "next_close"}}} for n in nodes.values()
+                             if k in {"open", "next_open", "next_close"}}} for n in select_records(nodes, "open", "running", "suspended", "held")
                             if n["state"] not in {"done", "cancelled"}],
                 "starving": self.starving(nodes, at)}
         # NT-R6: the state of sending — pending count, last accepted message
@@ -363,7 +367,7 @@ class Engine:
         `at` is that clock, read by the caller before any store transaction."""
         if self.starvation_after is None or at is None:
             return []                   # before the first tick
-        return [n["id"] for n in nodes.values() if n["state"] == "open" and n.get("ready_since")
+        return [n["id"] for n in select_records(nodes, "open") if n["state"] == "open" and n.get("ready_since")
                 and at - epoch(n["ready_since"]) >= self.starvation_after]
 
     def alias_status(self, db=None):
@@ -404,9 +408,14 @@ class Engine:
         # status can precede confirmed wrapper death; consuming that first
         # wakeup would leave subsequent rounds waiting for the periodic tick.
         with self.store.transaction(write=False) as db:
-            active = {a["run_id"] for a in attempts(db).values() if a["state"] in {"claimed", "launched"}}
-        return any(id in active and run["status"] not in ACTIVE | PAUSED | {"quota_paused"}
-                   for id, run in self.runner.tree.read()["nodes"].items())
+            active = {run_id for (run_id,) in db.execute(
+                "SELECT json_extract(record, '$.run_id') FROM attempts "
+                "WHERE json_extract(record, '$.state') IN ('claimed', 'launched')")}
+        if not active:
+            return False
+        runs = self.runner.tree.read()["nodes"]
+        return any(id in runs and runs[id]["status"] not in ACTIVE | PAUSED | {"quota_paused"}
+                   for id in active)
 
     def stop(self):
         self.stopped.set()
@@ -414,7 +423,7 @@ class Engine:
         self.thread.join(timeout=10)
         self.notifier.join(timeout=2)
         with self.service.changed, self.store.transaction() as db:
-            for attempt in attempts(db).values():
+            for attempt in attempt_records(db).values():
                 # The worker marks entry into Runner.start atomically with its
                 # claim check. Once entered, it owns the launch independently
                 # of scheduler shutdown (NC-R57), including its capability.
@@ -437,7 +446,10 @@ class Engine:
         """Candidates in admission order; a node whose evaluation or order key
         raised is recorded as failing and goes after the others."""
         keyed = []
-        for id, node in nodes.items():
+        eligible = (nodes.selected("open", "running", "suspended", "held")
+                    if hasattr(nodes, "selected") else nodes.values())
+        for node in eligible:
+            id = node["id"]
             if id not in candidates:
                 continue
             try:
@@ -460,10 +472,13 @@ class Engine:
         self.last_tick = datetime.fromtimestamp(self.window_instant, timezone.utc).isoformat()
         self.starvation_after = config.project["scheduler"]["starvation_after_seconds"]
         with self.store.transaction(write=False) as db:
-            initial_nodes = self.store.nodes(db)
-            candidates = set(initial_nodes)
-            managed = {a["run_id"] for a in attempts(db).values()}
-        windows.prepare(config.project["scheduler"].get("timezone", "Europe/Paris"), initial_nodes)
+            initial_nodes = self.store.node_records(db)
+            candidates = initial_nodes.indexes["ids"]
+            managed = attempt_records(db).run_ids
+        # A terminal child can be reopened during this tick. Prepare its zone
+        # too, from the cached names rather than walking the terminal records.
+        windows.prepare(config.project["scheduler"].get("timezone", "Europe/Paris"),
+                        [{"timezone": name} for name in initial_nodes.indexes["timezones"]])
         await self.runner.adopt(exclude=managed)
         await self.evaluate_windows()
         await self.reconcile()
@@ -473,9 +488,13 @@ class Engine:
         # client that sees a node done finds its transitions in the log.
         self.store.mirror()
         with self.store.transaction(write=False) as db:
-            nodes, journal = self.store.nodes(db), attempts(db)
+            nodes, journal = self.store.node_records(db), attempt_records(db)
         # Deposits arriving while reconciliation awaits I/O belong to the
         # next tick, so every admission pass has a coherent candidate set.
+        for remembered in (self.evaluation_failures, self.admission_refusals):
+            for id in list(remembered):
+                if id in candidates and id in nodes and nodes[id]["state"] in {"done", "cancelled"}:
+                    remembered.pop(id, None)
         for node in self.admission_order(nodes, candidates):
             if self.evaluating:
                 self.evaluation_failures.pop(self.evaluating, None)
@@ -488,17 +507,17 @@ class Engine:
                 self.admission_refusals.pop(node["id"], None)
                 continue
             self.episode(node["id"], True)
-            if any(a["node_id"] == node["id"] and a["state"] in {"claimed", "launched"} for a in journal.values()):
+            if any(a["node_id"] == node["id"] and a["state"] in {"claimed", "launched"} for a in select_records(journal, "claimed", "launched")):
                 self.admission_refusals.pop(node["id"], None)
                 continue
-            failed_cleanup = next((a for a in journal.values() if a.get("cleanup")
+            failed_cleanup = next((a for a in matching_records(journal, "node_id", node["id"]) if a.get("cleanup")
                                    and a["node_id"] == node["id"]
                                    and a["activation_id"] == node.get("activation_id")
                                    and a["state"] in {"abandoned", "recorded"}
                                    and not a.get("cleanup_succeeded")), None)
             if failed_cleanup:
                 with self.service.changed, self.store.transaction() as db:
-                    current = self.store.nodes(db)[node["id"]]
+                    current = self.store.node_records(db)[node["id"]]
                     if current["state"] == "open" and current["revision"] == node["revision"]:
                         self.hold(db, current, "dirty_worktree", failed_cleanup["cleanup_archive"])
                 continue
@@ -513,8 +532,8 @@ class Engine:
             with self.store.transaction(write=False) as db:
                 alias_key = sessions.alias_id(node, nodes)
                 checked_binding = sessions.aliases(db).get(alias_key)
-                checked_attempts = {id: a for id, a in attempts(db).items()
-                                    if alias_key and a.get("alias_id") == alias_key}
+                checked_attempts = {a["attempt_id"]: a for a in
+                                    matching_records(attempt_records(db), "alias_id", alias_key)} if alias_key else {}
             clean_failure = None
             try:
                 if checked_binding:
@@ -527,9 +546,9 @@ class Engine:
                 cleanup = None
                 task = sessions.cleanup_message(clean_failure[1])
                 with self.service.changed, self.store.transaction() as db:
-                    current_nodes = self.store.nodes(db)
+                    current_nodes = self.store.node_records(db)
                     current = current_nodes[node["id"]]
-                    blockers = self.session_blockers(current, current_nodes, attempts(db), db)
+                    blockers = self.session_blockers(current, current_nodes, attempt_records(db), db)
                     if (current["state"] != "open" or current["revision"] != node["revision"]
                             or sessions.aliases(db).get(alias_key) != checked_binding
                             or (blockers and blockers[0]["code"] == "session_busy")):
@@ -546,7 +565,7 @@ class Engine:
                     self.store.mirror()
                     self.spawn(cleanup)
                 with self.store.transaction(write=False) as db:
-                    nodes, journal = self.store.nodes(db), attempts(db)
+                    nodes, journal = self.store.node_records(db), attempt_records(db)
                 continue
             if session_blocked:
                 self.reasons[node["id"]] = session_blocked
@@ -585,10 +604,13 @@ class Engine:
                 continue
             self.admission_refusals.pop(node["id"], None)
             with self.store.transaction(write=False) as db:
-                preparation_nodes = self.store.nodes(db)
+                preparation_nodes = self.store.node_records(db)
             prospective = preparation_nodes[node["id"]]
             if prospective["state"] != "open" or prospective["revision"] != node["revision"]:
                 continue
+            # RecordView shares cached history and copies only local edits;
+            # prepare can mutate its records without changing the comparison
+            # snapshot used to validate the claim below.
             prepared_nodes = copy.deepcopy(preparation_nodes)
             preparation_failure = None
             if not clean_failure:
@@ -601,7 +623,7 @@ class Engine:
             with self.service.changed, self.store.transaction() as db:
                 if current_config is not config:
                     continue
-                current_nodes = self.store.nodes(db)
+                current_nodes = self.store.node_records(db)
                 if current_nodes != preparation_nodes:
                     continue
                 current = current_nodes[node["id"]]
@@ -609,9 +631,9 @@ class Engine:
                     continue
                 if sessions.alias_id(current, current_nodes) != alias_key:
                     continue
-                current_journal = attempts(db)
+                current_journal = attempt_records(db)
                 if alias_key and (sessions.aliases(db).get(alias_key) != checked_binding
-                        or {id: a for id, a in current_journal.items() if a.get("alias_id") == alias_key} != checked_attempts):
+                        or {a["attempt_id"]: a for a in matching_records(current_journal, "alias_id", alias_key)} != checked_attempts):
                     continue
                 if self.structural(current, current_nodes) or self.window_blockers(current, current_nodes):
                     continue
@@ -672,15 +694,15 @@ class Engine:
                 # Nothing was spawned: abandon this claim and hold the node,
                 # rather than failing every later evaluation at this point.
                 with self.service.changed, self.store.transaction() as db:
-                    claimed = attempts(db)[attempt["attempt_id"]]
+                    claimed = attempt_records(db)[attempt["attempt_id"]]
                     if claimed["state"] == "claimed":
                         claimed.update(state="abandoned", ended_at=now())
                         save_attempt(db, claimed)
                         db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
-                        self.hold(db, self.store.nodes(db)[attempt["node_id"]], "input_conflict",
+                        self.hold(db, self.store.node_records(db)[attempt["node_id"]], "input_conflict",
                                   str(exc) or type(exc).__name__)
                 with self.store.transaction(write=False) as db:
-                    nodes, journal = self.store.nodes(db), attempts(db)
+                    nodes, journal = self.store.node_records(db), attempt_records(db)
                 continue
             self.spawn(attempt)
             # The next candidate observes the tree reservation made by Runner,
@@ -688,12 +710,12 @@ class Engine:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and not self.stopped.is_set():
                 with self.store.transaction(write=False) as db:
-                    state = attempts(db)[attempt["attempt_id"]]["state"]
+                    state = attempt_records(db)[attempt["attempt_id"]]["state"]
                 if state != "claimed" or self.runner.tree.get(attempt["run_id"]):
                     break
                 await asyncio.sleep(0.05)
             with self.store.transaction(write=False) as db:
-                nodes, journal = self.store.nodes(db), attempts(db)
+                nodes, journal = self.store.node_records(db), attempt_records(db)
         if self.evaluating:
             self.evaluation_failures.pop(self.evaluating, None)
         self.evaluating = None
@@ -715,8 +737,8 @@ class Engine:
         # Persist stop intent before a supervisor signals anything. Reconcile
         # cannot mistake the ensuing terminal tree status for a completion.
         with self.service.changed, self.store.transaction() as db:
-            nodes, journal = self.store.nodes(db), attempts(db)
-            for node in nodes.values():
+            nodes, journal = self.store.node_records(db), attempt_records(db)
+            for node in nodes.selected("open", "running", "suspended", "held"):
                 window = self.window(node, nodes)
                 if node["state"] not in {"done", "cancelled"}:
                     if window["empty"] and not node.get("empty_window_notified"):
@@ -727,14 +749,14 @@ class Engine:
                         self.store.save_node(db, node)
                 if window["open"] or node["state"] != "running":
                     continue
-                for attempt in journal.values():
+                for attempt in select_records(journal, "launched"):
                     if (attempt["node_id"] == node["id"] and attempt["state"] == "launched"
                             and not attempt.get("capture_intent") and not attempt.get("cancel_requested")):
                         attempt.setdefault("window_stop", True)
                         save_attempt(db, attempt)
         with self.store.transaction(write=False) as db:
-            nodes, journal = self.store.nodes(db), attempts(db)
-        for attempt in journal.values():
+            nodes, journal = self.store.node_records(db), attempt_records(db)
+        for attempt in journal.selected("suspended", "field:window_stop"):
             if attempt.get("window_stop"):
                 self.spawn(attempt)
                 continue
@@ -751,7 +773,7 @@ class Engine:
                 continue
             run = self.runner.tree.get(attempt["run_id"])
             with self.service.changed, self.store.transaction() as db:
-                current_nodes, current_journal = self.store.nodes(db), attempts(db)
+                current_nodes, current_journal = self.store.node_records(db), attempt_records(db)
                 current = current_journal[attempt["attempt_id"]]
                 current_node = current_nodes[node["id"]]
                 if (current != attempt or current_node != node or current_node["state"] != "suspended"
@@ -775,8 +797,8 @@ class Engine:
 
     def evaluate_rate_limits(self):
         with self.store.transaction(write=False) as db:
-            nodes, journal = self.store.nodes(db), attempts(db)
-        for attempt in journal.values():
+            nodes, journal = self.store.node_records(db), attempt_records(db)
+        for attempt in journal.selected("suspended"):
             node = nodes[attempt["node_id"]]
             pending = node.get("pending_resume")
             if (attempt["state"] != "suspended" or not attempt.get("rate_limit_pending")
@@ -791,7 +813,7 @@ class Engine:
             if not run:
                 continue
             with self.service.changed, self.store.transaction() as db:
-                current_nodes, current_journal = self.store.nodes(db), attempts(db)
+                current_nodes, current_journal = self.store.node_records(db), attempt_records(db)
                 current = current_journal[attempt["attempt_id"]]
                 own = current_nodes[node["id"]]
                 if (current != attempt or own != node or current.get("cancel_requested")
@@ -817,7 +839,7 @@ class Engine:
 
     def session_notice(self, id, detail):
         with self.service.changed, self.store.transaction() as db:
-            node = self.store.nodes(db)[id]
+            node = self.store.node_records(db)[id]
             if not node.get("session_unavailable_notified"):
                 node["session_unavailable_notified"] = True
                 self.store.save_node(db, node)
@@ -828,7 +850,7 @@ class Engine:
         starvation_after = self.service.configuration().project["scheduler"]["starvation_after_seconds"]
         instant = self.instant()
         with self.service.changed, self.store.transaction() as db:
-            node = self.store.nodes(db)[id]
+            node = self.store.node_records(db)[id]
             if node["state"] != "open":
                 return
             if ready:
@@ -917,19 +939,8 @@ class Engine:
 
     def _anomaly_candidates(self, at, admission_after, held_after):
         with self.store.transaction(write=False) as db:
-            nodes = self.store.nodes(db)
-            latest = {}
-            for (record,) in db.execute("SELECT record FROM notifications"):
-                try:
-                    event = json.loads(record)
-                except ValueError:
-                    continue
-                nid = event.get("node_id")
-                if not nid:
-                    continue
-                seq = event.get("seq", 0)
-                if seq >= latest.get(nid, (-1, 0))[0]:
-                    latest[nid] = (seq, event.get("at", 0))
+            nodes = self.store.node_records(db)
+            latest = records(db, "notifications", lazy=True).indexes["latest"]
             seen = {key: value for key, value in
                     db.execute("SELECT key, value FROM meta WHERE key LIKE 'anomaly_seen:%'")}
             pending = {key for key, in
@@ -941,8 +952,14 @@ class Engine:
         tree_nodes = self.runner.tree.read()["nodes"]
         candidates, aging, held_ids = [], {}, set()
         pending_writes, pending_clears = set(), set()
-        revisions = {id: node["revision"] for id, node in nodes.items()}
-        for node in nodes.values():
+        selected_ids = {n["id"] for n in nodes.selected("open", "running", "suspended", "held")}
+        for run_id, raw in tree_nodes.items():
+            if raw.get("status") == "stuck":
+                selected_ids.update(nodes.indexes["last_runs"].get(run_id, ()))
+        selected_ids.update(key[len("anomaly_pending:"):].rpartition(":")[0] for key in pending)
+        selected_nodes = [nodes[id] for id in selected_ids if id in nodes]
+        revisions = {node["id"]: node["revision"] for node in selected_nodes}
+        for node in selected_nodes:
             nid = node["id"]
             runs = node.get("runs") or []
             if runs:
@@ -1062,7 +1079,7 @@ class Engine:
     def _anomaly_commit(self, candidates, revisions, aging, held_ids, pending_writes, pending_clears):
         with self.service.changed:
             with self.store.transaction() as db:
-                nodes = self.store.nodes(db)
+                nodes = self.store.node_records(db)
                 fresh = [c for c in candidates
                          if nodes.get(c["node_id"], {}).get("revision") == revisions.get(c["node_id"])
                          and c["revision"] == revisions.get(c["node_id"])]
@@ -1123,9 +1140,9 @@ class Engine:
         effects.finish_completions(self)
         effects.finish_operations(self)
         with self.store.transaction(write=False) as db:
-            journal = attempts(db)
+            journal = attempt_records(db)
         settled = []
-        for attempt in journal.values():
+        for attempt in journal.selected("captured", "claimed", "launched"):
             if attempt["state"] == "captured":
                 self.integrate(attempt)
                 continue
@@ -1169,7 +1186,7 @@ class Engine:
                 pending = attempt.get("resume_pending")
                 if pending and run.turn_started_at > attempt.get("previous_turn", 0):
                     with self.service.changed, self.store.transaction() as db:
-                        current = attempts(db)[attempt["attempt_id"]]
+                        current = attempt_records(db)[attempt["attempt_id"]]
                         current.pop("resume_pending", None)
                         save_attempt(db, current)
                     pending = None
@@ -1199,10 +1216,10 @@ class Engine:
                             predecessor = self.missing_predecessor(attempt)
                             confirmed = await self.runner._steer_predecessor_dead(predecessor)
                         with self.service.changed, self.store.transaction() as db:
-                            current = attempts(db)[attempt["attempt_id"]]
+                            current = attempt_records(db)[attempt["attempt_id"]]
                             if current["state"] not in {"claimed", "launched"}:
                                 continue
-                            node = self.store.nodes(db)[attempt["node_id"]]
+                            node = self.store.node_records(db)[attempt["node_id"]]
                             db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
                             if (evidence.exists() or current.get("launch_evidence")
                                     or current.get("launch_in_progress") or current["state"] == "launched"):
@@ -1397,7 +1414,7 @@ class Engine:
             message = {}
         markers = Runner.need_info(message.get("final_text", message.get("text", "")))
         with self.service.changed, self.store.transaction() as db:
-            current = attempts(db)[attempt["attempt_id"]]
+            current = attempt_records(db)[attempt["attempt_id"]]
             if (current.get("window_resumed_at") != attempt.get("window_resumed_at")
                     or (getattr(run, "turn_started_at", None) is not None
                         and current.get("turn_started_at") is not None
@@ -1415,7 +1432,7 @@ class Engine:
             from . import rate_limits
             if message.get("cause") == "rate_limited" and message.get("turn_started_at") == getattr(run, "turn_started_at", None):
                 db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
-                node = self.store.nodes(db)[current["node_id"]]
+                node = self.store.node_records(db)[current["node_id"]]
                 rate_limits.interrupted(self, db, current, node, message)
                 self.service.changed.notify_all()
                 return
@@ -1423,7 +1440,7 @@ class Engine:
             if (current.get("rate_limit_recovery") and tree_run and
                     (tree_run.reason == "session_lost" or (message.get("status") == "failed"
                      and Runner._session_resume_failure(message.get("stderr_tail", ""))))):
-                node = self.store.nodes(db)[current["node_id"]]
+                node = self.store.node_records(db)[current["node_id"]]
                 rate_limits.fresh(self.store, db, current, node, self.paths)
                 db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
                 self.service.changed.notify_all()
@@ -1453,13 +1470,13 @@ class Engine:
         if current.get("completion_proven") == "missing_tree":
             result.update(status="failed", failure="missing_tree")
         with self.service.changed, self.store.transaction() as db:
-            current = attempts(db)[attempt["attempt_id"]]
+            current = attempt_records(db)[attempt["attempt_id"]]
             if (current["state"] in {"recorded", "captured", "suspended"}
                     or current.get("window_stop") or current.get("window_stop_started") or current.get("window_resume")
                     or current.get("window_resumed_at") != attempt.get("window_resumed_at")
                     or (current["state"] == "abandoned" and current.get("cancel_requested") and current.get("window_suspended_at"))):
                 return
-            node = self.store.nodes(db)[attempt["node_id"]]
+            node = self.store.node_records(db)[attempt["node_id"]]
             if result.get("capture_error") and result.get("failure") != "missing_tree":
                 self.hold(db, node, "result_capture_failed", result["capture_error"])
             current.update(state="captured", result=result)
@@ -1482,9 +1499,9 @@ class Engine:
         # after its store transaction has closed, including retention refs.
         while True:
             with self.store.transaction(write=False) as db:
-                journal = attempts(db)
+                journal = attempt_records(db)
                 current = journal[attempt["attempt_id"]]
-                nodes = self.store.nodes(db)
+                nodes = self.store.node_records(db)
             if current["state"] != "captured":
                 return
             node = nodes[current["node_id"]]
@@ -1514,7 +1531,7 @@ class Engine:
                         generation, before = results.integrate(node, nodes, current)
                     except effects.FAILURES as exc:
                         with self.service.changed, self.store.transaction() as db:
-                            if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                            if self.store.node_records(db) != nodes or attempt_records(db)[attempt["attempt_id"]] != current:
                                 continue
                             self.hold(db, node, "integration_conflict", str(exc))
                             current["state"] = "recorded"
@@ -1522,7 +1539,7 @@ class Engine:
                         return
                     integration = {"generation": generation, "before": before}
                     with self.service.changed, self.store.transaction() as db:
-                        if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                        if self.store.node_records(db) != nodes or attempt_records(db)[attempt["attempt_id"]] != current:
                             continue
                         current["integration"] = integration
                         save_attempt(db, current)
@@ -1530,7 +1547,7 @@ class Engine:
                 generation = integration["generation"]
                 if actual not in {integration["before"], generation["commit"]}:
                     with self.service.changed, self.store.transaction() as db:
-                        if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                        if self.store.node_records(db) != nodes or attempt_records(db)[attempt["attempt_id"]] != current:
                             continue
                         self.hold(db, node, "integration_conflict", "node branch differs from its host-recorded tip")
                         current["state"] = "recorded"
@@ -1541,7 +1558,7 @@ class Engine:
                     for loop in recording_loops(node, nodes):
                         refs.append([f"refs/heads/node-generations/{loop['id']}/{len(loop['generations']) + 1}", generation["commit"]])
                     with self.store.transaction() as db:
-                        if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+                        if self.store.node_records(db) != nodes or attempt_records(db)[attempt["attempt_id"]] != current:
                             continue
                         current["integration"]["refs"] = refs
                         save_attempt(db, current)
@@ -1567,10 +1584,10 @@ class Engine:
                         continue
                     return
             with self.service.changed, self.store.transaction() as db:
-                current = attempts(db)[attempt["attempt_id"]]
+                current = attempt_records(db)[attempt["attempt_id"]]
                 if current["state"] != "captured":
                     return
-                nodes = self.store.nodes(db)
+                nodes = self.store.node_records(db)
                 node = nodes[current["node_id"]]
                 # Decided here, in the transaction that settles it, so a
                 # written verdict is receipted exactly where an explicit one
@@ -1651,7 +1668,7 @@ class Engine:
     def integration_failed(self, attempt, nodes, current, node, exc):
         """Hold the node on a ref that is not as journalled; True to re-read."""
         with self.service.changed, self.store.transaction() as db:
-            if self.store.nodes(db) != nodes or attempts(db)[attempt["attempt_id"]] != current:
+            if self.store.node_records(db) != nodes or attempt_records(db)[attempt["attempt_id"]] != current:
                 return True
             self.hold(db, node, "integration_conflict", str(exc) or type(exc).__name__)
             current["state"] = "recorded"
@@ -1663,7 +1680,7 @@ class Engine:
         if (actual == top["branch_tip"] or (own.get("before") == top["branch_tip"]
                 and own.get("generation", {}).get("commit") == actual)):
             return None
-        return next((other for other in journal.values()
+        return next((other for other in select_records(journal, "captured")
                      if other["attempt_id"] != current["attempt_id"] and other["state"] == "captured"
                      and other.get("branch_node") == current["branch_node"]
                      and other.get("integration", {}).get("before") == top["branch_tip"]
@@ -1679,7 +1696,7 @@ class Engine:
         as it was; a settled round is no longer held, so nothing is settled
         twice and a restart finds nothing to do.
         """
-        for loop in [n for n in nodes.values()
+        for loop in [n for n in nodes.selected("held")
                      if n["kind"] == "loop" and n["state"] == "held"
                      and (n["hold"] or {}).get("reason") == "unresolved_round"]:
             child = nodes.get((loop["loop"] or {}).get("verdict_child"))
@@ -1687,7 +1704,7 @@ class Engine:
             if not runs:
                 continue
             run_id = runs[-1]["run_id"]
-            attempt = next((a for a in journal.values() if a["run_id"] == run_id and a.get("review")), None)
+            attempt = next((a for a in matching_records(journal, "run_id", run_id) if a["run_id"] == run_id and a.get("review")), None)
             if attempt is None:
                 continue          # nothing binds a verdict to this round
             run = self.runner.tree.get(run_id)
@@ -1705,11 +1722,12 @@ class Engine:
 
     def composites(self):
         with self.service.changed, self.store.transaction() as db:
-            nodes = self.store.nodes(db)
+            nodes = self.store.node_records(db)
             if self.settle_held_once:
                 self.settle_held_once = False
-                self.settle_held_rounds(db, nodes, attempts(db))
-            for node in sorted((n for n in nodes.values() if n["kind"] != "simple"),
+                self.settle_held_rounds(db, nodes, attempt_records(db))
+            for node in sorted((n for n in nodes.selected("open", "running", "held") if n["kind"] != "simple"
+                                and n["state"] not in {"done", "cancelled", "suspended"}),
                                key=lambda n: len(model.subtree(nodes, n["id"]))):
                 if node["state"] in {"done", "cancelled", "suspended"} or node.get("completion_pending") or node.get("disposal_pending"):
                     continue
@@ -1754,7 +1772,7 @@ class Engine:
         if node.get("completion_pending"):
             return
         if node["kind"] in {"sequence", "group"} and outcome == "approved":
-            nodes = self.store.nodes(db)
+            nodes = self.store.node_records(db)
             top = top_node(node, nodes)
             commit = top.get("branch_tip")
             produced = [g for id in model.subtree(nodes, node["id"])
@@ -1802,8 +1820,8 @@ class Engine:
     async def cancel(self, ids):
         results = {}
         with self.store.transaction(write=False) as db:
-            journal = attempts(db)
-        for attempt in journal.values():
+            journal = attempt_records(db)
+        for attempt in select_records(journal, "claimed", "launched"):
             if attempt["node_id"] in ids and attempt["state"] in {"claimed", "launched"}:
                 result = await self.runner.stop(attempt["run_id"])
                 results[attempt["node_id"]] = result.get("predecessor_death_confirmed", False)
@@ -1817,12 +1835,12 @@ class Engine:
         a claim carrying this request and stops a handle that arrives later.
         """
         decided, stops = {}, {}
-        nodes = nodes if nodes is not None else self.store.nodes(db)
+        nodes = nodes if nodes is not None else self.store.node_records(db)
         for node_id in ids:
             node = nodes[node_id]
             if node.pop("pending_resume", None) is not None:
                 self.store.save_node(db, node)
-        for attempt in attempts(db).values():
+        for attempt in select_records(attempt_records(db), "claimed", "launched", "suspended"):
             if attempt["node_id"] in ids and attempt["state"] == "suspended":
                 attempt.update(state="abandoned", cancel_requested=True, cancel_confirmed=True)
                 save_attempt(db, attempt)
@@ -1864,8 +1882,8 @@ class Engine:
         if not admission.get("admitted"):
             return admission
         with self.store.transaction(write=False) as db:
-            nodes, journal = self.store.nodes(db), attempts(db)
-            owner = next((a for a in journal.values() if a["run_id"] == run_id), None)
+            nodes, journal = self.store.node_records(db), attempt_records(db)
+            owner = next((a for a in matching_records(journal, "run_id", run_id) if a["run_id"] == run_id), None)
             if not owner or not owner.get("window_resume") or owner.get("cancel_requested"):
                 return {"error": "node_suspended"}
             node = nodes[owner["node_id"]]
@@ -1879,14 +1897,14 @@ class Engine:
         if run is None:
             return {"error": "not_found"}
         if db is not None:
-            nodes, journal = self.store.nodes(db), attempts(db)
+            nodes, journal = self.store.node_records(db), attempt_records(db)
         else:
             with self.store.transaction(write=False) as connection:
                 nodes, journal = self.store.nodes(connection), attempts(connection)
         if not config.project["scheduler"]["enabled"]:
             return {"error": "scheduler_disabled",
                     "pending_nodes": sum(n["state"] not in {"done", "cancelled"} for n in nodes.values())}
-        owner = next((a for a in journal.values() if a["run_id"] == run_id), None)
+        owner = next((a for a in matching_records(journal, "run_id", run_id) if a["run_id"] == run_id), None)
         node_id = owner["node_id"] if owner else None
         if node_id:
             state = nodes[node_id]["state"]
@@ -1922,9 +1940,9 @@ class Engine:
                 if blockers:
                     return {"blocked": blockers}
             if db is not None and node_id and not window:
-                node = self.store.nodes(db)[node_id]
-                journal = attempts(db)
-                attempt = next(a for a in journal.values() if a["run_id"] == run_id)
+                node = self.store.node_records(db)[node_id]
+                journal = attempt_records(db)
+                attempt = next(a for a in matching_records(journal, "run_id", run_id) if a["run_id"] == run_id)
                 attempt.update(state="launched", resume_pending=now() + 60,
                                previous_turn=run.turn_started_at)
                 save_attempt(db, attempt)

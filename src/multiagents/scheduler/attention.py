@@ -7,8 +7,9 @@ from ..notify_sender import _held_seqs, _hold_mark
 
 
 def current(store, db, nodes=None, *, subject=None, unacknowledged=False):
-    nodes = store.nodes(db) if nodes is None else nodes
-    held = [n for n in nodes.values() if n["state"] == "held"
+    nodes = store.node_records(db) if nodes is None else nodes
+    candidates = nodes.selected("held") if hasattr(nodes, "selected") else nodes.values()
+    held = [n for n in candidates if n["state"] == "held"
             and (subject is None or n["created_by"] == subject)
             and (n.get("hold") or {}).get("reason") not in {"child_held", "stopped_by_orchestrator"}]
     # Only a window stop whose confirmation will clear this exact hold is
