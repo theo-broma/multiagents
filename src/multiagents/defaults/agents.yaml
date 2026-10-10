@@ -157,9 +157,8 @@ agents:
       implementation exists. Red is success.
     writes: true
     permission: sandbox
-    # No `effort`: that is an agy flag. claude declares only max_budget_usd, so
-    # an effort key here would be silently dropped and read as if it did
-    # something. Opus is the strong setting; there is no dial to turn.
+    # An `effort` pin reaches claude as --effort; omitted here, it uses the
+    # CLI's default.
     can_spawn: false
     timeout: 1500
     silence_timeout: 240
@@ -244,12 +243,11 @@ agents:
       escalated. Expensive; used deliberately.
     writes: true
     permission: full
-    # No `effort`, for two reasons that happen to agree. claude declares no
-    # such flag, so it would be dead config here; and agy REFUSES it for
+    # An `effort` pin reaches claude as --effort, but agy REFUSES it for
     # claude-opus-4-6-thinking, the fallback — "--effort is not supported for
     # model claude-opus-4-6-thinking", in eight seconds, on a real run. When
     # this agent was on opencode the fallback had to name `effort: ""` to drop
-    # it. Now there is nothing to drop.
+    # it. With no pin here, there is nothing to drop.
     can_spawn: true
     max_children: 2
     timeout: 2700

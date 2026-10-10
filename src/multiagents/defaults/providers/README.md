@@ -216,6 +216,7 @@ this by looking for a transcript under `~/.claude/projects/<cwd slug>/`.
 Additionally for `prepare` and `launch`:
 
     MULTIAGENTS_MODEL             model the roster entry asks for
+    MULTIAGENTS_EFFORT            effort, only when the roster entry sets it
     MULTIAGENTS_PROMPT_FILE       the agent's brief, freshly written
     MULTIAGENTS_MCP_CONFIG        a claude-shaped mcpServers JSON file
     MULTIAGENTS_MCP_COMMAND       the server command, for CLIs that want parts

@@ -135,6 +135,8 @@ def _launch_context(paths, config, spec) -> dict[str, str]:
     autocompact = spec.extra.get("autocompact")
     if autocompact not in (None, ""):
         context["MULTIAGENTS_AUTOCOMPACT"] = option_text(autocompact)
+    if spec.effort not in (None, ""):
+        context["MULTIAGENTS_EFFORT"] = option_text(spec.effort)
     return context
 
 

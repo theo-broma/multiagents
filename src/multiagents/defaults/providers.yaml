@@ -576,6 +576,7 @@ providers:
       optional:
         max_budget_usd: ["--max-budget-usd", "{max_budget_usd}"]
         autocompact: ["--autocompact", "{autocompact}"]
+        effort: ["--effort", "{effort}"]
     # How an agent with spawn rights is handed the multiagents MCP server
     # (SM-R1); one without them never is (SM-R2). Placeholders are whole
     # values, filled in per spawn: {mcp_command} and {mcp_args} (or both as

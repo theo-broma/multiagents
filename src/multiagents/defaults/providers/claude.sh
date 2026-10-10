@@ -713,6 +713,8 @@ launch)
     # because `launch` builds argv here rather than through build_command.
     [ -n "${MULTIAGENTS_AUTOCOMPACT:-}" ] && \
         set -- "$@" --autocompact "$MULTIAGENTS_AUTOCOMPACT"
+    [ -n "${MULTIAGENTS_EFFORT:-}" ] && \
+        set -- "$@" --effort "$MULTIAGENTS_EFFORT"
     # Each launched role owns a session id, because `--continue` resumes the
     # most recent conversation IN THE DIRECTORY and both roles share the project
     # root — so `init-agent` after `run` would reopen the orchestrator's

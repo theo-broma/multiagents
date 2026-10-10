@@ -501,7 +501,10 @@ def test_tb_r4_when_the_session_cannot_be_resumed_the_node_relaunches_fresh_and_
     w.start_scheduler()
     node = w.simple("A", "rlagent")
     c1 = interrupted(w)
-    old_run = w.get(node)["runs"][0]["run_id"]
+    # A fast provider can exit before the supervisor records its launch.
+    runs = w.until(lambda: w.get(node)["runs"], WAIT,
+                   what="the first launch to be recorded")
+    old_run = runs[0]["run_id"]
     worktree = w.tree_nodes()[old_run].get("worktree", "")
     c2 = nth_call(w, 2, node=node)
     assert c2["resume"] == c1["session"], "the resume was not tried first"

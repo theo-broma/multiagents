@@ -94,6 +94,12 @@ dependencies:
   match: exact
   used_by:
   - providers.yaml#/claude/spawn/optional/autocompact/0
+- id: flag.effort
+  kind: flag
+  value: --effort
+  match: exact
+  used_by:
+  - providers.yaml#/claude/spawn/optional/effort/0
 - id: state_path.claude
   kind: state_path
   value: .claude

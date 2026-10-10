@@ -4228,20 +4228,26 @@ def test_the_tester_and_the_deep_implementer_share_opus_on_purpose():
     assert "To remove the exception, move ONE of them" in text
 
 
-def test_no_claude_agent_carries_an_effort_flag():
-    """`effort` belongs to agy. claude declares only max_budget_usd, so an
-    effort key on a claude agent is dead config that reads as if it did
-    something — and agy then REFUSES it for claude-opus-4-6-thinking, which is
-    where implementer-deep falls back to."""
-    import yaml
-    from multiagents.paths import shipped_defaults_dir
-    providers = yaml.safe_load(
-        (shipped_defaults_dir() / "providers.yaml").read_text())["providers"]
-    assert "effort" not in (providers["claude"]["spawn"].get("optional") or {})
+@pytest.mark.parametrize("effort", [None, "", "low", "medium", "high"])
+def test_claude_agents_pass_only_configured_effort(effort):
+    """Claude consumes configured effort; an unset or cleared effort omits it."""
+    from multiagents.config import load
+    from multiagents.providers import load_providers
 
+    provider = load_providers(load(None).providers)["claude"]
+    spec = AgentSpec("worker", "claude", "opus", effort=effort)
+    argv = provider.build_command(prompt="go", model=spec.model, workdir="/w",
+                                  options={"effort": spec.effort})
+    if effort:
+        assert argv.count("--effort") == 1
+        assert argv[argv.index("--effort") + 1] == effort
+    else:
+        assert "--effort" not in argv
+
+
+def test_shipped_agy_claude_fallbacks_clear_effort():
+    """Claude's effort support does not change agy's model restrictions."""
     for name, spec in _shipped_agents().items():
-        if spec.get("provider") == "claude":
-            assert "effort" not in spec, f"{name} carries an effort claude ignores"
         agy = (spec.get("models") or {}).get("agy")
         if isinstance(agy, dict) and agy.get("model") == "claude-opus-4-6-thinking":
             assert agy.get("effort", "") == "", \
