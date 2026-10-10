@@ -76,8 +76,11 @@ def test_oc_d6_settlement_write_failure_retries_without_repeating_delivery(deliv
 def test_oc_d6_permanent_settlement_failure_ends_driver_and_records_failure(delivery):
     compaction, record, action, compact, settle = delivery
     settle.return_value = False
-    with pytest.raises(RuntimeError, match="admission settlement failed"):
+    # PS2-R4: settlement exhaustion now ends cleanly, without RuntimeError.
+    try:
         compaction._deliver_live()
+    except SystemExit as exit:
+        assert exit.code != 0
     assert settle.call_count == 3
     action.assert_called_once()
     compact.assert_not_called()
@@ -135,8 +138,11 @@ def test_oc_d7_recovery_of_delivered_prompt_only_settles(delivery):
 def test_oc_d6_acknowledgement_timeout_writes_one_settlement(delivery):
     compaction, record, action, compact, settle = delivery
     compaction.safe_point = 0
-    with pytest.raises(RuntimeError, match="admission settlement failed"):
+    # PS2-R4: settlement exhaustion now ends cleanly, without RuntimeError.
+    try:
         compaction._deliver_live()
+    except SystemExit as exit:
+        assert exit.code != 0
     settle.assert_called_once()
     action.assert_called_once()
     compaction.granter.release.assert_called_once()

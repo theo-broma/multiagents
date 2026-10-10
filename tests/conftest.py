@@ -273,6 +273,7 @@ def pytest_sessionstart(session):
 
 
 def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: integration checks that run nested suites or require real time")
     config.addinivalue_line(
         "markers",
         "real_providers: this test is about providers_view itself, so let it run")
