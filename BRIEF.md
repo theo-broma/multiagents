@@ -5467,3 +5467,4 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
   - **Spec 4 = small items**, context/specs/small-tooling-items.md: PS2-R4 OC clean exit, R5 consult admission by host record, R6 test-chunk cleanup, R7 ambient-config isolation. R1-R3 are withdrawn.
   - **Deferred:** 2b (hang detection, stop attribution, AL) and 4b (publication, PB), 4c (short outputs with pagination).
   Both specs are uncommitted, awaiting the user's yes.
+- 16:25Z: The user approved specs 2 and 4; committed as 85fa32aa. Testers on codex gpt-6.1-sol (medium): **nd-b92e8c4c** (TF, tests/test_tf_*.py) and **nd-daa7686f** (PS2, tests/test_ps2_*.py). The scheduler was restarted so RR and RM are live: new pid 3143758, and old pid 126052 is gone. `scheduler stop` answered `{"stopped": false}` although the old daemon did exit; that is a small tooling oddity to look at. The full suite on f9ced621 is still running in the scratchpad worktree.
