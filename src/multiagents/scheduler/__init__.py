@@ -266,6 +266,15 @@ def stop_managed(project_root, run_id, caller=None):
             return exc.result
 
 
+def consult_admission(project_root, agent, caller=None):
+    try:
+        token = os.environ.get("MULTIAGENTS_RPC_TOKEN") if caller else root_capability(project_root)
+        reply = call(project_root, "admit_consult", {"agent": agent}, token)
+        return reply["result"] if reply.get("ok") else reply["error"]
+    except (OSError, ValueError):
+        return {"error": "scheduler_unavailable"}
+
+
 def agent_admission(project_root, agent, caller=None, model=None):
     try:
         token = os.environ.get("MULTIAGENTS_RPC_TOKEN") if caller else root_capability(project_root)

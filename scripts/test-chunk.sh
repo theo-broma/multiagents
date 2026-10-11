@@ -50,9 +50,60 @@ if [ "${#chunk_files[@]}" -gt 0 ]; then
     printf '%s\n' "${chunk_files[@]}"
 fi
 
+# PS2-R6: pytest accepts repeated options; only its last basetemp is used.
+basetemp=""
+for (( idx = 0; idx < ${#extra_args[@]}; idx++ )); do
+    case "${extra_args[idx]}" in
+        --basetemp=*) basetemp="${extra_args[idx]#--basetemp=}" ;;
+        --basetemp)
+            basetemp=""
+            if (( idx + 1 < ${#extra_args[@]} )); then
+                idx=$((idx + 1))
+                basetemp="${extra_args[idx]}"
+            fi ;;
+        --) break ;;
+    esac
+done
+
+cleanup() {
+    if [ -z "$basetemp" ]; then return; fi
+    local resolved
+    resolved="$(realpath -m -- "$basetemp")" || return
+    if [ ! -e "$resolved" ]; then return; fi
+    if [ -d "$resolved" ] && [ "$(dirname -- "$resolved")" = /var/tmp ] &&
+       [[ "$(basename -- "$resolved")" = pt-* ]] &&
+       [ ! -e "$resolved/.git" ] &&
+       ! git -c safe.directory='*' -C "$resolved" rev-parse --git-dir >/dev/null 2>&1; then
+        rm -rf -- "$resolved" || echo "Could not clean pytest basetemp: $resolved" >&2
+    else
+        echo "Keeping pytest basetemp: $resolved (outside cleanup scope)" >&2
+    fi
+}
+trap cleanup EXIT
+# Signal the direct child as well: signals sent just to this shell must
+# still interrupt pytest. wait is retried by the handler before cleanup.
+pytest_pid=""
+interrupt() {
+    local sig="$1" status="$2"
+    trap '' INT TERM HUP
+    if [ -n "$pytest_pid" ]; then
+        kill -s "$sig" "$pytest_pid" 2>/dev/null || true
+        wait "$pytest_pid" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+trap 'interrupt INT 130' INT
+trap 'interrupt TERM 143' TERM
+trap 'interrupt HUP 129' HUP
+
+# Bash background jobs inherit ignored INT/QUIT; restore them for pytest.
 if [ -d .venv ]; then
     export PYTHONPATH=src
-    exec .venv/bin/python -m pytest "${chunk_files[@]}" "${extra_args[@]}"
+    env --default-signal=INT,QUIT .venv/bin/python -m pytest "${chunk_files[@]}" "${extra_args[@]}" &
 else
-    exec uv run --frozen python -m pytest "${chunk_files[@]}" "${extra_args[@]}"
+    env --default-signal=INT,QUIT uv run --frozen python -m pytest "${chunk_files[@]}" "${extra_args[@]}" &
 fi
+pytest_pid=$!
+status=0
+wait "$pytest_pid" || status=$?
+exit "$status"

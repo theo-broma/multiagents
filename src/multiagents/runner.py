@@ -9851,17 +9851,6 @@ class Runner(QuotaHandover):
                 f"Agent {agent_name!r} is not conversational. Use start_agent for "
                 f"task agents, or set `conversational: true` in agents.yaml."
             )
-        if self.scheduler_enabled():
-            from .scheduler import agent_admission, resume_admission
-            conversation = self._find_conversation(agent_name)
-            if conversation:
-                admission = await asyncio.to_thread(resume_admission, self.paths.root,
-                                                    conversation.id, self.self_id())
-            else:
-                admission = await asyncio.to_thread(agent_admission, self.paths.root,
-                                                    agent_name, self.self_id())
-            if admission.get("error") or admission.get("blocked"):
-                return admission
         # Waiting for the other turn is bounded by how long that turn may run.
         # PC-R3b: ONE deadline covers that wait, the wait for a provider slot
         # and the reply; the slot is waited for no longer than the consult's
@@ -9976,6 +9965,12 @@ class Runner(QuotaHandover):
         ticket, waiter: str = "", deadline: float | None = None,
     ) -> dict[str, Any]:
         node = self._find_conversation(agent_name)
+        if node is not None and self.scheduler_enabled():
+            from .scheduler import resume_admission
+            admission = await asyncio.to_thread(resume_admission, self.paths.root,
+                                                node.id, self.self_id())
+            if admission.get("error") or admission.get("blocked"):
+                return admission
         # OG-R3: the route a conversation recorded under a pre-rename name
         # lives on, read once for the checks below.
         recorded = self.tree.renames.canonical(node.provider) if node is not None else ""
@@ -10037,6 +10032,16 @@ class Runner(QuotaHandover):
         # restores a node the launch never reached — one already `running`
         # belongs to its run and is left alone.
         reserved = ""
+        # PS2-R5: issue a new child identity on the host while holding the
+        # conversation lock, including when replacing an owned conversation.
+        consult_run_id = ""
+        if node is None and self.scheduler_enabled():
+            from .scheduler import consult_admission
+            admission = await asyncio.to_thread(consult_admission, self.paths.root,
+                                                agent_name, self.self_id())
+            if admission.get("error") or admission.get("blocked"):
+                return admission
+            consult_run_id = admission["consult_run_id"]
         if node is None:
             # FO-R1/TB-R7: a new conversation uses the resolved route,
             # including that provider's `models:` entry.
@@ -10047,7 +10052,7 @@ class Runner(QuotaHandover):
             self._preflight(spec)
             parent = self.self_id()
             depth = self.self_depth() + 1
-            node_id = new_id()
+            node_id = consult_run_id or new_id()
             worktree_path = self.paths.worktree(node_id)
             # RM-R5a: the model/effort pair is settled before the worktree and
             # node below, the same side-effect-free point start() uses.

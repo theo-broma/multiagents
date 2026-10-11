@@ -847,6 +847,8 @@ class _AttachedCompaction:
 
     def due(self) -> bool:
         """One poll. True means: stop the child now, for a compaction."""
+        if getattr(self, "exit_status", 0):
+            return False
         record = self.journal.status(self.context.get("MULTIAGENTS_ROLE", self.spec.name),
                                      self.context.get("MULTIAGENTS_SESSION_ID", ""))
         if record["status"] in compaction_requests.ACTIVE:
@@ -1048,7 +1050,16 @@ class _AttachedCompaction:
         if not settled:
             # A committed server latch cannot be cleared without authentication.
             # End this driver so surviving servers can reopen on its death.
-            raise RuntimeError("compaction admission settlement failed")
+            self._settlement_failed()
+
+    def _settlement_failed(self) -> None:
+        # PS2-R4: let the attached CLI finish its lifecycle before returning
+        # failure; raising here would stop it and expose a traceback.
+        self.disabled = True
+        self.exit_status = 1
+        cause = " ".join(self.explicit["failure_detail"].splitlines())
+        print(f"Compaction {self.explicit['request_id']}: {cause}",
+              file=sys.stderr, flush=True)
 
     def recover(self) -> str:
         """Reconcile before launching anything after an interrupted execution."""
@@ -1099,7 +1110,7 @@ class _AttachedCompaction:
                 self.explicit = self.journal.update(self.explicit["request_id"], "failed",
                     failure_detail=detail, outcome=outcome)
                 if not settled:
-                    raise RuntimeError("compaction admission settlement failed")
+                    self._settlement_failed()
         if code == 0:
             self.spent = True
         else:
@@ -1184,6 +1195,8 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
     if context.get("MULTIAGENTS_SESSION_ID"):
         compaction.journal.bind(role, os.getpid(), session=context["MULTIAGENTS_SESSION_ID"])
         recovered_note = compaction.recover()
+        if getattr(compaction, "exit_status", 0):
+            return compaction.exit_status
     if recovered_note:
         env = {**env, "MULTIAGENTS_RESUME": "1", "MULTIAGENTS_RESUME_PROMPT": recovered_note}
     signals = _HoldSignals(paths, config, role)
@@ -1273,7 +1286,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                 # (R8f.12): only a CLI we stopped for it is compacted.
                 compaction.requested = None
                 compaction.release()
-                return code, time.monotonic() - began
+                return getattr(compaction, "exit_status", 0) or code, time.monotonic() - began
             compaction.compact()
             run_env = {k: v for k, v in run_env.items()
                        if k != "MULTIAGENTS_RESUME_PROMPT"}
@@ -1297,6 +1310,8 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         return stop
 
     code, ran_for = _attached(env)
+    if getattr(compaction, "exit_status", 0):
+        return compaction.exit_status
     if limit and not stopped_by_driver:
         # The user's own exit wins over a usage-limit stop too (R8f.19, the
         # rule of R8f.12 extended): `stopping()` fires only when we actually
@@ -1401,6 +1416,8 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                      "MULTIAGENTS_RESUME_PROMPT": QUOTA_RECOVERY_PROMPT if handover.fresh else RESUME_PROMPT}
         limit.clear()
         code, ran_for = _attached(retry_env)
+        if getattr(compaction, "exit_status", 0):
+            return compaction.exit_status
         if limit and not stopped_by_driver:
             # The user's own exit wins over a usage-limit stop too (R8f.19):
             # the same rule applies to the attached CLI of a retry.

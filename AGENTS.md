@@ -7,7 +7,6 @@ time on these 16 cores, and `-n auto` from each of them starves the others
 into timeouts.
 
     scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/pt-<hex-part-of-your-id>
-    rm -rf /var/tmp/pt-<hex-part-of-your-id>
 
 or, without a `.venv`,
 `PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider -n 4 --basetemp=... tests/`.
@@ -15,6 +14,11 @@ The per-id outcomes match a serial run (TS-R1; manifests in
 `context/ts/manifests/`). A test that patches a module global must use
 `monkeypatch`, never bare assignment: under xdist the leak lands in an
 unrelated test on the same worker.
+
+The script cleans up the effective basetemp after pytest exits, including
+failure and interruption. It resolves symlinks and removes only directories
+directly under /var/tmp named pt-* and outside any git repository; other
+paths are kept with a notice. Direct pytest invocations manage their own cleanup.
 
 A parallel run writes about 1.5 GB of temp dirs, and `/tmp` is a 14 GB tmpfs
 shared by every agent, so put `--basetemp` on real disk. It must be a path of

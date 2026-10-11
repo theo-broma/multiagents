@@ -323,6 +323,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS requests
                     (subject TEXT NOT NULL, request_id TEXT NOT NULL, payload TEXT NOT NULL,
                      reply TEXT NOT NULL, PRIMARY KEY(subject, request_id));
+                CREATE TABLE IF NOT EXISTS consults
+                    (run_id TEXT PRIMARY KEY, caller TEXT NOT NULL, agent TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS attempts
                     (id TEXT PRIMARY KEY, record TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS attempts_active ON attempts

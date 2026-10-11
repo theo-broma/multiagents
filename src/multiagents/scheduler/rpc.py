@@ -23,7 +23,7 @@ from .store import RecordView, matching_records, select_records, Store, encode, 
 OPS = {"create_node", "update_node", "cancel_node", "get_node", "list_nodes",
        "instantiate_template", "register_template", "list_templates", "wait_for_nodes",
        "ack_nodes", "give_verdict", "relaunch_node", "close_node", "merge_node",
-       "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_agent", "steer_run", "steer_result", "stop_run", "admit_window_resume"}
+       "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_consult", "admit_agent", "steer_run", "steer_result", "stop_run", "admit_window_resume"}
 MUTATING = OPS - {"get_node", "list_nodes", "list_templates", "wait_for_nodes", "scheduler_status", "admit_agent", "steer_result", "admit_window_resume"}
 ROOT_ONLY = {"register_template", "ack_nodes", "relaunch_node", "close_node", "merge_node", "dispose_node", "admit_window_resume"}
 
@@ -167,8 +167,15 @@ class Service:
             target = next((a["node_id"] for a in matching_records(journal, "run_id", args.get("run_id"))
                            if a["run_id"] == args.get("run_id")), None)
             recorded = self.engine.runner.authority.get(run.id) if run and self.engine.runner.authority else None
+            # PS2-R5: only host-issued consult identities can grant this
+            # exception, and only admission may use it.
+            consult = None
+            if op == "admit_run" and db is not None:
+                consult = db.execute("SELECT caller FROM consults WHERE run_id=?",
+                                     (args.get("run_id"),)).fetchone()
             if target not in model.subtree(nodes, principal["node_id"]) and not (
-                    recorded and recorded.get("parent") == subject):
+                    recorded and recorded.get("parent") == subject) and not (
+                    consult and consult[0] == subject):
                 raise Refused("forbidden")
         scope = model.subtree(nodes, principal["node_id"])
         permissions = principal["permissions"]
@@ -193,7 +200,7 @@ class Service:
             if not review:
                 raise Refused("forbidden")
             scope.add(review["node_id"])
-        if op in {"create_node", "start_agent", "admit_agent", "steer_run", "stop_run", "instantiate_template", "update_node", "cancel_node"} and "delegate" not in permissions:
+        if op in {"create_node", "start_agent", "admit_agent", "admit_consult", "steer_run", "stop_run", "instantiate_template", "update_node", "cancel_node"} and "delegate" not in permissions:
             raise Refused("forbidden")
         for field in ("id", "node_id"):
             if field in args and args[field] not in scope:
@@ -311,7 +318,7 @@ class Service:
                 elif pending.get("kind") == "window_admission":
                     reply["result"] = self.engine.window_launch_admission(pending["run_id"], pending["instant"])
                 elif pending.get("kind") == "admit_agent":
-                    reply["result"] = self.engine.agent_admission(args, principal)
+                    reply["result"] = {**reply["result"], **self.engine.agent_admission(args, principal)}
                 else:
                     reply = self.finish_cancel(principal, request_id, reply, pending)
         except Refused as exc:
@@ -355,6 +362,19 @@ class Service:
             save_attempt(db, attempt)
             after.append({"kind": "spawn", "attempt": attempt})
             return {"command_id": command_id}
+        if op == "admit_consult":
+            model.check_fields(args, {"agent"}, set())
+            spec = config.agent(args.get("agent"))
+            if not spec.conversational or spec.launch:
+                invalid("agent: expected a conversational agent")
+            # Generate the child identity on the host, never accept one from
+            # a caller. The scheduler database is outside container mounts.
+            from ..tree import new_id
+            run_id = new_id()
+            db.execute("INSERT INTO consults VALUES (?, ?, ?)",
+                       (run_id, principal["subject"], spec.name))
+            after.append({"kind": "admit_agent"})
+            return {"consult_run_id": run_id}
         if op == "admit_agent":
             after.append({"kind": "admit_agent"})
             return {}
