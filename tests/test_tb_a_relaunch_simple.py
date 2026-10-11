@@ -56,7 +56,12 @@ def held_simple(w) -> str:
 
 
 def failed_simple(w) -> str:
-    w.fxw.queue({"exit": 1})
+    """A simple node whose first run failed finally (TF-R2: the error text
+    makes the failure `other`, which is never automatically retried, so the
+    node ends `done/failed` and stays relaunchable)."""
+    from test_tf_support import failures
+    failures(w.fxw)
+    w.fxw.queue({"stderr": "Error: invalid task syntax\n", "exit": 1})
     w.start_scheduler()
     n = w.simple("N", "wk", prose="TASK-PROSE-XYZ")
     done = w.wait_state(n, "done", timeout=WAIT)
@@ -168,7 +173,7 @@ def test_tb_r2_a_failed_simple_node_is_relaunched(w):
 
 def test_tb_r2_a_relaunched_failed_node_that_fails_again_can_be_relaunched_again(w):
     n = failed_simple(w)
-    w.fxw.queue({"exit": 1})
+    w.fxw.queue({"stderr": "Error: invalid task syntax\n", "exit": 1})
     assert w.root_op("relaunch_node", n).get("ok") is True
     w.until(lambda: w.fxw.spawns() == 2 and w.get(n)["state"] == "done", WAIT, what="second failure")
     w.fxw.queue({"text": "third time lucky"})

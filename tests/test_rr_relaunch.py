@@ -76,7 +76,7 @@ def test_rr_r2_patched_tasks_and_pins_reach_first_admission(w):
                  "pins": {"model": "fxw/m2"}},
             rv: {"revision": w.get(rv)["revision"], "task": "PATCHED-REVIEW-RR"}})
         assert reply.get("ok"), reply
-        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="first patched launch")
+        w.until(lambda: len(w.fxw.calls()) == 2, WAIT, what="first patched launch")
         call = w.fxw.calls()[-1]
         assert "PATCHED-WORK-RR" in call["prompt"] and call["model"] == "fxw/m2"
         assert w.get(rv)["task"] == "PATCHED-REVIEW-RR"
@@ -127,7 +127,7 @@ def test_rr_r2_invalid_child_patch_is_atomic(w, bad):
     w.fxw.queue({"gate": "retry"})
     try:
         assert w.root_op("relaunch_node", loop).get("ok")
-        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="retry after refusal")
+        w.until(lambda: len(w.fxw.calls()) == 2, WAIT, what="retry after refusal")
         assert w.fxw.calls()[-1]["resume"] == session
     finally:
         w.gate("retry", w.fxw)
@@ -168,7 +168,7 @@ def test_rr_r2_child_new_session_renews_the_alias(w):
         reply = w.root_op("relaunch_node", loop, children={wk: {
             "revision": w.get(wk)["revision"], "new_session": True}})
         assert reply.get("ok"), reply
-        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="renewed session")
+        w.until(lambda: len(w.fxw.calls()) == 2, WAIT, what="renewed session")
         assert w.fxw.calls()[-1]["resume"] is None
         assert w.fxw.calls()[-1]["session"] != old_session
     finally:
@@ -186,32 +186,32 @@ def test_rr_r2_mcp_accepts_children_patch(w):
         except TypeError as exc:
             pytest.fail(f"relaunch_node MCP does not accept children: {exc}")
         assert not refused(reply), reply
-        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="MCP child patch launch")
+        w.until(lambda: len(w.fxw.calls()) == 2, WAIT, what="MCP child patch launch")
         assert "MCP-CHILD-PATCH" in w.fxw.calls()[-1]["prompt"]
     finally:
         w.gate("retry", w.fxw)
 
 
 def test_rr_r2_new_session_patch_renews_the_binding_shared_by_siblings(w):
-    from test_lr_loop_resume import PAIR, FAIL
+    from test_lr_loop_resume import PAIR, FAIL, wait_run_failed
     w.agent("rv", "fxw", writes=True)
-    w.fxw.queue(FAIL, FAIL)
+    w.fxw.queue(FAIL)
     w.start_scheduler()
     w.register_ok(PAIR.replace("session: B", "session: A"))
     loop = w.instantiate_ok("lrpair")
     wk, rv = w.children(loop)
-    w.wait_held(loop, "run_failed", timeout=WAIT)
+    wait_run_failed(w, loop)
     old = w.fxw.calls()[-1]["session"]
     w.fxw.queue({"gate": "retry"}, verdict_entry("approved"))
     try:
         reply = w.root_op("relaunch_node", loop, children={wk: {
             "revision": w.get(wk)["revision"], "new_session": True}})
         assert reply.get("ok"), reply
-        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="fresh shared worker session")
+        w.until(lambda: len(w.fxw.calls()) == 2, WAIT, what="fresh shared worker session")
         fresh = w.fxw.calls()[-1]["session"]
         assert fresh != old and w.fxw.calls()[-1]["resume"] is None
         w.gate("retry", w.fxw)
-        w.until(lambda: len(w.fxw.calls()) == 4, WAIT, what="sibling sharing renewed binding")
+        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="sibling sharing renewed binding")
         assert w.fxw.calls()[-1]["resume"] == fresh
     finally:
         w.gate("retry", w.fxw)

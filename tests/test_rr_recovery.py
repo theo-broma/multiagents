@@ -25,7 +25,11 @@ def w(tmp_path, monkeypatch):
 
 
 def dead_work(w, **kw):
-    w.fxw.queue(commit_entry("wip.txt", "saved work\n", "dead run work", exit=1))
+    # The provider error text makes the failure final (`other`, never retried
+    # under TF-R2), so the dead run stays the node's only attempt until the
+    # manual relaunch under test.
+    w.fxw.queue(commit_entry("wip.txt", "saved work\n", "dead run work", exit=1,
+                             stderr="Error: invalid task syntax\n"))
     w.start_scheduler()
     n = w.simple("N", "wk", **kw)
     assert w.wait_state(n, "done", timeout=WAIT)["outcome"] == "failed"
@@ -65,7 +69,8 @@ def test_rr_r3_new_dependency_input_is_merged_with_captured_work(w):
     w.start_scheduler()
     dep = w.simple("DEP", "wk")
     w.wait_state(dep, "done", timeout=WAIT)
-    w.fxw.queue(commit_entry("wip.txt", "saved work\n", "dead work", exit=1))
+    w.fxw.queue(commit_entry("wip.txt", "saved work\n", "dead work", exit=1,
+                             stderr="Error: invalid task syntax\n"))
     n = w.simple("N", "wk", inputs=[{"node": dep}])
     w.wait_state(n, "done", timeout=WAIT)
     w.fxw.queue(commit_entry("input.txt", "new input\n", "advanced input"))
@@ -129,7 +134,8 @@ def test_rr_r3_conflicting_current_inputs_hold_instead_of_dropping_work(w):
     w.start_scheduler()
     dep = w.simple("DEP", "wk")
     w.wait_state(dep, "done", timeout=WAIT)
-    w.fxw.queue(commit_entry("shared.txt", "dead WIP\n", exit=1))
+    w.fxw.queue(commit_entry("shared.txt", "dead WIP\n", exit=1,
+                             stderr="Error: invalid task syntax\n"))
     n = w.simple("N", "wk", inputs=[{"node": dep}])
     w.wait_state(n, "done", timeout=WAIT)
     attempt = w.get(n)["runs"][-1]["attempt_id"]
@@ -205,12 +211,14 @@ def test_rr_r3_prelaunch_exec_failure_keeps_recovery_for_the_next_try(w):
 
 
 def test_rr_r3_loop_relaunch_recovers_only_the_failed_child(w):
-    from test_lr_loop_resume import mkloop
-    w.fxw.queue(commit_entry("wip.txt", "first\n", exit=1),
-                 commit_entry("wip.txt", "newest dead work\n", exit=1))
+    from test_lr_loop_resume import mkloop, wait_run_failed
+    # One final failure (its error text matches nothing, TF-R2 never retries
+    # it) leaves the newest dead work as the captured commit to recover from.
+    w.fxw.queue(commit_entry("wip.txt", "newest dead work\n", exit=1,
+                             stderr="Error: invalid task syntax\n"))
     w.start_scheduler()
     loop, wk, rv = mkloop(w)
-    w.wait_held(loop, "run_failed", timeout=WAIT)
+    wait_run_failed(w, loop)
     attempt = w.get(wk)["runs"][-1]["attempt_id"]
     commit = w.git("rev-parse", f"refs/heads/node-results/{attempt}").stdout.strip()
     assert commit

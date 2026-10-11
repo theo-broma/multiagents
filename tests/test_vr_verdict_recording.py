@@ -42,10 +42,13 @@ TICK = 0.1
 
 
 def make_world(root: Path, monkeypatch) -> M4World:
+    from test_tf_support import failures
     root.mkdir(parents=True, exist_ok=True)
     world = M4World(root, monkeypatch, tick_seconds=TICK)
     world.fxw = world.provider("fxw")
     world.fxr = world.provider("fxr")
+    failures(world.fxw)
+    failures(world.fxr)
     world.agent("wk", "fxw", writes=True)
     world.agent("rv", "fxr", writes=True)
     return world
@@ -272,13 +275,19 @@ def test_vr_r2_an_agreeing_text_line_changes_nothing(w):
 # ------------------------------------------------------------------ VR-R3
 
 def test_vr_r3_a_run_that_did_not_finish_done_does_not_settle_the_round(w):
-    """A verdict line in the text of a run that exits 1 (and its retry): no round
-    is settled; the loop is held `run_failed`, as today."""
+    """A verdict line in the text of a run that fails finally — exit 1 with
+    provider error text that matches nothing, `other` under TF-R2, never
+    automatically retried: no round is settled; the loop is held `run_failed`."""
     w.fxw.queue(work(1))
-    w.fxr.queue(says("VERDICT(approved): fine", exit=1), says("VERDICT(approved): fine", exit=1))
+    w.fxr.queue(says("VERDICT(approved): fine", exit=1,
+                     stderr="Error: invalid task syntax\n"))
     w.start_scheduler()
     loop, _, rv = w.mkloop(3)
-    held_stays(w, loop, "run_failed")
+    settled(w, loop, WAIT, hold="run_failed")
+    w.quiet(QUIET)
+    node = w.get(loop)
+    assert node["state"] == "held" and (node["hold"] or {}).get("reason") == "run_failed", node
+    assert w.fxr.spawns() == 1, "a final failure must not be retried under TF-R2"
     assert w.get(loop)["generations"][-1]["verdict"] != "approved"
     assert w.get(rv)["outcome"] == "failed"
     assert "loop_exited" not in w.transitions(loop)

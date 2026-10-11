@@ -222,8 +222,13 @@ def test_tb_r4_a_rate_limit_in_a_clean_answer_is_not_a_rate_limit(w):
 
 
 def test_tb_r4_a_ordinary_failure_is_still_a_failure_and_counted(w):
-    """Precision guard: only a rate-limit signal defers; a crash still fails."""
-    w.rl.queue({"crash": True})
+    """TF-R2: an explicit non-transient provider error still fails once.
+
+    A text-free crash now retries, so it cannot serve as this precision guard.
+    """
+    from test_tf_support import failures
+    failures(w.rl)
+    w.rl.queue({"stderr": "Error: invalid task syntax\n", "exit": 1})
     w.start_scheduler()
     node = w.simple("A", "rlagent")
     done = w.wait_state(node, "done", WAIT)

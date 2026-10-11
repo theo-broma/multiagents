@@ -24,9 +24,12 @@ WAIT_ROUNDS = 20
 
 @pytest.fixture
 def w(tmp_path, monkeypatch):
+    from test_tf_support import failures
     world = M4World(tmp_path, monkeypatch)
     world.fxw = world.provider("fxw")
     world.fxr = world.provider("fxr")
+    failures(world.fxw)
+    failures(world.fxr)
     world.agent("wk", "fxw", writes=True)
     world.agent("rv", "fxr", writes=True)
     yield world
@@ -34,17 +37,21 @@ def w(tmp_path, monkeypatch):
 
 
 def test_adv_a_verdict_from_an_activation_that_then_failed_does_not_approve_the_generation(w):
-    """The reviewer gives `approved` and exits 1; its retry crashes. The loop
-    treats the round as having no verdict (it retried, then held run_failed),
-    yet the generation keeps `approved`, and through the work child's id it is
-    an eligible input of a node that depends on nothing else."""
+    """The reviewer gives `approved` through the verdict tool and then fails
+    finally — its error text matches nothing, so under TF-R2 the failure is
+    `other`, never automatically retried. The loop treats the round as having
+    no verdict and holds `run_failed`, yet the verdict tool accepted it, and
+    through the work child's id the generation would be an eligible input of
+    a node that depends on nothing else."""
     w.fxw.queue(commit_entry("f1.txt", "v1\n", "round 1"))
-    w.fxr.queue(verdict_entry("approved", exit=1), {"crash": True})
+    w.fxr.queue(verdict_entry("approved", exit=1,
+                              stderr="Error: invalid task syntax\n"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(3)
-    held = w.wait_held(loop, "run_failed", timeout=WAIT_ROUNDS)
+    from test_lr_loop_resume import wait_run_failed
+    held = wait_run_failed(w, loop)
     assert w.fxr.verdicts()[0]["replies"][-1]["ok"] is True   # the verdict was accepted
-    assert w.fxr.spawns() == 2                               # and the loop still retried
+    assert w.fxr.spawns() == 1, "a final failure must not be retried under TF-R2"
     reader = w.simple("READER", "wk", inputs=[{"node": wk}])
     w.quiet(3)
     assert w.fxw.by_tag("READER") == [], (

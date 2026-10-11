@@ -230,7 +230,7 @@ def test_nc_r17_r92_a_vanished_checkout_fails_without_holding(activation, monkey
 
 
 @pytest.mark.parametrize("missing_checkout", [False, True])
-def test_nc_r92_a_loop_retries_a_missing_tree_only_once_per_round(activation, missing_checkout):
+def test_nc_r92_a_missing_tree_does_not_get_a_per_round_crash_retry(activation, missing_checkout):
     _, engine, node, attempt, run, _ = activation
     reviewer = create_record({"kind": "simple", "agent": "guard", "task": "review"}, "root")
     loop = create_record({"kind": "loop", "children": [node["id"], reviewer["id"]],
@@ -245,19 +245,19 @@ def test_nc_r92_a_loop_retries_a_missing_tree_only_once_per_round(activation, mi
             engine.store.save_node(db, entry)
         save_attempt(db, attempt)
     engine.finished(attempt, run)
-    with engine.store.transaction(write=False) as db:
-        retried = engine.store.nodes(db)[node["id"]]
-        assert retried["state"] == "open"
-        assert engine.store.nodes(db)[loop["id"]]["state"] != "held"
-    second = {**attempt, "attempt_id": uuid.uuid4().hex, "state": "launched"}
-    retried.update(state="running")
-    retried["runs"].append({"run_id": run.id, "attempt_id": second["attempt_id"]})
-    with engine.store.transaction() as db:
-        engine.store.save_node(db, retried)
-        save_attempt(db, second)
-    engine.finished(second, run)
-    with engine.store.transaction(write=False) as db:
-        held = engine.store.nodes(db)[loop["id"]]
+    # TF-R2 retries only launch/crash/transient. A successful provider turn
+    # whose checkout disappeared during capture is an `other` failure, and
+    # no longer receives the former generic per-round retry.
+    from multiagents.scheduler import root_capability
+    token = root_capability(engine.paths.root)
+    def get(id):
+        reply = engine.service.request({"op": "get_node", "token": token,
+                                        "request_id": "tf-read-" + id, "args": {"id": id}})
+        assert reply.get("ok"), reply
+        return reply["result"]
+    child = get(node["id"])
+    assert child["state"] == "done" and child["outcome"] == "failed"
+    held = get(loop["id"])
     assert held["state"] == "held" and held["hold"]["reason"] == "run_failed"
 
 

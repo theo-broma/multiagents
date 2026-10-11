@@ -2,9 +2,13 @@
 
 Contract: `context/specs/loop-run-failed-resume.md`.
 
-A child run that fails twice in one round (the scheduler retries a failed
-child once per round) holds its nearest loop with `run_failed`. The fixture
-provides that with two `{"exit": 1}` queue entries on the child's provider.
+A child run that fails in its round holds its nearest loop with
+`run_failed`. The fixture provides that with one `FAIL` queue entry on the
+child's provider: FAIL carries provider error text that matches nothing, so
+under TF-R1 it classifies `other` — final, never automatically retried (the
+loop's former per-round crash retry is replaced by TF-R2's path, which only
+takes launch/crash/transient). A text-free `{"exit": 1}` would classify
+`crash` and be retried three times, so it cannot build this fixture any more.
 
 Where the contract is silent (kept loose):
 - worker (`W`) and reviewer (`R`) are bound to session aliases `A` and `B`;
@@ -22,20 +26,26 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.m4_world import (M4World, commit_entry, err_code,  # noqa: E402
-                                 finding, verdict_entry)
+                                  finding, verdict_entry)
 
 WAIT = 8
 WAIT_ROUNDS = 20
 CLEAR = 3
-FAIL = {"exit": 1}
+# Provider error text matching no configured pattern: class `other`, final
+# under TF-R2 (never retried). The stderr directive needs the failure-effects
+# script patch that make_world applies (test_tf_support.failures).
+FAIL = {"stderr": "Error: invalid task syntax\n", "exit": 1}
 
 
 def make_world(tmp_path, monkeypatch, *, threshold=None, **provider_extra):
+    from test_tf_support import failures
     world = M4World(tmp_path, monkeypatch)
     if threshold is not None:
         world.project["limits"]["provider_failure_threshold"] = threshold
     world.fxw = world.provider("fxw", **provider_extra)
     world.fxr = world.provider("fxr", **provider_extra)
+    failures(world.fxw)
+    failures(world.fxr)
     world.agent("wk", "fxw", writes=True)
     world.agent("rv", "fxr", writes=True)
     return world
@@ -58,7 +68,8 @@ def wpin(tmp_path, monkeypatch):
 
 @pytest.fixture
 def wbreaker(tmp_path, monkeypatch):
-    """Failure threshold 4: the original failure, its retry and a failed rerun do not trip the breaker."""
+    """Failure threshold 4: the original failure and a failed rerun never
+    trip the provider breaker (each is now a single final failure)."""
     world = make_world(tmp_path, monkeypatch, threshold=4)
     yield world
     world.close()
@@ -91,26 +102,48 @@ def mkloop(w, max_rounds: int = 3):
     return loop, wk, rv
 
 
+def wait_run_failed(w, loop: str) -> dict:
+    """The loop held `run_failed` — failing at once on any other terminal or
+    held state (a failure rescued by a retry shows up as a different hold,
+    and waiting out the round timeout would only hide that)."""
+    def probe():
+        n = w.get(loop)
+        if n["state"] == "held":
+            reason = (n.get("hold") or {}).get("reason")
+            if reason == "run_failed":
+                return n
+            raise AssertionError(f"{loop} held for {reason!r}, not 'run_failed'")
+        if n["state"] in ("done", "cancelled"):
+            raise AssertionError(
+                f"{loop} reached {n['state']} (outcome {n.get('outcome')!r}): "
+                "the child's failure did not hold the loop")
+        return None
+    return w.until(probe, WAIT_ROUNDS, what=f"{loop} held for run_failed")
+
+
 def worker_failed(w, *, prior_rejection: bool = False, max_rounds: int = 3):
-    """A loop held `run_failed` because the worker failed (twice) in its round."""
+    """A loop held `run_failed` because the worker failed in its round.
+
+    One final (`other`) failure is enough under TF-R2: there is no per-round
+    crash retry any more to consume a second entry."""
     if prior_rejection:
-        w.fxw.queue(work(1), FAIL, FAIL)
+        w.fxw.queue(work(1), FAIL)
         w.fxr.queue(verdict_entry("rejected", [finding("redo")]))
     else:
-        w.fxw.queue(FAIL, FAIL)
+        w.fxw.queue(FAIL)
     w.start_scheduler()
     loop, wk, rv = mkloop(w, max_rounds)
-    held = w.wait_held(loop, "run_failed", timeout=WAIT_ROUNDS)
+    held = wait_run_failed(w, loop)
     assert held["hold"]["detail"] == wk
     return loop, wk, rv
 
 
 def reviewer_failed(w, max_rounds: int = 3):
     w.fxw.queue(work(1))
-    w.fxr.queue(FAIL, FAIL)
+    w.fxr.queue(FAIL)
     w.start_scheduler()
     loop, wk, rv = mkloop(w, max_rounds)
-    held = w.wait_held(loop, "run_failed", timeout=WAIT_ROUNDS)
+    held = wait_run_failed(w, loop)
     assert held["hold"]["detail"] == rv
     return loop, wk, rv
 
@@ -200,7 +233,7 @@ def test_lr_r1_the_reviewer_verdict_after_the_relaunch_is_honoured_a_rejection_c
     assert relaunch_loop(w, loop).get("ok") is True
     held = w.wait_held(loop, "loop_max", timeout=WAIT_ROUNDS)
     assert held["loop"]["rounds_rejected"] == 1
-    assert w.fxw.spawns() == 3 and w.fxr.spawns() == 1
+    assert w.fxw.spawns() == 2 and w.fxr.spawns() == 1
 
 
 def test_lr_r1_a_rejection_after_the_relaunch_starts_the_next_round(w):
@@ -231,7 +264,7 @@ def test_lr_r1_pins_apply_to_the_failed_child(wpin):
     assert reply.get("ok") is True, reply
     wpin.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     models = [c["model"] for c in wpin.fxw.calls()]
-    assert models[:2] == ["fxw/m1", "fxw/m1"] and models[2] == "fxw/m2", models
+    assert models[0] == "fxw/m1" and models[1] == "fxw/m2", models
 
 
 def test_lr_r1_it_is_root_only_and_checks_the_revision(w):
@@ -242,7 +275,7 @@ def test_lr_r1_it_is_root_only_and_checks_the_revision(w):
     assert err_code(w.rpc("relaunch_node", {"id": loop, "revision": rev}, token=run)) == "forbidden"
     assert err_code(w.rpc("relaunch_node", {"id": loop, "revision": rev - 1})) == "conflict"
     w.quiet(1)
-    assert w.get(loop)["state"] == "held" and w.fxw.spawns() == 2
+    assert w.get(loop)["state"] == "held" and w.fxw.spawns() == 1
 
 
 def test_lr_r1_a_repeated_relaunch_launches_one_rerun(w):
@@ -257,7 +290,7 @@ def test_lr_r1_a_repeated_relaunch_launches_one_rerun(w):
         assert second.get("ok") is False or second.get("result") == first.get("result"), second
         w.wait_running(wk, timeout=WAIT)
         w.quiet(1)
-        assert w.fxw.spawns() == 3, "one relaunch must start one rerun"
+        assert w.fxw.spawns() == 2, "one relaunch must start one rerun"
     finally:
         w.gate("gw", w.fxw)
     w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
@@ -265,10 +298,10 @@ def test_lr_r1_a_repeated_relaunch_launches_one_rerun(w):
 
 def test_lr_r1_a_rerun_that_fails_again_holds_the_loop_again_and_can_be_relaunched(wbreaker):
     loop, wk, rv = worker_failed(wbreaker)
-    wbreaker.fxw.queue(FAIL, work(2))        # the rerun fails; the scheduler's own retry is not repeated
+    wbreaker.fxw.queue(FAIL, work(2))        # the rerun fails; under TF-R2 the failure is final
     wbreaker.fxr.queue(verdict_entry("approved"))
     assert relaunch_loop(wbreaker, loop).get("ok") is True
-    wbreaker.wait_held(loop, "run_failed", timeout=WAIT_ROUNDS)
+    wait_run_failed(wbreaker, loop)
     assert relaunch_loop(wbreaker, loop).get("ok") is True
     done = wbreaker.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved" and done["loop"]["rounds_rejected"] == 0
