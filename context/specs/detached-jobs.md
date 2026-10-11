@@ -382,3 +382,10 @@ passing in the suite.
 12. **Simultaneous end and CLI death** (DJ-R4 rule 5) is tested by binding a
     CLI pid that is already dead while an ended, unacknowledged job exists. The
     watcher must then exit 0 and record nothing (rule 1).
+13. **DJ-R9 keeps `MULTIAGENTS_CONTAINER` as its signal.** The docker
+    executor sets it at container creation as the variable that "`inside`
+    recognises the container by" (executor/docker.py, `run_args`). On
+    2026-10-11 the orchestrator checked its own root-session environment on
+    this docker project and found the variable absent. Host provider scripts
+    receive it only in the environment built for them, never in the root
+    session's. The check doubted in BRIEF.md 13:50Z is therefore settled.
