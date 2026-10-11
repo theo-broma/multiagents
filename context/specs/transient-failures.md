@@ -215,3 +215,9 @@ contract:
    launch (TF-R2, advisor 2026-10-10). Otherwise repeated mid-run crashes
    retry forever.
 3. The 429 path stays as it is; TF does not take it over.
+4. The shipped opencode-zai provider also declares default `failures`
+   patterns (2026-10-11, after tester ag-997ed0), so its real quota message
+   classifies out of the box: "Usage limit reached for 5 hour. Your limit
+   will reset at <time>" as `quota`, with that time as `reset`. z.ai prints
+   the time with no zone and means UTC+8. It arrives as an HTTP 429 error
+   event, and still classifies as `quota`, not `throttle`.
