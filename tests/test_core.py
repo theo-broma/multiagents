@@ -3509,6 +3509,10 @@ def test_a_conversation_whose_worktree_vanished_is_told_so(tmp_path):
                                                 conversational=True)},
                 {"p": {"bin": "sh", "spawn": {"args": ["-c", "true"]}}})
     captured = {}
+    # TF retries this deliberate launch fault. Keep all attempts and prompt
+    # assertions, without spending the default 750 s in backoff.
+    r.config.project["scheduler"] = {"retries": {
+        "budget": 3, "backoff_seconds": [0]}}
 
     async def fake_launch(**kwargs):
         captured.update(kwargs)

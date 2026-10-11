@@ -218,6 +218,10 @@ def test_tg_r1_reload_at_final_launch_gate_is_reported(w, monkeypatch, path):
     import json
 
     h.up(w, conversational=path == "consult")
+    # Exercise every bounded launch retry while retaining the guard's error
+    # and no-extra-process assertions; timing is covered by TF's clock tests.
+    w.runner.config.project["scheduler"] = {"retries": {
+        "budget": 3, "backoff_seconds": [0]}}
     if path in {"start", "consult", "queued"}:
         w.g.set(gate=None)
     if path == "retry":

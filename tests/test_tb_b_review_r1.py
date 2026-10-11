@@ -87,7 +87,7 @@ def test_tb_r4_a_quiet_rate_limit_keeps_empty_text_and_no_crash_summary(tmp_path
                            agents={"worker": h.AgentSpec("worker", "p", "m", writes=True)})
     run_id = run_to_end(runner)
     record = json.loads((runner.paths.run_dir(run_id) / "result.json").read_text())
-    assert record["status"] == "rate_limited" and record["cause"] == "rate_limited"
+    assert record["status"] == "rate_limited" and record["failure_cause"]["class"] == "throttle"
     assert record["text"] == ""
     assert not record.get("warnings")
     assert runner.tree.get(run_id).summary == ""
@@ -124,7 +124,7 @@ def test_tb_r4_a_model_capacity_refusal_resumes_the_same_session(tmp_path, monke
         first, resumed = world.rl.calls()
         assert resumed["resume"] == first["session"]
         assert done["outcome"] == "completed"
-        assert done["runs"][0]["cause"] == "rate_limited"
+        assert done["runs"][0]["cause"]["class"] == "throttle"
         assert not world.tree_json().get("provider_health", {}).get("rl", {}).get("consecutive_failures")
     finally:
         world.close()

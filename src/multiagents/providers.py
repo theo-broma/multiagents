@@ -403,6 +403,13 @@ class Provider:
     # by `load_providers` from the RAW block, never through `extends`: the
     # limit belongs to the instance that declares it.
     max_concurrent: int | None = None
+    # TF-R1 (interface of 2026-10-10): this provider's `failures:` pattern
+    # lists — `transient` and `quota` matched case-insensitively against its
+    # error text and stderr, `reset` extracting the announced reset time
+    # through a named group. `reset_timezone` is the UTC offset of naive
+    # textual resets, default +00:00. An absent list matches nothing: the
+    # words alone classify no failure.
+    failures: dict[str, Any] = field(default_factory=dict)
     # SC-R1: the validated `spend_cap` block, or None (the default: no cap).
     # Like `max_concurrent`, read from the RAW block, never through `extends`.
     spend_cap: SpendCap | None = None
@@ -474,6 +481,7 @@ class Provider:
             # hide a real dollar figure.
             billing="plan" if data.get("billing") == "plan" else "metered",
             effort_suffixes=_effort_suffixes(data.get("effort_suffixes")),
+            failures=(dict(data["failures"]) if isinstance(data.get("failures"), dict) else {}),
         )
 
     # ------------------------------------------------------------- command --

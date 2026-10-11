@@ -13,7 +13,10 @@ here looks at how the runner records or detects the loss: only at `check`,
 `collect`, `consult` and `steer` results, the event log, the fake CLI's argv
 log and the filesystem.
 
-Ids: C11-R1 / R1a (status, reason, scope, no relaunch), R2 / R2a (the next
+TF Decision 5 supersedes the original no-relaunch rule. Historical loss
+tests exhaust the configured budget; same-call recovery is tested separately.
+
+Ids: C11-R1 / R1a (status, reason, scope, requested-session history), R2 / R2a (the next
 consult says so), R3 / R3a (steer refuses). C11-R4 is the existing suites
 staying green and is not a test of its own.
 """
@@ -35,6 +38,7 @@ from multiagents.tree import Node  # noqa: E402
 ORIGINAL = "0199a213-81c0-7800-8aa1-bbab2a035a53"
 OTHER = "0199a213-81c0-7800-8aa1-bbab2a035a99"
 LOST = "session_lost"
+WAIT = 5
 
 
 def _events(thread=ORIGINAL, text="done"):
@@ -72,11 +76,14 @@ class Advisor:
         spec = h.AgentSpec("advisor", "codex", "gpt-x", conversational=True)
         self.runner = h.make_runner(self.tmp / "proj", self.monkeypatch,
                                     agents={"advisor": spec},
-                                    providers={"codex": self.block})
+                                    providers={"codex": self.block},
+                                    project={"scheduler": {"retries": {
+                                        "budget": 3, "backoff_seconds": [0]}}})
         return self.runner
 
     def consult(self, message="question"):
-        return asyncio.run(self.runner.consult("advisor", message, timeout=60))
+        return asyncio.run(asyncio.wait_for(
+            self.runner.consult("advisor", message, timeout=3), WAIT))
 
     def steer(self, agent_id, message="again"):
         """The steer result; a refusal raised counts as a refusal returned."""
@@ -124,7 +131,14 @@ class Advisor:
         """Turn 1, then a resume the provider cannot find. Returns the id."""
         agent_id = self.established()
         self.lose(how)
-        self.consult("second")      # the lost turn; its own return is not pinned
+        # Retained-history tests concern an unrecovered loss. Exhaust the
+        # configured budget instead of assuming loss cannot retry (TF D5).
+        policy = self.runner.config.project["scheduler"]["retries"]
+        policy["budget"] = 0
+        try:
+            self.consult("second")
+        finally:
+            policy["budget"] = 3
         self.heal()
         return agent_id
 
@@ -232,28 +246,60 @@ def test_c11_r1a_a_provider_without_the_signal_never_reports_session_lost(
     }
     spec = h.AgentSpec("advisor", "plain", "m", conversational=True)
     runner = h.make_runner(tmp_path / "proj", monkeypatch,
-                           agents={"advisor": spec}, providers={"plain": provider})
-    first = asyncio.run(runner.consult("advisor", "q1", timeout=60))
-    asyncio.run(runner.consult("advisor", "q2", timeout=60))
+                           agents={"advisor": spec}, providers={"plain": provider},
+                           project={"scheduler": {"retries": {
+                               "budget": 3, "backoff_seconds": [0]}}})
+
+    async def go():
+        first = await runner.consult("advisor", "q1", timeout=3)
+        await runner.consult("advisor", "q2", timeout=3)
+        return first
+
+    first = asyncio.run(asyncio.wait_for(go(), WAIT))
 
     node = runner.check(first["agent_id"])
     assert node["reason"] != LOST, node
 
 
 @pytest.mark.parametrize("how", ["empty", "different-id"])
-def test_c11_r1a_no_relaunch_after_a_lost_session(adv, how):
-    """The silent-failure free retry and the commit-fix resume must not fire:
-    the turn that lost its session runs the native CLI exactly once."""
-    agent_id = adv.lost(how)
+def test_tf_decision5_lost_session_retries_fresh_inside_the_same_call(adv, how):
+    agent_id = adv.established()
+    adv.lose(how)
+    adv.fake.set(events=_events(OTHER, text="fresh answer"))
 
-    assert len(adv.resumes()) == 1, adv.execs()
-    # Anything that relaunched would have had time to by now; look once more
-    # after the node settles.
-    node = adv.runner.check(agent_id)
-    assert node["status"] == "failed", node
-    assert len(adv.execs()) == 2, (
-        f"expected the first turn and one resume, got {len(adv.execs())}: "
-        f"{[c['argv'] for c in adv.execs()]}")
+    reply = adv.consult("second")
+
+    assert not reply.get("error"), reply
+    assert reply["status"] == "idle", reply
+    calls = adv.execs()
+    assert len(adv.resumes()) == 1, calls
+    assert "resume" not in calls[-1]["argv"], calls
+    assert "fresh answer" in reply.get("reply", ""), reply
+    assert "fresh session" in reply["reply"].lower(), reply
+    assert adv.runner.paths.worktree(agent_id).is_dir()
+    assert adv.runner.paths.run_dir(agent_id).is_dir()
+
+
+@pytest.mark.parametrize("surface", ["reply", "event"])
+@pytest.mark.parametrize("how", ["empty", "different-id"])
+def test_tf_decision5_same_call_fresh_recovery_emits_structured_replacement(adv, how, surface):
+    old = adv.established()
+    adv.lose(how)
+    adv.fake.set(events=_events(OTHER, text="fresh answer"))
+
+    reply = adv.consult("second")
+
+    assert not reply.get("error"), reply
+    if surface == "reply":
+        assert reply.get("conversation_replaced") == {
+            "previous_agent_id": old, "reason": LOST,
+            "requested_session": ORIGINAL,
+        }, reply
+    else:
+        replaced = adv.events("conversation_replaced")
+        assert len(replaced) == 1, replaced
+        assert old in _text(replaced[0]), replaced[0]
+        assert ORIGINAL in _text(replaced[0]) and LOST in _text(replaced[0]), replaced[0]
 
 
 def test_c11_r1a_a_lost_session_keeps_the_worktree_and_run_dir(adv):

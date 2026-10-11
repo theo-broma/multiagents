@@ -5,6 +5,7 @@ Contract: context/specs/refusal-classification.md (ticket bug-1213a0).
 from __future__ import annotations
 
 import re
+import json
 import sys
 import time
 from pathlib import Path
@@ -198,7 +199,12 @@ def test_rc_r2_recorded_excerpt_is_present_and_at_most_200_chars(tmp_path, monke
     assert rc.status(r, result) == "refused"
     blob = rc.recorded(r, result)
     assert "zq-blocked-xxx" in blob, "no excerpt of the matched text recorded"
-    assert "x" * 201 not in blob, "excerpt exceeds 200 chars"
+    data = json.loads((r.paths.run_dir(result["agent_id"]) / "result.json").read_text())
+    excerpt = data["refusal"]["excerpt"]
+    assert "zq-blocked-xxx" in excerpt, excerpt
+    assert len(excerpt) <= 200, excerpt
+    # TF-R1 records a separate, longer cause excerpt (up to 2,000 chars).
+    assert len(data["failure_cause"]["excerpt"]) <= 2000, data
 
 
 def test_rc_r2_recorded_excerpt_is_redacted(tmp_path, monkeypatch):

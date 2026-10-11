@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.agent import alive  # noqa: E402
@@ -262,8 +264,9 @@ def test_nc_r17_a_finished_run_goes_through_result_capture_exactly_once(w):
     assert w.transitions(node) == seq, "a restart replayed a transition"
 
 
-def test_nc_r17_a_failed_run_ends_the_node_failed_without_a_second_launch(w):
+def test_nc_r17_a_nonretryable_failure_ends_the_node_without_a_second_launch(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     node = w.simple("A", fx={"crash": True})
     done = w.wait_state(node, "done")
     assert done["outcome"] == "failed"

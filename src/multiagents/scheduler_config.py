@@ -23,8 +23,14 @@ def validate_setting(key, value, source=""):
     elif key in {"starvation_after_seconds", "window_tolerance_seconds",
                  "admission_timeout_seconds", "tick_seconds",
                  "anomaly_interval_seconds", "anomaly_admission_seconds",
-                 "anomaly_held_seconds"}:
+                 "anomaly_held_seconds", "quota_recheck_seconds"}:
         valid = (type(value) in (int, float) and math.isfinite(value) and value > 0)
+    elif key == "retries":
+        valid = (isinstance(value, dict) and set(value) <= {"budget", "backoff_seconds"}
+                 and (type(value.get("budget", 3)) is int and value.get("budget", 3) >= 0)
+                 and (isinstance(value.get("backoff_seconds", []), list)
+                      and all(type(item) in (int, float) and math.isfinite(item) and item >= 0
+                              for item in value.get("backoff_seconds", []))))
     if not valid:
         raise SchedulerConfigError(f"scheduler.{key}: invalid value {value!r}" + (f" ({source})" if source else ""))
 

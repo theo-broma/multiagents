@@ -36,6 +36,8 @@ DEFAULTS = {
     "enabled": False,
     "timezone": "Europe/Paris",
     "starvation_after_seconds": 7200,
+    "retries": {"budget": 3, "backoff_seconds": [30, 120, 600]},
+    "quota_recheck_seconds": 1800,
     "window_tolerance_seconds": 60,
     "admission_timeout_seconds": 10,
     "tick_seconds": 5,

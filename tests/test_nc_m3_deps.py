@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.gitworld import GitWorld  # noqa: E402
@@ -92,6 +94,7 @@ def test_nc_r22_a_satisfied_dependency_launches_the_node_exactly_once_after_the_
 
 def test_nc_r22_a_failed_predecessor_keeps_a_success_dependent_blocked_for_good(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.coder("A", fx={"crash": True})
     b = w.coder("B", {"b.txt": "b"}, depends_on=[dep(a, "success")])
     assert w.done(a)["outcome"] == "failed"
@@ -102,6 +105,7 @@ def test_nc_r22_a_failed_predecessor_keeps_a_success_dependent_blocked_for_good(
 
 def test_nc_r22_a_finished_dependency_is_satisfied_by_a_failed_predecessor(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.coder("A", fx={"crash": True})
     b = w.coder("B", {"b.txt": "b"}, depends_on=[dep(a, "finished")])
     w.done(a)
@@ -189,6 +193,7 @@ def test_nc_r33_the_input_is_bound_at_launch_later_generations_do_not_move_a_run
 
 def test_nc_r22_a_failed_input_leaves_the_dependent_blocked_with_input(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.coder("A", fx={"crash": True})
     b = w.coder("B", {"b.txt": "b"}, inputs=[{"node": a}])
     w.done(a)

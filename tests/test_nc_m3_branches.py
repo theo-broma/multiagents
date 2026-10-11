@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.gitworld import GitWorld  # noqa: E402
@@ -137,6 +139,7 @@ def test_nc_r33_main_is_never_written_by_the_scheduler(w):
 def test_nc_r33_a_failed_run_integrates_nothing_and_leaves_the_branch_where_it_was(w):
     w.start_scheduler()
     main_before = w.main_tip()
+    nonretryable_failure(w.fx)
     node = w.coder("A", {"a.txt": "a"}, fx={"crash": True})
     done = w.done(node)
     assert done["outcome"] == "failed"

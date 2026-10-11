@@ -61,9 +61,13 @@ def test_launch_exceptions_release_resumed_slot(standing, monkeypatch, exception
         raise exception("injected launch fault")
 
     monkeypatch.setattr(type(standing.runner.executor()), "start", fault)
-    if exception is RuntimeError:
+    standing.runner.config.project["scheduler"] = {
+        "retries": {"budget": 1, "backoff_seconds": [0]}}
+    if exception is not asyncio.CancelledError:
         result = asyncio.run(standing.runner.consult("advisor", "q", timeout=1))
         assert result.get("error")
+        assert "launch" in result["error"], result
+        assert standing.runner.check(STANDING)["cause"]["class"] == "launch"
     else:
         with pytest.raises(exception):
             asyncio.run(standing.runner.consult("advisor", "q", timeout=1))

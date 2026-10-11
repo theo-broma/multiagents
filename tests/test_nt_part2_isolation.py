@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
 from nt_part2_harness import (HOUR, INTERVAL, TOKEN, TOPIC, NtWorld, field, leaks_of,  # noqa: E402
@@ -49,6 +51,7 @@ def scenario(w):
     w.start_scheduler()
     w.question()
     w.done_node("S1")
+    nonretryable_failure(w.fx)
     crashed = w.simple("S2", "worker", fx={"crash": True})
     w.until(lambda: w.get(crashed)["state"] == "done", timeout=15, what="S2 finished")
     w.held_node()

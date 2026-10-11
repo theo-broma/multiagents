@@ -186,6 +186,8 @@ def test_rr_r3_no_recorded_capture_preserves_existing_relaunch(w):
 
 
 def test_rr_r3_prelaunch_exec_failure_keeps_recovery_for_the_next_try(w):
+    # Drive bounded TF launch handling without the default 30 s first delay.
+    w.project["scheduler"]["retries"] = {"budget": 1, "backoff_seconds": [0]}
     n, attempt, commit, _ = dead_work(w)
     script = w.fxw.dir / "agent.py"
     original = script.read_text()
@@ -198,6 +200,7 @@ def test_rr_r3_prelaunch_exec_failure_keeps_recovery_for_the_next_try(w):
         assert unwrap(reply["result"]).get("recovered_from") == {"attempt": attempt, "commit": commit}
         w.until(lambda: w.get(n)["state"] in {"held", "done"}, WAIT,
                 what="prelaunch exec failure to settle")
+        assert w.get(n)["hold"]["reason"] == "retries_exhausted", w.get(n)
         assert len(w.fxw.calls()) == 1, "fault unexpectedly launched a provider"
     finally:
         script.write_text(original)
@@ -226,7 +229,7 @@ def test_rr_r3_loop_relaunch_recovers_only_the_failed_child(w):
     try:
         reply = w.root_op("relaunch_node", loop)
         assert reply.get("ok"), reply
-        w.until(lambda: len(w.fxw.calls()) == 3, WAIT, what="recovered loop child")
+        w.until(lambda: len(w.fxw.calls()) == 2, WAIT, what="recovered loop child")
         call = w.fxw.calls()[-1]
         assert call["head"] == commit
         assert (Path(call["cwd"]) / "wip.txt").read_text() == "newest dead work\n"

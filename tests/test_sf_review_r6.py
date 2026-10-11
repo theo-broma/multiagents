@@ -287,9 +287,17 @@ def test_an_automatic_consult_timeout_does_not_release_unknown_liveness(w, monke
     w.agent("advisor", "acme", "acme/m1", conversational=True)
     w.up()
     state = {}
+    clock = [0.0]
+    # TF uses the injectable clock for this deadline. The fake wait advances
+    # it past the bound instead of burning the real 30 s lock slack.
+    monkeypatch.setattr(w.runner, "_failure_clock", lambda: clock[0], raising=False)
 
     class Deadline:
+        def is_set(self):
+            return False
+
         async def wait(self):
+            clock[0] += 100
             raise TimeoutError("the consult deadline passed")
 
     async def launch(*, node_id, **kwargs):

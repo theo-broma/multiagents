@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.gitworld import GitWorld  # noqa: E402
@@ -112,6 +114,7 @@ def test_nc_r39_a_node_that_is_not_done_is_refused_and_main_is_unchanged(w):
 
 def test_nc_r39_a_failed_node_is_refused_not_approved_unless_forced(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     node = w.coder("A", {"a.txt": "a"}, fx={"crash": True})
     w.done(node)
     before = w.main_tip()

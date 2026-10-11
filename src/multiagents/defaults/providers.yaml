@@ -240,6 +240,14 @@ providers:
     models_include: ["zai-coding-plan/*"]
     env:
       MULTIAGENTS_OPENCODE_PLAN: zai-coding-plan
+    # Decision 4 (2026-10-11): the observed quota message classifies out of
+    # the box. It arrives as an HTTP 429 error event, but announces a reset
+    # rather than a retry delay, so it is `quota`, never `throttle`. The time
+    # is printed with no zone and means UTC+8; the recorded reset is UTC.
+    failures:
+      quota: ["Usage limit reached"]
+      reset_timezone: "+08:00"
+      reset: ['Your limit will reset at (?P<reset>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)']
 
   # DeepInfra models through the same opencode CLI: its own family (DeepInfra
   # bills real money against its own DEEPINFRA_API_KEY, unrelated to the Go
@@ -759,6 +767,14 @@ providers:
   # express. See providers/codex.py and providers/README.md.
   codex:
     handover_mode: {docker: copy, local: copy}
+    # TF-R1 (interface of 2026-10-10): the failure texts this CLI is known to
+    # print. `workspace routing discovery failed` is transient at launch;
+    # "You've hit your usage limit" is a quota exhaustion, and its "try again
+    # at <time>" names the reset.
+    failures:
+      transient: ["workspace routing discovery failed"]
+      quota: ["You've hit your usage limit"]
+      reset: ['try again at (?P<reset>\S+)']
     # QH-R8: the adapter selects this private profile per account. Transfer
     # only its matching rollout; Codex repairs its own index on resume.
     session_store:

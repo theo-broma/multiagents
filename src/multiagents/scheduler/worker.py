@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import os
 import sys
 from pathlib import Path
@@ -144,7 +145,7 @@ async def supervise(root, attempt_id, lock_fd=None):
                     save_attempt(db, current)
                     db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
                 raise
-            if not result.get("agent_id"):
+            if not result.get("agent_id") and not result.get("error_kind"):
                 with store.transaction() as db:
                     current = attempts(db)[attempt_id]
                     current.pop("launch_in_progress", None)
@@ -152,6 +153,51 @@ async def supervise(root, attempt_id, lock_fd=None):
                         current.update(state="abandoned", refusal=result.get("blocked"), ended_at=now())
                     save_attempt(db, current)
                     db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
+                return
+            if not result.get("agent_id"):
+                # TF-R4: an exception out of the launch itself — recorded as a
+                # classified `launch` cause, bounded by TF-R2's budget.
+                from .. import failures as tf
+                with store.transaction() as db:
+                    current = attempts(db)[attempt_id]
+                    current.pop("launch_in_progress", None)
+                    if current["state"] == "claimed":
+                        kind = result.get("error_kind") or ""
+                        detail = (result.get("error") or result.get("reason")
+                                  or json.dumps(result.get("blocked") or result)[:2000])
+                        if kind and not detail.startswith(kind):
+                            detail = f"{kind}: {detail}"
+                        node = store.nodes(db)[current["node_id"]]
+                        provider_name = node["pins"].get("provider", "")
+                        spec = runner.config.agents.get(node["agent"])
+                        if not provider_name and spec is not None:
+                            provider_name = spec.provider
+                        provider = runner.providers.get(provider_name)
+                        cause = tf.classify(
+                            status="failed", launched=False, error_text=detail,
+                            provider=provider_name,
+                            account=(provider.container_account or provider_name) if provider else "",
+                            model=node["pins"].get("model") or (spec.model if spec else None) or "")
+                        # TF-R4: a launch that raised is still an attempt of
+                        # this activation — recorded with its classified cause
+                        # so TF-R2's budget bounds it, never abandoned silently.
+                        tree_run = runner.tree.get(current["run_id"])
+                        if tree_run is not None:
+                            record_launch(store, db, attempt, tree_run)
+                        # TF-R2/R4: Runner writes its tree reservation and
+                        # run directory before spawning. A returned setup
+                        # failure with neither proves no process was started;
+                        # the cause class alone cannot prove that.
+                        current["never_spawned"] = (tree_run is None
+                                                    and not paths.run_dir(current["run_id"]).exists())
+                        current.update(state="captured", ended_at=now(),
+                                       refusal=result.get("blocked"),
+                                       result={"status": "failed", "session_id": "",
+                                               "run_dir": str(paths.run_dir(current["run_id"])),
+                                               "cause": cause})
+                        save_attempt(db, current)
+                    db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
+                store.mirror()
                 return
         run = runner.tree.get(attempt["run_id"])
         if run:
@@ -213,6 +259,26 @@ async def supervise(root, attempt_id, lock_fd=None):
                         await asyncio.sleep(0.05)
                         continue
                     sessions.finish_cleanup(store, runner, current, tree_run)
+                if tree_run is not None and tree_run.status not in (ACTIVE | PAUSED | {"quota_paused"}):
+                    # TF-R1: the classified cause is public from the moment
+                    # the run is terminal — capture and settlement follow on
+                    # the scheduler's own tick, and must not delay the cause.
+                    try:
+                        from ..runner import _run_read
+                        recorded = json.loads(_run_read(paths.run_dir(attempt["run_id"]),
+                                                         "result.json"))
+                    except (OSError, ValueError):
+                        recorded = {}
+                    failure_cause = (recorded.get("failure_cause")
+                                     if isinstance(recorded, dict) else None)
+                    if isinstance(failure_cause, dict) and failure_cause.get("class"):
+                        with store.transaction() as db:
+                            node = store.nodes(db)[current["node_id"]]
+                            entry = next((r for r in node["runs"]
+                                          if r["attempt_id"] == attempt_id), None)
+                            if entry is not None and not entry.get("cause"):
+                                entry["cause"] = failure_cause
+                                store.save_node(db, node)
                 with store.transaction() as db:
                     db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
                 break

@@ -10,7 +10,11 @@ ACTIVE_ATTEMPTS = {"claimed", "launched", "captured", "suspended"}
 
 
 def active(attempt):
-    return attempt["state"] in ACTIVE_ATTEMPTS or attempt.get("resume_pending")
+    # TF: a numeric resume deadline is an internal backoff marker, not a
+    # pending request — on a finished attempt it blocks nothing. A recorded
+    # resume REQUEST (a dict) still holds the node until it is answered.
+    return (attempt["state"] in ACTIVE_ATTEMPTS
+            or isinstance(attempt.get("resume_pending"), dict))
 
 
 def recovery(node, journal, enabled):
@@ -99,7 +103,11 @@ def decide(service, db, op, args, nodes, config=None):
         raise Refused("published")
     if node.get("disposed"):
         raise Refused("disposed")
-    if node["kind"] not in {"simple", "loop"} or node["state"] not in {"held", "done"}:
+    # TF-R2: a pending automatic retry is not a settled node, but a root
+    # relaunch wins over it and cancels it — so it is relaunchable too.
+    pending_retry = node["kind"] == "simple" and node["state"] == "open" and (
+        node.get("retry_pending") or node.get("retry_route") or node.get("launch_failure"))
+    if node["kind"] not in {"simple", "loop"} or node["state"] not in {"held", "done"} and not pending_retry:
         invalid("state: relaunch requires a settled simple node or loop")
     if (node["kind"] == "loop" and node["state"] == "held"
             and (node["hold"] or {}).get("reason") not in {"loop_max", "unresolved_round", "run_failed"}):
@@ -122,8 +130,7 @@ def decide(service, db, op, args, nodes, config=None):
         failed_child = nodes.get(failed_loop["hold"].get("detail"))
         if (not failed_child or failed_child["kind"] != "simple"
                 or failed_child["id"] not in model.subtree(nodes, failed_loop["id"])
-                or failed_child["state"] != "done" or failed_child["outcome"] != "failed"
-                or failed_child.get("crash_retry_round") != failed_loop["loop"]["rounds_rejected"]):
+                or failed_child["state"] != "done" or failed_child["outcome"] != "failed"):
             invalid("state: run_failed must name a failed child in the current round")
     config = config or service._config
     bindings = sessions.aliases(db)
@@ -207,6 +214,16 @@ def decide(service, db, op, args, nodes, config=None):
         if child["kind"] == "simple":
             recovery(child, journal, recover)
             reopened_round(child, nodes)
+            # TF-R2: a root relaunch resets the retry budget and cancels any
+            # pending automatic retry, held quota release or launch failure.
+            for field in ("tf_retries", "retry_pending", "retry_route",
+                          "launch_failure"):
+                child.pop(field, None)
+            quota = child.pop("quota_hold", None)
+            if quota and quota.get("provider"):
+                # An explicit relaunch outranks the account cooldown the
+                # exhaustion placed; the budget guards the rest.
+                service.engine.runner.tree.clear_quota({quota["provider"]})
     for key in changed_bindings:
         sessions.save_alias(db, bindings[key])
     for id in patched - reset_ids:

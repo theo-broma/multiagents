@@ -13,7 +13,7 @@ def interrupted(engine, db, current, node, result):
     count = node.get("rate_limit_attempts", 0) + 1
     node.update(rate_limit_attempts=count, outcome=None, revision=node["revision"] + 1)
     entry = next(r for r in node["runs"] if r["attempt_id"] == current["attempt_id"])
-    entry["cause"] = "rate_limited"
+    entry["cause"] = result.get("failure_cause") or entry.get("cause") or "rate_limited"
     current.update(state="suspended", rate_limit_pending=True, rate_limit_result=result)
     current.pop("rate_limit_recovery", None)
     if current.get("alias_id"):

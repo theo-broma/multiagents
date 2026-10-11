@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
 from nt_part2_harness import (INTERVAL, QID, QUIET, TOPIC, FakeNtfy, NtWorld,  # noqa: E402
@@ -112,6 +114,7 @@ def test_nt_r3_done_event_names_the_node_and_its_outcome_and_is_default_priority
 def test_nt_r3_done_is_sent_whatever_the_outcome(make):
     w = make()
     n = w.first_message()
+    nonretryable_failure(w.fx)
     node = w.simple("F", "worker", fx={"crash": True})      # the run dies: the node finishes `failed`
     w.until(lambda: w.get(node)["state"] == "done", timeout=15, what="the node finished")
     outcome = w.get(node)["outcome"]

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.gitworld import GitWorld  # noqa: E402
@@ -88,6 +90,7 @@ def test_nc_r61_a_dependent_launched_after_the_restart_sees_the_recovered_result
 
 def test_nc_r61_a_failed_run_that_ends_while_the_scheduler_is_dead_integrates_nothing(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.coder("A", {"a.txt": "a"}, fx={"gate_after": "ga", "exit": 1})
     run = run_id_of(w.wait_running(a)["active_run"])
     w.kill9()

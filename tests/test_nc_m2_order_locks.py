@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.agent import alive  # noqa: E402
@@ -187,8 +189,9 @@ def test_nc_r26_a_different_lock_or_none_does_not_block(w):
     w.wait_running(free)
 
 
-def test_nc_r26_a_crashed_holder_releases_the_lock(w):
+def test_nc_r26_a_nonretryable_failed_holder_releases_the_lock(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.simple("A", locks=["L"], fx={"crash": True})
     b = w.simple("B", locks=["L"])
     assert w.wait_state(a, "done")["outcome"] == "failed"

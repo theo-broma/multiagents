@@ -116,7 +116,11 @@ def test_1_a_consult_resume_without_a_run_launches_the_recorded_model(
         tmp_path / "proj", monkeypatch,
         agents={"advisor": AgentSpec("advisor", "own", "gemini-new",
                                      conversational=True)},
-        providers={"own": own, "sib": sib})
+        providers={"own": own, "sib": sib},
+        # Refusal remains allowed; TF's launch retries should not turn this
+        # model-selection check into a 12.5-minute backoff test.
+        project={"scheduler": {"retries": {
+            "budget": 3, "backoff_seconds": [0]}}})
     worktree = runner.paths.worktree("ag-c0nv01")
     worktree.mkdir(parents=True, exist_ok=True)
     runner.tree.add(Node(id="ag-c0nv01", agent="advisor", provider="sib",

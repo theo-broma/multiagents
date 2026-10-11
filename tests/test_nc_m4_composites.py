@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from support.tf_reconciliation import nonretryable_failure
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nc_fixture.m4_world import M4World, blocked_codes  # noqa: E402
@@ -62,6 +64,7 @@ def test_nc_r5_a_sequence_launches_its_children_in_order(w):
 
 def test_nc_r5_a_failed_sequence_child_stops_the_rest_and_is_never_approved(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.simple("A", fx={"crash": True})
     b = w.simple("B")
     seq = w.comp("sequence", [a, b])
@@ -98,6 +101,7 @@ def test_nc_r5_group_children_follow_their_own_depends_on(w):
 
 def test_nc_r5_a_group_with_a_failed_child_is_done_failed(w):
     w.start_scheduler()
+    nonretryable_failure(w.fx)
     a = w.simple("A", fx={"crash": True})
     b = w.simple("B")
     grp = w.comp("group", [a, b])

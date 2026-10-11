@@ -28,6 +28,7 @@ import math
 import signal
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -812,6 +813,9 @@ class Run:
     refusal: dict | None = None
     final_status: str = ""
     final_result_detail: str = ""    # RV-R2: error payload apart from the response
+    # TF-R1: a structured reset the provider's result event announced (source
+    # 1 of the reset-time order; the provider's `reset:` pattern is source 2).
+    final_resets_at: str = ""
     verdict_after_error: bool = False
     rate_limit_resume: bool = False
     requested_session: str = ""     # adapter explicitly reported a resume mismatch
@@ -963,7 +967,13 @@ def _scheduled_start(fn):
                 result = await fn(self, agent_name, task, **kwargs)
             except (RuntimeError, PermissionError, ValueError, KeyError, FileNotFoundError) as exc:
                 if context:
-                    return admission_block(exc)
+                    # TF-R4: the exception's own type travels with the refusal —
+                    # a launch failure is recorded as the exception it was.
+                    block = admission_block(f"{type(exc).__name__}: {exc}"
+                                            if isinstance(exc, Exception) else exc,
+                                            getattr(exc, "retry_after", None))
+                    block["error_kind"] = type(exc).__name__ if isinstance(exc, Exception) else ""
+                    return block
                 raise
             if context and not result.get("agent_id") and not result.get("admitted"):
                 if not isinstance(result.get("blocked"), list):
@@ -1034,6 +1044,70 @@ class Runner(QuotaHandover):
             except Exception:
                 pass  # Retain the last valid gate during a malformed reload.
         return self._scheduler_gate
+
+    def _failure_instant(self):
+        """TF timing shares the scheduler's injectable clock."""
+        clock = getattr(self, "_failure_clock", None)
+        if clock is not None:
+            return clock()
+        from .scheduler.store import Store
+        from .scheduler.suspension import instant
+        store = Store(self.paths.root)
+        if store.file.exists():
+            with store.transaction(write=False) as db:
+                clock_file = store.meta(db, "clock_file")
+            return instant(clock_file)
+        return now()
+
+    async def _failure_sleep(self, seconds, deadline=None):
+        due = self._failure_instant() + seconds
+        while self._failure_instant() < due:
+            if deadline is not None and self._failure_instant() >= deadline:
+                return False
+            await asyncio.sleep(min(0.05, max(0, due - self._failure_instant())))
+        return deadline is None or self._failure_instant() < deadline
+
+    async def _failure_wait(self, event, deadline):
+        while not event.is_set():
+            remaining = deadline - self._failure_instant()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            try:
+                await asyncio.wait_for(event.wait(), min(0.05, remaining))
+            except asyncio.TimeoutError:
+                pass
+
+    def _publish_failure_cause(self, node_id, cause, markers=None):
+        """Publish a cause before the tree exposes a terminal run."""
+        node = self.tree.get(node_id)
+        if not node or not node.node_id or not node.attempt_id:
+            return
+        from .scheduler.store import Store
+        from .scheduler.engine import attempts
+        import sqlite3
+        store = Store(self.paths.root)
+        try:
+            with store.transaction() as db:
+                attempt = attempts(db).get(node.attempt_id)
+                owner = store.nodes(db).get(node.node_id)
+                if not attempt or not owner:
+                    return
+                entry = next((r for r in owner["runs"]
+                              if r["attempt_id"] == node.attempt_id), None)
+                if entry is not None:
+                    entry["cause"] = cause
+                if markers and owner["state"] not in {"held", "cancelled", "done"}:
+                    for field in ("retry_pending", "retry_route", "pending_resume", "quota_hold"):
+                        owner.pop(field, None)
+                    owner.update(state="held", outcome=None,
+                                 hold={"reason": "needs_info", "markers": markers},
+                                 revision=owner["revision"] + 1)
+                    store.transition(db, "needs_info", owner["id"], owner["hold"])
+                    store.transition(db, "held", owner["id"], owner["hold"])
+                store.save_node(db, owner)
+        except sqlite3.OperationalError:
+            # result.json is the durable fallback; reconciliation republishes it.
+            logging.getLogger(__name__).exception("could not publish failure cause for %s", node_id)
 
     def authoritative(self, node: Node, action: str) -> Node | None:
         """Use recorded operands, reporting container-written disagreements once.
@@ -3072,6 +3146,15 @@ class Runner(QuotaHandover):
         """Final information requests outside Markdown examples (RM-R1)."""
         text = text or ""
         return [text[m.start():m.end()].strip() for m in NEED_INFO.finditer(_control_text(text))]
+
+    @staticmethod
+    def question_markers(text: str) -> list[str]:
+        """Both kinds of control question, in their order in the final text."""
+        text = text or ""
+        visible = _control_text(text)
+        matches = sorted([*NEED_INFO.finditer(visible), *NEED_DECISION.finditer(visible)],
+                         key=lambda match: match.start())
+        return [text[m.start():m.end()].strip() for m in matches]
 
     def _file_tickets(self, node_id: str, text: str) -> list[dict]:
         """Turn a finished bug-reporter message into queued tickets.
@@ -5736,11 +5819,17 @@ class Runner(QuotaHandover):
                         prompt = (f"review: node_id={review['node_id']} "
                                   f"generation_seq={review['generation_seq']} commit={review['commit']}\n" + prompt)
                 try:
+                    resume_session = activation.get("session_id") if context else None
+                    if (context and resume_session and activation.get("session_provider")
+                            and provider.name != activation["session_provider"]):
+                        # TF-R2/TF-R3: the session belongs to another provider's
+                        # account; a route that lands elsewhere launches fresh.
+                        resume_session = None
                     run = await self._launch(
                         node_id=node_id, spec=spec, provider=provider, prompt=prompt,
                         workdir=worktree_path, branch=branch, parent=parent, depth=depth,
                         timeout=timeout, startup_token=startup_token,
-                        session_id=activation.get("session_id") if context else None,
+                        session_id=resume_session,
                     )
                 except SpendCapRefused as exc:
                     # SC-R3/R3b (#7): admitted, then a crossing landed before
@@ -5989,6 +6078,13 @@ class Runner(QuotaHandover):
                         self.tree.emit(node_id, "provider_recovered", provider=provider.name)
                 if event.kind == "result":
                     run.final_result = True
+                    # TF-R1: a structured reset in the result outranks the
+                    # provider's `reset:` pattern and the usage window.
+                    part = event.raw.get("part")
+                    for source in (event.raw, part if isinstance(part, dict) else None):
+                        if isinstance(source, dict) and source.get("resets_at"):
+                            run.final_resets_at = str(source["resets_at"])
+                            break
 
                 record = scrub({
                     "t": now(), "kind": event.kind, "name": event.name,
@@ -6217,6 +6313,11 @@ class Runner(QuotaHandover):
                 if node_id in self._holds:
                     self._defer_while_held(node_id, "cancelled", reason)
                 else:
+                    from .failures import classify
+                    self._publish_failure_cause(node_id, classify(
+                        status="cancelled", provider=run.provider.name,
+                        account=run.provider.container_account or run.provider.name,
+                        model=run.spec.model, error_text=reason))
                     self.tree.set_status(node_id, "cancelled", reason)
                     self._release(node_id)
                 with contextlib.suppress(Exception):
@@ -6608,6 +6709,27 @@ class Runner(QuotaHandover):
         }
         if status == "rate_limited":
             record.update(cause="rate_limited", retry_after=self._retry_after(stderr))
+        # TF-R1: every attempt that does not end `done` durably records a
+        # classified cause. Only the provider's failure channels feed the
+        # classification — the assistant's own text never does.
+        if status not in {"done", "merged", "idle"}:
+            from .failures import classify, pattern_lists, spawn_failure
+            failed_launch = spawn_failure(stderr)
+            record["failure_cause"] = classify(
+                status=status, exit_code=None if failed_launch else code,
+                error_text=failed_launch or f"{run.final_status}\n{stderr}",
+                patterns=pattern_lists(run.provider),
+                provider=run.provider.name,
+                account=(run.provider.container_account or run.provider.name),
+                model=run.spec.model,
+                markers=(self.question_markers(run.final_assistant_message or text)
+                         or ([run.awaiting["topic"]] if run.awaiting else None)),
+                refusal=status == "refused", cap_stop=run.cap_stop,
+                retry_after=record.get("retry_after"),
+                resets_at=run.final_resets_at or "",
+                launched=not failed_launch)
+            if run.final_resets_at:
+                record["resets_at"] = run.final_resets_at
         warnings = [event["warning"] for event in run.events if event.get("warning")]
         if status == "done" and run.verdict_after_error:
             detail = run.final_result_detail or scrub(stderr)
@@ -6640,6 +6762,9 @@ class Runner(QuotaHandover):
             # result.json is what survives the tree.
             record["refusal"] = run.refusal
         _run_write(run_dir, "result.json", json.dumps(scrub(record), indent=2))
+        if record.get("failure_cause"):
+            self._publish_failure_cause(node_id, record["failure_cause"],
+                                        self.question_markers(record.get("final_text") or text))
 
         total_usage = self._qh_total_usage(node_id, usage)
         usage_node = self.tree.get(node_id)
@@ -6701,7 +6826,7 @@ class Runner(QuotaHandover):
             self.tree.emit(node_id, "rate_limited", provider=run.provider.name,
                            retry_after=record.get("retry_after"))
         elif status == "quota":
-            cooldown = now() + float(
+            cooldown = self._failure_instant() + float(
                 self.config.project.get("budget", {}).get("blind_cooldown_seconds", 900)
             )
             self.tree.set_cooldown(run.provider.name, cooldown, "quota failure during run",
@@ -6861,6 +6986,7 @@ class Runner(QuotaHandover):
         # it held, rather than re-arming the outage for another cooldown.
         self._startup_finish(run.provider.name, node_id, run.startup_token,
                              failed=status == "failed" and not run.startup_progress
+                             and record.get("failure_cause", {}).get("class") != "launch"
                              and not run.stop_requested and not timed_out
                              and not retry_transport_refused,
                              resolved=status == "refused" or retry_transport_refused,
@@ -7098,6 +7224,11 @@ class Runner(QuotaHandover):
         """
         node_id = run.node_id
         limited = None
+        from .failures import spawn_failure
+        if spawn_failure(stderr):
+            # The wrapper ran, but the provider did not. An exec failure is
+            # a launch failure, not evidence of provider health.
+            return status, None
         if status == "failed" and getattr(run, "rate_limit_resume", False) and self._session_resume_failure(stderr):
             return status, None
         # A run the PROVIDER stopped is not a run that failed. The CLI says so
@@ -7458,8 +7589,19 @@ class Runner(QuotaHandover):
         )
         # A capacity refusal is retryable even if the provider reports REFUSED.
         # A completed answer still outranks a stale stderr signal (TB-R4).
+        # TF-R1/Decision 4: a 429 whose text announces a usage limit ("Usage
+        # limit reached … will reset at") is a quota exhaustion, not the
+        # throttle — a reset is not a retry delay. The bare 429 without any
+        # quota wording keeps today's rate-limit path (Decision 3).
         if ((not succeeded or not text.strip())
                 and self._rate_limit_signal(run.final_status, stderr)):
+            from .failures import classify, pattern_lists
+            kind = classify(status="rate_limited", exit_code=code,
+                            final_status=run.final_status, error_text=stderr,
+                            patterns=pattern_lists(run.provider),
+                            retry_after=self._retry_after(stderr))["class"]
+            if kind == "quota":
+                return "quota"
             return "rate_limited"
         if run.final_status.upper() == "REFUSED":
             return "refused"
@@ -7740,6 +7882,14 @@ class Runner(QuotaHandover):
         if filed:
             result["tickets"] = [{k: t[k] for k in ("id", "severity", "title", "status")}
                                  for t in filed]
+        # TF-R1: the classified cause of an attempt that did not end `done`.
+        if node.status not in {"done", "merged", "idle"}:
+            try:
+                recorded = json.loads(_run_read(self.paths.run_dir(agent_id), "result.json"))
+            except (OSError, ValueError):
+                recorded = {}
+            if isinstance(recorded, dict) and recorded.get("failure_cause"):
+                result["cause"] = recorded["failure_cause"]
         return result
 
     def _read_stream(self, agent_id: str) -> list[dict]:
@@ -7805,6 +7955,9 @@ class Runner(QuotaHandover):
                        **self._qh_position(node))
         if data.get("warnings") or node.warnings:
             payload["warnings"] = data.get("warnings") or node.warnings
+        if data.get("failure_cause"):
+            # TF-R1: the classified cause, exactly as it was recorded.
+            payload["cause"] = data["failure_cause"]
         if node.reason == "session_lost":
             payload["requested_session"] = node.requested_session
         payload.update(self._no_commits_note(node, text))
@@ -9687,7 +9840,7 @@ class Runner(QuotaHandover):
                 f"could not open the lock for {agent_name!r} "
                 f"({exc.strerror or exc}); this one did not run") from exc
         try:
-            deadline = time.monotonic() + wait
+            deadline = self._failure_instant() + wait
             while True:
                 try:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -9699,7 +9852,7 @@ class Runner(QuotaHandover):
                             f"could not lock {agent_name!r} for this turn "
                             f"({exc.strerror or exc}); this one did not run"
                         ) from exc
-                    if time.monotonic() >= deadline:
+                    if self._failure_instant() >= deadline:
                         yield False
                         return
                     await asyncio.sleep(0.1)
@@ -9856,7 +10009,7 @@ class Runner(QuotaHandover):
         # and the reply; the slot is waited for no longer than the consult's
         # own timeout.
         limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
-        began = time.monotonic()
+        began = self._failure_instant()
         wait = limit + self.CONSULT_LOCK_SLACK_SECONDS
         try:
             async with self._conversation_turn(agent_name, wait) as ours:
@@ -9897,7 +10050,7 @@ class Runner(QuotaHandover):
                     return self._consult_result(
                         agent_name, node.id if node else None, None,
                         error=f"{agent_name!r}: {SHUT_TEXT}")
-                if deadline is not None and time.monotonic() >= deadline:
+                if deadline is not None and self._failure_instant() >= deadline:
                     node = self._find_conversation(agent_name)
                     return self._consult_result(
                         agent_name, node.id if node else None, None,
@@ -9921,7 +10074,7 @@ class Runner(QuotaHandover):
                         str(refused), deferred_by=self.self_id(),
                         claim={"pid": os.getpid(), "at": now(),
                                "start": procs.start_time(os.getpid()) or ""})["id"]
-                remaining = (slot_by or 0) - time.monotonic()
+                remaining = (slot_by or 0) - self._failure_instant()
                 if remaining <= 0:
                     node = self._find_conversation(agent_name)
                     return self._consult_result(
@@ -10259,7 +10412,7 @@ class Runner(QuotaHandover):
                 self._mark_launch_failed(node_id, SHUT_TEXT)
             return self._consult_result(agent_name, node_id, None, view,
                                         error=SHUT_TEXT)
-        if deadline is not None and time.monotonic() >= deadline:
+        if deadline is not None and self._failure_instant() >= deadline:
             # PC-R3b (review finding 11): never launch past the one deadline.
             if reserved:
                 self._release_reserved_slot(node_id)
@@ -10269,58 +10422,150 @@ class Runner(QuotaHandover):
                                         timed_out=True,
                                         error="the consult's deadline passed before "
                                               "its turn launched; nothing was run")
-        try:
-            run = await self._launch(
-                node_id=node_id, spec=spec, provider=provider, prompt=prompt,
-                workdir=worktree_path, branch=node.branch, parent=node.parent,
-                depth=node.depth, session_id=session_id, timeout=timeout,
-            )
-        except SpendCapRefused as exc:
-            # SC-R3a: a capped session is refused, and stays resumable.
-            self._mark_cap_refused(node_id, session_id, exc.refusal)
-            return self._consult_result(agent_name, node_id, turn, view,
-                                        error=str(exc))
-        except RuntimeError as exc:
-            self._mark_launch_failed(node_id, str(exc))
-            return self._consult_result(agent_name, node_id, turn, view,
-                                        error=str(exc))
-        except BaseException as exc:
-            # RM-R1a: a reservation whose launch fails is released — the
-            # node must not sit `pending` for ever, holding a slot no run
-            # will ever account for. (`failed` above releases its own way.)
-            # A first turn's node was created `pending` for this launch and
-            # is marked failed like start()'s (review ag-43f57f). Either
-            # waits for the launch cleanup's confirmation while it holds.
-            if reserved:
-                self._release_reserved_slot(node_id)
+        # TF-R5: a transient failure of the turn itself is retried inside
+        # this same call — same message, same conversation lock, the same
+        # one deadline. Retries never extend the deadline; partial output
+        # from a failed try stays in the run record, never the reply.
+        from .failures import RETRYABLE, retry_policy, backoff_for
+        budget, backoff = retry_policy(self.config.project.get("scheduler", {}))
+        tries = 0
+        fresh_session = False
+        session_replaced = None
+        # Keep checkout notices on every replay of this turn's message.
+        retry_message = prompt if session_id else message
+        while True:
+            if (self.__dict__.get("_pc_shutting_down")
+                    or deadline is not None and self._failure_instant() >= deadline):
+                if reserved:
+                    self._release_reserved_slot(node_id)
+                return self._consult_result(
+                    agent_name, node_id, turn, view, timed_out=True,
+                    error="consult stopped or its deadline passed before the retry")
+            if tries:
+                # A retry re-earns the slot the dead try released.
+                self._admission_reserved(spec, self.tree.get(node_id), waiter)
+                reserved = node_id
+            run = None
+            try:
+                run = await self._launch(
+                    node_id=node_id, spec=spec, provider=provider, prompt=prompt,
+                    workdir=worktree_path, branch=node.branch, parent=node.parent,
+                    depth=node.depth, session_id=session_id, timeout=timeout,
+                )
+            except SpendCapRefused as exc:
+                # SC-R3a: a capped session is refused, and stays resumable.
+                self._mark_cap_refused(node_id, session_id, exc.refusal)
+                return self._consult_result(agent_name, node_id, turn, view,
+                                            error=str(exc))
+            except Exception as exc:
+                from .failures import classify
+                detail = f"{type(exc).__name__}: {exc}"
+                self._mark_launch_failed(node_id, detail)
+                cause = classify(status="failed", launched=False, error_text=detail,
+                                 provider=provider.name,
+                                 account=provider.container_account or provider.name,
+                                 model=spec.model)
+                _run_write(self.paths.run_dir(node_id), "result.json", json.dumps({
+                    "status": "failed", "failure_cause": cause, "text": "",
+                    "session_id": session_id or ""}))
+                if self._held(node_id):
+                    return self._consult_result(agent_name, node_id, turn, view,
+                                                error=f"launch: {detail}; liveness unknown")
+            except BaseException as exc:
+                # RM-R1a: a reservation whose launch fails is released — the
+                # node must not sit `pending` for ever, holding a slot no run
+                # will ever account for. (`failed` above releases its own way.)
+                # A first turn's node was created `pending` for this launch and
+                # is marked failed like start()'s (review ag-43f57f). Either
+                # waits for the launch cleanup's confirmation while it holds.
+                if reserved:
+                    self._release_reserved_slot(node_id)
+                else:
+                    self._mark_launch_failed(
+                        node_id, f"consult did not launch: {type(exc).__name__}: {exc}")
+                raise
+            reserved = ""
+            ticket.end()            # launched: the reply is not a transition
+
+            limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
+            bound = limit + 30
+            if deadline is not None:
+                # PC-R3b: the reply shares the consult's one deadline.
+                bound = max(0.0, min(bound, deadline - self._failure_instant()))
+            try:
+                if run is not None:
+                    await self._failure_wait(run.done, self._failure_instant() + bound)
+            except (asyncio.TimeoutError, TimeoutError):
+                await self.stop(node_id, release_terminal_hold=False)
+                return self._consult_result(agent_name, node_id, turn, view,
+                                            timed_out=True,
+                                            error=f"no reply within {limit}s")
+
+            # A free retry inside `_finalize` replaces `self.runs[node_id]` with a
+            # new Run sharing this same `done` event (see `_launch`'s `done=`), so
+            # the object this `run` name was bound to before the wait can be the
+            # dead first attempt — empty text_parts, no awaiting, no ticket. The
+            # live one, whichever attempt actually finished, is always the one
+            # `self.runs` holds now.
+            if run is not None:
+                run = self.runs.get(node_id) or run
+            final = self.tree.get(node_id)
+            settled = (final is None or final.status in
+                       {"done", "merged", "idle", "awaiting_user", "refused",
+                        "rate_limited", "unauthenticated", "limited", "cancelled"})
+            try:
+                recorded = json.loads(_run_read(self.paths.run_dir(node_id), "result.json"))
+            except (OSError, ValueError):
+                recorded = {}
+            kind = ((recorded.get("failure_cause") or {}).get("class")
+                    if not settled else "")
+            if settled or kind not in RETRYABLE or tries >= budget:
+                if not settled and kind not in RETRYABLE and final is not None and final.status not in {"done", "merged", "idle"}:
+                    return self._consult_result(
+                        agent_name, node_id, turn, view, status=final.status,
+                        reason=final.reason,
+                        error=f"{agent_name}'s turn failed ({kind or final.status}); "
+                              f"the cause class is never retried: {final.reason}")
+                elif not settled and tries >= budget:
+                    return self._consult_result(
+                        agent_name, node_id, turn, view, status=final.status,
+                        reason=final.reason,
+                        error=f"{agent_name}'s turn failed ({kind}); the retry "
+                              f"budget of {budget} was spent on it: {final.reason}")
+                break
+            # TF-R5: retry the transient failure. The deadline is the call's
+            # single authority: the configured backoff is never allowed to
+            # push a retry past it.
+            remaining = (deadline - self._failure_instant()) if deadline is not None else None
+            if remaining is not None and remaining <= 0.05:
+                return self._consult_result(
+                    agent_name, node_id, turn, view,
+                    error=f"{agent_name}'s turn failed ({kind}); the consult's "
+                          f"deadline passed before its retry could be launched")
+            delay = backoff_for(backoff, tries + 1)
+            if final.reason == "session_lost" or not final.session_id:
+                # TF-R5: the session did not survive — the retry goes to a
+                # fresh one, and the reply says so.
+                session_id = None
+                fresh_session = True
+                if final.reason == "session_lost" and session_replaced is None:
+                    session_replaced = {"previous_agent_id": node_id,
+                                        "reason": "session_lost",
+                                        "requested_session": final.requested_session}
+                    self.tree.emit(node_id, "conversation_replaced",
+                                   old_agent_id=node_id, reason="session_lost",
+                                   requested_session=final.requested_session,
+                                   provider=provider.name)
             else:
-                self._mark_launch_failed(
-                    node_id, f"consult did not launch: {type(exc).__name__}: {exc}")
-            raise
-        reserved = ""
-        ticket.end()            # launched: the reply is not a transition
-
-        limit = self.config.effective_limits(spec, timeout)["timeout"]["value"]
-        bound = limit + 30
-        if deadline is not None:
-            # PC-R3b: the reply shares the consult's one deadline.
-            bound = max(0.0, min(bound, deadline - time.monotonic()))
-        try:
-            await asyncio.wait_for(run.done.wait(), timeout=bound)
-        except (asyncio.TimeoutError, TimeoutError):
-            await self.stop(node_id, release_terminal_hold=False)
-            return self._consult_result(agent_name, node_id, turn, view,
-                                        timed_out=True,
-                                        error=f"no reply within {limit}s")
-
-        # A free retry inside `_finalize` replaces `self.runs[node_id]` with a
-        # new Run sharing this same `done` event (see `_launch`'s `done=`), so
-        # the object this `run` name was bound to before the wait can be the
-        # dead first attempt — empty text_parts, no awaiting, no ticket. The
-        # live one, whichever attempt actually finished, is always the one
-        # `self.runs` holds now.
-        run = self.runs.get(node_id) or run
-        final = self.tree.get(node_id)
+                session_id = final.session_id
+            tries += 1
+            if not await self._failure_sleep(delay, deadline):
+                return self._consult_result(
+                    agent_name, node_id, turn, view, timed_out=True,
+                    error=f"{kind}: the consult's deadline passed during retry backoff")
+            # A fresh session needs the same instructions as its first try.
+            prompt = (self.compose_prompt(spec, retry_message, self.tree.get(node_id), worktree_path)
+                      if not session_id else retry_message)
         reply = "\n".join(run.text_parts).strip()
         # The caller believed it was continuing a conversation; the reply
         # itself must say the memory it expected is not there (CX-C28).
@@ -10329,7 +10574,14 @@ class Runner(QuotaHandover):
             f"[system] {agent_name}'s launch configuration changed, so this "
             f"is a new conversation ({node_id}, replacing {replaced.id}); "
             f"nothing said earlier was carried over.\n")
-        replacement = {}
+        if fresh_session:
+            # TF-R5: the reply says the memory the caller expected is not
+            # there when a failed try cost the session.
+            notice = (f"[system] the failed try lost the session; this reply "
+                      f"came from a fresh session, and nothing said earlier "
+                      f"was carried over.\n") + notice
+        replacement = ({"conversation_replaced": session_replaced}
+                       if session_replaced is not None else {})
         if replaced is not None and replaced.reason == "session_lost":
             replacement = {"conversation_replaced": {
                 "previous_agent_id": replaced.id, "reason": "session_lost",

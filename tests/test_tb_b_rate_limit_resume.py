@@ -195,13 +195,14 @@ def health(w, provider: str = "rl") -> dict:
 # ============================================ recording: cause, not failure
 
 @pytest.mark.parametrize("style", ["429", "cli"])
-def test_tb_r4_a_rate_limited_run_is_recorded_with_cause_rate_limited_not_failed(w, style):
+def test_tb_r4_a_rate_limited_run_is_recorded_with_throttle_cause_not_failed(w, style):
     w.rl.queue(rl(retry_after=60 if style == "429" else None, style=style))
     w.start_scheduler()
     node = w.simple("A", "rlagent")
     interrupted(w)
-    w.until(lambda: "rate_limited" in cause_blob(w, node), WAIT,
-            what="cause `rate_limited` recorded against the run")
+    w.until(lambda: any((r.get("cause") or {}).get("class") == "throttle"
+                        for r in w.get(node).get("runs", [])), WAIT,
+            what="classified throttle cause recorded against the run")
     w.quiet(1.2)
     n = is_pending(w, node)
     assert (n.get("hold") or {}).get("reason") not in ("failed", "run_failed")

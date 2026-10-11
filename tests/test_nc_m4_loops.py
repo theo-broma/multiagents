@@ -24,6 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from nc_fixture.clock import ClockWorld, utc  # noqa: E402
 from nc_fixture.m4_world import (M4World, blocked_codes, commit_entry, err_code,  # noqa: E402
                                  finding, verdict_entry)
 
@@ -40,6 +41,21 @@ WAIT_ROUNDS = 20    # multi-round completion / hold, retries and sessions
 @pytest.fixture
 def w(tmp_path, monkeypatch):
     world = M4World(tmp_path, monkeypatch)
+    world.fxw = world.provider("fxw")
+    world.fxr = world.provider("fxr")
+    world.agent("wk", "fxw", writes=True)
+    world.agent("rv", "fxr", writes=True)
+    yield world
+    world.close()
+
+
+class ClockedM4World(M4World, ClockWorld):
+    """The verdict provider and NC's public --clock-file seam together."""
+
+
+@pytest.fixture
+def retry_clock(tmp_path, monkeypatch):
+    world = ClockedM4World(tmp_path, monkeypatch, now=utc(2035, 1, 1, 12))
     world.fxw = world.provider("fxw")
     world.fxr = world.provider("fxr")
     world.agent("wk", "fxw", writes=True)
@@ -123,11 +139,28 @@ def test_nc_r35_max_rounds_one_holds_after_the_first_rejection(w):
     assert w.fxw.spawns() == 1
 
 
-def test_nc_r35_a_crashed_reviewer_is_not_a_rejected_round(w):
+def test_nc_r35_a_crashed_reviewer_is_not_a_rejected_round(retry_clock):
+    w = retry_clock
     w.fxw.queue(work(1))
     w.fxr.queue({"crash": True}, verdict_entry("approved"))
     w.start_scheduler()
     loop, wk, rv = w.mkloop(2)
+    w.until(lambda: any((run.get("cause") or {}).get("class") == "crash"
+                        for run in w.get(rv)["runs"]), WAIT,
+            what="the reviewer crash to be captured before its retry")
+    assert w.get(loop)["loop"]["rounds_rejected"] == 0
+    assert w.fxr.spawns() == 1
+    assert w.fxw.spawns() == 1
+    # Result capture can precede scheduling the retry. Advance the public
+    # clock until the next CLI launch is observable, without choosing the
+    # node's intermediate state or the implementation's settlement order.
+    def retry_started():
+        if w.fxr.spawns() >= 2:
+            return True
+        w.advance(seconds=31)  # TF's first retry delay is 30 s.
+        return False
+
+    w.until(retry_started, WAIT, what="the reviewer retry to launch")
     done = w.wait_state(loop, "done", timeout=WAIT_ROUNDS)
     assert done["outcome"] == "approved"
     assert done["loop"]["rounds_rejected"] == 0

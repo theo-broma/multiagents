@@ -20,6 +20,7 @@ import uuid
 from .. import procs
 from ..renames import shipped as shipped_renames
 from ..runner import LaunchContext, Runner, VERDICT, admission_block, _run_read, _control_text
+from .. import failures as tf
 from ..tree import now
 from ..tree import ACTIVE, PAUSED
 from . import model
@@ -129,6 +130,7 @@ class Engine:
         self.paths = service.paths
         self.clock_file = Path(clock_file) if clock_file else None
         self.runner = Runner(self.paths, service.configuration())
+        self.runner._failure_clock = self.instant
         self.runner._scheduler_supervisor = True
         self.reasons = {}
         self.last_tick = None
@@ -296,6 +298,10 @@ class Engine:
             return [{"code": "held", "detail": node["hold"]}]
         if node["state"] != "open" or node["kind"] != "simple":
             return []
+        if node.get("retry_pending"):
+            # TF-R2: an automatic retry is pending — its backoff has not
+            # elapsed, or the predecessor's death is not yet established.
+            return [{"code": "retry_backoff", "detail": node["retry_pending"]}]
         # Delegated nodes can run after their creator finishes. A done simple
         # ancestor therefore imposes no composite gate on them (NC-R12).
         cur = node
@@ -510,7 +516,6 @@ class Engine:
         if self.runner.config is not config:
             self.runner.reload(config)
         self.window_instant = self.instant()
-        self.last_tick = datetime.fromtimestamp(self.window_instant, timezone.utc).isoformat()
         self.starvation_after = config.project["scheduler"]["starvation_after_seconds"]
         with self.store.transaction(write=False) as db:
             initial_nodes = self.store.node_records(db)
@@ -524,6 +529,11 @@ class Engine:
         await self.evaluate_windows()
         await self.reconcile()
         self.evaluate_rate_limits()
+        # TF-R2: settle pending retries (liveness, backoff) before admission.
+        await self.evaluate_retries()
+        # TF-R3: recheck quota-exhausted accounts, release recovered routes.
+        await self.evaluate_quota()
+        self.last_tick = datetime.fromtimestamp(self.window_instant, timezone.utc).isoformat()
         self.composites()
         # Mirror recorded results before admission awaits launches, so a
         # client that sees a node done finds its transitions in the log.
@@ -619,10 +629,22 @@ class Engine:
                 binding = None
             if binding:
                 probe = replace(probe, provider=binding["provider"])
-            result = await self.runner.start(node["agent"], node["task"],
-                                             model=binding["model"] if binding else node["pins"].get("model"),
-                                             launch_context=probe,
-                                             **node.get("launch", {}))
+            try:
+                result = await self.runner.start(node["agent"], node["task"],
+                                                 model=binding["model"] if binding else node["pins"].get("model"),
+                                                 launch_context=probe,
+                                                 **node.get("launch", {}))
+            except Exception as exc:
+                # TF-R4: an exception while admitting or launching is a
+                # classified `launch` failure — bounded by TF-R2's budget,
+                # never a silent drop and never an unbounded loop.
+                # Cancellation and shutdown are not failure classes.
+                if isinstance(exc, asyncio.CancelledError) or self.stopped.is_set():
+                    raise
+                self.launch_failure(node, nodes, f"{type(exc).__name__}: {exc}")
+                with self.store.transaction(write=False) as db:
+                    nodes, journal = self.store.node_records(db), attempt_records(db)
+                continue
             blocked = result.get("blocked", [])
             if binding and result.get("error"):
                 blocked = [{"code": "session_unavailable", "detail": result.get("reason", result["error"])}]
@@ -730,6 +752,23 @@ class Engine:
                            "lock_owners": self.lock_owners(current, current_nodes),
                            "retry_count": current.get("launch_tries", 0), "at": now(), **prepared}
                 current["launch_tries"] = attempt["retry_count"] + 1
+                # TF-R2: a retry whose route is the provider the failed
+                # attempt ran on resumes its session; a route that lands
+                # elsewhere launches fresh.
+                route = current.pop("retry_route", None)
+                if isinstance(route, dict):
+                    if route.get("session"):
+                        attempt["session_id"] = route["session"]
+                    attempt["session_provider"] = route.get("provider", "")
+                    if route.get("attempt"):
+                        retry = {"source_attempt": route["attempt"],
+                                 "attempt_id": attempt["attempt_id"],
+                                 "source_run": route.get("from"),
+                                 "run_id": attempt["run_id"], "at": self.instant()}
+                        current.setdefault("retry_history", []).append(retry)
+                        self.store.transition(db, "run_retried", current["id"], retry)
+                for stale in ("retry_pending", "launch_failure"):
+                    current.pop(stale, None)
                 self.store.save_node(db, current)
                 save_attempt(db, attempt)
             # The branch intent and input are durable before any git ref is
@@ -1241,6 +1280,18 @@ class Engine:
                     pending = None
                 if pending_commands or (pending and pending > now()):
                     continue
+                if run.status == "awaiting_user":
+                    # A parked question retains its attempt and locks. Replay
+                    # publication if the runner could not write the hold.
+                    try:
+                        message = json.loads(_run_read(self.paths.run_dir(run.id), "result.json"))
+                    except (OSError, ValueError):
+                        message = {}
+                    if isinstance(message, dict):
+                        markers = Runner.question_markers(message.get("final_text") or message.get("text", ""))
+                        cause = self.failure_cause(attempt, run, message, markers)
+                        if markers and cause:
+                            self.runner._publish_failure_cause(run.id, cause, markers)
                 if run.status not in ACTIVE | PAUSED | {"quota_paused"}:
                     # Terminal status alone is insufficient; a foreign stop can
                     # record cancelled while the wrapper still lives (NC-R26).
@@ -1363,6 +1414,8 @@ class Engine:
 
     def hold(self, db, node, reason, detail="", *, markers=None):
         hold = {"reason": reason, "detail": detail} if markers is None else {"reason": reason, "markers": markers}
+        for field in ("retry_pending", "retry_route"):
+            node.pop(field, None)
         node.update(state="held", hold=hold,
                     revision=node["revision"] + 1)
         if markers is not None:
@@ -1462,7 +1515,33 @@ class Engine:
             message = {}
         if not isinstance(message, dict):
             message = {}
-        markers = Runner.need_info(message.get("final_text", message.get("text", "")))
+        markers = Runner.question_markers(message.get("final_text") or message.get("text", ""))
+        # TF-R1: the classified cause of this attempt, settled once here so
+        # every public view and hold shows the same record. The runner's own
+        # classification (written to result.json with the Run in hand) wins;
+        # a missing or partial record is classified from what survived.
+        cause = self.failure_cause(attempt, run, message, markers)
+        if cause and cause.get("class") == "quota" and not cause.get("reset_time"):
+            # TF-R3: source 3 of a reset time — the account's usage window,
+            # read now, before the hold is laid down with its detail.
+            reset = self.quota_window_reset(cause.get("provider") or cause.get("account", ""))
+            if reset:
+                cause["reset_time"] = reset
+        if cause and cause.get("class") == "quota":
+            # TF-R3: the cooldown binds the ACCOUNT that ran out — until its
+            # announced reset when one is known, else the recheck interval.
+            # It is lifted the moment a recheck reads the account usable.
+            until = 0.0
+            if cause.get("reset_time"):
+                try:
+                    until = datetime.fromisoformat(cause["reset_time"]).timestamp()
+                except ValueError:
+                    until = 0.0
+            if not until:
+                until = self.instant() + self.quota_interval()
+            account = cause.get("provider") or cause.get("account", "")
+            if account:
+                self.runner.tree.set_cooldown(account, until, "quota exhausted", cause="quota")
         with self.service.changed, self.store.transaction() as db:
             current = attempt_records(db)[attempt["attempt_id"]]
             if (current.get("window_resumed_at") != attempt.get("window_resumed_at")
@@ -1519,6 +1598,13 @@ class Engine:
                 result["capture_error"] = str(exc)
         if current.get("completion_proven") == "missing_tree":
             result.update(status="failed", failure="missing_tree")
+        if result.get("failure") == "missing_tree" and cause:
+            # The provider's own turn ended fine; the capture lost it. TF-R1
+            # keeps the provider's class out of it — this is not a crash.
+            cause = {**cause, "class": "other",
+                     "excerpt": (result.get("detail") or "the result checkout disappeared")[:2000]}
+        if cause:
+            result["cause"] = cause
         with self.service.changed, self.store.transaction() as db:
             current = attempt_records(db)[attempt["attempt_id"]]
             if (current["state"] in {"recorded", "captured", "suspended"}
@@ -1527,8 +1613,18 @@ class Engine:
                     or (current["state"] == "abandoned" and current.get("cancel_requested") and current.get("window_suspended_at"))):
                 return
             node = self.store.node_records(db)[attempt["node_id"]]
+            if cause:
+                entry = next((r for r in node["runs"]
+                              if r["attempt_id"] == current["attempt_id"]), None)
+                if entry is not None:
+                    entry["cause"] = cause
+                    self.store.save_node(db, node)
             if result.get("capture_error") and result.get("failure") != "missing_tree":
                 self.hold(db, node, "result_capture_failed", result["capture_error"])
+            # TF: no flag left on a finished attempt may block a relaunch —
+            # a resume deadline that outlived its turn is dropped with it.
+            if isinstance(current.get("resume_pending"), (int, float)):
+                current.pop("resume_pending", None)
             current.update(state="captured", result=result)
             save_attempt(db, current)
             self.store.transition(db, "run_finished", node["id"], {"run_id": run.id, "status": result["status"], **({"failure": result["failure"]} if result.get("failure") else {})})
@@ -1539,6 +1635,329 @@ class Engine:
         sessions.finish_cleanup(self.store, self.runner, attempt, run)
         with self.service.changed:
             self.service.changed.notify_all()
+
+    # ------------------------------------------------------------------ TF
+    # Transient failures (context/specs/transient-failures.md): one bounded
+    # retry path (TF-R2), quota holds with rechecks (TF-R3), and launch
+    # exceptions that are caught, classified and reconciled (TF-R4). Every
+    # backoff and recheck reads the scheduler's own clock (`instant`).
+
+    def failure_cause(self, attempt, run, message, markers):
+        """TF-R1: the classified cause of a finished attempt, or None."""
+        # A successful resume must not overwrite its earlier throttle with
+        # a synthetic `other` cause. Questions still take precedence.
+        if not markers and (message.get("status") or run.status) in {"done", "merged", "idle"}:
+            return None
+        tree_run = self.runner.tree.get(run.id)
+        provider_name = (attempt.get("binding") or {}).get("provider") or getattr(tree_run, "provider", "") or ""
+        model = (attempt.get("binding") or {}).get("model") or getattr(tree_run, "model", "") or ""
+        from .. import failures as tf
+        if message.get("failure_cause"):
+            cause = dict(message["failure_cause"])
+        elif provider_name:
+            cause = tf.cause_from_result(
+                {**message, "status": message.get("status") or run.status},
+                markers, self.runner.providers.get(provider_name),
+                run_provider=provider_name, model=model,
+                account=(self.runner.providers.get(provider_name).container_account
+                         or provider_name) if self.runner.providers.get(provider_name) else "")
+        else:
+            cause = tf.classify(status=message.get("status") or run.status,
+                                markers=markers, model=model)
+        if not cause.get("class"):
+            return None
+        if markers:
+            # TF-R1 precedence: a question outranks every other class.
+            cause = {**cause, "class": "question"}
+        return cause
+
+    def quota_interval(self):
+        scheduler = self.service.configuration().project["scheduler"]
+        try:
+            return max(1.0, float(scheduler.get("quota_recheck_seconds", 1800)))
+        except (TypeError, ValueError):
+            return 1800.0
+
+    def quota_window_reset(self, provider_name):
+        """TF-R3: the account usage window's `resets_at`, read once, or ""."""
+        provider = self.runner.providers.get(provider_name)
+        if provider is None:
+            return ""
+        try:
+            from ..budget import read_provider
+            from ..config import global_config_dir
+            reading = read_provider(provider_name, provider, self.runner.executor(),
+                                    global_config_dir(), self.paths.config,
+                                    use_cache=False, force=True,
+                                    limits=self.runner.config.limits)
+        except Exception:
+            return ""
+        return tf.parse_reset(getattr(reading, "resets_at", None) or "")
+
+    def settle_failure(self, db, nodes, node, loop, current, result):
+        """TF-R2/TF-R3: settle a failed attempt inside the integrate
+        transaction. Returns the node's outcome when it is final, None when
+        the node stays alive (a pending retry, retries_exhausted or a quota
+        hold)."""
+        from .. import failures as tf
+        cause = result.get("cause") or {}
+        kind = cause.get("class", "other")
+        if kind in tf.RETRYABLE:
+            budget, backoff = tf.retry_policy(
+                self.service.configuration().project["scheduler"])
+            used = int(node.get("tf_retries", 0))
+            if used >= budget:
+                node.pop("retry_route", None)
+                self.hold(db, node, "retries_exhausted", {**cause, "retries": used})
+                return None
+            used += 1
+            node["tf_retries"] = used
+            node.update(state="open", outcome=None, revision=node["revision"] + 1)
+            node["retry_pending"] = {
+                "at": self.instant() + tf.backoff_for(backoff, used),
+                "from": current["run_id"], "attempt": current["attempt_id"],
+                "used": used, "kind": kind,
+                "session": result.get("session_id") or "",
+                "provider": (current.get("binding") or {}).get("provider")
+                or cause.get("provider", "")}
+            self.store.transition(db, "run_retry", node["id"],
+                                  {"attempt_id": current["attempt_id"], "class": kind, "retry": used})
+            return None
+        if kind == "quota":
+            reset = cause.get("reset_time") or ""
+            epoch_reset = datetime.fromisoformat(reset).timestamp() if reset else 0.0
+            recheck = epoch_reset or (self.instant() + self.quota_interval())
+            node["quota_hold"] = {"provider": cause.get("provider", ""),
+                                  "account": cause.get("account", ""),
+                                  "reset": reset or None,
+                                  "recheck_at": recheck,
+                                  "session": result.get("session_id") or "",
+                                  "agent": node["agent"]}
+            detail = dict(cause)
+            if reset:
+                detail["resets_at"] = reset
+            self.hold(db, node, "quota_exhausted", detail)
+            return None
+        return "failed"
+
+    def launch_failure(self, node, nodes, text):
+        """TF-R4: an exception while admitting or launching, recorded as a
+        classified `launch` cause and bounded by the retry budget."""
+        from .. import failures as tf
+        provider_name = node["pins"].get("provider", "")
+        spec = self.service.configuration().agents.get(node["agent"])
+        if not provider_name and spec is not None:
+            provider_name = spec.provider
+        provider = self.runner.providers.get(provider_name)
+        cause = tf.classify(status="failed", launched=False, error_text=text,
+                            patterns=tf.pattern_lists(provider) if provider else None,
+                            provider=provider_name,
+                            account=(provider.container_account or provider_name) if provider else "",
+                            model=node["pins"].get("model") or (spec.model if spec else None) or "")
+        budget, backoff = tf.retry_policy(
+            self.service.configuration().project["scheduler"])
+        with self.service.changed, self.store.transaction() as db:
+            current = self.store.node_records(db)[node["id"]]
+            if current["state"] != "open":
+                return
+            current["launch_failure"] = cause
+            used = int(current.get("tf_retries", 0))
+            if used >= budget:
+                current.pop("retry_route", None)
+                self.hold(db, current, "retries_exhausted", {**cause, "retries": used})
+            else:
+                used += 1
+                current["tf_retries"] = used
+                current.update(revision=current["revision"] + 1)
+                current["retry_pending"] = {"at": self.instant() + tf.backoff_for(backoff, used),
+                                            "from": "", "attempt": "", "used": used,
+                                            "kind": "launch"}
+                self.store.transition(db, "launch_failed", node["id"],
+                                      {"detail": text[:500], "retry": used})
+            self.store.save_node(db, current)
+            self.service.changed.notify_all()
+
+    def predecessor_liveness(self, run_id, attempt_id=None):
+        """TF-R2: the dead-alive-unknown verdict on a retry's predecessor,
+        from the run directory's own identity — the wrapper's pid and the
+        exit status it recorded, or the worker's proof it never spawned.
+        Anything unreadable is unknown, never death."""
+        if not run_id:
+            return "dead"
+        from ..runner import _positively_ended, _recorded_wrapper
+        run_dir = self.paths.run_dir(run_id)
+        try:
+            if (run_dir / "exit_status").is_file():
+                return "dead"
+            pid = _recorded_wrapper(run_dir)
+            if pid:
+                try:
+                    start = (run_dir / "wrapper.pid.start").read_text().strip()
+                except OSError:
+                    start = ""
+                return "alive" if not _positively_ended(pid, start, None) else "dead"
+        except OSError:
+            pass
+        if attempt_id:
+            with self.store.transaction(write=False) as db:
+                attempt = attempt_records(db).get(attempt_id)
+            if (attempt and attempt["run_id"] == run_id
+                    and attempt.get("never_spawned") is True):
+                return "dead"
+        return "unknown"
+
+    async def evaluate_retries(self):
+        """TF-R2: one pass over pending retries — liveness first, then the
+        backoff clock; a due retry whose predecessor is dead hands its route
+        (session continuity included) to normal admission."""
+        with self.store.transaction(write=False) as db:
+            nodes = self.store.node_records(db)
+        for node in [n for n in nodes.selected("open")
+                     if n["state"] == "open" and n.get("retry_pending")]:
+            pending = node["retry_pending"]
+            liveness = self.predecessor_liveness(pending.get("from"), pending.get("attempt"))
+            if liveness == "unknown":
+                with self.service.changed, self.store.transaction() as db:
+                    current = self.store.node_records(db)[node["id"]]
+                    if (current["state"] == "open"
+                            and current.get("retry_pending") == pending):
+                        self.hold(db, current, "liveness_unknown",
+                                  {"run_id": pending.get("from"), "kind": pending.get("kind"),
+                                   "retry": pending.get("used")})
+                continue
+            if liveness == "alive" or self.instant() < float(pending.get("at", 0) or 0):
+                continue
+            with self.service.changed, self.store.transaction() as db:
+                current = self.store.node_records(db)[node["id"]]
+                if (current["state"] == "open"
+                        and current.get("retry_pending") == pending):
+                    from . import control
+                    control.recovery(current, attempt_records(db), True)
+                    current.pop("retry_pending", None)
+                    route = {"attempt": pending.get("attempt"), "from": pending.get("from")}
+                    if pending.get("session"):
+                        route["session"] = pending["session"]
+                    if pending.get("provider"):
+                        route["provider"] = pending["provider"]
+                    if route:
+                        current["retry_route"] = route
+                    self.store.save_node(db, current)
+                    self.service.changed.notify_all()
+
+    def quota_fallback_usable(self, node, hold):
+        """TF-R3: is there a configured fallback route this node's agent can
+        run on now — usable, not the exhausted account and not its family?"""
+        spec = self.service.configuration().agents.get(hold.get("agent", ""))
+        if spec is None:
+            return False
+        exhausted = hold.get("provider", "")
+        family = (self.runner.providers.get(exhausted).family
+                  if self.runner.providers.get(exhausted) else "") or exhausted
+        models = spec.models or spec.extra.get("models") or {}
+        for name in models:
+            if name == exhausted:
+                continue
+            other = self.runner.providers.get(name)
+            if other is None or not other.enabled:
+                continue
+            if other.family and other.family == family:
+                continue
+            if self.runner.tree.cooldown(name):
+                continue
+            model, _ = spec.replace(models=models).fallback_for(name)
+            if self.runner._cap_refusal(name, model or ""):
+                continue
+            return True
+        return False
+
+    async def evaluate_quota(self):
+        """TF-R3: a held quota exhaustion is released when routing finds a
+        usable route — a recovered account, or a configured fallback. A
+        reset time is a recheck time, never proof; the account is read at or
+        after it, and every 30 minutes when no reset is known."""
+        from ..budget import read_provider
+        from ..config import global_config_dir
+        with self.store.transaction(write=False) as db:
+            nodes = self.store.node_records(db)
+        config = self.service.configuration()
+        reserve = float(config.project.get("budget", {}).get("reserve_headroom", 0.15))
+        for node in [n for n in nodes.selected("held") if n["state"] == "held"
+                     and (n.get("hold") or {}).get("reason") == "quota_exhausted"]:
+            hold = node.get("quota_hold") or {}
+            try:
+                fallback = self.quota_fallback_usable(node, hold)
+            except Exception:
+                # TF-R4: a bad route must not abort every node's tick. Keep
+                # its quota hold until routing can be evaluated safely.
+                logging.getLogger(__name__).exception("scheduler could not recheck quota for node %s", node["id"])
+                self.evaluation_failures[node["id"]] = time.monotonic()
+                continue
+            if fallback:
+                self.release_quota(node, hold, resume=False)
+                continue
+            if self.instant() < float(hold.get("recheck_at", 0) or 0):
+                continue
+            provider_name = hold.get("provider", "")
+            provider = self.runner.providers.get(provider_name)
+            if provider is None:
+                continue
+            try:
+                reading = await asyncio.to_thread(
+                    read_provider, provider_name, provider, self.runner.executor(),
+                    global_config_dir(), self.paths.config,
+                    None, False, True, self.runner.config.limits)
+            except Exception:
+                continue
+            usable = bool(reading.known and reading.headroom is not None
+                          and reading.headroom >= reserve)
+            if usable:
+                self.release_quota(node, hold, resume=True)
+                continue
+            reset = tf.parse_reset(getattr(reading, "resets_at", None) or "")
+            epoch_reset = datetime.fromisoformat(reset).timestamp() if reset else 0.0
+            recheck = (epoch_reset if epoch_reset > self.instant()
+                       else self.instant() + self.quota_interval())
+            with self.service.changed, self.store.transaction() as db:
+                current = self.store.node_records(db)[node["id"]]
+                if (current["state"] == "held"
+                        and (current.get("hold") or {}).get("reason") == "quota_exhausted"):
+                    held = current.get("quota_hold") or {}
+                    held["recheck_at"] = recheck
+                    if reset:
+                        held["reset"] = reset
+                    current["quota_hold"] = held
+                    detail = dict((current.get("hold") or {}).get("detail") or {})
+                    if reset:
+                        detail["resets_at"] = reset
+                    current["hold"]["detail"] = detail
+                    self.store.save_node(db, current)
+                    self.service.changed.notify_all()
+
+    def release_quota(self, node, hold, *, resume):
+        """TF-R3: a usable route exists — the node works again, from the
+        failed attempt's committed work; the same provider resumes the same
+        session, a fallback launches fresh."""
+        from . import control
+        with self.service.changed, self.store.transaction() as db:
+            current = self.store.node_records(db)[node["id"]]
+            if (current["state"] != "held"
+                    or (current.get("hold") or {}).get("reason") != "quota_exhausted"):
+                return
+            journal = attempt_records(db)
+            current.pop("quota_hold", None)
+            current.update(state="open", hold=None, revision=current["revision"] + 1)
+            if resume and hold.get("session"):
+                current["retry_route"] = {"session": hold["session"],
+                                          "provider": hold.get("provider", "")}
+            control.recovery(current, journal, True)
+            self.store.save_node(db, current)
+            self.store.transition(db, "quota_released", current["id"],
+                                  {"provider": hold.get("provider", ""),
+                                   "route": "session" if resume else "fallback"})
+            self.service.changed.notify_all()
+        if resume and hold.get("provider"):
+            # The account is usable again; nothing may keep routing away.
+            self.runner.tree.clear_cooldown(hold["provider"])
 
     def integrate(self, attempt):
         with effects.serialized(self.store):
@@ -1679,6 +2098,13 @@ class Engine:
                 tree_run = self.runner.tree.get(current["run_id"])
                 node.pop("rate_limit_attempts", None)
                 node.pop("rate_limit_fresh_from", None)
+                # TF-R1: the classified cause travels with the run entry the
+                # public views show, whatever settles below.
+                if result.get("cause"):
+                    entry = next((r for r in node["runs"]
+                                  if r["attempt_id"] == current["attempt_id"]), None)
+                    if entry is not None:
+                        entry["cause"] = result["cause"]
                 # TB-R1: hold in the settlement transaction, before any node
                 # can see this attempt as a successful dependency.
                 if (node["state"] not in {"cancelled", "held"} and result.get("need_info")
@@ -1691,14 +2117,12 @@ class Engine:
                     if result["status"] != "done" and loop:
                         loop.pop("pending_verdict", None)
                         self.store.save_node(db, loop)
-                    if (result["status"] != "done" and loop
-                            and loop["state"] not in {"held", "cancelled", "done"}
-                            and node.get("crash_retry_round") != loop["loop"]["rounds_rejected"]):
-                        node.update(state="open", outcome=None, revision=node["revision"] + 1,
-                                    crash_retry_round=loop["loop"]["rounds_rejected"])
-                        self.store.transition(db, "run_retry", node["id"], {"attempt_id": current["attempt_id"]})
-                    else:
-                        outcome = "completed" if result["status"] == "done" else "failed"
+                    outcome = None
+                    if result["status"] != "done":
+                        outcome = self.settle_failure(db, nodes, node, loop, current, result)
+                    if outcome is None and result["status"] == "done":
+                        outcome = "completed"
+                    if outcome is not None:
                         if verdict:
                             verdict["settled"] = True
                             self.record_round(db, loop, nodes, verdict)
@@ -1896,9 +2320,22 @@ class Engine:
         nodes = nodes if nodes is not None else self.store.node_records(db)
         for node_id in ids:
             node = nodes[node_id]
+            for field in ("retry_pending", "retry_route", "quota_hold"):
+                node.pop(field, None)
             if node.pop("pending_resume", None) is not None:
                 self.store.save_node(db, node)
         for attempt in select_records(attempt_records(db), "claimed", "launched", "suspended"):
+            if attempt["node_id"] in ids:
+                node = nodes[attempt["node_id"]]
+                run = self.runner.tree.get(attempt["run_id"])
+                cause = tf.classify(status="cancelled",
+                                    provider=getattr(run, "provider", ""),
+                                    account=getattr(run, "provider", ""),
+                                    model=getattr(run, "model", ""))
+                for entry in node["runs"]:
+                    if entry["attempt_id"] == attempt["attempt_id"]:
+                        entry["cause"] = cause
+                self.store.save_node(db, node)
             if attempt["node_id"] in ids and attempt["state"] == "suspended":
                 attempt.update(state="abandoned", cancel_requested=True, cancel_confirmed=True)
                 save_attempt(db, attempt)

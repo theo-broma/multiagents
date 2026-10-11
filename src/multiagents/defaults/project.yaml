@@ -593,3 +593,12 @@ scheduler:
   anomaly_admission_seconds: 600
   # How long a held node with no transition goes unreported (AN-R2).
   anomaly_held_seconds: 600
+  # TF-R2: automatic retries of launch/crash/transient failures — one shared
+  # budget per activation, not restored by a successful launch; the backoff
+  # delays precede retries 1, 2, 3… and the last value repeats.
+  retries:
+    budget: 3
+    backoff_seconds: [30, 120, 600]
+  # TF-R3: how often a quota-exhausted account with no announced reset is
+  # re-read.
+  quota_recheck_seconds: 1800
