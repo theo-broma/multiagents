@@ -107,6 +107,18 @@ def start(w, *directives, **fields):
     return w.simple('TF', 'wk', **fields)
 
 
+def wait_attempts(w, node, count):
+    """Bound each real launch/recovery separately, rather than their sum.
+
+    Missing retry progress still fails within WAIT seconds. Loop children
+    may finish a successful round between attempts, so `done` is permitted.
+    """
+    for expected in range(1, count + 1):
+        w.until(lambda: (n if len(n['runs']) >= expected else None)
+                if (n := w.get(node)) else None, WAIT,
+                what=f'attempt {expected} of {count}')
+
+
 def retry_success(w, node):
     def probe():
         n = w.get(node)
@@ -119,14 +131,19 @@ def retry_success(w, node):
 
 
 def captured(w, node):
-    """A provider has ended and admission has released its active run."""
+    """A provider has ended and its classified capture is publicly visible.
+
+    The runner's terminal status can precede scheduler capture by a tick;
+    it alone is not evidence that `get_node` has integrated the cause.
+    """
     def probe():
         n = w.get(node)
         calls = w.fxw.calls()
         ended = bool(n['runs']) and w.tree_nodes().get(n['runs'][0]['run_id'], {}).get('status') in {
             'failed', 'quota', 'rate_limited', 'refused', 'unauthenticated',
             'limited', 'awaiting_user', 'cancelled', 'discarded', 'quota_paused'}
-        if calls and n['runs'] and (n.get('active_run') is None or len(n['runs']) > 1 or ended):
+        classified = any('class' in record for record in objects(n))
+        if classified and calls and n['runs'] and (n.get('active_run') is None or len(n['runs']) > 1 or ended):
             return n
     return w.until(probe, WAIT, what='captured predecessor')
 

@@ -51,9 +51,8 @@ def test_tf_r1_question_precedes_quota_and_refusal(w):
     w.fxw.entry['refusal_markers'] = [r'.*TF content refused.*']
     node = start(w, {'text': 'NEED_DECISION(tf): TF content refused; choose?',
                      'stderr': 'Error: usage limit exhausted\n', 'exit': 1})
-    view = captured(w, node)
+    view = w.wait_held(node, 'needs_info', timeout=WAIT)
     cause(view, 'question')
-    assert view['state'] == 'held'
 
 
 @pytest.mark.parametrize('size', [0, 1999, 2000, 2001, 5000])

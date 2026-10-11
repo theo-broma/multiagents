@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from test_tf_support import w, WAIT, start, settle, cause, retry_success
+from test_tf_support import w, WAIT, start, settle, cause, retry_success, wait_attempts
 from test_lr_loop_resume import mkloop, work
 from nc_fixture.m4_world import commit_entry, verdict_entry, finding
 from nc_fixture.agent import alive
@@ -24,6 +24,7 @@ def test_tf_r2_crash_once_then_success_resumes_same_session(w):
 def test_tf_r2_four_crashes_exhaust_three_retries_despite_successful_launches(w):
     node = start(w, *([CRASH] * 4), {'gate': 'must-not-launch'})
     try:
+        wait_attempts(w, node, 4)
         held = w.wait_held(node, 'retries_exhausted', timeout=WAIT)
         assert len(held['runs']) == 4
         assert len(w.fxw.calls()) == 4
@@ -37,6 +38,7 @@ def test_tf_r2_four_crashes_exhaust_three_retries_despite_successful_launches(w)
 
 def test_tf_r2_root_relaunch_resets_exhausted_budget(w):
     node = start(w, *([CRASH] * 4))
+    wait_attempts(w, node, 4)
     w.wait_held(node, 'retries_exhausted', timeout=WAIT)
     w.fxw.queue(CRASH, {})
     assert w.root_op('relaunch_node', node).get('ok')
@@ -87,6 +89,7 @@ def test_tf_r2_loop_crash_uses_shared_budget_without_advancing_round_or_sibling(
     w.start_scheduler()
     loop, worker, reviewer = mkloop(w)
     try:
+        wait_attempts(w, worker, 4)
         held = w.wait_held(worker, 'retries_exhausted', timeout=WAIT)
         assert len(held['runs']) == 4, 'per-round retry must not stack with shared retries'
         assert w.get(loop)['loop']['rounds_rejected'] == 0
@@ -108,7 +111,16 @@ def test_tf_r2_a_successful_round_does_not_restore_the_retry_budget(w):
     w.fxr.queue(verdict_entry('rejected', [finding('round 2 please')]))
     w.start_scheduler()
     loop, worker, reviewer = mkloop(w)
-    held = w.wait_held(worker, 'retries_exhausted', timeout=WAIT)
+    wait_attempts(w, worker, 5)
+    # A loop child may be done between rounds while its reviewer runs;
+    # that intermediate success is not the end of this activation.
+    def exhausted():
+        n = w.get(worker)
+        if n['state'] == 'held' and (n['hold'] or {}).get('reason') == 'retries_exhausted':
+            return n
+        assert w.get(loop)['state'] not in {'done', 'cancelled'}, \
+            'the loop ended before exhausting the shared retry budget'
+    held = w.until(exhausted, WAIT, what='round 2 to exhaust the shared retry budget')
     assert len(held['runs']) == 5, \
         'a successful launch or a new round restored the retry budget'
     assert len(w.fxw.calls()) == 5

@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from test_tf_support import w, WAIT, cause, field, objects, retry_success
+from test_tf_support import w, WAIT, cause, field, objects, retry_success, wait_attempts
 from test_nc_m2_guard_recovery import local
 
 
@@ -21,6 +21,7 @@ def test_tf_r4_persistent_spawn_failure_holds_with_exception_text(w):
     try:
         w.start_scheduler()
         node = w.simple('TF', 'wk')
+        wait_attempts(w, node, 4)
         held = w.wait_held(node, 'retries_exhausted', timeout=WAIT)
         c = cause(held['hold']['detail'], 'launch')
         excerpt = field(c, 'excerpt', 'error_excerpt')
@@ -107,6 +108,7 @@ def test_tf_r2_crash_and_launch_failures_share_one_budget(w):
     try:
         w.start_scheduler()
         node = w.simple('TF', 'wk')
+        wait_attempts(w, node, 4)
         held = w.wait_held(node, 'retries_exhausted', timeout=WAIT)
         # One crashed attempt and only three further launch attempts: a
         # separate per-class budget would permit a fifth attempt.

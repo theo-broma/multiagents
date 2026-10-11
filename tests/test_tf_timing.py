@@ -31,6 +31,9 @@ def clocked(tmp_path, monkeypatch):
                         tick_seconds=0.05)
     w.fxw = w.provider('fxw')
     w.agent('wk', 'fxw', writes=True)
+    # Exercise the retry budget without the independent provider breaker
+    # taking the route out of admission after its default three failures.
+    w.project['limits']['provider_failure_threshold'] = 100
     failures(w.fxw)
     yield w
     w.close()
@@ -69,6 +72,13 @@ def test_tf_r2_the_last_backoff_value_repeats(clocked):
         if expected > len(w.fxw.calls()):
             calls(w, expected, f'{expected} attempts after +{seconds}s')
         assert len(w.fxw.calls()) == expected, (seconds, len(w.fxw.calls()))
+        if expected < 6:
+            # The backoff begins when this crash is captured, not when the
+            # provider starts. Keep the clock fixed until that happens.
+            w.until(lambda: (n if len(n['runs']) == expected and
+                             n.get('active_run') is None else None)
+                    if (n := w.get(node)) else None, WAIT,
+                    what=f'attempt {expected} to be captured')
     held = w.wait_held(node, 'retries_exhausted', timeout=WAIT)
     assert len(held['runs']) == 6
     w.advance(seconds=600)
@@ -78,6 +88,7 @@ def test_tf_r2_the_last_backoff_value_repeats(clocked):
 def test_tf_r2_the_configured_budget_bounds_the_retries(clocked):
     w = clocked
     node, _ = begin(w, *([CRASH] * 3), retries={'budget': 1, 'backoff_seconds': [10]})
+    w.advance(seconds=10)
     held = w.wait_held(node, 'retries_exhausted', timeout=WAIT)
     assert len(held['runs']) == 2
     assert len(w.fxw.calls()) == 2
@@ -127,7 +138,6 @@ def test_tf_r2_a_question_during_a_pending_retry_wins_and_cancels_it(clocked):
                  'exit': 1})
     w.start_scheduler()
     node = w.simple('TF', 'wk')
-    view = pending_retry(w, node)
     held = w.wait_held(node, 'needs_info', timeout=WAIT)
     assert held['outcome'] is None
     w.advance(seconds=7200)

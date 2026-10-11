@@ -120,7 +120,9 @@ def test_tf_r5_lost_session_uses_fresh_session_and_reports_it(conversation):
     source = script.read_text()
     source = source.replace('if fx.get("stderr"):', '''
 if fx.get("lose_session"):
-    emit("result", {"status": "SESSION_LOST", "text": "session not found"})
+    print(json.dumps({"type": "result", "requested_session": resume,
+                      "part": {"status": "SESSION_LOST", "text": "session not found"}}))
+    sys.stdout.flush()
 if fx.get("stderr"):''')
     script.write_text(source)
     w.fxw.entry['stream']['rules'].append({'match': {'type': 'result'}, 'as': 'result',
