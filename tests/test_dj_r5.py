@@ -63,9 +63,17 @@ with patch('multiagents.auth.check',return_value=auth.AuthState('claude','authen
         argv = [sys.executable,'-c',shim,'--path',str(paths.root),*args]
         env = dict(os.environ,PYTHONPATH=str(ROOT/'src'))
         if tty: env['DJ_TEST_TTY'] = '1'
+        provider_path = paths.config / 'providers.yaml'
+        provider_config = yaml.safe_load(provider_path.read_text())
+        provider_env = provider_config['providers']['claude'].setdefault('env', {})
         if hold:
             release = tmp_path / f'release-{len(releases)}'; releases.append(release)
-            env['DJ_RELEASE'] = str(release)
+            # Provider children receive only explicitly configured extra env.
+            provider_env['DJ_RELEASE'] = str(release)
+        else:
+            provider_env.pop('DJ_RELEASE', None)
+        provider_path.write_text(yaml.safe_dump(provider_config))
+        if hold:
             if captured.exists(): captured.unlink()
             child = subprocess.Popen(argv,cwd=paths.root,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             children.append(child)
