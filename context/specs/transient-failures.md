@@ -221,3 +221,14 @@ contract:
    will reset at <time>" as `quota`, with that time as `reset`. z.ai prints
    the time with no zone and means UTC+8. It arrives as an HTTP 429 error
    event, and still classifies as `quota`, not `throttle`.
+5. TF supersedes older contracts where they make a retryable failure final
+   (C11, NC, NT, RR, TB, RC, robustness and config defaults; advisor
+   2026-10-11). An adapter-confirmed `session_lost` is retryable: the retry
+   launches fresh (TF-R2). What C11 protects is against losing conversation
+   context silently, and that is kept: mismatch detection, the requested-session
+   history, newest-conversation precedence, preserved artifacts, and never
+   reporting a lost session as resumed. A fresh recovery inside the same call
+   emits the structured `conversation_replaced` field and event, not only a
+   text warning. The tests pinning immediate failure are reconciled by the
+   tester. The default backoff (about 12½ minutes over three retries)
+   deliberately lengthens failure latency.
