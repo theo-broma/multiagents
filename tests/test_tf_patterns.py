@@ -58,12 +58,12 @@ def test_tf_r1_an_absent_pattern_list_matches_nothing(w):
         cause(captured(w, configured), 'transient')
     finally:
         w.gate('absent', w.fxw)
-    w.fxw.queue(words)
+    fxn.queue(words)
     bare = w.simple('TF2', 'nag')
     view = settle(w, bare)
     cause(view, 'other')
     assert len(view['runs']) == 1, 'an unconfigured provider error is never retried'
-    assert len(w.fxn.calls()) == 1
+    assert len(fxn.calls()) == 1
 
 
 def test_tf_r1_quota_classification_comes_from_the_configured_pattern(w):
