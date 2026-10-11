@@ -344,3 +344,41 @@ passing in the suite.
    start time** (finding 10).
 9. **Root-session control variables are stripped from job environments**
    (finding 11).
+10. **`--no-supervise` applies to the orchestrator only.** Only
+    `multiagents run` and `resume` offer the flag (cli.py:3508). For the
+    initializer, DJ-R5 covers its supervised launch and its restarts. Tester
+    ag-2a5220 found this; the wording "supervised or `--no-supervise`" in Terms
+    and DJ-R5 is to be read accordingly.
+11. **Test seams, settled at the tester's request (ag-2a5220).** They are part
+    of the contract so that the suite can reach the cases DJ-R1 to DJ-R4 name.
+    - **State root.** The registry is `<state root>/bg/<project-id>/`, where
+      the state root is the one `MULTIAGENTS_STATE_DIR` already selects
+      (paths.py).
+    - **Record.** `<id>.json` is a JSON object carrying `"version": 1` and the
+      DJ-R2 fields, with `state` holding the last *recorded* state.
+      - States are always derived on read; the recorded state is never trusted.
+      - A record that fails to parse, lacks `version`, or has an unknown
+        version is `invalid`.
+      - Tests may write records directly to set up a reused pid, an orphaned
+        `starting` record, a malformed record or a planted symlink.
+    - **Exit file.** `<id>.exit` contains the decimal exit status or
+      `signal:<NAME>`, followed by a newline. The log is `<id>.log`.
+    - **Binding.** `<state root>/bg/<project-id>/bindings/<session-id>.json`
+      holds `{"version": 1, "role", "session_id", "pid", "pid_start"}`, written
+      by the driver as DJ-R5 says. Tests may write one directly.
+    - **Watcher lock.** `<state root>/bg/<project-id>/watch-<role>.lock` holds
+      the holder's pid and start time as JSON. A lock whose holder is not alive
+      with that start time is stale.
+    - **Pruning.** `multiagents bg prune` runs pruning explicitly and prints
+      what it removed. Every other `bg` command also prunes, as DJ-R2 says.
+    - **Clock.** `MULTIAGENTS_BG_NOW`, when set to a Unix timestamp, replaces
+      the current time for every age comparison: the 60-second `starting`
+      limit, the 15-minute re-emission window, the 7-day retention and the
+      heartbeat deadline. It does not change how long anything sleeps.
+      Process liveness is still read from the real system.
+    - **Hook timeout for tests.** `bg watch --timeout S` overrides the
+      deadline that `bg.watch_timeout` otherwise supplies. Tests may pass a
+      few seconds; the 120-second minimum applies to the config value only.
+12. **Simultaneous end and CLI death** (DJ-R4 rule 5) is tested by binding a
+    CLI pid that is already dead while an ended, unacknowledged job exists. The
+    watcher must then exit 0 and record nothing (rule 1).
