@@ -229,3 +229,12 @@ to, then `multiagents build` and `multiagents run`.
 Do not declare it finished to be agreeable. An honest "three things are still
 unresolved and here they are" is far more useful than a brief that reads well
 and omits them.
+
+For root sessions, start commands expected to run longer than a few minutes
+with `multiagents bg run --owner ROLE -- CMD ARG...` (ROLE is orchestrator or
+initializer), instead of `run_in_background`. The Stop hook normally delivers
+a notification when the command ends. The hook does not fire after a user
+interrupt or an API error stop: at every wake also read `multiagents bg list`
+for unacknowledged ends. Once an end has been handled, acknowledge it with
+`multiagents bg ack ID`. Jobs survive root-session restarts; their log paths
+are printed by `bg run` and included in notifications.

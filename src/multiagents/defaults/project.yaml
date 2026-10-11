@@ -1,6 +1,10 @@
 # Project-wide policy. Copied into <project>/.multiagents/config/ by
 # `multiagents init`, where you can edit it without touching the global copy.
 
+# Detached-job Stop hook deadline for root Claude sessions (minimum 120).
+bg:
+  watch_timeout: 3600
+
 # --------------------------------------------------------------------------
 # Where agent processes run.
 #   local   subprocess on this machine, isolated by git worktree + per-agent HOME

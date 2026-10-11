@@ -3449,6 +3449,14 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     return 1 if result.get("error") == "scheduler_unavailable" and args.scheduler_command == "start" else 0
 
 
+def cmd_bg(args) -> int:
+    if os.environ.get("MULTIAGENTS_CONTAINER"):
+        print("Detached jobs are unavailable inside an agent container.", file=sys.stderr)
+        return 1
+    from . import bg
+    return bg.dispatch(_resolve(args.path), args)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="multiagents",
@@ -3456,6 +3464,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--path", help="project directory (default: search upward from cwd)")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("bg", help="host-only detached commands")
+    p.set_defaults(func=cmd_bg)
+    commands = p.add_subparsers(dest="bg_command", required=True)
+    for action in ("run", "list", "wait", "stop", "ack", "watch", "prune"):
+        command = commands.add_parser(action)
+        command.set_defaults(func=cmd_bg)
+        if action in ("run", "list", "watch"):
+            command.add_argument("--owner", choices=("orchestrator", "initializer"),
+                                 required=action != "list")
+        if action == "run":
+            command.add_argument("--name")
+            command.add_argument("--key")
+            command.add_argument("argv", nargs=argparse.REMAINDER)
+        if action == "list":
+            command.add_argument("--json", action="store_true")
+        if action in ("wait", "watch"):
+            command.add_argument("--timeout", type=float)
+        if action in ("wait", "stop"):
+            command.add_argument("id")
+        if action == "stop":
+            command.description = "Stop the job process group; descendants that leave it are out of reach."
+        if action == "ack":
+            command.add_argument("ids", nargs="+")
 
     p = sub.add_parser("scheduler", help="manage the host plan scheduler")
     p.set_defaults(func=cmd_scheduler)

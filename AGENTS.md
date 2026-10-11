@@ -41,3 +41,12 @@ Changes to the nc/c23/pc fixtures must be checked with `MULTIAGENTS_SL_FULL=1`
 About 72 reds in `tests/test_phase2_*` are known and by design, pending the
 deferred phase 2 review; they are not regressions. Never `pkill` pytest by
 pattern: other agents run suites concurrently on this machine.
+
+For root sessions, start commands expected to run longer than a few minutes
+with `multiagents bg run --owner ROLE -- CMD ARG...` (ROLE is orchestrator or
+initializer), instead of `run_in_background`. The Stop hook normally delivers
+a notification when the command ends. The hook does not fire after a user
+interrupt or an API error stop: at every wake also read `multiagents bg list`
+for unacknowledged ends. Once an end has been handled, acknowledge it with
+`multiagents bg ack ID`. Jobs survive root-session restarts; their log paths
+are printed by `bg run` and included in notifications.

@@ -1351,6 +1351,7 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
     # GG-R1: wrongly typed git guard settings are refused at load, the way
     # other invalid settings are.
     _validate_git_section(merged["project.yaml"])
+    _validate_bg_section(merged["project.yaml"])
     # PS-R1/R5/R6: the providers (and their sharing keys) are built and
     # validated here, so a config error surfaces at load, and the roster's
     # routes are checked against the allowlists of the providers they name.
@@ -1434,6 +1435,17 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
         warnings=warnings,
         provider_sources=provider_sources,
     )
+
+
+def _validate_bg_section(project: dict) -> None:
+    """DJ-R5: leave sixty seconds for the watcher to deliver its heartbeat."""
+    block = project.get("bg", {})
+    if not isinstance(block, dict):
+        raise ValueError("bg must be a mapping")
+    timeout = block.get("watch_timeout", 3600)
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout < 120):
+        raise ValueError("bg.watch_timeout must be a finite number of at least 120 seconds")
 
 
 def _validate_git_section(project: dict) -> None:

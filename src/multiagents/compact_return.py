@@ -19,6 +19,8 @@ import time
 from datetime import datetime, timezone
 
 from .tree import ACTIVE, DRIVER_ROLES
+from .paths import ProjectPaths
+from . import bg
 
 CAP = 4_000
 # Statuses that mean the node is still somebody's business.
@@ -56,7 +58,14 @@ def _waiting(data: dict) -> list[dict]:
             if isinstance(d, dict) and d.get("status", "waiting") == "waiting"]
 
 
+def _jobs(tree):
+    path = getattr(tree, "path", None)
+    return bg.pending(ProjectPaths(path.parent.parent)) if path is not None else []
+
+
 def _in_flight(tree, data: dict, session: str) -> bool:
+    if _jobs(tree):
+        return True
     nodes = data.get("nodes") or {}
     if any(isinstance(n, dict) and n.get("status") in IN_FLIGHT
            and n.get("role", "") not in DRIVER_ROLES for n in nodes.values()):
@@ -239,6 +248,15 @@ def message(tree, session: str, snap: dict, outcome: dict) -> str:
         deferred = "Deferred tasks: none"
     tickets = f"Open tickets: {len(tree.open_tickets())}"
     agents_head = "Root agents (status at the stop → now):"
+    jobs = _jobs(tree)
+    if jobs:
+        paths = ProjectPaths(tree.path.parent.parent)
+        job_rows = [f"- {r['id']} {r['name']}: {r['state']}, "
+                    f"duration {max(0, (r['ended_at'] or bg.now()) - r['started_at']):.0f}s, "
+                    f"exit {r['exit_code']}; log {bg.state_root() / 'bg' / paths.slug / (r['id'] + '.log')}"
+                    for r in jobs]
+        rows = job_rows + rows
+        agents_head = "Detached jobs and root agents (states now):"
 
     fixed = "\n\n".join([first, agents_head, deferred, tickets, CHECKLIST])
     budget = CAP - len(fixed) - 8           # the joins the sections add

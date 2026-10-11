@@ -34,7 +34,7 @@ from .budget import read_all, reset_label
 from .config import limit_number, shipped_limits
 from .executor import executor_for
 from .executor.local import LocalExecutor
-from .paths import global_config_dir
+from .paths import ProjectPaths, global_config_dir
 from .providers import load_providers, option_text
 from .transcripts import session_at_prompt, session_context, session_transcript
 from .tree import Node, Tree, now as tree_now
@@ -252,6 +252,7 @@ def _run_attached(argv, env, stalled=None) -> int:
     child = None
     try:
         child = subprocess.Popen(argv, env=env)          # NOT start_new_session
+        _bind_bg_cli(env, child.pid)
         attached = getattr(stalled, "attached", None)
         if attached is not None:
             attached(child.pid)
@@ -390,6 +391,29 @@ def _other_driver_running(paths, role: str) -> tuple[str, int] | None:
 
 
 
+def _bg_hook(paths, config, role, spec, provider, context) -> None:
+    """DJ-R5: install the host hook when the root launch script supports it."""
+    context.pop("MULTIAGENTS_BG_SETTINGS", None)
+    if not getattr(provider, "root_bg_hook", False):
+        return
+    from . import bg
+
+    session = context.get("MULTIAGENTS_SESSION_ID", "")
+    if session:
+        timeout = config.project.get("bg", {}).get("watch_timeout", 3600)
+        context["MULTIAGENTS_BG_SETTINGS"] = str(bg.prepare_hook(paths, role, session, timeout))
+
+
+def _bind_bg_cli(env, pid) -> None:
+    """The direct CLI child, or our own pid immediately before exec."""
+    if not env.get("MULTIAGENTS_BG_SETTINGS"):
+        return
+    from . import bg
+
+    bg.bind(ProjectPaths(Path(env["MULTIAGENTS_PROJECT"])), env["MULTIAGENTS_ROLE"],
+            env["MULTIAGENTS_SESSION_ID"], pid)
+
+
 def _root_launch(name, provider, executor, action, config_dir, project_config, extra_env=None):
     """Use the script's launch arguments, with the driver owning the CLI child.
 
@@ -511,6 +535,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
     # that already has a transcript would collide with the session it names.
     context["MULTIAGENTS_SESSION_ID"] = _role_session_id(
         paths, role, rotate=not resume)
+    _bg_hook(paths, config, role, spec, provider, context)
     if resume:
         try:
             root_accounts.recover(paths, providers, role, spec.provider,
@@ -574,6 +599,7 @@ def _launch_agent(paths, config, role: str, resume: bool,
             # way anything can report on the session.
             _start_supervisor(paths, role, os.getpid())
             # Returns only when the handover FAILED; execvpe does not come back.
+            _bind_bg_cli(env, os.getpid())
             return _hand_over(argv, env, scripts.resolve(
                 spec.provider, provider, global_config_dir(), paths.config))
         return _run_supervised(paths, config, role, spec, provider, executor,
@@ -1265,6 +1291,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
                 compaction.detached()
             refused = handover.confirm(spec, provider, baseline, code)
             if refused:
+                _bg_hook(paths, config, role, spec, provider, context)
                 launch = _root_launch(spec.provider, provider, executor, "launch",
                     global_config_dir(), paths.config, extra_env=context)
                 argv, rebuilt = launch
@@ -1301,6 +1328,7 @@ def _run_supervised(paths, config, role, spec, provider, executor, context,
         stop, spec, provider, executor = handover.limit(spec, provider, limit, attempt)
         if stop is None and handover.pending:
             compaction = _AttachedCompaction(paths, config, spec, provider, executor, context)
+            _bg_hook(paths, config, role, spec, provider, context)
             argv, rebuilt = _root_launch(
                 spec.provider, provider, executor, "launch", global_config_dir(),
                 paths.config, extra_env=context)
@@ -1663,6 +1691,7 @@ def _supervise(paths, config, role, spec, provider, executor,
                     # After the first turn there is certainly a session to
                     # resume, whatever the launch marker said going in.
                     "MULTIAGENTS_RESUME": "1" if turn > 1 and not handover.fresh else context["MULTIAGENTS_RESUME"]}
+        _bg_hook(paths, config, role, spec, provider, turn_env)
         built = _root_launch(spec.provider, provider, executor, "launch",
                                     global_config_dir(), paths.config,
                                     extra_env=turn_env)
@@ -1678,6 +1707,7 @@ def _supervise(paths, config, role, spec, provider, executor,
         child = None
         try:
             child = subprocess.Popen(argv, env=env)
+            _bind_bg_cli(env, child.pid)
             _write_pid(paths, f"{role}-turn", child.pid)
             # Polled, not blocked on: a headless turn that hits a usage limit
             # can sit there indefinitely, and an unattended loop is exactly

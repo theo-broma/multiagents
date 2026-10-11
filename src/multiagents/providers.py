@@ -282,6 +282,8 @@ class Provider:
     # or an opaque directory simply omits it.
     transcript: dict = field(default_factory=dict)
     compaction: dict = field(default_factory=dict)
+    # DJ-R5: the root launch script accepts detached-job Stop hook settings.
+    root_bg_hook: bool = False
     auth: dict[str, Any] = field(default_factory=dict)
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -418,6 +420,9 @@ class Provider:
         bin_name = str(data.get("bin", name))
         if "/" in bin_name and not Path(bin_name).expanduser().is_absolute():
             raise ValueError("bin: containing '/' must be an absolute path")
+        root_bg_hook = data.get("root_bg_hook", False)
+        if not isinstance(root_bg_hook, bool):
+            raise ValueError(f"provider {name!r}: root_bg_hook must be a boolean")
         return cls(
             name=name,
             bin=bin_name,
@@ -441,6 +446,7 @@ class Provider:
             enabled=bool(data.get("enabled", True)),
             transcript=dict(data.get("transcript", {}) or {}),
             compaction=(dict(data["compaction"]) if isinstance(data.get("compaction"), dict) else {}),
+            root_bg_hook=root_bg_hook,
             auth=data.get("auth", {}) or {},
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),

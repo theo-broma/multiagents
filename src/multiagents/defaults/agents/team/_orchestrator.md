@@ -497,3 +497,12 @@ closed boundaries only — agents may be running — and the next turn opens wit
 the same return message. So end every turn with its state on disk: a turn that
 ends with a judgement only in your head ends with it about to be summarised
 away.
+
+For root sessions, start commands expected to run longer than a few minutes
+with `multiagents bg run --owner ROLE -- CMD ARG...` (ROLE is orchestrator or
+initializer), instead of `run_in_background`. The Stop hook normally delivers
+a notification when the command ends. The hook does not fire after a user
+interrupt or an API error stop: at every wake also read `multiagents bg list`
+for unacknowledged ends. Once an end has been handled, acknowledge it with
+`multiagents bg ack ID`. Jobs survive root-session restarts; their log paths
+are printed by `bg run` and included in notifications.

@@ -478,6 +478,7 @@ providers:
   # Claude Code as a full provider: orchestrator AND delegate.
   claude:
     compaction: {mode: restart}
+    root_bg_hook: true
     handover_mode: {docker: shared, local: none}
     bin: claude
     # The variable that relocates this CLI's whole state to a second account.

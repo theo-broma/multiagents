@@ -708,6 +708,8 @@ launch)
         set -- "$@" --mcp-config "$MULTIAGENTS_MCP_CONFIG" --strict-mcp-config
     [ -n "${MULTIAGENTS_PROMPT_FILE:-}" ] && \
         set -- "$@" --append-system-prompt-file "$MULTIAGENTS_PROMPT_FILE"
+    [ -n "${MULTIAGENTS_BG_SETTINGS:-}" ] && \
+        set -- "$@" --settings "$MULTIAGENTS_BG_SETTINGS"
     # The same per-agent key a spawned agent gets through `spawn.optional`
     # (providers.yaml); a launched role receives it as environment instead,
     # because `launch` builds argv here rather than through build_command.
