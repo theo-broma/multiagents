@@ -5571,3 +5571,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   - tester-only nodes (nd-b4865e8b, nd-c1aeb3c5) are never merged to main directly; their tests arrive through the implementer nodes.
 - **Old leftover held nodes, not ours this batch:** nd-74628b22 (AU-R2 opencode count) and nd-7866cea2 (SL-R10 revision race). Leave them for the next triage.
 - **Unpushed commits:** the user adds fingerprint f8c4fcdc3fec9d79 to `git.guard.allow_fingerprints` themselves.
+- ~08:05Z: ST3 review fixes done by ag-03a4b2 (nd-d055ad42; the "no_commits" flag is the ST4 false alarm; check the branch tip). **Next: start a reviewer on it (verifies ag-03a4b2), then my full suite and the merge.** No other agent was started after the wind-down notice.
