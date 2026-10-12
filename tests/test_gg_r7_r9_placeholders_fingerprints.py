@@ -265,7 +265,9 @@ def test_gg_r8_the_fingerprint_is_an_hmac_sha256_of_the_exact_match_truncated_to
     candidates = {raw, raw.strip()}
     for decode in (bytes.fromhex, base64.b64decode, base64.urlsafe_b64decode):
         try:
-            candidates.add(decode(raw.strip()))
+            # fromhex requires text on Python <=3.13; all these decoders
+            # accept ASCII text on every supported Python version.
+            candidates.add(decode(raw.strip().decode("ascii")))
         except Exception:
             pass
     expected = {hmac.new(k, EMAIL.encode(), hashlib.sha256).hexdigest()[:16] for k in candidates}

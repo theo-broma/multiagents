@@ -340,9 +340,27 @@ def test_tb2_r6_a_scheduler_restart_after_the_cleanup_does_not_start_another(w):
     worker_two_rounds(w)
     w.fxr.queue(dirtying(), {}, approve())
     top, wk, rv = start(w)
-    w.wait_held(rv, "dirty_worktree", timeout=WAIT_ROUNDS)
+
+    def cleanup_settled():
+        node = w.get(rv)
+        if node["state"] == "held" and node["hold"]["reason"] == "dirty_worktree":
+            return node
+        # A loop child is briefly done after a rejected round, before its
+        # next activation. Only a terminal loop makes the hold impossible.
+        loop = w.get(top)
+        if loop["state"] in ("done", "cancelled"):
+            raise AssertionError(f"the loop finished before cleanup held the reviewer: {loop}")
+        return None
+
+    w.until(cleanup_settled, WAIT_ROUNDS, what="the failed cleanup to hold the reviewer")
     w.restart_scheduler()
-    w.quiet(3)
+    # A listening socket alone does not prove the restarted scheduler has
+    # evaluated the persisted cleanup. The next tick proves its first
+    # reconciliation/admission pass finished, however slow the host is.
+    first_tick = w.until(lambda: w.status().get("last_tick"), WAIT,
+                         what="the restarted scheduler's first tick")
+    w.until(lambda: w.status().get("last_tick") != first_tick, WAIT,
+            what="the restarted scheduler to finish its first tick")
     assert w.fxr.spawns() == 2, "the restart granted a second cleanup"
     assert len(cleanup_calls(w)) == 1
     assert w.get(rv)["state"] == "held"

@@ -27,6 +27,8 @@ from multiagents.scheduler.model import create_record  # noqa: E402
 from multiagents.scheduler.rpc import Service  # noqa: E402
 from multiagents.tree import Tree, now  # noqa: E402
 
+TRIAL_TIMEOUT = 10
+
 
 @pytest.fixture(params=["pa", "opencode-go"], ids=["direct", "OG-R3-migrated"])
 def world(tmp_path, monkeypatch, request):
@@ -111,7 +113,7 @@ async def launch_trial(world):
     assert fx.spawns() == 0
 
     await engine.tick()
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + TRIAL_TIMEOUT
     while not fx.spawns() and time.monotonic() < deadline:
         await asyncio.sleep(.05)
     assert fx.spawns() == 1, (engine.reasons, engine.runner.tree.provider_health())
@@ -127,15 +129,21 @@ async def launch_trial(world):
     assert all(engine.reasons[n["id"]][0]["code"] == "admission:refused"
                for n in waiting)
 
+    trial_run = running[0]["runs"][-1]["run_id"]
+    trial_result = w.paths.run_dir(trial_run) / "result.json"
     fx.open_gate("trial")
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + TRIAL_TIMEOUT
     while time.monotonic() < deadline:
-        if not engine.runner.tree.provider_health()[provider].get("tripped"):
+        # Breaker health can clear before the detached worker publishes its
+        # result. Wait for both observable outcomes before reconciling it.
+        if (trial_result.is_file()
+                and not engine.runner.tree.provider_health()[provider].get("tripped")):
             break
         await asyncio.sleep(.05)
+    assert trial_result.is_file(), "the trial has not published its settled result"
     assert not engine.runner.tree.provider_health()[provider].get("tripped")
     await engine.tick()
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + TRIAL_TIMEOUT
     while fx.spawns() < len(nodes) and time.monotonic() < deadline:
         await asyncio.sleep(.05)
     assert fx.spawns() == len(nodes), "success must admit the waiting pins"

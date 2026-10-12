@@ -192,10 +192,17 @@ class World:
         return env
 
     def cli(self, *argv, timeout=RUN_TIMEOUT, tty=False) -> Result:
+        code = "import sys; from multiagents.cli import main; sys.exit(main(sys.argv[1:]))"
+        if argv and argv[0] == "init":
+            # init normally downloads the public OpenCode model catalogue.
+            # OA exercises Claude profiles, so its fake machine supplies that
+            # unrelated service too. Keep the run/resume paths unpatched.
+            code = ("import pytest\nfrom multiagents import catalog\n"
+                    "with pytest.MonkeyPatch.context() as patch:\n"
+                    "    patch.setattr(catalog, 'fetch_remote', "
+                    "lambda *a, **k: {'models': {}})\n    " + code)
         proc = subprocess.run(
-            [sys.executable, "-c",
-             "import sys; from multiagents.cli import main; sys.exit(main(sys.argv[1:]))",
-             "--path", str(self.proj), *argv],
+            [sys.executable, "-c", code, "--path", str(self.proj), *argv],
             env=self.env(), capture_output=True, text=True, timeout=timeout,
             stdin=subprocess.DEVNULL, cwd=str(self.proj))
         return Result(proc, self)

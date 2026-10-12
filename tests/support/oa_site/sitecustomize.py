@@ -5,7 +5,8 @@ Active only when OA_FAKE_DIR is set (the test puts this directory on PYTHONPATH)
     $OA_FAKE_DIR/vtime and returns at once; steps in sleep_script.json fire
     when the counter reaches their `after` (rewriting a profile's usage cache);
     past 400 virtual hours or 80 long sleeps it raises KeyboardInterrupt;
-  * a network connect (not AF_UNIX) fails and is logged to net-attempts;
+  * DNS resolution and a network connect (not AF_UNIX) fail and are logged
+    to net-attempts, even on machines without working DNS;
   * OA_CRASH_CFG: starting the fake `claude` for a launch under that
     CLAUDE_CONFIG_DIR kills this process before the child exists.
 """
@@ -74,6 +75,13 @@ if _dir:
         return _connect(self, address)
 
     socket.socket.connect = _no_net
+
+    def _no_dns(host, port, *args, **kwargs):
+        with open(os.path.join(_dir, "net-attempts"), "a") as log:
+            log.write(repr((host, port)) + "\n")
+        raise socket.gaierror("network disabled by the test")
+
+    socket.getaddrinfo = _no_dns
 
     crash = os.environ.get("OA_CRASH_CFG")
     if crash:

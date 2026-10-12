@@ -43,7 +43,9 @@ CLI_TIMEOUT = 20         # one `multiagents ...` command
 START_TIMEOUT = 12       # `scheduler start` until the socket answers
 STATUS_TIMEOUT = 2       # one status probe while waiting for start
 DEAD_TIMEOUT = 5         # a stopped / killed scheduler until its pid is gone
-RPC_TIMEOUT = 10         # one request on the socket (plus the op's own `timeout`)
+# ST7: host issuance can hold SQLite BEGIN IMMEDIATE for its 30 s contention
+# bound. Allow that bound plus transport overhead, below the server's 60 s.
+RPC_TIMEOUT = 40         # one request on the socket (plus the op's own `timeout`)
 CONNECT_TIMEOUT = 10     # a bare connection's socket timeout
 THREAD_START_TIMEOUT = 5   # in_threads: all callables reaching the barrier
 THREAD_JOIN_TIMEOUT = 20   # in_threads: each callable finishing

@@ -774,7 +774,7 @@ def test_sr_r5_steering_a_failed_run_resumes_it(w):
 
 def test_sr_r5_a_need_info_answer_resumes_the_run_with_the_answer(w):
     up(w)
-    w.g.set(gate=None, text="NEED_INFO: which database?")
+    w.g.set(gate=None, text="NEED_INFO(database): which database?")
 
     async def go():
         aid = await running(w)
