@@ -440,3 +440,9 @@ Each implementer run gets a reviewer.
      returning the containers to remove. The suite-wide guard is a
      session-scoped autouse fixture that puts a recording `docker` shim
      first on `PATH`.
+10. ST3 precedence, decided on 2026-10-12 after review ag-6626f2:
+    - an explicit `variant` option always wins over effort;
+    - effort fills `{variant}` only when no variant was given;
+    - `effort_as_variant` is validated at load. It accepts `true`, `false`
+      or absent, or a mapping of non-empty strings; anything else is a
+      ValueError.
