@@ -5553,3 +5553,21 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - 2026-10-12: contract committed 6d9f23de (user's yes). Testers (pinned codex) running: **nd-d960cabc** (ST1, ST2, ST9), **nd-b4865e8b** (ST3, ST4, ST6), **nd-c1aeb3c5** (ST5), **nd-da67736c** (ST7 test fixes, manifest, gg/oa host reds; host output in .multiagents/handoff/st7-host-env-reds.txt; not caused by the environment variables or HOME). Next per group: merge tests, then implementer (ST1/2/9 deep with the adversary after; ST3 quick; ST4+ST6 default; ST5 deep after docker), reviewer after each.
 - 2026-10-12: ST Decisions 7 (ST5 executor interface), 8 (effort_as_variant, effective_timeout) and 9 (ST1 seams; R4/R5 are test infrastructure) recorded. Tests for ST3/4/6 are done (nd-b4865e8b, tip ba294b79, not merged to main; implementers merge it first). Implementers: **nd-d055ad42** (ST3, quick) and **nd-7cd84091** (ST4+ST6, default). Testers still running: nd-d960cabc (ST1/2/9, relaunched with Decision 9), nd-c1aeb3c5 (ST5), nd-da67736c (ST7).
 - 2026-10-12: ST5 tests done (b339e1e9); ST5 implementer **nd-0cda7a8b** (deep). ST3 review ag-6626f2 rejected db3a0c47 (explicit variant erased; no validation) -> Decision 10, nd-d055ad42 relaunched. Running: ST4+6 impl nd-7cd84091, testers nd-d960cabc (ST1/2/9) and nd-da67736c (ST7).
+
+## HANDOFF 2026-10-12 ~08:00Z (orchestrator compaction): resume from here
+- **Stabilisation batch** (plan 2026-10-12-stabilization, applied; contract context/specs/stabilization.md, Decisions 1-10). ST8 merged (cc7132b6). F120 fixed.
+- **codex was exhausted (5h window until 11:04Z), so everything moved to codex-b** (2% used). All nodes are pinned to provider codex-b, model gpt-6.1-sol. Testers MUST be pinned: kimi on opencode-go fails at startup.
+- **The scheduler daemon was restarted at ~07:46Z** (pid 3038566). It had run pre-TF code since 10-10. TF was therefore not active: quota failures ended nodes as `failed` (not held), and relaunch was refused `active` (stale resume_pending). After the restart, relaunch works and recovers WIP. **Tooling item queued:** the daemon does not pick up merged code; it should be restarted, or warn, after a merge that touches the scheduler.
+- **In flight:**
+  - nd-d055ad42: ST3 impl-quick. Review fixes per Decision 10. Then a reviewer, then merge with tests ba294b79.
+  - nd-7cd84091: ST4+ST6 implementer. Merges ba294b79 first. WIP f73cda3d.
+  - nd-0cda7a8b: ST5 impl-deep. Merges b339e1e9 first. WIP f420472c.
+  - nd-da67736c: ST7 tester (flakes, manifest, gg/oa host reds; host output in .multiagents/handoff/st7-host-env-reds.txt). WIP feb7cf1c.
+  - nd-d960cabc: ST1/ST2/ST9 tester. Tests e90ee378 plus recovered WIP 1f135f3e. Docker is absent in agents. The orchestrator runs the SG_TEST_DOCKER=1 live checks on the host before the merge.
+- **Next steps:**
+  - per implementer: reviewer, then my full suite in /var/tmp (baseline 85: 72 phase2, 9 gg, 2 oa, sr, nc_m1_adv3), then audit, then merge_node;
+  - after the ST1/2/9 tests: implementer-deep (merges the tester tip first), then the adversary (ST9, the ST1-R2 migration, the ST2 proxy replacement) and a reviewer;
+  - after ST7: a reviewer, then the gg/oa reds rechecked on the host;
+  - tester-only nodes (nd-b4865e8b, nd-c1aeb3c5) are never merged to main directly; their tests arrive through the implementer nodes.
+- **Old leftover held nodes, not ours this batch:** nd-74628b22 (AU-R2 opencode count) and nd-7866cea2 (SL-R10 revision race). Leave them for the next triage.
+- **Unpushed commits:** the user adds fingerprint f8c4fcdc3fec9d79 to `git.guard.allow_fingerprints` themselves.
