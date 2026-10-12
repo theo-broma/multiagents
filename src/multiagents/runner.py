@@ -7906,7 +7906,7 @@ class Runner(QuotaHandover):
                 continue
         return out
 
-    def readonly_violations(self, node, base: str) -> list[str]:
+    def readonly_violations(self, node, base: str, tip: str | None = None) -> list[str]:
         """Protected paths this agent's branch MODIFIED, deleted or renamed.
 
         Additions are not violations — see `gitops.changed_paths`. An unknown
@@ -7914,7 +7914,7 @@ class Runner(QuotaHandover):
         right way round: a roster entry deleted mid-run must not make the
         branch unmergeable.
         """
-        if not node.branch:
+        if not (tip or node.branch):
             return []
         spec = self.config.agents.get(node.agent)
         if spec is None:
@@ -7922,7 +7922,7 @@ class Runner(QuotaHandover):
         patterns = self.config.readonly_paths_for(spec)
         if not patterns:
             return []
-        changed = gitops.changed_paths(self.paths.root, node.branch, base,
+        changed = gitops.changed_paths(self.paths.root, tip or node.branch, base,
                                        root=self.paths.root)
         return [path for path in changed if matches_any(patterns, path)]
 
@@ -7960,7 +7960,6 @@ class Runner(QuotaHandover):
             payload["cause"] = data["failure_cause"]
         if node.reason == "session_lost":
             payload["requested_session"] = node.requested_session
-        payload.update(self._no_commits_note(node, text))
         from .reviews import collected
         payload.update(collected(self, agent_id))
         filed = [{k: t[k] for k in ("id", "severity", "title", "status")}
@@ -7975,38 +7974,11 @@ class Runner(QuotaHandover):
             if len(text) > MAX_SUMMARY_CHARS:
                 payload["truncated"] = True
                 payload["hint"] = f"full transcript: {run_dir}/result.json, or collect(mode='full')"
-        if node.branch and gitops.is_repo(self.paths.root):
-            root = self.paths.root
-            try:
-                base, tip = self._commit_range(node)
-                payload["commits"] = gitops.commits_on(root, tip, base, root=root)
-                payload["diff_stat"] = gitops.diff_stat(root, tip, base,
-                                                        root=root)[:2000]
-                # Surfaced HERE as well as at the merge gate, so the
-                # orchestrator learns about it while it is still deciding
-                # rather than as a surprise in the merge result. The revert
-                # happens at merge.
-                violations = self.readonly_violations(node, base)
-            except gitops.GitError as exc:
-                self.git_unreadable(agent_id, root, exc)
-                payload["commits"] = None
-                payload["git_unreadable"] = str(exc)[:400]
-                violations = []
-            if violations:
-                payload["readonly_violations"] = violations[:50]
-                payload["readonly_note"] = (
-                    f"{node.agent} modified {len(violations)} file(s) it may not "
-                    f"change. They will be reverted to {base} when this branch "
-                    f"merges; the rest of its work is unaffected. Read what it "
-                    f"was trying to do before you re-run it — a developer "
-                    f"editing a test usually means the test and the "
-                    f"implementation disagree, and which one is wrong is your "
-                    f"call, not its."
-                )
+        payload.update(self._commit_report(node, text, include_violations=True))
         return payload
 
-    def _commit_range(self, node: Node) -> tuple[str, str]:
-        """TB2-R1: managed runs use immutable input and generation commits."""
+    def _commit_range(self, node: Node) -> tuple[str, str] | None:
+        """ST4-R1/R2: managed runs use immutable input and generation commits."""
         if not node.node_id:
             return (self.config.base_branch or gitops.current_branch(self.paths.root),
                     node.branch)
@@ -8017,33 +7989,74 @@ class Runner(QuotaHandover):
         run = next((r for r in planned.get("runs", []) if r["run_id"] == node.id), {})
         generation = next((g for g in planned.get("generations", [])
                            if g["run_id"] == node.id), {})
+        # An unpublished generation is unknown, not an empty range. The run
+        # entry itself may still be awaiting the scheduler's reconciliation.
+        if not generation.get("commit"):
+            return None
         base = run.get("input_commit")
         if not base:
             raise gitops.GitError("managed run has no recorded input commit")
-        # Until capture finishes there is no published work to report.
-        return base, generation.get("commit", base)
+        return base, generation["commit"]
+
+    def _commit_report(self, node: Node, text: str | None = None, *,
+                       include_violations: bool = False) -> dict[str, Any]:
+        if not (node.node_id or node.branch) or not gitops.is_repo(self.paths.root):
+            return {}
+        root = self.paths.root
+        try:
+            commit_range = self._commit_range(node)
+            if commit_range is None:
+                return {"commits_pending": True}
+            base, tip = commit_range
+            commits = gitops.commits_on(root, tip, base, root=root)
+            report = {"commits": commits,
+                      "diff_stat": gitops.diff_stat(root, tip, base, root=root)[:2000]}
+            spec = self.config.agents.get(node.agent)
+            if node.status == "done" and not commits:
+                if node.node_id:
+                    report["no_commits"] = True
+                elif spec and spec.writes:
+                    if text is None:
+                        try:
+                            text = json.loads(_run_read(self.paths.run_dir(node.id), "result.json")).get("text", "")
+                        except (OSError, json.JSONDecodeError):
+                            text = node.summary
+                    if not (self.need_info(text or "") or NEED_DECISION.search(_control_text(text or ""))):
+                        report["no_commits"] = True
+                if report.get("no_commits") and spec and spec.writes:
+                    report["no_commits_note"] = (
+                        "Writing agent finished without a commit; review its result before merging.")
+            if include_violations:
+                # Inspect the same fixed range, even if a later run moved the
+                # node branch or the original worker branch was removed.
+                violations = self.readonly_violations(node, base, tip)
+                if violations:
+                    report["readonly_violations"] = violations[:50]
+                    report["readonly_note"] = (
+                        f"{node.agent} modified {len(violations)} file(s) it may not "
+                        f"change. They will be reverted to {base} when this branch "
+                        f"merges; the rest of its work is unaffected. Read what it "
+                        f"was trying to do before you re-run it — a developer "
+                        f"editing a test usually means the test and the "
+                        f"implementation disagree, and which one is wrong is your "
+                        f"call, not its."
+                    )
+            return report
+        except gitops.GitError as exc:
+            self.git_unreadable(node.id, root, exc)
+            return {"commits": None, "git_unreadable": str(exc)[:400]}
 
     def _no_commits_note(self, node: Node, text: str | None = None) -> dict[str, Any]:
+        if node.status != "done":
+            return {}
         spec = self.config.agents.get(node.agent)
-        if (node.status != "done" or not node.branch or spec is None
-                or not spec.writes or not gitops.is_repo(self.paths.root)):
+        if not node.node_id and (not spec or not spec.writes):
             return {}
-        if text is None:
-            try:
-                text = json.loads(_run_read(self.paths.run_dir(node.id), "result.json")).get("text", "")
-            except (OSError, json.JSONDecodeError):
-                text = node.summary
-        text = text or ""
-        if self.need_info(text) or NEED_DECISION.search(_control_text(text)):
-            return {}
-        try:
-            base, tip = self._commit_range(node)
-            if gitops.commits_on(self.paths.root, tip, base, root=self.paths.root):
-                return {}
-        except gitops.GitError:
-            return {}
-        return {"no_commits": True,
-                "no_commits_note": "Writing agent finished without a commit; review its result before merging."}
+        return {k: v for k, v in self._commit_report(node, text).items()
+                if k in {"no_commits", "no_commits_note", "commits_pending"}}
+
+    def _wait_commit_report(self, node: Node) -> dict[str, Any]:
+        return (self._commit_report(node) if node.node_id else self._no_commits_note(node))
 
     # ---------------------------------------------------------------- control --
 
@@ -11444,6 +11457,7 @@ class Runner(QuotaHandover):
         # Drain the deferred queue first. A task waiting on a quota reset is
         # invisible to active(), so without this an orchestrator polling for
         # work is told there is none while tasks sit ready to restart.
+        deadline = time.monotonic() + timeout
         revived = await self.resume_deferred()
         # PC-R3a: the provider queues drain here too, whatever the pause.
         drained = await self._drain_queues()
@@ -11453,7 +11467,7 @@ class Runner(QuotaHandover):
                 1 for d in self.tree.read()["deferred"]
                 if isinstance(d, dict) and not deferred_malformed(d)
                 and d.get("status", "waiting") == "waiting")
-        result = await self._wait_for_any(agent_ids, timeout, revived)
+        result = await self._wait_for_any(agent_ids, max(0, deadline - time.monotonic()), revived)
         # DQ-R2: the drain's outcome rides on every result that followed one —
         # the "no active agents" and timeout returns included, which is where
         # a refused or dropped entry used to go unreported.
@@ -11543,7 +11557,7 @@ class Runner(QuotaHandover):
                 already.append({
                     "agent_id": agent_id, "agent": node.agent,
                     "status": node.status, "reason": node.reason,
-                    **self._no_commits_note(node),
+                    **self._wait_commit_report(node),
                 })
 
         if not pending:
@@ -11596,13 +11610,13 @@ class Runner(QuotaHandover):
                         changed_.append({
                             "agent_id": agent_id, "agent": node.agent,
                             "status": node.status, "reason": node.reason,
-                            **self._no_commits_note(node),
+                            **self._wait_commit_report(node),
                         })
                 else:
                     changed_.append({
                         "agent_id": agent_id, "agent": node.agent,
                         "status": node.status, "reason": node.reason,
-                        **self._no_commits_note(node),
+                        **self._wait_commit_report(node),
                     })
             return changed_, running_, still_stuck_
 

@@ -62,6 +62,7 @@ from .redact import scrub
 from .runner import Runner
 from .tree import Tree, deferred_malformed, find_deferred, now
 from .transcripts import session_context
+from .waits import bounded_timeout
 
 mcp = _Server("multiagents", version=__version__)
 
@@ -1152,10 +1153,20 @@ async def _wait_for_composites(run: Runner, node_ids: list[str], agent_ids: list
         tasks.append(asyncio.create_task(run.wait_for_any(agent_ids, max(0, deadline - loop.time()))))
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if (agent_ids and tasks[0] in done and tasks[1] not in done
+                and tasks[0].result().get("timed_out")
+                and "error" not in tasks[0].result()):
+            # Both waits share this deadline. Preserve the native timeout's
+            # running/finished snapshot even if the node clock wakes first.
+            await tasks[1]
+            done.add(tasks[1])
         results = [task.result() for task in tasks if task in done]
         # Keep an API failure even when the other wait succeeds in the same
         # event-loop turn. Task ordering must not decide whether it is shown.
         result = dict(next((reply for reply in results if "error" in reply), results[0]))
+        if (agent_ids and tasks[0] in done and tasks[1] in done
+                and tasks[0].result().get("timed_out") and "error" not in result):
+            result.update(tasks[1].result())
         result["changed"] = [change for reply in results for change in reply.get("changed", [])]
         notices = [notice for reply in results for notice in reply.get("limit_notices", [])]
         if notices:
@@ -1187,8 +1198,23 @@ async def wait_for_agents(agent_ids: list[str] | None = None, timeout: int = 300
     Given a composite node id, returns new transitions of that node or any
     descendant; leaf node ids wait for their current run.
     """
+    timeout, clamp = bounded_timeout(timeout)
     run = runner()
-    return _ok(_seen(run, await _wait_with_holds(run, agent_ids, float(timeout))))
+    result = await _wait_with_holds(run, agent_ids, timeout)
+    # Holds and nodes that launched during this wait can bypass the native
+    # run wait. Give their entries the same fixed range report as collect.
+    reports = {}
+    for key in ("changed", "already_finished", "holds"):
+        for entry in result.get(key, []):
+            agent_id = entry.get("agent_id")
+            node = run.tree.get(agent_id) if agent_id else None
+            if (node is not None and node.node_id and "commits" not in entry
+                    and "commits_pending" not in entry):
+                if agent_id not in reports:
+                    reports[agent_id] = await asyncio.to_thread(run._wait_commit_report, node)
+                entry.update(reports[agent_id])
+    result.update(clamp)
+    return _ok(_seen(run, result))
 
 
 async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
@@ -1198,6 +1224,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
     run-tool caller has not seen. Ordinary node transitions remain the
     responsibility of the existing waits. Neither observer advances ack_nodes.
     """
+    deadline = asyncio.get_running_loop().time() + timeout
     if not run.config.project.get("scheduler", {}).get("enabled"):
         return await _wait_for_agents(run, agent_ids, timeout)
 
@@ -1305,8 +1332,8 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
         if result["changed"]:
             return result
     if "holds" not in initial:
-        return await _wait_for_agents(run, agent_ids, timeout)
-    deadline = asyncio.get_running_loop().time() + timeout
+        return await _wait_for_agents(run, agent_ids, max(
+            0, deadline - asyncio.get_running_loop().time()))
 
     async def holds():
         while True:
@@ -1386,6 +1413,7 @@ async def _wait_with_holds(run: Runner, agent_ids, timeout: float) -> dict:
 async def _wait_for_agents(run: Runner, agent_ids, timeout: float) -> dict:
     # Leaf node ids retain the NC-R21 current-run behaviour. Composites
     # follow new transitions of their descendants (TB2-R4).
+    deadline = asyncio.get_running_loop().time() + timeout
     nodes, no_run, composites = {}, [], []
     if agent_ids:
         ids = []
@@ -1407,7 +1435,8 @@ async def _wait_for_agents(run: Runner, agent_ids, timeout: float) -> dict:
                                 "wait_for_nodes follows a node, not a run"}
         agent_ids = list(dict.fromkeys(ids))
     if composites:
-        result = await _wait_for_composites(run, composites, agent_ids, float(timeout))
+        result = await _wait_for_composites(run, composites, agent_ids, max(
+            0, deadline - asyncio.get_running_loop().time()))
         if nodes:
             result["node_runs"] = nodes
         if no_run:
@@ -1418,8 +1447,9 @@ async def _wait_for_agents(run: Runner, agent_ids, timeout: float) -> dict:
         listed = await asyncio.to_thread(_node_rpc, "list_nodes", {"state": "open"})
         snapshot = {n["id"]: n for n in listed.get("nodes", [])
                     if n["created_by"] == (run.self_id() or "root") and not n.get("runs")}
-    result = (await _wait_for_agents_and_nodes(run, snapshot, float(timeout)) if snapshot
-              else await run.wait_for_any(agent_ids, float(timeout)))
+    remaining = max(0, deadline - asyncio.get_running_loop().time())
+    result = (await _wait_for_agents_and_nodes(run, snapshot, remaining) if snapshot
+              else await run.wait_for_any(agent_ids, remaining))
     if nodes:
         result["node_runs"] = nodes
     if no_run:

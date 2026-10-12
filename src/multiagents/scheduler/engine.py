@@ -124,6 +124,9 @@ def record_launch(store, db, attempt, run):
 
 
 class Engine:
+    STOP_TIMEOUT = 10
+    NOTIFIER_STOP_TIMEOUT = 2
+
     def __init__(self, service, clock_file=None):
         self.service = service
         self.store = service.store
@@ -467,8 +470,8 @@ class Engine:
     def stop(self):
         self.stopped.set()
         self.notifier.stopped.set()
-        self.thread.join(timeout=10)
-        self.notifier.join(timeout=2)
+        self.thread.join(timeout=self.STOP_TIMEOUT)
+        self.notifier.join(timeout=self.NOTIFIER_STOP_TIMEOUT)
         with self.service.changed, self.store.transaction() as db:
             for attempt in attempt_records(db).values():
                 # The worker marks entry into Runner.start atomically with its

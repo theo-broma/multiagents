@@ -113,19 +113,26 @@ def start(project_root: Path, foreground=False, clock_file=None) -> dict:
 
 def stop(project_root: Path) -> dict:
     from .. import procs
+    from .engine import Engine
     record = directory(project_root) / "process.json"
     try:
         info = json.loads(record.read_text())
         pid, start_time = info["pid"], info["pid_start"]
     except (OSError, ValueError, KeyError):
         return {"stopped": True}
-    if not procs.alive(pid, start_time):
+    if not procs.living(pid, start_time):
         return {"stopped": True}
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 10
-    while record.exists() and time.monotonic() < deadline:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return {"stopped": True}
+    # Allow both engine joins and the daemon's final RPC/store cleanup.
+    deadline = time.monotonic() + Engine.STOP_TIMEOUT + Engine.NOTIFIER_STOP_TIMEOUT + 5
+    while procs.living(pid, start_time) and time.monotonic() < deadline:
         time.sleep(0.05)
-    return {"stopped": not record.exists()}
+    if not procs.living(pid, start_time):
+        return {"stopped": True}
+    return {"stopped": False, "pid": pid}
 
 
 def serve(project_root: Path, clock_file=None) -> None:

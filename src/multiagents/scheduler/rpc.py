@@ -768,9 +768,11 @@ class Service:
         return reply
 
     def wait(self, request, principal, args):
-        timeout = args.get("timeout", 0)
-        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
-            invalid("timeout: expected non-negative seconds")
+        from ..waits import bounded_timeout
+        try:
+            timeout, clamp = bounded_timeout(args.get("timeout", 0))
+        except ValueError as exc:
+            invalid(str(exc))
         if "include_held_ids" in args and type(args["include_held_ids"]) is not bool:
             invalid("include_held_ids: expected boolean")
         cursor = args.get("cursor")
@@ -815,6 +817,7 @@ class Service:
                                           "free_slots": self.configuration().limits.get("max_concurrent", 4)}})
                 return {"transitions": transitions, "next_cursor": max(after, top),
                         "holds": holds,
+                        **clamp,
                         **({"_held_node_ids": held_ids} if held_ids is not None else {}),
                         **capacity, "scheduler": self.status(nodes, scope=None if principal["root"] else scope)}
             if self.changed.acquire(timeout=min(remaining, 0.5)):
