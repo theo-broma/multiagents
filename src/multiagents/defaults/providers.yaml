@@ -149,6 +149,7 @@ providers:
             name: "part.tool"
             args: "part.state.input"
             state: "part.state.status"
+            tool_id: "part.id"
             # bug-2e68e4: the tool's output, for the doom-loop watchdog.
             result: "part.state.output"
         - match: {type: "step_finish"}

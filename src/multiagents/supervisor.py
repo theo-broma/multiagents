@@ -20,12 +20,15 @@ killing on suspicion throws away work that was often nearly finished.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
 from .providers import Event
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,9 +86,19 @@ class Supervisor:
     # See `_note_result`.
     _results: dict[str, deque] = field(default_factory=dict)
     _call_digests: dict[str, str] = field(default_factory=dict)
-    # TB2-R2: calls announced before execution cannot be judged until their
+    # ST5-R1: calls announced before execution cannot be judged until their
     # completion carries the output (or confirms there is none).
     _pending_calls: dict[str, Event] = field(default_factory=dict)
+    _pending_unidentified: deque[Event] = field(default_factory=deque)
+    _completed_calls: dict[str, None] = field(default_factory=dict)
+    # A changed result breaks both repeat and cycle streaks. Keep it separate
+    # from the argument digest so oscillating outputs of ONE command cannot
+    # masquerade as a two-command cycle.
+    _result_revision: int = 0
+    live_descendants: bool = False
+    descendant_observation_failed: bool = False
+    _activity_suppressed: bool = False
+    _logged_activity: str = ""
     last_step: int | None = None
     # SL-R3/SL-R6: opaque tool calls skip the loop-signature tracking above
     # entirely (that is what keeps them from tripping doom_loop on their
@@ -146,20 +159,50 @@ class Supervisor:
             self.steps += 1
 
         call = event
-        if event.kind == "tool" and event.tool_id and event.state in {"in_progress", "ACTIVE"}:
-            if len(self._pending_calls) >= 256:
-                del self._pending_calls[next(iter(self._pending_calls))]
-            self._pending_calls[event.tool_id] = event
+        completed = event.state.lower() in {"completed", "failed", "done", "error", "cancelled"}
+        # Some streams deliver only the call id and result on a later step,
+        # without repeating the lifecycle state. A matching result completes
+        # an open call just as an explicit terminal state does. Unmatched
+        # results cannot close another call (ST5-R1/R2).
+        completed = completed or bool(
+            not event.state and event.result and event.kind != "tool" and (
+                event.tool_id in self._pending_calls if event.tool_id
+                else self._pending_unidentified))
+        if event.kind == "tool" and event.state.lower() in {"in_progress", "active", "running", "pending"}:
+            if event.tool_id:
+                if len(self._pending_calls) >= 256:
+                    del self._pending_calls[next(iter(self._pending_calls))]
+                self._pending_calls[event.tool_id] = event
+                self._completed_calls.pop(event.tool_id, None)
+            else:
+                if len(self._pending_unidentified) >= 256:
+                    self._pending_unidentified.popleft()
+                self._pending_unidentified.append(event)
             call = None
-        elif event.tool_id in self._pending_calls and event.state in {"completed", "failed", "DONE"}:
+        elif event.tool_id in self._pending_calls and completed:
             started = self._pending_calls.pop(event.tool_id)
             call = Event(kind="tool", name=started.name, args=started.args,
                          tool_id=event.tool_id, step=started.step, result=event.result)
+        elif not event.tool_id and completed and self._pending_unidentified:
+            started = self._pending_unidentified.popleft()
+            call = Event(kind="tool", name=started.name, args=started.args,
+                         step=started.step, result=event.result)
+        if completed and not (self._pending_calls or self._pending_unidentified or self.live_descendants):
+            self._activity_suppressed = False
+            self._logged_activity = ""
+        if completed and call is not None and call.kind == "tool" and call.tool_id:
+            if call.tool_id in self._completed_calls:
+                call = None
+            else:
+                if len(self._completed_calls) >= 256:
+                    del self._completed_calls[next(iter(self._completed_calls))]
+                self._completed_calls[call.tool_id] = None
 
-        if call is event and event.result and event.kind != "tool":
+        if call is event and event.result and event.kind != "tool" and not completed:
             # A result delivered on a later event than the call (codex's
             # item.completed): find its call by id, else the latest call.
-            self._note_result(self._call_digests.get(event.tool_id, self.last_digest),
+            self._note_result((self._call_digests.get(event.tool_id, "")
+                               if event.tool_id else self.last_digest),
                               event.result)
 
         trip: Trip | None = None
@@ -177,17 +220,31 @@ class Supervisor:
             # Measured on a real project: doom_loop produced 53% of every
             # watchdog alert and 89% of those agents went on to merge, because
             # "called 5 times" was really two and a half.
-            repeat = (digest == self.last_digest and call.step is not None
+            repeat = (not (completed and call.tool_id)
+                      and digest == self.last_digest and call.step is not None
                       and call.step == self.last_step)
             self.last_digest, self.last_step = digest, call.step
             if call.tool_id:
-                if len(self._call_digests) > 256:
+                if len(self._call_digests) >= 256:
                     del self._call_digests[next(iter(self._call_digests))]
                 self._call_digests[call.tool_id] = digest
-            if not repeat:
-                self.signatures.append((digest, self.current_progress))
-            if call.result:
-                self._note_result(digest, call.result)
+            if completed:
+                # A changed output starts a new streak at THIS completed call.
+                # Keep the argument digest separate: alternating outputs of a
+                # single command must not become a two-command cycle.
+                seen = self._results.get(digest)
+                if seen and call.result != seen[-1]:
+                    self._result_revision += 1
+                self._remember_result(digest, call.result)
+                if not repeat:
+                    self.signatures.append((digest, f"{self.current_progress}|r:{self._result_revision}"))
+            else:
+                # Streams without lifecycle/result fields retain the original
+                # arguments-and-disk rule, including delayed result updates.
+                if not repeat:
+                    self.signatures.append((digest, self.current_progress))
+                if call.result:
+                    self._note_result(digest, call.result)
             if not repeat:
                 trip = self._check_loop(call)
 
@@ -202,14 +259,9 @@ class Supervisor:
         """TB2-R2: compare with the previous result, including oscillation."""
         if not digest:
             return
-        seen = self._results.pop(digest, None)
-        if seen is None:
-            if len(self._results) >= 256:
-                del self._results[next(iter(self._results))]
-            seen = deque(maxlen=self.loop_window)
-        self._results[digest] = seen    # re-insert: a signature in use is never the oldest
+        seen = self._results.get(digest)
         novel = bool(seen) and result != seen[-1]
-        seen.append(result)
+        self._remember_result(digest, result)
         if not novel:
             return
         for i in range(len(self.signatures) - 1, -1, -1):
@@ -217,6 +269,15 @@ class Supervisor:
             if entry_digest == digest:
                 self.signatures[i] = (entry_digest, f"{progress}|r:{result}")
                 return
+
+    def _remember_result(self, digest: str, result: str) -> None:
+        seen = self._results.pop(digest, None)
+        if seen is None:
+            if len(self._results) >= 256:
+                del self._results[next(iter(self._results))]
+            seen = deque(maxlen=self.loop_window)
+        self._results[digest] = seen    # re-insert: a signature in use is never the oldest
+        seen.append(result)
 
     def _matches_opaque_args(self, event: Event) -> bool:
         """bug-8615db: does this call match one of `opaque_tool_args`?
@@ -309,7 +370,8 @@ class Supervisor:
             if (position - 1) % self.loop_rearm == 0:
                 return Trip(
                     "doom_loop",
-                    f"{event.name} called {self.loop_repeats}x with identical arguments "
+                    f"{event.loop_signature()} called {self.loop_repeats}x with identical arguments "
+                    f"{('and result digest ' + event.result + ' ') if event.result else ''}"
                     f"and nothing changed on disk",
                 )
 
@@ -320,7 +382,8 @@ class Supervisor:
             if (position - 1) % self.loop_rearm == 0:
                 return Trip("doom_loop",
                             f"two-step cycle repeated {self.loop_repeats}x with nothing "
-                            f"changing on disk (last: {event.name})")
+                            f"changing on disk (last: {event.loop_signature()}, "
+                            f"result digest: {event.result or 'unavailable'})")
         return None
 
     # --------------------------------------------------------------- polling --
@@ -336,6 +399,22 @@ class Supervisor:
         if not self._timeout_reported and now - self.started > self.wall_timeout:
             self._timeout_reported = True
             return Trip("timeout", f"exceeded {self.wall_timeout:.0f}s wall clock")
+        evidence = self.activity_evidence
+        if evidence:
+            if now - self.last_event > self.silence_timeout and evidence != self._logged_activity:
+                log.debug("silence watchdog suppressed by %s", evidence)
+                self._logged_activity = evidence
+            self._activity_suppressed = True
+            return None
+        if self._activity_suppressed:
+            # An unavailable observation is not proof the child ended, and
+            # must not grant a fresh silence window as an exemption.
+            if not self.descendant_observation_failed:
+                self.last_event = now
+                self.progress_when_last_quiet = None
+                self._silence_pending = False
+            self._activity_suppressed = False
+            self._logged_activity = ""
         if not self._silence_pending and now - self.last_event > self.silence_timeout:
             # "Said nothing" is not "did nothing". A single long tool call —
             # a test suite, an install, a large edit — streams nothing while it
@@ -371,6 +450,16 @@ class Supervisor:
         return None
 
     # ---------------------------------------------------------------- status --
+
+    @property
+    def activity_evidence(self) -> str:
+        activity = []
+        if self._pending_calls or self._pending_unidentified:
+            ids = ", ".join(self._pending_calls)
+            activity.append(f"open tool call ({ids or 'without call id'})")
+        if self.live_descendants:
+            activity.append("live CLI descendant child")
+        return ", ".join(activity)
 
     @property
     def elapsed(self) -> float:

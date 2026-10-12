@@ -568,6 +568,51 @@ def _recorded_pid(run_dir: Path, name: str, data: Path | None = None) -> str:
     return head[0] if head and head[0].isdigit() else ""
 
 
+_DESCENDANTS_CHECK = r'''
+import os, sys
+from pathlib import Path
+root = int(sys.argv[1])
+def stat(pid):
+    fields = Path('/proc/%d/stat' % pid).read_text().rpartition(')')[2].split()
+    return fields[0], int(fields[1])
+try:
+    # Missing /proc is unknown, not evidence that the CLI has exited.
+    stat(os.getpid())
+    try:
+        state, _ = stat(root)
+    except FileNotFoundError:
+        state = 'X'
+    if state in ('Z', 'X'):
+        answer = False
+    else:
+        children, live = {}, set()
+        for name in os.listdir('/proc'):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            try:
+                state, parent = stat(pid)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            children.setdefault(parent, []).append(pid)
+            if state not in ('Z', 'X'):
+                live.add(pid)
+        seen, todo, answer = {root}, list(children.get(root, [])), False
+        while todo:
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            if pid in live:
+                answer = True
+                break
+            todo.extend(children.get(pid, []))
+    print('descendants:' + str(answer).lower())
+except (OSError, ValueError, IndexError):
+    print('descendants:unknown')
+'''
+
+
 PROXY_PORT = 8888
 
 # The variable names `run_args` sets on the container itself (allowlist
@@ -2699,6 +2744,28 @@ sys.exit(rc)
                 _run([*prefix, "/usr/bin/python3", "-c", _ALIVE_PROBE_KILL,
                       pidfile], timeout=5)
             raise
+
+    def has_live_descendants(self, agent_id: str) -> bool | None:
+        """ST5-R2: inspect below the recorded CLI pid in the container.
+
+        The wrapper and the host docker exec client are not CLI descendants.
+        A failed docker command is unknown, never evidence of an idle CLI.
+        """
+        if self.paths is None:
+            return None
+        pid = _recorded_pid(self.paths.run_dir(agent_id), "container.pid", self.paths.data)
+        if not pid:
+            return None
+        if self.inside():
+            return procs.has_live_descendants(int(pid))
+        try:
+            result = _run(["docker", "exec", self.container, "/usr/bin/python3",
+                           "-c", _DESCENDANTS_CHECK, pid], timeout=ALIVE_PROBE_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return {"descendants:true": True, "descendants:false": False}.get(result.stdout.strip())
 
     def wrapper_alive(self, agent_id: str) -> bool | None:
         """Whether an agent's wrapper is alive in the container, asked from

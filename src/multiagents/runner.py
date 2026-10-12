@@ -6234,7 +6234,8 @@ class Runner(QuotaHandover):
                 # paired with the state of the tree as it stands now. Threaded:
                 # a blocking `git` call in this loop would stop draining the
                 # process's pipe, which is a deadlock rather than a slowdown.
-                if event.kind == "tool" and progress_dir is not None \
+                if (event.kind == "tool" or event.result or event.tool_id and event.state.lower() in
+                        {"completed", "failed", "done", "error", "cancelled"}) and progress_dir is not None \
                         and time.monotonic() - last_progress >= PROGRESS_SAMPLE_SECONDS:
                     last_progress = time.monotonic()
                     run.supervisor.note_progress(
@@ -7412,6 +7413,9 @@ class Runner(QuotaHandover):
         good.
         """
         assert run.supervisor is not None
+        executor = None
+        last_observation_error = ""
+        last_activity_evidence = ""
         node = self.tree.get(run.node_id)
         progress_dir = (Path(node.worktree) if node and node.worktree
                         and gitops.is_repo(Path(node.worktree)) else None)
@@ -7429,6 +7433,31 @@ class Runner(QuotaHandover):
             if self._shutdown_preserves(run.node_id):
                 return
             try:
+                try:
+                    if executor is None:
+                        executor = self.executor(run.spec)
+                    descendants = await asyncio.to_thread(executor.has_live_descendants, run.node_id)
+                    observation_error = ("CLI descendant observation unavailable"
+                                         if descendants is None else "")
+                except Exception as exc:
+                    descendants = None
+                    observation_error = f"CLI descendant observation failed: {type(exc).__name__}: {exc}"
+                if observation_error and observation_error != last_observation_error:
+                    self.tree.emit(run.node_id, "watchdog_observation_error", detail=observation_error)
+                last_observation_error = observation_error
+                run.supervisor.live_descendants = descendants is True
+                run.supervisor.descendant_observation_failed = descendants is None
+                evidence = run.supervisor.activity_evidence
+                if (evidence and evidence != last_activity_evidence
+                        and run.supervisor.quiet_for >= run.supervisor.silence_timeout):
+                    self.tree.emit(run.node_id, "watchdog_activity",
+                                   detail=f"silence suppressed by {evidence}")
+                    last_activity_evidence = evidence
+                elif not evidence and last_activity_evidence:
+                    self.tree.emit(run.node_id, "watchdog_activity",
+                                   detail=(f"silence suppression ended: {observation_error}" if observation_error
+                                           else f"silence restarts after {last_activity_evidence} ended"))
+                    last_activity_evidence = ""
                 # Only while the agent is quiet, and only if it has a tree of
                 # its own. The silence check needs a CURRENT reading to tell a
                 # long tool call from a stall, and `_consume` refreshes this on

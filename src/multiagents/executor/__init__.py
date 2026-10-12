@@ -29,7 +29,7 @@ def get_executor(
     bind mounts; the local one needs only the providers, to recognise an
     adapter run (CX-C1)."""
     if kind == "local":
-        return LocalExecutor(providers)
+        return LocalExecutor(providers, paths=paths)
     if kind == "docker":
         return DockerExecutor(config or {}, paths, providers, config_dir)
     raise ValueError(f"Unknown executor kind {kind!r} (expected 'local' or 'docker')")

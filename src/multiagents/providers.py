@@ -222,15 +222,15 @@ class Event:
         if self.kind != TOOL or not self.name:
             return None
         try:
-            args = json.dumps(self.args, sort_keys=True, default=str)[:2000]
+            args = json.dumps(self.args, sort_keys=True, default=str)
         except (TypeError, ValueError):
-            args = str(self.args)[:2000]
+            args = str(self.args)
         return f"{self.name}:{args}"
 
 
 def _result_text(value: Any) -> str:
     """Digest of a tool result, hashed where it is extracted (bug-2e68e4)."""
-    if value is None or value == "":
+    if value is None:
         return ""
     if not isinstance(value, str):
         try:

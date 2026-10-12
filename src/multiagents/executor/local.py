@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .. import procs
+from .. import gitops, procs
 from ..agentwrap import prompt_stdin
 from ..scheduler.owner import _check as owner_alive
 from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
@@ -36,9 +36,21 @@ STREAM_LIMIT = 16 * 1024 * 1024
 class LocalExecutor(Executor):
     kind = "local"
 
-    def __init__(self, providers: dict[str, Any] | None = None):
+    def __init__(self, providers: dict[str, Any] | None = None, *, paths=None):
         # Only for an adapter run (CX-C1, CX-C16); nothing else here needs them.
         self.providers = providers or {}
+        self.paths = paths
+
+    def has_live_descendants(self, agent_id: str) -> bool | None:
+        if self.paths is None:
+            return None
+        run_dir = self.paths.run_dir(agent_id)
+        raw = gitops._read_beneath(self.paths.data, run_dir.relative_to(self.paths.data).parts,
+                                 "agent.pid", 256) or b""
+        head = raw.decode("ascii", errors="replace").split()[:1]
+        if not head or not head[0].isdigit():
+            return None
+        return procs.has_live_descendants(int(head[0]))
 
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
                     run_dir: Path | None = None, deadline: float = 0,

@@ -471,6 +471,14 @@ class Executor(ABC):
         """Problems that would make every run fail. Empty means ready."""
         return []
 
+    def has_live_descendants(self, agent_id: str) -> bool | None:
+        """Live children of this CLI in its execution environment (ST5-R2).
+
+        None means observation failed, and cannot exempt a silence watchdog.
+        Blocking; callers poll no faster than their existing watch interval.
+        """
+        return None
+
     def host_path(self, path: Path) -> Path:
         """Where `path`, as an agent run by this executor sees it, lives on
         the host. The same path for an executor that runs on the host."""

@@ -183,3 +183,32 @@ def descendants(pid: int) -> list[int] | None:
         out.append(child)
         todo.extend(children.get(child, []))
     return out
+
+
+def has_live_descendants(pid: int) -> bool | None:
+    """ST5-R2: ancestry rooted at the CLI, excluding exited children."""
+    # An absent CLI is evidence only when /proc itself is observable. Without
+    # it, even this observer's entry is missing: report observation failure.
+    try:
+        _stat(os.getpid())
+    except (_Gone, OSError, ValueError):
+        return None
+    try:
+        if _stat(pid)[0] in ("Z", "X"):
+            return False
+    except _Gone:
+        return False
+    except (OSError, ValueError):
+        return None
+    children = descendants(pid)
+    if children is None:
+        return None
+    for child in children:
+        try:
+            if _stat(child)[0] not in ("Z", "X"):
+                return True
+        except _Gone:
+            continue
+        except (OSError, ValueError):
+            return None
+    return False
