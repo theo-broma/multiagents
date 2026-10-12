@@ -5572,3 +5572,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - **Old leftover held nodes, not ours this batch:** nd-74628b22 (AU-R2 opencode count) and nd-7866cea2 (SL-R10 revision race). Leave them for the next triage.
 - **Unpushed commits:** the user adds fingerprint f8c4fcdc3fec9d79 to `git.guard.allow_fingerprints` themselves.
 - ~08:05Z: ST3 review fixes done by ag-03a4b2 (nd-d055ad42; the "no_commits" flag is the ST4 false alarm; check the branch tip). **Next: start a reviewer on it (verifies ag-03a4b2), then my full suite and the merge.** No other agent was started after the wind-down notice.
+- ~08:20Z: ST3 reviewer **nd-2ed776a1** started (verifies ag-03a4b2, range main..2492b6bc). My full suite on 2492b6bc runs from /var/tmp/st3-suite (log /var/tmp/st3-suite.log, bg job 6d7418da0ed8). Then: audit, merge_node nd-d055ad42.
