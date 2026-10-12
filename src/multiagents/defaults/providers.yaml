@@ -89,6 +89,7 @@ providers:
    # (OG-R2), and its durable state moves once, merging what it finds (OG-R3).
   opencode:
     bin: opencode
+    effort_as_variant: true
     bin_search: ["~/.opencode/bin"]
     # Script implementing the check/login contract; see auth/README.md.
     auth:

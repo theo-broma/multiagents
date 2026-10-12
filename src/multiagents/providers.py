@@ -398,6 +398,9 @@ class Provider:
     # refused — the pair would otherwise be rejected by the CLI at launch,
     # nine seconds into a run that already had a worktree and a branch.
     effort_suffixes: dict[str, str] = field(default_factory=dict)
+    # ST3-R1/R2: fill the variant option from effort, optionally translating
+    # its name. None keeps effort and variant independent.
+    effort_as_variant: bool | dict[str, str] | None = None
     # PC-R1: how many runs may hold a slot on this provider at once, across
     # the whole project. None (absent or null) is no limit, the default. Set
     # by `load_providers` from the RAW block, never through `extends`: the
@@ -430,6 +433,15 @@ class Provider:
         root_bg_hook = data.get("root_bg_hook", False)
         if not isinstance(root_bg_hook, bool):
             raise ValueError(f"provider {name!r}: root_bg_hook must be a boolean")
+        effort_as_variant = data.get("effort_as_variant", False)
+        if not (isinstance(effort_as_variant, bool) or (
+            isinstance(effort_as_variant, dict)
+            and all(isinstance(key, str) and key and isinstance(value, str) and value
+                    for key, value in effort_as_variant.items())
+        )):
+            raise ValueError(
+                f"provider {name!r}: effort_as_variant must be a boolean or "
+                "a mapping of non-empty strings to non-empty strings")
         return cls(
             name=name,
             bin=bin_name,
@@ -481,6 +493,7 @@ class Provider:
             # hide a real dollar figure.
             billing="plan" if data.get("billing") == "plan" else "metered",
             effort_suffixes=_effort_suffixes(data.get("effort_suffixes")),
+            effort_as_variant=effort_as_variant,
             failures=(dict(data["failures"]) if isinstance(data.get("failures"), dict) else {}),
         )
 
@@ -611,6 +624,16 @@ class Provider:
             raise ValueError(error)
         if self.prompt_transport == "file" and prompt_file is None:
             prompt_file = _standalone_prompt_file(prompt)
+        options = dict(options or {})
+        if "variant" not in options and (
+            self.effort_as_variant is True or isinstance(self.effort_as_variant, dict)
+        ):
+            effort = options.get("effort")
+            options["variant"] = (
+                self.effort_as_variant.get(effort, effort)
+                if isinstance(self.effort_as_variant, dict) and _given(effort)
+                else effort
+            )
         values = {
             "prompt": prompt,
             "prompt_file": prompt_file or "",
