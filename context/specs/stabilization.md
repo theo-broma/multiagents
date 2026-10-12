@@ -470,3 +470,16 @@ Each implementer run gets a reviewer.
     be confirmed as the container that recorded it, has no applied digest
     (ST2-R1 "absent"), and is reconciled. Not a new rule: it restates
     ST2-R1 after adversary ag-c9a624 found it violated.
+14. Decided on 2026-10-12 after review ag-f494de:
+    - **Wildcard roots.** An entry `X` is refused under ST9-R1 when the
+      pinned PSL has a wildcard rule `*.X`, unless an exception rule
+      makes `X` itself an exception. Suffix-matching `X` would admit
+      every tenant under the wildcard (`run.app`,
+      `digitaloceanspaces.com`), which is what F10 forbids, even though
+      `X` is formally registrable.
+    - **Replacement is not a start.** ST1-R3's missing-source check
+      applies to starting an existing container. When the egress proxy
+      is to be replaced (ST2-R1 reconciliation), the old container's
+      missing sources do not block: it is removed and the replacement is
+      created from current sources. A missing source of the
+      *replacement* still refuses.
