@@ -372,8 +372,16 @@ findings:
         as the place the fallback table leaks into the dispatcher.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: 'Verified on main 161f75fe (2026-10-12, researcher ag-a4cb1a, plan 2026-10-12-stabilization
+        item 9): tests/test_c2_budget_characterization.py::test_claude_builtin_fallback_ignores_the_callers_config_dir
+        and ::test_a_second_named_claude_account_reads_its_own_profile_through_extends
+        pass (2 passed). budget.py resolves built-ins through `extends` and reads
+        the resolved per-provider profile (budget.py:1034-1144, 1094-1097).'
+      sha: 161f75fef139119ffec4889d7303319c54dbdf75
+      status: fixed
     severity: critical
-    status: scheduled
+    status: fixed
     summary: 'Multi-account claude quota reading is unreachable: the built-in fallback
       always calls `read_claude()` with no arguments, dropping the caller''s `config_dir`'
   F121:
