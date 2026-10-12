@@ -69,7 +69,12 @@ executor:
     egress_allowlist:
       # 1. Model endpoints. Without these no agent can run at all.
       - opencode.ai
-      - googleapis.com
+      # googleapis.com is a public suffix refused by ST9/F10; narrowed to the hosts agy uses.
+      - cloudcode-pa.googleapis.com
+      - daily-cloudcode-pa.googleapis.com
+      - oauth2.googleapis.com
+      - www.googleapis.com
+      - play.googleapis.com
       - google.com
       - api.anthropic.com
       - antigravity.google
@@ -88,8 +93,9 @@ executor:
       - files.pythonhosted.org
       - registry.npmjs.org
       # Dart/Flutter. pub resolves version constraints against pub.dev before
-      # fetching archives from storage.googleapis.com (already covered by
-      # googleapis.com), and it does that even with a fully warm cache — there
+      # fetching archives from storage.googleapis.com. A Dart project must add
+      # storage.googleapis.com itself: anyone can host a bucket there (exfiltration risk).
+      # pub does that even with a fully warm cache — there
       # is no offline resolve. So without this line an agent cannot run the
       # test suite of any Dart project on a branch of its own, which is every
       # branch it has.
