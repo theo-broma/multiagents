@@ -264,8 +264,8 @@ def test_ba_r2_a_clean_tree_is_still_a_clean_no_op(tmp_path):
 # BA-R3 — through the Runner
 
 CONFLICT_SCRIPT = (
-    "export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@a GIT_COMMITTER_NAME=a "
-    "GIT_COMMITTER_EMAIL=a@a; "
+    "export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@example.invalid GIT_COMMITTER_NAME=a "
+    "GIT_COMMITTER_EMAIL=a@example.invalid; "
     "echo base > f.txt; git add f.txt; git commit -q -m base; "
     "git checkout -q -b side; echo theirs > f.txt; git commit -q -am side; "
     "git checkout -q -; echo ours > f.txt; git commit -q -am ours; "
@@ -273,8 +273,8 @@ CONFLICT_SCRIPT = (
     "echo BA_R3_ANSWER all finished")
 
 CLEAN_SQUASH_SCRIPT = (
-    "export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@a GIT_COMMITTER_NAME=a "
-    "GIT_COMMITTER_EMAIL=a@a; "
+    "export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@example.invalid GIT_COMMITTER_NAME=a "
+    "GIT_COMMITTER_EMAIL=a@example.invalid; "
     "echo base > f.txt; git add f.txt; git commit -q -m base; "
     "git checkout -q -b side; echo side > g.txt; git add g.txt; git commit -q -m side; "
     "git checkout -q -; git merge --squash side >/dev/null 2>&1; "

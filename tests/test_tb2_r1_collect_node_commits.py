@@ -146,7 +146,7 @@ def _standalone(tmp_path, monkeypatch, commits: int):
     for i in range(commits):
         (wt / f"f{i}.txt").write_text(str(i))
         subprocess.run(["git", "-C", str(wt), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(wt), "-c", "user.name=F", "-c", "user.email=f@x.invalid",
+        subprocess.run(["git", "-C", str(wt), "-c", "user.name=F", "-c", "user.email=f@example.invalid",
                         "commit", "-q", "-m", f"c{i}"], check=True)
     return r, agent_id
 

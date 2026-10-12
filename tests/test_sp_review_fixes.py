@@ -144,8 +144,8 @@ def test_executor_at_cache_is_bounded(tmp_path, fresh_at, monkeypatch):
 # --------------------------------------------------------------- SP-R4 --
 
 def _git(repo: Path, *args: str) -> str:
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
                           capture_output=True, text=True, env=env).stdout
 
