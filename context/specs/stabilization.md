@@ -414,3 +414,12 @@ Each implementer run gets a reviewer.
    `None`, or an exception, means the observation failed, and grants no
    exemption. The tester proposed it (ag-9015b1) and the orchestrator
    decided it on 2026-10-12.
+8. Interface details, decided on 2026-10-12 for tester ag-13552e:
+   - **ST3.** A provider entry in providers.yaml may declare
+     `effort_as_variant`. Its value is either `true`, which passes the
+     effort through unchanged, or a mapping from effort name to variant
+     name; an unmapped effort passes through. When the key is present, the
+     run's effort fills that provider's `{variant}` option. Without the
+     key, nothing changes. The shipped opencode providers set it to `true`.
+   - **ST6.** A clamped reply carries `timeout_clamped: true` and
+     `effective_timeout`, the effective value in seconds.
