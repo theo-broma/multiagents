@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -28,6 +29,30 @@ from multiagents.scheduler.rpc import Service  # noqa: E402
 from multiagents.tree import Tree, now  # noqa: E402
 
 TRIAL_TIMEOUT = 10
+POLL_INTERVAL = .05
+TRIAL_TAGS = ("A", "B", "C", "REFUSED")
+
+
+async def until(observed, what, *, tick=None):
+    """Wait for an observable boundary, driving the manual scheduler if needed."""
+    deadline = time.monotonic() + TRIAL_TIMEOUT
+    while True:
+        value = observed()
+        if value:
+            return value
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f"did not observe {what} within {TRIAL_TIMEOUT}s"
+        if tick is not None:
+            try:
+                await asyncio.wait_for(tick(), timeout=remaining)
+            except TimeoutError:
+                pytest.fail(f"scheduler did not settle {what} within {TRIAL_TIMEOUT}s")
+        await asyncio.sleep(min(POLL_INTERVAL, max(0, deadline - time.monotonic())))
+
+
+def scheduler_nodes(engine):
+    with engine.store.transaction(write=False) as db:
+        return engine.store.nodes(db)
 
 
 @pytest.fixture(params=["pa", "opencode-go"], ids=["direct", "OG-R3-migrated"])
@@ -71,20 +96,25 @@ def world(tmp_path, monkeypatch, request):
     try:
         yield w, fx, provider, engine
     finally:
-        fx.open_gate("trial")
+        fx.open_all_gates(TRIAL_TAGS)
         # The detached workers are ours; wait for their actual completion.
-        for child in engine.children:
-            if child.poll() is None:
-                child.terminate()
-            child.wait(timeout=10)
-        engine.loop.close()
-        w.close()
+        deadline = time.monotonic() + TRIAL_TIMEOUT
+        try:
+            for child in engine.children:
+                try:
+                    child.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=TRIAL_TIMEOUT)
+        finally:
+            engine.loop.close()
+            w.close()
 
 
 def deposit(engine, provider, tag):
     node = create_record({
         "kind": "simple", "agent": "trial-worker",
-        "task": task(tag, gate="trial"),
+        "task": task(tag, gate=tag),
         "pins": {"provider": provider, "model": f"{provider}/m1"},
     }, "root")
     with engine.store.transaction() as db:
@@ -94,7 +124,7 @@ def deposit(engine, provider, tag):
 
 async def launch_trial(world):
     w, fx, provider, engine = world
-    for tag in ("A", "B", "C"):
+    for tag in TRIAL_TAGS[:3]:
         deposit(engine, provider, tag)
     before = engine.runner.tree.provider_health()[provider].get("trial_at")
     reading = budget_mod.read_all(
@@ -112,15 +142,15 @@ async def launch_trial(world):
     assert engine.runner.tree.provider_health()[provider].get("trial_at") == before
     assert fx.spawns() == 0
 
-    await engine.tick()
-    deadline = time.monotonic() + TRIAL_TIMEOUT
-    while not fx.spawns() and time.monotonic() < deadline:
-        await asyncio.sleep(.05)
+    # A provider's calls log precedes the worker's launch publication. Wait
+    # for the scheduler's running state too, before inspecting its run id.
+    await until(lambda: fx.spawns() and any(
+        n["state"] == "running" for n in scheduler_nodes(engine).values()),
+        "the trial's provider spawn and scheduler launch", tick=engine.tick)
     assert fx.spawns() == 1, (engine.reasons, engine.runner.tree.provider_health())
     claimed = engine.runner.tree.provider_health()[provider]["trial_at"]
-    await engine.tick()
-    with engine.store.transaction(write=False) as db:
-        nodes = engine.store.nodes(db)
+    await asyncio.wait_for(engine.tick(), timeout=TRIAL_TIMEOUT)
+    nodes = scheduler_nodes(engine)
     running = [n for n in nodes.values() if n["state"] == "running"]
     waiting = [n for n in nodes.values() if n["state"] == "open"]
     assert len(running) == 1 and len(waiting) == len(nodes) - 1, nodes
@@ -131,22 +161,28 @@ async def launch_trial(world):
 
     trial_run = running[0]["runs"][-1]["run_id"]
     trial_result = w.paths.run_dir(trial_run) / "result.json"
-    fx.open_gate("trial")
-    deadline = time.monotonic() + TRIAL_TIMEOUT
-    while time.monotonic() < deadline:
-        # Breaker health can clear before the detached worker publishes its
-        # result. Wait for both observable outcomes before reconciling it.
-        if (trial_result.is_file()
-                and not engine.runner.tree.provider_health()[provider].get("tripped")):
-            break
-        await asyncio.sleep(.05)
+    # Only the trial may finish. Later launches stay gated so their completion
+    # cannot change the plan while the scheduler is admitting the other pins.
+    fx.open_gate(fx.calls()[0]["tag"])
+    # ST7: result.json precedes terminal status and final cleanup. Process exit
+    # is the settled boundary for the detached supervisors this fixture owns;
+    # neither a result file nor cleared breaker health proves that boundary.
+    await until(lambda: all(child.poll() is not None for child in engine.children),
+                "the trial's detached supervisors to exit")
     assert trial_result.is_file(), "the trial has not published its settled result"
+    assert engine.runner.tree.get(trial_run).status == "done"
     assert not engine.runner.tree.provider_health()[provider].get("tripped")
-    await engine.tick()
-    deadline = time.monotonic() + TRIAL_TIMEOUT
-    while fx.spawns() < len(nodes) and time.monotonic() < deadline:
-        await asyncio.sleep(.05)
+    # A tick may defer a candidate when a concurrent launch changes its plan
+    # snapshot. Keep this manually driven scheduler ticking, as its daemon
+    # would, until the provider spawns and launch publications have settled.
+    await until(lambda: fx.spawns() >= len(nodes) and all(
+        n["state"] == "running" for n in scheduler_nodes(engine).values()
+        if n["id"] != running[0]["id"]),
+        "the waiting pins' provider spawns and scheduler launches", tick=engine.tick)
     assert fx.spawns() == len(nodes), "success must admit the waiting pins"
+    fx.open_all_gates(TRIAL_TAGS)
+    await until(lambda: all(child.poll() is not None for child in engine.children),
+                "all admitted pins' detached supervisors to exit")
 
 
 def test_lapsed_zero_failure_breaker_admits_one_scheduler_trial(world):
@@ -189,8 +225,8 @@ def test_refused_scheduler_activation_keeps_the_lapsed_trial_available(
                 patch.setattr(engine.runner, "_launch", launch_failure)
             patch.setattr(engine, "spawn", lambda a: activations.append(
                 asyncio.create_task(refuse(a))))
-            await engine.tick()
-            await asyncio.gather(*activations)
+            await asyncio.wait_for(engine.tick(), timeout=TRIAL_TIMEOUT)
+            await asyncio.wait_for(asyncio.gather(*activations), timeout=TRIAL_TIMEOUT)
 
     asyncio.run(first_attempt())
     assert len(refused) == 1 and refused[0].get("blocked"), refused
