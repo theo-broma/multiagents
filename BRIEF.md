@@ -5547,3 +5547,4 @@ Current work, before phase 7 part 2. Items ST1 to ST9 follow the plan's "Apply n
 - ST9: verify F120, and reproduce F10 (adversary if it is still present).
 
 Pipeline: tester, implementer, then a reviewer on every implementer run; test-only items go to a tester and a reviewer. Contracts go in `context/specs/stabilization.md`, shown to the user before commit. Order after the batch: triage of the open findings (F24, F30, F60, F61, F62 before part 2), then part 2. User action outside the plan: the fingerprint `f8c4fcdc3fec9d79` goes in `git.guard.allow_fingerprints`, set by the user only.
+- 2026-10-12: researchers started: nd-78cc9d8e (ST1+ST2 docker/proxy), nd-f1377108 (ST3+ST4+ST5), nd-ef701e52 (ST6 + §4 defects), nd-37ce3bde (ST7 flakes/env reds), nd-0a92515a (ST9 F10/F120). ST8 tester nd-8a56e08a (test-only; reviewer after). Next: write context/specs/stabilization.md from their answers, show it to the user, commit after yes.
