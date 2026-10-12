@@ -446,3 +446,27 @@ Each implementer run gets a reviewer.
     - `effort_as_variant` is validated at load. It accepts `true`, `false`
       or absent, or a mapping of non-empty strings; anything else is a
       ValueError.
+11. Unobservable mounts, decided on 2026-10-12 after adversary ag-c9a624:
+    - when `docker inspect` cannot report an existing container's mounts,
+      its sources count as volatile (as an unknown filesystem does in
+      ST1-R1). If its policy is not `no`, or cannot be read, it gets
+      `docker update --restart no`; a failed update refuses as in ST1-R2;
+    - an exited container whose mounts cannot be observed is **not
+      started**: the ensure refuses, naming the failed observation and the
+      fix (recreate the container). ST1-R3 cannot be checked, so it fails
+      closed;
+    - a running container with policy `no` proceeds.
+    `test_st1_unobserved_state_starts_without_claiming_mount_drift`, which
+    expected the start, is superseded and goes to the tester.
+12. IPv4 forms in the allowlist, decided on 2026-10-12 after adversary
+    ag-c9a624. An entry whose last label is numeric (decimal digits, or a
+    `0x`/`0X` hexadecimal form) is an IPv4 address in the sense of the
+    WHATWG URL host parser, never a domain. It is accepted only as a
+    canonical dotted-quad of four decimal octets without leading zeros,
+    and then matches only exactly. Every other such entry (`1.1`, `0x1.1`,
+    `010.0.0.1`, `127.1`, fullwidth or mixed-case variants once
+    normalised) is refused under ST9-R1.
+13. A proxy whose applied digest cannot be read, or whose identity cannot
+    be confirmed as the container that recorded it, has no applied digest
+    (ST2-R1 "absent"), and is reconciled. Not a new rule: it restates
+    ST2-R1 after adversary ag-c9a624 found it violated.
