@@ -123,7 +123,16 @@ if step.get("exhaust"):
 sys.exit(1 if do == "fail" else 0)
 '''
 
-FAKE_DOCKER = "#!/bin/sh\nexit 0\n"
+# ST1-R3 / D11: an empty successful inspect means an existing container with
+# unobservable mounts, which must not be started. OA's fake machine has no
+# existing containers; say so explicitly and let the normal ensure create one.
+FAKE_DOCKER = """#!/bin/sh
+if [ "$1" = inspect ]; then
+    echo 'No such container' >&2
+    exit 1
+fi
+exit 0
+"""
 
 
 def slug(path) -> str:

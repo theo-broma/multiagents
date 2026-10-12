@@ -12,7 +12,7 @@ One test (or a small group) per requirement, named after its id:
 Black box throughout: the docker run command (`DockerExecutor.run_args`), the
 `steer_agent` MCP tool of a real server process, and the `multiagents` CLI run
 as a subprocess. No docker daemon is needed except by the one opt-in docker
-variant of SP-R1 (`SP_TEST_DOCKER=1`); elsewhere a fake `docker` binary stands
+variant of SP-R1 (`SG_TEST_DOCKER=1 SP_TEST_DOCKER=1`); elsewhere a fake `docker` binary stands
 in, as in `tests/test_subagent_mcp.py`.
 
 Assumptions the contract leaves open, recorded so they can be challenged:
@@ -280,7 +280,8 @@ def test_sp_r1_the_shipped_claude_provider_backs_its_projects_dir(tmp_path, home
         "already backs")
 
 
-def test_sp_r1_docker_variant_a_transcript_survives_container_recreation(tmp_path, monkeypatch):
+def test_sp_r1_docker_variant_a_transcript_survives_container_recreation(tmp_path, monkeypatch,
+                                                                     st_live_docker):
     why = _docker_ready()
     if why:
         pytest.skip(why)
@@ -307,14 +308,20 @@ def test_sp_r1_docker_variant_a_transcript_survives_container_recreation(tmp_pat
         assert read.stdout.strip() == "kept", (
             f"the transcript did not survive `docker rm && docker up`: {read.stderr}")
     finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-        proj.cleanup()
+        try:
+            proj.cleanup()
+        finally:
+            for name in (container, f"multiagents-proxy-{proj.paths.slug}",
+                         f"multiagents-auth-{proj.paths.slug}"):
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=5)
+            subprocess.run(["docker", "network", "rm", f"multiagents-net-{proj.paths.slug}"],
+                           capture_output=True, timeout=5)
 
 
 def _docker_ready() -> str:
     import shutil
-    if os.environ.get("SP_TEST_DOCKER") != "1":
-        return "docker cases are opt-in: set SP_TEST_DOCKER=1 with a working container setup"
+    if os.environ.get("SG_TEST_DOCKER") != "1" or os.environ.get("SP_TEST_DOCKER") != "1":
+        return "docker cases are opt-in: set SG_TEST_DOCKER=1 SP_TEST_DOCKER=1 with a working container setup"
     if not shutil.which("docker"):
         return "no docker binary"
     if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:

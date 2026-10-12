@@ -63,10 +63,12 @@ answers rather than a guess at them:
 - under `network: bridge` and `network: none` the allowlist is **not
   validated at all**, because it is unused there.
 
-**Untouched on purpose.** `tests/test_c1_allowlist_characterization.py` holds
-the five F11 reproductions and the F10 one. They pin today's silent-and-dead
-behaviour, they go red when this contract is implemented, and inverting them
-is a separate, deliberate run. Nothing here duplicates them.
+**ST9 supersession.** Stabilization ST9/Decision 5 now drops single labels,
+public suffixes and IP fragments with non-fatal diagnostics, and accepts
+whole IPv4 addresses only as exact matches. The public-suffix regression
+below follows ST9, and domain examples use non-PSL example.com. The deferred
+R14 single-label and R15 validation requirements stay visible in the baseline
+manifest; the characterization suite separately reconciles its ST9 cases.
 """
 
 from __future__ import annotations
@@ -160,19 +162,18 @@ def test_r14_a_single_label_internal_name_is_still_an_exact_match(tmp_path):
 
 
 def test_r14_a_dotted_entry_keeps_todays_suffix_behaviour(tmp_path):
-    """The regression guard that matters most. Every entry in both real
-    allowlists is multi-label and every one of them depends on the `(^|\\.)`
-    prefix — the contract names it as explicitly out of scope. A fix that made
-    *all* entries exact would silently cut the agents off from
-    `storage.googleapis.com`, `files.pythonhosted.org` and the rest, which is
-    an outage rather than a tightening."""
-    allowlist = ["googleapis.com"]
-    assert h.allowlist_admits(tmp_path, allowlist, "googleapis.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "storage.googleapis.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "a.b.googleapis.com")
-    # Still a label-boundary suffix, not a string suffix.
-    assert not h.allowlist_admits(tmp_path, allowlist, "evil-googleapis.com")
-    assert not h.allowlist_admits(tmp_path, allowlist, "googleapis.com.evil.net")
+    """ST9 preserves label-boundary suffix matching for non-PSL domains.
+
+    googleapis.com was the original example, but is a private public suffix
+    and therefore refused under ST9. A registrable example domain keeps the
+    original guard against accidentally making every dotted entry exact.
+    """
+    allowlist = ["example.com"]
+    assert h.allowlist_admits(tmp_path, allowlist, "example.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "storage.example.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "a.b.example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil-example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "example.com.evil.net")
 
 
 def test_r14_dotless_and_dotted_entries_keep_their_own_rules_in_one_list(tmp_path):
@@ -196,18 +197,16 @@ def test_r14_a_dotless_entry_is_valid_configuration_not_a_malformed_one(
     assert _preflight(tmp_path, monkeypatch, ["com", "localhost", "redis"]) == []
 
 
-def test_r14_a_multi_label_public_suffix_is_out_of_scope_and_still_a_suffix(tmp_path):
-    """What R14 does NOT close, pinned so nobody reads F10 as fully resolved.
-
-    `co.uk` has a dot, so it takes the dotted rule and keeps admitting every
-    host beneath it. Distinguishing a public suffix from an ordinary domain
-    needs a public suffix list, which is a dependency and a decision this
-    contract declines to take. Asserted rather than left implicit, because the
-    obvious "while I am here" improvement is to add one, and doing that
-    quietly is how a dependency arrives without a decision.
-    """
-    assert h.allowlist_admits(tmp_path, ["co.uk"], "anything.co.uk")
-    assert h.allowlist_admits(tmp_path, ["github.io"], "someones-pages.github.io")
+def test_r14_a_multi_label_public_suffix_is_refused_under_st9(tmp_path, capsys):
+    """ST9/Decision 5 supersedes R14's permission for public-suffix entries."""
+    for entry, child in (("co.uk", "anything.co.uk"), ("github.io", "someones-pages.github.io")):
+        allowlist = [entry, "example.org"]
+        assert not h.allowlist_admits(tmp_path, allowlist, child)
+        diagnostic = capsys.readouterr().err
+        assert entry in diagnostic and "public suffix" in diagnostic
+        assert not h.allowlist_admits(tmp_path, allowlist, entry)
+        assert h.allowlist_admits(tmp_path, allowlist, "example.org")
+        assert h.allowlist_admits(tmp_path, allowlist, "api.example.org")
 
 
 # ---------------------------------------------------------------------------
@@ -658,9 +657,10 @@ def test_r14_an_ipv4_entry_and_a_domain_entry_keep_their_own_rules_together(
     """Both rules in one realistic list: an internal address alongside a
     public domain. The domain keeps its subdomains, the address does not
     acquire any, and neither widens the other."""
-    allowlist = ["192.168.1.10", "googleapis.com"]
+    # ST9 refuses the original googleapis.com example (a private PSL suffix).
+    allowlist = ["192.168.1.10", "example.com"]
     assert h.allowlist_admits(tmp_path, allowlist, "192.168.1.10")
-    assert h.allowlist_admits(tmp_path, allowlist, "storage.googleapis.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "storage.example.com")
     assert not h.allowlist_admits(tmp_path, allowlist, "foo.192.168.1.10")
     assert not h.allowlist_admits(tmp_path, allowlist, "evil.net")
 

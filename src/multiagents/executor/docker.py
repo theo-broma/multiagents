@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -43,6 +45,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -53,6 +56,7 @@ from ..paths import ProjectPaths, server_install_paths, state_root
 from ..providers import credential_owner
 from ..safepoint import strip_key
 from .. import gitops, procs
+from ..publicsuffix import is_public_suffix, normalize as normalize_hostname
 from ..agentwrap import prompt_stdin
 from ..scheduler.owner import _check as owner_alive
 from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
@@ -743,6 +747,40 @@ def _validate_allowlist_entry(entry: str) -> str | None:
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def filesystem_type(path: str) -> str | None:
+    """Observe the mount containing a resolved source; unknown fails closed."""
+    try:
+        result = _run(["findmnt", "--noheadings", "--output", "FSTYPE", "--target", path], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    return result.stdout.strip() or None
+
+
+def _restart_policy(sources) -> str:
+    for source in sources:
+        try:
+            resolved = Path(source).resolve()
+            if any(resolved == root or root in resolved.parents
+                   for root in map(Path, ("/tmp", "/run", "/var/run", "/dev/shm"))):
+                return "no"
+            kind = filesystem_type(str(resolved))
+            if kind is None or kind in ("tmpfs", "devtmpfs", "ramfs"):
+                return "no"
+        except (OSError, RuntimeError):
+            return "no"
+    return "unless-stopped"
+
+
+def _missing_sources(sources) -> str | None:
+    for source in sources:
+        if not Path(source).exists():
+            return (f"mount source {source} is missing; recreate the container "
+                    "with existing sources before starting it")
+    return None
 
 
 def docker_available() -> str | None:
@@ -2217,6 +2255,122 @@ sys.exit(rc)
         result = _run(["docker", "inspect", "-f", "{{.State.Status}}", name])
         return result.stdout.strip() if result.returncode == 0 else "absent"
 
+    # Docker's own container state vocabulary; anything else answering a
+    # status probe means the observation cannot identify a container.
+    _CONTAINER_STATUSES = frozenset(
+        {"created", "running", "paused", "restarting", "removing", "exited", "dead"})
+
+    def _inspect_container(self, name: str) -> dict | None:
+        """The container as the daemon itself sees it, or None when absent.
+
+        `{{json .}}` is the only format carrying everything ST1 and ST2 read
+        back: the mounts a container actually has, its restart policy, its
+        networks, its start time. When a daemon will not answer it — errored,
+        or answered with something that is not a container — the same box is
+        assembled from the field formats historical code already uses, marked
+        `_observed: "fields"`; a probe that names no container state at all is
+        marked `_observed: "unobserved"`. Failed mount observations stay
+        distinct from an observed empty mount list. When no format yields a
+        state, the inspection fails. Every box carries its observation tier under
+        `_observed` ("json" when read whole).
+        """
+        try:
+            result = _run(["docker", "inspect", "--format", "{{json .}}", name])
+            if result.returncode:
+                raise ValueError(result.stderr.strip() or f"cannot inspect {name}")
+            box = json.loads(result.stdout)
+            if (not isinstance(box, dict) or not isinstance(box.get("Mounts"), list)
+                    or not isinstance(box.get("State"), dict)):
+                raise ValueError("missing mount or state information")
+            box["_observed"] = "json"
+            return box
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return self._field_inspect(name)
+
+    def _field_inspect(self, name: str) -> dict | None:
+        failures = {}
+
+        def field(fmt):
+            try:
+                probe = _run(["docker", "inspect", "-f", fmt, name])
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                failures[fmt] = str(exc)
+                return None
+            if probe.returncode:
+                failures[fmt] = probe.stderr.strip()
+                return None
+            return probe.stdout.strip()
+
+        probe = _run(["docker", "inspect", "-f", "{{.State.Status}}", name])
+        if probe.returncode:
+            reason = probe.stderr.strip()
+            if "no such container" in reason.lower() or "no such object" in reason.lower():
+                return None
+            raise ValueError(reason or f"cannot inspect {name}")
+        status = probe.stdout.strip()
+        observed = "fields" if status in self._CONTAINER_STATUSES else "unobserved"
+        box = {"_observed": observed, "State": {"Status": status or "unknown"}}
+        mount_format = "{{range .Mounts}}{{.Source}}>{{.Destination}}\n{{end}}"
+        mounts = field(mount_format)
+        if mounts is None or observed == "unobserved":
+            box["Mounts"] = None
+            box["_mount_error"] = failures.get(mount_format) or "mount information unavailable"
+        else:
+            box["Mounts"] = []
+            for line in mounts.splitlines():
+                source, separator, destination = line.partition(">")
+                if source and separator and destination:
+                    # No Type field here, so every named source counts as a
+                    # bind: a volume's own storage lives under /var/lib/docker,
+                    # which is persistent, so this can only err on the
+                    # volatile side.
+                    box["Mounts"].append({"Type": "bind", "Source": source,
+                                          "Destination": destination})
+                else:
+                    box["Mounts"] = None
+                    box["_mount_error"] = "invalid mount information"
+                    break
+        started = field("{{.State.StartedAt}}")
+        if started:
+            box["State"]["StartedAt"] = started
+        identifier = field("{{.Id}}")
+        if identifier:
+            box["Id"] = identifier
+        policy = field("{{.HostConfig.RestartPolicy.Name}}")
+        if policy:
+            box["HostConfig"] = {"RestartPolicy": {"Name": policy}}
+        networks = field("{{json .NetworkSettings.Networks}}")
+        if networks:
+            with contextlib.suppress(ValueError):
+                attached = json.loads(networks)
+                if isinstance(attached, dict):
+                    box["NetworkSettings"] = {"Networks": attached}
+        return box
+
+    def _existing_mounts(self, name: str, box: dict, *, check_start: bool = True) -> None:
+        """ST1-R2: before an existing container is used, correct its restart
+        policy from the mounts it actually has — not the configured ones —
+        and check its sources before starting it. A replacement only needs
+        the policy check, since it uses new sources (D14)."""
+        mounts = box.get("Mounts")
+        sources = [mount["Source"] for mount in mounts or [] if mount.get("Source")]
+        policy = box.get("HostConfig", {}).get("RestartPolicy", {}).get("Name")
+        mount_error = (f"cannot observe mounts of {name}: "
+                       f"{box.get('_mount_error', 'mount information unavailable')}; "
+                       "recreate the container with existing sources before starting it"
+                       if mounts is None else "")
+        if policy != "no" and (mounts is None or _restart_policy(sources) == "no"):
+            result = _run(["docker", "update", "--restart", "no", name])
+            if result.returncode:
+                reason = result.stderr.strip() or f"cannot update restart policy of {name}"
+                raise ValueError(reason + (f"; {mount_error}" if mount_error else ""))
+        if check_start and box["State"].get("Status") != "running":
+            if mount_error:
+                raise ValueError(mount_error)
+            error = _missing_sources(sources)
+            if error:
+                raise ValueError(error)
+
     def build_image(self, dockerfile: Path, tag: str, timeout: int = 1800) -> dict:
         if not dockerfile.is_file():
             return {"ok": False, "error": f"missing {dockerfile}"}
@@ -2232,19 +2386,55 @@ sys.exit(rc)
 
     # --- egress proxy ------------------------------------------------------
 
-    def write_proxy_config(self, target: Path) -> Path:
-        """Generate tinyproxy's config and allowlist from project.yaml."""
-        target.mkdir(parents=True, exist_ok=True)
-        allow = list(self.config.get("egress_allowlist", []) or [])
+    def allowlist_entries(self) -> tuple[list[str], list[str]]:
+        allowed, diagnostics = [], []
+        for entry in self.config.get("egress_allowlist", []) or []:
+            reason = None
+            try:
+                host = normalize_hostname(entry)
+            except UnicodeError:
+                host = entry
+                reason = "invalid IDNA hostname"
+            if not entry.strip() or any(ord(char) < 32 or ord(char) == 127 for char in entry):
+                reason = "blank entry or control character in hostname"
+            elif _is_ipv6_literal(host):
+                reason = "IPv6 addresses are unsupported"
+            elif _is_ipv4_literal(host):
+                pass
+            # WHATWG's IPv4 number parser also accepts bare 0x as zero.
+            elif re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]*)", host.rsplit(".", 1)[-1]):
+                reason = "non-canonical IPv4 address or fragment; use a whole dotted-quad decimal address"
+            elif all(_LABEL_RE.fullmatch(label) for label in host.split(".")):
+                if "." not in host:
+                    reason = "single label; use a registrable domain"
+                elif is_public_suffix(host):
+                    reason = "public suffix; use a registrable domain"
+            if reason:
+                diagnostics.append(f"refused allowlist entry {entry!r}: {reason}")
+            else:
+                allowed.append(host)
+        return allowed, diagnostics
 
+    def report_allowlist_diagnostics(self) -> None:
+        for diagnostic in self.allowlist_entries()[1]:
+            print(diagnostic, file=sys.stderr)
+
+    def _proxy_filter(self) -> str:
+        allow, _ = self.allowlist_entries()
         # FilterExtended uses POSIX extended regex against the destination host.
         # Anchored, with a leading optional subdomain group, so "example.com"
         # permits api.example.com but not evil-example.com.
         patterns = []
         for host in allow:
             escaped = _ere_literal(host)
-            patterns.append(f"(^|\\.){escaped}$")
-        (target / "filter").write_text("\n".join(patterns) + "\n")
+            patterns.append(f"^{escaped}$" if _is_ipv4_literal(host) else f"(^|\\.){escaped}$")
+        return "\n".join(patterns) + "\n"
+
+    def write_proxy_config(self, target: Path) -> Path:
+        """Generate tinyproxy's config and allowlist from project.yaml."""
+        target.mkdir(parents=True, exist_ok=True)
+        self.report_allowlist_diagnostics()
+        (target / "filter").write_text(self._proxy_filter())
 
         (target / "tinyproxy.conf").write_text(
             "User nobody\n"
@@ -2279,20 +2469,95 @@ sys.exit(rc)
             return {"ok": True, "skipped": self.network_mode}
         if not self.image_exists(self.proxy_image):
             return {"ok": False, "error": f"proxy image {self.proxy_image} not built"}
+        # Outside every container mount. A file lock covers both threads and
+        # independent launches; the applied receipt is tied to a container id.
+        directory = state_root() / "container-state" / self.slug / "egress-proxy"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with (directory / "lock").open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return self._ensure_proxy_locked(directory / "applied.json")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "error": str(exc)}
 
-        state = self.container_state(self.proxy_container)
-        if state == "running":
-            return {"ok": True, "existed": True}
-        if state != "absent":
-            _run(["docker", "rm", "-f", self.proxy_container])
+    @staticmethod
+    def _write_proxy_receipt(path: Path, receipt: dict) -> None:
+        fd, temporary = tempfile.mkstemp(dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(receipt, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+
+    def _ensure_proxy_locked(self, receipt_path: Path) -> dict:
+        box = self._inspect_container(self.proxy_container)
+        present = box is not None and box.get("_observed") != "unobserved"
+        try:
+            receipt = json.loads(receipt_path.read_text())
+            if not isinstance(receipt, dict):
+                receipt = {}
+        except (OSError, ValueError):
+            receipt = {}
+        digest = hashlib.sha256(self._proxy_filter().encode()).hexdigest()
+        attached = set(box.get("NetworkSettings", {}).get("Networks", {})) if box else set()
+        networks = attached | {self.network, "bridge"}
+        if "digest" not in receipt:
+            networks |= set(receipt.get("networks", []))
+        # The running proxy enforces this filter only when the receipt says so
+        # AND the daemon ties the receipt to the container in front of us.
+        # Without readable identity, the applied digest is absent. A failed
+        # field start-time read cannot stand in for the receipt's timestamp.
+        fields = present and box["_observed"] == "fields"
+        matches = (present and receipt.get("digest") == digest
+                   and box.get("Id")
+                   and receipt.get("container_id") == box["Id"]
+                   and (not fields or box["State"].get("StartedAt"))
+                   and receipt.get("started_at", "") == box["State"].get("StartedAt", "")
+                   and ((fields and "NetworkSettings" not in box) or networks <= attached))
+        if present:
+            # D14: old sources matter only when this container will start.
+            # A replacement uses current sources, but ST1-R2 still applies.
+            self._existing_mounts(self.proxy_container, box, check_start=bool(matches))
+        if matches:
+            if box["State"].get("Status") == "running":
+                return {"ok": True, "existed": True}
+            result = _run(["docker", "start", self.proxy_container])
+            if result.returncode:
+                return {"ok": False, "error": result.stderr.strip()[:400]}
+            started = self._inspect_container(self.proxy_container)
+            if started is None or started["State"].get("Status") != "running":
+                return {"ok": False, "error": "proxy did not start"}
+            receipt["started_at"] = started["State"].get("StartedAt", "")
+            self._write_proxy_receipt(receipt_path, receipt)
+            return {"ok": True, "started": True}
 
         config_dir = self.write_proxy_config(
             (self.config_dir or Path.home() / ".config" / "multiagents") / "proxy" / self.slug
         )
+        # Preserve the intended attachments across failures, but invalidate the
+        # digest before replacement. A partial startup is never accepted later.
+        self._write_proxy_receipt(receipt_path, {"networks": sorted(networks)})
+        if present:
+            result = _run(["docker", "rm", "-f", self.proxy_container])
+            if result.returncode:
+                return {"ok": False, "error": result.stderr.strip()[:400]}
+        sources = [config_dir / "tinyproxy.conf", config_dir / "filter"]
+        error = _missing_sources(sources)
+        if error:
+            return {"ok": False, "error": error}
         result = _run([
             "docker", "run", "-d", "--name", self.proxy_container,
             "--network", self.network,
-            "--restart", "unless-stopped",
+            "--restart", _restart_policy(sources),
             "-v", f"{config_dir / 'tinyproxy.conf'}:/etc/tinyproxy/tinyproxy.conf:ro",
             "-v", f"{config_dir / 'filter'}:/etc/tinyproxy/filter:ro",
             self.proxy_image,
@@ -2300,7 +2565,28 @@ sys.exit(rc)
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:400]}
         # Give the proxy a route out. The agent container never gets one.
-        _run(["docker", "network", "connect", "bridge", self.proxy_container])
+        for network in sorted(networks - {self.network}):
+            result = _run(["docker", "network", "connect", network, self.proxy_container])
+            if result.returncode:
+                return {"ok": False, "error": result.stderr.strip()[:400]}
+        box = self._inspect_container(self.proxy_container)
+        if box is not None and box.get("_observed") != "unobserved":
+            # Recorded only once the proxy is up and attached, so a startup
+            # that half-finished is never mistaken for an applied filter.
+            if (box["State"].get("Status") != "running"
+                    or (box["_observed"] == "json" and not box.get("Id"))
+                    or ((box["_observed"] == "json" or "NetworkSettings" in box)
+                        and not networks <= set(box.get("NetworkSettings", {}).get("Networks", {})))):
+                return {"ok": False, "error": "proxy startup or network attachment incomplete"}
+            receipt = {"networks": sorted(networks)}
+            if box.get("Id") and (box["_observed"] == "json" or box["State"].get("StartedAt")):
+                receipt.update(container_id=box["Id"], digest=digest,
+                               started_at=box["State"].get("StartedAt", ""))
+            self._write_proxy_receipt(receipt_path, receipt)
+        else:
+            # Lifecycle commands succeeded, but no identity can confirm a
+            # digest. Retain attachments for the next reconciliation only.
+            self._write_proxy_receipt(receipt_path, {"networks": sorted(networks)})
         return {"ok": True, "created": True}
 
     # The proxy speaks one upstream's protocol: it forwards to
@@ -2367,6 +2653,12 @@ sys.exit(rc)
         """
         if not self.auth_proxy_enabled():
             return {"ok": True, "skipped": "not enabled"}
+        try:
+            box = self._inspect_container(self.auth_container)
+            if box is not None:
+                self._existing_mounts(self.auth_container, box)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "error": str(exc)}
         vault = self.vault_state(self.AUTH_PROVIDER)[self.AUTH_PROVIDER]
         vault.mkdir(parents=True, exist_ok=True)
         # The secret must exist before the container reads it, and the host
@@ -2384,26 +2676,35 @@ sys.exit(rc)
         from ..authproxy import Accounts
         Accounts(vault, self.account_pins())
 
-        if self.container_state(self.auth_container) == "running":
+        if box is not None and box.get("_observed") != "unobserved":
+            if box["Mounts"] is None and box["State"].get("Status") == "running":
+                return {"ok": True, "existed": True}
             # Old sidecars have no config mount. Refuse to serve a new pin
             # through one; recreate it before the workspace admits a launch.
-            mounted = _run(["docker", "inspect", "--format",
-                            '{{range .Mounts}}{{println .Destination}}{{end}}',
-                            self.auth_container])
-            if "/proxy-config" in mounted.stdout.splitlines():
-                return {"ok": True, "existed": True}
-        _run(["docker", "rm", "-f", self.auth_container])
+            if any(m.get("Destination") == "/proxy-config" for m in box["Mounts"]):
+                if box["State"].get("Status") == "running":
+                    return {"ok": True, "existed": True}
+                result = _run(["docker", "start", self.auth_container])
+                return {"ok": result.returncode == 0, "started": result.returncode == 0,
+                        "error": result.stderr.strip()[:400]}
+            result = _run(["docker", "rm", "-f", self.auth_container])
+            if result.returncode:
+                return {"ok": False, "error": result.stderr.strip()[:400]}
         # Neutral paths inside, unlike everywhere else here. The identical-path
         # rule exists so git can resolve a worktree; this container has no
         # worktree and no git, and mounting the package over its own deep host
         # path only invites the parent directories to be created by docker and
         # owned by root.
         source = Path(__file__).resolve().parent.parent     # .../multiagents
+        sources = [vault, proxy_config, source]
+        error = _missing_sources(sources)
+        if error:
+            return {"ok": False, "error": error}
         result = _run([
             "docker", "run", "-d", "--name", self.auth_container,
             "--network", self.network,
             "--user", f"{os.getuid()}:{os.getgid()}",
-            "--restart", "unless-stopped",
+            "--restart", _restart_policy(sources),
             "-v", f"{vault}:/vault:ro",
             "-v", f"{proxy_config}:/proxy-config:ro",
             "-v", f"{source}:/opt/ma/multiagents:ro",
@@ -2471,11 +2772,15 @@ sys.exit(rc)
     # --- workspace container ----------------------------------------------
 
     def run_args(self) -> list[str]:
+        private = self.backing()
+        mounts = self.mounts()
+        server_mounts = self.server_mounts(mounts)
+        sources = [private.get(path, path) for path, _ in mounts] + server_mounts
         argv = [
             "docker", "run", "-d", "--init", "--name", self.container,
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--workdir", str(self.paths.root) if self.paths else "/workspace",
-            "--restart", "unless-stopped",
+            "--restart", _restart_policy(sources),
             # What `inside` recognises the container by, from within it.
             "--env", f"MULTIAGENTS_CONTAINER={self.container}",
         ]
@@ -2490,14 +2795,12 @@ sys.exit(rc)
             if value:
                 argv += [flag, str(value)]
 
-        private = self.backing()
-        mounts = self.mounts()
         for path, read_only in mounts:
             source = private.get(path, path)
             argv += ["-v", f"{source}:{path}" + (":ro" if read_only else "")]
         # Added here and not in `mounts()`, which lists what a container is
         # owed: these are best effort (see `server_mounts`).
-        for path in self.server_mounts(mounts):
+        for path in server_mounts:
             argv += ["-v", f"{path}:{path}:ro"]
 
         if self.network_mode == "allowlist":
@@ -2543,14 +2846,20 @@ sys.exit(rc)
         errors = self._depth_errors()
         if errors:
             return {"ok": False, "error": "; ".join(errors)}
+        if not docker_available():
+            return {"ok": False, "error": "docker is not on PATH"}
+        try:
+            box = self._inspect_container(self.container)
+            if box is not None:
+                self._existing_mounts(self.container, box)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "error": str(exc)}
         # Before anything is created or started: a container must never run
         # with a protected path missing, and a project it cannot protect is
         # refused outright (SG-R2).
         error = self.protect_project()
         if error:
             return {"ok": False, "error": error}
-        if not docker_available():
-            return {"ok": False, "error": "docker is not on PATH"}
         self.seed_private_state()
         self.refresh_private_credentials()
         self.project_placeholder()
@@ -2568,8 +2877,9 @@ sys.exit(rc)
             if not auth.get("ok"):
                 return {"ok": False, "error": f"auth proxy: {auth.get('error')}"}
 
-        state = self.container_state(self.container)
-        stale = self.stale_mounts()
+        state = box["State"].get("Status") if box else "absent"
+        stale = (self.stale_mounts() if box is not None
+                 and box.get("_observed") != "unobserved" else [])
         if stale:
             # A mount list is fixed when a container is CREATED. Starting an
             # old one back up gives you the mounts it was born with, so a
@@ -2603,16 +2913,24 @@ sys.exit(rc)
                                 "docker up`. That ends any agent still inside.")}
         if state == "running":
             return {"ok": True, "container": self.container, "existed": True}
-        if state in ("exited", "created", "paused"):
+        # A successful inspect without readable state still names an existing
+        # container. Start it through Docker rather than inferring a new one;
+        # Docker also accepts start for a container that is already running.
+        if state in ("exited", "created", "paused", "unknown"):
             result = _run(["docker", "start", self.container])
             if result.returncode == 0:
                 return {"ok": True, "container": self.container, "started": True}
-            _run(["docker", "rm", "-f", self.container])
+            return {"ok": False, "error": result.stderr.strip()[:600]}
 
         try:
             argv = self.run_args()
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        sources = [argv[index + 1].split(":", 1)[0] for index, token in enumerate(argv[:-1])
+                   if token == "-v"]
+        error = _missing_sources(sources)
+        if error:
+            return {"ok": False, "error": error}
         result = _run(argv, timeout=300)
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:600]}

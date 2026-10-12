@@ -232,6 +232,9 @@ def test_dk_r4b_sidecar_pins_derive_from_config_and_reload(rig, monkeypatch):
     monkeypatch.setattr(rig.ex, "container_state", lambda _: "missing")
     def run(argv, **kwargs):
         calls.append(argv)
+        # ST1-R3 / D11: this fake daemon has no existing auth sidecar.
+        if argv[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such container")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
     monkeypatch.setattr(docker, "_run", run)
     assert rig.ex.ensure_auth_proxy()["created"]

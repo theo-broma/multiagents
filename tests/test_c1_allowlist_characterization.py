@@ -62,13 +62,12 @@ def test_parent_domain_of_a_listed_subdomain_is_refused(tmp_path):
 
 
 def test_case_of_entry_and_host_does_not_affect_the_decision(tmp_path):
-    """The raw generated pattern preserves the entry's original case, but
-    `allowlist_admits` matches case-insensitively — consistent with tinyproxy
-    being configured `FilterCaseSensitive Off`."""
+    """ST9 lowercases entries; tinyproxy still matches hosts case-insensitively."""
     allowlist = ["Example.COM"]
-    assert h.filter_patterns(tmp_path, allowlist) == [r"(^|\.)Example\.COM$"]
     assert h.allowlist_admits(tmp_path, allowlist, "example.com")
     assert h.allowlist_admits(tmp_path, allowlist, "EXAMPLE.COM")
+    assert h.allowlist_admits(tmp_path, allowlist, "API.EXAMPLE.COM")
+    assert not h.allowlist_admits(tmp_path, allowlist, "EVIL-EXAMPLE.COM")
 
 
 def test_duplicate_entries_produce_duplicate_lines_but_no_behavior_change(tmp_path):
@@ -78,19 +77,25 @@ def test_duplicate_entries_produce_duplicate_lines_but_no_behavior_change(tmp_pa
     assert h.allowlist_admits(tmp_path, allowlist, "example.com")
 
 
-def test_very_long_entry_is_handled_with_no_truncation_or_error(tmp_path):
+def test_very_long_entry_is_handled_with_no_truncation_or_error(tmp_path, capsys):
+    """ST9 drops an overlong single label with its full name in the diagnostic."""
     long_host = "x" * 300
     allowlist = [long_host]
-    assert h.allowlist_admits(tmp_path, allowlist, long_host)
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert long_host in diagnostic and "IDNA" in diagnostic
+    assert not h.allowlist_admits(tmp_path, allowlist, long_host)
+    assert not h.allowlist_admits(tmp_path, allowlist, "x" * 63)
     assert not h.allowlist_admits(tmp_path, allowlist, "short.com")
 
 
-def test_unicode_host_is_matched_literally_including_its_subdomains(tmp_path):
-    """A raw-unicode entry (not punycode) works the same way an ASCII entry
-    does — matched as a literal string, admitting subdomains the same way."""
+def test_unicode_host_is_matched_as_idna_including_its_subdomains(tmp_path):
+    """ST9 normalizes the Unicode entry to an IDNA A-label before matching."""
     allowlist = ["例え.jp"]
-    assert h.allowlist_admits(tmp_path, allowlist, "例え.jp")
-    assert h.allowlist_admits(tmp_path, allowlist, "sub.例え.jp")
+    assert h.allowlist_admits(tmp_path, allowlist, "xn--r8jz45g.jp")
+    assert h.allowlist_admits(tmp_path, allowlist, "sub.xn--r8jz45g.jp")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil-xn--r8jz45g.jp")
+    assert not h.allowlist_admits(tmp_path, allowlist, "xn--r8jz45g.jp.evil.com")
 
 
 def test_punycode_idn_form_is_matched_literally(tmp_path):
@@ -98,14 +103,13 @@ def test_punycode_idn_form_is_matched_literally(tmp_path):
     assert h.allowlist_admits(tmp_path, allowlist, "xn--nxasmq6b.xn--fiqs8s")
 
 
-def test_ip_address_entry_matches_the_exact_address_and_dotted_suffixes(tmp_path):
-    """An IP address is escaped and anchored exactly like a hostname — the
-    dots in it get the same `\\.` escaping and the same subdomain-shaped
-    prefix rule, since nothing distinguishes an IP entry from a hostname
-    entry in this code path."""
+def test_ip_address_entry_matches_only_the_exact_address(tmp_path):
+    """ST9/F10 accepts whole IPv4 addresses with exact matching only."""
     allowlist = ["192.168.1.1"]
     assert h.allowlist_admits(tmp_path, allowlist, "192.168.1.1")
-    assert h.allowlist_admits(tmp_path, allowlist, "x.192.168.1.1")
+    assert not h.allowlist_admits(tmp_path, allowlist, "x.192.168.1.1")
+    assert not h.allowlist_admits(tmp_path, allowlist, "192.168.1.10")
+    assert not h.allowlist_admits(tmp_path, allowlist, "192.168.1.1.evil.com")
 
 
 # ---------------------------------------------------------------------------
@@ -118,80 +122,65 @@ def test_empty_allowlist_denies_everything(tmp_path):
     assert not h.allowlist_admits(tmp_path, [], "")
 
 
-def test_empty_string_entry_produces_a_pattern_matching_only_a_trailing_dot(tmp_path):
-    """An empty-string entry generates the line `(^|\\.)$`, which does not
-    match an ordinary host, but does match a host with a literal trailing dot
-    (the FQDN root-dot form) and matches the empty string itself."""
+def test_empty_string_entry_is_dropped_with_a_diagnostic(tmp_path, capsys):
+    """ST9 normalization leaves no filter line for an empty entry."""
     allowlist = [""]
-    assert h.filter_patterns(tmp_path, allowlist) == [r"(^|\.)$"]
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert "''" in diagnostic and any(word in diagnostic for word in ("empty", "blank"))
     assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "example.com.")
-    assert h.allowlist_admits(tmp_path, allowlist, "")
+    assert not h.allowlist_admits(tmp_path, allowlist, "example.com.")
+    assert not h.allowlist_admits(tmp_path, allowlist, "")
 
 
 # ---------------------------------------------------------------------------
-# F10 — bare/short suffix entries act as a wildcard over every host sharing
-# that suffix, including an entire public suffix like a TLD.
+# F10 — ST9 drops bare labels and IP fragments instead of granting a
+# wildcard over the namespace or addresses sharing that suffix.
 # ---------------------------------------------------------------------------
 
-def test_bare_public_suffix_entry_admits_every_host_under_that_suffix(tmp_path):
-    """F10: a bare TLD entry (a very plausible typo, or a misguided attempt
-    to allow 'anything .com') is not rejected or special-cased — it produces
-    `(^|\\.)com$`, which admits `com` itself, AND every domain ending in
-    `.com`, because the anchoring rule that lets `example.com` correctly cover
-    `api.example.com` has no floor on how short or generic the listed label
-    sequence is. One entry `com` silently grants egress to the entire `.com`
-    namespace."""
+def test_bare_public_suffix_entry_is_dropped_and_denies_its_namespace(tmp_path, capsys):
+    """ST9/F10 refuses a bare TLD instead of granting the entire namespace."""
     allowlist = ["com"]
-    assert h.filter_patterns(tmp_path, allowlist) == [r"(^|\.)com$"]
-    assert h.allowlist_admits(tmp_path, allowlist, "com")
-    assert h.allowlist_admits(tmp_path, allowlist, "example.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "evil.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "attacker-controlled.com")
-    # It is a suffix match, not a substring match, so a name merely
-    # containing "com" without a dot boundary is still refused.
-    assert not h.allowlist_admits(tmp_path, allowlist, "com.evil.net")
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert "'com'" in diagnostic and any(word in diagnostic for word in ("single", "suffix"))
+    for host in ("com", "example.com", "evil.com", "attacker-controlled.com", "com.evil.net"):
+        assert not h.allowlist_admits(tmp_path, allowlist, host)
 
 
-def test_short_generic_entry_admits_unrelated_hosts_sharing_it_as_a_suffix(tmp_path):
-    """F10 (same root cause): a short, IP-fragment-shaped entry like `1.1`
-    (e.g. meant as shorthand, or a typo dropping the first two octets of an
-    internal address) matches any host ending in `.1.1` — including an
-    unrelated public IP address that merely happens to end that way."""
+def test_short_ip_fragment_entry_is_dropped_and_denies_addresses_ending_in_it(tmp_path, capsys):
+    """ST9/F10 refuses a numeric fragment instead of matching unrelated IPv4."""
     allowlist = ["1.1"]
-    assert h.allowlist_admits(tmp_path, allowlist, "1.1")
-    assert h.allowlist_admits(tmp_path, allowlist, "192.168.1.1")
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert "1.1" in diagnostic and "fragment" in diagnostic
+    assert not h.allowlist_admits(tmp_path, allowlist, "1.1")
+    assert not h.allowlist_admits(tmp_path, allowlist, "192.168.1.1")
+    assert not h.allowlist_admits(tmp_path, allowlist, "x.1.1")
 
 
 # ---------------------------------------------------------------------------
-# F11 — malformed-looking entries silently match nothing: no trimming, no
-# normalization, no validation error. The operator gets a dead entry with no
-# signal that it is dead.
+# F11 — ST9 normalization now diagnoses a leading dot and removes a trailing
+# dot. Whitespace, ports and URLs retain the deferred F11 behavior below.
 # ---------------------------------------------------------------------------
 
-def test_leading_or_trailing_dot_on_an_entry_makes_it_match_no_ordinary_host(tmp_path):
-    """F11: a leading dot is a common way to write 'this host and all its
-    subdomains' in other allowlist syntaxes (e.g. cookie domains, nginx
-    server_name). Here it is not special-cased — `.` is escaped like any
-    other character in the entry, so `.example.com` requires a LITERAL double
-    dot (`..example.com`) or a leading dot at the very start of the host to
-    match, neither of which any real hostname has. The entry matches nothing
-    a real request would ever send."""
+def test_leading_dot_on_an_entry_is_dropped_with_a_diagnostic(tmp_path, capsys):
+    """ST9 IDNA normalization refuses a leading empty label, keeping F11 inert."""
     allowlist = [".example.com"]
-    assert h.filter_patterns(tmp_path, allowlist) == [r"(^|\.)\.example\.com$"]
-    assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
-    assert not h.allowlist_admits(tmp_path, allowlist, "sub.example.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "..example.com")
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert ".example.com" in diagnostic and "IDNA" in diagnostic
+    for host in ("example.com", "sub.example.com", ".example.com", "..example.com"):
+        assert not h.allowlist_admits(tmp_path, allowlist, host)
 
 
-def test_trailing_dot_on_an_entry_makes_it_match_only_the_fqdn_root_dot_form(tmp_path):
-    """F11: same mechanism as the leading-dot case, mirrored — an entry
-    written with a trailing dot (a technically-valid FQDN form some tools
-    emit) requires the destination host to ALSO carry that trailing dot to
-    match, which ordinary proxied requests do not."""
+def test_trailing_dot_on_an_entry_is_normalized_before_matching(tmp_path):
+    """ST9 removes the entry's root dot and preserves ordinary domain semantics."""
     allowlist = ["example.com."]
-    assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "example.com.")
+    assert h.allowlist_admits(tmp_path, allowlist, "example.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "api.example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "example.com.")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil-example.com")
 
 
 def test_leading_or_trailing_whitespace_on_an_entry_makes_it_match_nothing(tmp_path):
@@ -225,11 +214,10 @@ def test_entry_with_a_scheme_and_path_never_matches_the_bare_host(tmp_path):
 # The two tests below were also filed under F11, by a different mechanism:
 # `^`, `$` and `\` reached ERE unescaped and made the entry unsatisfiable.
 # R12 (context/specs/phase2-ere-escaping.md) escapes all three as part of the
-# same table, so that mechanism is gone and both are inverted below. The five
-# F11 tests above are untouched and still pass — a leading dot, a trailing
-# dot, stray whitespace, a `:port` and a full URL still produce an entry that
-# matches no real host, with no signal that it is inert. F11 is narrowed by
-# R12, not closed by it.
+# same table, so that mechanism is gone and both are inverted below. ST9
+# separately supersedes the leading/trailing-dot cases above. Whitespace, a
+# `:port` and a full URL still produce entries matching no real host. General
+# hostname validation remains deferred; the R12 escaping guards still apply.
 
 
 def test_embedded_caret_or_dollar_in_an_entry_is_matched_as_a_literal_character(tmp_path):

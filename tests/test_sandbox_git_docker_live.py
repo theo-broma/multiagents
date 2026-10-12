@@ -178,7 +178,11 @@ class Live:
         try:
             self.p.cleanup()
         finally:
-            subprocess.run(["docker", "rm", "-f", self.container], capture_output=True)
+            for name in (self.container, f"multiagents-proxy-{self.p.paths.slug}",
+                         f"multiagents-auth-{self.p.paths.slug}"):
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=5)
+            subprocess.run(["docker", "network", "rm", f"multiagents-net-{self.p.paths.slug}"],
+                           capture_output=True, timeout=5)
 
     # --- the oracle --------------------------------------------------------
 
@@ -218,7 +222,7 @@ def finishing(sid: str = SID) -> list:
 
 
 @pytest.fixture
-def live(tmp_path):
+def live(tmp_path, st_live_docker):
     made: list[Live] = []
 
     def build(**kw) -> Live:

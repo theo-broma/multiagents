@@ -1,7 +1,7 @@
 """OA-R1, OA-R2: the root's quota check and wait read the host profile it runs on.
 
 Black box: `multiagents run --unattended` as a subprocess over a fake machine
-(tests/support/oa_world.py). A fake docker (exits 0) lets the project use the
+(tests/support/oa_world.py). A fake Docker with no existing containers lets the project use the
 docker executor; the fake vault disagrees with the host profiles on purpose.
 Long sleeps are virtual (tests/support/oa_site).
 """
@@ -19,7 +19,10 @@ HOURS = 3600
 @pytest.fixture
 def world(tmp_path):
     w = World(tmp_path)
-    w.add_provider("claude-b", account="b")
+    # OA exercises the root's host profile, which does not need a container
+    # account pin. Pins already required auth_proxy before ST1-R3 made run
+    # ensure the workspace; keep this auth_proxy-disabled fixture valid.
+    w.add_provider("claude-b", extra='    container_private_home: [".claude-claude-b"]\n')
     w.project_set("", executor="docker")
     return w
 

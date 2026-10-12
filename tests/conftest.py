@@ -43,10 +43,16 @@ from __future__ import annotations
 
 import inspect
 import os
+import sys
 import urllib.error
 from pathlib import Path
 
 import pytest
+
+sys.path.append(str(Path(__file__).resolve().parent / "support"))
+import st_container_guard
+from st_container_guard import st_docker_guard, st_live_docker, pytest_configure_node  # noqa: F401
+from st_docker_isolation import st_docker_daemon_is_opt_in, st_unavailable_docker  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -270,9 +276,11 @@ def pytest_sessionstart(session):
         sys.path.append(support)            # last: shadows nothing
     import scheduler_owner
     scheduler_owner.session_sweep()
+    st_container_guard.pytest_sessionstart(session)
 
 
 def pytest_configure(config):
+    st_container_guard.pytest_configure(config)
     config.addinivalue_line("markers", "slow: integration checks that run nested suites or require real time")
     config.addinivalue_line(
         "markers",

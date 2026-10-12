@@ -22,7 +22,7 @@ What these tests read, and why each is fair game:
   file under `runs/<id>/` for the lines, SV-R5 and SV-R7 are tested by their
   consequences.
 
-Docker variants (SV-R1, SV-R4) are opt-in: `SV_TEST_DOCKER=1` with a working
+Docker variants (SV-R1, SV-R4) are opt-in: `SG_TEST_DOCKER=1 SV_TEST_DOCKER=1` with a working
 docker daemon and project container. They skip otherwise.
 """
 
@@ -56,7 +56,7 @@ EXECUTORS = [
 
 
 @pytest.fixture
-def project(tmp_path):
+def project(tmp_path, st_live_docker):
     made: list[h.Project] = []
 
     def build(**kw) -> h.Project:

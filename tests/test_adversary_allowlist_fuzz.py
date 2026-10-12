@@ -20,22 +20,23 @@ import c1_harness as h  # noqa: E402
 # Boundary values — hosts the suite never tests
 # ---------------------------------------------------------------------------
 
-def test_host_with_consecutive_dots(tmp_path):
-    """A host with consecutive dots is not a valid DNS name, but what does
-    the allowlist do with it?"""
+def test_host_with_consecutive_dots(tmp_path, capsys):
+    """ST9 normalization refuses empty IDNA labels rather than emitting a regex."""
     allowlist = ["example..com"]
-    patterns = h.filter_patterns(tmp_path, allowlist)
-    assert patterns == [r"(^|\.)example\.\.com$"]
-    assert h.allowlist_admits(tmp_path, allowlist, "example..com")
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert "example..com" in diagnostic and "IDNA" in diagnostic
+    assert not h.allowlist_admits(tmp_path, allowlist, "example..com")
     assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
 
 
-def test_host_with_only_dots(tmp_path):
-    """A host of only dots."""
+def test_host_with_only_dots(tmp_path, capsys):
+    """ST9 normalization drops an entry consisting solely of empty labels."""
     allowlist = ["..."]
-    patterns = h.filter_patterns(tmp_path, allowlist)
-    assert patterns == [r"(^|\.)\.\.\.$"]
-    assert h.allowlist_admits(tmp_path, allowlist, "...")
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert "'...'" in diagnostic and "IDNA" in diagnostic
+    assert not h.allowlist_admits(tmp_path, allowlist, "...")
     assert not h.allowlist_admits(tmp_path, allowlist, "..")
 
 
@@ -46,36 +47,49 @@ def test_host_with_underscore(tmp_path):
     assert h.allowlist_admits(tmp_path, allowlist, "sub.my_host.example.com")
 
 
-def test_ipv6_loopback(tmp_path):
-    """IPv6 addresses use colons, not dots. How does the allowlist handle them?"""
+def test_ipv6_loopback(tmp_path, capsys):
+    """ST9 keeps IPv6 unsupported and reports its omission from the filter."""
     allowlist = ["::1"]
-    patterns = h.filter_patterns(tmp_path, allowlist)
-    # Colons are not escaped, so the pattern is literal
-    assert patterns == [r"(^|\.)::1$"]
-    assert h.allowlist_admits(tmp_path, allowlist, "::1")
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert "::1" in diagnostic and "IPv6" in diagnostic
+    assert not h.allowlist_admits(tmp_path, allowlist, "::1")
 
 
-def test_ipv6_full_address(tmp_path):
-    """A full IPv6 address."""
-    allowlist = ["2001:db8::1"]
-    assert h.allowlist_admits(tmp_path, allowlist, "2001:db8::1")
+def test_ipv6_full_address(tmp_path, capsys):
+    """Full IPv6 addresses are refused just like loopback (ST9-R1)."""
+    allowlist = ["2001:db8::1", "example.com"]
+    assert not h.allowlist_admits(tmp_path, allowlist, "2001:db8::1")
+    diagnostic = capsys.readouterr().err
+    assert "2001:db8::1" in diagnostic and "IPv6" in diagnostic
     assert not h.allowlist_admits(tmp_path, allowlist, "2001:db8::2")
+    assert h.allowlist_admits(tmp_path, allowlist, "api.example.com")
 
 
-def test_very_long_hostname(tmp_path):
-    """DNS hostnames are limited to 253 characters. What about longer?"""
+def test_very_long_hostname(tmp_path, capsys):
+    """ST9 IDNA normalization refuses an oversized label without truncating it."""
     long_host = "a" * 300 + ".com"
     allowlist = [long_host]
-    assert h.allowlist_admits(tmp_path, allowlist, long_host)
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    diagnostic = capsys.readouterr().err
+    assert long_host in diagnostic and "IDNA" in diagnostic
+    assert not h.allowlist_admits(tmp_path, allowlist, long_host)
     assert not h.allowlist_admits(tmp_path, allowlist, "a" * 299 + ".com")
 
 
-def test_hostname_at_dns_limit(tmp_path):
-    """A hostname at the DNS limit (253 chars)."""
-    host = "a" * 249 + ".com"  # 253 chars total
+def test_hostname_at_dns_limit(tmp_path, capsys):
+    """The total DNS limit does not excuse a label exceeding the IDNA limit."""
+    invalid = "a" * 249 + ".com"
+    assert len(invalid) == 253
+    assert h.filter_patterns(tmp_path, [invalid]) == []
+    diagnostic = capsys.readouterr().err
+    assert invalid in diagnostic and "IDNA" in diagnostic
+    assert not h.allowlist_admits(tmp_path, [invalid], invalid)
+    # Keep the original total-length boundary with individually valid labels.
+    host = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 57, "com"])
     assert len(host) == 253
-    allowlist = [host]
-    assert h.allowlist_admits(tmp_path, allowlist, host)
+    assert h.allowlist_admits(tmp_path, [host], host)
+    assert not h.allowlist_admits(tmp_path, [host], host.replace("a", "z", 1))
 
 
 def test_empty_host_string(tmp_path):
@@ -119,34 +133,35 @@ def test_host_with_at_sign(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_unicode_nfc_vs_nfd(tmp_path):
-    """Unicode can be normalized in different forms (NFC vs NFD). Are they
-    treated as equivalent?"""
+    """ST9 maps canonically equivalent Unicode entries to the same IDNA host."""
     import unicodedata
-    # é can be represented as a single character (NFC) or e + combining accent (NFD)
-    nfc = "café.com"  # single character é
-    nfd = unicodedata.normalize("NFD", nfc)  # e + combining accent
-    assert nfc != nfd  # They're different strings
-
-    allowlist = [nfc]
-    # The allowlist should match the exact string, not the normalized form
-    assert h.allowlist_admits(tmp_path, allowlist, nfc)
-    # NFD form is a different string, so it should not match
-    assert not h.allowlist_admits(tmp_path, allowlist, nfd)
+    nfc = "café.com"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    for entry in (nfc, nfd):
+        assert h.allowlist_admits(tmp_path, [entry], "xn--caf-dma.com")
+        assert h.allowlist_admits(tmp_path, [entry], "api.xn--caf-dma.com")
+        assert not h.allowlist_admits(tmp_path, [entry], "cafe.com")
+        assert not h.allowlist_admits(tmp_path, [entry], "evil-xn--caf-dma.com")
 
 
 def test_unicode_with_zero_width_space(tmp_path):
-    """A zero-width space in a hostname."""
-    host = "example\u200b.com"  # zero-width space
+    """ST9 IDNA normalization removes the zero-width space from the entry."""
+    host = "example\u200b.com"
     allowlist = [host]
-    assert h.allowlist_admits(tmp_path, allowlist, host)
-    assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "example.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "api.example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, host)
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil-example.com")
 
 
 def test_mixed_script_hostname(tmp_path):
-    """A hostname with mixed scripts (Latin + Cyrillic)."""
+    """ST9 mixed-script entries match their IDNA form without admitting lookalikes."""
     host = "exampleпример.com"
     allowlist = [host]
-    assert h.allowlist_admits(tmp_path, allowlist, host)
+    assert h.allowlist_admits(tmp_path, allowlist, "xn--example-ehg0a4b5amd.com")
+    assert h.allowlist_admits(tmp_path, allowlist, "api.xn--example-ehg0a4b5amd.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
 
 
 # ---------------------------------------------------------------------------
@@ -260,30 +275,24 @@ def test_entry_with_character_class_is_accepted_and_matches_only_itself(tmp_path
 # Fuzzing with random inputs
 # ---------------------------------------------------------------------------
 
-def test_fuzz_random_hosts_against_random_allowlists(tmp_path):
-    """Fuzzing: generate random hosts and allowlists, check properties hold."""
+def test_fuzz_random_hosts_against_random_allowlists(tmp_path, capsys):
+    """ST9: random registrable domains round-trip; single labels fail closed."""
     import random
-    random.seed(42)  # Reproducible
-
+    random_source = random.Random(42)
     for _ in range(100):
-        # Generate a random allowlist
-        allowlist_size = random.randint(0, 5)
         allowlist = []
-        for _ in range(allowlist_size):
-            # Generate a random hostname-like string
-            parts = random.randint(1, 4)
-            host = ".".join(
-                "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789-", k=random.randint(1, 10)))
-                for _ in range(parts)
-            )
-            allowlist.append(host)
-
-        # Property: every host in the allowlist should be admitted
+        for _ in range(random_source.randint(0, 5)):
+            labels = ["a" + "".join(random_source.choices(
+                "abcdefghijklmnopqrstuvwxyz0123456789", k=random_source.randint(1, 10)))
+                for _ in range(random_source.randint(1, 4))]
+            allowlist.append(".".join([*labels, "example", "com"]))
+        refused = "a" + "".join(random_source.choices("abcdefghijklmnopqrstuvwxyz", k=10))
+        mixed = [*allowlist, refused]
         for host in allowlist:
-            assert h.allowlist_admits(tmp_path, allowlist, host), \
-                f"Failed: allowlist={allowlist}, host={host}"
-
-        # Property: an empty allowlist denies everything
-        if allowlist:
-            random_host = "test.example.com"
-            assert not h.allowlist_admits(tmp_path, [], random_host)
+            assert h.allowlist_admits(tmp_path, mixed, host), (mixed, host)
+            assert h.allowlist_admits(tmp_path, mixed, f"api.{host}"), (mixed, host)
+        assert not h.allowlist_admits(tmp_path, mixed, refused)
+        diagnostic = capsys.readouterr().err
+        assert refused in diagnostic and "single label" in diagnostic
+        assert not h.allowlist_admits(tmp_path, mixed, f"evil.{refused}")
+        assert not h.allowlist_admits(tmp_path, [], "test.example.com")

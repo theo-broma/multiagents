@@ -11,6 +11,7 @@ stderr, as the real exec wrapper does. It never succeeds whatever the argv is.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -65,7 +66,10 @@ def project(tmp_path, monkeypatch, *, entry, executor_cfg=None):
                                  extra_entry=entry, project_yaml=project_yaml)
     s.write_yaml(s.project_manifest_path(paths), s.runtime_manifest())
     # the host's PATH does not hold the CLI either
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    # Keep Docker isolated when narrowing PATH for the provider lookup.
+    # Doctor also inspects mount/credential drift through the real executor.
+    monkeypatch.setenv("PATH", os.pathsep.join((os.environ["ST_TEST_DOCKER_GUARD"],
+                       os.environ["ST_TEST_DOCKER_FALLBACK"], "/usr/bin", "/bin")))
     return paths
 
 

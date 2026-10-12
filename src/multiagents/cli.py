@@ -992,6 +992,7 @@ def _executor_problems(paths, config) -> list[str]:
         return []
     try:
         executor = _docker_executor(paths)
+        executor.report_allowlist_diagnostics()
         problems = executor.preflight()
         stale = executor.mount_drift()
         if stale:
@@ -1374,6 +1375,11 @@ def cmd_resume(args: argparse.Namespace) -> int:
     # orchestrator launch spends a network round trip on ground that rarely
     # moves. The orchestrator calls check_model_catalog when something suggests
     # it has.
+    if config.executor == "docker":
+        state = _docker_executor(paths).ensure_running()
+        if not state.get("ok"):
+            print(f"\nexecutor     {state.get('error')}", file=sys.stderr)
+            return 4
     return driver._launch_agent(paths, config, "orchestrator", resume=args.resume,
                          force=getattr(args, "force", False),
                          unattended=getattr(args, "unattended", 0),
@@ -1784,7 +1790,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # Invalid mount ownership also makes auth/budget reads ambiguous, so report
     # it before those sections attempt to select a private profile.
     if paths and config.executor == "docker":
-        conflicts = _docker_executor(paths).configuration_problems()
+        executor = _docker_executor(paths)
+        executor.report_allowlist_diagnostics()
+        conflicts = executor.configuration_problems()
         if conflicts:
             print("\ncontainer private state")
             for conflict in conflicts:

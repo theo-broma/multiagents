@@ -541,6 +541,14 @@ class Project:
                 os.kill(inv["pid"], signal.SIGKILL)
             except OSError:
                 pass
+        if self.executor == 'docker' and os.environ.get('ST_TEST_DOCKER_LIVE') == '1':
+            for name in (f'multiagents-{self.paths.slug}',
+                         f'multiagents-proxy-{self.paths.slug}',
+                         f'multiagents-auth-{self.paths.slug}'):
+                subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=5)
+            subprocess.run(['docker', 'network', 'rm', f'multiagents-net-{self.paths.slug}'],
+                           capture_output=True, timeout=5)
+
 
 
 def size(path: Path) -> int:
@@ -568,8 +576,8 @@ def stopped_growing(path: Path, timeout: float) -> bool:
 def docker_ready() -> str:
     """Why the docker variants cannot run here, or "" when they can."""
     import shutil
-    if os.environ.get("SV_TEST_DOCKER") != "1":
-        return "docker cases are opt-in: set SV_TEST_DOCKER=1 with a working container setup"
+    if os.environ.get("SG_TEST_DOCKER") != "1" or os.environ.get("SV_TEST_DOCKER") != "1":
+        return "docker cases are opt-in: set SG_TEST_DOCKER=1 SV_TEST_DOCKER=1 with a working container setup"
     if not shutil.which("docker"):
         return "no docker binary"
     probe = subprocess.run(["docker", "info"], capture_output=True, text=True)

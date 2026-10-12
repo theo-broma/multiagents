@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import time
 import types
@@ -49,6 +50,7 @@ from multiagents import budget as budget_mod  # noqa: E402
 from multiagents import cli, scripts  # noqa: E402
 from multiagents.config import AgentSpec  # noqa: E402
 from multiagents.executor.local import LocalExecutor  # noqa: E402
+from multiagents.executor import docker  # noqa: E402
 from multiagents.paths import ProjectPaths  # noqa: E402
 from multiagents.providers import load_providers  # noqa: E402
 from multiagents.runner import Run  # noqa: E402
@@ -64,6 +66,21 @@ def _clean_budget_cache():
     budget_mod.invalidate_cache()
     yield
     budget_mod.invalidate_cache()
+
+
+@pytest.fixture
+def unavailable_docker(monkeypatch, st_docker_guard):
+    """PS checks need an executor context, not a container launch (ST1-R4).
+
+    Keep the real executor/env construction and provider check scripts; a
+    fake unavailable daemon refuses the unrelated launch after recovery.
+    """
+    before = st_docker_guard.records()
+    monkeypatch.setattr(docker, "docker_available", lambda: "fixture-docker")
+    monkeypatch.setattr(docker, "_run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 127, "", "fixture daemon unavailable"))
+    yield
+    assert st_docker_guard.records() == before, "PS context checks must not invoke the Docker binary"
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +164,7 @@ def _docker_run(runner, node_id="ag-ctx01", agent="worker"):
 # ===========================================================================
 
 def test_1_a_block_from_the_container_context_survives_a_passing_host_check(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, unavailable_docker):
     """The failure was observed through the failed run's own (docker)
     executor, and the block records that context. The host's login is then
     repaired but the container's is not: the recovery probe asks the
@@ -182,7 +199,7 @@ def test_1_a_block_from_the_container_context_survives_a_passing_host_check(
     assert result.get("deferred") or result.get("error"), result
 
 
-def test_1_a_matching_context_recovers(tmp_path, monkeypatch):
+def test_1_a_matching_context_recovers(tmp_path, monkeypatch, unavailable_docker):
     """The other half of R4b: with the project executor in the same context
     as the recorded block, the probe's pass clears the group."""
     g = _group_runner(tmp_path, monkeypatch,
