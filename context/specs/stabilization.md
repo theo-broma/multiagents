@@ -423,3 +423,20 @@ Each implementer run gets a reviewer.
      key, nothing changes. The shipped opencode providers set it to `true`.
    - **ST6.** A clamped reply carries `timeout_clamped: true` and
      `effective_timeout`, the effective value in seconds.
+9. ST1 interfaces, decided on 2026-10-12 for tester ag-22488e:
+   - **Filesystem observation.** The seam is
+     `multiagents.executor.docker.filesystem_type(path: str) -> str | None`.
+     It returns the filesystem type of the resolved path (`tmpfs`, `ext4`,
+     ...), or `None` when the type is unknown. Tests monkeypatch it. The
+     volatility rule of ST1-R1 is computed from it together with the path
+     prefixes.
+   - **Test infrastructure belongs to the tester.** ST1-R4 (labels, reaper)
+     and ST1-R5 (the suite-wide guard) concern only containers the tests
+     create, so the tester builds them in `tests/` and `tests/support/`,
+     with any conftest hook needed. The owner label is
+     `multiagents.test.owner=<hostname>:<pid>:<start time>`, where the
+     start time is field 22 of `/proc/<pid>/stat`. The reaper's entry point
+     is a function in `tests/support/`, taking the container listing and
+     returning the containers to remove. The suite-wide guard is a
+     session-scoped autouse fixture that puts a recording `docker` shim
+     first on `PATH`.
