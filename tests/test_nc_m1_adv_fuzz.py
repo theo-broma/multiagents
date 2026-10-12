@@ -13,20 +13,58 @@ from __future__ import annotations
 import json
 import random
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
-from nc_harness import code, live, nc, stored  # noqa: E402,F401
+from nc_harness import nc, stored  # noqa: E402,F401
+from multiagents.scheduler.engine import Engine  # noqa: E402
+from multiagents.scheduler.rpc import Handler, Server, Service  # noqa: E402
+from multiagents.tree import now  # noqa: E402
 
 STEPS = 120
+SERVER_JOIN_TIMEOUT = 3
 
 
-def _plan(live):
+@pytest.fixture
+def plan_rpc(nc):
+    """Real RPC and store with background evaluation stopped (ST7, NC-R7).
+
+    These M1 tests attribute stored changes to a client write. A live engine
+    can independently admit simple nodes or advance composites between the
+    snapshots, even when that write was refused. Start and stop the real
+    engine while the plan is empty, then serve the same RPC with that engine
+    attached: only the test's requests can change the plan.
+    """
+    service = Service(nc.root, now())
+    service.store.initialize()
+    engine = Engine(service)
+    service.engine = engine
+    engine.start()
+    engine.stop()
+    nc.rpc_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with Server(str(nc.sock), Handler) as server:
+            server.service = service
+            thread = threading.Thread(
+                target=server.serve_forever, kwargs={"poll_interval": 0.05})
+            thread.start()
+            try:
+                yield nc
+            finally:
+                server.shutdown()
+                thread.join(timeout=SERVER_JOIN_TIMEOUT)
+                assert not thread.is_alive(), "plan RPC server did not stop"
+    finally:
+        nc.sock.unlink(missing_ok=True)
+
+
+def _plan(plan_rpc):
     return {n["id"]: {k: v for k, v in stored(n).items() if k != "plan_revision"}
-            for n in live.ok("list_nodes", {})["nodes"]}
+            for n in plan_rpc.ok("list_nodes", {})["nodes"]}
 
 
 def _subtree(nodes, root):
@@ -41,18 +79,18 @@ def _subtree(nodes, root):
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
-def test_adv_fuzz_run_token_never_touches_or_reads_outside_its_subtree(live, seed):
+def test_adv_fuzz_run_token_never_touches_or_reads_outside_its_subtree(plan_rpc, seed):
     rng = random.Random(seed)
-    outside = [live.create(task=f"outside {i}")["id"] for i in range(3)]
-    live.create(kind="group", children=[outside[0], outside[1]])
-    own = live.create(task="the run's node")["id"]
-    token = live.issue("run-f", own, {"read", "delegate", "verdict"})
-    before = _plan(live)
+    outside = [plan_rpc.create(task=f"outside {i}")["id"] for i in range(3)]
+    plan_rpc.create(kind="group", children=[outside[0], outside[1]])
+    own = plan_rpc.create(task="the run's node")["id"]
+    token = plan_rpc.issue("run-f", own, {"read", "delegate", "verdict"})
+    before = _plan(plan_rpc)
     foreign = set(before) - {own}
     junk = ["nd-00000000", "", None, 7, ["x"], {"node": "x"}]
 
     def pick():
-        current = list(_plan(live))
+        current = list(_plan(plan_rpc))
         mine = [i for i in current if i not in foreign]
         return rng.choice(mine * 3 + current + junk)
 
@@ -65,7 +103,7 @@ def test_adv_fuzz_run_token_never_touches_or_reads_outside_its_subtree(live, see
         args = {}
         if op == "create_node":
             args = {"kind": rng.choice(["simple", "group", "sequence"]),
-                    "plan_revision": live.plan_revision()}
+                    "plan_revision": plan_rpc.plan_revision()}
             if args["kind"] == "simple":
                 args.update(agent="worker", task="t")
             if rng.random() < 0.6:
@@ -78,7 +116,7 @@ def test_adv_fuzz_run_token_never_touches_or_reads_outside_its_subtree(live, see
             target = pick()
             rev = before.get(target, {}).get("revision", 1) if isinstance(target, str) else 1
             try:
-                rev = live.get(target)["revision"]
+                rev = plan_rpc.get(target)["revision"]
             except Exception:
                 pass
             args = {"id": target, "revision": rev}
@@ -98,9 +136,9 @@ def test_adv_fuzz_run_token_never_touches_or_reads_outside_its_subtree(live, see
                     "revision": 1, "name": "x"}
         if rng.random() < 0.3:
             args.update(caller="root", run_id="root")
-        reply = live.rpc(op, args, token)
+        reply = plan_rpc.rpc(op, args, token)
         accepted += reply.get("ok") is True and op in ("create_node", "update_node", "cancel_node")
-        now = _plan(live)
+        now = _plan(plan_rpc)
         for fid in foreign:
             assert now[fid] == before[fid], (
                 f"seed={seed} step={step} {op} {args} -> {reply}: changed {fid}\n"
@@ -153,16 +191,17 @@ def _acyclic_and_consistent(nodes):
 
 
 @pytest.mark.parametrize("seed", [11, 12])
-def test_adv_fuzz_root_writes_keep_the_plan_valid_or_leave_it_identical(live, seed):
+def test_adv_fuzz_root_writes_keep_the_plan_valid_or_leave_it_identical(plan_rpc, seed):
     rng = random.Random(seed)
     accepted = 0
     for step in range(STEPS):
-        plan = _plan(live)
+        before = plan_rpc.snapshot()
+        plan = {n["id"]: n for n in before["nodes"]}
         ids = list(plan) or ["nd-00000000"]
         op = rng.choice(["create", "create", "update", "cancel"])
         if op == "create":
             kind = rng.choice(["simple", "simple", "group", "sequence", "loop"])
-            args = {"kind": kind, "plan_revision": live.plan_revision()}
+            args = {"kind": kind, "plan_revision": before["plan_revision"]}
             if kind == "simple":
                 args.update(agent="worker", task="t")
             if rng.random() < 0.4:
@@ -174,21 +213,24 @@ def test_adv_fuzz_root_writes_keep_the_plan_valid_or_leave_it_identical(live, se
                 if kind == "loop":
                     args["loop"] = {"verdict_child": (args["children"] or ["x"])[-1],
                                     "max_rounds": rng.randint(0, 2)}
-            reply = live.rpc("create_node", args)
+            reply = plan_rpc.rpc("create_node", args)
         else:
             target = rng.choice(ids)
             rev = plan.get(target, {}).get("revision", 1)
             if op == "cancel":
-                reply = live.rpc("cancel_node", {"id": target, "revision": rev})
+                reply = plan_rpc.rpc("cancel_node", {"id": target, "revision": rev})
             else:
                 field = rng.choice(["depends_on", "children", "inputs"])
                 value = ([{"node": rng.choice(ids)}] if field != "children"
                          else rng.sample(ids, k=min(len(ids), rng.randint(0, 2))))
-                reply = live.rpc("update_node", {"id": target, "revision": rev, field: value})
-        after = _plan(live)
+                reply = plan_rpc.rpc("update_node", {"id": target, "revision": rev, field: value})
+        snapshot = plan_rpc.snapshot()
+        after = {n["id"]: n for n in snapshot["nodes"]}
         accepted += reply.get("ok") is True
         if reply.get("ok") is not True:
-            assert after == plan, f"seed={seed} step={step} refused {reply} but plan changed"
+            assert snapshot == before, (
+                f"seed={seed} step={step} refused {reply} but plan changed\n"
+                f"before={before}\nafter={snapshot}")
         try:
             _acyclic_and_consistent(after)
         except AssertionError as exc:
