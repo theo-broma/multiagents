@@ -408,3 +408,9 @@ Each implementer run gets a reviewer.
    folded in: ST1 volatility, owner protocol and missing sources; ST2
    applied digest; ST4 pending generations; ST5 call pairing and container
    observation; ST6 ack safety; ST7 manifest.
+7. The ST5 executor interface is `has_live_descendants(agent_id) -> bool |
+   None`, on the executor (local and docker). It answers whether a live
+   process descends from that agent's CLI in its execution environment.
+   `None`, or an exception, means the observation failed, and grants no
+   exemption. The tester proposed it (ag-9015b1) and the orchestrator
+   decided it on 2026-10-12.
