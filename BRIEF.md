@@ -5610,3 +5610,29 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - ~19:00Z Also removed 2 live containers leaked by my combo5 suite run (multiagents-proj-09e6c646 and multiagents-proxy-proj-09e6c646, created 20:22 CEST, unlabelled, unless-stopped) and their network. The host is back to 3 containers and 5 networks. After combo6, re-check that nothing leaked.
 - ~19:50Z The final host suite (combo6) is clean: 70 phase2 reds, nc_m2 r12 flake (3/3 serial passes), no guard ERROR, no Docker leak (3 containers, 5 networks). nd-188720dd round 6 green (tip 99a18d7f, 1046 passed). The audit outside the PSL is clean, but public_suffix_list.dat holds 687 third-party names/emails in comments, which breaks the no-personal-data rule and would trip the guard. implementer-quick nd-0950c9d2 (codex) strips comments except the license header and section markers, with an identical rule set. Plan: reviewer on nd-0950c9d2, a full suite on main+its tip+83cbeced, then merge_node nd-0950c9d2 (the squash carries all of ST1/2/9, so main history never gets the emails) and nd-9734c7ba, then discard/dispose nd-188720dd (superseded), restart the daemon, close the batch.
 - ~20:00Z nd-0950c9d2 tip unusable: its readonly restore reverted the tests to main. Its own commit 1cbf5aaa is correct (MPL header and markers kept, 0 emails, rules identical: 10,336 lines, checked by me). nd-188720dd round 7 takes those 2 files with `git checkout 1cbf5aaa -- ...`; reviewer nd-983650cc on 1cbf5aaa. Final suite on the same tree in /var/tmp/combo7 (log /var/tmp/combo7.log, bg 16208d885d5c). Then: audit, merge_node nd-188720dd then nd-9734c7ba, dispose nd-0950c9d2, restart the daemon, close the batch.
+
+**2026-10-12 ~20:45Z: stabilization batch DONE.** ST1/ST2/ST9 merged in 0d5ada79 (nd-188720dd) and the default googleapis narrowing in 3e2bbf05 (nd-9734c7ba). Evidence: adversary + 2 review rounds + PSL strip review; final host suite at 70 phase2 reds (+ nt_part2 flake, 3/3 serial); live Docker checks 2/2; no Docker leak. Daemon restarted at 20:42Z (pid 481285). F10 set `fixed`; F120 was already `fixed` (161f75fe). Baseline manifest is now 70 phase2 reds. All of ST1-ST9 are merged.
+- Cleanup still open, non-blocking: superseded or used nodes whose branches stay retained: nd-0950c9d2 (its readonly restore reverted tests, NEVER merge it), and the tester/adversary nodes nd-523a1471, nd-97059b36, nd-9d25e013, nd-0755bb3a, nd-4fcb8d58, nd-dc6817ff' testers. dispose_node them when convenient. /var/tmp/main-host is the orchestrator's worktree: remove it.
+- Proxy: the narrowed allowlist in .multiagents/config/project.yaml (googleapis to 5 hosts) is applied at the next agent launch (ST2-R1 now live). Watch the first agy run for egress denials to a *.googleapis.com host not in the list.
+- Tooling queue (for the next phase, not done):
+  - wait_for_agents reports no_run_yet for nodes that already ran, and returns on every false stuck flag;
+  - a node that goes back to `open` after a quota stop is not reported;
+  - an agent that merges another branch gets src/tests reverted at publish ("restore readonly paths"), and merging its tip back propagates the revert;
+  - the daemon must be restarted after merges;
+  - the doom-loop/wall-clock watchdogs fire on agents polling their own suite logs.
+- Left for triage: held nd-74628b22 (AU-R2 conflict) and nd-7866cea2 (SL-R10 revision race), open nd-65004b6a (reviewer under nd-b6b90957).
+- User action still pending: add fingerprint f8c4fcdc3fec9d79 to git.guard.allow_fingerprints before pushing.
+
+## Next phase (imported from context/plans/2026-10-12-stabilization.md)
+
+- **Triage of the 48 `open` findings with the user**, led by the five the report leads with. The high-severity findings in the docker executor and the proxies (F24, F30, F60, F61, F62) are decided **before** part 2, which rewrites that executor. Note: ST1/ST2 changed the docker executor and proxy today, so re-check each of these five against main first.
+- **Phase 7 part 2: one container per run**, specified with the user from `phase7-nodes-and-containers.md` (PAC-R*), as amended:
+  - tmux step 2 (tmux as the process supervisor; the user confirmed on 2026-10-10 that tmux stays, not Zellij);
+  - a live node view, for visibility only, with each node's diff, attach and shell; the scheduler and the orchestrator keep every decision;
+  - microVM isolation as an option to evaluate; still to check whether it runs on Linux without Docker Desktop.
+- **Still queued, not in this plan:**
+  - DJ-b (DJ-R7, needs real Stop-hook payloads);
+  - specs 2b (hang detection, stop attribution), 4b (publication) and 4c (short outputs with pagination);
+  - the kimi-k2.6 server errors at startup;
+  - the review's phases 2 and 3;
+  - the tooling queue above.

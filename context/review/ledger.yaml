@@ -70,8 +70,18 @@ findings:
         accepting any prefix, not the escaping.'
       sha: 019fdcfcb94095cbeb88b206af1f6c7a61089172
       status: scheduled
+    - by: orchestrator
+      note: Fixed by ST9 (context/specs/stabilization.md ST9-R1/R2, Decisions 5, 12,
+        14), merged in 0d5ada79 (node nd-188720dd). Single labels, public suffixes
+        per a pinned PSL snapshot (ICANN+private, wildcard and exception rules), wildcard
+        roots (run.app) and IPv4 fragments/non-canonical forms are refused with a
+        non-fatal diagnostic; whole IPv4 matches exactly. Adversary (ag-c9a624) and
+        two review rounds; full host suite at the 70-phase2 baseline. Shipped default
+        googleapis.com narrowed to five hosts in 3e2bbf05 (user-approved).
+      sha: 3e2bbf0574b72fac33cef5b3526fa8f37ce536ea
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: Bare or short generic suffix entries act as wildcards across unrelated
       hosts
   F100:
