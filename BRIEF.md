@@ -5532,3 +5532,18 @@ Per the plan, these are fixed before phase 7 part 2 is specified.
 - 21:20Z: TF tester nd-08969f20 (ag-8cdc2c, codex) reconciled the pre-TF tests (tests only, tip a409b0bf; never merge that node to main). Remaining genuine impl failures: C11 conversation_replaced x4, c16 prompt_transport reason, core recreated-worktree notice, phase0 opencode names in core failures.py, rr_settlement close with pending resume, scheduler copy-cost x2, tb_b capacity->throttle. TF implementer nd-a3944db2 relaunched (merge a409b0bf + these). Then: reviewer on 46806aac..tip, my full suite, audit, merge; then close nd-08969f20 unmerged.
 - 22:25Z: TF implementer ag-8e1c60 done (tip 79fa93a0; merged a409b0bf; all 8 defects fixed; 113 TF + 742 regression pass). Reviewer **nd-03fe0b65** on 46806aac..79fa93a0 (src). My detached full suite on main+TF (c71f45fd, /var/tmp/oc-wt-tf, scratchpad full-tf.txt). Then audit, merge_node nd-a3944db2, close tester nd-08969f20 unmerged, cleanup worktree and /var/tmp/pt-oc-tf.
 - 2026-10-12 ~00:00Z: **TF merged** as b13bfa9b (nd-a3944db2; reviewer ag-ceab6a approved 46806aac..79fa93a0, the 3 earlier blockers verified fixed; my full suite on main+TF = 85 failed, exactly the baseline: 72 phase2, 9 gg_r7_r9 + 2 oa env, sr + nc_m1_adv3 flakes; audit clean). Tester node nd-08969f20 left unmerged by design (its test commits reached main through TF). **Batch done: RR, TF, RM, PS2 and DJ all merged.** No plans, tickets or questions open. Queued, for the user to choose: DJ-b (R7, needs real Stop-hook background_tasks payloads), specs 2b/4b/4c, collect_agent false no_commits, kimi server errors at startup (tester pinned to codex meanwhile), doom-loop false alarms while agents poll their suites, wait_for_agents >30 min hits the MCP idle timeout (use <=1500 s), container restart policy, flaky sr/nc_m1_adv3, effort->variant mapping, egress proxy recreate, scheduler stop, gg/oa env reds on main.
+
+## Stabilisation batch (plan context/plans/2026-10-12-stabilization.md, applied 2026-10-12)
+
+Current work, before phase 7 part 2. Items ST1 to ST9 follow the plan's "Apply now" items 1 to 9:
+- ST1: no container restart policy for containers the tests create; the project container keeps `unless-stopped` only if no mount source can vanish at boot.
+- ST2: an `egress_allowlist` change takes effect by itself, by restarting only the proxy.
+- ST3: `effort` maps to opencode's `--variant`.
+- ST4: `collect_agent` reads the node branch.
+- ST5: a live child process or a tool start counts as watchdog activity.
+- ST6: waits are capped under the MCP idle timeout; `scheduler stop` reports truthfully; a researcher checks the remaining §4 defects.
+- ST7: flakes and environment reds are investigated; the target baseline is exactly the 72 `test_phase2_*` reds.
+- ST8: the fixture email becomes `f@example.invalid`, with a grep over `tests/`.
+- ST9: verify F120, and reproduce F10 (adversary if it is still present).
+
+Pipeline: tester, implementer, then a reviewer on every implementer run; test-only items go to a tester and a reviewer. Contracts go in `context/specs/stabilization.md`, shown to the user before commit. Order after the batch: triage of the open findings (F24, F30, F60, F61, F62 before part 2), then part 2. User action outside the plan: the fingerprint `f8c4fcdc3fec9d79` goes in `git.guard.allow_fingerprints`, set by the user only.
