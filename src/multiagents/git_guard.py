@@ -108,7 +108,7 @@ def _decode_key(raw: bytes) -> bytes | None:
     text = raw.strip()
     if not text:
         return None
-    for decode in (bytes.fromhex, base64.b64decode,
+    for decode in (lambda value: bytes.fromhex(value.decode("ascii")), base64.b64decode,
                    base64.urlsafe_b64decode):
         try:
             key = decode(text)
