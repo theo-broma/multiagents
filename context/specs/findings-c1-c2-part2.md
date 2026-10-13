@@ -221,7 +221,7 @@ mixing one of them with `a.example` still allowing `a.example`.
 refusal wins:
 1. the refusals made today on the raw entry (blank, control character),
    with today's wording;
-2. new raw-shape refusals: any whitespace character that is not already a
+2. new raw-shape refusals, checked in the order listed: any whitespace character that is not already a
    control character (`contains whitespace`), exactly one `:` followed by
    digits at the end (`contains a port`; an IPv6 address, having several
    `:`, keeps today's IPv6 refusal and wording), a leading `.`
