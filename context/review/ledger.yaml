@@ -220,8 +220,15 @@ findings:
         the five that remain rather than assuming the finding closed.'
       sha: 5bd61e06f937cf4a5005b7ac4398add08da705ca
       status: open
+    - by: initializer
+      note: 'Partly fixed by ST9 (leading dot, public suffixes, IPv6 refused) but
+        on main 67411d14 allowlist_entries still accepts " a.com" and "b.com:443"
+        as allowed hosts. Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item
+        1: refuse them with a diagnostic.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: Dead or malformed entries (leading/trailing dot, whitespace, port) silently
       match nothing
   F110:
@@ -301,8 +308,13 @@ findings:
       note: filed in context/review/C2-seam.md
       sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 6 (provider
+        seam).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`MULTIAGENTS_PROVIDER` in a script''s environment can name a different
       provider than the one whose script actually ran'
   F114:
@@ -315,8 +327,13 @@ findings:
       note: filed in context/review/C2-seam.md
       sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 2 (failure
+        classification, which TF now relies on).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: a timeout and a "script is not executable" `OSError` are indistinguishable
       by exit code
   F115:
@@ -329,8 +346,15 @@ findings:
       note: filed in context/review/C2-seam.md
       sha: f69077ce873bda0bad509dc0de04aefbb5ee87ab
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: a provider env: block referencing the computed
+        MULTIAGENTS_* values is a feature nobody needs today; scripts read those values
+        from their environment directly. Reopen if a provider needs to derive config
+        from them.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: accepted
     severity: low
-    status: open
+    status: accepted
     summary: a provider's `env:` block cannot reference the `MULTIAGENTS_*` values
       `build_env` just computed for that same call
   F12:
@@ -404,8 +428,16 @@ findings:
       note: filed in context/review/C2-budget.md
       sha: 7d0b747bdcd709258babb4f5c64569320f76e298
       status: open
+    - by: initializer
+      note: 'Still present on main fe47dc15. User decision 2026-10-13: a provider
+        never read is USABLE in both positions (preferred and fallback), consistent
+        with "unknown headroom is not no headroom"; the reason must say there is no
+        reading, never "has headroom". Plan context/plans/2026-10-13-findings-c1-c2-part1.md,
+        item 4.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`choose_provider` treats "this provider was never read" as usable when
       it''s the preferred slot, but as unusable when it''s a fallback — the same missing-entry
       state means opposite things depending on argument position'
@@ -447,8 +479,13 @@ findings:
       note: filed in context/review/C2-budget.md
       sha: 7d0b747bdcd709258babb4f5c64569320f76e298
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4 (quotas
+        and budget).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: A script's reported `headroom` is accepted with no range validation,
       so an out-of-range value (e.g. `1.5` or `-0.5`) produces a `Budget` with an
       internally inverted-looking severity
@@ -462,8 +499,13 @@ findings:
       note: filed in context/review/C2-budget.md
       sha: 7d0b747bdcd709258babb4f5c64569320f76e298
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4 (quotas
+        and budget), together with F142.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: An empty or field-less script response and a genuine parse failure both
       produce `known=False, severity="unknown"`, but only the parse failure carries
       an explanatory note
@@ -617,8 +659,13 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 6: refuse
+        an extends: naming a nonexistent parent at load.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: a provider whose `extends:` names a nonexistent parent is grouped into
       a "family" that does not exist, named after the missing parent
   F135:
@@ -631,8 +678,16 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: initializer
+      note: 'Still present on main fe47dc15 (opencode.sh:278 sed requires a non-digit
+        before the count). User decision 2026-10-13: a count at line start parses
+        normally; only output with no count at all stays unknown (exit 20), superseding
+        the older AU reading that kept line-start counts unknown. Plan context/plans/2026-10-13-findings-c1-c2-part1.md,
+        item 5; replaces held nodes nd-74628b22/nd-65004b6a.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`opencode.sh`''s credential-count extraction silently fails when the
       digit count opens the CLI''s line, reporting 1 instead of the real number'
   F136:
@@ -645,8 +700,14 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: initializer
+      note: Still present on main 67411d14 (characterization test passes); looks_like_auth_failure
+        now feeds TF classification (failures.py:160, runner.py:7652). Plan context/plans/2026-10-13-findings-c1-c2-part2.md,
+        item 2.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`looks_like_auth_failure`''s `"401"` marker is an unanchored substring
       match, not an HTTP-status match'
   F137:
@@ -659,8 +720,14 @@ findings:
       note: filed in context/review/C2-auth.md
       sha: 957b0e21533391f71f0c9b6aea23b0b4cc5c1903
       status: open
+    - by: initializer
+      note: Still present on main 67411d14 (characterization test passes); looks_like_auth_failure
+        now feeds TF classification. Plan context/plans/2026-10-13-findings-c1-c2-part2.md,
+        item 2.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`looks_like_auth_failure` does not recognize several plausible real-world
       authentication-failure phrasings'
   F14:
@@ -734,8 +801,14 @@ findings:
       note: filed in context/review/C2-audit.md
       sha: 0a8120ae3914bc25d207193d11242e111d50f92a
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: reading the small opencode auth.json on every
+        spawn costs little, and caching it risks routing on stale credentials after
+        a re-login. Reopen if profiling shows spawn latency from it.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: accepted
     severity: low
-    status: open
+    status: accepted
     summary: '`detect_opencode_subscription` reads the auth.json file from disk on
       every call with no caching, doing redundant I/O and `register_literal` work
       on every `read_opencode` invocation'
@@ -754,8 +827,13 @@ findings:
       note: filed in context/review/C2-audit.md
       sha: 0a8120ae3914bc25d207193d11242e111d50f92a
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4 (quotas
+        and budget), together with F124.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: '`read_claude` sets `source="cachedUsageUtilization"` at construction
       time, so when the cache file is missing AND the API fetch fails the returned
       Budget claims a source that never existed'
@@ -773,8 +851,13 @@ findings:
       note: filed in context/review/C2-audit.md
       sha: 0a8120ae3914bc25d207193d11242e111d50f92a
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4: write
+        models.yaml atomically (temp file + rename).'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: '`refresh_models` writes `models.yaml` directly to the target path with
       no atomic rename, so a crash or kill mid-write leaves a corrupt or truncated
       file that the next reader will see'
@@ -816,8 +899,14 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 5: tests
+        only (tester + reviewer, no implementer), pin the boundary so the mutation
+        fails.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: 'The `reserve` boundary is not pinned: a mutation from `>=` to `>` survives
       all 70 tests'
   F152:
@@ -830,8 +919,14 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 5: tests
+        only (tester + reviewer, no implementer), pin the boundary so the mutation
+        fails.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: Severity thresholds at 75 and 90 are not pinned, in two separate derivations
   F153:
     class: correctness
@@ -843,8 +938,14 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 5: tests
+        only (tester + reviewer, no implementer), pin the boundary so the mutation
+        fails.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: 'The cache TTL boundary is not pinned: `<` to `<=` survives all 70 tests'
   F154:
     class: correctness
@@ -882,8 +983,14 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 5: tests
+        only (tester + reviewer, no implementer), pin the boundary so the mutation
+        fails.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: The `usable` headroom boundary is pinned loosely enough that a shift
       from 0.02 to 0.021 passes
   F156:
@@ -896,8 +1003,13 @@ findings:
       note: filed in context/review/C2-budget-adversary.md
       sha: f65af6aa58f9a558045951a0f623fa2eeae7aff8
       status: open
+    - by: initializer
+      note: 'Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 5: tests
+        only, cover the two untested usable behaviours.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: Two `usable` behaviours are correct and completely untested
   F160:
     class: correctness
@@ -909,8 +1021,13 @@ findings:
       note: filed in context/review/C2-budget-implementation.md
       sha: 44585c13c19ba561c966d9e7fc823d8965112d15
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4 (claude
+        spend visible in budget_status), together with F161.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`budget_status`''s per-provider spend table cannot see claude spend'
   F161:
     class: maintainability
@@ -922,8 +1039,13 @@ findings:
       note: filed in context/review/C2-budget-implementation.md
       sha: 44585c13c19ba561c966d9e7fc823d8965112d15
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4, together
+        with F160.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: '`render()`''s per-node token label is blank for a claude run'
   F170:
     class: bug
@@ -935,8 +1057,16 @@ findings:
       note: filed in context/review/C3-consult.md
       sha: 9fd62e673d2e291e6c1af34d54a3568c8f2e7ad3
       status: open
+    - by: initializer
+      note: 'Fixed by TF-R5 (TF merged b13bfa9b): consult retries a crashed turn and
+        returns. Evidence: tests/test_tf_consult.py, 8 passed on main fe47dc15 (2026-10-13),
+        including test_tf_r5_crash_once_then_answer_replays_message_on_same_session
+        and the deadline/persistent-crash cases. User accepted this evidence without
+        a separate reproduction of the original free-retry path.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: fixed
     severity: high
-    status: open
+    status: fixed
     summary: '`consult()` never returns when its run is silently retried'
   F171:
     class: bug
@@ -948,8 +1078,14 @@ findings:
       note: filed in context/review/C2-budget.md
       sha: 9e4b1a51bbe08108bc76a4c7ce1565eb92819bd3
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 4; it distorts
+        routing (severity stuck at critical after the cooldown lapses), so it goes
+        first in that item.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`read_all`''s cooldown decoration lands on the shared cached `Budget`,
       so the note accumulates on every cache hit and `severity` stays pinned at `critical`
       after the cooldown has lapsed'
@@ -979,8 +1115,14 @@ findings:
         rather than one entry being non-string.'
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: open
+    - by: initializer
+      note: Still present on main 67411d14 (allowlist_entries([5]) raises AttributeError,
+        reproduced). Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 1
+        (sandbox and egress, with the adversary).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: A non-string `egress_allowlist` entry crashes container config generation
       with an uncaught `AttributeError`
   F20:
@@ -993,8 +1135,13 @@ findings:
       note: filed in context/review/C1-sandbox-authproxy.md
       sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 2 (failure
+        classification, which TF now relies on).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: Ordinary upstream errors (anything but 429/529) emit no `on_event` at
       all
   F200:
@@ -1145,8 +1292,13 @@ findings:
       note: filed in context/review/C1-sandbox-authproxy.md
       sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 1; to be done
+        together with or after F24 (part 1), which reworks _scrub.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`_scrub` only removes secret-*shaped* content; plain PII (organisation,
       email) in an upstream error body passes through completely unredacted'
   F22:
@@ -1159,8 +1311,12 @@ findings:
       note: filed in context/review/C1-sandbox-authproxy.md
       sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: The error-passthrough branch of `_forward` drops every upstream response
       header except a proxy-generated `content-type`/`content-length`
   F23:
@@ -1173,8 +1329,12 @@ findings:
       note: filed in context/review/C1-sandbox-authproxy.md
       sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: Every HTTP verb reaching the proxy is forwarded upstream as `POST`, including
       a literal `GET`
   F24:
@@ -1187,8 +1347,15 @@ findings:
       note: filed in context/review/C1-sandbox-authproxy.md
       sha: ae741b0e18b8b049be53938f84822ddda7eb0f2f
       status: open
+    - by: initializer
+      note: 'Still present on main fe47dc15 (authproxy.py:488-489 returns the raw
+        body). Plan context/plans/2026-10-13-findings-c1-c2-part1.md, item 1: on a
+        non-JSON body fall back to text redaction from redact.py. Also closes F71
+        (its duplicate).'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`_scrub` is a complete no-op on a non-JSON error body, bypassing even
       its shape-based patterns'
   F30:
@@ -1202,8 +1369,15 @@ findings:
       note: filed in context/review/C1-sandbox-executor.md
       sha: ad571a703d0407ddcccb603ac76baefe46ed384c
       status: open
+    - by: initializer
+      note: 'Still present on main fe47dc15 (mounts() dedup keeps the first entry,
+        the writable root). Plan context/plans/2026-10-13-findings-c1-c2-part1.md,
+        item 2: on a path collision read-only wins, or the config is refused; never
+        a silent downgrade.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: A read-only `extra_mounts` entry naming the project root is silently
       downgraded to writable
   F31:
@@ -1216,8 +1390,15 @@ findings:
       note: filed in context/review/C1-sandbox-executor.md
       sha: ad571a703d0407ddcccb603ac76baefe46ed384c
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: medium
-    status: open
+    status: deferred
     summary: Built-in mounts (root, worktrees, homes) are dropped with no warning
       if the directory doesn't exist yet when `mounts()` runs
   F32:
@@ -1230,8 +1411,15 @@ findings:
       note: filed in context/review/C1-sandbox-executor.md
       sha: ad571a703d0407ddcccb603ac76baefe46ed384c
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: low
-    status: open
+    status: deferred
     summary: '`pids_limit`/`cpus`/`memory` of `0` is indistinguishable from "not set";
       a negative value is passed to docker unvalidated'
   F33:
@@ -1271,8 +1459,15 @@ findings:
       note: filed in context/review/C1-sandbox-executor.md
       sha: ad571a703d0407ddcccb603ac76baefe46ed384c
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: medium
-    status: open
+    status: deferred
     summary: '`prepare_home` raises an uncaught `FileExistsError`/`PermissionError`
       if the target path is a pre-existing file, or its parent isn''t writable'
   F35:
@@ -1285,8 +1480,15 @@ findings:
       note: filed in context/review/C1-sandbox-executor.md
       sha: ad571a703d0407ddcccb603ac76baefe46ed384c
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: low
-    status: open
+    status: deferred
     summary: '`extra_mounts` string-form entries can never be marked read-only, and
       relative paths are never resolved'
   F50:
@@ -1444,8 +1646,15 @@ findings:
         with F2 in one change when someone schedules either.'
       sha: 383d9d5ada708e5f337b72534818fc2b01c695fc
       status: open
+    - by: initializer
+      note: 'Verified on main 67411d14 by the initializer (2026-10-13): DockerExecutor.allowlist_entries
+        iterates `self.config.get("egress_allowlist", []) or []`, so a null list yields
+        ([], []) with no exception (reproduced). Came with ST9. User validated the
+        triage.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: fixed
     severity: low
-    status: open
+    status: fixed
     summary: '`egress_allowlist: null` raises an uncaught `TypeError`'
   F56:
     class: maintainability
@@ -1499,8 +1708,14 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'Verified on main fe47dc15 by the initializer (2026-10-13): DockerExecutor.stop()
+        iterates (self.container, self.proxy_container, self.auth_container), src/multiagents/executor/docker.py:3014.
+        User validated the triage.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: fixed
     severity: high
-    status: open
+    status: fixed
     summary: '`stop()` never stops or removes the auth container'
   F61:
     class: bug
@@ -1512,8 +1727,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'Verified on main fe47dc15 by the initializer (2026-10-13): ensure_proxy
+        now checks every `docker network connect` and returns ok=False on failure
+        (src/multiagents/executor/docker.py:2569-2571), from ST2. User validated the
+        triage.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: fixed
     severity: high
-    status: open
+    status: fixed
     summary: '`ensure_proxy` returns success when bridge-network connect fails, leaving
       proxy isolated'
   F62:
@@ -1526,8 +1748,14 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'Still present on main fe47dc15 (docker.py:2718, unchecked `docker network
+        connect bridge` for the auth container). Plan context/plans/2026-10-13-findings-c1-c2-part1.md,
+        item 3: same fix as F61.'
+      sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
+      status: scheduled
     severity: high
-    status: open
+    status: scheduled
     summary: '`ensure_auth_proxy` returns success when bridge-network connect fails,
       leaving auth proxy isolated'
   F63:
@@ -1540,8 +1768,14 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: Characterization test test_credential_drift_shell_injects_paths still
+        passes on main 67411d14. Plan context/plans/2026-10-13-findings-c1-c2-part2.md,
+        item 1, with the adversary.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`credential_drift` interpolates paths into shell command without quoting'
   F64:
     class: architecture
@@ -1553,8 +1787,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: medium
-    status: open
+    status: deferred
     summary: '`ensure_running` performs filesystem and network side effects before
       verifying the image exists'
   F65:
@@ -1567,8 +1808,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: low
-    status: open
+    status: deferred
     summary: '`project_placeholder` leaves credential temp file on disk if interrupted'
   F66:
     class: maintainability
@@ -1580,8 +1828,12 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy).
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`Handler._event` silently swallows all exceptions from the event callback'
   F67:
     class: performance
@@ -1593,8 +1845,13 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy);
+        the backoff must stay consistent with TF's retry budget and quota holds.
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: scheduled
     severity: medium
-    status: open
+    status: scheduled
     summary: '`do_POST` retries rate-limited accounts with zero backoff'
   F68:
     class: performance
@@ -1606,8 +1863,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: at this project''s scale (about six concurrent
+        agents, a handful of accounts) unpinning every agent at once on mark_limited
+        causes no real thundering herd. Reopen if the agent count grows by an order
+        of magnitude.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: accepted
     severity: low
-    status: open
+    status: accepted
     summary: '`mark_limited` unpins all agents simultaneously, causing thundering
       herd'
   F69:
@@ -1620,8 +1884,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: low
-    status: open
+    status: deferred
     summary: '`seed_private_state` deletes lock files based on a TOCTOU-vulnerable
       PID check'
   F70:
@@ -1634,8 +1905,15 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: executor lifecycle defect; phase 7 part 2 (one
+        container per run) rewrites mounts and container lifecycle. The part 2 spec
+        must carry it as a requirement so the rewrite does not reproduce it. Reopen
+        as scheduled when part 2 is specified.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: deferred
     severity: low
-    status: open
+    status: deferred
     summary: '`Handle.stop` may SIGKILL a reassigned process group after timeout'
   F71:
     class: security
@@ -1669,8 +1947,14 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: Accounts.token caches one entry per account,
+        and there is a handful of accounts per auth proxy, so the unbounded growth
+        is bounded in practice. Reopen if accounts become dynamic or numerous.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: accepted
     severity: low
-    status: open
+    status: accepted
     summary: '`Accounts.token` cache has no eviction and grows unbounded'
   F73:
     class: security
@@ -1704,7 +1988,14 @@ findings:
       note: filed in context/review/C1-sandbox.md
       sha: 1d9f4c5f054d177511464d385298c1e744b6a753
       status: open
+    - by: initializer
+      note: 'User decision 2026-10-13: evidence tier is opinion with no attack scenario
+        shown; _copy_settings copies the user''s own settings into the agent HOME,
+        so following a symlink the user created is acceptable. Reopen if a scenario
+        where an agent controls the source path appears.'
+      sha: 67411d14a7270198eb42867ba588a9d66069501b
+      status: accepted
     severity: low
-    status: open
+    status: accepted
     summary: '`_copy_settings` copies symlink targets as regular files without checking
       source is a symlink'

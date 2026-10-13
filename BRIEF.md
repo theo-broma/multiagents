@@ -5636,3 +5636,10 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   - the kimi-k2.6 server errors at startup;
   - the review's phases 2 and 3;
   - the tooling queue above.
+
+## Findings C1/C2 part 1 (plan context/plans/2026-10-13-findings-c1-c2-part1.md, applied 2026-10-13)
+
+- Contract: context/specs/findings-c1-c2-part1.md (HF1-HF5 for F24/F71, F30, F62, F121, F135), validated by the user 2026-10-13 after an advisor pass. F30 decision: a disagreeing collision with a user-configured mount is refused (spec Decision 1).
+- Cleanup (plan item 6) done: nd-74628b22, nd-65004b6a, nd-b6b90957, nd-7866cea2, nd-0950c9d2 and the stabilisation tester/adversary nodes cancelled or disposed; /var/tmp/main-host removed.
+- Pipeline: three chains in parallel, each tester -> implementer review-loop: C1 (HF1-HF3, then adversary before merge), B (HF4, budget.py), A (HF5, opencode.sh). Part 2 plan (2026-10-13-findings-c1-c2-part2.md) starts after part 1 merges.
+- When merged: set F24, F71, F30, F62, F121, F135 to fixed citing the merge commits (plan item 7).
