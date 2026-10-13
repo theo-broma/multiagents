@@ -3200,9 +3200,14 @@ def cmd_docker(args: argparse.Namespace) -> int:
                 print(f"no auth script for {provider_name!r}", file=sys.stderr)
                 return 2
             argv, env = built
+            script_provider = provider
+            if provider.auth_owner is not None:
+                script_provider = dataclasses.replace(
+                    provider.auth_owner, name=provider_name,
+                    script=provider.auth_owner.script_name)
             sys.stdout.flush()
             return driver._hand_over(argv, env, scripts.resolve(
-                provider_name, provider.auth_owner or provider,
+                provider_name, script_provider,
                 global_config_dir(), paths.config))
         state = ex.ensure_running()
         if not state.get("ok"):

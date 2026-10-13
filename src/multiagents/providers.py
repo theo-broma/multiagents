@@ -884,9 +884,8 @@ def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:
 
     Shallow-merged one level deep, the same way the config layers are: an
     instance overrides the keys it names and inherits the rest. A missing base
-    is left alone rather than raised on — a provider that names a base which is
-    disabled or absent should degrade to "unavailable", not stop the CLI from
-    starting.
+    at any link raises ValueError naming the instance and missing provider.
+    A defined but disabled base can still supply inherited integration fields.
     """
     from .config import deep_merge
 
@@ -895,7 +894,9 @@ def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:
         data = dict(data or {})
         base_name = data.get("extends")
         seen = set()
-        while base_name and base_name in raw and base_name not in seen:
+        while base_name and base_name not in seen:
+            if base_name not in raw:
+                raise ValueError(f"provider {name!r}: extends: no provider named {base_name!r}")
             seen.add(base_name)
             base = dict(raw[base_name] or {})
             base.pop("extends", None)

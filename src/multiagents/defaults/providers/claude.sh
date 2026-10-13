@@ -328,7 +328,8 @@ note = '; unknown: ' + json.dumps(unknown, sort_keys=True) if unknown else ''
 if usable:
     note += '; authenticated'
 elif not unknown:
-    note += '; no usable account; run `multiagents auth login ' + __import__('os').environ.get('MULTIAGENTS_PROVIDER', 'claude') + '`'
+    env = __import__('os').environ
+    note += '; no usable account; run `multiagents auth login ' + env.get('MULTIAGENTS_LOGIN_PROVIDER', env.get('MULTIAGENTS_PROVIDER', 'claude')) + '`'
 print('accounts: ' + json.dumps(statuses, sort_keys=True) + note)
 sys.exit(0 if usable else 20 if unknown else 10)
 PY

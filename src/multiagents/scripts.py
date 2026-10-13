@@ -113,9 +113,16 @@ def find_script(name: str, config_dir: Path,
     return None
 
 
+def _validate_identity(provider_name: str, provider: Any) -> None:
+    name = getattr(provider, "name", provider_name)
+    if name != provider_name:
+        raise ValueError(f"provider name {provider_name!r} differs from provider.name {name!r}")
+
+
 def build_env(provider_name: str, provider: Any, executor: Any,
               extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Allowlisted ambient inputs, computed state, then provider/action overlays."""
+    """Allowlisted inputs and overlays, with authoritative instance identity."""
+    _validate_identity(provider_name, provider)
     env = {key: value for key, value in os.environ.items()
            if key in SCRIPT_ENV_KEYS or key.startswith("LC_")}
     env.update({
@@ -126,11 +133,11 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     })
     if getattr(executor, "kind", "local") == "docker":
         env["MULTIAGENTS_CONTAINER"] = executor.container
-        # THIS provider's private home, not whichever one the executor happened
-        # to list first. With one provider using it the difference never showed;
-        # with two, a script would have been handed the other one's directory.
+        credential_name = getattr(provider, "auth_from", "") or provider_name
+        # Credential storage belongs to the login owner, while script identity
+        # remains the instance. Never take another provider's first directory.
         try:
-            private = executor.private_state(provider_name) or {}
+            private = executor.private_state(credential_name) or {}
         except TypeError:                     # an executor from before the filter
             private = executor.private_state() or {}
         for container_path, host_path in private.items():
@@ -139,7 +146,7 @@ def build_env(provider_name: str, provider: Any, executor: Any,
             break
         # Where the REAL credential lives: a host-only profile the container
         # cannot see. BACKING is what agents read; VAULT is what can mint it.
-        vault = getattr(executor, "vault_state", lambda _n="": {})(provider_name)
+        vault = getattr(executor, "vault_state", lambda _n="": {})(credential_name)
         if vault:
             env["MULTIAGENTS_PRIVATE_VAULT"] = str(next(iter(vault.values())))
         if getattr(executor, "auth_proxy_enabled", lambda: False)():
@@ -179,6 +186,9 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     # later budget reads. Only an explicit caller may select that profile.
     env.pop("MULTIAGENTS_PROFILE", None)
     env.update(extra or {})
+    # Scripts select account secrets by the configured instance, even when
+    # another provider supplies the script or credentials.
+    env["MULTIAGENTS_PROVIDER"] = provider_name
     # The executor object is authoritative. An ambient or provider variable,
     # or an action overlay, cannot turn a container read into a host read.
     # Missing executor information remains unknown rather than implying local.
@@ -213,6 +223,7 @@ def build_env(provider_name: str, provider: Any, executor: Any,
 
 def resolve(provider_name: str, provider: Any, config_dir: Path,
             project_config: Path | None = None) -> Path | None:
+    _validate_identity(provider_name, provider)
     name = getattr(provider, "script_name", None) or f"{provider_name}.sh"
     return find_script(name, config_dir, project_config)
 
@@ -269,7 +280,8 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
                cwd: Path | None = None) -> tuple[int, str, str]:
     """Run a captured action. Returns ``(returncode, stdout, stderr)``.
 
-    Never raises: a missing script, a timeout or an OS error all come back as a
+    Never raises except ValueError when provider_name differs from provider.name:
+    a missing script, a timeout or an OS error all come back as a
     non-zero code with the reason in stderr, because every caller of this is
     reporting status rather than doing work. Output that is not UTF-8 is
     decoded with replacement rather than raising: a CLI error that echoes a

@@ -96,19 +96,21 @@ def check(provider_name: str, provider: Any, executor: Any,
     owner = getattr(provider, "auth_owner", None)
     own_pin = getattr(provider, "container_account", "")
     if owner is not None and owner_name:
-        pin = own_pin
-        if pin and getattr(executor, "kind", "") == "docker" and profile != HOST:
-            import copy
-            provider = copy.copy(owner)
-            provider.container_account = pin
-        else:
-            provider = owner
+        import copy
+        provider = copy.copy(owner)
+        # Freeze the owner's default script filename before renaming the copy.
+        provider.script = getattr(owner, "script_name", "") or f"{owner_name}.sh"
+        provider.name = provider_name
+        provider.auth_from = owner_name
+        provider.auth_owner = owner
+        if own_pin and getattr(executor, "kind", "") == "docker" and profile != HOST:
+            provider.container_account = own_pin
     # The script's suggested login and the structured fix name the same
     # owner, unless this instance selects its own container account.
     pinned = (own_pin and
               getattr(executor, "kind", "") == "docker" and profile != HOST)
     login_name = provider_name if pinned else owner_name or provider_name
-    script = _scripts.resolve(login_name, provider, config_dir, project_config)
+    script = _scripts.resolve(provider_name, provider, config_dir, project_config)
     if script is None:
         return AuthState(provider_name, "no_script",
                          detail=f"no script for provider {provider_name!r}",
@@ -116,9 +118,10 @@ def check(provider_name: str, provider: Any, executor: Any,
                          profile=profile)
 
     code, out, err = _scripts.run_action(
-        login_name, provider, executor, "check", config_dir, project_config,
+        provider_name, provider, executor, "check", config_dir, project_config,
         timeout=CHECK_TIMEOUT,
-        extra_env={"MULTIAGENTS_PROFILE": profile} if profile else None,
+        extra_env={"MULTIAGENTS_LOGIN_PROVIDER": login_name,
+                   **({"MULTIAGENTS_PROFILE": profile} if profile else {})},
     )
     detail = (out.strip() or err.strip()).splitlines()
     line = detail[-1][:300] if detail else ""
@@ -190,6 +193,10 @@ def login_command(provider_name: str, provider: Any, executor: Any,
             and getattr(executor, "kind", "") == "docker" and profile != HOST):
         import copy
         selected = copy.copy(owner)
+        selected.script = getattr(owner, "script_name", "") or f"{getattr(owner, 'name', provider_name)}.sh"
+        selected.name = provider_name
+        selected.auth_from = getattr(owner, "name", "")
+        selected.auth_owner = owner
         selected.container_account = getattr(provider, "container_account", "")
         provider = selected
     if profile:
