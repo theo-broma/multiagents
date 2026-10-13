@@ -313,8 +313,12 @@ findings:
         seam).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: PS1 + Decision 14, merged aa98b29a (impl) + b6f01334 (tests).
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`MULTIAGENTS_PROVIDER` in a script''s environment can name a different
       provider than the one whose script actually ran'
   F114:
@@ -684,8 +688,12 @@ findings:
         an extends: naming a nonexistent parent at load.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: PS2, merged aa98b29a + b6f01334.
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: a provider whose `extends:` names a nonexistent parent is grouped into
       a "family" that does not exist, named after the missing parent
   F135:
@@ -949,8 +957,12 @@ findings:
         fails.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: BT1 mutation pins, merged 98997563; reviewer re-applied every mutation.
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: 'The `reserve` boundary is not pinned: a mutation from `>=` to `>` survives
       all 70 tests'
   F152:
@@ -969,8 +981,12 @@ findings:
         fails.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: BT1 mutation pins, merged 98997563.
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: Severity thresholds at 75 and 90 are not pinned, in two separate derivations
   F153:
     class: correctness
@@ -988,8 +1004,12 @@ findings:
         fails.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: BT1 mutation pins, merged 98997563.
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: 'The cache TTL boundary is not pinned: `<` to `<=` survives all 70 tests'
   F154:
     class: correctness
@@ -1033,8 +1053,12 @@ findings:
         fails.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: BT1 mutation pins, merged 98997563.
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: The `usable` headroom boundary is pinned loosely enough that a shift
       from 0.02 to 0.021 passes
   F156:
@@ -1052,8 +1076,12 @@ findings:
         only, cover the two untested usable behaviours.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: BT1 mutation pins, merged 98997563.
+      sha: 9899756382cae33c5755cd28756e9af64d568897
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: Two `usable` behaviours are correct and completely untested
   F160:
     class: correctness
