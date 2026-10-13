@@ -1,5 +1,6 @@
 ---
-status: ready
+status: applied
+applied_in: 57805b52
 ---
 # Review findings, C1 and C2, part 1: the high-severity ones still open
 
