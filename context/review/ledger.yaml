@@ -436,8 +436,15 @@ findings:
         item 4.'
       sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
       status: scheduled
+    - by: orchestrator
+      note: 'HF4 (context/specs/findings-c1-c2-part1.md): unread providers usable
+        in any position, reason says no reading. Merged d4834f3b (implementation)
+        + ea10896d (tests, characterization reversed). Full suite on main+HF4+HF5
+        observed 2026-10-13: no HF4-related red.'
+      sha: ea10896dee0d72f8284410a47dd6d1faea5098a9
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`choose_provider` treats "this provider was never read" as usable when
       it''s the preferred slot, but as unusable when it''s a fallback — the same missing-entry
       state means opposite things depending on argument position'
