@@ -1768,7 +1768,7 @@ def _has_room(candidate: Budget | None, reserve: float, reserved: bool) -> bool:
         return True
     if not candidate.usable:
         return False
-    if reserved and candidate.known and candidate.headroom is not None:
+    if reserved and _known_reading(candidate):
         return candidate.headroom >= reserve
     return True
 
@@ -1799,12 +1799,13 @@ def _known_reading(budget: Budget | None) -> bool:
     """Is this a reading that says something usable about headroom?
 
     RM-R3a's "known": the provider reported a number. A reading that is
-    merely not-refused (``known=False``, or no reading at all) is unknown,
+    merely not-refused (``known=False``, no headroom, or no reading at all) is unknown,
     not good — and so is one that has aged past the reading bound (RM-R4b):
     a stale reading ranks as unknown inside its tier, never ahead of a
     known one.
     """
-    return budget is not None and budget.known and not budget.stale
+    return (budget is not None and budget.known and not budget.stale
+            and budget.headroom is not None)
 
 
 _WINDOW_SPANS = {
@@ -1995,7 +1996,17 @@ def choose_provider(
     # routing, whatever the roster says shares its family.
     if allowed is not None:
         siblings = [name for name in siblings if name in allowed]
+    instances = [name for name in [preferred, *siblings]
+                 if allowed is None or name in allowed]
     routes = list(dict.fromkeys(routes or []))
+
+    def selected(name: str, reason: str) -> tuple[str, str]:
+        if not _known_reading(budgets.get(name)):
+            if name == preferred:
+                reason = "preferred provider has no quota reading"
+            else:
+                reason += f"; {name} has no quota reading"
+        return name, reason
 
     # With more than one account on this CLI, the agent's pin chooses the
     # FAMILY and the router chooses the instance. That is the point of a second
@@ -2009,50 +2020,50 @@ def choose_provider(
     # chosen by reservation, load and last use; they are never split into two
     # preference tiers.
     if siblings:
-        chosen = pick_instance([preferred, *siblings], budgets, reserve,
+        chosen = pick_instance(instances, budgets, reserve,
                                reserved, load, last_used, strategy=strategy,
                                tolerance_minutes=tolerance_minutes,
                                tolerance_points=tolerance_points)
         if chosen == preferred:
-            return preferred, "preferred provider has headroom"
+            return selected(preferred, "preferred provider has headroom")
         if chosen:
             if not _has_room(budgets.get(preferred), reserve, preferred in reserved):
-                return chosen, f"{preferred} is constrained; using {chosen}"
+                return selected(chosen, f"{preferred} is constrained; using {chosen}")
             if preferred in reserved and chosen not in reserved:
-                return chosen, f"{preferred} is held for the orchestrator; using {chosen}"
+                return selected(chosen, f"{preferred} is held for the orchestrator; using {chosen}")
             if not _known_reading(budgets.get(preferred)) and _known_reading(budgets.get(chosen)):
-                return chosen, f"{preferred} has no quota reading; using {chosen}"
-            group, scores = _instance_group([preferred, *siblings], budgets, reserve,
+                return selected(chosen, f"{preferred} has no quota reading; using {chosen}")
+            group, scores = _instance_group(instances, budgets, reserve,
                                             reserved, strategy, tolerance_minutes,
                                             tolerance_points)
             if chosen in scores and preferred not in scores:
-                return chosen, f"{preferred} has missing data for {strategy}; using {chosen}"
+                return selected(chosen, f"{preferred} has missing data for {strategy}; using {chosen}")
             if preferred in scores and preferred not in group:
                 best = min(scores, key=lambda name: (scores[name].value, name))
                 winner, previous = scores[best], scores[preferred]
                 if strategy == "soonest_reset":
-                    return chosen, (f"{strategy}: {best}'s {winner.window} "
+                    return selected(chosen, (f"{strategy}: {best}'s {winner.window} "
                                     f"{reset_label(datetime.fromtimestamp(winner.fact).astimezone().isoformat())}, "
-                                    f"before {preferred}'s {previous.window}; using {chosen}")
-                return chosen, (f"{strategy}: {best} has {winner.fact:g}% of "
+                                    f"before {preferred}'s {previous.window}; using {chosen}"))
+                return selected(chosen, (f"{strategy}: {best} has {winner.fact:g}% of "
                                 f"{winner.window} left vs {previous.fact:g}% for "
-                                f"{preferred}; using {chosen}")
+                                f"{preferred}; using {chosen}"))
             if (load or {}).get(chosen, 0) < (load or {}).get(preferred, 0):
-                return chosen, f"sharing accounts: {chosen} has fewer running agents"
+                return selected(chosen, f"sharing accounts: {chosen} has fewer running agents")
             if (last_used or {}).get(chosen, 0.0) < (last_used or {}).get(preferred, 0.0):
-                return chosen, f"sharing accounts: {chosen} was used less recently"
-            return chosen, f"sharing accounts: {chosen} wins the account name tie-break"
+                return selected(chosen, f"sharing accounts: {chosen} was used less recently")
+            return selected(chosen, f"sharing accounts: {chosen} wins the account name tie-break")
         # Nothing in the family can take it. If one of them is merely waiting
         # out a short window, waiting is cheaper than moving the work to
         # another vendor's model — and far cheaper than spending the
         # orchestrator's account on it.
         if wait_for_reset_within and any(
                 resets_soon(budgets.get(name), wait_for_reset_within)
-                for name in [preferred, *siblings]):
+                for name in instances):
             return None, (f"{preferred} and its other accounts are full, and one "
                           f"resets shortly — waiting rather than moving the work")
-    elif _has_room(budgets.get(preferred), reserve, preferred in reserved):
-        return preferred, "preferred provider has headroom"
+    elif instances and _has_room(budgets.get(preferred), reserve, preferred in reserved):
+        return selected(preferred, "preferred provider has headroom")
 
     skipped, no_room = [], []
     stop = False
@@ -2078,8 +2089,7 @@ def choose_provider(
                 # The reserve applies to a fallback too. Otherwise work diverted
                 # off a constrained provider lands on the orchestrator's own and
                 # eats exactly the slice the reserve exists to keep.
-                if budgets.get(name) is not None \
-                        and _has_room(budgets.get(name), reserve, name in reserved):
+                if _has_room(budgets.get(name), reserve, name in reserved):
                     return name
                 no_room.append(f"{name} ({_why_not(budgets.get(name), reserve, name in reserved)})")
         return None
@@ -2087,8 +2097,8 @@ def choose_provider(
     chosen = try_tier(routes)
     if chosen:
         # RM-R2: the message says the route came from the agent's own list.
-        return chosen, (f"{preferred} is constrained; using {chosen} from "
-                        f"the agent's own models list")
+        return selected(chosen, (f"{preferred} is constrained; using {chosen} from "
+                                 f"the agent's own models list"))
     if not stop:
         # Tier C: the project chain entries neither Tier A nor Tier B listed.
         listed = {preferred, *siblings, *routes}
@@ -2097,9 +2107,9 @@ def choose_provider(
             if routes:
                 # RM-R2: with the agent's own routes in play, say this one
                 # came from the project chain instead.
-                return chosen, (f"{preferred} is constrained; falling back to "
-                                f"{chosen} from the project fallback_chain")
-            return chosen, f"{preferred} is constrained; falling back to {chosen}"
+                return selected(chosen, (f"{preferred} is constrained; falling back to "
+                                         f"{chosen} from the project fallback_chain"))
+            return selected(chosen, f"{preferred} is constrained; falling back to {chosen}")
 
     # Both halves, and the second one is the half that matters. Naming only the
     # providers skipped for lack of a MODEL made the message actively
