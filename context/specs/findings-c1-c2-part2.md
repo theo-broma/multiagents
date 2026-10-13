@@ -515,3 +515,8 @@ completes. Verified by: one rejected and one limited account giving 429 with
     JSON-with-trailing-text bodies, the structured organisation-key masking
     only. Registered literals and plain-text e-mail addresses are still
     masked in those bodies.
+16. **SE5 with nothing to probe** (SE tester question): the command is
+    `multiagents docker check`. With no accepted entry it still runs the
+    denied probe, says there is no allowed host to probe, and exits 0 when the
+    denied probe is refused as expected: an empty allowlist is a valid,
+    fully closed sandbox.
