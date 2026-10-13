@@ -187,6 +187,190 @@ characterization tests in `tests/test_c2_auth_characterization.py`
 (reversed); a missing grandparent; a disabled parent; the shipped providers
 still load.
 
+## Part 2b — sandbox, egress and the auth proxy (plan items 1 and 3)
+
+Specified once HF6 had passed review. Findings: F2, F11, F63 (group SE,
+`executor/docker.py`) and F21, F66, F67, F23, F22, F20 plus the two leaks
+deferred by part 1's Decision 4 (group AP, `authproxy.py`, `redact.py`). Both
+groups are credential or egress boundaries, so the adversary runs on each
+before merge.
+
+### SE — sandbox and egress
+
+`DockerExecutor.allowlist_entries() -> tuple[list[str], list[str]]` returns
+the accepted hosts and the diagnostics. A diagnostic reads `refused
+allowlist entry {entry!r}: {reason}`. Diagnostics stay non-fatal (ST9): they
+are printed to stderr wherever, and in whichever network modes, they are
+printed today; this part changes which entries are refused, not where the
+refusal is shown.
+
+**SE1 — F2.** An `egress_allowlist` entry that is not a string (a number, a
+boolean, `null`, a mapping, a list) is refused with the reason `not a
+string`. It never raises, and the other entries are still read. A whole
+`egress_allowlist: null` stays an empty list. Verified by: `[5]`, `[true]`,
+`[null]`, `[{}]`, `[[]]` each giving one diagnostic and no exception; a list
+mixing one of them with `a.example` still allowing `a.example`.
+
+**SE2 — F11.** Each string entry is checked in this order, and the first
+refusal wins:
+1. the refusals made today on the raw entry (blank, control character),
+   with today's wording;
+2. new raw-shape refusals: any whitespace character that is not already a
+   control character (`contains whitespace`), exactly one `:` followed by
+   digits at the end (`contains a port`; an IPv6 address, having several
+   `:`, keeps today's IPv6 refusal and wording), a leading `.`
+   (`leading dot`);
+3. today's normalisation (IDNA to ASCII, lower case, one trailing dot
+   removed, in that order), then today's refusals on the normalised name
+   (IPv6, non-canonical IPv4, single label, public suffix), with today's
+   wording.
+
+The unused `_validate_allowlist_entry` is not wired in unchanged: it would
+refuse trailing dots and non-ASCII labels that are accepted today. The
+deferred R15 reds in `tests/test_phase2_entry_semantics.py` stay deferred.
+Verified by: `" a.com"`, `"a.com "`, `"a .com"`, `"a\u00a0.com"` (whitespace),
+`"b.com:443"` (port), `".c.com"` (leading dot) refused with those reasons
+and none of them in the filter; `"d.com."` accepted as `d.com`; `"a\t.com"` and an entry
+with both a control character and a space refused as today (control
+character); `"::1"` and `"[::1]:443"` refused with today's IPv6 wording; the existing ST9
+tests unchanged.
+
+**SE3 — F63.** `credential_drift` never puts a path inside a command
+string. Paths reach the container only as separate argv elements, either one
+`docker exec` per path or one constant command that takes the paths as
+arguments and answers in their order; no shell ever parses a path. What it
+reports is unchanged: an inode per readable path; a missing or unreadable
+file is not reported as drift, as today; in the container a symlink is not
+followed, as today (`stat` without `-L`). Failures are as today: a nonzero
+return from any `docker exec` makes the whole result `[]`, discarding paths
+already read; docker missing (`FileNotFoundError`) and a timeout
+propagate. Verified by:
+a fake `docker exec` recording the argv, with paths containing a space,
+`;`, `$(...)`, a quote and a leading `-`, each arriving as exactly one
+argument and appearing in no command string; drift results for an
+existing, a missing and a changed file matching today's; a nonzero exec
+on the second of three paths giving `[]`.
+
+### AP — the auth proxy
+
+**AP1 — F21 and part 1's Decision 4 leaks.** In an upstream body passed
+back to an agent (`authproxy._scrub`), on top of what HF1 masks:
+- every e-mail address is masked, in JSON values, in JSON keys and in
+  non-JSON text. An e-mail address is ASCII `local@domain`: `local` is one or
+  more of letters, digits and `._%+-`; `domain` is two or more dot-separated
+  labels of letters, digits and `-`, the last of two or more letters. It is
+  not preceded by a `local` character nor followed by a label character, so
+  the mask covers the whole address and only it. `user@host` with no dot
+  in the domain is not an e-mail address here;
+- in JSON, the value under a key named, case-insensitively,
+  `organization`, `organization_id`, `organization_name`, `org`, `org_id`,
+  `org_name`, `email`, `user_email` is masked whatever its shape (a string,
+  a number, an object, a list). Only that value is masked: its siblings
+  (an error's `type`, `code`, `message`) are kept and scrubbed as usual;
+- a registered literal used as a JSON key is masked in the key too. When
+  masking makes two keys of one object equal, the later one wins;
+- a JSON value nested deeper than the scrubber's depth limit (`_depth > 24`)
+  is replaced whole by the mask, never passed through raw.
+
+This applies to `_scrub` only. `redact.scrub` keeps its current behaviour
+for every other caller (logs, results), so ordinary e-mail addresses in an
+agent's own output are not touched. "Unchanged" for a JSON body means the
+same parsed value: HF1 re-serialises it. Verified by: an e-mail in a JSON
+value, in a JSON key, in a non-JSON page and inside a longer string with
+punctuation around it; `user@host` left alone; each listed key with a
+string, a number and an object value, with its siblings kept; a literal as
+a key; two keys colliding after masking; a 30-level body with a literal at
+the bottom; a body with none of these parsing to the same value.
+
+**AP2 — F66.** An exception raised by the `on_event` callback is reported
+on the proxy's stderr, once per occurrence, naming the event kind and the
+exception type, with its message passed through `redact.scrub`. Reporting is
+best-effort: a failure to write it is swallowed. The proxy keeps serving the
+request and later ones. Verified by: a callback raising an exception whose
+message contains a registered literal; the stderr line contains the kind
+and the type, not the literal; the request still completes; a stderr that
+raises on write does not break the request.
+
+**AP3 — F67.** The per-account cooldown is the backoff:
+- a 429 or 529 marks the account limited for `max(60 s, the upstream
+  hint)`, or 3600 s when there is no usable hint. The hint is `retry-after`
+  as delta-seconds or as an HTTP-date, else the unified-reset header as epoch
+  seconds or as an ISO 8601 timestamp. A hint that does not parse, is not
+  finite, or is in the past is not usable;
+- a new mark never shortens a cooldown already running on that account,
+  whichever request sets it;
+- no attempt admitted after the mark uses that account before its cooldown
+  ends (attempts already sent upstream are not recalled);
+- within one request, each account is tried at most once;
+- the proxy never sleeps.
+
+Cooldowns live in the proxy's memory and are lost when the proxy restarts
+(Decision 11). TF retries (launch, crash, transient) and quota holds sit
+above this and are unchanged. Verified by: tests pinning each bullet,
+including an HTTP-date `retry-after`, an ISO reset, `inf` and `nan`, a past
+date, and two marks in either order.
+
+**AP4 — F23.** The proxy forwards the request's own method for `GET`,
+`HEAD` and `POST` (Decision 10). Each is sent upstream with the same method
+and the same HF6 target check. A request carrying a `Content-Length` (even
+`0`) is forwarded with that body; one without is forwarded with none.
+A request with a `Transfer-Encoding` header gets `411` and nothing is sent
+upstream (the proxy reads only `Content-Length` today and would leave chunk
+bytes on the connection). Any other method gets `405` (a deliberate change
+from today's `501`) with an `Allow: GET, HEAD, POST` header and nothing sent
+upstream. After a `405` or `411` for a request that may carry a body, the
+proxy closes the connection (`Connection: close`) rather than reading the
+next request from unconsumed bytes. A `HEAD`
+response carries no body bytes, whatever produced it (upstream, or the
+proxy's own 400, 429, 502). Redirects are never followed: for a 3xx from
+upstream the status is preserved, the body scrubbed and the headers
+filtered under AP5 (so no `Location`). Verified by: each served method arriving upstream unchanged,
+with a body, with an empty body and with none; `PUT`, `DELETE` and
+`OPTIONS` giving 405 with nothing upstream and the connection closed; a
+chunked `POST` giving 411 with nothing upstream; a refused target on `GET` giving
+HF6's 400; `HEAD` against an upstream 200, an upstream error and an
+exhausted 429, each with an empty body; a 302 not followed.
+
+**AP5 — F22.** On an upstream non-2xx response passed through to the
+agent, including the saved 401 returned after every account was tried,
+these upstream headers are forwarded: `retry-after`, `request-id`,
+`x-request-id`, and every header whose name starts with
+`anthropic-ratelimit-`. No other upstream header is forwarded: never
+`set-cookie`, `authorization`, `www-authenticate`, `location`, `proxy-*`,
+nor any header whose name contains `organization` or `org-`; where a name
+matches both rules, it is not forwarded. `content-type` and
+`content-length` are the proxy's and describe the body actually sent:
+`application/json; charset=utf-8` for a scrubbed JSON body, upstream's own
+`content-type` for scrubbed text, the proxy's own type for a body it
+replaced. When every account is limited and the proxy answers 429 itself,
+it sets `retry-after` to the whole seconds, rounded up, until the earliest
+cooldown end among the accounts that agent may use and that are limited
+(not rejected), at least 1, read under the same lock as account selection;
+when no such account exists, no `retry-after` is sent. Verified by: a 500,
+a 400 and the saved 401 with each allowed and each forbidden header,
+including `anthropic-ratelimit-organization-id`; a JSON and a text body with
+matching `content-type` and `content-length`; the exhausted 429 carrying
+the expected `retry-after`, and none when every account was rejected.
+
+**AP6 — F20.** Each upstream attempt emits at most one of the two new
+events below; the existing events (`unauthenticated`, `switch`, ...) are
+unchanged and not counted. An upstream
+response with a status of 400 or more other than 401, 429 and 529 emits
+`upstream_error` with `{"agent", "label", "status"}`, even if reading its
+body then fails; in that case the agent gets the proxy's own `502` and the
+connection is closed. A failure before any upstream status is received
+(connection, DNS, TLS, timeout, sending the request) emits
+`upstream_unreachable` with `{"agent", "label", "error"}`, where `error` is
+the exception's class name only. A failure while relaying a successful
+response also emits `upstream_unreachable`, closes the connection, and
+never starts a second response. The agent disconnecting is not an upstream
+failure and emits nothing. Neither event carries any part of the body or the
+target. The events for 401, 429 and 529, and what the proxy retries, are
+unchanged: this item adds events only. Verified by: a 500, a 400, a refused
+connection, a timeout and a body read failing mid-relay, each emitting
+exactly one event with those fields; a client disconnect emitting none; the
+characterization tests pinning "no event" reversed.
+
 ## Decisions
 
 1. **Part 2 is split.** Items 2, 4, 5 and 6 are specified here and run
@@ -205,3 +389,24 @@ still load.
    script is 126.
 6. **F136 requires HTTP context** for `401`; bare `code 401`/`error 401`
    are not enough.
+7. **Part 2b groups AP1 (F21) with the proxy**, since it lives in
+   `authproxy._scrub`; e-mail and organisation masking is limited to upstream
+   bodies, so an agent's own output is not rewritten.
+8. **F67 is fixed in place, not by a sleep:** the per-account cooldown
+   already honours `retry-after`; AP3 closes its gaps (date formats, non-finite
+   hints, a mark shortening a cooldown). A sleep inside the proxy would hold
+   the agent's request and duplicate TF's retry and the quota holds.
+9. **The exhausted 429 carries `retry-after`** (AP5), so an agent knows when
+   to come back instead of retrying blind.
+10. **The proxy serves `GET`, `HEAD` and `POST` only.** This
+    is a deliberate compatibility limit, not a security boundary: `POST` can
+    already cancel a batch. It keeps the surface to what agent work needs
+    (messages, token counting) and blocks `DELETE` of account files, which
+    no agent task here needs. `405` with `Allow` says so plainly. Widening
+    it is a later, explicit decision.
+11. **Cooldowns stay in memory.** A proxy restart forgets them; the next
+    requests then meet the upstream 429 again and re-mark the account, which
+    costs a few requests per account. Persisting them is not worth a state file.
+12. **SE2 extends today's checks rather than adopting
+    `_validate_allowlist_entry`**, so no entry accepted today on purpose
+    (trailing dot, non-ASCII label) starts being refused.
