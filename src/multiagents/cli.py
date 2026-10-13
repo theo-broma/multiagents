@@ -2687,19 +2687,21 @@ def cmd_usage(args: argparse.Namespace) -> int:
         return 0
 
     total_cost = sum(r["cost_usd"] for r in rows)
-    total_tokens = sum(r["tokens"] for r in rows)
+    reported_tokens = [r["tokens"] for r in rows if r["tokens"] is not None]
+    total_tokens = f"{sum(reported_tokens):,}" if reported_tokens else "?"
     print(f"{'provider/model':42} {'runs':>4} {'tokens':>12} {'cost':>9}  share")
     for r in rows:
         share = (100 * r["cost_usd"] / total_cost) if total_cost else 0
         bar = "#" * int(share / 4)
         cost = (f"{'plan':>9}" if r.get("billing") == "plan"
                 else f"${r['cost_usd']:>8.4f}")
+        tokens = f"{r['tokens']:,}" if r["tokens"] is not None else "?"
         print(f"{r['provider'] + '/' + r['model']:42} {r['runs']:>4} "
-              f"{r['tokens']:>12,} {cost}  {share:4.0f}% {bar}")
+              f"{tokens:>12} {cost}  {share:4.0f}% {bar}")
         if args.agents:
             print(f"{'':42}      {', '.join(r['agents'])}")
     print(f"\n{'total':42} {sum(r['runs'] for r in rows):>4} "
-          f"{total_tokens:>12,} ${total_cost:>8.4f}")
+          f"{total_tokens:>12} ${total_cost:>8.4f}")
 
     # A provider that bills per token and one that does not are not comparable,
     # so say which is which rather than letting a $0.00 row read as free.

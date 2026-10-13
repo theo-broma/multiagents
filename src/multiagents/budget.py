@@ -807,7 +807,7 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
     bounds — though not an active rate-limit backoff. Defensive throughout: an
     undocumented surface must degrade to ``known=False`` rather than raise.
     """
-    budget = Budget(provider="claude", known=False, source="cachedUsageUtilization")
+    budget = Budget(provider="claude", known=False, source="none")
     profile = Path(config_dir).expanduser() if config_dir else None
     if vault_profile and (profile is None or _claude_token(profile) is None):
         return replace(budget, note="vault account credentials are missing or expired")
@@ -858,9 +858,12 @@ def read_claude(fetch: bool = True, config_dir: Path | str | None = None,
             worst_percent, worst_reset = percent, detail.get("resets_at")
 
     if worst_percent is None:
+        budget.source = "none"
         budget.note = "utilisation present but no readable bucket"
         return budget
 
+    if budget.source == "none":
+        budget.source = "cachedUsageUtilization"
     budget.known = True
     budget.headroom = max(0.0, 1.0 - worst_percent / 100.0)
     budget.resets_at = worst_reset
@@ -1277,8 +1280,11 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
     if code != 0:
         return Budget(provider=name, known=False, source="script",
                       note=(err or out).strip()[:200] or f"budget action exit {code}")
+    if not out.strip():
+        return Budget(provider=name, known=False, source="script",
+                      note="script returned no reading")
     try:
-        data = json.loads(out.strip() or "{}")
+        data = json.loads(out.strip())
     except json.JSONDecodeError:
         return Budget(provider=name, known=False, source="script",
                       note="budget action did not print valid JSON")
@@ -1291,6 +1297,12 @@ def _from_script(name: str, provider: Any, executor: Any, config_dir: Path,
     # exactly this field. Derived from the number, on the same thresholds the
     # built-in reader uses, unless the script says otherwise itself.
     headroom = data.get("headroom")
+    if headroom is not None and (isinstance(headroom, bool)
+                                 or not isinstance(headroom, (int, float))
+                                 or not math.isfinite(headroom)
+                                 or not 0 <= headroom <= 1):
+        return Budget(provider=name, known=False, source="script",
+                      note=f"invalid headroom received: {headroom!r}")
     severity = data.get("severity")
     if not severity and data.get("known") and isinstance(headroom, (int, float)):
         used = (1 - float(headroom)) * 100

@@ -81,6 +81,25 @@ def token_count(usage: dict[str, Any] | None) -> int:
     return int(parts)
 
 
+def reports_tokens(usage: dict[str, Any] | None) -> bool:
+    """Whether a usage record supplies a numeric token field, including zero."""
+    return any(isinstance(value := (usage or {}).get(key), (int, float))
+               and not isinstance(value, bool) for key in TOKEN_TOTALS + TOKEN_PARTS)
+
+
+def token_summary(usages: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Read-time token spend, keeping missing counts distinct from zero."""
+    tokens = reported = unreported = 0
+    for usage in usages:
+        if reports_tokens(usage):
+            tokens += token_count(usage)
+            reported += 1
+        elif usage:
+            unreported += 1
+    return {"tokens": None if unreported and not reported else tokens,
+            "tokens_unreported": unreported}
+
+
 def cost_of(usage: dict[str, Any] | None) -> float:
     return float((usage or {}).get("cost_usd") or 0.0)
 
@@ -1126,6 +1145,7 @@ class Tree:
         """
         rows: dict[tuple[str, str], dict[str, Any]] = {}
         entries = []
+        usages: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for node in self.read()["nodes"].values():
             segments = node.get("segments") or []
             if len(segments) > 1:
@@ -1144,14 +1164,16 @@ class Tree:
             })
             row["runs"] += 1
             row["agents"].add(node.get("agent") or "?")
-            row["tokens"] += token_count(usage)
+            usages.setdefault(key, []).append(usage)
             row["cost_usd"] += cost_of(usage)
         out = []
-        for row in rows.values():
+        for key, row in rows.items():
+            row.update(token_summary(usages[key]))
             row["agents"] = sorted(row["agents"])
             row["cost_usd"] = round(row["cost_usd"], 6)
             out.append(row)
-        out.sort(key=lambda r: (-r["cost_usd"], -r["tokens"]))
+        out.sort(key=lambda r: (-r["cost_usd"], r["tokens"] is None,
+                                -(r["tokens"] or 0)))
         return out
 
     def usage_for_tag(self, tag: str) -> dict[str, float]:
@@ -2025,7 +2047,7 @@ class Tree:
             branch_glyph = "" if top else ("└─ " if last else "├─ ")
             status = node.get("status", "?")
             usage = node.get("usage") or {}
-            tokens = usage.get("total") or usage.get("total_tokens") or 0
+            tokens = token_count(usage) if reports_tokens(usage) else None
             cost = usage.get("cost_usd") or 0
             label = f"[{status}]"
             if node.get("conversation"):
@@ -2038,8 +2060,10 @@ class Tree:
             bits = [f"{node['id']}", f"{node.get('agent','?')}", label]
             if node.get("reason"):
                 bits.append(f"({node['reason']})")
-            if tokens:
+            if tokens is not None:
                 bits.append(f"{tokens:,}tok")
+            elif usage:
+                bits.append("tok?")
             if cost:
                 bits.append(f"${cost:.4f}")
             if node.get("branch"):

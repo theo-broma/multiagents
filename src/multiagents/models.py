@@ -10,7 +10,10 @@ Re-run after any subscription change — the available models move with the plan
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -157,12 +160,26 @@ def refresh_models(providers: dict[str, Provider], target: Path, *,
         "# GENERATED FILE — do not hand-edit.\n"
         "# Rewritten by `multiagents refresh-models`. Re-run after a subscription change.\n\n"
     )
-    with target.open("w") as handle:
-        handle.write(header)
-        yaml.safe_dump(
-            {"models": models, "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
-            handle, sort_keys=True, default_flow_style=False,
-        )
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=target.parent,
+                                         prefix=f".{target.name}.", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(header)
+            yaml.safe_dump(
+                {"models": models, "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
+                handle, sort_keys=True, default_flow_style=False,
+            )
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
     return {
         "written": str(target),

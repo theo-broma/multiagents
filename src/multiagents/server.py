@@ -60,7 +60,7 @@ from .renames import Renames, shipped as shipped_renames
 from .quota_handover import quota_handover_settings
 from .redact import scrub
 from .runner import Runner
-from .tree import Tree, deferred_malformed, find_deferred, now
+from .tree import Tree, deferred_malformed, find_deferred, now, token_summary
 from .transcripts import session_context
 from .waits import bounded_timeout
 
@@ -2140,6 +2140,7 @@ def budget_status() -> dict:
     run = runner()
     data = run.tree.read()
     spend: dict[str, dict[str, Any]] = {}
+    usages: dict[str, list[dict[str, Any]]] = {}
     for node in data.get("nodes", {}).values():
         rows = node.get("segments") or [node]
         for row in rows:
@@ -2148,12 +2149,13 @@ def budget_status() -> dict:
                 continue
             usage = row.get("usage") or (node.get("usage") if len(rows) == 1 else {}) or {}
             entry = spend.setdefault(provider, {"tokens": 0, "cost_usd": 0.0})
-            total = usage.get("total") or usage.get("total_tokens") or 0
-            if isinstance(total, (int, float)):
-                entry["tokens"] += int(total)
+            usages.setdefault(provider, []).append(usage)
             cost = usage.get("cost_usd")
             if isinstance(cost, (int, float)):
                 entry["cost_usd"] = round(entry["cost_usd"] + cost, 6)
+
+    for provider, entry in spend.items():
+        entry.update(token_summary(usages[provider]))
 
     budgets = budget_mod.read_all(
         run.providers, lambda name: run.executor(), global_config_dir(),
@@ -2175,7 +2177,9 @@ def budget_status() -> dict:
     return _ok({
         "root": reported_root(run.paths, run.config),
         "providers": {k: v.to_dict() for k, v in budgets.items()},
-        "tree_usage": run.tree.rollup_usage(),
+        "tree_usage": {"cost_usd": 0.0, **run.tree.rollup_usage(),
+                       **token_summary(n.get("usage") or {}
+                                       for n in data.get("nodes", {}).values())},
         "quota_handover": {"reserved_instance": handover["reserved_instance"],
                            "reserve_fraction": handover["reserve_fraction"]},
         "by_model": billed_rows(run.tree.usage_by_model(), run.providers),
