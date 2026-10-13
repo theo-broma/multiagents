@@ -178,12 +178,12 @@ def test_run_action_on_a_dot_sh_script_ignores_the_executable_bit(tmp_path):
     assert (code, err) == (0, "")
 
 
-def test_run_action_on_a_non_sh_script_without_exec_bit_is_an_oserror_reported_as_124(tmp_path):
+def test_run_action_on_a_non_sh_script_without_exec_bit_is_an_oserror_reported_as_126(tmp_path):
     provider = h.make_provider("p", script="p")
     script = h.write_script(tmp_path, "p", "#!/bin/sh\nexit 0\n")
     script.chmod(0o644)
     code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
-    assert code == 124
+    assert code == 126
     assert "not executable" in err
     assert "chmod +x" in err
 
@@ -195,7 +195,7 @@ def test_run_action_on_an_executable_non_sh_script_with_no_shebang_is_enoexec(tm
     script.write_text("echo x\n")
     script.chmod(0o755)
     code, out, err = h.run_action("p", provider, h.FakeExecutor(), "check", tmp_path)
-    assert code == 124
+    assert code == 126
     assert "cannot tell how to run it" in err
     assert "shebang" in err
 

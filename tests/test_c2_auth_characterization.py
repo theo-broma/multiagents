@@ -295,27 +295,21 @@ def test_looks_like_auth_failure_ignores_unrelated_runtime_errors():
         assert not h.looks_like_auth_failure("failed", stderr), stderr
 
 
-def test_looks_like_auth_failure_the_401_marker_is_an_unanchored_substring():
-    """F13x: "401" is matched as a bare substring of the whole
-    status+stderr blob, with no word boundary and no requirement that it look
-    like an HTTP status. Any message that happens to contain the digits "401"
-    anywhere — a byte count, an item count, part of a longer number — is
-    classified as an authentication failure."""
-    assert h.looks_like_auth_failure("failed", "wrote 40105 bytes to disk")
-    assert h.looks_like_auth_failure("failed", "processed 401 items successfully")
+def test_fc1_looks_like_auth_failure_rejects_bare_401_substrings():
+    """FC1/F136 deliberately reverses the unanchored substring defect."""
+    assert not h.looks_like_auth_failure("failed", "wrote 40105 bytes to disk")
+    assert not h.looks_like_auth_failure("failed", "processed 401 items successfully")
 
 
-def test_looks_like_auth_failure_misses_common_real_world_phrasings():
-    """F13x: several phrasings a real CLI plausibly uses for an expired
-    session or missing key are NOT in `_AUTH_MARKERS` and so are not caught —
-    they share no substring with any marker in the list."""
+def test_fc2_looks_like_auth_failure_recognizes_common_real_world_phrasings():
+    """FC2/F137 deliberately reverses the four characterized misses."""
     for stderr in (
         "your session has expired, please sign in again",
         "Error: session expired",
         "API key missing",
         "missing api key",
     ):
-        assert not h.looks_like_auth_failure("failed", stderr), stderr
+        assert h.looks_like_auth_failure("failed", stderr), stderr
 
 
 def test_looks_like_auth_failure_reads_status_too_not_just_stderr():
