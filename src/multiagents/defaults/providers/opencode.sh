@@ -269,18 +269,45 @@ check)
     if zen_plan; then zen_py check; exit $?; fi
     out=$("$BIN" providers list 2>/dev/null) || {
         echo "could not run '$BIN providers list'"; exit 20; }
-    # "0 credentials" means no stored login. An API key in the environment is
-    # reported separately and is not a subscription credential.
-    case "$out" in
-        *"0 credentials"*)
-            echo "no stored credentials (free tier / env keys only)"; exit 10 ;;
-        *)
-            n=$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) credential.*/\1/p' | head -1)
-            if [ -n "$n" ]; then
-                echo "$n stored credential(s)"; exit 0
-            fi
-            echo "unknown: could not parse the stored credential count"; exit 20 ;;
-    esac
+    # Only the stored total counts: provider rows and the separate environment
+    # section can also contain numbers. Strip ANSI decoration before parsing.
+    n=$(printf '%s\n' "$out" | awk '
+        BEGIN { esc = sprintf("%c", 27) }
+        {
+            gsub(esc "\\[[0-?]*[ -/]*[@-~]", "")
+            if ($0 ~ /^[[:space:]]*┌[[:space:]]*Environment([[:space:]]|$)/) {
+                environment = 1
+                next
+            }
+            if (environment || $0 ~ /^[[:space:]]*●/) next
+            if ($0 ~ /^[[:space:]]*┌[[:space:]]*Credentials([[:space:]]|$)/) {
+                section = 1
+                next
+            }
+            if (section && $0 !~ /^[[:space:]]*└/) next
+            line = $0
+            while (match(line, /[0-9]+[[:space:]]+credentials?([^[:alnum:]_]|$)/)) {
+                before = substr(line, 1, RSTART - 1)
+                value = substr(line, RSTART, RLENGTH)
+                sub(/[[:space:]].*$/, "", value)
+                if (before ~ /[-+.0-9]$/) invalid = 1
+                sub(/^0+/, "", value)
+                if (value == "") value = "0"
+                if (seen && ("x" total) != ("x" value)) invalid = 1
+                total = value
+                seen = 1
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+        END { if (seen && !invalid) print total }
+    ')
+    if [ "$n" = "0" ]; then
+        echo "no stored credentials (free tier / env keys only)"; exit 10
+    fi
+    if [ -n "$n" ]; then
+        echo "$n stored credential(s)"; exit 0
+    fi
+    echo "unknown: could not parse the stored credential count"; exit 20
     ;;
 login)
     if zai_plan; then

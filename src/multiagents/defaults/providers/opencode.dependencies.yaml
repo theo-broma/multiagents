@@ -263,10 +263,12 @@ dependencies:
   match: fragment
   used_by:
   - src/multiagents/defaults/providers/opencode.sh::case:check
-- id: text_match.0-credentials
+- id: text_match.credential-total
   kind: text_match
-  value: 0 credentials
+  value: credential
   match: fragment
+  note: Stored total wording is N credential or N credentials, with a decimal count;
+    provider rows and the separate environment count are ignored.
   used_by:
   - src/multiagents/defaults/providers/opencode.sh::case:check
 - id: subcommand.login
