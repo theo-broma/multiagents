@@ -557,20 +557,17 @@ def test_opencode_sh_check_extracts_the_reported_credential_count(tmp_path):
     assert "3 stored credential(s)" in result.stdout
 
 
-def test_au_r2_opencode_sh_check_digit_opening_the_line_is_unknown_not_a_guessed_count(tmp_path):
-    """F135/F132, AU-R2 inverted: the positive-count pattern needs a non-digit
-    before the count, so "3 credentials stored" matches neither it nor the
-    "0 credentials" case. That output is unknown (exit 20), never the guessed
-    default "1 stored credential(s)" with exit 0. The pattern is deliberately
-    not widened to accept it."""
+def test_hf5_1_opencode_sh_check_digit_opening_the_line_reports_the_actual_count(tmp_path):
+    """HF5.1/F135 deliberately supersedes AU-R2's 2026-10-07 decision:
+    a count at line start is recognised, without guessing a default of one.
+    The user's 2026-10-13 decision is in findings-c1-c2-part1.md."""
     fake_bin = tmp_path / "opencode"
     fake_bin.write_text('#!/bin/sh\necho "3 credentials stored"\n')
     fake_bin.chmod(0o755)
     result = h.run_shipped_script("opencode", "check", {"MULTIAGENTS_BIN": str(fake_bin)})
-    assert result.returncode == 20
-    assert "unknown" in result.stdout.lower()
+    assert result.returncode == 0
+    assert "3 stored credential(s)" in result.stdout
     assert "1 stored credential(s)" not in result.stdout
-    assert "stored credential(s)" not in result.stdout
 
 
 def test_au_r2_opencode_sh_check_unrecognised_output_is_unknown_not_one_credential(tmp_path):
