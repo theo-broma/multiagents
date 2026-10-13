@@ -693,8 +693,16 @@ findings:
         item 5; replaces held nodes nd-74628b22/nd-65004b6a.'
       sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
       status: scheduled
+    - by: orchestrator
+      note: 'HF5 (context/specs/findings-c1-c2-part1.md): stored-credential total
+        parsed at line start or after a non-digit, exit 10 only for exactly 0; dependency
+        manifest updated. Merged 598f3cf6 (implementation) + 06ad3cc9 (tests, characterization
+        reconciled). Full suite observed 2026-10-13: baseline reds only (tb2_r6 flake
+        passed serially).'
+      sha: 06ad3cc9f25eb17b1b63f547e3877b5e696b6039
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`opencode.sh`''s credential-count extraction silently fails when the
       digit count opens the CLI''s line, reporting 1 instead of the real number'
   F136:
