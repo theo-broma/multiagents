@@ -90,7 +90,7 @@ agents:
   # orchestrator tends to agree with it, which defeats the purpose.
   advisor:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: team/advisor.md
     models:
       opencode-go: opencode-go/qwen3.6-plus
@@ -284,7 +284,7 @@ agents:
   # can_spawn on `implementer`, not a longer instruction.
   dev-advisor:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: team/dev-advisor.md
     models:
       opencode-go: opencode-go/kimi-k2.7-code
@@ -360,7 +360,7 @@ agents:
   # merge. A checker used on everything teaches its reader to skim it.
   reviewer:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: team/reviewer.md
     models:
       opencode-go: opencode-go/minimax-m3
@@ -388,7 +388,7 @@ agents:
   # budget under it.
   cartographer:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: team/cartographer.md
     models:
       opencode-go: opencode-go/qwen3.6-plus
@@ -434,7 +434,7 @@ agents:
     provider: opencode-go
     model: opencode-go/kimi-k2.7-code
     instructions: team/characterizer.md
-    # No `models:` entry at all, deliberately. NOT gemini-3.1-pro-high, which is
+    # No `models:` entry at all, deliberately. NOT gemini-3.8-flash-high, which is
     # where the auditor lands: the auditor partly judges what this agent chose
     # to pin, and with opencode down they would have collapsed onto one model at
     # the moment nobody is watching.
@@ -458,7 +458,7 @@ agents:
   # partly judging.
   auditor:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: team/auditor.md
     models:
       opencode-go: opencode-go/qwen3.6-plus
@@ -539,7 +539,7 @@ agents:
   gemini:
     disabled: true
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     description: Deprecated alias for `advisor`.
 
 # ---------------------------------------------------------------------------
@@ -566,7 +566,7 @@ agents:
 # different family precisely so something in the chain does not share that
 # blind spot.
 #
-# To remove the exception, move ONE of them. `tester` to gemini-3.1-pro-high,
+# To remove the exception, move ONE of them. `tester` to gemini-3.8-flash-high,
 # or `implementer-deep` to agy/claude-opus-4-6-thinking (nearly the same model,
 # so that one is mostly cosmetic — prefer the first).
 #

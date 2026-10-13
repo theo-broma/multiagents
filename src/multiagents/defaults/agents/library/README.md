@@ -53,7 +53,7 @@ express as a test. This is for when those are not enough.
 ```yaml
   specifier:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: library/specifier.md
     models:
       opencode: opencode-go/qwen3.6-plus
@@ -108,7 +108,7 @@ that a boundary can still be moved for free.
 ```yaml
   security-advisor:
     provider: agy
-    model: gemini-3.1-pro-high
+    model: gemini-3.8-flash-high
     instructions: library/security-advisor.md
     models:
       opencode: opencode-go/qwen3.7-plus
