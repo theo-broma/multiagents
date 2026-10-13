@@ -72,6 +72,8 @@ LOGIN_TIMEOUT = 900
 AUTHENTICATED = 0
 NOT_AUTHENTICATED = 10
 UNIMPLEMENTED = 64
+EXIT_TIMEOUT = 124
+EXIT_NOT_STARTED = 126
 
 # Ambient inputs provider scripts and their CLIs need. LC_* is the only
 # family allowed; credentials and action selectors require explicit overlays.
@@ -273,6 +275,12 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
     decoded with replacement rather than raising: a CLI error that echoes a
     binary path is still an answer.
 
+    EXIT_TIMEOUT (124) means the script started but ran past its timeout;
+    EXIT_NOT_STARTED (126) means an OS error prevented it from starting.
+    127 means no script resolved, or the script does not implement the action.
+    A script may itself exit with any of these codes, so the code alone does
+    not prove where it came from.
+
     The script runs in its own process group, and a timeout kills the GROUP.
     A shell script's real work is usually a child — a `compact` that runs the
     CLI to do it — and killing only the shell left that child working on the
@@ -295,12 +303,12 @@ def run_action(provider_name: str, provider: Any, executor: Any, action: str,
             cwd=cwd,
         )
     except OSError as exc:
-        return 124, "", why_it_would_not_run(script, exc)
+        return EXIT_NOT_STARTED, "", why_it_would_not_run(script, exc)
     try:
         out, err = child.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _kill_group(child)
-        return 124, "", f"{type(exc).__name__}: {exc}"
+        return EXIT_TIMEOUT, "", f"{type(exc).__name__}: {exc}"
     except BaseException:
         # P0-R8f.11: interrupted while waiting — Ctrl-C, a signal handler's
         # exception — the action must not go on working after its caller has

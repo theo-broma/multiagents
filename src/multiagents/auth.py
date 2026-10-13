@@ -18,6 +18,7 @@ in :mod:`multiagents.scripts`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -205,8 +206,17 @@ _AUTH_MARKERS = (
     "authentication required", "not authenticated", "unauthenticated",
     "please log in", "please login", "run 'agy' to log in", "log in, then retry",
     "providers login", "auth login", "invalid api key", "invalid_api_key",
-    "unauthorized", "401", "authentication failed", "credentials not found",
+    "unauthorized", "authentication failed", "credentials not found",
     "no credentials", "token expired", "oauth token",
+    "session expired", "session has expired", "sign in again",
+    "api key missing", "missing api key",
+)
+
+# A numeric substring is not an HTTP status without a contextual label.
+_HTTP_401 = re.compile(
+    r"\b(?:http(?:/\d+(?:\.\d+)*)?|httperror|status(?:\s+code|_code)?)"
+    r"[\s:=\"']*(?<![\d._])401(?![\w.])",
+    re.IGNORECASE,
 )
 
 # Phrases that look like auth failures but are not — a tool being denied
@@ -221,11 +231,12 @@ def looks_like_auth_failure(status: str, stderr: str) -> bool:
     agent writing *about* authentication must not be recorded as unauthenticated.
     """
     blob = f"{status}\n{stderr}".lower()
-    if not any(marker in blob for marker in _AUTH_MARKERS):
+    if not any(marker in blob for marker in _AUTH_MARKERS) and not _HTTP_401.search(blob):
         return False
     # A permission denial mentions neither credentials nor logging in; if the
     # only signal is a permission phrase, this is not an auth problem.
     if any(marker in blob for marker in _NOT_AUTH) and \
-       not any(m in blob for m in ("log in", "login", "credential", "token", "unauthorized")):
+       not any(m in blob for m in ("log in", "login", "credential", "token", "unauthorized",
+                                  "sign in", "session", "api key")):
         return False
     return True
