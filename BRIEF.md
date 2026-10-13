@@ -5680,3 +5680,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 
 - The remaining open findings (medium and low): triaged with the user and carried by plan 2026-10-13-findings-c1-c2-part2.md (in progress).
 - Phase 7 part 2, one container per run: plan 2026-10-13-phase7-part2-containers.md (ready) and context/specs/phase7-part2-containers.md; starts when findings part 2 is done (part 2's Next phase).
+- 17:30 CEST: PS tester redo done (nd-1dd53342 tip 5726b8a5: main merged, no conflict, 26 PS reds, FC green). PS review-loop nd-67479ae1: implementer nd-08072e9a (codex-b), reviewer nd-58cc279a pre-patched (restore test_c2_auth/seam from 5726b8a5). Merge order: loop, then tester nd-1dd53342, check the two c2 files equal 5726b8a5. BT tester nd-70992ed8 (codex) running, tests only + mutation table.
