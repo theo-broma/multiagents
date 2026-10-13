@@ -7969,6 +7969,7 @@ def test_an_unreachable_account_degrades_to_unknown_rather_than_raising(tmp_path
                         lambda config_dir=None: (None, "usage endpoint unreachable: URLError"))
     b = budget_mod.read_claude()
     assert b.known is False and "unreachable" in b.note
+    assert b.source == "none"  # QB4/F142: no readable utilization source.
     assert b.usable, "unknown headroom is not no headroom"
 
 

@@ -82,14 +82,13 @@ def test_read_provider_parses_known_headroom_and_derives_severity(tmp_path):
     assert (b.known, b.headroom, b.severity, b.source) == (True, 0.5, "normal", "script")
 
 
-def test_read_provider_empty_stdout_parses_as_empty_object_not_an_error(tmp_path):
-    # `json.loads(out.strip() or "{}")` treats a blank body as `{}`, which is
-    # NOT the same code path as invalid JSON — no explanatory note is set.
+def test_qb4_read_provider_empty_stdout_explains_missing_reading(tmp_path):
+    # QB4/F124: successful blank output explains why no quota is known.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(tmp_path, "p.sh", 'budget) printf ""; exit 0 ;;')
     b = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, use_cache=False)
-    assert (b.known, b.headroom, b.severity, b.note) == (False, None, "unknown", "")
+    assert (b.known, b.headroom, b.severity, b.note) == (False, None, "unknown", "script returned no reading")
 
 
 def test_read_provider_missing_fields_object_also_has_no_note(tmp_path):
@@ -130,25 +129,24 @@ def test_read_provider_ignores_unknown_extra_fields(tmp_path):
     assert not hasattr(b, "bogus_field")
 
 
-def test_read_provider_headroom_above_1_is_accepted_unclamped_and_reads_as_normal(tmp_path):
-    # F123: no range validation on the script's own "headroom" number. 1.5
-    # implies -50% used, which the severity thresholds read as "normal".
+def test_qb3_read_provider_headroom_above_1_is_refused(tmp_path):
+    # QB3/F123: malformed headroom refuses the reading rather than clamping.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(tmp_path, "p.sh", 'budget) printf \'{"known": true, "headroom": 1.5}\'; exit 0 ;;')
     b = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, use_cache=False)
-    assert b.headroom == 1.5
-    assert b.severity == "normal"
+    assert (b.known, b.headroom, b.severity) == (False, None, "unknown")
+    assert "1.5" in b.note
 
 
-def test_read_provider_headroom_below_0_is_accepted_unclamped_and_reads_as_critical(tmp_path):
-    # F123, the other direction: -0.5 implies 150% used, read as "critical".
+def test_qb3_read_provider_headroom_below_0_is_refused(tmp_path):
+    # QB3/F123 also refuses values below zero.
     h.invalidate_cache()
     provider = h.make_provider("p")
     h.case_script(tmp_path, "p.sh", 'budget) printf \'{"known": true, "headroom": -0.5}\'; exit 0 ;;')
     b = h.read_provider("p", provider, h.FakeExecutor(), tmp_path, use_cache=False)
-    assert b.headroom == -0.5
-    assert b.severity == "critical"
+    assert (b.known, b.headroom, b.severity) == (False, None, "unknown")
+    assert "-0.5" in b.note
 
 
 def test_read_provider_reset_time_already_in_the_past_is_corrected(tmp_path):
@@ -253,6 +251,7 @@ def test_claude_builtin_fallback_ignores_the_callers_config_dir(tmp_path, monkey
 
     assert b.known is False
     assert "credentials are missing or expired" in b.note
+    assert b.source == "none"  # QB4/F142: failed fetch supplies no bucket.
 
 
 def test_a_second_named_claude_account_reads_its_own_profile_through_extends(tmp_path, monkeypatch):
@@ -473,6 +472,7 @@ def test_read_claude_empty_profile_reports_run_claude_code_once(tmp_path):
     b = h.budget_mod.read_claude(fetch=False, config_dir=profile)
     assert b.known is False
     assert profile.name in b.note or "unreadable" in b.note
+    assert b.source == "none"  # QB4/F142: no bucket was read.
 
 
 def test_read_claude_fresh_cache_is_used_without_fetching(tmp_path):
@@ -509,6 +509,7 @@ def test_read_claude_expired_token_short_circuits_without_a_network_call(tmp_pat
     b = h.budget_mod.read_claude(fetch=True, config_dir=profile)
     assert b.known is False
     assert "credentials are missing or expired" in b.note
+    assert b.source == "none"  # QB4/F142: failed fetch supplies no bucket.
 
 
 def test_read_claude_picks_the_worst_of_multiple_limit_buckets(tmp_path):
