@@ -208,7 +208,9 @@ refusal is shown.
 boolean, `null`, a mapping, a list) is refused with the reason `not a
 string`. It never raises, and the other entries are still read. A whole
 `egress_allowlist: null` stays an empty list. A whole value that is not a
-list (a string, a number, a boolean, a mapping) is refused as a whole with
+list (a string, a number, a boolean, a mapping, falsy ones such as `""`,
+`0`, `false` and `{}` included; only `null` or an absent key is silent) is
+refused as a whole with
 one diagnostic, `refused egress_allowlist {value!r}: not a list`, and allows
 no host; it is never iterated, so a string is not read character by
 character (Decision 13). Verified by: `[5]`, `[true]`,
