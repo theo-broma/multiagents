@@ -215,6 +215,35 @@ line saying it is superseded by HF5, with this path. Verified by: review.
 Done when `tests/test_zai_provider.py`, `tests/test_au_*.py` and the full
 suite are green against the baseline.
 
+## HF6 — the auth proxy sends the account token only to the model API
+
+Found by the adversary on 2026-10-13 (run ag-198e9b), outside the review's
+findings. It predates HF1. `authproxy` builds the upstream URL as
+`UPSTREAM + self.path`. A request target that does not start with `/`, such
+as `.attacker.invalid/v1/messages`, therefore makes the proxy call
+`https://api.anthropic.com.attacker.invalid/...` with the account token in
+`Authorization`. The auth container reaches the internet through `bridge`.
+
+**HF6.1.** Before any account is chosen or any token is read, the proxy
+checks the URL it would request. Its scheme and host must be exactly those
+of `UPSTREAM`: `https`, the same hostname, and the default port. It must
+have no userinfo. Checking the URL actually built, not the raw target, is
+what makes the check hold for every spelling. Verified by: request targets
+`.attacker.invalid/x`, `-x.attacker.invalid/x`, `@attacker.invalid/x`,
+`:8443/x` and an absolute-form `http://attacker.invalid/x`. None of them
+causes an upstream request, and no token appears in any request a fake
+opener records.
+
+**HF6.2.** A refused target gets a `400` response with a short fixed body
+and no upstream content. The refusal is recorded as a proxy event naming the
+agent, never the target text verbatim. The proxy keeps serving the requests
+that follow. Verified by: a handler-level test that sends a refused target
+and then a normal `/v1/messages`, which is forwarded.
+
+**HF6.3.** Normal targets are unchanged. That covers an origin-form path
+starting with `/`, with or without a query string such as
+`/v1/messages?beta=true`. Verified by: the existing authproxy tests, unchanged.
+
 ## Decisions
 
 1. **The F30 choice (orchestrator, 2026-10-13).** The plan offered two
@@ -246,3 +275,22 @@ suite are green against the baseline.
    - HF4.1: the cases with no reading, including stale ones; HF4.3 keeps
      Tier A's precedence;
    - HF5.0 and HF5.3: what output is parsed, and ambiguity.
+4. **The adversary's pass on HF1 to HF3 (2026-10-13, run ag-198e9b).**
+   - **The token sent to an arbitrary host** is a new requirement, HF6.
+   - **A server install path:** an `extra_mounts` entry equal to one, set
+     writable, silently replaced the read-only mount. HF2.1a already covers
+     this, because the comparison is over the complete final list, which
+     includes `server_mounts`. It is an implementation gap, not a contract
+     change.
+   - **A non-JSON error body in UTF-16 or UTF-32** is not redacted, because
+     HF1.3 decodes as UTF-8. This is accepted, not fixed:
+     - the body comes from `api.anthropic.com`, and only that host chooses
+       the encoding;
+     - the agent controls neither the encoding nor the body;
+     - guessing an encoding without a BOM would trade a theoretical leak for
+       mangled bytes.
+
+     The adversary's three tests for it are not merged.
+   - **Two leaks that predate HF1 and that HF1.1 keeps:** a registered
+     literal used as a JSON key, and JSON nested more than 24 levels deep.
+     They go to part 2 with F21, which decides what counts as personal data.
