@@ -332,8 +332,13 @@ findings:
         classification, which TF now relies on).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'FC3: timeout 124, not-started 126, 127 kept for no-script (Decision 5).
+        Merged bb458c50 + c30d058a.'
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: a timeout and a "script is not executable" `OSError` are indistinguishable
       by exit code
   F115:
@@ -491,8 +496,12 @@ findings:
         and budget).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'QB3: out-of-range headroom refuses the reading. Merged 355f6aed + 534a1e1d.'
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: A script's reported `headroom` is accepted with no range validation,
       so an out-of-range value (e.g. `1.5` or `-0.5`) produces a `Budget` with an
       internally inverted-looking severity
@@ -511,8 +520,12 @@ findings:
         and budget), together with F142.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: QB4, merged 355f6aed + 534a1e1d.
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: An empty or field-less script response and a genuine parse failure both
       produce `known=False, severity="unknown"`, but only the parse failure carries
       an explanatory note
@@ -721,8 +734,12 @@ findings:
         item 2.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: FC1, merged bb458c50 (impl) + c30d058a (tests).
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`looks_like_auth_failure`''s `"401"` marker is an unanchored substring
       match, not an HTTP-status match'
   F137:
@@ -741,8 +758,12 @@ findings:
         item 2.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: FC2, merged bb458c50 + c30d058a.
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`looks_like_auth_failure` does not recognize several plausible real-world
       authentication-failure phrasings'
   F14:
@@ -847,8 +868,12 @@ findings:
         and budget), together with F124.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: QB4, merged 355f6aed + 534a1e1d.
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: '`read_claude` sets `source="cachedUsageUtilization"` at construction
       time, so when the cache file is missing AND the API fetch fails the returned
       Budget claims a source that never existed'
@@ -871,8 +896,12 @@ findings:
         models.yaml atomically (temp file + rename).'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'QB5: atomic models.yaml write. Merged 355f6aed + 534a1e1d.'
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: '`refresh_models` writes `models.yaml` directly to the target path with
       no atomic rename, so a crash or kill mid-write leaves a corrupt or truncated
       file that the next reader will see'
@@ -1041,8 +1070,12 @@ findings:
         spend visible in budget_status), together with F161.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: QB2 (findings-c1-c2-part2), merged 355f6aed (impl) + 534a1e1d (tests).
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`budget_status`''s per-provider spend table cannot see claude spend'
   F161:
     class: maintainability
@@ -1059,8 +1092,12 @@ findings:
         with F160.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: QB2 (findings-c1-c2-part2), merged 355f6aed (impl) + 534a1e1d (tests).
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: '`render()`''s per-node token label is blank for a claude run'
   F170:
     class: bug
@@ -1099,8 +1136,13 @@ findings:
         first in that item.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: Already fixed on main (decoration on a copy); QB1 tests pinning it merged
+        534a1e1d (Decision 3).
+      sha: f35af2595a628a039cddab4c16c5030930525551
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`read_all`''s cooldown decoration lands on the shared cached `Budget`,
       so the note accumulates on every cache hit and `severity` stays pinned at `critical`
       after the cooldown has lapsed'
