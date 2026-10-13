@@ -141,12 +141,11 @@ def test_hardcoding_headroom_exactly_one_is_usable():
 
 
 def test_hardcoding_choose_provider_with_empty_budgets_dict():
-    """The suite tests preferred missing from budgets, but not an entirely empty
-    dict. Should still return the preferred with "has headroom" reason.
-    """
+    """HF4.1/HF4.2 / F121: an empty dict permits work without claiming quota."""
     name, why = h.choose_provider("p", {}, [], reserve=0.15)
     assert name == "p"
-    assert why == "preferred provider has headroom"
+    assert "no quota reading" in why or "no budget reading" in why or "no reading" in why
+    assert "has headroom" not in why
 
 
 def test_hardcoding_choose_provider_chain_with_only_defer():
@@ -330,12 +329,11 @@ def test_hardcoding_choose_provider_family_with_only_preferred():
 
 
 def test_hardcoding_choose_provider_family_all_exhausted_no_wait():
-    """If all family members are exhausted and wait_for_reset_within=0, should
-    fall through to chain, not wait.
-    """
+    """HF4.1/HF4.4 / F121: without a wait, use the unread chain fallback."""
     soon = mkbudget(headroom=0.0, cooldown_until=time.time() + 50)
     name, why = h.choose_provider("claude", {"claude": soon, "claude-2": soon}, ["fallback"],
                                   reserve=0.15, family=["claude", "claude-2"],
                                   wait_for_reset_within=0)
-    assert name is None
-    assert "fallback (no budget reading)" in why
+    assert name == "fallback"
+    assert "no quota reading" in why or "no budget reading" in why or "no reading" in why
+    assert "has headroom" not in why
