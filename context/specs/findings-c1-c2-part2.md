@@ -169,7 +169,10 @@ the copy that way. A `provider_name` argument that differs from
 `ValueError` naming both, before running anything. That is the one
 exception to `run_action`'s "never raises", and its docstring says so. A
 provider-like object without `name` falls back to the `provider_name`
-argument, as today. Verified by: the two characterization tests in
+argument, as today. Text shown to the user about a borrowed account's login
+(a check's detail and its fix hint) keeps naming the login owner, since that
+is where the user logs in; only the identity a script or the executor sees
+changes (Decision 14). Verified by: the two characterization tests in
 `tests/test_c2_seam_characterization.py` (reversed); a child extending a
 parent seeing its own name; a borrowed-account auth check seeing the
 instance name and running the owner's script; an env overlay setting
@@ -421,3 +424,10 @@ characterization tests pinning "no event" reversed.
     iterating it, as today, allows single characters. Refusing allows nothing,
     which is the safe failure for an egress control, and the diagnostic says
     why.
+14. **Borrowed-account hints keep naming the owner** (PS implementer question,
+    2026-10-13): `MULTIAGENTS_PROVIDER` and `Provider.name` are the instance,
+    but a login hint must send the user to the account that holds the login.
+    The existing C6 tests asserting owner-named hints stay as they are.
+    Test fixtures that `extends:` an undefined parent (for example
+    `opencode-go` without `opencode`) are incomplete under PS2 and are
+    completed by the tester, not exempted.
