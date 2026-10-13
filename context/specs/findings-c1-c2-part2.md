@@ -207,7 +207,11 @@ refusal is shown.
 **SE1 — F2.** An `egress_allowlist` entry that is not a string (a number, a
 boolean, `null`, a mapping, a list) is refused with the reason `not a
 string`. It never raises, and the other entries are still read. A whole
-`egress_allowlist: null` stays an empty list. Verified by: `[5]`, `[true]`,
+`egress_allowlist: null` stays an empty list. A whole value that is not a
+list (a string, a number, a boolean, a mapping) is refused as a whole with
+one diagnostic, `refused egress_allowlist {value!r}: not a list`, and allows
+no host; it is never iterated, so a string is not read character by
+character (Decision 13). Verified by: `[5]`, `[true]`,
 `[null]`, `[{}]`, `[[]]` each giving one diagnostic and no exception; a list
 mixing one of them with `a.example` still allowing `a.example`.
 
@@ -410,3 +414,8 @@ characterization tests pinning "no event" reversed.
 12. **SE2 extends today's checks rather than adopting
     `_validate_allowlist_entry`**, so no entry accepted today on purpose
     (trailing dot, non-ASCII label) starts being refused.
+13. **A non-list `egress_allowlist` is refused whole** (SE tester question,
+    2026-10-13): reading `"a.example"` as one entry would guess at intent, and
+    iterating it, as today, allows single characters. Refusing allows nothing,
+    which is the safe failure for an egress control, and the diagnostic says
+    why.
