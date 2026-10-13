@@ -61,10 +61,12 @@ constants and listed in its docstring:
 - `EXIT_NOT_STARTED = 126`: the script could not be started at all (any
   `OSError` at start: not executable, bad format, missing interpreter).
 
-127 is not used by `run_action` itself: it stays the code a script returns
-for an action it does not implement, which `budget._from_script` treats as
-"no script" and answers with the built-in reader. A broken installation must
-never take that path. stderr keeps its current reason text. The docstring
+127 keeps its current meaning, unchanged: `run_action` returns it when no
+script resolves for the provider (`scripts.py:285`, "no script for
+provider ..."), and a script may return it for an action it does not
+implement. `budget._from_script` treats 127 as "no script" and answers with
+the built-in reader. A script that exists but cannot be started is a broken
+installation, gets 126, and must never take that path. stderr keeps its current reason text. The docstring
 says that a script may itself exit with any of these codes, so a code alone
 does not prove where it came from. No other caller changes behaviour.
 Verified by: the two characterization tests pinning 124 for both cases
@@ -196,8 +198,10 @@ still load.
 4. **F123 refuses rather than clamps:** a value outside [0, 1] says the
    script is wrong, and clamping would hide it. The whole reading is refused,
    so its windows cannot reintroduce a headroom.
-5. **F114 does not use 127** (advisor, 2026-10-13): 127 means "action not
-   implemented" to the budget reader, which then falls back to its built-in
-   reader. Every start failure is 126.
+5. **F114 leaves 127 alone** (advisor, 2026-10-13; corrected the same day
+   after the FC tester found `run_action` itself returns 127 for "no script"):
+   127 means "no script / action not implemented" to the budget reader, which
+   then falls back to its built-in reader. Every start failure of an existing
+   script is 126.
 6. **F136 requires HTTP context** for `401`; bare `code 401`/`error 401`
    are not enough.
