@@ -260,6 +260,37 @@ argument and appearing in no command string; drift results for an
 existing, a missing and a changed file matching today's; a nonzero exec
 on the second of three paths giving `[]`.
 
+**SE4 — hostname shape (adversary finding, 2026-10-13).** After SE2's
+normalisation, a domain name is accepted only if every label is 1 to 63
+letters, digits or hyphens, not starting or ending with a hyphen, any
+`xn--` label decodes as IDNA, and the whole name is at most 253 characters.
+A name that IDNA already rejects keeps today's `invalid IDNA hostname`; any
+other name failing this shape is refused with the reason `invalid hostname`,
+at SE2 step 3 after today's IPv6 and IPv4 refusals and before single label
+and public suffix. Names with underscores (`_dmarc.example.com`) are now
+refused: an HTTP egress destination never needs one. An accepted IPv4
+address keeps today's exact match (ST9), with no subdomains. Today a name failing the
+label check is silently accepted, so `api.github.com#ci` or a 568-character
+name reaches the egress filter, where the proxy reads `#` as a comment and
+splits long lines, leaving patterns without an end or start anchor. Every
+line the filter file contains is anchored at both ends and admits exactly the
+accepted domain and its subdomains, or exactly the accepted IPv4 address. Verified by: the adversary's tests in
+`tests/test_se_adversary_filter.py` (commit 05b264ff), including the seeded
+fuzz; `a_b.com`, `-a.com`, `a-.com`, `xn--a.com` and a 254-character
+name refused with `invalid hostname`, a 64-character label with today's IDNA
+wording; IDNA names still accepted as their ASCII form.
+
+**SE5 — `sandbox check` reads accepted entries (adversary finding).** The
+probe in `multiagents sandbox check` uses the first entry accepted by
+`allowlist_entries()`, never the raw configuration value. With no accepted
+entry it says there is nothing to probe. Its denied-host probe uses a name
+under `.invalid`, which no accepted rule can match, and it reports a refusal
+by the egress proxy separately from any other failure (DNS, TLS, HTTP), so a
+correct sandbox is never reported `UNEXPECTED`. A non-list or mapping value
+never raises there. Verified by: a
+mapping, a string, and a list whose first entry is refused (`b.com:443`
+followed by `a.com`, which probes `a.com`), with `ensure_running` faked.
+
 ### AP — the auth proxy
 
 **AP1 — F21 and part 1's Decision 4 leaks.** In an upstream body passed
@@ -382,6 +413,50 @@ connection, a timeout and a body read failing mid-relay, each emitting
 exactly one event with those fields; a client disconnect emitting none; the
 characterization tests pinning "no event" reversed.
 
+### AP — adversary findings (2026-10-13, run ag-23957f, tests 8d1663de)
+
+**AP7 — headers on every response.** AP5's forbidden list applies to every
+response relayed to an agent, 2xx and HEAD included: never `set-cookie`,
+`authorization`, `www-authenticate`, `location`, `proxy-*`, nor any header
+whose name contains `organization`, `org-`, `workspace` or `user-profile`
+(the model API sends `anthropic-organization-id` on successful responses).
+On a 2xx the other upstream headers are still forwarded, so clients keep
+their rate-limit and streaming headers; on a non-2xx AP5's allowlist applies
+as written. Hop-by-hop headers are removed and the framing headers
+(`content-length`, `transfer-encoding`) are the proxy's, as today. A
+forwarded header whose value contains a registered literal or an e-mail
+address is dropped, except `content-type`, which is then replaced by
+`application/octet-stream`. Residual: an identity header under another name
+(for example a request identity echoed back) is only caught if its value is
+a registered literal. Verified
+by: the adversary's header tests; a 200 to POST, GET and HEAD with each
+forbidden header; an allowed header whose value carries a literal or an
+e-mail address.
+
+**AP8 — masking order.** Registered literals are masked before e-mail
+addresses, longest literal first, so a literal containing an e-mail-shaped
+part or another literal is masked whole (HF1.2 holds). Verified by: a connection-string literal containing
+`user:pass@host.example.com` in a text body and in a JSON value.
+
+**AP9 — refusals never leave unread bytes.** Every response the proxy
+generates before reading the request body (the 401 for a missing or forged
+token, 405, 411, HF6's 400) closes the connection, and the method and
+`Transfer-Encoding` checks come before the token check, so a chunked request
+gets 411 whatever its token; an unsupported method gets 405 even with
+`Transfer-Encoding`. A malformed, negative or repeated-and-conflicting
+`Content-Length` gets 400 and the connection is closed. Nothing after a
+refusal on that connection is read as a request. Verified by: a forged token with a chunked body (411, one
+response, closed); a forged token whose Content-Length body holds a complete
+signed request (one 401, nothing upstream).
+
+**AP10 — mixed exhaustion.** When no account is usable and at least one of
+the agent's accounts is limited (others rejected), the proxy answers 429 with
+`retry-after` from the limited accounts, as in AP5; only when every account
+is rejected does it answer 401. AP2 also covers a callback raising any
+exception, `SystemExit` and `KeyboardInterrupt` included: the request still
+completes. Verified by: one rejected and one limited account giving 429 with
+`retry-after`; a callback raising `SystemExit`.
+
 ## Decisions
 
 1. **Part 2 is split.** Items 2, 4, 5 and 6 are specified here and run
@@ -433,3 +508,10 @@ characterization tests pinning "no event" reversed.
     Test fixtures that `extends:` an undefined parent (for example
     `opencode-go` without `opencode`) are incomplete under PS2 and are
     completed by the tester, not exempted.
+15. **Adversary findings on AP are fixed in place** (AP7-AP10). Accepted, as
+    the class part 1's Decision 4 accepted for UTF-16 (upstream chooses the
+    encoding): a registered literal arriving as a JSON number; gzip-encoded
+    error bodies; HTML-entity or percent-encoded addresses; and, in SSE or
+    JSON-with-trailing-text bodies, the structured organisation-key masking
+    only. Registered literals and plain-text e-mail addresses are still
+    masked in those bodies.
