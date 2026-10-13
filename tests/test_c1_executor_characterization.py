@@ -235,22 +235,22 @@ def test_extra_mounts_path_with_colon_and_spaces_passes_through_unvalidated(tmp_
 
 
 def test_extra_mounts_read_only_is_silently_dropped_when_path_collides_with_root(tmp_path):
-    # WIDEN-THE-BOUNDARY finding (see F30 in C1-sandbox-executor.md): the
-    # built-in project mounts come BEFORE extra_mounts is appended, and the
-    # dedup loop's `path not in seen` guard means the FIRST occurrence of a
-    # path wins. Since SG-R2 the built-in root mount is read-only, so the
-    # collision is tested in the direction that still matters: a config
-    # author who names paths.root in extra_mounts WITHOUT read_only (a bare
-    # string, always writable) does not get a writable root — the built-in
-    # read-only mount wins and the extra entry is dropped.
+    # HF2.1 / F30 supersedes first-wins: contradicting the read-only root
+    # with writable user entries must refuse the configuration.
     ex = h.make_docker_executor(
         tmp_path,
         extra_mounts=[str(tmp_path), {"path": str(tmp_path), "read_only": False}],
     )
-    result = ex.mounts()
-    assert dict(result)[ex.paths.root] is True        # NOT False, despite the request
-    assert [p for p, _ in result].count(ex.paths.root) == 1
+    problems = ex.configuration_problems()
+    assert any(str(tmp_path) in problem for problem in problems)
+    with pytest.raises(ValueError) as caught:
+        ex.mounts()
+    assert str(tmp_path) in str(caught.value)
     assert ex.paths.root == tmp_path
+    ex.config["extra_mounts"] = [{"path": str(tmp_path), "read_only": True}]
+    result = ex.mounts()
+    assert dict(result)[ex.paths.root] is True
+    assert [p for p, _ in result].count(ex.paths.root) == 1
 
 
 def test_duplicate_extra_mounts_entries_first_one_wins(tmp_path):
@@ -263,20 +263,15 @@ def test_duplicate_extra_mounts_entries_first_one_wins(tmp_path):
             {"path": str(dup), "read_only": True},
         ],
     )
-    result = dict(ex.mounts())
-    assert result[dup] is False       # first entry's read_only wins, second dropped
+    # HF2.1 / F30: neither contradictory user entry silently wins.
+    assert any(str(dup) in problem for problem in ex.configuration_problems())
+    with pytest.raises(ValueError) as caught:
+        ex.mounts()
+    assert str(dup) in str(caught.value)
 
 
 def test_extra_mounts_wins_over_a_colliding_cli_binary_mount_because_it_comes_first_in_out(tmp_path):
-    # `out` is built in this order: root/worktrees/homes, then extra_mounts,
-    # then (if mount_cli_from_host) each provider's CLI-binary mount and
-    # home_links. First-wins dedup means extra_mounts is checked BEFORE the
-    # CLI/home_links entries are even appended — so an extra_mounts entry
-    # naming the exact same absolute path as a provider's CLI binary wins
-    # over that binary's normal read-only mount, producing a writable mount
-    # at the path the sandboxed CLI binary lives at. This is the same
-    # first-wins mechanism as F30, applied to a built-in CLI mount instead of
-    # the project root.
+    # HF2.1a / F30 includes CLI mounts in collision validation.
     binary_dir = tmp_path / "fakebin"
     binary_dir.mkdir()
     binary_path = binary_dir / "fake-cli"
@@ -293,8 +288,14 @@ def test_extra_mounts_wins_over_a_colliding_cli_binary_mount_because_it_comes_fi
         providers={"fake": provider},
         extra_mounts=[{"path": str(binary_path), "read_only": False}],
     )
-    result = dict(ex.mounts())
-    assert result[binary_path] is False        # extra_mounts' writable entry won
+    assert any(str(binary_path) in problem for problem in ex.configuration_problems())
+    with pytest.raises(ValueError) as caught:
+        ex.mounts()
+    assert str(binary_path) in str(caught.value)
+    # An agreeing user entry remains valid and yields one read-only mount.
+    ex.config["extra_mounts"] = [{"path": str(binary_path), "read_only": True}]
+    assert ex.configuration_problems() == []
+    assert [(p, ro) for p, ro in ex.mounts() if p == binary_path] == [(binary_path, True)]
 
 
 def test_config_dir_is_mounted_read_only_after_root_and_wins_at_its_own_path(tmp_path):

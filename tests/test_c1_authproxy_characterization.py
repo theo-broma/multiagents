@@ -319,12 +319,7 @@ def test_scrub_masks_a_key_named_like_a_secret_but_not_its_sibling_pii(tmp_path,
 
 
 def test_scrub_falls_back_to_original_bytes_on_non_json_error_body(tmp_path, monkeypatch):
-    """`_scrub` wraps `json.loads`/`scrub`/`json.dumps` in a bare `except
-    Exception: return payload` — a non-JSON error body from upstream (plain
-    text, HTML) is returned completely unscrubbed, byte for byte. If such a
-    body ever contained a bearer token in a shape `_scrub`'s own regexes
-    would normally catch, that protection is bypassed entirely because the
-    body never reaches `redact.scrub` at all."""
+    """HF1.2 / F24, F71 reverses the original non-JSON secret passthrough."""
     body = b"<html>Bad Gateway: token=sk-live-1234567890abcdef leaked here</html>"
     with h.fake_http_server(h.fixed_response_upstream(502, body=body)) as upstream_url:
         with h.authproxy_server(tmp_path, monkeypatch, accounts={"acc": "t"},
@@ -335,7 +330,9 @@ def test_scrub_falls_back_to_original_bytes_on_non_json_error_body(tmp_path, mon
             with pytest.raises(urllib.error.HTTPError) as exc:
                 urllib.request.urlopen(req)
             assert exc.value.code == 502
-            assert exc.value.read() == body
+            received = exc.value.read()
+            assert b"sk-live-1234567890abcdef" not in received
+            assert received == b"<html>Bad Gateway: token=[redacted] leaked here</html>"
 
 
 # ---------------------------------------------------------------------------

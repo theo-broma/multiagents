@@ -68,12 +68,19 @@ def test_ensure_proxy_half_state_on_bridge_connect_failure(tmp_path):
 # F62 — ensure_auth_proxy half-state on bridge connect failure
 # ---------------------------------------------------------------------------
 
-def test_ensure_auth_proxy_half_state_on_bridge_connect_failure(tmp_path):
-    """Same root cause as F61, in ensure_auth_proxy. The auth proxy container
-    is started, then `docker network connect bridge` is called without
-    checking its return code. A failure leaves the auth proxy running on the
-    internal network where it cannot reach the model API upstream."""
-    assert True  # trace-based finding, same mechanism as F61
+def test_ensure_auth_proxy_half_state_on_bridge_connect_failure(tmp_path, monkeypatch):
+    """HF3.1 / F62 replaces the trace-only finding with observable refusal."""
+    from st_docker import DockerWorld
+
+    world = DockerWorld(tmp_path, monkeypatch)
+    ex = world.auth_executor()
+    world.fail(["network", "connect", "bridge"], reason="auth bridge refused",
+               target=ex.auth_container)
+    outcome = ex.ensure_auth_proxy()
+    assert outcome.get("ok") is False, outcome
+    assert outcome["error"] == "auth bridge refused"
+    assert ["rm", "-f", ex.auth_container] in world.calls()
+    assert ex.auth_container not in world.read()["containers"]
 
 
 # ---------------------------------------------------------------------------
