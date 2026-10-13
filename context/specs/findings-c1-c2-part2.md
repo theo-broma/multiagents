@@ -305,7 +305,9 @@ raises on write does not break the request.
   hint)`, or 3600 s when there is no usable hint. The hint is `retry-after`
   as delta-seconds or as an HTTP-date, else the unified-reset header as epoch
   seconds or as an ISO 8601 timestamp. A hint that does not parse, is not
-  finite, or is in the past is not usable;
+  finite, or is in the past is not usable; an unusable `retry-after` falls
+  back to the unified-reset header, and `retry-after: 0` is a usable hint
+  (the 60 s floor applies);
 - a new mark never shortens a cooldown already running on that account,
   whichever request sets it;
 - no attempt admitted after the mark uses that account before its cooldown
