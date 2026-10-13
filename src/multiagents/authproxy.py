@@ -317,6 +317,31 @@ class Accounts:
 # The proxy itself
 # --------------------------------------------------------------------------
 
+def upstream_url(path: str) -> str:
+    """The URL a request target would be forwarded to, or "" if it leaves UPSTREAM.
+
+    The target is appended to `UPSTREAM`, so one that does not start with `/`
+    (`.attacker.invalid/x`, `@attacker.invalid/x`, `:8443/x`) moves the host,
+    and with it the account token. The check is on the URL as built, both as
+    `urlsplit` reads it and as urllib will dial it, so it holds for every
+    spelling rather than for the ones someone thought of.
+    """
+    url = UPSTREAM + path
+    want = urllib.parse.urlsplit(UPSTREAM)
+    try:
+        got = urllib.parse.urlsplit(url)
+        port = got.port
+        request = urllib.request.Request(url)
+    except ValueError:
+        return ""
+    if (got.scheme, got.hostname, port, got.username, got.password) != \
+            (want.scheme, want.hostname, want.port, None, None):
+        return ""
+    if request.type != want.scheme or request.host != want.netloc:
+        return ""
+    return url
+
+
 def _retry_after(headers: Any, body: bytes) -> float:
     """How long the upstream says to wait. Falls back to an hour."""
     for name in ("retry-after", "anthropic-ratelimit-unified-reset"):
@@ -371,6 +396,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail(401, "this proxy serves multiagents agents only")
 
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        # Before any account is chosen: a target that moves the host would
+        # carry the token there. The target itself is not repeated anywhere —
+        # it is the caller's text, and the event names who sent it.
+        url = upstream_url(self.path)
+        if not url:
+            self._event("rejected", agent=agent, reason="request target leaves the upstream")
+            return self._fail(400, "request target must be an origin-form path")
         accounts = type(self).accounts
         try:
             accounts.reload_pins()
@@ -404,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
             if not token:
                 type(self).accounts.mark_limited(label, 300)
                 continue
-            outcome = self._forward(label, token, body)
+            outcome = self._forward(url, label, token, body)
             if outcome not in ("limited", "unauthenticated"):
                 return
             unauthenticated |= outcome == "unauthenticated"
@@ -415,11 +447,11 @@ class Handler(BaseHTTPRequestHandler):
 
     do_GET = do_POST
 
-    def _forward(self, label: str, token: str, body: bytes) -> str:
+    def _forward(self, url: str, label: str, token: str, body: bytes) -> str:
         headers = {k: v for k, v in self.headers.items()
                    if k.lower() not in HOP_HEADERS}
         headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(UPSTREAM + self.path, data=body,
+        request = urllib.request.Request(url, data=body,
                                          headers=headers, method="POST")
         try:
             upstream = urllib.request.urlopen(request, timeout=UPSTREAM_TIMEOUT)
