@@ -1369,8 +1369,14 @@ findings:
         (its duplicate).'
       sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
       status: scheduled
+    - by: orchestrator
+      note: 'HF1 (findings-c1-c2-part1) merged 59e3336f (impl) + 1f6efa80 (tests),
+        budget-test restore e49faf28. Full suite observed: baseline reds + 3 load
+        flakes green serially.'
+      sha: e49faf28bba20c11c6a23569c7bcd17578233bc6
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`_scrub` is a complete no-op on a non-JSON error body, bypassing even
       its shape-based patterns'
   F30:
@@ -1391,8 +1397,14 @@ findings:
         a silent downgrade.'
       sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
       status: scheduled
+    - by: orchestrator
+      note: HF2 incl. HF2.1a server-install collision gap (6b2edf18), merged 59e3336f
+        + 1f6efa80; gap tests tests/test_hf_c1_gaps.py (c981fe64) on main via the
+        loop.
+      sha: e49faf28bba20c11c6a23569c7bcd17578233bc6
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: A read-only `extra_mounts` entry naming the project root is silently
       downgraded to writable
   F31:
@@ -1769,8 +1781,12 @@ findings:
         item 3: same fix as F61.'
       sha: fe47dc1593fbbf8ff6de01fcd05067458d928ce1
       status: scheduled
+    - by: orchestrator
+      note: HF3 auth bridge, merged 59e3336f + 1f6efa80.
+      sha: e49faf28bba20c11c6a23569c7bcd17578233bc6
+      status: fixed
     severity: high
-    status: scheduled
+    status: fixed
     summary: '`ensure_auth_proxy` returns success when bridge-network connect fails,
       leaving auth proxy isolated'
   F63:
@@ -1949,8 +1965,12 @@ findings:
         counted once; fixing F24 fixes both.'
       sha: 9030cdac2f454ef1fb56c730d47ea14159fbe60f
       status: accepted
+    - by: orchestrator
+      note: With F24 via HF1, merged 59e3336f + 1f6efa80.
+      sha: e49faf28bba20c11c6a23569c7bcd17578233bc6
+      status: fixed
     severity: medium
-    status: accepted
+    status: fixed
     summary: '`_scrub` returns non-JSON error bodies completely unredacted'
   F72:
     class: performance
