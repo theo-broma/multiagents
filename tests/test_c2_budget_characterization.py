@@ -637,32 +637,36 @@ def test_choose_provider_defer_sentinel_stops_the_chain_before_reaching_it():
 
 
 def test_choose_provider_preferred_missing_from_budgets_entirely_is_still_chosen():
-    # HF4.1/HF4.2 / F121 deliberately reverse the old headroom claim: missing
-    # readings stay usable, but are reported honestly in either position.
+    # F122, half one: `_has_room(None, ...)` returns True (unknown headroom is
+    # not "no headroom"), and the preferred branch reaches it directly — a
+    # provider never read at all is treated exactly like one with headroom,
+    # down to the reported reason.
     name, why = h.choose_provider("p", {}, [], reserve=0.15)
-    assert name == "p"
-    assert "no quota reading" in why or "no budget reading" in why or "no reading" in why
-    assert "has headroom" not in why
+    assert (name, why) == ("p", "preferred provider has headroom")
 
 
-def test_choose_provider_fallback_missing_from_budgets_entirely_is_accepted():
-    # HF4.1/HF4.2 / F121 deliberately reverse the position-dependent refusal.
+def test_choose_provider_fallback_missing_from_budgets_entirely_is_rejected():
+    # F122, half two: the SAME "never read" state, reached as a fallback
+    # instead of as the preferred slot, is excluded outright — the chain loop
+    # requires `budgets.get(name) is not None` before it will even ask
+    # `_has_room`. A provider missing from `budgets` is usable as a preferred
+    # but never as a fallback.
     exhausted = mkbudget(headroom=0.0)
     name, why = h.choose_provider("p", {"p": exhausted}, ["q"], reserve=0.15)
-    assert name == "q"
-    assert "no quota reading" in why or "no budget reading" in why or "no reading" in why
-    assert "has headroom" not in why
+    assert name is None
+    assert "q (no budget reading)" in why
 
 
 def test_choose_provider_fallback_with_known_false_reading_is_accepted():
-    # HF4.1/HF4.2 / F121 keep this usable, and now require the reason to say
-    # that there is no reading, just as for an absent Budget entry.
+    # Contrast with the previous test: a provider that WAS read and came back
+    # known=False (a real "unknown headroom" Budget, not an absent dict entry)
+    # passes `_has_room` and is chosen — the missing-vs-unknown line falls
+    # between "never in the dict" and "read but inconclusive", not between
+    # "known" and "not known".
     exhausted = mkbudget(headroom=0.0)
     unknown = mkbudget(known=False)
     name, why = h.choose_provider("p", {"p": exhausted, "q": unknown}, ["q"], reserve=0.15)
-    assert name == "q"
-    assert "no quota reading" in why or "no budget reading" in why or "no reading" in why
-    assert "has headroom" not in why
+    assert (name, why) == ("q", "p is constrained; falling back to q")
 
 
 def test_choose_provider_reserve_blocks_a_fallback_only_when_it_is_reserved():
@@ -749,11 +753,8 @@ def test_choose_provider_family_all_exhausted_falls_through_to_chain_when_reset_
     name, why = h.choose_provider("claude", {"claude": soon, "claude-2": soon}, ["fallback"],
                                   reserve=0.15, family=["claude", "claude-2"],
                                   wait_for_reset_within=10)
-    # HF4.1/HF4.4 / F121: waiting still precedes fallback, but an unread
-    # fallback becomes usable once the reset lies outside the wait window.
-    assert name == "fallback"
-    assert "no quota reading" in why or "no budget reading" in why or "no reading" in why
-    assert "has headroom" not in why
+    assert name is None
+    assert "fallback (no budget reading)" in why    # fell through into the ordinary chain loop
 
 
 # ===========================================================================

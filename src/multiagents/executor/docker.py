@@ -1192,6 +1192,67 @@ sys.exit(rc)
         problems = self.configuration_problems()
         if problems:
             raise ValueError("; ".join(problems))
+        out, late = self._declared_mounts()
+        from ..scheduler import enabled, transport_directory
+        scheduler_enabled = enabled(self.paths.root)
+        if scheduler_enabled:
+            transport = transport_directory(self.paths.root)
+            transport.mkdir(parents=True, exist_ok=True, mode=0o700)
+            transport.chmod(0o700)
+        required = {path for path, _ in self.project_mounts()}
+        seen: dict[Path, bool] = {}
+        for path, read_only in out:
+            if (path.exists() or path in required) and path not in seen:
+                seen[path] = read_only
+        mounts = sorted(seen.items())
+        # Prepare backing stores only after the pure configuration check.
+        for store in (*self.private_state().values(), *self.transcript_state().values()):
+            store.mkdir(parents=True, exist_ok=True)
+        for mount in late:
+            # Versions roots keep the existing path-first deduplication;
+            # private and transcript projections retain their overlay order.
+            if mount[1] and any(path == mount[0] for path, _ in mounts):
+                continue
+            if mount not in mounts:
+                mounts.append(mount)
+        from ..authority import HostAuthority
+        authority = HostAuthority.directory_for(self.paths).resolve()
+        for source, _ in mounts:
+            mounted = source.resolve()
+            if (mounted == authority or mounted in authority.parents
+                    or authority in mounted.parents):
+                raise ValueError(f"mount {source} would expose host authority records")
+        scheduler_state = (state_root() / "scheduler").resolve()
+        if scheduler_enabled or scheduler_state.exists():
+            for source, _ in mounts:
+                mounted = source.resolve()
+                if (mounted == scheduler_state or mounted in scheduler_state.parents
+                        or scheduler_state in mounted.parents):
+                    raise ValueError(f"mount {source} would expose scheduler state")
+        if scheduler_enabled:
+            rpc = transport.resolve()
+            for source, read_only in mounts:
+                mounted = source.resolve()
+                if (mounted == rpc or mounted in rpc.parents or rpc in mounted.parents):
+                    if mounted != rpc or not read_only:
+                        raise ValueError(f"mount {source} would expose writable scheduler transport")
+        return mounts
+
+    def _extra_mounts(self) -> list[tuple[Path, bool]]:
+        out = []
+        for entry in self.config.get("extra_mounts", []) or []:
+            if isinstance(entry, str):
+                out.append((Path(entry).expanduser(), False))
+            elif isinstance(entry, dict) and entry.get("path"):
+                out.append((Path(entry["path"]).expanduser(), bool(entry.get("read_only"))))
+        return out
+
+    def _declared_mounts(self) -> tuple[list[tuple[Path, bool]], list[tuple[Path, bool]]]:
+        """All mount intentions before existence filtering or deduplication.
+
+        The second list contains projections and versions roots mounted last.
+        No directories are created and no admission checks are called here.
+        """
         # Listed whether or not they exist yet: `protect_project` creates the
         # missing ones before a container is created, and a protection that
         # vanished from the list because its path was absent would be a
@@ -1207,15 +1268,9 @@ sys.exit(rc)
         scheduler_enabled = enabled(self.paths.root)
         if scheduler_enabled:
             transport = transport_directory(self.paths.root)
-            transport.mkdir(parents=True, exist_ok=True, mode=0o700)
-            transport.chmod(0o700)
             out.append((transport, True))
 
-        for entry in self.config.get("extra_mounts", []) or []:
-            if isinstance(entry, str):
-                out.append((Path(entry).expanduser(), False))
-            elif isinstance(entry, dict) and entry.get("path"):
-                out.append((Path(entry["path"]).expanduser(), bool(entry.get("read_only"))))
+        out.extend(self._extra_mounts())
 
         if self.config.get("mount_cli_from_host", True):
             for provider in self.providers.values():
@@ -1275,55 +1330,36 @@ sys.exit(rc)
                 out.append((script, True))
                 executable_mounts.append((script, True))
 
-        required = {path for path, _ in project}
-        seen: dict[Path, bool] = {}
-        for path, read_only in out:
-            if (path.exists() or path in required) and path not in seen:
-                seen[path] = read_only
-        mounts = sorted(seen.items())
+        private = {path: backing for name, owner, path, backing
+                   in self._private_state_entries()[0] if name == owner}
+        late = [(path, False) for path in private]
+        late += [(path, False) for path in self._transcript_state(list(private))]
+        late += [(path, True) for path in self._versions_roots()]
+        return out, late
 
-        # Container-private state is mounted OVER the host path, so a per-agent
-        # HOME's symlinks still resolve while the host's own credentials stay
-        # untouched and unreachable.
-        for host_path, private_path in self.private_state().items():
-            private_path.mkdir(parents=True, exist_ok=True)
-            mounts.append((host_path, False))
-        # And a provider's session transcripts, where no private home already
-        # holds them (SP-R1): in the container layer they die with it.
-        for container_path, store in self.transcript_state().items():
-            store.mkdir(parents=True, exist_ok=True)
-            mounts.append((container_path, False))
-        # CX-C3: a versions root, read-only and nothing above it, so a self-
-        # update under it reaches the container without a recreate. Last,
-        # because it may nest inside a private home mounted just above: the
-        # deeper mount has to come after the one it sits in.
-        listed = {path for path, _ in mounts}
-        for root in self._versions_roots():
-            if root not in listed:
-                mounts.append((root, True))
-                listed.add(root)
-        from ..authority import HostAuthority
-        authority = HostAuthority.directory_for(self.paths).resolve()
-        for source, _ in mounts:
-            mounted = source.resolve()
-            if (mounted == authority or mounted in authority.parents
-                    or authority in mounted.parents):
-                raise ValueError(f"mount {source} would expose host authority records")
-        scheduler_state = (state_root() / "scheduler").resolve()
-        if scheduler_enabled or scheduler_state.exists():
-            for source, _ in mounts:
-                mounted = source.resolve()
-                if (mounted == scheduler_state or mounted in scheduler_state.parents
-                        or scheduler_state in mounted.parents):
-                    raise ValueError(f"mount {source} would expose scheduler state")
-        if scheduler_enabled:
-            rpc = transport.resolve()
-            for source, read_only in mounts:
-                mounted = source.resolve()
-                if (mounted == rpc or mounted in rpc.parents or rpc in mounted.parents):
-                    if mounted != rpc or not read_only:
-                        raise ValueError(f"mount {source} would expose writable scheduler transport")
-        return mounts
+    def _mount_collision_problems(self) -> list[str]:
+        if self.paths is None or not self._extra_mounts():
+            return []
+        out, late = self._declared_mounts()
+        # server_mounts() omits covered installation paths. Validate their
+        # read-only intentions before that coverage filtering, just as for
+        # other declarations before deduplication (HF2.1a).
+        server = [(path.expanduser(), True) for path in server_install_paths()]
+        extras = self._extra_mounts()
+        problems = []
+        for index, (path, read_only) in enumerate(extras):
+            if not any(other == path and flag != read_only
+                       for other, flag in (*out, *late, *server)):
+                continue
+            builtin = ("server installation mount" if (path, True) in server else
+                       "built-in mount (CLI binary, adapter or provider path)")
+            readonly_entry = (f"extra_mounts[{index}]" if read_only else
+                              next((f"extra_mounts[{i}]" for i, (other, flag)
+                                    in enumerate(extras) if other == path and flag),
+                                   builtin))
+            problems.append(f"mount collision at {path}: contradictory read_only values; "
+                            f"{readonly_entry} requests read-only")
+        return problems
 
     def _adapter_paths(self) -> list[Path]:
         """The host path of every enabled provider's `adapter:` that is
@@ -2028,7 +2064,7 @@ sys.exit(rc)
                                 f"its host backing root {owner_root}")
         if problems:
             return problems
-        return self._action_script_paths()[1]
+        return [*self._action_script_paths()[1], *self._mount_collision_problems()]
 
     def private_state(self, provider: str = "") -> dict[Path, Path]:
         """{path as seen in the container: backing directory on the host}.
@@ -2081,11 +2117,13 @@ sys.exit(rc)
         Per project, whatever `credential_scope` says: sessions are work, not
         an account.
         """
+        return self._transcript_state(list(self.private_state()), provider)
+
+    def _transcript_state(self, held: list[Path], provider: str = "") -> dict[Path, Path]:
         if self.paths is None:
             return {}
         from ..watchdog import transcript_prefix
 
-        held = list(self.private_state())
         root = state_root() / "transcripts" / self.slug
         home = self.container_home()
         out: dict[Path, Path] = {}
@@ -2641,6 +2679,23 @@ sys.exit(rc)
         return bool(self.config.get("auth_proxy")) and \
             bool(self.vault_state(self.AUTH_PROVIDER))
 
+    def _auth_bridge_error(self, box: dict | None = None) -> str | None:
+        """Attach the auth sidecar, accepting a failed reply only if observed."""
+        if (box is not None
+                and "bridge" in box.get("NetworkSettings", {}).get("Networks", {})):
+            return None
+        result = _run(["docker", "network", "connect", "bridge", self.auth_container])
+        if result.returncode == 0:
+            return None
+        try:
+            attached = self._inspect_container(self.auth_container)
+            if (attached is not None
+                    and "bridge" in attached.get("NetworkSettings", {}).get("Networks", {})):
+                return None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        return result.stderr.strip()[:400]
+
     def ensure_auth_proxy(self) -> dict:
         """The only thing on the agents' network that can reach the model API.
 
@@ -2678,13 +2733,23 @@ sys.exit(rc)
 
         if box is not None and box.get("_observed") != "unobserved":
             if box["Mounts"] is None and box["State"].get("Status") == "running":
+                error = self._auth_bridge_error(box)
+                if error is not None:
+                    return {"ok": False, "error": error}
                 return {"ok": True, "existed": True}
             # Old sidecars have no config mount. Refuse to serve a new pin
             # through one; recreate it before the workspace admits a launch.
             if any(m.get("Destination") == "/proxy-config" for m in box["Mounts"]):
                 if box["State"].get("Status") == "running":
+                    error = self._auth_bridge_error(box)
+                    if error is not None:
+                        return {"ok": False, "error": error}
                     return {"ok": True, "existed": True}
                 result = _run(["docker", "start", self.auth_container])
+                if result.returncode == 0:
+                    error = self._auth_bridge_error(box)
+                    if error is not None:
+                        return {"ok": False, "error": error}
                 return {"ok": result.returncode == 0, "started": result.returncode == 0,
                         "error": result.stderr.strip()[:400]}
             result = _run(["docker", "rm", "-f", self.auth_container])
@@ -2715,7 +2780,12 @@ sys.exit(rc)
         ])
         if result.returncode != 0:
             return {"ok": False, "error": result.stderr.strip()[:400]}
-        _run(["docker", "network", "connect", "bridge", self.auth_container])
+        error = self._auth_bridge_error()
+        if error is not None:
+            removed = _run(["docker", "rm", "-f", self.auth_container])
+            if removed.returncode:
+                error += f"; container removal failed: {removed.stderr.strip()[:400]}"
+            return {"ok": False, "error": error}
         return {"ok": True, "created": True}
 
     def project_placeholder(self) -> None:

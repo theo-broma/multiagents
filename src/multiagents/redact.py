@@ -21,6 +21,7 @@ a short or unusual token would slip past every regex.
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 MASK = "[redacted]"
@@ -48,6 +49,7 @@ _PATTERNS: list[re.Pattern[str]] = [
 ]
 
 _literals: set[str] = set()
+_literals_lock = threading.Lock()
 
 
 def register_literal(value: str | None, *, min_length: int = 8) -> None:
@@ -57,7 +59,8 @@ def register_literal(value: str | None, *, min_length: int = 8) -> None:
     unrelated output far more often than it would protect anything.
     """
     if value and len(value) >= min_length:
-        _literals.add(value)
+        with _literals_lock:
+            _literals.add(value)
 
 
 def register_environment(names: list[str]) -> None:
@@ -73,7 +76,9 @@ def register_environment(names: list[str]) -> None:
 
 
 def _scrub_text(text: str) -> str:
-    for literal in _literals:
+    with _literals_lock:
+        literals = tuple(_literals)
+    for literal in literals:
         if literal in text:
             text = text.replace(literal, MASK)
     for pattern in _PATTERNS:

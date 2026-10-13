@@ -484,9 +484,14 @@ def _scrub(payload: bytes) -> bytes:
     except ImportError:                       # running as a bare script
         return payload
     try:
-        return json.dumps(scrub(json.loads(payload))).encode()
+        try:
+            value = json.loads(payload)
+        except (ValueError, UnicodeError):
+            text = payload.decode("utf-8", errors="surrogateescape")
+            return scrub(text).encode("utf-8", errors="surrogateescape")
+        return json.dumps(scrub(value)).encode()
     except Exception:
-        return payload
+        return b"Upstream response withheld."
 
 
 class _Server(socketserver.ThreadingMixIn, HTTPServer):
