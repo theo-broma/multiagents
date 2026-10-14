@@ -5857,3 +5857,6 @@ RP13 loop nd-ac976ec5: round 1 implementer added tests/test_rp_lazy_policy_edges
 its round-2 deletion was restored by capture (implementer can't vouch for tests/**),
 so the reviewer rejected twice. Reviewer task patched to ignore that file; drop it
 at merge. Tooling note: an implementer cannot undo its own test-file addition.
+16:50 CEST: RP14 loop nd-ef7469ce approved (485efb44); full suite on main+RP14 running
+(bg cfc0a959d333, /var/tmp/p-rp14). RP13 loop nd-ac976ec5 approved (004dd125; drop
+tests/test_rp_lazy_policy_edges.py at merge); adversary pass 4 nd-b055eccb running.
