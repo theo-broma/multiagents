@@ -5761,3 +5761,13 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   on the AP11-13 code. Merge after both: merge_node nd-fe9e687b, copy tests/
   from /var/tmp/p2-ap (+ any adversary3 file accepted), diff -rq, ledger.
 - 2026-10-14 ~09:05 CEST — RP implementer NEED_INFO (valid): colliding identical commits in test_rp3_writing_a_trusted_version_without_merging_its_source_is_restored; tester nd-b9931044 relaunched to fix. Then relaunch loop nd-48764ae0 implementer (merge new tester generation).
+- 2026-10-14 ~09:55 CEST — AP MERGED: merge_node nd-fe9e687b → cc1617c3;
+  tests from 2f3d3594 applied ad5eaf7c; src/tests diff -rq identical to the
+  tested tree; suite 71 reds = 70 baseline + nc_r17 (passed serially); audit
+  clean. Ledger F20 F21 F22 F23 F66 F67 fixed. Adversary pass 3 (nd-d4b57877,
+  tip 52389a52; new files at 46a03e98: tests/support/ap_adversary3_raw.py,
+  tests/test_ap_adversary3_folding.py (3 red, AP14),
+  tests/test_ap_adversary3_mutants.py) found folded headers, 1xx relay,
+  Content-Length preallocation, short body forwarded, case-sensitive names.
+  Draft AP14-AP17 + Decision 19 uncommitted (backup scratchpad
+  part2-draft-ap14.md), awaiting user yes. RP: tester fixing colliding commits.

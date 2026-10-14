@@ -1234,8 +1234,12 @@ findings:
         classification, which TF now relies on).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'AP6 merged: cc1617c3 + tests ad5eaf7c.'
+      sha: ad5eaf7c0b72d0ae0924c4b86b7901056f9d375d
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: Ordinary upstream errors (anything but 429/529) emit no `on_event` at
       all
   F200:
@@ -1405,8 +1409,14 @@ findings:
         together with or after F24 (part 1), which reworks _scrub.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'AP1/AP7/AP11/AP12 merged: cc1617c3 + tests ad5eaf7c. Literal masking
+        still inert in the deployed sidecar (F205, deferred to phase 7 part 2); folded
+        headers tracked as AP14.'
+      sha: ad5eaf7c0b72d0ae0924c4b86b7901056f9d375d
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`_scrub` only removes secret-*shaped* content; plain PII (organisation,
       email) in an upstream error body passes through completely unredacted'
   F22:
@@ -1423,8 +1433,12 @@ findings:
       note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'AP5/AP7/AP11 merged: cc1617c3 + tests ad5eaf7c.'
+      sha: ad5eaf7c0b72d0ae0924c4b86b7901056f9d375d
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: The error-passthrough branch of `_forward` drops every upstream response
       header except a proxy-generated `content-type`/`content-length`
   F23:
@@ -1441,8 +1455,12 @@ findings:
       note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'AP4 merged: cc1617c3 + tests ad5eaf7c.'
+      sha: ad5eaf7c0b72d0ae0924c4b86b7901056f9d375d
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: Every HTTP verb reaching the proxy is forwarded upstream as `POST`, including
       a literal `GET`
   F24:
@@ -1960,8 +1978,12 @@ findings:
       note: Plan context/plans/2026-10-13-findings-c1-c2-part2.md, item 3 (auth proxy).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'AP2 merged: cc1617c3 + tests ad5eaf7c.'
+      sha: ad5eaf7c0b72d0ae0924c4b86b7901056f9d375d
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`Handler._event` silently swallows all exceptions from the event callback'
   F67:
     class: performance
@@ -1978,8 +2000,12 @@ findings:
         the backoff must stay consistent with TF's retry budget and quota holds.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: 'AP3 merged (fixed in place, Decision 8): cc1617c3 + tests ad5eaf7c.'
+      sha: ad5eaf7c0b72d0ae0924c4b86b7901056f9d375d
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`do_POST` retries rate-limited accounts with zero backoff'
   F68:
     class: performance
