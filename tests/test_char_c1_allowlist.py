@@ -14,6 +14,12 @@ the listed entry admits itself, which the original never checked.
 
 `test_lone_close_bracket_matches_literal` is untouched: a lone `]` was already
 an ordinary character to ERE, so R12 did not change what that entry does.
+
+SE4 (F11, `context/specs/findings-c1-c2-part2.md`, Part 2b) then refuses
+every one of these entries as `invalid hostname`: none is letters, digits and
+hyphens. Reversed deliberately: an entry no longer admits its own literal
+text, it admits nothing, so each test's refusals stand and its one admit
+becomes a refusal.
 """
 
 import sys
@@ -35,13 +41,13 @@ def test_lone_close_paren_decides_and_admits_only_that_literal(tmp_path):
     given, which is the failure mode a bare no-raise check would miss.
     """
     allowlist = [")"]
-    assert h.allowlist_admits(tmp_path, allowlist, ")")
+    assert not h.allowlist_admits(tmp_path, allowlist, ")")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "a)b")
     assert not h.allowlist_admits(tmp_path, allowlist, "")
 
 def test_lone_close_bracket_matches_literal(tmp_path):
     allowlist = ["]"]
-    assert h.allowlist_admits(tmp_path, allowlist, "]")
+    assert not h.allowlist_admits(tmp_path, allowlist, "]")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "a]b")
 
 def test_balanced_parens_match_the_literal_entry_not_the_inner_string(tmp_path):
@@ -52,7 +58,7 @@ def test_balanced_parens_match_the_literal_entry_not_the_inner_string(tmp_path):
     flipped; the entry now means its own text.
     """
     allowlist = ["a(b)c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a(b)c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a(b)c")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "abc")
 
 def test_balanced_brackets_match_the_literal_entry_not_the_character_class(tmp_path):
@@ -66,7 +72,7 @@ def test_balanced_brackets_match_the_literal_entry_not_the_character_class(tmp_p
     fix that widened the entry rather than making it literal.
     """
     allowlist = ["a[bc]d"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a[bc]d")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a[bc]d")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "abd")
     assert not h.allowlist_admits(tmp_path, allowlist, "acd")
     assert not h.allowlist_admits(tmp_path, allowlist, "axd")
@@ -81,6 +87,6 @@ def test_interval_quantifier_braces_are_matched_as_literal_braces(tmp_path):
     merely deleted the braces and their contents.
     """
     allowlist = ["a{2}b"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a{2}b")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a{2}b")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "aab")
     assert not h.allowlist_admits(tmp_path, allowlist, "ab")

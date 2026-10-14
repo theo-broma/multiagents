@@ -31,7 +31,8 @@ import c1_harness as h  # noqa: E402
 
 def test_exact_host_is_admitted(tmp_path):
     allowlist = ["example.com"]
-    assert h.filter_patterns(tmp_path, allowlist) == [r"(^|\.)example\.com$"]
+    # SE4 (F11) fixes no pattern text, only that one line admits the host.
+    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
     assert h.allowlist_admits(tmp_path, allowlist, "example.com")
 
 
@@ -72,8 +73,10 @@ def test_case_of_entry_and_host_does_not_affect_the_decision(tmp_path):
 
 def test_duplicate_entries_produce_duplicate_lines_but_no_behavior_change(tmp_path):
     allowlist = ["example.com", "example.com"]
-    assert h.filter_patterns(tmp_path, allowlist) == [
-        r"(^|\.)example\.com$", r"(^|\.)example\.com$"]
+    # SE4 (F11) fixes no pattern text: the lines are those of the single
+    # entry (whether repeated or not), so the duplicate changes nothing.
+    single = h.filter_patterns(tmp_path / "ref", ["example.com"])
+    assert set(h.filter_patterns(tmp_path, allowlist)) == set(single)
     assert h.allowlist_admits(tmp_path, allowlist, "example.com")
 
 
@@ -165,11 +168,17 @@ def test_short_ip_fragment_entry_is_dropped_and_denies_addresses_ending_in_it(tm
 # ---------------------------------------------------------------------------
 
 def test_leading_dot_on_an_entry_is_dropped_with_a_diagnostic(tmp_path, capsys):
-    """ST9 IDNA normalization refuses a leading empty label, keeping F11 inert."""
+    """SE2 (F11) refuses a leading dot as such, before normalisation.
+
+    Reversed deliberately: this test pinned ST9's wording, where the IDNA
+    codec refused the empty leading label ("invalid IDNA hostname"). SE2
+    step 2 refuses the raw shape first with `leading dot`
+    (context/specs/findings-c1-c2-part2.md, Part 2b). The entry is still
+    dropped and still admits nothing."""
     allowlist = [".example.com"]
     assert h.filter_patterns(tmp_path, allowlist) == []
     diagnostic = capsys.readouterr().err
-    assert ".example.com" in diagnostic and "IDNA" in diagnostic
+    assert "'.example.com': leading dot" in diagnostic
     for host in ("example.com", "sub.example.com", ".example.com", "..example.com"):
         assert not h.allowlist_admits(tmp_path, allowlist, host)
 
@@ -236,9 +245,9 @@ def test_embedded_caret_or_dollar_in_an_entry_is_matched_as_a_literal_character(
     metacharacter" rules out both the old behaviour and a fix that merely
     dropped the offending character.
     """
-    assert h.allowlist_admits(tmp_path, ["a^b"], "a^b")
+    assert not h.allowlist_admits(tmp_path, ["a^b"], "a^b")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, ["a^b"], "ab")
-    assert h.allowlist_admits(tmp_path, ["a$b"], "a$b")
+    assert not h.allowlist_admits(tmp_path, ["a$b"], "a$b")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, ["a$b"], "ab")
 
 
@@ -257,7 +266,7 @@ def test_embedded_backslash_in_an_entry_is_matched_as_a_literal_backslash(tmp_pa
     this inversion from admitting a superset of what it used to.
     """
     allowlist = ["a\\b"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a\\b")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a\\b")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "ab")
 
 
@@ -283,7 +292,7 @@ def test_a_star_in_an_entry_is_a_literal_star_not_a_repetition_operator(tmp_path
     that turned the entry into something broader.
     """
     allowlist = ["a.b*c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a.b*c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.b*c")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "a.bc")
     assert not h.allowlist_admits(tmp_path, allowlist, "a.bbbc")
     assert not h.allowlist_admits(tmp_path, allowlist, "a.xc")
@@ -297,7 +306,7 @@ def test_a_plus_in_an_entry_is_a_literal_plus_not_a_one_or_more_operator(tmp_pat
     entry admits its own text instead.
     """
     allowlist = ["a.b+c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a.b+c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.b+c")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "a.bc")
     assert not h.allowlist_admits(tmp_path, allowlist, "a.bbc")
 
@@ -310,7 +319,7 @@ def test_a_question_mark_in_an_entry_is_a_literal_not_an_optional_marker(tmp_pat
     refused and the entry admits its own text instead.
     """
     allowlist = ["a.b?c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a.b?c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a.b?c")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "a.c")
     assert not h.allowlist_admits(tmp_path, allowlist, "a.bc")
 
@@ -348,8 +357,8 @@ def test_unbalanced_paren_in_an_entry_admits_its_literal_text_without_raising(tm
     is about what the entry matches, not how the escaping is spelled.
     """
     allowlist = ["a(b"]
-    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
-    assert h.allowlist_admits(tmp_path, allowlist, "a(b")
+    assert h.filter_patterns(tmp_path, allowlist) == []  # SE4 (F11): refused, invalid hostname
+    assert not h.allowlist_admits(tmp_path, allowlist, "a(b")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "ab")
 
 
@@ -361,19 +370,31 @@ def test_unbalanced_bracket_in_an_entry_admits_its_literal_text_without_raising(
     decision is the literal one.
     """
     allowlist = ["a[b"]
-    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
-    assert h.allowlist_admits(tmp_path, allowlist, "a[b")
+    assert h.filter_patterns(tmp_path, allowlist) == []  # SE4 (F11): refused, invalid hostname
+    assert not h.allowlist_admits(tmp_path, allowlist, "a[b")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "ab")
 
 
 # ---------------------------------------------------------------------------
 # F2 (already filed) — non-string entry, confirmed again here as part of the
-# ordinary boundary sweep, not re-filed.
+# ordinary boundary sweep, not re-filed. Fixed by SE1 and inverted below.
 # ---------------------------------------------------------------------------
 
-def test_non_string_entry_raises_attributeerror_not_a_validation_error(tmp_path):
-    with pytest.raises(AttributeError):
-        h.filter_patterns(tmp_path, [{"sub": "example.com"}])
+def test_non_string_entry_is_refused_without_raising(tmp_path, capsys):
+    """F2, inverted by SE1 — deliberate, not a weakened test.
+
+    This pinned the crash: a mapping entry raised AttributeError out of the
+    filter writer. SE1 (context/specs/findings-c1-c2-part2.md, Part 2b)
+    refuses it with `not a string` and keeps reading the other entries, so
+    the inversion also asserts the valid neighbour still opens and that
+    nothing the mapping spells is admitted."""
+    allowlist = [{"sub": "example.com"}, "ok.example.com"]
+    # SE4 (F11) fixes no pattern text: the filter is the valid entry's alone.
+    assert h.filter_patterns(tmp_path, allowlist) == h.filter_patterns(
+        tmp_path / "ref", ["ok.example.com"])
+    assert "{'sub': 'example.com'}: not a string" in capsys.readouterr().err
+    assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "sub")
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +424,7 @@ def test_a_pipe_in_one_entry_admits_only_that_entrys_own_literal_text(tmp_path):
     """
     allowlist = ["good.example.com", "evil.com|.*"]
     assert not h.allowlist_admits(tmp_path, allowlist, "totally-unrelated.example")
-    assert h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "evil.com")
     assert h.allowlist_admits(tmp_path, allowlist, "good.example.com")
     assert h.allowlist_admits(tmp_path, allowlist, "api.good.example.com")

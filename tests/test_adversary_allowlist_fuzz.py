@@ -31,11 +31,15 @@ def test_host_with_consecutive_dots(tmp_path, capsys):
 
 
 def test_host_with_only_dots(tmp_path, capsys):
-    """ST9 normalization drops an entry consisting solely of empty labels."""
+    """An entry consisting solely of dots is dropped.
+
+    Reversed deliberately: ST9 refused it through the IDNA codec ("invalid
+    IDNA hostname"); SE2 (F11) step 2 refuses its raw shape first, with
+    `leading dot` (context/specs/findings-c1-c2-part2.md, Part 2b)."""
     allowlist = ["..."]
     assert h.filter_patterns(tmp_path, allowlist) == []
     diagnostic = capsys.readouterr().err
-    assert "'...'" in diagnostic and "IDNA" in diagnostic
+    assert "'...': leading dot" in diagnostic
     assert not h.allowlist_admits(tmp_path, allowlist, "...")
     assert not h.allowlist_admits(tmp_path, allowlist, "..")
 
@@ -43,8 +47,8 @@ def test_host_with_only_dots(tmp_path, capsys):
 def test_host_with_underscore(tmp_path):
     """Underscores are not valid in DNS hostnames but are sometimes used."""
     allowlist = ["my_host.example.com"]
-    assert h.allowlist_admits(tmp_path, allowlist, "my_host.example.com")
-    assert h.allowlist_admits(tmp_path, allowlist, "sub.my_host.example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "my_host.example.com")  # SE4 (F11): refused, invalid hostname
+    assert not h.allowlist_admits(tmp_path, allowlist, "sub.my_host.example.com")  # SE4 (F11): refused, invalid hostname
 
 
 def test_ipv6_loopback(tmp_path, capsys):
@@ -117,7 +121,7 @@ def test_host_with_percent_encoding(tmp_path):
     allowlist = ["example%20.com"]
     patterns = h.filter_patterns(tmp_path, allowlist)
     # Percent is not a regex metacharacter, so it's literal
-    assert h.allowlist_admits(tmp_path, allowlist, "example%20.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "example%20.com")  # SE4 (F11): refused, invalid hostname
 
 
 def test_host_with_at_sign(tmp_path):
@@ -125,7 +129,7 @@ def test_host_with_at_sign(tmp_path):
     allowlist = ["user@example.com"]
     patterns = h.filter_patterns(tmp_path, allowlist)
     # At-sign is not a regex metacharacter
-    assert h.allowlist_admits(tmp_path, allowlist, "user@example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "user@example.com")  # SE4 (F11): refused, invalid hostname
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +249,12 @@ def test_entry_that_is_valid_regex_but_not_hostname_is_accepted_and_matches_only
     `a(b)c` refused. R12 escapes them, so both flip.
     """
     allowlist = ["a(b)c"]
-    # Claim 1, unchanged by R12: the entry is not validated. No error, and it
-    # still becomes one line of the egress boundary.
-    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
+    # Claim 1, unchanged by R12 but inverted by SE4: the entry is validated
+    # and refused, so it becomes no line of the egress boundary.
+    assert h.filter_patterns(tmp_path, allowlist) == []  # SE4 (F11): refused, invalid hostname
     # Claim 2, inverted by R12: the parens are literal, so the line admits the
     # entry's own text and not the group it used to denote.
-    assert h.allowlist_admits(tmp_path, allowlist, "a(b)c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a(b)c")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "abc")
 
 
@@ -262,8 +266,8 @@ def test_entry_with_character_class_is_accepted_and_matches_only_itself(tmp_path
     R12 escapes the brackets, so the set collapses to the literal entry.
     """
     allowlist = ["a[bc]d"]
-    assert len(h.filter_patterns(tmp_path, allowlist)) == 1
-    assert h.allowlist_admits(tmp_path, allowlist, "a[bc]d")
+    assert h.filter_patterns(tmp_path, allowlist) == []  # SE4 (F11): refused, invalid hostname
+    assert not h.allowlist_admits(tmp_path, allowlist, "a[bc]d")  # SE4 (F11): refused, invalid hostname
     # Every member of the class the entry used to denote is now refused...
     assert not h.allowlist_admits(tmp_path, allowlist, "abd")
     assert not h.allowlist_admits(tmp_path, allowlist, "acd")

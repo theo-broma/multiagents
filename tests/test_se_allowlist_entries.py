@@ -305,3 +305,161 @@ def test_se2_the_answer_is_the_same_when_asked_twice():
     assert first == ([VALID], [diagnostic(" a.com", WHITESPACE),
                                diagnostic(5, NOT_A_STRING),
                                diagnostic("b.com:443", PORT)])
+
+
+# ---------------------------------------------------------------------------
+# SE4 — hostname shape (F11, adversary finding): after SE2's normalisation
+# every label is 1-63 letters, digits or hyphens, no hyphen at either end,
+# any `xn--` label decodes, the whole name at most 253 characters.
+# ---------------------------------------------------------------------------
+
+INVALID_HOSTNAME = "invalid hostname"
+NON_CANONICAL_IPV4 = ("non-canonical IPv4 address or fragment; "
+                      "use a whole dotted-quad decimal address")
+
+
+def name_of_length(length, tld="com"):
+    """A name of exactly `length` characters, every label valid (<= 63)."""
+    labels, remaining = [], length - len(tld)
+    while remaining > 0:
+        size = min(63, remaining - 1)
+        if remaining - 1 - size == 1:  # never leave a lone dot with no label
+            size -= 1
+        labels.append("a" * size)
+        remaining -= size + 1
+    name = ".".join(labels + [tld])
+    assert len(name) == length and all(1 <= len(l) <= 63 for l in name.split("."))
+    return name
+
+
+@pytest.mark.parametrize("entry", [
+    "a_b.com",
+    "-a.com",
+    "a-.com",
+    "xn--a.com",
+    name_of_length(254),
+    "_dmarc.example.com",
+    # The same faults deeper in the name, and the shapes the adversary used.
+    "x.a_b.com",
+    "x.-a.com",
+    "x.a-.com",
+    "A_B.COM",
+    "api.github.com#ci",
+    "x#.example.com",
+    "a*.example.com",
+    "a(b)c.example.com",
+    "user@example.com",
+    "example%20.com",
+    "a/b.example.com",
+    "a:b.example.com",
+])
+def test_se4_a_name_failing_the_label_shape_is_refused_as_invalid_hostname(entry):
+    assert_refused_alone(entry, INVALID_HOSTNAME)
+
+
+@pytest.mark.parametrize("entry", ["a" * 64 + ".com", "x." + "b" * 64 + ".com"])
+def test_se4_a_64_character_label_keeps_todays_idna_wording(entry):
+    """IDNA itself rejects a label over 63, so today's reason stays."""
+    assert_refused_alone(entry, INVALID_IDNA)
+
+
+@pytest.mark.parametrize(("entry", "host"), [
+    (name_of_length(253), name_of_length(253)),
+    # The 253 limit applies after one trailing dot is removed.
+    (name_of_length(253) + ".", name_of_length(253)),
+    ("a" * 63 + ".com", "a" * 63 + ".com"),
+    ("a.com", "a.com"),
+    ("a-b.example.com", "a-b.example.com"),
+    ("0.example.com", "0.example.com"),
+    ("1a.example.com", "1a.example.com"),
+    ("xn--bcher-kva.de", "xn--bcher-kva.de"),
+    ("münchen.example.com", "xn--mnchen-3ya.example.com"),
+    ("BÜCHER.de", "xn--bcher-kva.de"),
+])
+def test_se4_names_inside_every_bound_are_still_accepted(entry, host):
+    assert entries([entry]) == ([host], [])
+
+
+def test_se4_an_ipv4_address_keeps_its_exact_match_with_no_subdomains(tmp_path, capsys):
+    assert entries(["1.2.3.4"]) == (["1.2.3.4"], [])
+    text, _ = filter_lines(tmp_path, ["1.2.3.4"])
+    assert admits(text, "1.2.3.4")
+    for stranger in ("x.1.2.3.4", "11.2.3.4", "1.2.3.45", "1.2.3.4.attacker.example",
+                     "1x2.3.4"):
+        assert not admits(text, stranger), stranger
+
+
+@pytest.mark.parametrize(("entry", "reason"), [
+    # IPv6 is decided before the shape: brackets and colons are not labels.
+    ("[::1]", IPV6),
+    ("[fe80::1]", IPV6),
+    # Today's non-canonical IPv4 refusal comes before the shape too.
+    ("a_b.1", NON_CANONICAL_IPV4),
+    ("-a.255", NON_CANONICAL_IPV4),
+    # The shape comes before single label ...
+    ("a_b", INVALID_HOSTNAME),
+    ("-com", INVALID_HOSTNAME),
+    ("xn--a", INVALID_HOSTNAME),
+    # ... and before public suffix (`*.ck` makes every `x.ck` a suffix).
+    ("a_b.ck", INVALID_HOSTNAME),
+    ("-a.ck", INVALID_HOSTNAME),
+])
+def test_se4_the_shape_refusal_sits_after_ipv6_and_ipv4_and_before_label_and_suffix(
+        entry, reason):
+    assert_refused_alone(entry, reason)
+
+
+def test_se4_the_shape_refusal_comes_after_every_raw_shape_refusal():
+    for entry, reason in (("a_b.com:443", PORT), (" a_b.com", WHITESPACE),
+                          (".a_b.com", LEADING_DOT), ("a_b\x01.com", BLANK_OR_CONTROL)):
+        assert_refused_alone(entry, reason)
+
+
+SE4_FILTER_MIX = [
+    "a.example",
+    "1.2.3.4",
+    name_of_length(253),
+    "bücher.de",
+    "a" * 63 + ".example.com",
+    # Refused by SE4: none of these may reach the file.
+    "api.github.com#ci",
+    "x#.example.com",
+    name_of_length(254),
+    ".".join(["a" * 60] * 9) + ".com",
+    "_dmarc.example.com",
+    "a(b)c.example.com",
+]
+FILTER_LINE_LIMIT = 511  # tinyproxy reads a filter line with fgets(buf, 512)
+
+
+def test_se4_every_filter_line_is_anchored_at_both_ends_and_admits_only_its_host(
+        tmp_path, capsys):
+    """Checked on the generated filter text: one line per accepted host, each
+    a whole pattern as tinyproxy reads it (no comment `#`, no whitespace, not
+    split by its line buffer), admitting exactly that host and, for a domain,
+    its subdomains."""
+    allowed, _ = entries(SE4_FILTER_MIX)
+    assert allowed == ["a.example", "1.2.3.4", name_of_length(253),
+                       "xn--bcher-kva.de", "a" * 63 + ".example.com"]
+    text, lines = filter_lines(tmp_path, SE4_FILTER_MIX)
+    assert len(lines) == len(allowed)
+    for line in text.splitlines():
+        assert line.strip(), f"blank line in filter: {text!r}"
+        assert "#" not in line and not any(c.isspace() for c in line), line
+        assert len(line.encode()) <= FILTER_LINE_LIMIT, len(line)
+    for host in allowed:
+        own = [line for line in lines if admits(line, host)]
+        assert len(own) == 1, (host, own)
+        line = own[0]
+        refused = ["x" + host, "evil-" + host, host + "x", host + ".attacker.example",
+                   host[1:], "attacker.example"]
+        if host == "1.2.3.4":
+            refused.append("x." + host)
+        else:
+            assert admits(line, "api." + host), (line, host)
+        for stranger in refused:
+            assert not admits(line, stranger), (line, stranger)
+        # No other accepted host is admitted by this host's line.
+        for other in allowed:
+            if other != host:
+                assert not admits(line, other), (line, other)

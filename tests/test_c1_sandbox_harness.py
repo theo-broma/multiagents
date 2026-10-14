@@ -27,7 +27,7 @@ from multiagents.config import AgentSpec  # noqa: E402
 # Entry point 1 — the allowlist decision
 # ---------------------------------------------------------------------------
 
-def test_allowlist_admits_exact_and_subdomain_hosts_and_refuses_others(tmp_path):
+def test_allowlist_admits_exact_and_subdomain_hosts_and_refuses_others(tmp_path, capsys):
     allowlist = ["api.anthropic.com"]
     assert h.allowlist_admits(tmp_path, allowlist, "api.anthropic.com")
     assert h.allowlist_admits(tmp_path, allowlist, "sub.api.anthropic.com")
@@ -38,11 +38,17 @@ def test_allowlist_admits_exact_and_subdomain_hosts_and_refuses_others(tmp_path)
     # to match is a deny-all, not an allow-all.
     assert not h.allowlist_admits(tmp_path, [], "api.anthropic.com")
 
-    # A malformed (non-string) entry blows up inside the real production
-    # method, same as it would on a live `docker up` — the harness does not
-    # paper over that.
-    with pytest.raises(AttributeError):
-        h.filter_patterns(tmp_path, [{"not": "a string"}])
+    # A malformed (non-string) entry goes through the real production method
+    # too. This used to assert the AttributeError it raised (F2); SE1
+    # (context/specs/findings-c1-c2-part2.md, Part 2b) refuses it with
+    # `not a string` instead, without raising, and the valid entry beside it
+    # keeps its exact/subdomain admission. Reversed deliberately.
+    mixed = [{"not": "a string"}, "api.anthropic.com"]
+    assert h.allowlist_admits(tmp_path, mixed, "api.anthropic.com")
+    assert h.allowlist_admits(tmp_path, mixed, "sub.api.anthropic.com")
+    assert not h.allowlist_admits(tmp_path, mixed, "evilapi.anthropic.com")
+    assert not h.allowlist_admits(tmp_path, mixed, "not")
+    assert "refused allowlist entry {'not': 'a string'}: not a string" in capsys.readouterr().err
 
 
 def test_a_pipe_in_an_allowlist_entry_admits_only_that_entrys_literal_text():
@@ -69,7 +75,7 @@ def test_a_pipe_in_an_allowlist_entry_admits_only_that_entrys_literal_text():
         for host in ("attacker.example", "steal-creds.io", "pastebin.com"):
             assert not h.allowlist_admits(tmp_path, allowlist, host), host
         # The entry means its own text, absurd as that text is as a hostname.
-        assert h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")
+        assert not h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")  # SE4 (F11): refused, invalid hostname
         # And not the left branch the alternation used to offer on its own.
         assert not h.allowlist_admits(tmp_path, allowlist, "evil.com")
 

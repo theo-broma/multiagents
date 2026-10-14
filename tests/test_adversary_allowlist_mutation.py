@@ -85,28 +85,42 @@ def test_filter_file_ends_with_newline(tmp_path):
     assert content.endswith("\n")
 
 
-def test_allowlist_with_none_entry_does_not_crash(tmp_path):
-    """If an entry in the allowlist is None, it should be handled gracefully."""
-    # This is a different case from M6 — here the allowlist itself is a list,
-    # but one of its entries is None.
-    # The current code would raise AttributeError from None.replace().
-    # This test documents that behavior.
-    with pytest.raises(AttributeError):
-        h.filter_patterns(tmp_path, ["example.com", None])
+# The three tests below pinned the F2 crash: a non-string entry raised
+# AttributeError (or TypeError) out of the filter writer. SE1 (F2,
+# context/specs/findings-c1-c2-part2.md, Part 2b) refuses such an entry with
+# `not a string`, never raises, and keeps reading the other entries. Reversed
+# deliberately, not weakened: each still checks the valid neighbour opens.
+
+def test_allowlist_with_none_entry_is_refused_and_the_rest_still_read(tmp_path, capsys):
+    """An entry that is None, inside an otherwise valid list (not M6's whole
+    `egress_allowlist: null`)."""
+    allowlist = ["example.com", None]
+    # SE4 (F11) fixes no pattern text: the filter is the valid entry's alone.
+    assert h.filter_patterns(tmp_path, allowlist) == h.filter_patterns(
+        tmp_path / "ref", ["example.com"])
+    assert "refused allowlist entry None: not a string" in capsys.readouterr().err
+    assert h.allowlist_admits(tmp_path, allowlist, "api.example.com")
 
 
-def test_allowlist_with_integer_entry_raises_typeerror_or_attributeerror(tmp_path):
-    """If an entry is an integer, it should fail with a clear error."""
-    # The current code would raise AttributeError from int.replace().
-    with pytest.raises((AttributeError, TypeError)):
-        h.filter_patterns(tmp_path, ["example.com", 8080])
+def test_allowlist_with_integer_entry_is_refused_and_the_rest_still_read(tmp_path, capsys):
+    """An integer entry (a port written on its own line) is refused, not
+    stringified into a pattern."""
+    allowlist = ["example.com", 8080]
+    # SE4 (F11) fixes no pattern text: the filter is the valid entry's alone.
+    assert h.filter_patterns(tmp_path, allowlist) == h.filter_patterns(
+        tmp_path / "ref", ["example.com"])
+    assert "refused allowlist entry 8080: not a string" in capsys.readouterr().err
+    assert not h.allowlist_admits(tmp_path, allowlist, "8080")
 
 
-def test_allowlist_with_boolean_true_entry(tmp_path):
-    """Boolean True is a subclass of int in Python. What happens?"""
-    # True.replace() would raise AttributeError.
-    with pytest.raises(AttributeError):
-        h.filter_patterns(tmp_path, [True])
+def test_allowlist_with_boolean_true_entry_is_refused_without_raising(tmp_path, capsys):
+    """Boolean True (an int subclass, and what YAML makes of `yes`) is
+    refused like any other non-string; alone, it leaves a deny-all filter."""
+    allowlist = [True]
+    assert h.filter_patterns(tmp_path, allowlist) == []
+    assert "refused allowlist entry True: not a string" in capsys.readouterr().err
+    for host in ("True", "true", "1", "example.com"):
+        assert not h.allowlist_admits(tmp_path, allowlist, host)
 
 
 def test_allowlist_with_empty_list_produces_empty_filter_file(tmp_path):

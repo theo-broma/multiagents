@@ -53,7 +53,7 @@ def test_r12_f1_entry_containing_a_pipe_admits_only_its_own_literal_text(tmp_pat
     `anything.example`, which is related to no entry in the list.
     """
     allowlist = ["evil.com|.*"]
-    assert h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")
+    assert not h.allowlist_admits(tmp_path, allowlist, "evil.com|.*")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "anything.example")
     assert not h.allowlist_admits(tmp_path, allowlist, "evil.com")
     assert not h.allowlist_admits(tmp_path, allowlist, "")
@@ -123,7 +123,7 @@ def test_r12_f14_entry_with_balanced_parens_admits_its_literal_text_not_the_grou
     parse) would not have made the entry mean its own text.
     """
     allowlist = ["a(b)c"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a(b)c")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a(b)c")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "abc")
 
 
@@ -137,7 +137,7 @@ def test_r12_f14_entry_with_balanced_brackets_admits_its_literal_text_not_the_cl
     hosts rather than for one other host.
     """
     allowlist = ["a[bc]d"]
-    assert h.allowlist_admits(tmp_path, allowlist, "a[bc]d")
+    assert not h.allowlist_admits(tmp_path, allowlist, "a[bc]d")  # SE4 (F11): refused, invalid hostname
     assert not h.allowlist_admits(tmp_path, allowlist, "abd")
     assert not h.allowlist_admits(tmp_path, allowlist, "acd")
 
@@ -167,7 +167,7 @@ def test_r12_f12_entry_with_a_quantifier_admits_its_literal_self_and_nothing_els
     hosts they did not, so a fix is only a fix if it moves both.
     """
     allowlist = [entry]
-    assert h.allowlist_admits(tmp_path, allowlist, entry)
+    assert not h.allowlist_admits(tmp_path, allowlist, entry)  # SE4 (F11): refused, invalid hostname
     for host in must_not_admit:
         assert not h.allowlist_admits(tmp_path, allowlist, host), (
             f"entry {entry!r} must not admit {host!r}")
@@ -188,7 +188,7 @@ def test_r12_f12_glob_style_entry_admits_only_itself_not_the_hosts_it_looks_like
     assert not h.allowlist_admits(tmp_path, allowlist, "example.com")
     assert not h.allowlist_admits(tmp_path, allowlist, "api.example.com")
     assert not h.allowlist_admits(tmp_path, allowlist, "unrelated.example")
-    assert h.allowlist_admits(tmp_path, allowlist, "*.example.com")
+    assert not h.allowlist_admits(tmp_path, allowlist, "*.example.com")  # SE4 (F11): refused, invalid hostname
 
 
 # ---------------------------------------------------------------------------

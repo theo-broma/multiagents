@@ -82,9 +82,9 @@ def make_docker_executor(tmp_path: Path, providers: dict | None = None,
 def filter_patterns(tmp_path: Path, allowlist: list) -> list[str]:
     """The exact ERE lines `DockerExecutor.write_proxy_config` hands to
     tinyproxy for this allowlist. Calls the real production method — nothing
-    about pattern generation is reimplemented here. A malformed entry (not a
-    string) raises AttributeError from inside that real method, same as it
-    would on a live `docker up`; this does not catch it for you."""
+    about pattern generation is reimplemented here. Whatever that real method
+    does with a malformed entry (SE1: refuse a non-string with a diagnostic on
+    stderr) happens here too; this catches nothing for you."""
     ex = make_docker_executor(tmp_path, egress_allowlist=allowlist)
     target = ex.write_proxy_config(tmp_path / "proxy")
     return [line for line in (target / "filter").read_text().splitlines() if line.strip()]
