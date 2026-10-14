@@ -5908,3 +5908,8 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
 - **AGENTS.md timing fix merged:** 033611b1 (loop nd-cba9406f, approved; the tests that read AGENTS.md passed on its tip).
 - **Researcher nd-ecb4f46a: cause 2 measured at about 131 worker-seconds,** not 2,000-3,500. Cause 3 is unmeasured; the report is in `.multiagents/handoff/suite-speed-measured-2026-10-14.md`.
 - **Follow-up researcher nd-d97b4694** measures cause 3 and the per-family distribution from the full durations log, `.multiagents/handoff/suite-durations-full-2026-10-14.log`.
+- **Researcher nd-d97b4694 (ag-6c181d): cause 3 and the distribution.**
+  - 525 tests over 5 s carry 4,696 worker-seconds, and 2,394 tests of 1-5 s carry 5,306.
+  - By family, `nc_` carries 3,115, then `nt` 691, `tb_` 644, `phase0` 530, `tb2_` 506.
+  - The profiles show time mostly waiting on child processes (consult, sp, sl) and SQLite/thread contention (nc adv3). Only about 49 worker-seconds are directly removable sleeps (tb2).
+  - Conclusion: there is no cheap large win, and the cost is real process integration spread across thousands of tests.
