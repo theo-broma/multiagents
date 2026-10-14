@@ -5730,3 +5730,11 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - 03:30 CEST: SE5 fix fcc559c5 (cli.py only; full suite exactly baseline). SE reviewer running. Then combined SE suite and merge (12 files from 7415f763 + 2 adversary2 files from 5ade33da onto main).
 - 03:40 CEST: SE loop nd-cfc2bb5d APPROVED again (tip fcc559c5). Combined suite job 2659821a248e on /var/tmp/p2-se (main + loop; non-SE test files from main; 12 SE files from 7415f763; adversary2 files from 5ade33da; log /var/tmp/p2-se.log). On green: merge_node nd-cfc2bb5d, then make main's tests/ equal /var/tmp/p2-se (copy, commit), verify src equals; do NOT merge_node nd-7cab8a3a (its history resets docker.py) - close/dispose it; adversary nodes nd-3234409c, nd-6478e3c9 disposed unmerged (their tests copied). Ledger F2 F11 F63 fixed.
 - 04:40 CEST: SE MERGED: 84835473 (loop) + 2c73ed84 (tests from 7415f763 and 5ade33da; PS tests restored after the loop's restore commits). Suite: 70 baseline + nt_r4 (green serially). src/tests equal the tested worktree. Ledger F2 F11 F63 fixed. Disposed nd-7cab8a3a (tester, not merged: history resets docker.py), nd-3234409c, nd-6478e3c9 (adversaries, tests copied). AP still waits for the user (AP11-AP13 draft re-applied uncommitted; deployed-proxy literal question).
+- 2026-10-14 07:25 CEST — user approved: AP11-AP13 committed (d074eca0) with
+  Decision 18 (sidecar literal registration deferred to phase 7 part 2, F205
+  filed, open). AP tester nd-d104dd06 relaunched (round 3: main + adversary2
+  files from 4da79438 + AP11-AP13 tests). Next: relaunch AP loop nd-fe9e687b
+  on its tip with explicit restore list, reviewer without full suite, then
+  full suite and merge. In parallel, user approved fixing the readonly-restore
+  defect (tooling queue item 1): researcher nd-7e558d0f maps it; then a spec
+  shown to the user before commit.
