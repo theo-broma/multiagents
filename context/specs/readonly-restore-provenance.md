@@ -309,3 +309,9 @@ covers, the tester reverses it deliberately and says which.
     consult's) are covered by the concurrency guarantee; there is no retry
     cap below a few consecutive clashes; every `new_id` caller, including
     the quota handover, goes through one project-aware allocator.
+15. **RP14 creates no scheduler state with the gate off** (full suite on
+    485efb44, 2026-10-14): NC-R48 holds, so reservations never live under
+    the scheduler's state directories (`state/scheduler*`), nor under
+    `.multiagents/runs/`, nor in any git-tracked path. A test that replaces
+    `new_id` with a zero-argument stub is adapted by the tester to accept
+    the new arguments; the allocator's signature is the implementer's choice.
