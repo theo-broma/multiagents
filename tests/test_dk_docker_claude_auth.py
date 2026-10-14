@@ -364,11 +364,23 @@ def test_dk_r2a_a_529_also_fails_over_for_the_pool(rig, tmp_path):
     assert (status, served_by(body)) == (200, "tok-beta")
 
 
-def test_dk_r2a_a_401_on_the_last_account_after_a_429_is_the_final_answer(rig, tmp_path):
+def test_dk_r2a_a_429_then_401_on_the_last_account_answers_429_ap10(rig, tmp_path):
+    # Reversed for AP10 (findings-c1-c2-part2): one limited and one rejected
+    # account is mixed exhaustion, answered 429 with retry-after from the
+    # limited account; 401 only when every account is rejected. Still guards
+    # that each account is tried exactly once.
     vault = make_vault(tmp_path, alpha="tok-alpha", beta="tok-beta")
     up = rig.upstream({"tok-alpha": 429, "tok-beta": 401})
     base = rig.start_proxy(vault)
-    assert post(base, rig.mint("agent"))[0] == 401
+    req = urllib.request.Request(base + "/v1/messages", data=b"{}",
+                                 headers={"Authorization": "Bearer " + rig.mint("agent")})
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(req, timeout=20)
+    caught.value.read()
+    assert caught.value.code == 429
+    retry_after = caught.value.headers.get("retry-after")
+    assert retry_after is not None and retry_after.isdigit()
+    assert 1 <= int(retry_after) <= 120            # upstream asked for 120 s
     assert up.count("tok-alpha") == 1 and up.count("tok-beta") == 1
 
 
