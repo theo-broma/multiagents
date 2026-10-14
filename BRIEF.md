@@ -5874,3 +5874,6 @@ reservations in state/run-ids/<slug>/), reviewer next. Then one full suite on
 main+RP13+RP14+tester stub change, drop tests/test_rp_lazy_policy_edges.py, merge.
 suite p-rpall started (bg) ~18:15 CEST
 Researcher nd-a2480ae2 (suite speed) launched ~18:20 CEST; durations in .multiagents/handoff/.
+19:20 CEST: RP13+RP14 MERGED (e65ca7bc, 639deb7e, 6e6e0eb5, tests 664a3e67). Combined
+suite = baseline 70 + tb2_r6 load flake (3/3 green alone). F206/F207 fixed. Remaining:
+researcher nd-a2480ae2 (suite speed) running; report to user, no work without approval.

@@ -1415,8 +1415,13 @@ findings:
       note: RP13 (spec 9918dbb9); tester nd-51ceb8b7
       sha: 9918dbb939fb4924050679bdd7bcf80c2f10def6
       status: scheduled
+    - by: orchestrator
+      note: RP13 merged e65ca7bc (tests bdfb3cbd, adversary pass 4 tests 664a3e67);
+        sibling case accepted as Decision 16
+      sha: 664a3e6792454e95503a3a89fe377e69d91ee136
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: capture fails on a missing producer policy the decision does not need
   F207:
     class: correctness
@@ -1432,8 +1437,13 @@ findings:
       note: RP14 (spec 9918dbb9); tester nd-76f98daa
       sha: 9918dbb939fb4924050679bdd7bcf80c2f10def6
       status: scheduled
+    - by: orchestrator
+      note: RP14 merged 639deb7e (tests a89be81b, stub 6e6e0eb5); reservations under
+        state/run-ids/<slug> (Decision 15)
+      sha: 664a3e6792454e95503a3a89fe377e69d91ee136
+      status: fixed
     severity: low
-    status: scheduled
+    status: fixed
     summary: run ids are 6 hex digits with no uniqueness check
   F21:
     class: security
