@@ -298,3 +298,9 @@ covers, the tester reverses it deliberately and says which.
     user-approved): policies are read lazily per decision (RP13); run ids
     keep their `ag-` plus 6 hex format, which `viewer.py` and `tmux.py`
     parse, and are made unique at allocation rather than widened (RP14).
+13. **RP13's two silences** (RP13 tester, 2026-10-14): a commit on the base
+    branch's first-parent chain is not subject to RP10, so its policy is
+    never needed even when it is also a recorded generation. A generation
+    with an unreadable policy that an allowed descendant would supersede on
+    that path either way may be treated as needed or not: both outcomes are
+    safe, and neither is tested.
