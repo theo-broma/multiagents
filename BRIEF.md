@@ -5873,3 +5873,4 @@ merge). Sibling case accepted (Decision 16). RP14 round 2 implementer done (3647
 reservations in state/run-ids/<slug>/), reviewer next. Then one full suite on
 main+RP13+RP14+tester stub change, drop tests/test_rp_lazy_policy_edges.py, merge.
 suite p-rpall started (bg) ~18:15 CEST
+Researcher nd-a2480ae2 (suite speed) launched ~18:20 CEST; durations in .multiagents/handoff/.
