@@ -5745,3 +5745,7 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   tester). Readonly-restore spec drafted, uncommitted:
   context/specs/readonly-restore-provenance.md (RP1-RP6, advisor-reviewed),
   awaiting user yes.
+- 2026-10-14 ~08:05 CEST — user approved RP spec: committed d62c173c. RP tester
+  nd-b9931044 (claude opus) writing the suite. Next: review its result, then
+  review-loop (implementer-deep + reviewer, no full suite in reviewer), then
+  adversary on claude opus, full suite, merge.
