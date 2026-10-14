@@ -6,9 +6,9 @@ adversary pass", AP13 (with AP9).
 - a 204 or 304 relayed to the agent carries no body bytes and no chunked
   terminator, so a second request on the same connection gets its own
   response intact;
-- a `Content-Length` too large to read gets a 400 and the connection is
-  closed, as AP9's other malformed values; nothing after it is read as a
-  request.
+- a `Content-Length` too large to read is refused and the connection is
+  closed; nothing after it is read as a request. AP13 said 400; AP17 (third
+  adversary pass) supersedes it: a well-formed length above 64 MiB gets 413.
 
 The client side is raw sockets: `http.client` would skip stray bytes after
 a 204 and hide exactly what is being tested.
@@ -166,9 +166,12 @@ def test_ap13_a_304_carries_no_body_and_the_next_response_is_intact(tmp_path, mo
 @pytest.mark.parametrize("length", ["99999999999999999999999", str(2 ** 64)],
                          ids=["spec-value", "two-to-the-64"])
 @pytest.mark.parametrize("method", ["POST", "GET"])
-def test_ap13_a_content_length_too_large_to_read_gets_400_and_closes(tmp_path, monkeypatch,
-                                                                     method, length):
-    """Followed by a complete signed request: it must not be served."""
+def test_ap13_ap17_a_content_length_too_large_to_read_gets_413_and_closes(
+        tmp_path, monkeypatch, method, length):
+    """Followed by a complete signed request: it must not be served.
+
+    Reversed deliberately for AP17: was 400 under AP13; a well-formed length
+    above 64 MiB is now 413."""
     upstream = ap.Upstream()
     with ap.upstream_server(upstream) as url, \
             ap.proxy_server(tmp_path, monkeypatch, accounts={"acc": "tok-ap13"},
@@ -180,7 +183,7 @@ def test_ap13_a_content_length_too_large_to_read_gets_400_and_closes(tmp_path, m
                          token=proxy.mint("agent-ap13-follower"))
         raw, closed = ap.raw_exchange(proxy.port, first + follower)
         requests = list(upstream.requests)
-    assert ap.split_response(raw)[0] == 400, raw[:300]
+    assert ap.split_response(raw)[0] == 413, raw[:300]
     assert raw.count(b"HTTP/1.1 ") == 1, f"bytes after the refusal were served: {raw!r}"
-    assert closed, "the proxy must close the connection after the 400"
+    assert closed, "the proxy must close the connection after the 413"
     assert requests == [], "nothing may reach the upstream"
