@@ -1,5 +1,6 @@
 ---
-status: ready
+status: applied
+applied_in: 890e14ad
 ---
 # Phase 7, part 2: one container per run
 
