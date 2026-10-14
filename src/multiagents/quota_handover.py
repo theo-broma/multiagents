@@ -1630,7 +1630,7 @@ class QuotaHandover:
 
     def _qh_new_floor_id(self):
         from .runner import new_id
-        return new_id()
+        return new_id(self.paths)
 
     def _qh_take_floor_grant(self, grant):
         bound = self.__dict__.setdefault("_qh_floor_grants", {}).pop(grant, None)

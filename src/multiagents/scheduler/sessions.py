@@ -13,7 +13,7 @@ import tempfile
 import uuid
 
 from .. import gitops
-from ..tree import now
+from ..tree import now, new_id
 from .model import Refused, invalid
 from .store import matching_records, select_records, encode
 
@@ -301,7 +301,7 @@ def request_cleanup(store, db, node, binding, runner, detail, task, *, replacing
            and a["attempt_id"] != replacing for a in select_records(journal, "claimed", "launched", "captured", "suspended")):
         return None
     attempt = {"attempt_id": uuid.uuid4().hex, "activation_id": activation,
-               "node_id": node["id"], "run_id": "ag-" + uuid.uuid4().hex[:6],
+               "node_id": node["id"], "run_id": new_id(store.paths, db),
                "state": "claimed", "at": now(), "cleanup": True,
                "cleanup_archive": detail, "cleanup_task": task, "cleanup_agent": previous.agent,
                "cleanup_previous_run": previous.id,

@@ -130,8 +130,9 @@ def sum_usage(nodes: Iterable[dict[str, Any]]) -> dict[str, float]:
     return total
 
 
-def new_id() -> str:
-    return "ag-" + uuid.uuid4().hex[:6]
+def new_id(paths, db=None) -> str:
+    from .run_ids import allocate
+    return allocate(paths, db)
 
 
 def now() -> float:

@@ -5283,7 +5283,7 @@ class Runner(QuotaHandover):
             depth = int(queued["spec"].get("depth") or depth)
         if context:
             parent, depth = context.run_parent, context.depth
-        node_id = floor_id or (context.run_id if context and context.run_id else new_id())
+        node_id = floor_id or (context.run_id if context and context.run_id else new_id(self.paths))
 
         # --- budget routing -------------------------------------------------
         # Budget now shells out to provider scripts, so it must not run on the
@@ -10247,7 +10247,7 @@ class Runner(QuotaHandover):
             self._preflight(spec)
             parent = self.self_id()
             depth = self.self_depth() + 1
-            node_id = consult_run_id or new_id()
+            node_id = consult_run_id or new_id(self.paths)
             worktree_path = self.paths.worktree(node_id)
             # RM-R5a: the model/effort pair is settled before the worktree and
             # node below, the same side-effect-free point start() uses.

@@ -21,7 +21,7 @@ from .. import procs
 from ..renames import shipped as shipped_renames
 from ..runner import LaunchContext, Runner, VERDICT, admission_block, _run_read, _control_text
 from .. import failures as tf
-from ..tree import now
+from ..tree import now, new_id
 from ..tree import ACTIVE, PAUSED
 from . import model
 from .store import encode, records, select_records, matching_records
@@ -750,7 +750,7 @@ class Engine:
                 activation = current.get("activation_id") or uuid.uuid4().hex
                 current["activation_id"] = activation
                 attempt = {"attempt_id": uuid.uuid4().hex, "activation_id": activation,
-                           "node_id": node["id"], "run_id": "ag-" + uuid.uuid4().hex[:6],
+                           "node_id": node["id"], "run_id": new_id(self.store.paths, db),
                            "state": "claimed", "locks": sorted(self.lock_set(current, current_nodes)),
                            "lock_owners": self.lock_owners(current, current_nodes),
                            "retry_count": current.get("launch_tries", 0), "at": now(), **prepared}

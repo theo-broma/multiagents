@@ -370,7 +370,7 @@ class Service:
             # Generate the child identity on the host, never accept one from
             # a caller. The scheduler database is outside container mounts.
             from ..tree import new_id
-            run_id = new_id()
+            run_id = new_id(self.store.paths, db)
             db.execute("INSERT INTO consults VALUES (?, ?, ?)",
                        (run_id, principal["subject"], spec.name))
             after.append({"kind": "admit_agent"})
