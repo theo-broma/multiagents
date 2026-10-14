@@ -5889,3 +5889,9 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
 - **Plan after the yes.** A `tester` makes the conftest change, a reviewer checks it (gemini-3.8-flash-high), then a full-suite parity check and a duration comparison.
 - **Spec committed.** The Run D spec is cd4a4907.
 - **Loop launched.** The review loop is nd-2803c003: the tester nd-c81f1b91, pinned to codex gpt-6.1-sol, then the reviewer nd-d39a5000.
+- **Tester done.** ag-363e61 committed 782cee32.
+  - The sample of three files showed no gain: 72.2 to 78.9 worker-seconds.
+  - Likely reason: `budget._cache` lives 60 s per process, so the scripts already ran rarely.
+  - The full-suite `--durations=0` comparison will settle it.
+  - Reviewer nd-d39a5000 is running.
+- **Next.** Start the "after" full suite only once baseline job 113485caebe6 ends, so the two timings are not distorted.
