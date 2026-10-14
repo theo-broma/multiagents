@@ -25,6 +25,10 @@ one execution of it. Today's tree "nodes" are runs.
 
 ## Part 2: one container per run (decided 2026-10-03)
 
+**Status (amended 2026-10-15):** specified in `phase7-part2-containers.md`
+(IC-*), which supersedes PAC-R1..R13 and the C15 residuals (plan
+`context/plans/2026-10-13-phase7-part2-containers.md`).
+
 ### The decision and why
 
 - Inside today's single project container, agents are **not isolated from

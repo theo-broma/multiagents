@@ -5924,3 +5924,33 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
 - **Nothing running.**
   - The brief's work is done. Phase 7 part 2 goes through `multiagents init-agent`; the C3-C7 review is the user's choice.
   - Fast-lane idea: mark tests over 5 s so agents skip them while iterating, with the full suite still before every merge. Offered to the user, not requested.
+
+## Phase 7 part 2 — one container per run (current work, opened 2026-10-15)
+
+Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
+2026-10-15). Requirements: `context/specs/phase7-part2-containers.md`
+(IC-D1..D7, IC-R1..R15).
+
+- **Correction:** the closing note of 2026-10-14 said part 2 goes through
+  `init-agent`; it does not, the plan was already ready.
+- **tmux step 2 as a supervisor is withdrawn** (IC-D4, user, 2026-10-13).
+  tmux stays as the viewer.
+- **The live node view is in scope** (IC-D5).
+- **F205 joins IC-R15** (user, 2026-10-14): the contract decides which
+  account literals the auth-proxy sidecar registers, where they come from
+  and how they reach it; they never enter the run's container (IC-R4).
+  Credentials milestone, adversary mandatory.
+- **Adversary mandatory** on provisioning (IC-R1..R3), executor signals and
+  adoption (IC-R6..R8, C15), credentials (IC-R4, F205), network and RPC
+  transport (IC-R10, R11).
+- **Live Docker checks are part of done**, run by the orchestrator from a
+  `/var/tmp` worktree: isolation suite (IC-R13), latency benchmark, host
+  restart with a live run adopted.
+- `phase7-nodes-and-containers.md` part 2 status amended to point to the IC
+  spec.
+- **Order:** (1) cleanup of worktrees and branches, counts before/after
+  recorded here; (2) the interface contract `context/specs/phase7-part2-contract.md`,
+  advisor pass, shown to the user, committed on yes; (3) milestones per the
+  contract.
+- **At merge:** set F31, F32, F34, F35, F64, F65, F69, F70, F205 to fixed or
+  reconsider each (IC-R15).
