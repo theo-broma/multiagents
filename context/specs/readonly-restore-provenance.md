@@ -151,6 +151,60 @@ pattern and an ordered negation.
 base with no protected path changed is captured as today (Decision 8); a
 replay whose restored tree changed is refused (RP5).
 
+## Second amendment (adversary pass 2, 2026-10-14, run ag-f45a34)
+
+The second pass found no defect in the implementation of RP7 and RP8 but
+two holes in the contract. (1) Additions are never restored (RP5), so a
+non-exempt node that *adds* a file at a protected path carries an unvetted
+entry in its generation, which then vouched over the real file. (2) RP7
+only asked whether the source changed a path; when the input changed the
+same path too, the run's resolution of that conflict was kept.
+
+**RP10 — a generation vouches only where its producer was allowed to
+write.** A generation vouches for a path only if the path is not protected
+for the attempt that produced it: the `readonly_paths` recorded on that
+attempt at launch, found through the generation's `run_id`, never the
+agent's current configuration. A generation from an exempt agent
+(`readonly_paths: []`) can vouch for any path; an implementer generation can
+vouch for `src/` but never for `tests/`. Base first-parent commits are not
+subject to RP10. When several records name the same commit, it may vouch
+for a path only if every one of them allows it. When a generation is needed
+for a decision and its producing attempt's `readonly_paths` cannot be read,
+capture fails. RP10 applies per path and **before** supersession: a source
+not allowed to vouch for a path is removed for that path first, so it can
+never supersede an allowed source on that path. Permission covers the
+generation's whole tree at that path, including entries it inherited.
+Verified by: the adversary's addition case (a non-exempt node adds
+`tests/test_new.py`, an implementer merges it over the tester's version):
+restored to the input; an implementer generation that changed `src/m.py`
+still vouches for it under an adversary's `["**"]`; an implementer
+generation that merely carries a tester's test, merged by a later run: the
+tester's generation still vouches; a generation whose attempt record is
+missing its `readonly_paths`, needed for a decision: capture fails.
+
+**RP11 — only one-sided changes vouch.** A source does not vouch for a path
+when the input's entry for that path differs from the path's entry at any
+merge base of the source and the input: both sides changed it, and the run's
+resolution is the run's own change. This holds for base commits too: when
+main and the input both changed one protected file, the path is restored to
+the input's entry and the conflict is left to the orchestrator's merge.
+A later tester round whose generation descends from the input still vouches
+(its merge base is the input). Verified by: a disposed stale generation
+(v0 to weak) merged against an input that changed v0 to strict, resolved to
+weak: restored to strict; a base commit after the input that changed the
+same test as the input: restored to the input; a tester round 2 descending
+from the input: kept.
+
+**RP12 — coverage.** Verified by: a source with no merge base with the
+input vouches for nothing; a git failure while computing merge bases fails
+capture; an older base candidate is superseded by a newer one on the chain;
+RP6 and Decision 9's choice of `source` between two incomparable
+generations, and between an incomparable base commit and generation.
+
+RP10 and RP11 apply only when a capture decision is first made; decisions
+already persisted are replayed as recorded (RP4), and the producer policies
+used are persisted with the decision.
+
 ## Existing tests that must stay green unchanged
 
 - `tests/test_nc_m3_branches.py::test_nc_r65_readonly_paths_are_restored_from_the_input_commit_and_recorded`
@@ -202,3 +256,10 @@ covers, the tester reverses it deliberately and says which.
     git's own notion of what a merged side brought. A node whose own
     `readonly_paths` do not cover a path can still change it and have its
     generation trusted; that is Decision 1 working as designed, not a gap.
+11. **Trust follows write permission and one-sided change** (adversary pass
+    2, 2026-10-14; advisor-checked): a generation is vetted only where its
+    producer could not have written unvetted content, and a source vouches
+    only for a change the input did not also make. Concurrent changes to one
+    protected file by main and by the input are deliberately restored, even
+    when git would merge them cleanly: the orchestrator resolves them at
+    merge, not the agent.
