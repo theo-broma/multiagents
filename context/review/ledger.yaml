@@ -1411,8 +1411,12 @@ findings:
       note: filed in context/review/RP-adversary3.md
       sha: dc5d99db6871173e2e135f191a9731b1472a7521
       status: open
+    - by: orchestrator
+      note: RP13 (spec 9918dbb9); tester nd-51ceb8b7
+      sha: 9918dbb939fb4924050679bdd7bcf80c2f10def6
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: capture fails on a missing producer policy the decision does not need
   F207:
     class: correctness
@@ -1424,8 +1428,12 @@ findings:
       note: filed in context/review/RP-adversary3.md
       sha: dc5d99db6871173e2e135f191a9731b1472a7521
       status: open
+    - by: orchestrator
+      note: RP14 (spec 9918dbb9); tester nd-76f98daa
+      sha: 9918dbb939fb4924050679bdd7bcf80c2f10def6
+      status: scheduled
     severity: low
-    status: open
+    status: scheduled
     summary: run ids are 6 hex digits with no uniqueness check
   F21:
     class: security
