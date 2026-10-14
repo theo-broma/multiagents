@@ -5860,3 +5860,6 @@ at merge. Tooling note: an implementer cannot undo its own test-file addition.
 16:50 CEST: RP14 loop nd-ef7469ce approved (485efb44); full suite on main+RP14 running
 (bg cfc0a959d333, /var/tmp/p-rp14). RP13 loop nd-ac976ec5 approved (004dd125; drop
 tests/test_rp_lazy_policy_edges.py at merge); adversary pass 4 nd-b055eccb running.
+User 2026-10-14 ~17:05 CEST: profile the suite (step 1: next full suite with
+--durations=200), then a researcher groups the slow tests by cause and estimates
+gains. Plan: after the RP14 suite, run main+RP14+RP13 with durations (also RP13's suite).
