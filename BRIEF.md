@@ -5899,3 +5899,9 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
   - Researcher nd-ecb4f46a measures causes 2 and 3. Its report goes to `.multiagents/handoff/suite-speed-measured-2026-10-14.md`.
   - The AGENTS.md timing fix runs as loop nd-cba9406f: implementer nd-b62deb37 on codex, then reviewer nd-d4baf81c.
 - **Housekeeping.** The 19 finished AP/RP/RP13-14 nodes listed above are disposed.
+- **Baseline done** (ae9e6014, `--durations=0`).
+  - Wall time 3093 s. Failures: 71, i.e. the 70 known reds plus a tb2_r7 hold-signal flake.
+  - Phase totals: call 10,136 s, setup 1,265 s, teardown 845 s, so 12,246 worker-seconds.
+  - Failure list in `/var/tmp/tsd-before.fails`.
+- **"After" run started.** Worktree `/var/tmp/tsd-after` (main plus the three Run D files from 782cee32), bg job 37dd5c1e8c1e, log `/var/tmp/tsd-after.log`.
+- **Run D approved.** Loop nd-2803c003, reviewer ag-cf7bbb.
