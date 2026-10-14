@@ -5887,3 +5887,5 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
 - **Spec drafted.** The amendment is in `context/specs/ts-test-speed.md` (TS-R6 to TS-R8). It is uncommitted and awaits the user's yes.
 - **Baseline running.** The `--durations=0` baseline is running on ae9e6014 from `/var/tmp/tsd-before` as bg job 113485caebe6, logging to `/var/tmp/tsd-before.log`.
 - **Plan after the yes.** A `tester` makes the conftest change, a reviewer checks it (gemini-3.8-flash-high), then a full-suite parity check and a duration comparison.
+- **Spec committed.** The Run D spec is cd4a4907.
+- **Loop launched.** The review loop is nd-2803c003: the tester nd-c81f1b91, pinned to codex gpt-6.1-sol, then the reviewer nd-d39a5000.
