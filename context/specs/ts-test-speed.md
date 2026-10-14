@@ -112,3 +112,41 @@
 - **The 5 s check covers every test,** so `--durations=0` is filtered, not only the top 30.
 
 **Note.** `scripts/test-chunk.sh` already forwards extra pytest arguments, so `-n` needs no new interface.
+
+## Amendments of 2026-10-14: Run D, budget readers (cause 1 of the suite-speed research)
+
+Source: the researcher's report (nd-a2480ae2), cause 1. A profiling run of the
+full suite at `-n 4` took 3163 s wall, about 12,650 worker-seconds. Every
+`Runner.start` reads every enabled provider's budget (`budget.read_all`,
+runner.py around lines 5294 and 4928). Today the `_no_host_cli_budget` fixture
+in `tests/conftest.py` keeps that read away from the host CLI, but the shipped
+script still **runs**, as a subprocess, to produce its no-CLI answer. The
+estimated cost is 3,000 to 5,000 worker-seconds. That estimate was not
+measured, so it is the first thing this run measures.
+
+**TS-R6: no process is spawned for a default budget/models read.**
+- **The rule.** In a test that is not marked `real_providers`, a `budget` or `models` action that would run a SHIPPED provider script against a CLI the test did not build under the basetemp spawns no process. "Shipped" means byte-identical to its twin in the shipped defaults, as the fixture already defines it.
+- **The answer stays the same.** That action returns exactly what the script returns today when run with `MULTIAGENTS_BIN` empty: the same reading, the same exit status, the same error text. A precomputed or memoized answer is acceptable, provided it is that answer.
+- **Unchanged cases.**
+  - A test pointing at a fake script or fake CLI of its own still runs it.
+  - A test marked `real_providers` still runs the real script.
+  - `budget`'s own caching semantics are unchanged.
+- Verified by:
+  - a test that counts process spawns during a default `Runner.start` and expects zero from budget/models reads;
+  - a test showing that a fake-CLI budget script is still executed;
+  - a test that compares the replaced answer with a real no-CLI run of each shipped script, so the replacement cannot drift from the scripts.
+
+**TS-R7: the routing guarantees do not move.**
+- No test outcome changes.
+- **Parity.** The full suite at `-n 4`, run from a clean worktree, gives per-id outcomes identical to the base, ae9e6014. Known load flakes are rerun alone to confirm them.
+- Verified by: the orchestrator's full-suite comparison before merge.
+
+**TS-R8: the gain is measured, not assumed.**
+- **What is reported.** The summed `--durations=0` worker-seconds, before and after, under the conditions of TS-R2b.
+- **A small gain is a finding.** A reduction under 1,000 worker-seconds is reported as a finding about the research estimate, not hidden.
+- Verified by: the two duration files under `.multiagents/handoff/`.
+
+**Scope.**
+- The change lives in `tests/` (fixtures and support), so the `tester` makes it: implementers cannot edit existing test files.
+- Any `src/` seam is not included. If one turns out to be needed, the agent stops with NEED_INFO.
+- Causes 2 and 3 of the report (template repositories, an injectable clock) are not part of this run.
