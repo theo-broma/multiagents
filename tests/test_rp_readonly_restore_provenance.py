@@ -439,7 +439,11 @@ def test_rp3_writing_a_trusted_version_without_merging_its_source_is_restored(h)
     from the captured tip."""
     tester = h.generation({TEST: "from tester\n"})
     impl = h.launch(["tests/**"])
-    h.write(impl, {TEST: "from tester\n"})
+    # Its own message: with the generation's tree, parent, identity and
+    # second, a default message would rebuild the generation byte for byte.
+    own = h.write(impl, {TEST: "from tester\n"}, "impl rewrites the test")
+    assert own != tester
+    assert h.sh(impl, f"git merge-base --is-ancestor {tester} HEAD || echo absent") == "absent"
     assert h.sh(impl, f"git ls-tree HEAD -- {TEST}").split("\t")[0] == h.entry(tester, TEST)
     restored_to_input(h, impl)
 
@@ -562,15 +566,32 @@ def test_rp5_an_agent_without_protected_paths_is_exempt(h):
 
 # ----------------------------------------------------------------------- RP6
 
-def test_rp6_the_base_branch_commit_is_the_source_when_a_generation_also_matches(h):
+def test_rp6_rp7_a_base_commit_superseded_by_a_generation_cut_from_it_is_not_the_source(h):
+    """Reversed by RP7 (was: the base commit is the source). The generation
+    is cut from the moved base, so the base commit is its ancestor and is
+    dropped by supersession before RP6 picks a source."""
     impl = h.launch(["tests/**"])
     main = h.base_commit({TEST: "shared\n"})
-    # Cut from the moved base: its generation carries the same entry.
     tester = h.generation({"t.txt": "t\n"})
     assert h.entry(tester, TEST) == h.entry(main, TEST)
     merged(h, impl, tester)
     generation = done(h, h.finish(impl))
     result = h.result(impl)
+    assert h.blob(generation["commit"], TEST) == "shared"
+    assert result["readonly_kept"] == [{"path": TEST, "source": tester}]
+    assert generation["readonly_kept"] == [{"path": TEST, "source": tester}]
+
+
+def test_rp6_the_base_branch_commit_is_the_source_when_an_unrelated_generation_also_matches(h):
+    """Neither source is an ancestor of the other and both brought the same
+    entry: RP6 prefers the base commit."""
+    impl = h.launch(["tests/**"])
+    tester = h.generation({TEST: "shared\n"})
+    main = h.base_commit({TEST: "shared\n"})
+    merged(h, impl, tester, main)
+    generation = done(h, h.finish(impl))
+    result = h.result(impl)
+    assert h.blob(generation["commit"], TEST) == "shared"
     assert result["readonly_kept"] == [{"path": TEST, "source": main}]
     assert generation["readonly_kept"] == [{"path": TEST, "source": main}]
 
