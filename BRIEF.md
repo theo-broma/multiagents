@@ -5749,3 +5749,8 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   nd-b9931044 (claude opus) writing the suite. Next: review its result, then
   review-loop (implementer-deep + reviewer, no full suite in reviewer), then
   adversary on claude opus, full suite, merge.
+- 2026-10-14 ~08:15 CEST — RP tester done: b0110a69 (tests/test_rp_*.py,
+  13 red, 15 guards green). Decisions 7-9 committed (bcc3bb9f). RP loop
+  nd-48764ae0 (implementer nd-073e1c42 codex, reviewer nd-2830050c without
+  full suite). Next: adversary on claude opus, full suite, merge (tester file
+  is an addition, so no restore issue). AP loop nd-fe9e687b still running.
