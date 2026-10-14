@@ -5954,3 +5954,7 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   contract.
 - **At merge:** set F31, F32, F34, F35, F64, F65, F69, F70, F205 to fixed or
   reconsider each (IC-R15).
+- 2026-10-15 CEST: cleanup researcher nd-546477ae (which refs/worktrees are
+  safe to delete; RP may read node-generations refs) running. Advisor consulted on
+  writing the contract in slices (slice 1 = executor backend interface + IC-R13
+  isolation suite + latency benchmark). Nothing deleted yet.
