@@ -5754,3 +5754,9 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   nd-48764ae0 (implementer nd-073e1c42 codex, reviewer nd-2830050c without
   full suite). Next: adversary on claude opus, full suite, merge (tester file
   is an addition, so no restore issue). AP loop nd-fe9e687b still running.
+- 2026-10-14 ~08:35 CEST — AP loop approved at 1be33781 (implementer: 70
+  baseline reds exactly; reviewer: no defects). Orchestrator full suite in bg
+  on /var/tmp/p2-ap (1be33781 + tests from 2f3d3594), log
+  /var/tmp/p2-ap-suite.log. Focused adversary pass 3 nd-d4b57877 (claude opus)
+  on the AP11-13 code. Merge after both: merge_node nd-fe9e687b, copy tests/
+  from /var/tmp/p2-ap (+ any adversary3 file accepted), diff -rq, ledger.
