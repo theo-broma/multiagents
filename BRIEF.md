@@ -5760,3 +5760,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   /var/tmp/p2-ap-suite.log. Focused adversary pass 3 nd-d4b57877 (claude opus)
   on the AP11-13 code. Merge after both: merge_node nd-fe9e687b, copy tests/
   from /var/tmp/p2-ap (+ any adversary3 file accepted), diff -rq, ledger.
+- 2026-10-14 ~09:05 CEST — RP implementer NEED_INFO (valid): colliding identical commits in test_rp3_writing_a_trusted_version_without_merging_its_source_is_restored; tester nd-b9931044 relaunched to fix. Then relaunch loop nd-48764ae0 implementer (merge new tester generation).
