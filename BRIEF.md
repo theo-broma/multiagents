@@ -5779,3 +5779,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   RP implementer nd-073e1c42 relaunched (restores that file uncommitted);
   reviewer nd-2830050c patched likewise. At RP merge: copy
   tests/test_rp_readonly_restore_provenance.py from 2994a4ac.
+- 2026-10-14 ~11:10 CEST — RP loop approved at b1c43687 (implementer suite = baseline; reviewer no defects). RP adversary nd-8c941ab7 (claude opus). AP14-17 implementer e29bd311 (suite = baseline exactly); AP reviewer running.
