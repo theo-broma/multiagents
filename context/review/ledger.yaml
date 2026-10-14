@@ -1376,6 +1376,20 @@ findings:
     status: accepted
     summary: '`compose_prompt` puts per-run unique text ahead of the stable per-role
       instructions'
+  F205:
+    class: security
+    context: context/review/C1-authproxy-deployed.md
+    evidence: trace
+    first_seen: d074eca0be357bec360347f48f719339dc2c31c8
+    history:
+    - by: auditor
+      note: filed in context/review/C1-authproxy-deployed.md
+      sha: d074eca0be357bec360347f48f719339dc2c31c8
+      status: open
+    severity: medium
+    status: open
+    summary: the deployed auth proxy registers no literals, so literal masking is
+      inert in production
   F21:
     class: security
     context: context/review/C1-sandbox-authproxy.md
