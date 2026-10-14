@@ -5784,3 +5784,26 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - 2026-10-14 ~12:05 CEST — RP adversary nd-8c941ab7 REJECTED: stale trusted sources (moved base / non-ancestor sibling generation) vouch for reverts and deletions; newline-named protected paths unmatched (pre-existing). Tests at 37b9e207 (tests/test_rp_adversary_stale_source.py, tests/test_rp_adversary_path_names.py). Draft RP7 (supersession + merge-base vouching), RP8 (newline paths), RP9 (coverage), Decision 10 uncommitted in the RP spec (backup scratchpad rp-draft-rp7.md), advisor-checked; awaiting user yes. RP not merged.
 - 2026-10-14 ~12:20 CEST — user approved RP7-RP9: committed 914d4ae3. RP tester nd-b9931044 relaunched (round 3: main + adversary files from 37b9e207 + RP7-RP9 tests). Next: relaunch RP loop nd-48764ae0 (implementer restores tester test files uncommitted), reviewer, new RP adversary pass, suite, merge.
 - 2026-10-14 ~11:45 CEST — RP tester round 3 done: c6bd9238 (tests/test_rp_amendment.py + adversary files; 19 red vs b1c43687). RP loop nd-48764ae0 relaunched round 2 (implementer merges main 79fb9259, restores tests from c6bd9238 uncommitted). At merge: copy tests/ from c6bd9238-based tested tree.
+- 2026-10-14 ~12:00 CEST — AP14-AP17 MERGED: merge_node nd-2748c3f8 →
+  1757e3ba; tests e5a3cc02 applied 2a2b7897; src/tests identical to the
+  tested tree; suite exactly the 70 baseline reds; audit clean. Plan part 2
+  is DONE. F205 deferred to phase 7 part 2 (Decision 18). Ledger: 63 fixed,
+  8 accepted, 9 deferred, 0 live.
+
+## Next phase (imported from context/plans/2026-10-13-findings-c1-c2-part2.md)
+
+- **Phase 7 part 2: one container per run.** Specified with the user from
+  `phase7-nodes-and-containers.md` (PAC-R*), with the scope recorded in the
+  plan of 2026-10-12: tmux step 2; the live node view; microVM as an option;
+  the findings deferred to it as requirements of the rewritten executor
+  (F31, F32, F34, F35, F64, F65, F69, F70) and F205 (register account
+  literals in the auth-proxy sidecar; part 2 Decision 18).
+  Plan ready: context/plans/2026-10-13-phase7-part2-containers.md.
+- **The review of C1 and C2 is acted on:** no live finding remains apart
+  from the deferred ones above.
+- **C3 to C7 were never reviewed** (REPORT.md, "What this covers"). Whether
+  to review them is the user's choice, to raise once phase 7 part 2 is
+  specified.
+- Still in flight outside the plan (user-approved tooling fix): readonly
+  restore by provenance (RP, context/specs/readonly-restore-provenance.md),
+  loop nd-48764ae0 round 2.

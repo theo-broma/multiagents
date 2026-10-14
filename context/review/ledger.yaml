@@ -1390,8 +1390,15 @@ findings:
       note: filed in context/review/C1-authproxy-deployed.md
       sha: d074eca0be357bec360347f48f719339dc2c31c8
       status: open
+    - by: orchestrator
+      note: 'Deferred to phase 7 part 2 (containers), which owns the sidecar: part
+        2 Decision 18, user decision 2026-10-14. Which literals, from where (without
+        the container reading credential files), and how they reach the sidecar is
+        that phase''s spec.'
+      sha: 2a2b7897afde9458dfb36015f14437ec221840dd
+      status: deferred
     severity: medium
-    status: open
+    status: deferred
     summary: the deployed auth proxy registers no literals, so literal masking is
       inert in production
   F21:
