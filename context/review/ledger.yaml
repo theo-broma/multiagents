@@ -227,8 +227,13 @@ findings:
         1: refuse them with a diagnostic.'
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: SE2 + SE4 (hostname shape, anchored filter lines; adversary findings)
+        + SE5/Decisions 16-17 (docker check), merged 84835473 + 2c73ed84.
+      sha: 2c73ed84b7c6b8bc1c5317cfe5432ae36afbff53
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: Dead or malformed entries (leading/trailing dot, whitespace, port) silently
       match nothing
   F110:
@@ -1206,8 +1211,12 @@ findings:
         (sandbox and egress, with the adversary).
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: SE1 + Decision 13, merged 84835473 (loop) + 2c73ed84 (tests).
+      sha: 2c73ed84b7c6b8bc1c5317cfe5432ae36afbff53
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: A non-string `egress_allowlist` entry crashes container config generation
       with an uncaught `AttributeError`
   F20:
@@ -1875,8 +1884,12 @@ findings:
         item 1, with the adversary.
       sha: 67411d14a7270198eb42867ba588a9d66069501b
       status: scheduled
+    - by: orchestrator
+      note: SE3 credential_drift argv-only, merged 84835473 + 2c73ed84.
+      sha: 2c73ed84b7c6b8bc1c5317cfe5432ae36afbff53
+      status: fixed
     severity: medium
-    status: scheduled
+    status: fixed
     summary: '`credential_drift` interpolates paths into shell command without quoting'
   F64:
     class: architecture
