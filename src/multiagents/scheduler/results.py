@@ -170,9 +170,13 @@ def input_generation(node, ref, nodes, consumer=None):
 
 
 class Results:
-    def __init__(self, paths, config):
+    def __init__(self, paths, config, *, generation_commits=(), generation_policies=None,
+                 persist_capture=None):
         self.paths, self.config = paths, config
         self.root = paths.root
+        self.generation_commits = set(generation_commits)
+        self.generation_policies = generation_policies or {}
+        self.persist_capture = persist_capture
 
     def git(self, *args, **kwargs):
         with gitops._host_scope(self.root):
@@ -267,6 +271,109 @@ class Results:
         with gitops._host_scope(path):
             gitops.run(path, "checkout", "-b", branch, commit, check=True)
 
+    def tree_entries(self, commit, paths):
+        # One query for all paths in a source, including modes, symlinks,
+        # gitlinks and directories. Missing entries are represented by None.
+        raw = self.git("--literal-pathspecs", "ls-tree", "-r", "-t", "-z", commit,
+                       "--", *paths, strip=False, check=True).out
+        entries = {}
+        for item in raw.split("\0"):
+            if item:
+                entry, path = item.split("\t", 1)
+                entries[path] = entry.split(" ")
+        return {path: entries.get(path) for path in paths}
+
+    def readonly_decision(self, attempt, commit, paths):
+        base = self.config.base_branch or gitops.current_branch(self.root)
+        base_commit = self.tip(base) if base else ""
+        if not base_commit:
+            raise gitops.GitError("readonly capture base branch cannot be resolved")
+        # Intersect the two host-owned source sets with the attempt's new
+        # ancestry. Neither a generation's ancestors nor base side parents
+        # acquire authority from their descendant's record.
+        base_chain = set(self.git("rev-list", "--first-parent", base_commit, check=True).out.splitlines())
+        input_commit = attempt["input_commit"]
+        history = [line.split() for line in self.git(
+            "rev-list", "--topo-order", "--parents", commit, "--not", input_commit,
+            check=True).out.splitlines()]
+        eligible = base_chain | self.generation_commits
+        candidates = [source for source, *parents in history if source in eligible]
+        producer_policies = {}
+        for source in candidates:
+            if source in base_chain:
+                continue
+            policies = self.generation_policies.get(source)
+            if not policies or any(not records or any(
+                    not isinstance(policy, list) or any(not isinstance(pattern, str) for pattern in policy)
+                    for policy in records) for records in policies.values()):
+                raise gitops.GitError("readonly generation producer policy is unavailable: " + source)
+            producer_policies[source] = policies
+        path_sources = {}
+        for path in paths:
+            allowed = {source for source in candidates if source in base_chain or all(
+                not matches_any(policy, path)
+                for records in producer_policies[source].values() for policy in records)}
+            sources, superseded = [], set()
+            # Descendants precede parents. Only a source allowed on this
+            # path can supersede an older eligible snapshot (RP7/RP10).
+            for source, *parents in history:
+                if source in superseded:
+                    superseded.update(parents)
+                elif source in allowed:
+                    sources.append(source)
+                    superseded.update(parents)
+            path_sources[path] = sources
+        sources = dict.fromkeys(source for selected in path_sources.values() for source in selected)
+        merge_bases = {}
+        for source in sources:
+            pair = (source, input_commit)
+            bases = self.git("merge-base", "--all", *pair)
+            if not bases.ok and not (bases.code == 1 and not bases.out and not bases.err):
+                raise gitops.GitError(bases.err or bases.out or "readonly source merge-base failed")
+            merge_bases[pair] = bases.out.splitlines()
+        # Batch all protected paths per commit, caching sources and shared
+        # merge bases alike; no Git call depends on an individual path.
+        commits = dict.fromkeys([input_commit, commit, *sources,
+                                *(base for bases in merge_bases.values() for base in bases)])
+        entries = {source: self.tree_entries(source, paths) for source in commits}
+        tip = entries[commit]
+        decisions = []
+        for path in paths:
+            vouching = [source for source in path_sources[path] if merge_bases[(source, input_commit)]
+                        and all(entries[source][path] != entries[base][path]
+                                and entries[input_commit][path] == entries[base][path]
+                                for base in merge_bases[(source, input_commit)])]
+            matches = [source for source in vouching if entries[source][path] == tip[path]]
+            if matches:
+                source = next((source for source in matches if source in base_chain), matches[0])
+                decisions.append({"path": path, "outcome": "kept", "source": source})
+                continue
+            alternatives = {tuple(entries[source][path]) if entries[source][path] else None
+                            for source in vouching}
+            source = input_commit
+            if len(alternatives) == 1:
+                source = vouching[0]
+            decisions.append({"path": path, "outcome": "reverted", "source": source})
+        return {"base_commit": base_commit, "producer_policies": producer_policies, "paths": decisions}
+
+    def restored_tree(self, commit, decisions):
+        groups = {}
+        for decision in decisions:
+            if decision["outcome"] == "reverted":
+                groups.setdefault(decision["source"], []).append(decision["path"])
+        with tempfile.TemporaryDirectory(dir=self.paths.scheduler) as tmp:
+            env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+            self.git("read-tree", commit, env=env, check=True)
+            for source, paths in groups.items():
+                # An already-absent path needs no index operation (and would
+                # otherwise fail git restore's pathspec check on replay).
+                target, current = self.tree_entries(source, paths), self.tree_entries(commit, paths)
+                changed = [path for path in paths if target[path] != current[path]]
+                if changed:
+                    self.git("--literal-pathspecs", "restore", "--source=" + source, "--staged", "--",
+                             *changed, env=env, check=True)
+            return self.git("write-tree", env=env, check=True).out
+
     def capture(self, run, attempt, authority):
         record = checkout_record(run, authority)
         branch = record["branch"]
@@ -318,24 +425,38 @@ class Results:
         retained = self.tip(retention_ref)
         patterns = attempt.get("readonly_paths", [])
         changed = self.git("diff", "--no-renames", "--name-only", "--diff-filter=MDT", "-z",
-                           attempt["input_commit"], commit, strip=False).out.split("\0")
-        reverted = [path for path in changed if path and matches_any(patterns, path)]
-        if reverted:
-            with tempfile.TemporaryDirectory(dir=self.paths.scheduler) as tmp:
-                env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
-                self.git("read-tree", commit, env=env, check=True)
-                self.git("restore", "--source=" + attempt["input_commit"], "--staged", "--",
-                         *reverted, env=env, check=True)
-                tree = self.git("write-tree", env=env, check=True).out
-                if retained and self.git("rev-parse", retained + "^{tree}", check=True).out != tree:
-                    raise gitops.GitError("captured result changed after run completion")
-                commit = retained or self.commit(tree, [commit], "multiagents: restore readonly paths")
-        if retained and not reverted and retained != commit:
+                           attempt["input_commit"], commit, strip=False, check=True).out.split("\0")
+        protected = [path for path in changed if path and matches_any(patterns, path)]
+        decision = attempt.get("readonly_capture")
+        if decision is None:
+            decision = (self.readonly_decision(attempt, commit, protected) if protected
+                        else {"base_commit": None, "paths": []})
+        reverted = [item["path"] for item in decision["paths"] if item["outcome"] == "reverted"]
+        kept = [{"path": item["path"], "source": item["source"]}
+                for item in decision["paths"] if item["outcome"] == "kept"]
+        # Replay uses only frozen authority. Additional protected mutations
+        # still undergo the original restored-tree check, without new trust.
+        known = {item["path"] for item in decision["paths"]}
+        restorations = decision["paths"] + [
+            {"path": path, "outcome": "reverted", "source": attempt["input_commit"]}
+            for path in protected if path not in known]
+        if any(item["outcome"] == "reverted" for item in restorations):
+            tree = self.restored_tree(commit, restorations)
+            frozen = decision.get("commit") or retained
+            if frozen and self.git("rev-parse", frozen + "^{tree}", check=True).out != tree:
+                raise gitops.GitError("captured result changed after run completion")
+            commit = frozen or self.commit(tree, [commit], "multiagents: restore readonly paths")
+        if (decision.get("commit") or retained) and (decision.get("commit") or retained) != commit:
             raise gitops.GitError("captured result changed after run completion")
+        if "commit" not in decision:
+            decision["commit"] = commit
+            if self.persist_capture is None:
+                raise gitops.GitError("result capture journal is unavailable")
+            self.persist_capture(decision)
         self.move(retention_ref, commit, "")
         return {"status": run.status, "session_id": run.session_id, "branch": branch,
                 "run_dir": str(self.paths.run_dir(run.id)), "commit": commit, "checkout_commit": checkout_commit,
-                "readonly_reverted": reverted}
+                "readonly_reverted": reverted, **({"readonly_kept": kept} if kept else {})}
 
     def integrate(self, node, nodes, attempt):
         top = nodes[attempt["branch_node"]]
@@ -348,7 +469,9 @@ class Results:
         # The prepared commit is journalled before moving refs by Engine.
         return {"seq": seq, "commit": commit, "run_id": attempt["run_id"], "verdict": None,
                 **({"readonly_reverted": attempt["result"]["readonly_reverted"]}
-                   if attempt["result"].get("readonly_reverted") else {})}, before
+                   if attempt["result"].get("readonly_reverted") else {}),
+                **({"readonly_kept": attempt["result"]["readonly_kept"]}
+                   if attempt["result"].get("readonly_kept") else {})}, before
 
     def prepare_publication(self, node):
         from .model import Refused

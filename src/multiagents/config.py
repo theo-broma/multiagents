@@ -398,7 +398,7 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
     body = "".join(out)
     if not anchored:
         body = r"(?:.*/)?" + body
-    return re.compile(body + r"\Z")
+    return re.compile(body + r"\Z", re.DOTALL)
 
 
 @lru_cache(maxsize=512)
@@ -418,7 +418,7 @@ def matches_any(patterns: Sequence[str], path: str) -> bool:
     carve out does nothing. Write `\\!` for a filename that really begins with
     an exclamation mark.
     """
-    candidate = str(path).strip().removeprefix("./")
+    candidate = str(path).removeprefix("./")
     selected = False
     for raw in patterns:
         pattern = str(raw).strip()

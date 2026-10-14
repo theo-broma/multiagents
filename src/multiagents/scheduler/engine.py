@@ -1582,6 +1582,18 @@ class Engine:
                                "need_info": markers})
             save_attempt(db, current)
             db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (run.id,))
+            generation_commits = set()
+            generation_policies = {}
+            if "input_commit" in current and current.get("readonly_capture") is None:
+                journal, policies = attempt_records(db), {}
+                for node in self.store.node_records(db).values():
+                    for generation in node["generations"]:
+                        commit, run_id = generation["commit"], generation.get("run_id")
+                        generation_commits.add(commit)
+                        if run_id not in policies:
+                            producers = matching_records(journal, "run_id", run_id) if run_id else []
+                            policies[run_id] = [producer.get("readonly_paths") for producer in producers] or [None]
+                        generation_policies.setdefault(commit, {})[run_id] = policies[run_id]
         run = SimpleNamespace(**current["capture_intent"])
         if current.get("window_completion"):
             # The journal owns confirmed completion before the tree looks
@@ -1593,8 +1605,19 @@ class Engine:
                   "run_dir": str(self.paths.run_dir(run.id))}
         if "input_commit" in current:
             from .results import MissingCheckout
+
+            def persist_capture(decision):
+                # Durable before Results publishes the retention ref. Keep
+                # unrelated attempt fields written during capture intact.
+                with self.store.transaction() as db:
+                    pending = attempt_records(db)[current["attempt_id"]]
+                    pending["readonly_capture"] = decision
+                    save_attempt(db, pending)
+
             try:
-                result.update(Results(self.paths, config).capture(run, current, self.runner.authority))
+                result.update(Results(self.paths, config, generation_commits=generation_commits,
+                                      generation_policies=generation_policies,
+                                      persist_capture=persist_capture).capture(run, current, self.runner.authority))
             except MissingCheckout as exc:
                 result.update(status="failed", failure="missing_tree", detail=str(exc))
             except (gitops.GitError, OSError, ValueError) as exc:
