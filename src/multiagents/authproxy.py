@@ -36,10 +36,13 @@ anything — and then only for agents that have not started yet.
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import email.utils
+import hashlib
 import hmac
+import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -50,6 +53,7 @@ import time
 import urllib.error
 import urllib.request
 import urllib.parse
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -253,38 +257,57 @@ class Accounts:
         headroom on that one. See the module docstring.
         """
         with self.lock:
-            eligible = self.eligible(provider) if eligible is None else eligible
-            free = [label for label in eligible if label not in (tried or [])
-                    and self.usable(label)]
-            fixed = self.provider_pins.get(provider) if fixed is None else fixed
-            if fixed:
-                return fixed if fixed in free else ""
-            label = self.pinned.get(agent_id)
-            if label and label in free:
-                return label
-            if not free:
-                return ""
-            # Fewest agents first, so a second account is actually used rather
-            # than sitting idle until the first one is exhausted.
-            counts = {l: 0 for l in free}
-            for pinned in self.pinned.values():
-                if pinned in counts:
-                    counts[pinned] += 1
-            label = min(free, key=lambda l: (counts[l], l))
-            self.pinned[agent_id] = label
+            return self._select(agent_id, provider, tried, eligible=eligible, fixed=fixed)
+
+    def admit(self, agent_id: str, provider: str, tried: list[str], *,
+              eligible: list[str], fixed: str) -> tuple[str, int | None, bool]:
+        """Select and snapshot exhaustion under the cooldown mark's lock."""
+        with self.lock:
+            label = self._select(agent_id, provider, tried, eligible=eligible, fixed=fixed)
+            rejected = {l for l in eligible if self.is_rejected(l)}
+            now = time.monotonic()
+            ends = [self.limited[l] for l in eligible if l not in rejected
+                    and self.limited.get(l, 0) > now]
+            retry = max(1, math.ceil(min(ends) - now)) if ends else None
+            return label, retry, bool(rejected)
+
+    def _select(self, agent_id: str, provider: str, tried: list[str] | None, *,
+                eligible: list[str] | None, fixed: str | None) -> str:
+        eligible = self.eligible(provider) if eligible is None else eligible
+        free = [label for label in eligible if label not in (tried or [])
+                and self.usable(label)]
+        fixed = self.provider_pins.get(provider) if fixed is None else fixed
+        if fixed:
+            return fixed if fixed in free else ""
+        label = self.pinned.get(agent_id)
+        if label and label in free:
             return label
+        if not free:
+            return ""
+        # Fewest agents first, so a second account is actually used rather
+        # than sitting idle until the first one is exhausted.
+        counts = {l: 0 for l in free}
+        for pinned in self.pinned.values():
+            if pinned in counts:
+                counts[pinned] += 1
+        label = min(free, key=lambda l: (counts[l], l))
+        self.pinned[agent_id] = label
+        return label
 
     def eligible(self, provider: str = "") -> list[str]:
         fixed = self.provider_pins.get(provider)
         return [fixed] if fixed else [label for label in self.labels()
                                      if label not in self.provider_pins.values()]
 
-    def usable(self, label: str) -> bool:
+    def is_rejected(self, label: str) -> bool:
         self.token(label)                        # refresh the content fingerprint
         stamp = self._cache.get(label, ("", ""))[0]
-        if label in self.rejected and self.rejected[label] == stamp:
+        return label in self.rejected and self.rejected[label] == stamp
+
+    def usable(self, label: str) -> bool:
+        if self.is_rejected(label):
             return False
-        return self.limited.get(label, 0) <= time.time()
+        return self.limited.get(label, 0) <= time.monotonic()
 
     def mark_unauthenticated(self, label: str, token: str) -> None:
         with self.lock:
@@ -300,7 +323,8 @@ class Accounts:
 
     def mark_limited(self, label: str, seconds: float) -> None:
         with self.lock:
-            self.limited[label] = time.time() + max(60.0, seconds)
+            self.limited[label] = max(self.limited.get(label, 0),
+                                      time.monotonic() + max(60.0, seconds))
             # Unpin everyone on it. They will land somewhere else NEXT request,
             # which is the only moment a switch is safe: mid-stream it is not
             # possible and between streams it costs only the cache.
@@ -343,18 +367,34 @@ def upstream_url(path: str) -> str:
 
 
 def _retry_after(headers: Any, body: bytes) -> float:
-    """How long the upstream says to wait. Falls back to an hour."""
+    """Interpret hints against wall time; cooldowns use monotonic time."""
+    del body
+    now = time.time()
     for name in ("retry-after", "anthropic-ratelimit-unified-reset"):
         raw = headers.get(name) if headers else None
-        if raw:
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+            if name != "retry-after":
+                value -= now
+        except (ValueError, TypeError):
             try:
-                value = float(raw)
-                # A reset may be an epoch or a duration; both appear in the wild.
-                return value - time.time() if value > 1e9 else value
-            except ValueError:
-                pass
-    del body
+                stamp = (email.utils.parsedate_to_datetime(raw) if name == "retry-after"
+                         else datetime.fromisoformat(raw))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                value = stamp.timestamp() - now
+            except (ValueError, TypeError, OverflowError):
+                continue
+        if math.isfinite(value) and value >= 0:
+            return value
     return 3600.0
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -366,43 +406,95 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:        # noqa: D102 - quiet by default
         pass
 
-    def _fail(self, status: int, message: str) -> None:
+    def _fail(self, status: int, message: str, headers: Any = None) -> None:
         payload = json.dumps({"type": "error",
                               "error": {"type": "multiagents", "message": message}}
                              ).encode()
-        self._error_payload(status, payload)
+        self._error_payload(status, payload, headers=headers)
 
-    def _error_payload(self, status: int, payload: bytes) -> None:
+    def _error_payload(self, status: int, payload: bytes, *,
+                       content_type: str = "application/json; charset=utf-8",
+                       headers: Any = None) -> None:
         self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(payload)))
+        bodyless = status in (204, 304)
+        if not bodyless:
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(len(payload)))
+        for key, value in headers or []:
+            self.send_header(key, value)
+        if self.close_connection:
+            self.send_header("connection", "close")
         self.end_headers()
-        self.wfile.write(payload)
+        if self.command != "HEAD" and not bodyless:
+            try:
+                self.wfile.write(payload)
+            except OSError:                    # the agent disconnected
+                self.close_connection = True
 
     def _event(self, kind: str, **fields) -> None:
         if callable(type(self).on_event):
             try:
                 type(self).on_event(kind, fields)
-            except Exception:
-                pass
+            except BaseException as exc:
+                try:
+                    from .redact import scrub
+                    message = scrub(str(exc)).replace("\n", "\\n").replace("\r", "\\r")
+                    print(f"authproxy event {kind}: {type(exc).__name__}: {message}",
+                          file=sys.stderr, flush=True)
+                except BaseException:          # reporting must not stop serving
+                    pass
+
+    def do_unsupported(self) -> None:
+        self.close_connection = True
+        self._fail(405, "method not allowed", [("allow", "GET, HEAD, POST")])
+
+    def __getattr__(self, name: str):
+        # BaseHTTPRequestHandler otherwise generates 501 for unknown methods.
+        if name.startswith("do_"):
+            return self.do_unsupported
+        raise AttributeError(name)
 
     def do_POST(self) -> None:                   # noqa: N802 - http.server API
+        if "transfer-encoding" in self.headers:
+            self.close_connection = True
+            return self._fail(411, "Content-Length is required")
         agent, provider = read_claim(self.headers.get("authorization", ""), type(self).secret)
         if not agent:
             # Not one of ours. Nothing reachable here should be sending
             # anything else, so this is either a misconfigured agent or
             # something that should not be on this network at all.
+            self.close_connection = True
             self._event("rejected", reason="unsigned token")
             return self._fail(401, "this proxy serves multiagents agents only")
 
-        body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.agent = agent
+        lengths = self.headers.get_all("content-length", [])
+        try:
+            values = [value.strip(" \t") for length in lengths for value in length.split(",")]
+            if any(not re.fullmatch(r"[0-9]+", value) for value in values):
+                raise ValueError("invalid length")
+            sizes = {int(value) for value in values}
+            if len(sizes) > 1:
+                raise ValueError("conflicting lengths")
+            size = sizes.pop() if sizes else 0
+            if size > sys.maxsize:
+                raise ValueError("unreadable length")
+        except ValueError:
+            self.close_connection = True
+            return self._fail(400, "invalid Content-Length")
         # Before any account is chosen: a target that moves the host would
         # carry the token there. The target itself is not repeated anywhere —
         # it is the caller's text, and the event names who sent it.
         url = upstream_url(self.path)
         if not url:
+            self.close_connection = True
             self._event("rejected", agent=agent, reason="request target leaves the upstream")
             return self._fail(400, "request target must be an origin-form path")
+        try:
+            body = self.rfile.read(size) if lengths else None
+        except (OverflowError, MemoryError):
+            self.close_connection = True
+            return self._fail(400, "invalid Content-Length")
         accounts = type(self).accounts
         try:
             accounts.reload_pins()
@@ -418,19 +510,21 @@ class Handler(BaseHTTPRequestHandler):
             # Freeze admission's pool and pin for this request. Concurrent
             # logins cannot grow a retry loop, nor can a reload move a pinned
             # request onto a different account halfway through its attempts.
-            label = accounts.for_agent(identity, provider, tried,
-                                       eligible=eligible, fixed=fixed)
+            label, retry, rejected = accounts.admit(identity, provider, tried,
+                                                    eligible=eligible, fixed=fixed)
             if not label or label in tried:
                 self._event("exhausted", agent=agent, tried=tried)
-                denied = unauthenticated or any(l in accounts.rejected for l in eligible)
-                if not fixed and unauthenticated:
-                    return self._error_payload(401, self._last_auth_error)
+                denied = (unauthenticated or rejected) and retry is None
+                if not fixed and unauthenticated and retry is None:
+                    return self._error_payload(401, **self._last_auth_error)
+                status = 401 if denied or (fixed and not accounts.token(fixed)) else 429
                 return self._fail(
-                    401 if denied or (fixed and not accounts.token(fixed)) else 429,
+                    status,
                     f"account {fixed} is unusable" if fixed else
                     "no usable account remains" if denied else
                     "every account for this provider is rate limited; "
-                    "the run will be retried when one resets")
+                    "the run will be retried when one resets",
+                    [("retry-after", str(retry))] if status == 429 and retry is not None else None)
             tried.append(label)
             token = type(self).accounts.token(label)
             if not token:
@@ -445,83 +539,200 @@ class Handler(BaseHTTPRequestHandler):
             # returning here rather than having sent anything.
             self._event("switch", agent=agent, away_from=label)
 
-    do_GET = do_POST
+    do_GET = do_HEAD = do_POST
 
-    def _forward(self, url: str, label: str, token: str, body: bytes) -> str:
+    def _forward(self, url: str, label: str, token: str, body: bytes | None) -> str:
         headers = {k: v for k, v in self.headers.items()
                    if k.lower() not in HOP_HEADERS}
         headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(url, data=body,
-                                         headers=headers, method="POST")
         try:
-            upstream = urllib.request.urlopen(request, timeout=UPSTREAM_TIMEOUT)
+            request = urllib.request.Request(url, data=body,
+                                             headers=headers, method=self.command)
+            upstream = urllib.request.build_opener(_NoRedirect()).open(
+                request, timeout=UPSTREAM_TIMEOUT)
         except urllib.error.HTTPError as exc:
-            payload = exc.read()
-            if exc.code == 401:
-                type(self).accounts.mark_unauthenticated(label, token)
-                self._event("unauthenticated", label=label)
-                self._last_auth_error = _scrub(payload)
-                return "unauthenticated"
-            if exc.code in (429, 529):
-                type(self).accounts.mark_limited(
-                    label, _retry_after(exc.headers, payload))
-                return "limited"
-            # Upstream errors name the account, the organisation, sometimes the
-            # email. That reply is about to be handed to a container running
-            # somebody else's code with approvals off, so it is scrubbed first
-            # — the same redactor that guards everything else written here.
-            payload = _scrub(payload)
-            self.send_response(exc.code)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return "error"
-        except Exception as exc:                  # network, DNS, timeout
+            upstream = exc
+        except Exception as exc:                # no upstream status was received
+            self._event("upstream_unreachable", agent=self.agent, label=label,
+                        error=type(exc).__name__)
+            self.close_connection = True
             self._fail(502, f"upstream unreachable: {type(exc).__name__}")
             return "error"
 
-        # Past this line the status is committed and a retry elsewhere is no
-        # longer possible: bytes have gone to the client. A limit that arrives
-        # mid-stream therefore has to be a hard failure, which the runner
-        # already knows how to read — it detects the limit in the agent's own
-        # output and puts the provider on a cooldown.
         with upstream:
-            self.send_response(upstream.status)
-            for key, value in upstream.headers.items():
-                if key.lower() not in ("transfer-encoding", "connection",
-                                       "content-length"):
-                    self.send_header(key, value)
-            self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
-            while True:
-                # Raw bytes, unaltered. Server-sent events are framed by the
-                # upstream and re-framing them here — merging chunks, splitting
-                # a line — corrupts a stream the client parses incrementally.
-                chunk = upstream.read(8192)
-                if not chunk:
-                    break
+            if not 200 <= upstream.status < 300:
+                status = upstream.status
+                if status >= 400 and status not in (401, 429, 529):
+                    self._event("upstream_error", agent=self.agent, label=label, status=status)
                 try:
+                    payload = upstream.read()
+                except Exception as exc:
+                    self.close_connection = True
+                    self._fail(502, f"upstream response unreadable: {type(exc).__name__}")
+                    return "error"
+                if status == 401:
+                    type(self).accounts.mark_unauthenticated(label, token)
+                    self._event("unauthenticated", label=label)
+                    self._last_auth_error = _error_response(payload, upstream.headers)
+                    return "unauthenticated"
+                if status in (429, 529):
+                    type(self).accounts.mark_limited(
+                        label, _retry_after(upstream.headers, payload))
+                    return "limited"
+                self._error_payload(status, **_error_response(payload, upstream.headers))
+                return "error"
+
+            # After headers reach the agent, a relay failure only closes this
+            # response. Separate reads and writes distinguish upstream failures
+            # from an agent that has disconnected.
+            try:
+                self.send_response(upstream.status)
+                for key, value in _response_headers(upstream.headers, success=True):
+                    self.send_header(key, value)
+                if upstream.status == 204:
+                    pass                       # no body or framing on a 204
+                elif self.command == "HEAD":
+                    length = upstream.headers.get("content-length")
+                    if length is not None and re.fullmatch(r"[0-9]+", length):
+                        self.send_header("content-length", str(int(length)))
+                else:
+                    self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+            except OSError:
+                self.close_connection = True
+                return "error"
+            if self.command == "HEAD" or upstream.status == 204:
+                return "ok"
+            while True:
+                try:
+                    chunk = upstream.read(8192)
+                    if not chunk and getattr(upstream, "length", None):
+                        raise http.client.IncompleteRead(b"")
+                except Exception as exc:
+                    self._event("upstream_unreachable", agent=self.agent, label=label,
+                                error=type(exc).__name__)
+                    self.close_connection = True
+                    return "error"
+                try:
+                    if not chunk:
+                        self.wfile.write(b"0\r\n\r\n")
+                        break
                     self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                     self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    return "error"           # the agent gave up; so do we
-            self.wfile.write(b"0\r\n\r\n")
+                except OSError:
+                    self.close_connection = True
+                    return "error"
         return "ok"
+
+
+def _error_response(payload: bytes, headers: Any) -> dict[str, Any]:
+    """Scrub a non-2xx body and keep only the upstream's public diagnostics."""
+    clean = _scrub(payload)
+    if _header_sensitive(headers.get("content-type", "")):
+        content_type = "application/octet-stream"
+    elif clean == b"Upstream response withheld.":
+        content_type = "text/plain; charset=utf-8"
+    else:
+        try:
+            json.loads(clean)
+            content_type = "application/json; charset=utf-8"
+        except (ValueError, UnicodeError):
+            content_type = headers.get("content-type", "text/plain; charset=utf-8")
+    return {"payload": clean, "content_type": content_type,
+            "headers": _response_headers(headers, success=False)}
+
+
+def _header_sensitive(value: str) -> bool:
+    from .redact import _literal_snapshot
+
+    readings = [value]
+    try:
+        # http.client decodes the wire as Latin-1. Keep that reading too;
+        # invalid UTF-8 bytes must not hide a valid literal beside them.
+        readings.append(value.encode("latin-1").decode("utf-8", errors="surrogateescape"))
+    except UnicodeEncodeError:
+        pass
+    literals = _literal_snapshot()
+    return any(any(literal in reading for literal in literals) or _EMAIL.search(reading)
+               for reading in readings)
+
+
+def _response_headers(headers: Any, *, success: bool) -> list[tuple[str, str]]:
+    """Apply the same privacy and hop rules before either relay path writes."""
+    hop = {"connection", "keep-alive", "upgrade", "te", "trailer",
+           "transfer-encoding", "content-length"}
+    for key, value in headers.items():
+        if key.lower() == "connection":
+            hop.update(name.strip().lower() for name in value.split(","))
+    allowed = []
+    for key, value in headers.items():
+        if _header_sensitive(key):
+            continue
+        name = key.lower()
+        if (name in hop or name in {"set-cookie", "authorization", "www-authenticate", "location"}
+                or name.startswith("proxy-")
+                or any(part in name for part in ("organization", "org-", "workspace", "user-profile"))):
+            continue
+        if not success and not (name in ("retry-after", "request-id", "x-request-id")
+                                or name.startswith("anthropic-ratelimit-")):
+            continue
+        if _header_sensitive(value):
+            if name != "content-type":
+                continue
+            value = "application/octet-stream"
+        allowed.append((key, value))
+    return allowed
+
+
+# Identity masking belongs only to upstream error bodies, never agent output.
+_EMAIL = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@"
+    r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z0-9-])"
+)
+_IDENTITY_KEYS = {"organization", "organization_id", "organization_name", "org",
+                  "org_id", "org_name", "email", "user_email"}
 
 
 def _scrub(payload: bytes) -> bytes:
     try:
-        from .redact import scrub
+        from .redact import MASK, _literal_snapshot, scrub
     except ImportError:                       # running as a bare script
         return payload
     try:
+        literals = _literal_snapshot()
+
+        def text(value: str) -> str:
+            for literal in literals:
+                value = value.replace(literal, MASK)
+            return _EMAIL.sub(MASK, value)
+
+        def limit(value: Any, depth: int = 0) -> Any:
+            if depth > 24:
+                return MASK
+            if isinstance(value, dict):
+                return {key: MASK if key.lower() in _IDENTITY_KEYS else limit(item, depth + 1)
+                        for key, item in value.items()}
+            if isinstance(value, list):
+                return [limit(item, depth + 1) for item in value]
+            if isinstance(value, str):
+                return text(value)
+            return value
+
+        def identity(value: Any) -> Any:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                return {scrub(text(key)): identity(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [identity(item) for item in value]
+            return value
+
         try:
             value = json.loads(payload)
         except (ValueError, UnicodeError):
-            text = payload.decode("utf-8", errors="surrogateescape")
-            return scrub(text).encode("utf-8", errors="surrogateescape")
-        return json.dumps(scrub(value)).encode()
+            value = payload.decode("utf-8", errors="surrogateescape")
+            return scrub(text(value)).encode("utf-8", errors="surrogateescape")
+        return json.dumps(identity(scrub(limit(value)))).encode()
     except Exception:
         return b"Upstream response withheld."
 

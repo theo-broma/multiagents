@@ -225,14 +225,10 @@ def test_retry_after_header_is_read_as_a_duration_not_an_epoch(tmp_path, monkeyp
 # Ordinary (non-429/529) upstream errors: status, headers, and events
 # ---------------------------------------------------------------------------
 
-def test_ordinary_500_passthrough_preserves_status_and_emits_no_event(tmp_path, monkeypatch):
-    """The handoff flagged this exact case as unconfirmed: a genuine HTTPError
-    from upstream (not 429/529, so it never reaches `mark_limited`/`_event`
-    at all — `_forward`'s `except HTTPError` branch for a non-limit code has
-    no `self._event(...)` call anywhere on it). Confirmed here with a live
-    500, distinct from the unreachable-upstream 502 case already pinned in
-    `test_char_c1_authproxy.py` (that one takes the bare `except Exception`
-    branch, not `except HTTPError`).
+def test_ordinary_500_passthrough_preserves_status_and_emits_upstream_error(tmp_path, monkeypatch):
+    """AP6 / F20 reverses the original "no event": a genuine HTTPError from
+    upstream (not 401/429/529) now emits one `upstream_error` naming the
+    agent, the account and the status.
 
     Note: `_scrub` round-trips every JSON error body through
     `json.loads`/`json.dumps` even when nothing is redacted, so the bytes are
@@ -251,7 +247,8 @@ def test_ordinary_500_passthrough_preserves_status_and_emits_no_event(tmp_path, 
                 urllib.request.urlopen(req)
             assert exc.value.code == 500
             assert json.loads(exc.value.read()) == json.loads(body)
-            assert events == []
+            assert events == [("upstream_error",
+                               {"agent": "agent1", "label": "acc", "status": 500})]
 
 
 def test_ordinary_401_passthrough_drops_all_upstream_headers(tmp_path, monkeypatch):
@@ -279,15 +276,19 @@ def test_ordinary_401_passthrough_drops_all_upstream_headers(tmp_path, monkeypat
             assert exc.value.code == 401
             assert json.loads(exc.value.read()) == {"error": "expired"}
             assert exc.value.headers.get("X-Upstream-Marker") is None
-            assert exc.value.headers.get("Content-Type") == "application/json"
+            # AP5 / F22: a scrubbed JSON body is typed as UTF-8 JSON.
+            assert exc.value.headers.get("Content-Type") == "application/json; charset=utf-8"
 
 
 # ---------------------------------------------------------------------------
 # What `_scrub` actually catches
 # ---------------------------------------------------------------------------
 
-def test_scrub_masks_a_key_named_like_a_secret_but_not_its_sibling_pii(tmp_path, monkeypatch):
-    """`_scrub` -> `redact.scrub` drops a dict VALUE wholesale when its KEY
+def test_scrub_masks_a_key_named_like_a_secret_and_its_sibling_pii(tmp_path, monkeypatch):
+    """AP1 / F21 reverses the second half of the original pin below: the
+    "organization" and "email" siblings are now masked too.
+
+    Originally: `_scrub` -> `redact.scrub` drops a dict VALUE wholesale when its KEY
     matches `_SECRET_KEYS` (e.g. "api_key", "access_token"), regardless of
     the value's shape. A sibling key like "organization" or "email" is not
     dropped — it only survives redaction if its VALUE happens to match one of
@@ -313,8 +314,8 @@ def test_scrub_masks_a_key_named_like_a_secret_but_not_its_sibling_pii(tmp_path,
                 urllib.request.urlopen(req)
             got = json.loads(exc.value.read())
             assert got["error"]["api_key"] == "[redacted]"
-            assert got["error"]["organization"] == "MyCorp Inc"
-            assert got["error"]["email"] == "admin@example.invalid"
+            assert got["error"]["organization"] == "[redacted]"
+            assert got["error"]["email"] == "[redacted]"
             assert got["error"]["message"] == "token invalid"
 
 
@@ -351,8 +352,11 @@ def test_empty_body_passes_through_as_empty(tmp_path, monkeypatch):
             assert data["body"] == ""
 
 
-def test_get_request_is_forwarded_upstream_as_post(tmp_path, monkeypatch):
-    """`Handler.do_GET = do_POST` (authproxy.py:299) is a straight alias, and
+def test_get_request_is_forwarded_upstream_as_get(tmp_path, monkeypatch):
+    """AP4 / F23 reverses the original pin below: a GET now reaches the
+    upstream as a GET.
+
+    Originally: `Handler.do_GET = do_POST` (authproxy.py:299) is a straight alias, and
     `_forward` hardcodes `method="POST"` on the `urllib.request.Request` it
     builds regardless of `self.command`. A client sending a bare GET to the
     proxy therefore reaches the upstream as a POST, not a GET — confirmed
@@ -366,7 +370,7 @@ def test_get_request_is_forwarded_upstream_as_post(tmp_path, monkeypatch):
                 method="GET")
             resp = urllib.request.urlopen(req)
             data = json.loads(resp.read())
-            assert data["method"] == "POST"
+            assert data["method"] == "GET"
 
 
 import contextlib

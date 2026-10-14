@@ -52,6 +52,12 @@ _literals: set[str] = set()
 _literals_lock = threading.Lock()
 
 
+def _literal_snapshot() -> tuple[str, ...]:
+    """Registered secrets, longest first, for the upstream proxy's scrubber."""
+    with _literals_lock:
+        return tuple(sorted(_literals, key=lambda value: (-len(value), value)))
+
+
 def register_literal(value: str | None, *, min_length: int = 8) -> None:
     """Mark an exact string as secret so it is masked wherever it appears.
 

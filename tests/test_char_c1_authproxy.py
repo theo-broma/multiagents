@@ -44,8 +44,9 @@ def test_authproxy_forwards_headers_body_and_query_string(tmp_path, monkeypatch)
             assert data["headers"]["x-custom"] == "val"
             assert data["body"] == '{"msg": "hi"}'
 
-def test_authproxy_scrub_leaves_pii_unscrubbed(tmp_path, monkeypatch):
-    """F21: The scrub method leaves non-credential PII unredacted."""
+def test_authproxy_scrub_masks_organization_and_email(tmp_path, monkeypatch):
+    """AP1 / F21 reverses the original PII passthrough: the organisation and
+    e-mail values are masked, their sibling message kept."""
     body_with_org = b'{"error": {"message": "Invalid token", "organization": "MyCorp", "email": "admin@example.invalid"}}'
     with h.fake_http_server(h.fixed_response_upstream(400, body=body_with_org)) as upstream_url:
         with h.authproxy_server(tmp_path, monkeypatch, accounts={"acc": "token"}, upstream=upstream_url) as proxy:
@@ -58,11 +59,13 @@ def test_authproxy_scrub_leaves_pii_unscrubbed(tmp_path, monkeypatch):
                 urllib.request.urlopen(req)
             
             error_body = exc.value.read()
-            # It passes through unchanged, exposing organization and email.
-            assert error_body == body_with_org
+            assert json.loads(error_body) == {"error": {
+                "message": "Invalid token", "organization": "[redacted]",
+                "email": "[redacted]"}}
 
-def test_authproxy_upstream_error_emits_no_events(tmp_path, monkeypatch):
-    """F20: Ordinary upstream errors (like 500 or 502) emit no events."""
+def test_authproxy_unreachable_upstream_emits_upstream_unreachable(tmp_path, monkeypatch):
+    """AP6 / F20 reverses the original silence: an unreachable upstream
+    emits one `upstream_unreachable`."""
     events = []
     def on_event(kind, fields): events.append(kind)
     
@@ -76,8 +79,7 @@ def test_authproxy_upstream_error_emits_no_events(tmp_path, monkeypatch):
             urllib.request.urlopen(req)
         
         assert exc.value.code == 502
-        # No event is emitted!
-        assert events == []
+        assert events == ["upstream_unreachable"]
 
 def test_authproxy_post_redirect_is_not_auto_followed(tmp_path, monkeypatch):
     """POST 307 redirects are returned as errors, not auto-followed."""
