@@ -520,3 +520,10 @@ completes. Verified by: one rejected and one limited account giving 429 with
     denied probe, says there is no allowed host to probe, and exits 0 when the
     denied probe is refused as expected: an empty allowlist is a valid,
     fully closed sandbox.
+17. **SE5 applies to both probes** (SE adversary pass 2, 2026-10-14): "a
+    correct sandbox is never reported `UNEXPECTED`" covers the allowed probe
+    too. The allowed probe passes when the egress proxy admitted the
+    connection (CONNECT answered 2xx), whatever happens after it (TLS, HTTP,
+    certificate); it fails only when the proxy refused it. In network modes
+    without the egress proxy (`none`, `bridge`), `docker check` keeps its
+    previous behaviour and exit code.
