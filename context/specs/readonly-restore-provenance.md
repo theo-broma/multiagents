@@ -304,3 +304,8 @@ covers, the tester reverses it deliberately and says which.
     with an unreadable policy that an allowed descendant would supersede on
     that path either way may be treated as needed or not: both outcomes are
     safe, and neither is tested.
+14. **RP14's silences** (RP14 tester, 2026-10-14): an allocated id is
+    reserved when it is handed out, so ids not yet recorded anywhere (a
+    consult's) are covered by the concurrency guarantee; there is no retry
+    cap below a few consecutive clashes; every `new_id` caller, including
+    the quota handover, goes through one project-aware allocator.
