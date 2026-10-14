@@ -5771,3 +5771,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   Content-Length preallocation, short body forwarded, case-sensitive names.
   Draft AP14-AP17 + Decision 19 uncommitted (backup scratchpad
   part2-draft-ap14.md), awaiting user yes. RP: tester fixing colliding commits.
+- 2026-10-14 ~10:00 CEST — user approved AP14-AP17: committed b7d5b7e2. AP round-4 tester nd-2aa508f2 (claude opus, from main, takes adversary3 files from 46a03e98). Next: new review-loop from main (implementer-deep codex, reviewer no full suite, tests restored from tester tip uncommitted), suite, merge, then close part 2.
