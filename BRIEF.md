@@ -5867,3 +5867,8 @@ gains. Plan: after the RP14 suite, run main+RP14+RP13 with durations (also RP13'
 h1 ha_r7 zero-arg new_id stub). Decision 15 (705e3504). Tester nd-a08174d1 adapts the
 stub; RP14 loop nd-ef7469ce relaunched round 2 (max_rounds 4). Profiling suite on main
 running (bg cf8aa3dd5430, /var/tmp/p-prof.log, --durations=200) -> then researcher.
+18:00 CEST: RP13 adversary pass 4 (nd-b055eccb, ag-31b163) approved: no trust hole,
+16 mutations, 3000-seed oracle; tests 7fb6296c (take tests/test_rp_adversary4_*.py at
+merge). Sibling case accepted (Decision 16). RP14 round 2 implementer done (36476e35:
+reservations in state/run-ids/<slug>/), reviewer next. Then one full suite on
+main+RP13+RP14+tester stub change, drop tests/test_rp_lazy_policy_edges.py, merge.

@@ -315,3 +315,8 @@ covers, the tester reverses it deliberately and says which.
     `.multiagents/runs/`, nor in any git-tracked path. A test that replaces
     `new_id` with a zero-argument stub is adapted by the tester to accept
     the new arguments; the allocator's signature is the implementer's choice.
+16. **A sibling with an unreadable policy may fail capture** (RP13
+    adversary pass 4, 2026-10-14): when a generation with an unreadable
+    policy changed a protected path the run resolved to an allowed sibling's
+    version, its entry "could vouch", so treating its policy as needed is
+    accepted. It fails closed (the node is held), never wrongly keeps a path.
