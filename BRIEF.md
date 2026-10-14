@@ -5872,3 +5872,4 @@ running (bg cf8aa3dd5430, /var/tmp/p-prof.log, --durations=200) -> then research
 merge). Sibling case accepted (Decision 16). RP14 round 2 implementer done (36476e35:
 reservations in state/run-ids/<slug>/), reviewer next. Then one full suite on
 main+RP13+RP14+tester stub change, drop tests/test_rp_lazy_policy_edges.py, merge.
+suite p-rpall started (bg) ~18:15 CEST
