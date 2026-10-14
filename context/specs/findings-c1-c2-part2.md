@@ -457,6 +457,28 @@ exception, `SystemExit` and `KeyboardInterrupt` included: the request still
 completes. Verified by: one rejected and one limited account giving 429 with
 `retry-after`; a callback raising `SystemExit`.
 
+### AP — second adversary pass (2026-10-14, run ag-7cc06c)
+
+**AP11 — header names.** The masking rule of AP7 applies to header names as
+well as values: an upstream header whose name contains a registered literal
+or an e-mail address is dropped on every response, `anthropic-ratelimit-*`
+on an error included. Verified by: a 200 and a 500 carrying
+`x-account-<literal>: 1`, `x-owner.<address>: 1`,
+`anthropic-ratelimit-<address>: 1`, none reaching the agent.
+
+**AP12 — header bytes.** Header names and values are compared with the
+registered literals both as received (Latin-1, as `http.client` decodes
+them) and as UTF-8, so a non-ASCII literal sent as UTF-8 bytes is caught.
+Verified by: `Kontoinhaber-Müller-Geheim` registered, sent as UTF-8 in a 200
+header and in `request-id` on a 500, never reaching the agent.
+
+**AP13 — framing.** A 204 or 304 relayed to the agent carries no body bytes
+and no chunked terminator. A `Content-Length` too large to read gets a 400
+and the connection is closed, as AP9's other malformed values. Verified by:
+a 204 and a 304 followed by a second request on the same connection, which
+gets its own response intact; `Content-Length: 99999999999999999999999`
+answered 400.
+
 ## Decisions
 
 1. **Part 2 is split.** Items 2, 4, 5 and 6 are specified here and run
@@ -527,3 +549,8 @@ completes. Verified by: one rejected and one limited account giving 429 with
     certificate); it fails only when the proxy refused it. In network modes
     without the egress proxy (`none`, `bridge`), `docker check` keeps its
     previous behaviour and exit code.
+18. **Registering literals in the deployed proxy is deferred** (AP
+    adversary pass 2, 2026-10-14, user decision): the sidecar registers none
+    today (F205), so the literal rules are exercised by tests only. Which
+    literals, from where, and how they reach the sidecar is decided in phase 7
+    part 2 (containers), which owns the sidecar. Part 2 closes without it.
