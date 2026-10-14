@@ -104,6 +104,53 @@ matching generation commit that comes first in commit order from the tip
 (`git rev-list --topo-order`). Verified by: RP1's cases asserting
 `readonly_kept` on the result and on the generation.
 
+## Amendment after the adversary pass (2026-10-14, run ag-d934db)
+
+The pass showed that a *stale* trusted source vouches for a revert: a base
+commit or a sibling generation cut before the input still carries the old
+entry, so a run that merges it and then writes the old entry back (or
+deletes a file the input added) had its own change kept. RP1's wording
+allowed it; RP3 and Decision 3 did not. RP7 settles it.
+
+**RP7 — a source vouches only for a change it brought.** For each changed
+path, the decision runs in this order:
+1. *Eligible sources*: the trusted sources of the Terms section.
+2. *Supersession*: an eligible source that is an ancestor of another
+   eligible source is dropped, so a later trusted snapshot on the same line
+   of history (including one that reverts an earlier one) is the one that
+   counts.
+3. *Vouching*: a remaining source vouches for the path only if its entry
+   differs from the path's entry at every merge base of that source and the
+   input commit (`git merge-base --all`). A source with no merge base with
+   the input vouches for nothing. A failure of git is a capture failure, not
+   "no merge base".
+4. *Decision*: RP1 keeps the path when its tip entry equals the entry of a
+   vouching source; RP2 restores it to the vouching sources' entry when they
+   all carry the same one, else to the input's entry.
+Entries are compared whole (mode, type, oid, absent), as before. RP7 applies
+only when a capture decision is first made; a decision already persisted
+before RP7 is replayed as recorded (RP4). Verified by: the adversary's
+tests in tests/test_rp_adversary_stale_source.py (revert to a moved base's
+version, deletion of a file the input added, revert through an unrelated
+sibling generation: each restored to the input); a stale source steering the
+restore target: restored to the input, not the stale version; a trusted
+revert v1→v0 descending from a trusted v0→v1 with input v0, then an own edit
+to v2: restored to v0; a criss-cross history with two merge bases; an
+earlier generation of a node with several, merged on its own: vouches.
+
+**RP8 — protected-path matching covers every file name.** `readonly_paths`
+matching treats a newline, a leading or trailing space and any other
+character in a file name like any other character: `*`, `?` and `**` match
+them, and the path is never trimmed before matching. Trimming of the
+configured patterns themselves is unchanged. Verified by:
+tests/test_rp_adversary_path_names.py; a path with an embedded newline, a
+terminal newline and a trailing space, under `*`, `?`, `**`, a directory
+pattern and an ordered negation.
+
+**RP9 — coverage the first suite lacked.** Verified by: an unresolvable
+base with no protected path changed is captured as today (Decision 8); a
+replay whose restored tree changed is refused (RP5).
+
 ## Existing tests that must stay green unchanged
 
 - `tests/test_nc_m3_branches.py::test_nc_r65_readonly_paths_are_restored_from_the_input_commit_and_recorded`
@@ -150,3 +197,8 @@ covers, the tester reverses it deliberately and says which.
 9. **RP6's base source is one commit:** when several commits of the base
    branch's first-parent chain match, `source` is the one nearest the tip in
    `git rev-list --topo-order` from the tip, as for generations.
+10. **Provenance means a change, not a matching snapshot** (adversary pass,
+    2026-10-14; advisor-checked): RP7's supersession and merge-base rule is
+    git's own notion of what a merged side brought. A node whose own
+    `readonly_paths` do not cover a path can still change it and have its
+    generation trusted; that is Decision 1 working as designed, not a gap.
