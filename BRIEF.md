@@ -5772,3 +5772,10 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   Draft AP14-AP17 + Decision 19 uncommitted (backup scratchpad
   part2-draft-ap14.md), awaiting user yes. RP: tester fixing colliding commits.
 - 2026-10-14 ~10:00 CEST — user approved AP14-AP17: committed b7d5b7e2. AP round-4 tester nd-2aa508f2 (claude opus, from main, takes adversary3 files from 46a03e98). Next: new review-loop from main (implementer-deep codex, reviewer no full suite, tests restored from tester tip uncommitted), suite, merge, then close part 2.
+- 2026-10-14 ~10:45 CEST — AP14-17 tester done: e5a3cc02 (36 red; reversed
+  test_ap13 400→413 in test_ap_framing.py and adversary3 mutants). AP loop
+  nd-2748c3f8 (implementer nd-7d774f09 codex, reviewer nd-dae6e9b2), tests
+  restored from e5a3cc02 uncommitted. RP tester fixed collision at 2994a4ac;
+  RP implementer nd-073e1c42 relaunched (restores that file uncommitted);
+  reviewer nd-2830050c patched likewise. At RP merge: copy
+  tests/test_rp_readonly_restore_provenance.py from 2994a4ac.
