@@ -5847,3 +5847,9 @@ nd-c5c3a5e6, nd-c573907f, nd-d4b57877, nd-2aa508f2, nd-dcbfa377,
 nd-90593c19; RP: nd-b9931044, nd-7e558d0f, nd-8c941ab7, nd-46503c4d,
 nd-e8e39590). Then hand back: brief done; phase 7 part 2 via
 `multiagents init-agent`; C3-C7 review is the user's choice.
+
+### 2026-10-14 ~16:30 CEST — F206/F207 follow-up (RP13-RP14, user-approved)
+
+Spec 9918dbb9. Testers: RP13 nd-51ceb8b7, RP14 nd-76f98daa (opus). Next:
+merge each tester, then a review-loop per item (codex gpt-6.1-sol implementer,
+agy reviewer), adversary on RP13 only, full suite, merge, F206/F207 fixed.
