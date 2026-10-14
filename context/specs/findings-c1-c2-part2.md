@@ -479,6 +479,41 @@ a 204 and a 304 followed by a second request on the same connection, which
 gets its own response intact; `Content-Length: 99999999999999999999999`
 answered 400.
 
+### AP — third adversary pass (2026-10-14, run ag-224960)
+
+**AP14 — folded headers.** An upstream header line continued by obs-fold
+(a line starting with a space or tab) is unfolded before any check: each
+fold becomes one space, and AP7, AP11 and AP12 apply to the unfolded name
+and value. The proxy never writes a fold to the agent: a header it keeps is
+sent on one line. Verified by: literal `Acme Holdings-Secret` sent as
+`X-Account: Acme\r\n Holdings-Secret` (space and tab folds) on a 200 and as
+`Request-Id` on a 500, never reaching the agent; a folded harmless header
+kept on one line.
+
+**AP15 — header names are case-insensitive.** The name check of AP11
+matches registered literals and e-mail addresses ignoring ASCII case.
+Verified by: literal `SECRETLITERAL` and upstream `x-account-secretliteral:
+1`, dropped.
+
+**AP16 — interim responses.** An upstream 1xx other than 100 Continue is
+never relayed as the response: the proxy answers the agent `502` with no
+upstream header, emits `upstream_error` with that status, and closes the
+connection. Verified by: upstream `103 Early Hints` then `200`, and `101`,
+each giving the agent one 502 and a closed connection.
+
+**AP17 — request bodies are bounded.** A request whose `Content-Length` is
+above 64 MiB gets `413` and the connection is closed, before any body byte is
+read or anything sent upstream. A body that ends (the agent closes or
+half-closes) before `Content-Length` bytes arrived gets `400`, closed,
+nothing sent upstream. A body during which no byte arrives for 60 s gets
+`408`, closed, nothing sent upstream; the worker is released. Memory used
+for a body never exceeds what was actually received plus a constant.
+Verified by: `Content-Length: 67108865` answered 413 with nothing upstream;
+`Content-Length: 8000000000` then `{}` answered 413 at once, the proxy's
+memory not growing; `Content-Length: 100` then `{}` and a half-close answered
+400 with nothing upstream; a stalled body answered 408 with a fake clock or a
+shortened timeout seam, the thread gone afterwards.
+
 ## Decisions
 
 1. **Part 2 is split.** Items 2, 4, 5 and 6 are specified here and run
@@ -554,3 +589,8 @@ answered 400.
     today (F205), so the literal rules are exercised by tests only. Which
     literals, from where, and how they reach the sidecar is decided in phase 7
     part 2 (containers), which owns the sidecar. Part 2 closes without it.
+19. **Third adversary pass, fixed in place** (AP14-AP17). Accepted as
+    residuals, with Decision 15's encoding family: a literal split across a
+    header's name and value, and a literal registered in NFC arriving in NFD.
+    The 64 MiB body bound sits above the upstream API's own request limit;
+    the 60 s idle bound applies to the request body only, not to upstream.
