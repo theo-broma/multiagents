@@ -5895,3 +5895,7 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
   - The full-suite `--durations=0` comparison will settle it.
   - Reviewer nd-d39a5000 is running.
 - **Next.** Start the "after" full suite only once baseline job 113485caebe6 ends, so the two timings are not distorted.
+- **Launched, user-approved:**
+  - Researcher nd-ecb4f46a measures causes 2 and 3. Its report goes to `.multiagents/handoff/suite-speed-measured-2026-10-14.md`.
+  - The AGENTS.md timing fix runs as loop nd-cba9406f: implementer nd-b62deb37 on codex, then reviewer nd-d4baf81c.
+- **Housekeeping.** The 19 finished AP/RP/RP13-14 nodes listed above are disposed.
