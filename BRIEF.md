@@ -5820,7 +5820,7 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 (eede14c8); ledger: no live finding from C1/C2 except deferred ones (F205 +
 8 executor findings → phase 7 part 2).
 
-**In hand: RP merge** (readonly restore by provenance, user-approved tooling
+**RP MERGED** (e141c62f + tests ff7ddcf0; suite = baseline + nc_r17 flake, 3/3 serial green; src/tests identical to tested tree). Was: RP merge (readonly restore by provenance, user-approved tooling
 fix, spec context/specs/readonly-restore-provenance.md RP1-RP12):
 - Loop nd-48764ae0 approved at d64ba44d (3 rounds; implementer suite =
   baseline). Adversary pass 3 nd-e8e39590: no trust hole; low finding F206
