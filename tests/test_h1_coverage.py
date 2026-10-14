@@ -100,7 +100,7 @@ def test_ha_r7_seeded_child_is_not_merged_when_its_host_parent_ends(legacy, monk
     # seeded record's parent agrees with the ending node and only its seeded
     # provenance stands between it and the merge.
     import multiagents.runner as runner_module
-    monkeypatch.setattr(runner_module, "new_id", lambda: "ag-hostpar")
+    monkeypatch.setattr(runner_module, "new_id", lambda *args, **kwargs: "ag-hostpar")
 
     async def run():
         parent = await start(runner, wait=False)
