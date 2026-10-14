@@ -5918,3 +5918,9 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
   - Worker-seconds 12,001 against 12,246: −245, about 2%, within load noise.
   - TS-R7 parity holds. TS-R8 finding: the gain is under 1,000 worker-seconds, so the research estimate of 3,000-5,000 is refuted.
 - **Recommendation to the user:** do not merge Run D (adds about 300 lines of test infrastructure for a noise-level gain), and close the speed workstream. The user decides; nothing merged yet.
+- **Suite-speed workstream closed** (user decision, 2026-10-14 night).
+  - Run D was not merged; nodes nd-2803c003, nd-cba9406f, nd-ecb4f46a and nd-d97b4694 are disposed, and the `/var/tmp/tsd-*` worktrees are removed.
+  - The outcome is recorded in `context/specs/ts-test-speed.md`. The only change merged is the AGENTS.md timing fix, 033611b1.
+- **Nothing running.**
+  - The brief's work is done. Phase 7 part 2 goes through `multiagents init-agent`; the C3-C7 review is the user's choice.
+  - Fast-lane idea: mark tests over 5 s so agents skip them while iterating, with the full suite still before every merge. Offered to the user, not requested.

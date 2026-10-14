@@ -150,3 +150,10 @@ measured, so it is the first thing this run measures.
 - The change lives in `tests/` (fixtures and support), so the `tester` makes it: implementers cannot edit existing test files.
 - Any `src/` seam is not included. If one turns out to be needed, the agent stops with NEED_INFO.
 - Causes 2 and 3 of the report (template repositories, an injectable clock) are not part of this run.
+
+**Outcome of Run D (2026-10-14, user decision): not merged; the speed workstream is closed.**
+- **TS-R6 — withdrawn.** It was implemented and approved (782cee32, never merged), and parity held: exactly the 70 baseline reds. The measured gain was 12,246 → 12,001 worker-seconds (−2%, within load noise) and wall time 3093 → 3038 s. That does not justify about 300 lines of test infrastructure (TS-R8 finding: the 3,000-5,000 estimate is refuted).
+- **TS-R7 — withdrawn,** with Run D.
+- **TS-R8 — withdrawn,** with Run D. Its measurement was done; the figures are above.
+- **What was measured.** Causes 2 and 3 of the research were also measured, not estimated: about 131 worker-seconds of world construction, and about 49 worker-seconds of removable sleeps. The rest of the time is real process integration spread over about 2,900 tests of 1 s or more (`nc_` alone carries 3,115 worker-seconds). No change of a reasonable size makes the suite substantially faster without weakening it.
+- **Measurement files.** They are in the gitignored `.multiagents/handoff/`: `suite-speed-research-2026-10-14.md`, `suite-speed-measured-2026-10-14.md` and `suite-durations-full-2026-10-14.log`.
