@@ -5780,3 +5780,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   reviewer nd-2830050c patched likewise. At RP merge: copy
   tests/test_rp_readonly_restore_provenance.py from 2994a4ac.
 - 2026-10-14 ~11:10 CEST — RP loop approved at b1c43687 (implementer suite = baseline; reviewer no defects). RP adversary nd-8c941ab7 (claude opus). AP14-17 implementer e29bd311 (suite = baseline exactly); AP reviewer running.
+- 2026-10-14 ~11:20 CEST — AP14-17 loop nd-2748c3f8 approved (e29bd311). Orchestrator suite bg on /var/tmp/p2-ap4 (e29bd311 + tests e5a3cc02), ids /var/tmp/p2-ap4-ids.txt. No 4th AP adversary pass (targeted fixes, tester + adversary3 tests cover them). Merge: merge_node nd-2748c3f8, copy tests from /var/tmp/p2-ap4, diff -rq. Then close part 2 (import Next phase).
