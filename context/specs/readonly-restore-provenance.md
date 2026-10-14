@@ -201,6 +201,37 @@ capture; an older base candidate is superseded by a newer one on the chain;
 RP6 and Decision 9's choice of `source` between two incomparable
 generations, and between an incomparable base commit and generation.
 
+**RP13 — F206: a producer policy is read only where it is needed.** A
+generation's producer policy (RP10) is required only for a path the
+decision actually considers: a protected path changed by the result, for a
+candidate source whose entry at that path could make it vouch or supersede
+another source on that path. A generation that changed no protected path,
+or whose entries at every protected path considered are irrelevant to the
+decision, never causes capture to fail, whether its attempt record is
+missing, has no `readonly_paths`, or has one that is not a list of strings.
+When a policy is needed and cannot be read, capture still fails, as RP10
+says. The persisted decision (RP4) records the policies actually used.
+Verified by: the adversary's two tests in
+`tests/test_rp_adversary3_unneeded_policy.py` (commit 12cf46a6); a
+generation with an unreadable policy that changed an unrelated `src/` file
+while the result changed a protected test: captured; the same generation
+when it also carries the protected test at a version that could vouch:
+capture fails.
+
+**RP14 — F207: run ids are unique within a project.** Every run id
+allocated by multiagents (the scheduler's attempts in `engine.py` and
+`scheduler/sessions.py`, and `tree.new_id` for every caller) is different
+from every run id already known to the project: in the run tree, in the
+scheduler's attempt records, and as a directory under `.multiagents/runs/`.
+On a clash, allocation draws again; it never reuses or overwrites. The
+format stays `ag-` followed by 6 lowercase hex digits, which `viewer.py`
+and `tmux.py` parse. Allocation is safe under concurrent allocators in one
+project (two allocations racing never return the same id). Verified by: a
+random source forced to return an id already present in each of the three
+places, then a fresh one: the fresh one is returned; two concurrent
+allocations forced onto the same first draw: different ids; existing ids
+untouched.
+
 RP10 and RP11 apply only when a capture decision is first made; decisions
 already persisted are replayed as recorded (RP4), and the producer policies
 used are persisted with the decision.
@@ -263,3 +294,7 @@ covers, the tester reverses it deliberately and says which.
     protected file by main and by the input are deliberately restored, even
     when git would merge them cleanly: the orchestrator resolves them at
     merge, not the agent.
+12. **F206 and F207 are fixed inside RP** (adversary pass 3, 2026-10-14;
+    user-approved): policies are read lazily per decision (RP13); run ids
+    keep their `ag-` plus 6 hex format, which `viewer.py` and `tmux.py`
+    parse, and are made unique at allocation rather than widened (RP14).
