@@ -5813,3 +5813,37 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - 2026-10-14 ~14:00 CEST — user approved RP10-RP12: committed a12f4e14. RP tester nd-b9931044 round 4 (RP10-RP12 tests, checked vs c5016195). Next: RP loop nd-48764ae0 round 3 (rounds_rejected 0 so far; adversary rejections are outside the loop), reviewer, adversary pass 3, suite, merge.
 - 2026-10-14 ~14:20 CEST — RP tester round 4 done: 55ff6d9b (tests/test_rp_second_amendment.py, 8 red vs c5016195). RP loop nd-48764ae0 round 3 relaunched (merge main c94e1170, restore tests from 55ff6d9b). Old p-rp suite (c5016195 combo) still running as reference.
 - 2026-10-14 ~15:05 CEST — RP round 3 approved (d64ba44d; implementer suite = baseline). RP adversary pass 3 nd-e8e39590 (claude opus). Orchestrator suite bg on /var/tmp/p-rp = main + diff c94e1170..d64ba44d src + 5 RP test files from 55ff6d9b. Merge after both: merge_node nd-48764ae0, add the RP test files, diff -rq vs /var/tmp/p-rp.
+
+### Handoff 2026-10-14 ~15:40 CEST (context wind-down)
+
+**Done this session:** plan part 2 fully merged (SE, AP1-AP17); plan imported
+(eede14c8); ledger: no live finding from C1/C2 except deferred ones (F205 +
+8 executor findings → phase 7 part 2).
+
+**In hand: RP merge** (readonly restore by provenance, user-approved tooling
+fix, spec context/specs/readonly-restore-provenance.md RP1-RP12):
+- Loop nd-48764ae0 approved at d64ba44d (3 rounds; implementer suite =
+  baseline). Adversary pass 3 nd-e8e39590: no trust hole; low finding F206
+  (capture fails on an unneeded missing policy) and F207 (run-id
+  collisions) filed open, context/review/RP-adversary3.md — follow-up, not
+  blocking. Its coverage tests (pass) at 12cf46a6:
+  tests/test_rp_adversary3_coverage.py → include at merge; its
+  tests/test_rp_adversary3_unneeded_policy.py (red, F206) → NOT merged, for
+  the follow-up.
+- Orchestrator suite running in bg on /var/tmp/p-rp (main + diff
+  c94e1170..d64ba44d src + 5 RP test files from 55ff6d9b); ids written to
+  /var/tmp/p-rp-ids.txt; compare with `comm` against
+  /var/tmp/base-sorted.txt (sorted baseline-reds).
+- Merge steps: merge_node nd-48764ae0; `git checkout 55ff6d9b --` the 5
+  tests/test_rp_*.py files + `git checkout 12cf46a6 --
+  tests/test_rp_adversary3_coverage.py`; run that coverage file + RP files
+  quickly; commit; `diff -rq src /var/tmp/p-rp/src`; audit; then remove
+  /var/tmp/p-rp. Then update memory readonly-tests-applied-by-tester (RP
+  makes merged tester generations survive capture; tasks merge recorded
+  generation commits).
+**Next after RP:** follow-up for F206/F207 (small, implementer tier
+default) only if the user wants it; dispose finished nodes (AP: nd-d104dd06,
+nd-c5c3a5e6, nd-c573907f, nd-d4b57877, nd-2aa508f2, nd-dcbfa377,
+nd-90593c19; RP: nd-b9931044, nd-7e558d0f, nd-8c941ab7, nd-46503c4d,
+nd-e8e39590). Then hand back: brief done; phase 7 part 2 via
+`multiagents init-agent`; C3-C7 review is the user's choice.

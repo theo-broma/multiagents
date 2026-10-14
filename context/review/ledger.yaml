@@ -1401,6 +1401,32 @@ findings:
     status: deferred
     summary: the deployed auth proxy registers no literals, so literal masking is
       inert in production
+  F206:
+    class: correctness
+    context: context/review/RP-adversary3.md
+    evidence: reproduction
+    first_seen: dc5d99db6871173e2e135f191a9731b1472a7521
+    history:
+    - by: auditor
+      note: filed in context/review/RP-adversary3.md
+      sha: dc5d99db6871173e2e135f191a9731b1472a7521
+      status: open
+    severity: low
+    status: open
+    summary: capture fails on a missing producer policy the decision does not need
+  F207:
+    class: correctness
+    context: context/review/RP-adversary3.md
+    evidence: trace
+    first_seen: dc5d99db6871173e2e135f191a9731b1472a7521
+    history:
+    - by: auditor
+      note: filed in context/review/RP-adversary3.md
+      sha: dc5d99db6871173e2e135f191a9731b1472a7521
+      status: open
+    severity: low
+    status: open
+    summary: run ids are 6 hex digits with no uniqueness check
   F21:
     class: security
     context: context/review/C1-sandbox-authproxy.md
