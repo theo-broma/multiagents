@@ -1,6 +1,7 @@
 ---
-status: applied
+status: imported
 applied_in: f229cf22
+imported_in: e3808c1c
 ---
 # Review findings, C1 and C2, part 2: the medium and low ones
 
