@@ -44,8 +44,24 @@ requirements IC-R1 to IC-R15.
   - Record that **tmux step 2, as a supervisor, is withdrawn** (IC-D4,
     user, 2026-10-13). tmux stays as the viewer.
   - Record that the live node view is in scope (IC-D5).
-- **The ledger.** When part 2 merges, set F31, F32, F34, F35, F64, F65, F69
-  and F70 to `fixed`, or reconsider each one (IC-R15).
+- **F205 joins IC-R15 (user, 2026-10-14).** The findings part 2 plan
+  deferred it here after this spec was written (`findings-c1-c2-part2.md`,
+  Decision 18). The deployed auth-proxy sidecar registers no account
+  literals, so literal masking works only in tests.
+  - The contract adds it to IC-R15's list. It decides which literals are
+    registered, where they come from and how they reach the sidecar. Those
+    literals must never enter the run's container (IC-R4).
+  - It belongs to the credentials milestone, so the adversary pass is
+    mandatory on it.
+- **Clean up first, before part 2's first node.** On 2026-10-14 there are
+  about 60 worktrees and about 1,586 branches not merged into main.
+  - Remove the worktrees and branches of nodes that are merged, disposed or
+    closed, and the `/var/tmp` worktrees that no bg job uses.
+  - Keep anything whose content is not on main and that no handoff marks as
+    disposable. List it for the user instead of deleting it.
+  - Report the counts before and after in BRIEF.
+- **The ledger.** When part 2 merges, set F31, F32, F34, F35, F64, F65, F69,
+  F70 and F205 to `fixed`, or reconsider each one (IC-R15).
 
 ## Next phase
 
