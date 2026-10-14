@@ -5958,3 +5958,15 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   safe to delete; RP may read node-generations refs) running. Advisor consulted on
   writing the contract in slices (slice 1 = executor backend interface + IC-R13
   isolation suite + latency benchmark). Nothing deleted yet.
+- 2026-10-15 cleanup: before = 60 worktrees, 2,083 branches (1,586 not merged).
+  Researcher nd-546477ae (ag-5c3607): only `dispose_node` may remove `nodes/*`
+  and `node-*` refs (never `git branch -D`); `multiagents clean --branches`
+  (no --force) for legacy `agents/*`. Of 422 top-level nodes: 227 safe
+  (published / no branch / no commits / content on main), 161 need a human look
+  (list: .multiagents/handoff/cleanup-human-2026-10-15.txt). 4 disposed, then
+  the auto-mode classifier denied further dispose_node calls; remaining 223 in
+  .multiagents/handoff/cleanup-dispose-2026-10-15.txt (id, node revision).
+  Waiting on the user to allow or do the batch.
+- Contract slice 1 drafted: context/specs/phase7-part2-contract.md (uncommitted,
+  advisor turns 21-22 applied; backup in session scratchpad contract-draft.md).
+  Shown to the user, commit on yes; then tester (slice 1 work split).
