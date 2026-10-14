@@ -140,3 +140,13 @@ covers, the tester reverses it deliberately and says which.
    before this lands keep their restore commits; the BRIEF workarounds
    (explicit restore lists, copying tests at merge) stay until those branches
    are gone.
+7. **"Unset" base branch means unresolvable after today's fallback**
+   (RP tester, 2026-10-14): capture resolves the base branch as
+   `Results.prepare` does (`git.base_branch`, else the current branch), and
+   fails only when that still resolves to no commit.
+8. **An unresolvable base fails capture only when it matters:** when at
+   least one protected path changed. A result touching no protected path is
+   captured as today.
+9. **RP6's base source is one commit:** when several commits of the base
+   branch's first-parent chain match, `source` is the one nearest the tip in
+   `git rev-list --topo-order` from the tip, as for generations.
