@@ -5913,3 +5913,8 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
   - By family, `nc_` carries 3,115, then `nt` 691, `tb_` 644, `phase0` 530, `tb2_` 506.
   - The profiles show time mostly waiting on child processes (consult, sp, sl) and SQLite/thread contention (nc adv3). Only about 49 worker-seconds are directly removable sleeps (tb2).
   - Conclusion: there is no cheap large win, and the cost is real process integration spread across thousands of tests.
+- **Run D "after" run** (main plus 782cee32 files; job 37dd5c1e8c1e).
+  - Wall time 3038 s. Failures: exactly the 70 baseline ids. 12,647 passed, against 12,603 before, the difference being the new tests and a flake that passed.
+  - Worker-seconds 12,001 against 12,246: −245, about 2%, within load noise.
+  - TS-R7 parity holds. TS-R8 finding: the gain is under 1,000 worker-seconds, so the research estimate of 3,000-5,000 is refuted.
+- **Recommendation to the user:** do not merge Run D (adds about 300 lines of test infrastructure for a noise-level gain), and close the speed workstream. The user decides; nothing merged yet.
