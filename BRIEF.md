@@ -5863,3 +5863,7 @@ tests/test_rp_lazy_policy_edges.py at merge); adversary pass 4 nd-b055eccb runni
 User 2026-10-14 ~17:05 CEST: profile the suite (step 1: next full suite with
 --durations=200), then a researcher groups the slow tests by cause and estimates
 gains. Plan: after the RP14 suite, run main+RP14+RP13 with durations (also RP13's suite).
+17:35 CEST: RP14 full suite: 2 regressions (NC-R48 gate-off creates scheduler/run-ids;
+h1 ha_r7 zero-arg new_id stub). Decision 15 (705e3504). Tester nd-a08174d1 adapts the
+stub; RP14 loop nd-ef7469ce relaunched round 2 (max_rounds 4). Profiling suite on main
+running (bg cf8aa3dd5430, /var/tmp/p-prof.log, --durations=200) -> then researcher.
