@@ -5877,3 +5877,7 @@ Researcher nd-a2480ae2 (suite speed) launched ~18:20 CEST; durations in .multiag
 19:20 CEST: RP13+RP14 MERGED (e65ca7bc, 639deb7e, 6e6e0eb5, tests 664a3e67). Combined
 suite = baseline 70 + tb2_r6 load flake (3/3 green alone). F206/F207 fixed. Remaining:
 researcher nd-a2480ae2 (suite speed) running; report to user, no work without approval.
+19:45 CEST: suite-speed researcher done (ag-dfcac2; report saved gitignored at
+.multiagents/handoff/suite-speed-research-2026-10-14.md). Top 3: shared strict budget
+stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable clock
+(1.2-2k). Estimates not measured on the tail. Awaiting user decision; nothing launched.
