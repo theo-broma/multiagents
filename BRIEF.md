@@ -5905,3 +5905,6 @@ stub fixture (est. 3-5k worker-s), session template repo (2-3.5k), injectable cl
   - Failure list in `/var/tmp/tsd-before.fails`.
 - **"After" run started.** Worktree `/var/tmp/tsd-after` (main plus the three Run D files from 782cee32), bg job 37dd5c1e8c1e, log `/var/tmp/tsd-after.log`.
 - **Run D approved.** Loop nd-2803c003, reviewer ag-cf7bbb.
+- **AGENTS.md timing fix merged:** 033611b1 (loop nd-cba9406f, approved; the tests that read AGENTS.md passed on its tip).
+- **Researcher nd-ecb4f46a: cause 2 measured at about 131 worker-seconds,** not 2,000-3,500. Cause 3 is unmeasured; the report is in `.multiagents/handoff/suite-speed-measured-2026-10-14.md`.
+- **Follow-up researcher nd-d97b4694** measures cause 3 and the per-family distribution from the full durations log, `.multiagents/handoff/suite-durations-full-2026-10-14.log`.
