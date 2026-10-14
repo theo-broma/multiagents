@@ -5807,3 +5807,4 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
 - Still in flight outside the plan (user-approved tooling fix): readonly
   restore by provenance (RP, context/specs/readonly-restore-provenance.md),
   loop nd-48764ae0 round 2.
+- 2026-10-14 ~12:50 CEST — RP round 2 implementer c5016195 (suite = baseline + 1 flake serial-green). Reviewer run ag-3ca4b4 failed on agy network EOF (loadCodeAssist); loop relaunched with retry=verdict_child.
