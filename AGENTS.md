@@ -1,10 +1,13 @@
 # Test suite
 
 Fast path: run the whole suite in one process with pytest-xdist, about
-3.5 minutes on the 16-core machine with `-n auto` instead of about 45
-serially. Use `-n 4`, not `-n auto`: up to six agents run suites at the same
-time on these 16 cores, and `-n auto` from each of them starves the others
-into timeouts.
+50–53 minutes wall with `-n 4` on the shared 16-core machine (measured
+2026-10-14: 3163 s, about 12,650 worker-seconds). Use `-n 4`, not `-n auto`:
+up to six agents run suites at the same time on these 16 cores, and `-n auto`
+from each of them starves the others
+into timeouts. A full run takes close to an hour: root sessions should use
+`multiagents bg run`, and agents should prefer targeted files unless the task
+asks for a full run.
 
     scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/pt-<hex-part-of-your-id>
 
