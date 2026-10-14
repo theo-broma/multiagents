@@ -48,6 +48,7 @@ import re
 import secrets
 import socketserver
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -68,6 +69,9 @@ CLAIM_PREFIX = "mxa2"
 # CLI has its own timeout (it sends X-Stainless-Timeout: 600) and should be the
 # one to give up.
 UPSTREAM_TIMEOUT = 900
+
+MAX_BODY_SIZE = 64 * 1024 * 1024
+BODY_IDLE_TIMEOUT = 60
 
 # Headers that belong to the hop, not the request. `authorization` is dropped
 # because replacing it is the entire job; the rest would be wrong to forward.
@@ -473,15 +477,20 @@ class Handler(BaseHTTPRequestHandler):
             values = [value.strip(" \t") for length in lengths for value in length.split(",")]
             if any(not re.fullmatch(r"[0-9]+", value) for value in values):
                 raise ValueError("invalid length")
-            sizes = {int(value) for value in values}
+            sizes = {value.lstrip("0") or "0" for value in values}
             if len(sizes) > 1:
                 raise ValueError("conflicting lengths")
-            size = sizes.pop() if sizes else 0
-            if size > sys.maxsize:
-                raise ValueError("unreadable length")
+            length = sizes.pop() if sizes else "0"
         except ValueError:
             self.close_connection = True
             return self._fail(400, "invalid Content-Length")
+        # Compare decimal strings before conversion, including lengths too
+        # long for Python's integer parser. Every valid oversized length is 413.
+        bound = str(MAX_BODY_SIZE)
+        if len(length) > len(bound) or (len(length) == len(bound) and length > bound):
+            self.close_connection = True
+            return self._fail(413, "request body exceeds 64 MiB")
+        size = int(length)
         # Before any account is chosen: a target that moves the host would
         # carry the token there. The target itself is not repeated anywhere —
         # it is the caller's text, and the event names who sent it.
@@ -491,10 +500,13 @@ class Handler(BaseHTTPRequestHandler):
             self._event("rejected", agent=agent, reason="request target leaves the upstream")
             return self._fail(400, "request target must be an origin-form path")
         try:
-            body = self.rfile.read(size) if lengths else None
-        except (OverflowError, MemoryError):
+            body = self._read_body(size) if lengths else None
+        except TimeoutError:
             self.close_connection = True
-            return self._fail(400, "invalid Content-Length")
+            return self._fail(408, "request body timed out")
+        except (EOFError, OSError):
+            self.close_connection = True
+            return self._fail(400, "incomplete request body")
         accounts = type(self).accounts
         try:
             accounts.reload_pins()
@@ -541,6 +553,27 @@ class Handler(BaseHTTPRequestHandler):
 
     do_GET = do_HEAD = do_POST
 
+    def _read_body(self, size: int) -> bytes:
+        timeout = self.connection.gettimeout()
+        self.connection.settimeout(BODY_IDLE_TIMEOUT)
+        try:
+            # Only buffer bytes already received. Spill larger bodies to disk
+            # so building the final bytes object needs no second body buffer.
+            with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as body:
+                remaining = size
+                while remaining:
+                    # read1 performs at most one socket read: every arrival
+                    # resets the idle bound, even on a slow trickle.
+                    chunk = self.rfile.read1(min(8192, remaining))
+                    if not chunk:
+                        raise EOFError("incomplete request body")
+                    body.write(chunk)
+                    remaining -= len(chunk)
+                body.seek(0)
+                return body.read()
+        finally:
+            self.connection.settimeout(timeout)
+
     def _forward(self, url: str, label: str, token: str, body: bytes | None) -> str:
         headers = {k: v for k, v in self.headers.items()
                    if k.lower() not in HOP_HEADERS}
@@ -560,6 +593,12 @@ class Handler(BaseHTTPRequestHandler):
             return "error"
 
         with upstream:
+            if 100 <= upstream.status < 200 and upstream.status != 100:
+                self._event("upstream_error", agent=self.agent, label=label,
+                            status=upstream.status)
+                self.close_connection = True
+                self._fail(502, "unexpected upstream interim response")
+                return "error"
             if not 200 <= upstream.status < 300:
                 status = upstream.status
                 if status >= 400 and status not in (401, 429, 529):
@@ -628,7 +667,8 @@ class Handler(BaseHTTPRequestHandler):
 def _error_response(payload: bytes, headers: Any) -> dict[str, Any]:
     """Scrub a non-2xx body and keep only the upstream's public diagnostics."""
     clean = _scrub(payload)
-    if _header_sensitive(headers.get("content-type", "")):
+    upstream_type = _unfold_header(headers.get("content-type", "text/plain; charset=utf-8"))
+    if _header_sensitive(upstream_type):
         content_type = "application/octet-stream"
     elif clean == b"Upstream response withheld.":
         content_type = "text/plain; charset=utf-8"
@@ -637,12 +677,16 @@ def _error_response(payload: bytes, headers: Any) -> dict[str, Any]:
             json.loads(clean)
             content_type = "application/json; charset=utf-8"
         except (ValueError, UnicodeError):
-            content_type = headers.get("content-type", "text/plain; charset=utf-8")
+            content_type = upstream_type
     return {"payload": clean, "content_type": content_type,
             "headers": _response_headers(headers, success=False)}
 
 
-def _header_sensitive(value: str) -> bool:
+def _unfold_header(value: str) -> str:
+    return re.sub(r"[ \t]*\r?\n[ \t]+", " ", value)
+
+
+def _header_sensitive(value: str, *, name: bool = False) -> bool:
     from .redact import _literal_snapshot
 
     readings = [value]
@@ -653,6 +697,11 @@ def _header_sensitive(value: str) -> bool:
     except UnicodeEncodeError:
         pass
     literals = _literal_snapshot()
+    if name:
+        # Header names ignore ASCII case; values retain their literal case.
+        lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+        readings = [reading.translate(lower) for reading in readings]
+        literals = [literal.translate(lower) for literal in literals]
     return any(any(literal in reading for literal in literals) or _EMAIL.search(reading)
                for reading in readings)
 
@@ -661,12 +710,13 @@ def _response_headers(headers: Any, *, success: bool) -> list[tuple[str, str]]:
     """Apply the same privacy and hop rules before either relay path writes."""
     hop = {"connection", "keep-alive", "upgrade", "te", "trailer",
            "transfer-encoding", "content-length"}
-    for key, value in headers.items():
+    unfolded = [(_unfold_header(key), _unfold_header(value)) for key, value in headers.items()]
+    for key, value in unfolded:
         if key.lower() == "connection":
             hop.update(name.strip().lower() for name in value.split(","))
     allowed = []
-    for key, value in headers.items():
-        if _header_sensitive(key):
+    for key, value in unfolded:
+        if _header_sensitive(key, name=True):
             continue
         name = key.lower()
         if (name in hop or name in {"set-cookie", "authorization", "www-authenticate", "location"}
