@@ -297,22 +297,53 @@ class Results:
             "rev-list", "--topo-order", "--parents", commit, "--not", input_commit,
             check=True).out.splitlines()]
         eligible = base_chain | self.generation_commits
-        candidates = [source for source, *parents in history if source in eligible]
-        producer_policies = {}
+        candidates = dict.fromkeys(source for source, *parents in history if source in eligible)
+        merge_bases = {}
         for source in candidates:
+            pair = (source, input_commit)
+            bases = self.git("merge-base", "--all", *pair)
+            if not bases.ok and not (bases.code == 1 and not bases.out and not bases.err):
+                raise gitops.GitError(bases.err or bases.out or "readonly source merge-base failed")
+            merge_bases[pair] = bases.out.splitlines()
+        # Batch all protected paths per commit, caching sources and shared
+        # merge bases alike; no Git call depends on an individual path.
+        commits = dict.fromkeys([input_commit, commit, *candidates,
+                                *(base for bases in merge_bases.values() for base in bases)])
+        entries = {source: self.tree_entries(source, paths) for source in commits}
+        tip = entries[commit]
+        producer_policies = {}
+
+        def policy_allows(source, path):
+            # Base first-parent commits are exempt even when a generation
+            # record also names them (RP10, Decision 13).
             if source in base_chain:
-                continue
-            policies = self.generation_policies.get(source)
-            if not policies or any(not records or any(
-                    not isinstance(policy, list) or any(not isinstance(pattern, str) for pattern in policy)
-                    for policy in records) for records in policies.values()):
-                raise gitops.GitError("readonly generation producer policy is unavailable: " + source)
-            producer_policies[source] = policies
-        path_sources = {}
+                return True
+            if source not in producer_policies:
+                policies = self.generation_policies.get(source)
+                if not policies or any(not records or any(
+                        not isinstance(policy, list) or any(not isinstance(pattern, str) for pattern in policy)
+                        for policy in records) for records in policies.values()):
+                    raise gitops.GitError("readonly generation producer policy is unavailable: " + source)
+                producer_policies[source] = policies
+            return all(not matches_any(policy, path)
+                       for records in producer_policies[source].values() for policy in records)
+
+        decisions = []
         for path in paths:
-            allowed = {source for source in candidates if source in base_chain or all(
-                not matches_any(policy, path)
-                for records in producer_policies[source].values() for policy in records)}
+            could_vouch = {source for source in candidates if merge_bases[(source, input_commit)]
+                           and all(entries[source][path] != entries[base][path]
+                                   and entries[input_commit][path] == entries[base][path]
+                                   for base in merge_bases[(source, input_commit)])}
+            allowed, ancestors = set(), {}
+            # Parents precede descendants here. A policy matters only for
+            # a possible vouch or a source that could supersede an allowed
+            # vouching ancestor, including a revert to the input (RP13).
+            for source, *parents in reversed(history):
+                inherited = any(ancestors.get(parent, False) for parent in parents)
+                if (source in candidates and (source in could_vouch or inherited)
+                        and policy_allows(source, path)):
+                    allowed.add(source)
+                ancestors[source] = inherited or (source in allowed and source in could_vouch)
             sources, superseded = [], set()
             # Descendants precede parents. Only a source allowed on this
             # path can supersede an older eligible snapshot (RP7/RP10).
@@ -322,27 +353,7 @@ class Results:
                 elif source in allowed:
                     sources.append(source)
                     superseded.update(parents)
-            path_sources[path] = sources
-        sources = dict.fromkeys(source for selected in path_sources.values() for source in selected)
-        merge_bases = {}
-        for source in sources:
-            pair = (source, input_commit)
-            bases = self.git("merge-base", "--all", *pair)
-            if not bases.ok and not (bases.code == 1 and not bases.out and not bases.err):
-                raise gitops.GitError(bases.err or bases.out or "readonly source merge-base failed")
-            merge_bases[pair] = bases.out.splitlines()
-        # Batch all protected paths per commit, caching sources and shared
-        # merge bases alike; no Git call depends on an individual path.
-        commits = dict.fromkeys([input_commit, commit, *sources,
-                                *(base for bases in merge_bases.values() for base in bases)])
-        entries = {source: self.tree_entries(source, paths) for source in commits}
-        tip = entries[commit]
-        decisions = []
-        for path in paths:
-            vouching = [source for source in path_sources[path] if merge_bases[(source, input_commit)]
-                        and all(entries[source][path] != entries[base][path]
-                                and entries[input_commit][path] == entries[base][path]
-                                for base in merge_bases[(source, input_commit)])]
+            vouching = [source for source in sources if source in could_vouch]
             matches = [source for source in vouching if entries[source][path] == tip[path]]
             if matches:
                 source = next((source for source in matches if source in base_chain), matches[0])
