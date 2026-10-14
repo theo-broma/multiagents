@@ -5738,3 +5738,10 @@ Pipeline: tester, implementer, then a reviewer on every implementer run; test-on
   full suite and merge. In parallel, user approved fixing the readonly-restore
   defect (tooling queue item 1): researcher nd-7e558d0f maps it; then a spec
   shown to the user before commit.
+- 2026-10-14 ~07:50 CEST — AP tester round 3 done: 2f3d3594 (AP11-AP13 tests
+  + adversary2 files; 28 red against the implementation, all AP11-13). AP loop
+  nd-fe9e687b relaunched (implementer restores tests from 2f3d3594
+  uncommitted). At merge: copy tests/ from 2f3d3594 (not merge_node the
+  tester). Readonly-restore spec drafted, uncommitted:
+  context/specs/readonly-restore-provenance.md (RP1-RP6, advisor-reviewed),
+  awaiting user yes.
