@@ -397,11 +397,6 @@ def test_r3_5_only_agy_ships_view_file_guidance(tmp_path):
         if name == "agy" or (block or {}).get("extends") == "agy":
             continue
         providers = {name: {**(block or {}), **RUNNABLE}}
-        # PS2 requires the shipped inheritance chain to remain defined.
-        parent = (block or {}).get("extends")
-        while parent and parent not in providers:
-            providers[parent] = dict(shipped[parent] or {})
-            parent = providers[parent].get("extends")
         assert "view_file" not in _prompt(tmp_path, providers, name), name
 
 

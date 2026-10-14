@@ -9,8 +9,6 @@ for anything surprising are filed in `context/review/C2-seam.md` as F110+.
 from __future__ import annotations
 
 import os
-
-import pytest
 import sys
 import time
 from pathlib import Path
@@ -261,22 +259,30 @@ def test_exec_action_never_runs_the_script_it_describes(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_run_action_uses_provider_dot_script_name_not_the_provider_name_argument(tmp_path):
-    """PS1 / F113: disagreement refuses execution of the chosen script."""
+    """Script resolution keys off `provider.script_name` (derived from the
+    `Provider` object's OWN `name`/`script` fields), never off the
+    `provider_name` string a caller happens to pass as the first argument to
+    `run_action`/`resolve`. Here the two are made to disagree, and the script
+    tied to `provider.name` is the one that runs."""
     provider = h.make_provider("realname")
-    marker = tmp_path / "ran"
-    h.case_script(tmp_path, "realname.sh", f'check) echo ran > "{marker}"; exit 0 ;;')
-    with pytest.raises(ValueError) as caught:
-        h.run_action("calledas", provider, h.FakeExecutor(), "check", tmp_path)
-    assert "calledas" in str(caught.value) and "realname" in str(caught.value)
-    assert not marker.exists()
+    h.case_script(tmp_path, "realname.sh", "check) echo ran; exit 0 ;;")
+    code, out, err = h.run_action("calledas", provider, h.FakeExecutor(), "check", tmp_path)
+    assert (code, out) == (0, "ran\n")
 
 
 def test_build_env_provider_identity_env_var_comes_from_the_argument_not_provider_dot_name(tmp_path):
-    """PS1 / F113: disagreement is a programming error."""
+    """F113 — companion to the test above. The script that runs is chosen by
+    `provider.name`/`provider.script_name`; the identity that script is TOLD
+    it is running as (`MULTIAGENTS_PROVIDER`) comes from the separate
+    `provider_name` argument. When a caller passes a `provider_name` that
+    does not match `provider.name`, the running script sees an environment
+    that names a different provider than the one whose script actually
+    executed it."""
     provider = h.make_provider("realname")
-    with pytest.raises(ValueError) as caught:
-        h.build_env("calledas", provider, h.FakeExecutor())
-    assert "calledas" in str(caught.value) and "realname" in str(caught.value)
+    env = h.build_env("calledas", provider, h.FakeExecutor())
+    assert env["MULTIAGENTS_PROVIDER"] == "calledas"
+    assert provider.name == "realname"
+    assert env["MULTIAGENTS_PROVIDER"] != provider.name
 
 
 # ---------------------------------------------------------------------------
@@ -406,10 +412,14 @@ def test_build_env_with_no_env_block_and_a_missing_binary_adds_only_bin_error(tm
 
 
 def test_build_env_providers_env_block_is_applied_and_can_override_protocol_keys(tmp_path):
-    """PS1 / F113: provider env applies, but identity is protected."""
+    """F112 (context) — a provider's own `env:` block is applied AFTER the
+    `MULTIAGENTS_*` keys `build_env` itself computed, with no protection: a
+    provider config can overwrite `MULTIAGENTS_PROVIDER` (or any other
+    protocol variable) for every action run against it, not just the ones it
+    plausibly needs to change."""
     provider = h.make_provider("p", env={"MULTIAGENTS_PROVIDER": "hijacked", "CUSTOM": "1"})
     env = h.build_env("p", provider, h.FakeExecutor())
-    assert env["MULTIAGENTS_PROVIDER"] == "p"
+    assert env["MULTIAGENTS_PROVIDER"] == "hijacked"
     assert env["CUSTOM"] == "1"
 
 

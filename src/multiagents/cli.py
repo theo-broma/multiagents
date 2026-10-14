@@ -3320,18 +3320,53 @@ def cmd_docker(args: argparse.Namespace) -> int:
         if not state.get("ok"):
             print(state.get("error"), file=sys.stderr)
             return 1
-        allowed = (ex.config.get("egress_allowlist") or ["opencode.ai"])[0]
-        for host, expect in ((allowed, "allow"), ("example.com", "deny")):
+        if ex.network_mode != "allowlist":
+            allowed = (ex.config.get("egress_allowlist") or ["opencode.ai"])[0]
+            for host, expect in ((allowed, "allow"), ("example.com", "deny")):
+                probe = subprocess.run(
+                    ["docker", "exec", ex.container, "curl", "-sS", "-o", "/dev/null",
+                     "-m", "20", "-w", "%{http_code}", f"https://{host}/"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                code = probe.stdout.strip() or "-"
+                reached = probe.returncode == 0 and code not in ("", "-", "000", "403")
+                verdict = "OK" if (reached == (expect == "allow")) else "UNEXPECTED"
+                print(f"  {expect:5} {host:24} http={code:4} reached={reached}  {verdict}")
+            return 0
+        allowed, diagnostics = ex.allowlist_entries()
+        for diagnostic in diagnostics:
+            print(diagnostic, file=sys.stderr)
+        probes = []
+        if allowed:
+            probes.append((allowed[0], "allow"))
+        else:
+            print("  no allowed host: nothing to probe")
+        # Choose a .invalid name outside every accepted rule.
+        denied = "multiagents-egress-check.invalid"
+        while any(denied == host or denied.endswith("." + host) for host in allowed):
+            denied = "x" + denied
+        probes.append((denied, "deny"))
+        ok = True
+        for host, expect in probes:
             probe = subprocess.run(
                 ["docker", "exec", ex.container, "curl", "-sS", "-o", "/dev/null",
-                 "-m", "20", "-w", "%{http_code}", f"https://{host}/"],
+                 "-m", "20", "-w", "%{http_code} %{http_connect}", f"https://{host}/"],
                 capture_output=True, text=True, timeout=60,
             )
-            code = probe.stdout.strip() or "-"
-            reached = probe.returncode == 0 and code not in ("", "-", "000", "403")
-            verdict = "OK" if (reached == (expect == "allow")) else "UNEXPECTED"
-            print(f"  {expect:5} {host:24} http={code:4} reached={reached}  {verdict}")
-        return 0
+            codes = probe.stdout.split()
+            code = codes[0] if codes else "000"
+            connect = codes[1] if len(codes) > 1 else "000"
+            refused = connect == "403"
+            reached = probe.returncode == 0 and code not in ("000", "-")
+            # TLS and HTTP failures after CONNECT do not prove a refusal.
+            expected = not refused if expect == "allow" else refused
+            ok = ok and expected
+            outcome = "proxy refused" if refused else ("HTTP response" if reached else "request failed")
+            verdict = "OK" if expected else "UNEXPECTED"
+            print(f"  {expect:5} {host:24} http={code:4} {outcome}  {verdict}")
+            if not refused and probe.stderr.strip():
+                print(f"    {probe.stderr.strip()}")
+        return 0 if ok else 1
 
     return 2
 

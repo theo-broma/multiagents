@@ -643,13 +643,7 @@ _ERE_ESCAPE_TABLE = {ord(c): "\\" + c for c in r"\^$.|?*+()[]{}"}
 
 
 def _ere_literal(text: str) -> str:
-    """Escape `text` so it matches only itself as a POSIX ERE.
-
-    `str.translate` so a non-string entry still fails with the same
-    `AttributeError` the old `host.replace(...)` gave — a malformed entry is
-    F2/F55, out of scope for this fix, and not something to change the shape
-    of as a side effect.
-    """
+    """Escape `text` so it matches only itself as a POSIX ERE."""
     return text.translate(_ERE_ESCAPE_TABLE)
 
 
@@ -1916,8 +1910,8 @@ sys.exit(rc)
         been revoked" while `auth status` on the host read the correct file and
         said everything was fine. A whole day of runs.
 
-        Comparing inodes settles it in one `docker exec`, and a restart — not a
-        rebuild — re-resolves the bind.
+        Comparing inodes settles it, and a restart — not a rebuild —
+        re-resolves the bind.
         """
         if self.container_state(self.container) != "running":
             return []
@@ -1932,9 +1926,11 @@ sys.exit(rc)
         if not wanted:
             return []
 
-        script = "; ".join(f'stat -c "%i" {path} 2>/dev/null || echo -' 
-                           for path in wanted)
-        result = _run(["docker", "exec", self.container, "sh", "-c", script])
+        # Paths are quoted positional arguments, never shell source. -- keeps
+        # even a leading hyphen from becoming a stat option.
+        script = 'for path do stat -c "%i" -- "$path" 2>/dev/null || echo -; done'
+        result = _run(["docker", "exec", self.container, "sh", "-c", script,
+                       "sh", *(str(path) for path in wanted)])
         if result.returncode != 0:
             return []
         inside = result.stdout.split()
@@ -2426,27 +2422,53 @@ sys.exit(rc)
 
     def allowlist_entries(self) -> tuple[list[str], list[str]]:
         allowed, diagnostics = [], []
-        for entry in self.config.get("egress_allowlist", []) or []:
+        entries = self.config.get("egress_allowlist")
+        if entries is None:
+            return allowed, diagnostics
+        if not isinstance(entries, list):
+            return allowed, [f"refused egress_allowlist {entries!r}: not a list"]
+        for entry in entries:
             reason = None
-            try:
-                host = normalize_hostname(entry)
-            except UnicodeError:
-                host = entry
-                reason = "invalid IDNA hostname"
-            if not entry.strip() or any(ord(char) < 32 or ord(char) == 127 for char in entry):
+            host = ""
+            if not isinstance(entry, str):
+                reason = "not a string"
+            elif not entry.strip() or any(ord(char) < 32 or ord(char) == 127 for char in entry):
                 reason = "blank entry or control character in hostname"
-            elif _is_ipv6_literal(host):
-                reason = "IPv6 addresses are unsupported"
-            elif _is_ipv4_literal(host):
-                pass
-            # WHATWG's IPv4 number parser also accepts bare 0x as zero.
-            elif re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]*)", host.rsplit(".", 1)[-1]):
-                reason = "non-canonical IPv4 address or fragment; use a whole dotted-quad decimal address"
-            elif all(_LABEL_RE.fullmatch(label) for label in host.split(".")):
-                if "." not in host:
-                    reason = "single label; use a registrable domain"
-                elif is_public_suffix(host):
-                    reason = "public suffix; use a registrable domain"
+            elif any(char.isspace() for char in entry):
+                reason = "contains whitespace"
+            elif entry.count(":") == 1 and entry.rsplit(":", 1)[-1].isdigit():
+                reason = "contains a port"
+            elif entry.startswith("."):
+                reason = "leading dot"
+            else:
+                try:
+                    host = normalize_hostname(entry)
+                except UnicodeError:
+                    reason = "invalid IDNA hostname"
+                if reason is None:
+                    if _is_ipv6_literal(host) or host.count(":") > 1:
+                        reason = "IPv6 addresses are unsupported"
+                    elif _is_ipv4_literal(host):
+                        pass
+                    # WHATWG's IPv4 number parser also accepts bare 0x as zero.
+                    elif re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]*)", host.rsplit(".", 1)[-1]):
+                        reason = "non-canonical IPv4 address or fragment; use a whole dotted-quad decimal address"
+                    else:
+                        labels = host.split(".")
+                        valid = len(host) <= 253 and all(_LABEL_RE.fullmatch(label) for label in labels)
+                        if valid:
+                            try:
+                                for label in labels:
+                                    if label.startswith("xn--"):
+                                        label.encode("ascii").decode("idna")
+                            except UnicodeError:
+                                valid = False
+                        if not valid:
+                            reason = "invalid hostname"
+                        elif "." not in host:
+                            reason = "single label; use a registrable domain"
+                        elif is_public_suffix(host):
+                            reason = "public suffix; use a registrable domain"
             if reason:
                 diagnostics.append(f"refused allowlist entry {entry!r}: {reason}")
             else:
@@ -2465,7 +2487,7 @@ sys.exit(rc)
         patterns = []
         for host in allow:
             escaped = _ere_literal(host)
-            patterns.append(f"^{escaped}$" if _is_ipv4_literal(host) else f"(^|\\.){escaped}$")
+            patterns.append(f"^{escaped}$" if _is_ipv4_literal(host) else f"^([^.]+\\.)*{escaped}$")
         return "\n".join(patterns) + "\n"
 
     def write_proxy_config(self, target: Path) -> Path:

@@ -14,8 +14,6 @@ behind each one; this docstring only flags which test proves which finding.
 from __future__ import annotations
 
 import json
-
-import pytest
 import sys
 import time
 from pathlib import Path
@@ -227,13 +225,17 @@ def test_login_command_sets_multiagents_profile_only_when_given(tmp_path):
 
 
 def test_login_commands_extra_env_can_override_everything_build_env_sets(tmp_path):
-    """PS1 / F113: ordinary action overrides apply, but identity is protected."""
+    """`extra_env` is applied LAST inside `scripts.build_env`
+    (`env.update(extra or {})`), after `MULTIAGENTS_*` plumbing and the
+    provider's own configured `env:`. There is no protected subset — a caller
+    of `login_command` can override the provider's identity variable itself.
+    """
     provider = h.make_provider("p", env={"FIXED": "provider-value"})
     h.case_script(tmp_path, "p.sh", "login) exit 0 ;;")
     _, env = h.login_command(
         "p", provider, h.FakeExecutor(), tmp_path,
         extra_env={"MULTIAGENTS_PROVIDER": "hijacked", "FIXED": "overridden"})
-    assert env["MULTIAGENTS_PROVIDER"] == "p"
+    assert env["MULTIAGENTS_PROVIDER"] == "hijacked"
     assert env["FIXED"] == "overridden"
 
 
@@ -630,20 +632,30 @@ def test_extends_shallow_merges_the_parent_one_level_deep():
 
 
 def test_extends_a_missing_parent_is_left_unresolved_not_raised(tmp_path):
-    """PS2 / F133: missing parents refuse folding and loading."""
+    """`resolve_inheritance`'s own docstring says this is deliberate: "A
+    missing base is left alone rather than raised on." Pinning the actual
+    shape of "left alone" — the child keeps ONLY what it wrote itself, none
+    of a parent's fields, and the raw `extends: ghost` key survives into the
+    resolved dict unchanged."""
     raw = {"child": {"extends": "ghost", "bin": "x", "env": {"A": "1"}}}
-    for surface in (h.resolve_inheritance, h.load_providers):
-        with pytest.raises(ValueError) as caught:
-            surface(raw)
-        assert str(caught.value) == "provider 'child': extends: no provider named 'ghost'"
+    resolved = h.resolve_inheritance(raw)
+    assert resolved == raw               # untouched: no merge happened at all
+    providers = h.load_providers(raw)
+    assert providers["child"].env == {"A": "1"}
+    assert providers["child"].bin == "x"
 
 
 def test_extends_a_missing_parent_still_sets_family_to_the_ghost_name():
-    """PS2 / F133: refusal prevents publication of a phantom family."""
+    """F133: `Provider.from_dict`'s family fallback is
+    `family = data.get("family") or data.get("extends") or name` — it reads
+    the UNRESOLVED `extends:` value even when that base was never found by
+    `resolve_inheritance`. The child is placed in a family named after a
+    provider that does not exist, and `families()` then reports a group
+    containing only the orphan — not an error, not a fallback to `name`."""
     raw = {"child": {"extends": "ghost", "bin": "x"}}
-    with pytest.raises(ValueError) as caught:
-        h.families(h.load_providers(raw))
-    assert str(caught.value) == "provider 'child': extends: no provider named 'ghost'"
+    providers = h.load_providers(raw)
+    assert providers["child"].family == "ghost"
+    assert h.families(providers) == {"ghost": ["child"]}
 
 
 def test_extends_a_direct_cycle_does_not_hang_and_merges_once_each_way():

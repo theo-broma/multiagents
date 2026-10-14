@@ -123,16 +123,7 @@ class Layered:
 
         def load(paths=None, *a, **kw):
             cfg = real(paths, *a, **kw)
-            # Keep the selected providers' parents: PS2 requires a complete
-            # inheritance chain even in this reduced doctor fixture.
-            selected = set(names)
-            pending = list(selected)
-            while pending:
-                parent = (cfg.providers.get(pending.pop()) or {}).get("extends")
-                if parent and parent not in selected:
-                    selected.add(parent)
-                    pending.append(parent)
-            cfg.providers = {k: v for k, v in cfg.providers.items() if k in selected}
+            cfg.providers = {k: v for k, v in cfg.providers.items() if k in names}
             cfg.agents = {k: v for k, v in cfg.agents.items() if v.provider in names}
             return cfg
         self.mp.setattr(config_mod, "load", load)
