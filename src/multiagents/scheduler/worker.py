@@ -46,7 +46,15 @@ async def supervise(root, attempt_id, lock_fd=None):
             window_nodes = store.nodes(db)
         windows.prepare(window_timezone, window_nodes)
         existing = runner.tree.get(attempt["run_id"])
-        if existing and not (attempt.get("window_stop") or attempt.get("window_resume") or attempt.get("rate_limit_resume") or attempt["state"] == "suspended"):
+        launch = attempt.get("launch_evidence")
+        executor = launch.get("executor") if isinstance(launch, dict) else None
+        if (existing and isinstance(executor, dict) and executor.get("kind") == "isolated"
+                and runner._pending_seeded_launch(existing.id)):
+            if await runner.resume_seeded_launch(existing, attempt):
+                return
+            if not runner._pending_seeded_launch(existing.id):
+                await runner.adopt(exclude={n.id for n in runner.tree.active() if n.id != attempt["run_id"]})
+        elif existing and not (attempt.get("window_stop") or attempt.get("window_resume") or attempt.get("rate_limit_resume") or attempt["state"] == "suspended"):
             # A supervisor died after writing launch evidence. Adoption reads
             # the recorded wrapper, session and run directory, never relaunches.
             await runner.adopt(exclude={n.id for n in runner.tree.active() if n.id != attempt["run_id"]})

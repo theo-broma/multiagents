@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import tarfile
 import tempfile
@@ -112,7 +113,16 @@ def freeze(db, node, nodes, result, paths, config):
                  "model": result["model"], "session_id": None, "worktree": str(paths.worktree("alias-" + key[:24])),
                  "home_id": "alias-" + key[:24]}
         save_alias(db, bound)
+    kind = (result.get("executor_selection") or {}).get("kind") or config.executor
+    # Old bindings predate isolated resources. Their HOME belongs to the
+    # legacy activation, whichever of the two legacy executors it uses.
+    previous_kind = bound.get("executor_kind", kind if kind in {"local", "docker"} else "local")
+    if previous_kind != kind:
+        bound["home_id"] = "alias-" + key[:24] + "-" + kind + "-" + uuid.uuid4().hex[:12]
+    bound["executor_kind"] = kind
+    save_alias(db, bound)
     return {"alias_id": key, "alias_worktree": bound["worktree"], "alias_home": bound["home_id"],
+            "previous_executor_kind": previous_kind,
             "session_id": bound["session_id"], "binding": {k: bound[k] for k in ("provider", "account", "model")}}
 
 
@@ -310,6 +320,11 @@ def request_cleanup(store, db, node, binding, runner, detail, task, *, replacing
                "alias_id": binding["id"], "alias_worktree": binding["worktree"],
                "alias_home": binding["home_id"], "session_id": previous.session_id,
                "binding": route}
+    # Cleanup acts on the old checkout with its original executor selection.
+    if prior.get("launch_evidence", {}).get("executor"):
+        selection = prior["launch_evidence"]["executor"]
+        attempt["launch_evidence"] = {"executor": {k: selection[k] for k in
+            ("kind", "backend", "backend_version", "spec_version") if k in selection}}
     if replacing:
         claimed = journal[replacing]
         attempt.update(locks=claimed.get("locks", []), lock_owners=claimed.get("lock_owners", {}))
@@ -354,6 +369,15 @@ def finish_cleanup(store, runner, attempt, run):
 def create_checkout(results, authority, path, branch, attempt):
     if attempt.get("cleanup"):
         return
+    if attempt.get("launch_evidence", {}).get("executor", {}).get("kind") == "isolated":
+        # Provisioning stages the backend's verified clone; never create a
+        # shared repository even temporarily for an isolated activation.
+        return
+    if attempt.get("previous_executor_kind") == "isolated" and path.exists():
+        staged = path.with_name(".legacy-" + attempt["attempt_id"])
+        results.create_checkout(staged, branch, attempt["input_commit"])
+        install_checkout(results.paths, authority, path, staged, attempt)
+        return
     if not attempt.get("alias_id") or not path.exists():
         results.create_checkout(path, branch, attempt["input_commit"])
         return
@@ -363,6 +387,123 @@ def create_checkout(results, authority, path, branch, attempt):
         gitops._write_beneath(pinned, (".git", "refs", "heads", *branch.split("/")[:-1]),
                              branch.split("/")[-1], (attempt["input_commit"] + "\n").encode(), create=True)
         gitops._write_beneath(pinned, (".git",), "HEAD", ("ref: refs/heads/" + branch + "\n").encode())
+
+
+def swap_intent(paths, attempt, path, staged, *, complete=False):
+    """Persist host-issued swap operands before staging or moving a clone."""
+    if not attempt.get("alias_id"):
+        return
+    from .store import Store
+    with Store(paths.root).transaction() as db:
+        binding = aliases(db)[attempt["alias_id"]]
+        prior = binding.get("swap") or {}
+        if prior.get("attempt_id") == attempt["attempt_id"]:
+            if complete:
+                binding["swap"] = dict(prior, complete=True)
+                save_alias(db, binding)
+            return
+        binding["swap"] = {"state": "staging", "old": str(path), "new": str(staged),
+                           "attempt_id": attempt["attempt_id"]}
+        save_alias(db, binding)
+
+
+def checkout_swap(paths, attempt):
+    if not attempt.get("alias_id"):
+        return {}
+    from .store import Store
+    with Store(paths.root).transaction(write=False) as db:
+        intent = aliases(db)[attempt["alias_id"]].get("swap") or {}
+    return intent if intent.get("attempt_id") == attempt["attempt_id"] else {}
+
+
+def install_checkout(paths, authority, path, staged, attempt):
+    """Swap forward with a durable intent and retain the prior gitdir host-side."""
+    from .store import Store
+    old = path.with_name(".previous-" + attempt["attempt_id"])
+    recovery = paths.scheduler / "alias-recovery" / attempt["attempt_id"]
+
+    def record(state):
+        if attempt.get("alias_id"):
+            with Store(paths.root).transaction() as db:
+                binding = aliases(db)[attempt["alias_id"]]
+                binding["swap"] = {"state": state, "old": str(old), "new": str(staged),
+                                   "attempt_id": attempt["attempt_id"]}
+                save_alias(db, binding)
+
+    if checkout_swap(paths, attempt).get("state") != "done":
+        record("swapping")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Both names have scheduler-generated basenames and anchored parents.
+        with authority.pinned_parent(path) as target, authority.pinned_parent(staged) as source:
+            if source.exists():
+                if target.exists() and recovery.exists() and attempt.get("alias_id"):
+                    # An archive alone does not prove that this staged clone
+                    # was installed. Preserve both checkouts on a collision.
+                    raise gitops.GitError("checkout recovery archive already exists")
+                # A non-alias restart may stage again after archival. The
+                # installed checkout is already new; never archive it over
+                # the predecessor or leave a second .previous directory.
+                if target.exists() and (old.exists() or recovery.exists()):
+                    shutil.rmtree(source)
+                else:
+                    if target.exists():
+                        os.replace(target, old)
+                    try:
+                        os.replace(source, target)
+                    except BaseException:
+                        if not target.exists() and old.exists():
+                            os.replace(old, target)
+                        raise
+            elif not target.exists():
+                raise gitops.GitError("staged clone is missing")
+        record("done")
+    if old.exists():
+        recovery.parent.mkdir(parents=True, exist_ok=True)
+        if not recovery.exists():
+            shutil.move(str(old), str(recovery))
+
+
+def settle_checkout(paths, authority, path, attempt):
+    """Settle P7 before abandoning an uninvoked resource or its storage."""
+    intent = checkout_swap(paths, attempt)
+    staged = path.with_name(".seed-" + attempt["attempt_id"])
+    old = path.with_name(".previous-" + attempt["attempt_id"])
+    if intent.get("rolled_back"):
+        if old.exists():
+            shutil.rmtree(old)
+        return
+    if intent.get("state") in {"swapping", "done"} or intent.get("complete"):
+        install_checkout(paths, authority, path, staged, attempt)
+        if attempt.get("alias_id") and attempt.get("input_commit"):
+            from .store import Store
+            with Store(paths.root).transaction() as db:
+                binding = aliases(db)[attempt["alias_id"]]
+                binding["commit"] = attempt["input_commit"]
+                save_alias(db, binding)
+        return
+    # Staging has not recorded a complete swap. Discard a partial copy and
+    # keep the clean checkout, retaining its recovery data before releasing it.
+    with authority.pinned_parent(path) as target, authority.pinned_parent(staged) as source:
+        if source.exists():
+            shutil.rmtree(source)
+        if not target.exists() and old.exists():
+            os.replace(old, target)
+        recovery = paths.scheduler / "alias-recovery" / attempt["attempt_id"]
+        prior = old if old.exists() else target
+        if prior.exists() and not recovery.exists():
+            recovery.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".archive-", dir=recovery.parent) as tmp:
+                archive = Path(tmp) / "checkout"
+                shutil.copytree(prior, archive, symlinks=True)
+                os.replace(archive, recovery)
+    if attempt.get("alias_id") and intent:
+        from .store import Store
+        with Store(paths.root).transaction() as db:
+            binding = aliases(db)[attempt["alias_id"]]
+            binding["swap"] = dict(intent, state="done", rolled_back=True)
+            save_alias(db, binding)
+    if old.exists():
+        shutil.rmtree(old)
 
 
 def retains_checkout(paths, run):

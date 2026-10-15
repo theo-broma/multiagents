@@ -21,6 +21,9 @@ import time
 from typing import Any, Protocol
 import uuid
 
+from ..provision.git import git_command, git_env
+from ..provision.seeds import SeedError
+
 
 @dataclasses.dataclass
 class LaunchSpec:
@@ -196,8 +199,9 @@ class ReferenceBackend:
     _processes: dict[tuple[str, int], subprocess.Popen] = {}
     _records: dict[tuple[str, str, str], dict] = {}
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, seeds=None):
         self.root = Path(root).resolve()
+        self.seeds = seeds
 
     @contextlib.contextmanager
     def _locked(self):
@@ -261,7 +265,7 @@ class ReferenceBackend:
             for other in guests[index + 1:]:
                 if PurePosixPath(guest).is_relative_to(other) or PurePosixPath(other).is_relative_to(guest):
                     return InvalidSpec("guest paths must not overlap")
-        for name in ("seed", "session_state", "resources", "credential_handle", "transport_handle"):
+        for name in ("session_state", "resources", "credential_handle", "transport_handle"):
             if getattr(spec, name):
                 return Unsupported(name)
         try:
@@ -320,20 +324,105 @@ class ReferenceBackend:
         refusal = self._valid_spec(spec)
         if refusal is not None:
             return refusal
+        if spec.seed and self.seeds is None:
+            return InvalidSpec("seed_unavailable: no registry")
         digest = spec_digest(spec)
         with self._locked() as control:
+            identity = None
             for path in control.glob("*/resource.json"):
                 record = _read(path)
                 if record["key"] == key:
-                    return ResourceIdentity(path.parent.name) if record["digest"] == digest else IdentityConflict()
-            identity = ResourceIdentity(uuid.uuid4().hex)
+                    if record["digest"] != digest:
+                        return IdentityConflict()
+                    identity = ResourceIdentity(path.parent.name)
+                    # A completed resource, especially a running one, is never
+                    # reset by another provisioning request.
+                    if (path.parent / "clone.json").is_file() or self._invocation_records(path.parent):
+                        return identity
+                    break
+            if identity is None:
+                # Validate authority before creating anything find() can see.
+                if spec.seed:
+                    try:
+                        self.seeds.record(spec.seed, spec.owner)
+                    except SeedError as exc:
+                        return InvalidSpec(str(exc))
+                identity = ResourceIdentity(uuid.uuid4().hex)
             path = control / identity.id
-            path.mkdir(mode=0o700)
+            path.mkdir(mode=0o700, exist_ok=True)
             (self.root / ".guests").mkdir(mode=0o700, exist_ok=True)
-            self._guest_resource(identity).mkdir(mode=0o700)
+            guest = self._guest_resource(identity)
+            guest.mkdir(mode=0o700, exist_ok=True)
             _write(path / "resource.json", {"key": key, "digest": digest,
                                            "spec": dataclasses.asdict(spec), "removed": False})
+            repo = guest / "repo"
+            if repo.is_symlink():
+                repo.unlink()
+            elif repo.exists():
+                shutil.rmtree(repo)
+            if spec.seed:
+                try:
+                    with self.seeds.acquire(spec.seed, spec.owner) as bundle:
+                        seed = self.seeds._authorised(spec.seed, spec.owner)
+                        self._clone(bundle, repo, seed["checkout_commit"])
+                except SeedError as exc:
+                    # An authority refusal has no created resource. An I/O
+                    # failure, in contrast, keeps its identity for recovery.
+                    shutil.rmtree(path)
+                    shutil.rmtree(guest)
+                    return InvalidSpec(str(exc))
+            else:
+                repo.mkdir(mode=0o700)
+            _write(path / "clone.json", {"digest": digest, "repo": str(repo)})
             return identity
+
+    def _clone(self, bundle: Path, repo: Path, commit: str) -> None:
+        def git(*args):
+            subprocess.run(git_command(*args), env=git_env(), capture_output=True, check=True)
+
+        git("clone", "--no-checkout", "--no-hardlinks", "--no-local", str(bundle), str(repo))
+        # The bundle's sole ref is a host pin, outside refs/heads. Clone's
+        # default refspec does not select that namespace.
+        git("-C", str(repo), "fetch", "--no-tags", "--no-write-fetch-head", str(bundle), commit)
+        git("-C", str(repo), "remote", "remove", "origin")
+        git("-C", str(repo), "checkout", "--detach", commit)
+
+    async def checkout_path(self, identity: ResourceIdentity) -> Path | Absent:
+        """Host adapter: locate the checkout for capture or an alias swap."""
+        with self._locked() as control:
+            path = self._resource(control, identity)
+            if path is None:
+                return Absent()
+            record = _read(path / "resource.json")
+            return Path(record.get("repo_path", self._guest_resource(identity) / "repo"))
+
+    async def attach_checkout(self, identity: ResourceIdentity, checkout: Path, home: Path | None = None):
+        """Host adapter after a durable swap; never called using guest input."""
+        with self._locked() as control:
+            path = self._resource(control, identity)
+            if path is None:
+                return Absent()
+            if isinstance(self._state(path), (Running, Unknown)):
+                return InvalidSpec("cannot attach a live checkout")
+            record = _read(path / "resource.json")
+            record["repo_path"] = str(Path(checkout).resolve())
+            if home is not None:
+                record["home_path"] = str(Path(home).resolve())
+            _write(path / "resource.json", record)
+            return identity
+
+    async def prepare_input(self, identity: ResourceIdentity, source):
+        """Host adapter: snapshot a bounded, already-framed prompt for stdin."""
+        with self._locked() as control:
+            path = self._resource(control, identity)
+            if path is None:
+                raise ValueError("resource disappeared before input preparation")
+            directory = self.root / "inputs"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            target = directory / uuid.uuid4().hex
+            with target.open("xb") as output:
+                shutil.copyfileobj(source, output)
+            return str(target)
 
     async def find(self, key: str):
         with self._locked() as control:
@@ -415,8 +504,9 @@ class ReferenceBackend:
             inv_path = path / directory
             guest = self._guest_resource(identity)
             inv_guest = guest / directory
-            mappings = {spec["guest_repo"]: str(guest / "repo"),
-                        spec["guest_home"]: str(inv_guest / "home"),
+            home = (guest / "home") if spec["lifetime"] == "conversation" else inv_guest / "home"
+            mappings = {spec["guest_repo"]: resource.get("repo_path", str(guest / "repo")),
+                        spec["guest_home"]: resource.get("home_path", str(home)),
                         spec["guest_temp"]: str(inv_guest / "tmp")}
             for value in spec["writable_paths"]:
                 mappings[value] = value
@@ -429,6 +519,7 @@ class ReferenceBackend:
             inv_guest.mkdir(mode=0o700)
             for name in ("home", "tmp"):
                 (inv_guest / name).mkdir(mode=0o700)
+            Path(mappings[spec["guest_home"]]).mkdir(parents=True, mode=0o700, exist_ok=True)
             (guest / "repo").mkdir(exist_ok=True)
             for value in spec["readonly_paths"]:
                 target = Path(mappings[value])

@@ -75,7 +75,7 @@ def recorded_tip(pinned, branch):
             if separator and ref == "refs/heads/" + branch:
                 matches.append(sha)
         commit = matches[0] if len(matches) == 1 else ""
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
         raise gitops.GitError("result branch is not a regular commit ref")
     return commit
 
@@ -387,49 +387,60 @@ class Results:
 
     def capture(self, run, attempt, authority):
         record = checkout_record(run, authority)
+        isolated = (attempt.get("launch_evidence") or {}).get("executor", {}).get("kind") == "isolated"
         branch = record["branch"]
         with pinned_checkout(record, authority) as pinned:
             metadata = pinned / ".git"
             if not metadata.is_dir() or metadata.is_symlink():
-                raise gitops.GitError("result git directory was replaced")
+                raise gitops.GitError(("import_malformed: " if isolated else "")
+                                     + "result git directory was replaced")
             # Read the recorded branch, never the agent's HEAD or .git pointer.
-            commit = recorded_tip(pinned, branch)
+            try:
+                commit = recorded_tip(pinned, branch)
+            except (gitops.GitError, OSError, UnicodeError) as exc:
+                if isolated:
+                    raise gitops.GitError("import_malformed: " + str(exc)) from exc
+                raise
             checkout_commit = commit
             # Quarantine and verify before adding immutable objects to the
             # project. An agent cannot overwrite an existing host object.
             with tempfile.TemporaryDirectory(dir=self.paths.scheduler) as tmp:
-                quarantine = Path(tmp) / "repo"
-                gitops.run(self.root, "init", "--bare", str(quarantine), check=True)
-                gitops._write_beneath(quarantine, ("objects", "info"), "alternates",
-                                     (str(self.root / ".git" / "objects") + "\n").encode())
-                objects = metadata / "objects"
-                if objects.is_symlink() or not objects.is_dir():
-                    raise gitops.GitError("result object directory was replaced")
-                copied = []
-                for directory in objects.iterdir():
-                    if not re.fullmatch(r"[0-9a-f]{2}|pack", directory.name):
-                        continue
-                    if directory.is_symlink() or not directory.is_dir():
+                if isolated:
+                    from .import_validation import import_isolated
+                    import_isolated(pinned, Path(tmp), self.root, commit, attempt["input_commit"], self.config)
+                else:
+                    quarantine = Path(tmp) / "repo"
+                    gitops.run(self.root, "init", "--bare", str(quarantine), check=True)
+                    gitops._write_beneath(quarantine, ("objects", "info"), "alternates",
+                                         (str(self.root / ".git" / "objects") + "\n").encode())
+                    objects = metadata / "objects"
+                    if objects.is_symlink() or not objects.is_dir():
                         raise gitops.GitError("result object directory was replaced")
-                    for source in directory.iterdir():
-                        pattern = r"[0-9a-f]{38}" if directory.name != "pack" else r"pack-[0-9a-f]{40}\.(pack|idx)"
-                        if not re.fullmatch(pattern, source.name):
+                    copied = []
+                    for directory in objects.iterdir():
+                        if not re.fullmatch(r"[0-9a-f]{2}|pack", directory.name):
                             continue
-                        data = gitops._read_beneath(pinned, (".git", "objects", directory.name),
-                                                   source.name, 512 * 1024 * 1024)
-                        if data is None:
-                            raise gitops.GitError("unreadable result object")
-                        gitops._write_beneath(quarantine, ("objects", directory.name), source.name,
-                                             data, create=True)
-                        copied.append((directory.name, source.name))
-                gitops.run(self.root, "--git-dir=" + str(quarantine), "fsck", "--full", "--strict",
-                           "--no-reflogs", "--no-dangling", commit, check=True)
-                for directory, name in copied:
-                    target = self.root / ".git" / "objects" / directory / name
-                    if target.exists():
-                        continue
-                    data = gitops._read_beneath(quarantine, ("objects", directory), name, 512 * 1024 * 1024)
-                    gitops._write_beneath(self.root / ".git", ("objects", directory), name, data, create=True)
+                        if directory.is_symlink() or not directory.is_dir():
+                            raise gitops.GitError("result object directory was replaced")
+                        for source in directory.iterdir():
+                            pattern = r"[0-9a-f]{38}" if directory.name != "pack" else r"pack-[0-9a-f]{40}\.(pack|idx)"
+                            if not re.fullmatch(pattern, source.name):
+                                continue
+                            data = gitops._read_beneath(pinned, (".git", "objects", directory.name),
+                                                       source.name, 512 * 1024 * 1024)
+                            if data is None:
+                                raise gitops.GitError("unreadable result object")
+                            gitops._write_beneath(quarantine, ("objects", directory.name), source.name,
+                                                 data, create=True)
+                            copied.append((directory.name, source.name))
+                    gitops.run(self.root, "--git-dir=" + str(quarantine), "fsck", "--full", "--strict",
+                               "--no-reflogs", "--no-dangling", commit, check=True)
+                    for directory, name in copied:
+                        target = self.root / ".git" / "objects" / directory / name
+                        if target.exists():
+                            continue
+                        data = gitops._read_beneath(quarantine, ("objects", directory), name, 512 * 1024 * 1024)
+                        gitops._write_beneath(self.root / ".git", ("objects", directory), name, data, create=True)
         if not self.git("merge-base", "--is-ancestor", attempt["input_commit"], commit).ok:
             raise gitops.GitError("result does not descend from input commit")
         retention_ref = "refs/heads/node-results/" + attempt["attempt_id"]
@@ -464,7 +475,12 @@ class Results:
             if self.persist_capture is None:
                 raise gitops.GitError("result capture journal is unavailable")
             self.persist_capture(decision)
-        self.move(retention_ref, commit, "")
+        # A successful non-writing isolated attempt that returned its input
+        # has no new result to pin. Keep unexpected commits and failed-run
+        # recovery refs, along with legacy and pre-upgrade retention.
+        if not (isolated and attempt.get("writes") is False and run.status == "done"
+                and commit == attempt["input_commit"]):
+            self.move(retention_ref, commit, "")
         return {"status": run.status, "session_id": run.session_id, "branch": branch,
                 "run_dir": str(self.paths.run_dir(run.id)), "commit": commit, "checkout_commit": checkout_commit,
                 "readonly_reverted": reverted, **({"readonly_kept": kept} if kept else {})}

@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -48,12 +50,14 @@ class IsolatedExecutor(Executor):
         self.version = "unavailable"
         self.problem = "isolated docker lifecycle is not implemented yet"
         self.record = lambda fields: None
+        from ..provision.seeds import SeedRegistry
+        self.seeds = SeedRegistry(paths) if paths else None
         target = os.environ.get("MULTIAGENTS_TEST_ISOLATED_BACKEND")
         if target:
             try:
                 module, factory = target.split(":", 1)
                 root = paths.data / "isolated" if paths else Path.cwd() / ".isolated"
-                self.backend = getattr(importlib.import_module(module), factory)(root)
+                self.backend = getattr(importlib.import_module(module), factory)(root, seeds=self.seeds)
                 self.backend_name = getattr(self.backend, "name", "reference")
                 self.version = self.backend.version
                 if not isinstance(self.version, str) or not self.version:
@@ -95,13 +99,44 @@ class IsolatedExecutor(Executor):
         result = await outcome(self.backend.probe)
         return [result.reason] if isinstance(result, Unknown) else result
 
-    def bind(self, owner, record, *, previous=None, begin=None):
+    def bind(self, owner, record, *, previous=None, begin=None, attempt=None,
+             checkout=None, branch="", authority=None):
         self.record = record
         self.begin = begin or record
         self.previous = dict(previous or {})
         self.restore(self.previous)
-        self.spec = LaunchSpec(owner=owner, lifetime="attempt",
+        self.attempt, self.checkout, self.branch, self.authority = attempt, checkout, branch, authority
+        self.spec = LaunchSpec(owner=owner, lifetime="conversation" if (attempt or {}).get("alias_id") else "attempt",
                                labels={"multiagents.project": self.paths.slug if self.paths else ""})
+
+    async def _install_checkout(self, identity):
+        """Bridge the reference guest storage to the host's guarded capture path."""
+        if not self.attempt or not self.checkout or not self.authority:
+            return
+        from ..scheduler.sessions import checkout_swap, install_checkout, swap_intent
+        from ..provision.git import git_command, git_env
+        path = Path(self.checkout)
+        home = self.paths.home(self.attempt["alias_home"]) if self.attempt.get("alias_id") else None
+        if not self.attempt.get("cleanup"):
+            staged = path.with_name(".seed-" + self.attempt["attempt_id"])
+            intent = checkout_swap(self.paths, self.attempt)
+            if intent.get("state") != "done":
+                if intent.get("state") != "swapping" and not intent.get("complete"):
+                    source = await self.backend.checkout_path(identity)
+                    if not isinstance(source, Path):
+                        raise RuntimeError("provisioned checkout is missing")
+                    if staged.exists():
+                        shutil.rmtree(staged)
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(source, staged, symlinks=True)
+                    subprocess.run(git_command("-C", str(staged), "checkout", "-b", self.branch,
+                                               self.attempt["input_commit"]),
+                                   env=git_env(), check=True, capture_output=True)
+                    swap_intent(self.paths, self.attempt, path, staged, complete=True)
+            install_checkout(self.paths, self.authority, path, staged, self.attempt)
+        reply = await self.backend.attach_checkout(identity, path, home)
+        if not isinstance(reply, ResourceIdentity):
+            raise RuntimeError(getattr(reply, "reason", "checkout attachment failed"))
 
     def _uncertain(self, creation_key, operation, reply):
         return Unknown(f"predecessor {creation_key}: {operation}: "
@@ -151,6 +186,10 @@ class IsolatedExecutor(Executor):
         if self.backend is None:
             raise RuntimeError("isolation_unavailable: " + self.problem)
         if self.previous.get("creation_key"):
+            if (self.previous.get("attempt_id") == self.spec.owner
+                    and not self.previous.get("invocation_id")):
+                return Unknown("own interrupted launch requires unlaunched-claim recovery: "
+                               + self.previous["creation_key"])
             resolved = await self._resolve_failure(self.previous["creation_key"],
                                                    self.previous.get("invocation_key", ""), None)
             if isinstance(resolved, Unknown):
@@ -159,9 +198,32 @@ class IsolatedExecutor(Executor):
         creation_key = self.creation_key = "resource-" + launch_id
         invocation_key = "invocation-" + launch_id
         self.termination_confirmed = False
-        self.begin({"kind": self.kind, "backend": self.backend_name,
+        fields = {"kind": self.kind, "attempt_id": self.spec.owner, "backend": self.backend_name,
                     "backend_version": self.version, "spec_version": self.spec.spec_version,
-                    "spec_digest": spec_digest(self.spec), "creation_key": creation_key})
+                    "creation_key": creation_key}
+        try:
+            if self.attempt:
+                if self.previous.get("seed") and self.previous.get("attempt_id") == self.spec.owner:
+                    self.spec.seed = self.seeds.restore(self.previous["seed"], self.spec.owner)
+                elif self.attempt.get("input_commit"):
+                    self.spec.seed = self.seeds.build(self.spec.owner, self.attempt["input_commit"])
+                else:
+                    raise ValueError("seed_required")
+                fields["seed"] = self.seeds.record(self.spec.seed, self.spec.owner)
+                if self.attempt.get("alias_id") and not self.attempt.get("cleanup"):
+                    from ..scheduler.sessions import swap_intent
+                    path = Path(self.checkout)
+                    swap_intent(self.paths, self.attempt, path,
+                                path.with_name(".seed-" + self.attempt["attempt_id"]))
+            fields["spec_digest"] = spec_digest(self.spec)
+        except Exception as exc:
+            from ..provision.seeds import SeedError
+            terminal = isinstance(exc, (SeedError, ValueError))
+            failure = {"class": "other" if terminal else "launch", "retryable": not terminal,
+                       "detail_code": "isolation_unavailable", "excerpt": str(exc)}
+            self.begin({**fields, "failure": failure, "termination_confirmed": True})
+            raise RuntimeError("isolation_unavailable: " + str(exc)) from exc
+        self.begin(fields)
         if run_dir is not None:
             directory = gitops._open_beneath(*gitops.beneath(run_dir), create=True)
             try:
@@ -183,9 +245,26 @@ class IsolatedExecutor(Executor):
                        "excerpt": getattr(identity, "reason", str(identity))}
         else:
             self.record({"identity": identity.id, "invocation_key": invocation_key})
+            try:
+                await self._install_checkout(identity)
+            except Exception as exc:
+                failure = {"class": "launch", "detail_code": "isolation_unavailable", "excerpt": str(exc)}
+                self.record({"failure": failure})
+                resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
+                if isinstance(resolved, Unknown):
+                    return resolved
+                raise RuntimeError("isolation_unavailable: " + str(exc)) from exc
             environment = strip_run_environment(dict(self.adapter_env(argv, env, provider)))
+            from ..agentwrap import prompt_stdin
+            source = prompt_stdin(environment)
+            stdin = None
+            if hasattr(source, "close"):
+                try:
+                    stdin = await self.backend.prepare_input(identity, source)
+                finally:
+                    source.close()
             invocation = InvocationSpec(argv=list(argv), env=environment, cwd=self.spec.guest_repo,
-                                        stdin=None, kind="agent")
+                                        stdin=stdin, kind="agent")
             reply = await outcome(self.backend.run, identity, invocation, invocation_key)
             if reply == invocation_key:
                 self.record({"invocation_id": reply})

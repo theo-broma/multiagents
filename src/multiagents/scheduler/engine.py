@@ -751,6 +751,7 @@ class Engine:
                 current.pop("session_unavailable_notified", None)
                 spec = config.agents[current["agent"]]
                 prepared["readonly_paths"] = list(config.readonly_paths_for(spec))
+                prepared["writes"] = spec.writes
                 parent = current_nodes.get(current["parent"])
                 if current.get("launch", {}).get("_review_commit"):
                     prepared["input_commit"] = current["launch"]["_review_commit"]
@@ -1307,7 +1308,7 @@ class Engine:
                         self.finished(attempt, SimpleNamespace(id=run.id, status="failed", session_id=run.session_id))
                     continue
                 pending = attempt.get("resume_pending")
-                if pending and run.turn_started_at > attempt.get("previous_turn", 0):
+                if pending and (run.turn_started_at or 0) > (attempt.get("previous_turn") or 0):
                     with self.service.changed, self.store.transaction() as db:
                         current = attempt_records(db)[attempt["attempt_id"]]
                         current.pop("resume_pending", None)
@@ -1635,7 +1636,11 @@ class Engine:
             self.runner._release(run.id)
         result = {"status": run.status, "session_id": run.session_id, "need_info": getattr(run, "need_info", []),
                   "run_dir": str(self.paths.run_dir(run.id))}
-        if "input_commit" in current:
+        executor_evidence = current.get("launch_evidence", {}).get("executor", {})
+        unstarted_isolated = (executor_evidence.get("kind") == "isolated"
+                              and executor_evidence.get("failure")
+                              and not executor_evidence.get("invocation_id"))
+        if "input_commit" in current and not unstarted_isolated:
             from .results import MissingCheckout
 
             def persist_capture(decision):
