@@ -6041,3 +6041,6 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - **Ticket bug-a3d76f:** regression test merged e10818a3 (decided: legacy ""-session unseen history
   is not imported into a no-ID wait). Fix review-loop nd-6d5460da (implementer-quick nd-d32ff131 codex,
   reviewer nd-683cedee). At merge: resolve_ticket fixed (never submit).
+- **Slice 2 tester ag-f5cce9 done** (nd-1ea96d2c, not merged), 7 NEED_INFOs -> draft "Slice 2
+  clarifications" Q1..Q7 in the contract, UNCOMMITTED (backup in scratchpad), awaiting user yes;
+  then tester round 2, merge. Slice 1 adversary ag-d1670a passed its 1500 s wall clock, still running.
