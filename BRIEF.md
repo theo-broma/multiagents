@@ -6231,3 +6231,4 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
     user's to apply.
 
 - 2026-10-15 21:50 CEST: slice 3 deposited ahead of the slice 2 merge. Loop nd-107f13d6 (implementer-deep + reviewer, base `git merge 11d27e1a`), adversary nd-9fd98257 depends_on/inputs the loop. If the main+11d27e1a suite shows a slice 2 regression, steer the slice 3 implementer to merge the fix commit. bug-30623f part 1 (sessions.py pins) still waits for the slice 2 merge.
+- 2026-10-15 22:00 CEST: watchdog fix merged (dc4f9a5d), bug-d3bf10 resolved fixed. Noted: tests/test_nc_m2_lifecycle.py::test_nc_r17_repeated_crashes_still_leave_one_run_per_node[0.1] fails on main+slice2 and on main+watchdog alike (not in baseline); tb2_r6 alias cleanup is flaky under load (a different case fails each run). To diagnose after the slice 2 merge.
