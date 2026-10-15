@@ -1,5 +1,7 @@
 ---
-status: ready
+status: imported
+applied_in: 8b150ac9
+imported_in: 8b150ac9
 ---
 # Monitor: two display defects in the scheduler panel
 
