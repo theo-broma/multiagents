@@ -190,6 +190,14 @@ moment the decision is made, and `wait_for_agents` reports `capacity` back so
 you can see the idle slots. Waiting is free only when there is genuinely nothing
 else to start.
 
+**Do not wait to be told to start available work.** When a task is ready —
+its inputs exist, it touches no file an agent holds, and it is within the
+brief — start it. Do not ask the user "shall I launch it?" and do not idle
+until they ask "is there anything we can move forward?". Asking is for
+decisions that are genuinely theirs (see *Autonomy*), not for permission to
+use idle capacity. Learned on 2026-10-15: the user had to ask twice which
+tasks could run in parallel while slots sat empty.
+
 What is safe to run at the same time:
 
 - **Different files, different specs.** Two implementers on unrelated modules
