@@ -1366,7 +1366,10 @@ class Engine:
                                 continue
                             node = self.store.node_records(db)[attempt["node_id"]]
                             db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (attempt["run_id"],))
-                            if (evidence.exists() or current.get("launch_evidence")
+                            # Executor selection is persisted with the claim,
+                            # before any worker starts. Only a launch identity
+                            # (even an incomplete one) is process evidence.
+                            if (evidence.exists() or "pid" in (current.get("launch_evidence") or {})
                                     or current.get("launch_in_progress") or current["state"] == "launched"):
                                 if confirmed:
                                     current.update(state="abandoned", ended_at=now())
@@ -1395,6 +1398,7 @@ class Engine:
                             else:
                                 current.update(state="abandoned", ended_at=now())
                                 save_attempt(db, current)
+                                self.recovered(db, current, node)
         for attempt in settled:
             self.finished(attempt, self.missing_result(attempt))
         self.children = [p for p in self.children if p.poll() is None]
