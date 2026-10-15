@@ -6050,3 +6050,12 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   runs[].executor projection in scheduler/engine.py on some record shape). Others passed serially (load).
   Plan: relaunch loop nd-6d1ca605 (rev 4) with this + adversary findings in one round once the
   adversary (ag-d1670a) reports.
+- **Slice 1 adversary ag-d1670a (nd-750860bb): rejected, 4 findings** — high: 2nd steer of an isolated
+  run refused (keys from owner only, WIP lost); medium: steer drops earlier resource evidence; reference
+  stop trusts a guest-writable pid record (kills unrelated process); stderr tail lost at exit. Plus
+  config annoyances and ~25 surviving mutants. Its 3 test files committed to main 0ac5678a.
+  Decided: unique keys per launch, previous resource stopped/removed keep_artifacts; evidence keeps an
+  append-only history of earlier launches. Loop nd-6d1ca605 relaunched (round 2, rev 5) with the suite
+  regression + these. Mutant-killing tests: tester nd-6d69606a (tests/test_ic_c4_mutants.py).
+  Note: several IC scheduler tests time out under load (k10 [start-3]/[provision-3], k3 other kinds,
+  c2a k5) — tester to make waits load-tolerant if they stay flaky.
