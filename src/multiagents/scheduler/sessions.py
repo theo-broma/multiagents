@@ -42,6 +42,25 @@ def save_alias(db, binding):
     db.execute("INSERT OR REPLACE INTO aliases VALUES (?, ?)", (binding["id"], encode(binding)))
 
 
+def provider_family(provider, config):
+    declaration = config.providers.get(provider, {})
+    return declaration.get("family") or declaration.get("extends") or provider
+
+
+def pin_changed(node, binding, config):
+    """A current pin may replace a conversation, never silently resume it elsewhere."""
+    pins = node["pins"]
+    if not binding or binding.get("renew") or not (pins.get("provider") or pins.get("model")):
+        return False
+    provider = pins.get("provider") or binding["provider"]
+    account = config.providers.get(provider, {}).get("container_account") or provider
+    return (provider != binding["provider"]
+            or pins.get("model", binding["model"]) != binding["model"]
+            or account != binding["account"]
+            or provider_family(provider, config) != binding.get(
+                "family", provider_family(binding["provider"], config)))
+
+
 def validate_attachments(nodes, original, journal, bindings):
     launched = {alias_id(node, original) for node in original.values() if node["runs"]}
     launched.update(key for key, binding in bindings.items() if binding.get("last_run"))
@@ -61,11 +80,14 @@ def blockers(node, nodes, journal, bindings, runner):
     key = alias_id(node, nodes)
     if not key:
         return []
+    binding = bindings.get(key)
+    changed = pin_changed(node, binding, runner.config) if binding else False
     if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured", "suspended"}
            for a in select_records(journal, "claimed", "launched", "captured", "suspended")):
+        if changed:
+            return [{"code": "session_binding", "detail": binding["provider"]}]
         return [{"code": "session_busy", "detail": node["session"]}]
-    binding = bindings.get(key)
-    if binding and not binding.get("renew"):
+    if binding and not binding.get("renew") and not changed:
         if unavailable(binding, runner):
             return [{"code": "session_unavailable", "detail": binding["provider"]}]
     return []
@@ -87,7 +109,8 @@ def freeze(db, node, nodes, result, paths, config):
         return {}
     bound = aliases(db).get(key)
     provider = result["provider"]
-    family = config.providers.get(provider, {}).get("family") or config.providers.get(provider, {}).get("extends") or provider
+    family = provider_family(provider, config)
+    changed = pin_changed(node, bound, config)
     # Recheck at activation: an accepted assignment may have outlived its
     # provider declaration. Its actual route must still match the alias family.
     for other in nodes.values():
@@ -95,13 +118,26 @@ def freeze(db, node, nodes, result, paths, config):
             continue
         spec = config.agents.get(other.get("agent"))
         declared = other["pins"].get("provider") or (spec.provider if spec else None)
+        if other["id"] == node["id"] and other["pins"].get("model"):
+            # A model-only pin can select a configured fallback family.
+            declared = provider
         if declared:
-            other_family = config.providers.get(declared, {}).get("family") or config.providers.get(declared, {}).get("extends") or declared
+            other_family = provider_family(declared, config)
             if other_family != family:
                 invalid("session: incompatible provider families at activation")
+    if changed:
+        # Preserve the old store and its route. A fresh HOME also prevents a
+        # different provider/account from adopting provider-local state.
+        bound.setdefault("archives", []).append({k: bound[k] for k in
+            ("provider", "family", "account", "model", "session_id", "home_id", "last_run") if k in bound})
+        bound.update(renew=True, reason="provider_changed",
+                     home_id="alias-" + key[:24] + "-" + uuid.uuid4().hex[:12])
     if bound and bound.get("renew"):
+        if not changed:
+            bound.pop("reason", None)
         bound.update(provider=provider, model=result["model"], session_id=None,
-                     account=config.providers.get(provider, {}).get("container_account") or provider)
+                     account=config.providers.get(provider, {}).get("container_account") or provider,
+                     family=family)
         bound.pop("renew")
         save_alias(db, bound)
     if bound:
@@ -110,9 +146,11 @@ def freeze(db, node, nodes, result, paths, config):
     else:
         bound = {"id": key, "alias": node["session"], "instance": instance_node(node, nodes)["template"]["instance"],
                  "provider": provider, "account": config.providers.get(provider, {}).get("container_account") or provider,
-                 "model": result["model"], "session_id": None, "worktree": str(paths.worktree("alias-" + key[:24])),
+                 "family": family, "model": result["model"], "session_id": None,
+                 "worktree": str(paths.worktree("alias-" + key[:24])),
                  "home_id": "alias-" + key[:24]}
         save_alias(db, bound)
+    bound.setdefault("family", family)
     kind = (result.get("executor_selection") or {}).get("kind") or config.executor
     # Old bindings predate isolated resources. Their HOME belongs to the
     # legacy activation, whichever of the two legacy executors it uses.
@@ -123,6 +161,7 @@ def freeze(db, node, nodes, result, paths, config):
     save_alias(db, bound)
     return {"alias_id": key, "alias_worktree": bound["worktree"], "alias_home": bound["home_id"],
             "previous_executor_kind": previous_kind,
+            **({"reason": "provider_changed"} if not bound["session_id"] and bound.get("reason") == "provider_changed" else {}),
             "session_id": bound["session_id"], "binding": {k: bound[k] for k in ("provider", "account", "model")}}
 
 

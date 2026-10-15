@@ -100,6 +100,7 @@ def record_launch(store, db, attempt, run):
     if not any(r["attempt_id"] == attempt["attempt_id"] for r in node["runs"]):
         node["runs"].append({"run_id": run.id, "attempt_id": attempt["attempt_id"],
                              "activation_id": attempt["activation_id"],
+                             **({"reason": "provider_changed"} if current.get("reason") == "provider_changed" else {}),
                              **({"input_commit": attempt["input_commit"]} if "input_commit" in attempt else {})})
     if node["state"] == "open":
         node.update(state="running", ready_since=None, revision=node["revision"] + 1)
@@ -596,7 +597,7 @@ class Engine:
                 self.admission_refusals.pop(node["id"], None)
                 continue
             session_blocked = self.session_blockers(node, nodes, journal)
-            if session_blocked and session_blocked[0]["code"] == "session_busy":
+            if session_blocked and session_blocked[0]["code"] in {"session_busy", "session_binding"}:
                 self.reasons[node["id"]] = session_blocked
                 self.admission_refusals.pop(node["id"], None)
                 continue
@@ -622,7 +623,7 @@ class Engine:
                     blockers = self.session_blockers(current, current_nodes, attempt_records(db), db)
                     if (current["state"] != "open" or current["revision"] != node["revision"]
                             or sessions.aliases(db).get(alias_key) != checked_binding
-                            or (blockers and blockers[0]["code"] == "session_busy")):
+                            or (blockers and blockers[0]["code"] in {"session_busy", "session_binding"})):
                         continue
                     cleanup = sessions.request_cleanup(self.store, db, current, checked_binding,
                                                        self.runner, clean_failure[1], task)
@@ -645,13 +646,21 @@ class Engine:
                 continue
             binding = checked_binding
             probe = self.context(node, probe=True)
-            if binding and binding.get("renew"):
+            renew_for_pin = sessions.pin_changed(node, binding, config)
+            if binding and (binding.get("renew") or renew_for_pin):
                 binding = None
             if binding:
                 probe = replace(probe, provider=binding["provider"])
+            probe_model = binding["model"] if binding else node["pins"].get("model")
+            if renew_for_pin and not probe_model and probe.provider:
+                # Runner's model pin holds this exact route through quota
+                # admission, including when only the provider was edited.
+                spec = self.runner._usable_spec(config.agents[node["agent"]], probe.provider, resume=True)
+                probe_model = (checked_binding["model"] if probe.provider == checked_binding["provider"]
+                               else (spec or config.agents[node["agent"]]).model)
             try:
                 result = await self.runner.start(node["agent"], node["task"],
-                                                 model=binding["model"] if binding else node["pins"].get("model"),
+                                                 model=probe_model,
                                                  launch_context=probe,
                                                  **node.get("launch", {}))
             except Exception as exc:

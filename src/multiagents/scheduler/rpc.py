@@ -727,6 +727,10 @@ class Service:
             self.store.transition(db, transition, node["id"])
         self.store.set_meta(db, "plan_revision", plan_revision)
         result = self.view(reply_node or node, plan_revision)
+        if op == "update_node" and "pins" in args:
+            binding = sessions.aliases(db).get(sessions.alias_id(node, nodes))
+            if sessions.pin_changed(node, binding, config):
+                result["session_renewal"] = {"reason": "provider_changed", "at": "next_admission"}
         if aliased:
             return {**result, "warnings": aliased}
         return result
