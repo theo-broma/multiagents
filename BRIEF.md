@@ -6200,3 +6200,23 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   marks swap done (P7, medium). Tests on main 37676f23 (tests/test_ic_adv4_*.py, 4 red on dd83ea5c).
   All six pass-3 mutants killed. Loop relaunched for a round. Full suite on main+dd83ea5c running
   (/var/tmp/ic-comb). Never merge_node nd-31a94b6a (contains a readonly-restore commit reverting src).
+- HANDOFF ~21:30 CEST 2026-10-15 (orchestrator context wind-down):
+  * Main 41ecb63e: K16, K17(+K17.4 erratum), K18, slice 3 red suite (b7ede3e7), slice 4A contract (ee50b391,
+    IC-C20..C24) + 4A red suite (56fba0b1, 41ecb63e incl K18 cases), adv4 tests 37676f23, c9 race fix c6df5766,
+    orchestrator brief rule "deposit the plan ahead" (16773dbe). kimi removed from fallbacks.
+  * SLICE 2: loop nd-0f41b6c3 APPROVED round 3 at 11d27e1a (IC-C8 gate for nc_r58). Full suite running on
+    main+11d27e1a in /var/tmp/ic-comb (bg db230112bdca; reds -> /var/tmp/comb-suite-reds.txt). Compare with
+    scratchpad base.s excluding test_ic_(c1[4-9]|k17|c2[0-4]); expected only C2b milestone reds. If clean:
+    merge_node nd-0f41b6c3, then DEPOSIT slice 3 chain (implementer-deep+reviewer loop from contract slice 3 +
+    K17, then adversary depends_on), then bug-30623f part 1 (alias pins at admission; sessions.py).
+    Never merge_node adversary nodes nd-31a94b6a/nd-b08f43ef (take tests only). Slice 3 also needs host
+    real-Docker runs (SG_TEST_DOCKER=1, 91 cases) after implementation.
+  * bug-d3bf10 watchdog: nd-bcbf287b approved (reviewer nd-10a54a45) at 75822f39; full suite running on
+    main+75822f39 in /var/tmp/wd-comb (bg 3b90a514f86d, reds /var/tmp/wd-suite-reds.txt). If clean:
+    merge_node nd-bcbf287b, resolve_ticket bug-d3bf10 fixed.
+  * bug-30623f part 2 (consult correlation + provider-family session): nd-24571e24 relaunched to do
+    HOST-SIDE correlation (no reply markers; existing consult tests unchanged); reviewer nd-f855c993 deposited
+    depends_on. Then full suite + merge; ticket stays open until part 1 (pins) done.
+  * Slice 4B: advisor skeleton in .multiagents/handoff/slice4b-advisor-skeleton.md (IC-C25..C31); draft
+    contract, show user, commit on yes. 4C (credentials) after.
+  * Dispose done tester nodes when convenient; remove /var/tmp/ic-comb and /var/tmp/wd-comb when done.
