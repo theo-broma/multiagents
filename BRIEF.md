@@ -6194,3 +6194,9 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - In flight: slice 2 implementer nd-fe176cc7 (loop nd-0f41b6c3, rounds_rejected 2/3): ff to its merge
   e51fc73c (ref orch/slice2-merge-e51fc73c in alias repo), merge d247b21d, K16, F2-F5. Then reviewer,
   re-adversary, full suite, merge. Slice 3 implementer-deep waits for slice 2 on main (needs K15 seam).
+- ~19:45 CEST: slice 2 dd83ea5c approved by review; adversary pass 4 (nd-31a94b6a, run on codex-b
+  after a first codex "cybersecurity" refusal -> reworded as robustness tests) REJECTED 3: packed delta
+  base bypasses P4 inflation bound (high), own failed claim relaunched (K16, high), archive collision
+  marks swap done (P7, medium). Tests on main 37676f23 (tests/test_ic_adv4_*.py, 4 red on dd83ea5c).
+  All six pass-3 mutants killed. Loop relaunched for a round. Full suite on main+dd83ea5c running
+  (/var/tmp/ic-comb). Never merge_node nd-31a94b6a (contains a readonly-restore commit reverting src).
