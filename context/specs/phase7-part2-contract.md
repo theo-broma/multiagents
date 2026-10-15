@@ -1062,6 +1062,172 @@ in slice 3:
 
 Milestones 4 to 6 stay red.
 
+### Slice 3 clarifications (2026-10-15, after the tester's first pass)
+
+**K17 — names the slice 3 contract left unsaid (D-S3.2, D-S3.3, IC-C14,
+IC-C18; the tester's NEED_INFO on nd-8a27cb3a).**
+
+**K17.1 — the Docker backend and its configuration (D-S3.3, IC-C14).**
+- Constructor: `multiagents.executor.lifecycle.DockerBackend(root: Path, *,
+  seeds=None, cli="docker", image="multiagents/workspace:latest", resources=None)`, next to
+  `ReferenceBackend`.
+  - Construction has no Docker or filesystem side effect.
+  - It implements IC-C4 and K15, and has `.name == "docker"` and a non-empty
+    `.version`.
+- Selection: `executor.kind: isolated` with `executor.isolated.backend:
+  docker`, the default.
+- Docker settings: `executor.isolated.docker.cli` and
+  `executor.isolated.docker.image`, defaulting to the constructor defaults.
+  - `cli` is an executable name resolved through the host scheduler's PATH,
+    or an absolute path to an executable. It is never a shell command.
+  - Nothing is inherited from the legacy `executor.docker` block.
+- Resources: `executor.isolated.resources`, with these keys and defaults:
+  - `memory: "6g"`;
+  - `pids: 4096`;
+  - `cpu_shares: 1024`;
+  - `cpus: null`, meaning no cap.
+- Rules for resource values:
+  - An omitted or null value takes its default.
+  - Zero, a negative or a malformed value is a config error that names the
+    full key (F32).
+  - An explicit `LaunchSpec.resources` entry overrides the backend default.
+- `probe()` reports unavailable prerequisites. A launch never builds an
+  image.
+- Verified by:
+  - an import and constructor test;
+  - config validation tests;
+  - fake-CLI tests of selection and flags;
+  - the real-Docker conformance suite.
+
+**K17.2 — the provider's declaration of what it needs (D-S3.2).**
+- A provider declares `needs` in its `providers.yaml` entry, alongside
+  `spawn` and `auth`:
+  ```yaml
+  needs:
+    credentials: false
+    network: false
+    rpc: false
+  ```
+- Defaults and validation:
+  - Each value is a boolean.
+  - An omitted member is `true`. An omitted block means all three are `true`.
+  - Null, a non-mapping, an unknown member or a non-boolean is a config
+    error naming the provider and the field.
+  - The block follows normal provider layering and `extends` inheritance.
+- On `isolated`, slice 3 checks the declaration before any provisioning or
+  provider preparation. Precedence is credentials, then network, then RPC:
+  - `credentials: true` is refused with `Unsupported("credential_handle")`;
+  - `network: true` is refused with `Unsupported("network")`;
+  - `rpc: true` is refused with `Unsupported("transport_handle")`.
+  - Each refusal is TF class `other`.
+- Declaring all three false never waives an actual need. A non-empty
+  `credential_handle` or `transport_handle` is still refused (K9).
+- Verified by:
+  - parsing, inheritance and default tests;
+  - one test per refusal, showing no resource and no provider preparation;
+  - a provider that declares all three false runs.
+
+**K17.3 — K15, the slice 2 provisioning seam (IC-C4).** Both backends expose
+these async methods:
+- `checkout_path(identity) -> Path | Absent | Unknown`:
+  - returns the absolute host path of the resource's current repository,
+    including after retention;
+  - a discarded or absent resource gives `Absent`.
+- `attach_checkout(identity, checkout: Path, home: Path | None = None) ->
+  ResourceIdentity | Absent | InvalidSpec | Unknown`:
+  - associates a host-authorised checkout, and optionally a HOME, with the
+    resource before invocation;
+  - later execution sees them at the declared guest paths, and
+    `checkout_path` returns the attached checkout;
+  - an omitted `home` keeps the current association;
+  - an identical repeated attachment is idempotent;
+  - it preserves the resource identity, and attaching never starts a
+    process;
+  - a running resource is refused, and uncertain state gives `Unknown`.
+- `prepare_input(identity, source: BinaryIO) -> str | Absent | InvalidSpec |
+  Unknown`:
+  - snapshots the already-framed input bytes into host-controlled storage;
+  - returns an absolute path accepted by `InvocationSpec.stdin`;
+  - leaves `source` open, and later changes to `source` cannot change the
+    snapshot;
+  - the snapshot lasts until discard.
+- Error outcomes:
+  - A path not authorised for that resource gives `InvalidSpec`, and no
+    association changes.
+  - A missing resource gives `Absent`.
+  - Operational failures follow K7.
+  - These typed outcomes are binding, even where the slice 2 code at
+    3127f4f7 raises instead.
+- Verified by: conformance on both backends covering attachment, the actual
+  guest content, stdin bytes, retention and discard, invalid paths and
+  uncertain state.
+
+**K17.4 — reserved labels (K12, IC-C14).** A Docker container carries:
+- `multiagents.project`, supplied by the host;
+- `multiagents.owner`, which is `spec.owner` (the attempt id in slice 3);
+- `multiagents.lifetime`, which is `spec.lifetime`;
+- `multiagents.creation_key`, the provision key;
+- `multiagents.spec_digest`, the IC-C4 canonical digest.
+
+Rules:
+- The last four are generated by the backend and are excluded from the
+  digest of `spec.labels`.
+- Supplying any of the five through `spec.labels` gives `InvalidSpec`.
+- The test-session label `multiagents.test.owner` is preserved.
+- Verified by: tests of inspected labels, digest consistency, reserved-label
+  refusal and project filtering.
+
+**K17.5 — orphan reporting (IC-C18).**
+- Root `scheduler_status` gains `orphans` and `orphans_error`.
+  `multiagents scheduler orphans` prints the same two fields as JSON, from
+  the same discovery result. Existing status fields are unchanged.
+- `orphans` is a list sorted by `container_id`. Each entry is
+  `{container_id, name, labels, created_at, project, attempt_id, reason}`:
+  - `labels` is the full label mapping;
+  - `created_at` is an RFC 3339 string;
+  - `attempt_id` may be null;
+  - `reason` is `unrecorded_attempt` or `discarded_node`.
+- Discovery reconciles recorded identities and creation keys before
+  classifying, so a container in the window between create and recording
+  its id is not reported.
+- Successful discovery gives `orphans_error: null`. Failed or incomplete
+  discovery gives `orphans: null` and `orphans_error: {reason}`, never an
+  empty list.
+- A scoped, non-root `scheduler_status` omits both fields.
+- Listing never removes anything.
+- Verified by:
+  - parity between the CLI and status output;
+  - both reasons;
+  - retained resources are excluded;
+  - the creation window;
+  - project filtering;
+  - daemon failure;
+  - scoped visibility.
+
+**K17.6 — orphan removal (IC-C18).** `multiagents scheduler remove-orphan
+CONTAINER_ID` is a host-user command. No agent RPC exposes it.
+- It accepts only an exact, full container id. Names and prefixes are
+  refused.
+- It rechecks project ownership and orphan status, resolving recorded
+  creation keys first.
+- A confirmed orphan is stopped with the cancellation grace, then removed
+  with `remove(identity, keep_artifacts=False)`. Storage is deleted only on
+  backend authority, never at a path taken from a label.
+- Uncertainty stops any further deletion, and the container stays reported.
+- Output:
+  - success is `{ok: true, container_id, state: "absent"}`, and an
+    already-absent container also succeeds;
+  - failure is `{ok: false, container_id, error, reason}`, with `error` one
+    of `not_orphan`, `wrong_project`, `unknown` or `invalid_id`, and a
+    non-zero exit.
+- Verified by:
+  - removing an orphan;
+  - stopping a live orphan;
+  - refusing a retained or non-orphan container;
+  - refusing another project's container;
+  - daemon uncertainty;
+  - a repeated removal.
+
 ### Slice 3 work split
 
 1. **`tester`:** the fake `docker` CLI under `tests/support/` (scriptable
