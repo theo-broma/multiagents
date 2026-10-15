@@ -6138,5 +6138,11 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   resolve_ticket bug-a3d76f. Then slice 2: merge slice 1 tip into it, reviewer nd-feb2ec0f,
   adversary (mandatory), full suite, merge_node nd-0f41b6c3.
 - merge_node is now allowed by a local permission rule (user-run script).
+- 11:35 CEST update: nd-fe176cc7 launched on codex-b (run ag-45ba0b), so alias A is NOT bound
+  to account codex. nd-3855912d re-pinned opencode-zai/glm-5.3 (user rule: fallback when codex is
+  exhausted), but admission still routes via alias A's codex binding: an open child of a running
+  loop can be neither rebound (update_node session -> "already launched") nor relaunched (not
+  settled), and cancel_node would leave it unrelaunchable. Scheduler gap to ticket. It waits for
+  the 13:16 reset; at the 13:20 wake, if it launched on codex, fine.
 - Never tell an alias-session implementer to check out files uncommitted: it causes a
   dirty_worktree hold (cleared by hand in the alias worktree this time).
