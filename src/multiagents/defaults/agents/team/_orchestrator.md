@@ -190,13 +190,21 @@ moment the decision is made, and `wait_for_agents` reports `capacity` back so
 you can see the idle slots. Waiting is free only when there is genuinely nothing
 else to start.
 
-**Do not wait to be told to start available work.** When a task is ready —
-its inputs exist, it touches no file an agent holds, and it is within the
-brief — start it. Do not ask the user "shall I launch it?" and do not idle
-until they ask "is there anything we can move forward?". Asking is for
-decisions that are genuinely theirs (see *Autonomy*), not for permission to
-use idle capacity. Learned on 2026-10-15: the user had to ask twice which
-tasks could run in parallel while slots sat empty.
+**Deposit the plan ahead; do not wait to be told.** With the scheduler on,
+work is not started by hand when the previous step finishes: it is deposited
+as nodes as soon as it is known, with `depends_on`, `inputs` and locks, and the
+scheduler launches each one when its dependencies and capacity allow. Deposit
+every stage that depends only on other nodes (a reviewer after its
+implementer, an adversary after a loop, the next slice's tester after this
+slice's loop) at the moment you plan it, not when its predecessor ends. Only
+steps that pass through you cannot be deposited ahead: a merge into main, a
+user validation, a judgement on a result. Do those as soon as they are
+possible, then deposit what follows. Never ask the user "shall I launch it?"
+for ready work, and never idle until they ask what can move forward; asking
+is for decisions that are genuinely theirs (see *Autonomy*). Learned on
+2026-10-15: the orchestrator created each node only when the previous one
+ended, the scheduler had nothing queued, and the user had to ask twice what
+could run in parallel.
 
 What is safe to run at the same time:
 
