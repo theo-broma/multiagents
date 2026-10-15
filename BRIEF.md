@@ -6014,3 +6014,6 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   advisor turn 23 changed K6: compute reservation freed on confirmed termination).
   Tester nd-8860c8a3 relaunched (round 2, revision 4) to align. Next: merge tester,
   implementer-deep review-loop, adversary, full suite, merge.
+- **Tooling note (to bug-reporter at next stop):** `wait_for_agents()` with no ids, while
+  tester run ag-58e4ca was running, returned at once with ~90 long-finished historic
+  agents and "every agent you named had already finished" — it did not wait on the live run.
