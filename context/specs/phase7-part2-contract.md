@@ -235,6 +235,121 @@ tests, the IC-R13 isolation suite written red, and the latency benchmark.
   suite equals the 70-id baseline.
 - Verified by: the full suite, run by the orchestrator before merge.
 
+### Slice 1 clarifications (2026-10-15, after the tester's first pass)
+
+These settle what the tester had to guess and what slice 1 left unsaid. They
+refine the ids above; they add no new behaviour id.
+
+**K1 — Python names (IC-C4, IC-C5).** In `multiagents.executor.lifecycle`:
+- `ReferenceBackend(root: Path)`, with `.version: str`.
+- `LaunchSpec(spec_version=1, owner, lifetime, labels, writable_paths,
+  readonly_paths, guest_repo, guest_home, guest_temp, seed, session_state,
+  resources, credential_handle, transport_handle)`.
+  - Optional fields default to empty.
+  - Guest paths default to `/work/repo`, `/work/home` and `/work/tmp`.
+- `InvocationSpec(argv, env, cwd, stdin, kind)`.
+- `ResourceIdentity`: frozen and hashable, with `.id`.
+- Outcomes: `InvalidSpec(reason)`, `Unsupported(field)`, `IdentityConflict`,
+  `AlreadyInvoked`, `Absent`, `Created`, `Running`,
+  `Exited(code, oom, finished_at)`, `Unknown(reason)`.
+- The invocation id returned by `run` equals the invocation key.
+
+**K2 — idempotency by key also covers the invocation (IC-C4).** If `run` is
+called with the same key but a different `InvocationSpec`, it returns
+`IdentityConflict` and starts nothing. Same rule as `provision`.
+
+**K3 — test injection of a backend (IC-C5, IC-C6).**
+- The environment variable `MULTIAGENTS_TEST_ISOLATED_BACKEND=module:callable`
+  names a callable `(root: Path) -> backend`.
+- It is read only by the host scheduler or runner process, when it constructs
+  the backend, and only for `kind: isolated`. It is never read from
+  `project.yaml` or from run state.
+- If the import or the factory call fails, isolated execution is refused
+  (IC-C3). There is no fallback.
+- This variable, `IC_TEST_PLAN` and `IC_BACKEND_ROOT` are removed from every run
+  environment. They are stripped last, after all overlays and passthrough, in
+  the same way as `safepoint.strip_key`.
+
+**K4 — what is recorded under injection (IC-C2).**
+- An injected reference backend is recorded truthfully: `kind: "isolated"`,
+  `backend: "reference"`, and its actual `.version`.
+- C2b resolves a recorded backend name only through the host's injection or
+  registry, never through anything supplied by run state.
+
+**K5 — evidence field names (IC-C2, IC-C3).**
+- Alongside the existing fields, record:
+  - `launch_evidence.executor.creation_key` and `invocation_key`, each written
+    before the operation that uses it;
+  - `identity` and `invocation_id`, written after the operation returns them.
+- Writing launch evidence merges into the `executor` mapping. It never
+  replaces the mapping and drops these fields (today's write at `runner.py`
+  replaces it).
+
+**K6 — when reservations are released (IC-C3; replaces "not released before
+the backend confirms the resource is gone").**
+- **Compute reservations** are released once termination is confirmed, that
+  is, when `inspect` reports `exited` or `absent`. A retained resource stays
+  `exited` by design, so waiting for `absent` would hold memory forever.
+- **Storage quota** is held until the resource is discarded.
+- If the outcome is `unknown`, the reservation and the liveness hold are both
+  kept.
+
+**K7 — unexpected exceptions (IC-C4).**
+- The caller (Runner, or the seam adapter) wraps an operational exception into
+  `Unknown(reason)`. Cancellation propagates unchanged.
+- An exception can arrive after the creation or the start succeeded, so it
+  never means "nothing exists". Before TF retries, the caller resolves the
+  recorded keys (`find(creation_key)`, `inspect_invocation`) to learn what
+  started.
+- Verified by: an injected backend that raises at provision and at run.
+
+**K8 — the D-S1.2 property.**
+- `Executor.uses_guest_environment: bool` is false for `local` and true for
+  `docker` and `isolated`.
+- The call sites that test `kind == "docker"` for credential and auth location
+  use this property instead.
+- Sites that need Docker transport details (for example `.container` in
+  `scripts.py`) are not converted mechanically. They keep a transport-specific
+  path and must not assume a container name exists for `isolated`.
+
+**K9 — what the reference backend implements (IC-C5).**
+- It implements: owner, lifetime, labels, writable and read-only paths, and the
+  guest paths, mapped under its private root. Each invocation gets a private
+  HOME and TMPDIR, and declared path access is enforced where the backend
+  claims it.
+- Every other field, when non-empty, is refused with `Unsupported(field)`.
+  Path validation (`InvalidSpec`) comes first.
+- An unset `resources` field must not inherit production limits, which would
+  make every reference launch unsupported.
+
+**K10 — TF bound (IC-C3).**
+- The bound is TF's existing one: `scheduler.retries.budget` additional
+  retries per activation. The default is 3 retries (4 attempts), with backoffs
+  `[30, 120, 600]`.
+- Tests read the effective value through `failures.retry_policy()` and assert
+  `budget + 1` failures followed by `retries_exhausted`. Shortened backoffs in
+  tests are fine.
+
+**K11 — the benchmark's interface (IC-C7).**
+- Flags: `--backend`, `--repetitions` (default 5), `--image cold|warm`,
+  `--seed-cache cold|warm`.
+- Output: one JSON document:
+  `{"backend", "image", "seed_cache", "samples": [{"loadavg": [..],
+  "stages": {"seed", "provision", "start", "first_output", "exit",
+  "cleanup"}}]}`.
+  - Stage values are seconds, or the string `"unsupported"`.
+  - On the reference backend, `seed` is `"unsupported"` and the top level
+    carries `"image_status": "unsupported"`. The test asserts both.
+
+**K12 — labels and reaping (IC-C6, IC-C4 `list_owned`).**
+- Every resource-creating command carries the test-session label. That
+  includes `docker create` as well as `docker run`, and any network or volume
+  a test creates. The Docker test shim is extended to match.
+- Resources carry a reserved project label, which `list_owned(project)` uses.
+  A test checks that two projects' resources are kept apart.
+- Reaping at session start removes only resources whose owning test session is
+  verifiably dead. A live concurrent suite's resources are never touched.
+
 ### Slice 1 work split
 
 1. `tester`: IC-C1..C3 (C2b marked milestone 3), IC-C5 conformance suite,
