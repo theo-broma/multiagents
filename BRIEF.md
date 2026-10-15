@@ -6017,3 +6017,10 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - **Tooling note (to bug-reporter at next stop):** `wait_for_agents()` with no ids, while
   tester run ag-58e4ca was running, returned at once with ~90 long-finished historic
   agents and "every agent you named had already finished" — it did not wait on the live run.
+- **2026-10-15 08:15 CEST:** tester nd-8860c8a3 closed approved and merged 9af2a955 (its last
+  NEED_INFOs answered by me: project label `multiagents.project` = project slug; compute
+  reservation = limits.max_concurrent slot; TF retry = new attempt, old resource resolved
+  and removed keep_artifacts). Open for a later tester round: C6 teardown does not remove
+  its own networks/volumes. Review-loop nd-6d1ca605: implementer-deep nd-3855912d (codex
+  gpt-6.1-sol), reviewer nd-800aefe5 (task patched: no full suite). Then adversary, full
+  suite (bg run), merge.
