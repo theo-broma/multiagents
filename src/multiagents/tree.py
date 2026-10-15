@@ -421,6 +421,7 @@ class Node:
     branch: str = ""
     worktree: str = ""
     session_id: str = ""
+    session_provider_family: str = ""  # creator of session_id, independent of routing
     requested_session: str = ""     # explicit resume mismatch, retained after session loss
     home_provider: str = ""
     segments: list[dict[str, Any]] = field(default_factory=list)

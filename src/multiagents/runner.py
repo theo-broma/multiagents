@@ -38,6 +38,7 @@ import tempfile
 import textwrap
 import time
 import traceback
+import uuid
 from dataclasses import asdict, dataclass, field, replace
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -137,6 +138,7 @@ class LaunchContext:
 
 
 _launch_context: ContextVar[LaunchContext | None] = ContextVar("launch_context", default=None)
+_consult_request_id: ContextVar[str] = ContextVar("consult_request_id", default="")
 
 
 def encode_admission(admission):
@@ -809,6 +811,7 @@ class Run:
     task: asyncio.Task | None = None
     events: list[dict] = field(default_factory=list)
     text_parts: list[str] = field(default_factory=list)
+    consult_request_id: str = ""  # host owner of this turn and its retries
     final_assistant_message: str = ""
     refusal_signal: str = ""
     # RC-R2 (review ag-997df9 finding 3): the verdict's evidence as structure —
@@ -4788,7 +4791,7 @@ class Runner(QuotaHandover):
         # the guard below can raise outside the cleanup's ownership.
         run = Run(
             node_id=node_id, provider=provider, spec=spec, handle=handle,
-            supervisor=supervisor,
+            supervisor=supervisor, consult_request_id=_consult_request_id.get(),
             turn_start=getattr(handle, "offset", 0), limits=limits,
             startup_token=startup_token, launched_at=launched_at,
             prompt_file=prompt_name, rate_limit_resume=rate_limit_resume,
@@ -6489,6 +6492,13 @@ class Runner(QuotaHandover):
                         and event.status.upper() in {"SUCCESS", "OK", "COMPLETED"}):
                     successful_result_response = True
                 if event.text:
+                    current = self.runs.get(node_id)
+                    if (run.consult_request_id and current is not None
+                            and current is not run and current.done is not run.done
+                            and current.consult_request_id):
+                        self.tree.emit(node_id, "consult_reply_discarded",
+                                       request_id=current.consult_request_id,
+                                       observed_request_ids=[run.consult_request_id])
                     run.text_parts.append(event.text)
                     if event.kind == "text" or (event.kind == "result" and not run.final_assistant_message):
                         run.final_assistant_message = event.text
@@ -6901,6 +6911,10 @@ class Runner(QuotaHandover):
         rule a reader had to know.
         """
         node_id = run.node_id
+        # A consult timeout ends this attempt's authority, even if its reader
+        # reaches the post-mortem after another turn has launched on the node.
+        if run.consult_request_id and run.stop_requested:
+            return False
         self.tree.update(node_id, turn_ended_at=now())
         if run.fix_turn:
             return await self._finalize_fix_turn(run, code, usage)
@@ -6959,6 +6973,8 @@ class Runner(QuotaHandover):
         else:
             limited = None
 
+        if run.consult_request_id and run.stop_requested:
+            return False
         if status == "failed" and getattr(run, "rate_limit_resume", False) and self._session_resume_failure(stderr):
             run.requested_session = stuck_before.session_id if stuck_before else ""
         session_lost = (status == "failed" and bool(run.requested_session))
@@ -6969,6 +6985,8 @@ class Runner(QuotaHandover):
         # reaches a continuation unchanged. The old wrapper is already dead.
         if not stopped_elsewhere and not run.awaiting:
             handover = await self._qh_after(run, status, usage, session_id, limited)
+            if run.consult_request_id and run.stop_requested:
+                return False
             if handover is True:
                 return True
             if isinstance(handover, dict):
@@ -7003,6 +7021,8 @@ class Runner(QuotaHandover):
             # guest configuration before the quarantine has checked it.
             commit_result = None
 
+        if run.consult_request_id and run.stop_requested:
+            return False
         # CI-R5: a commit a git hook refused goes back to the agent, in the
         # same session and worktree, before anything here is recorded — so
         # the node stays `running` and `result.json` is written once.
@@ -7018,6 +7038,8 @@ class Runner(QuotaHandover):
                 and session_id and run.provider.spawn.get("resume")):
             commit_result, fix_attempts, ended_by, fix_usage, fix_cut = \
                 await self._commit_fix_loop(run, node, commit_result, session_id)
+            if run.consult_request_id and run.stop_requested:
+                return False
             if ended_by in ("stopped", "steered", "detached"):
                 # The orchestrator's action is handled as for any live run: a
                 # stop has already recorded `cancelled`, a steer has a new run
@@ -7144,6 +7166,7 @@ class Runner(QuotaHandover):
             total_usage = {**sum_usage([{"usage": usage_node.rate_limit_usage_base}, {"usage": usage}]),
                            "interrupted": usage_node.rate_limit_usage_base}
         self.tree.update(node_id, usage=total_usage, session_id=session_id, summary=summary[:2000],
+                         session_provider_family=(run.provider.family or run.provider.name) if session_id else "",
                          requested_session=run.requested_session if session_lost else "",
                          warnings=warnings)
         # Filed even when the run failed: a partial write-up of a real defect is
@@ -7268,6 +7291,8 @@ class Runner(QuotaHandover):
                         # point it waits, and a server that exits meanwhile
                         # leaves the node to the next one's adoption.
                         with await self.gate.enter_when_open():
+                            if run.consult_request_id and run.stop_requested:
+                                return False
                             retried = await self._launch(
                                 node_id=node_id, spec=run.spec, provider=run.provider,
                                 prompt=self._retry_prompt(node_id, run.prompt_file),
@@ -10486,6 +10511,20 @@ class Runner(QuotaHandover):
         restarted. That is what makes an actual back-and-forth possible instead
         of a series of amnesiac one-shot queries.
         """
+        request_id = uuid.uuid4().hex
+        token = _consult_request_id.set(request_id)
+        try:
+            result = await self._consult_request(agent_name, message, timeout)
+            return {**result, "request_id": request_id}
+        except Exception as exc:
+            exc.consult_request_id = request_id
+            raise
+        finally:
+            _consult_request_id.reset(token)
+
+    async def _consult_request(
+        self, agent_name: str, message: str, timeout: int | None,
+    ) -> dict[str, Any]:
         spec = self.config.agent(agent_name)
         if spec.launch:
             raise PermissionError(
@@ -10625,6 +10664,20 @@ class Runner(QuotaHandover):
         current_spec = (route if destination == recorded and route is not None
                         else spec.routed(spec.provider)).replace(provider=destination)
         current_provider = self.providers.get(destination)
+        session_family = ""
+        if node is not None and node.session_id:
+            creator = self.providers.get(recorded)
+            # Legacy nodes predate creator provenance; their recorded route
+            # is the only available evidence. New sessions persist the family
+            # separately so changing a provider definition cannot rewrite it.
+            session_family = (node.session_provider_family
+                              or ((creator.family or creator.name) if creator else recorded))
+        live = self.runs.get(node.id) if node is not None else None
+        resumer = live.provider if live is not None else current_provider
+        provider_changed = bool(session_family and any(
+            candidate is not None
+            and session_family != (candidate.family or candidate.name)
+            for candidate in (current_provider, resumer)))
         new_fingerprint = (self._launch_fingerprint(current_spec, current_provider)
                            if current_provider is not None else None)
         old_fingerprint = None
@@ -10666,7 +10719,7 @@ class Runner(QuotaHandover):
                     f"{node.id}: {refusal} Nothing was launched and nothing "
                     f"was changed. To start a new conversation, stop this one "
                     f"(stop_agent {node.id}) and consult again.")
-            if node.reason == "session_lost" or route is None or fingerprint_changed:
+            if node.reason == "session_lost" or route is None or fingerprint_changed or provider_changed:
                 # TB-R7/CX-C28: a lost session or changed effective launch
                 # starts fresh on the route the current roster resolves.
                 replaced = node
@@ -10744,6 +10797,7 @@ class Runner(QuotaHandover):
                                new_fingerprint=self._launch_fingerprint(spec, provider),
                                old_provider=replaced.provider,
                                provider=provider.name,
+                               **({"reason": "provider_changed"} if provider_changed else {}),
                                **({"reason": "session_lost",
                                    "requested_session": replaced.requested_session}
                                   if replaced.reason == "session_lost" else {}))
@@ -10924,6 +10978,8 @@ class Runner(QuotaHandover):
         fresh_session = False
         session_replaced = None
         # Keep checkout notices on every replay of this turn's message.
+        request_id = _consult_request_id.get()
+        self.tree.emit(node_id, "consult_requested", request_id=request_id, turn=turn)
         retry_message = prompt if session_id else message
         while True:
             if (self.__dict__.get("_pc_shutting_down")
@@ -10944,6 +11000,8 @@ class Runner(QuotaHandover):
                     workdir=worktree_path, branch=node.branch, parent=node.parent,
                     depth=node.depth, session_id=session_id, timeout=timeout,
                 )
+                if not getattr(run, "consult_request_id", ""):
+                    run.consult_request_id = request_id
             except SpendCapRefused as exc:
                 # SC-R3a: a capped session is refused, and stays resumable.
                 self._mark_cap_refused(node_id, session_id, exc.refusal)
@@ -10996,11 +11054,36 @@ class Runner(QuotaHandover):
             # A free retry inside `_finalize` replaces `self.runs[node_id]` with a
             # new Run sharing this same `done` event (see `_launch`'s `done=`), so
             # the object this `run` name was bound to before the wait can be the
-            # dead first attempt — empty text_parts, no awaiting, no ticket. The
-            # live one, whichever attempt actually finished, is always the one
-            # `self.runs` holds now.
+            # dead first attempt — empty text_parts, no awaiting, no ticket.
+            # A replacement is eligible only within that completion group;
+            # another turn under the same conversation id is unrelated.
+            mismatched_requests = []
             if run is not None:
-                run = self.runs.get(node_id) or run
+                current = self.runs.get(node_id)
+                # A conversation id is reused across turns. Only a retry
+                # sharing the launched turn's completion event belongs here.
+                if current is not None and current is not run:
+                    if (current.done is run.done
+                            and current.consult_request_id == request_id):
+                        run = current
+                    elif current.text_parts:
+                        mismatched_requests.append(current.consult_request_id or "unknown")
+                        self.tree.emit(node_id, "consult_reply_discarded",
+                                       request_id=request_id,
+                                       observed_request_ids=mismatched_requests)
+            # Report a stale-only reply before the ordinary failure/retry path
+            # can hide its request mismatch behind an empty-turn error.
+            if (run is not None and (run.consult_request_id != request_id
+                    or (mismatched_requests and not run.text_parts and not run.awaiting))):
+                observed = (", ".join(mismatched_requests) if mismatched_requests else
+                            run.consult_request_id)
+                self.tree.emit(node_id, "consult_reply_discarded", request_id=request_id,
+                               observed_request_ids=[observed])
+                return self._consult_result(
+                    agent_name, node_id, turn, view,
+                    error=f"consult reply request mismatch: expected {request_id}; observed {observed}",
+                    **({"session": "fresh", "reason": "provider_changed"}
+                       if provider_changed else {}))
             final = self.tree.get(node_id)
             settled = (final is None or final.status in
                        {"done", "merged", "idle", "awaiting_user", "refused",
@@ -11058,7 +11141,23 @@ class Runner(QuotaHandover):
             # A fresh session needs the same instructions as its first try.
             prompt = (self.compose_prompt(spec, retry_message, self.tree.get(node_id), worktree_path)
                       if not session_id else retry_message)
+        if run is None:
+            self.tree.emit(node_id, "consult_reply_discarded", request_id=request_id,
+                           observed_request_ids=["no launched turn"])
+            return self._consult_result(
+                agent_name, node_id, turn, view,
+                error=f"consult reply request mismatch: expected {request_id}; observed no launched turn",
+                **({"session": "fresh", "reason": "provider_changed"}
+                   if provider_changed else {}))
         reply = "\n".join(run.text_parts).strip()
+        if not reply and not run.awaiting and not (final and final.status in {"idle", "refused"}):
+            return self._consult_result(
+                agent_name, node_id, turn, view,
+                status=final.status if final else "unknown",
+                reason="provider_changed" if provider_changed else (final.reason if final else ""),
+                error=f"no reply for consult request {request_id}"
+                      + (f" ({final.status}: {final.reason})" if final else ""),
+                **({"session": "fresh"} if provider_changed else {}))
         # The caller believed it was continuing a conversation; the reply
         # itself must say the memory it expected is not there (CX-C28).
         # Prefixed after truncation, so a long reply cannot cut it off.
@@ -11082,6 +11181,8 @@ class Runner(QuotaHandover):
                       f"requested {replaced.requested_session}); this is a new "
                       f"conversation ({node_id}, replacing {replaced.id}). "
                       f"Nothing said earlier was carried over.\n")
+        if provider_changed:
+            replacement.update(session="fresh", reason="provider_changed")
         if run.awaiting:
             # The advisor stopped to ask, not to answer. Returning its partial
             # text would read as a considered reply.

@@ -1827,6 +1827,10 @@ async def consult(agent: str, message: str, timeout: int = 0) -> dict:
     its context between calls — so this is a real back-and-forth, not a series
     of one-shot questions.
 
+    Results include a request_id, correlated to the launched turn by the host.
+    A changed provider family starts a new conversation and reports
+    session="fresh", reason="provider_changed".
+
     Use it with `critic` before any decision worth a second opinion: changing
     agents.yaml, picking between approaches, deciding whether a stuck agent
     should be steered or discarded. Tell it what you intend to do and why, not
@@ -1839,7 +1843,9 @@ async def consult(agent: str, message: str, timeout: int = 0) -> dict:
     try:
         return _ok(_seen(run, await run.consult(agent, message, timeout or None)))
     except (ValueError, KeyError, FileNotFoundError, PermissionError, RuntimeError) as exc:
-        return _ok({"error": f"{type(exc).__name__}: {exc}"})
+        return _ok({"error": f"{type(exc).__name__}: {exc}",
+                    **({"request_id": exc.consult_request_id}
+                       if hasattr(exc, "consult_request_id") else {})})
 
 
 # --------------------------------------------------------------------------
