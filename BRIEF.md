@@ -6044,3 +6044,9 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - **Slice 2 tester ag-f5cce9 done** (nd-1ea96d2c, not merged), 7 NEED_INFOs -> draft "Slice 2
   clarifications" Q1..Q7 in the contract, UNCOMMITTED (backup in scratchpad), awaiting user yes;
   then tester round 2, merge. Slice 1 adversary ag-d1670a passed its 1500 s wall clock, still running.
+- **Slice 1 full suite (ed990978): REGRESSION.** 83 red = 70 baseline + 3 milestone-3 + 10 new; serial
+  rerun: 5 deterministic reds (test_nc_m1_adv3_edits x3, test_nc_m1_adv3_state cancel_refused,
+  test_nc_m1_hardening2 r59[open-runs5]) — `list_nodes` returns {'error':'internal'} (likely the
+  runs[].executor projection in scheduler/engine.py on some record shape). Others passed serially (load).
+  Plan: relaunch loop nd-6d1ca605 (rev 4) with this + adversary findings in one round once the
+  adversary (ag-d1670a) reports.
