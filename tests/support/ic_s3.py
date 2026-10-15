@@ -90,6 +90,13 @@ class DockerWorld:
 
 # ---------------------------------------------------------------- scheduler
 
+class ShortRPC:
+    """Keep missing-feature failures bounded instead of the legacy 40s RPC default."""
+    def rpc(self, *args, **kwargs):
+        kwargs.setdefault("timeout", ic.WAIT)
+        return super().rpc(*args, **kwargs)
+
+
 def events_stdout(text: str = "done", sid: str = "ses_ic_fake") -> bytes:
     """What the fake opencode-shaped provider prints for a short successful run."""
     def ev(kind, part):
@@ -101,7 +108,7 @@ def events_stdout(text: str = "done", sid: str = "ses_ic_fake") -> bytes:
             + ev("text", {"id": "prt_t0", "type": "text", "text": text}))
 
 
-class FakeDockerSched(ic.IcSched):
+class FakeDockerSched(ShortRPC, ic.IcSched):
     """The scheduler on the REAL isolated backend (nothing injected) whose
     `docker` is the fake CLI. The provider declares that it needs nothing."""
 
@@ -156,7 +163,7 @@ def evidence_of(s: ic.IcSched, node: str) -> dict:
 
 # ------------------------------------------------------- injected-backend world
 
-class S3Sched(ic.IcSched):
+class S3Sched(ShortRPC, ic.IcSched):
     """The scheduler with the crash-injecting double (`ic_s3_backends`) around
     the reference backend, or (backend="docker", SG_TEST_DOCKER=1) around the
     real Docker backend. The provider is the scriptable workload
@@ -197,28 +204,17 @@ class S3Sched(ic.IcSched):
             return docker_backend(self.backend_root)
         return importlib.import_module("ic_backends").make_reference(self.backend_root)
 
-    def store_attempts(self) -> dict:
-        from multiagents.scheduler.engine import attempts
-        from multiagents.scheduler.store import Store
-        with Store(self.root).transaction() as db:
-            table = attempts(db)
-            return {k: json.loads(json.dumps(table[k])) for k in list(table)}
-
-    def calls(self) -> list[str]:
-        path = Path(str(self.plan_file) + ".calls")
-        return path.read_text().split() if path.exists() else []
-
-    def crash_at(self, point: str) -> int:
-        """Arm a crash, return the scheduler pid to wait on."""
-        pid = self.pid()
-        self.plan({"calls": True, "crash": point, "kill_pid": pid})
-        return pid
-
     def host_output(self, run_id: str) -> tuple[bytes, bytes]:
         from multiagents.paths import ProjectPaths
         d = ProjectPaths(self.root).run_dir(run_id)
         read = lambda n: (d / n).read_bytes() if (d / n).is_file() else b""  # noqa: E731
         return read("output.ndjson"), read("stderr.log")
+
+    def crash_at(self, point: str) -> int:
+        """Arm the K3 injector to kill this scheduler at a public backend boundary."""
+        pid = self.pid()
+        self.plan({"calls": True, "crash": point, "kill_pid": pid})
+        return pid
 
     def run_ids(self, node: str) -> list[str]:
         return [r["run_id"] for r in self.runs(node) if r.get("run_id")]

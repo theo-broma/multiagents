@@ -68,6 +68,8 @@ def _journal(op: str) -> None:
 class Crashy(ic_backends.Double):
     async def provision(self, spec, key):
         _journal("provision")
+        with open(str(_plan_path()) + ".creation_keys", "a") as keys:
+            keys.write(json.dumps({"owner": spec.owner, "key": key}) + "\n")
         _crash_if("provision_entry")
         got = await super().provision(spec, key)
         _crash_if("provision_done")

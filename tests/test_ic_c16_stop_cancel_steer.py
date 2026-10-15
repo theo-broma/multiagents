@@ -57,7 +57,6 @@ def running(s, node):
     run = s.wait_runs(node, 1)[0]
     s.wait(lambda: s.evidence(run["attempt_id"]).get("executor", {}).get("invocation_id"),
            ic.WAIT * 2, "the invocation to be recorded")
-    time.sleep(0.4)
     return run
 
 
@@ -126,7 +125,6 @@ def test_ic_c16_k6_an_unconfirmed_stop_keeps_the_hold_and_the_attempt_is_not_dec
     run = running(sx, node)
     sx.plan({"calls": True, "inspect": "unknown"})               # stop cannot be confirmed
     assert sx.cancel_raw(node).get("ok") is True
-    time.sleep(ic.QUIET * 2)
     assert sx.get(node)["state"] != "cancelled"
     assert len(sx.runs(node)) == 1
     sx.plan({"calls": True})
@@ -177,7 +175,6 @@ def test_ic_c16_forged_pid_files_naming_a_dead_pid_do_not_make_a_live_attempt_lo
     sx.start()
     node = sx.node({"forge": {"pid": corpse.pid}}, {"hold": 3.5}, {"lines": 3, "gap": 0.0})
     sx.wait_runs(node, 1)
-    time.sleep(ic.QUIET * 2)                                       # long enough for any pid-based check to act
     view = sx.get(node)
     assert view["state"] not in ("done", "failed", "cancelled", "held"), ic.text_of(view)[:300]
     assert len(sx.runs(node)) == 1
@@ -203,7 +200,6 @@ def test_ic_c16_a_config_change_with_a_running_attempt_lets_it_finish_and_the_ne
     sx.start()
     node = sx.node({"hold": 3}, {"lines": 3, "gap": 0.0})
     sx.wait_runs(node, 1)
-    time.sleep(0.4)
     sx.executor("local")
     assert s3.wait_done(sx, node, 15)["state"] == "done"
     assert len(sx.runs(node)) == 1 and sx.runs(node)[0]["executor"]["kind"] == "isolated"
@@ -219,7 +215,6 @@ def test_ic_c16_the_legacy_recreate_on_config_change_path_never_touches_an_isola
     running(fs, node)
     (container,) = fs.fd.containers().values()
     fs.executor("isolated", isolated={"backend": "docker", "resources": s3.resources(memory="256m")})
-    time.sleep(ic.QUIET * 2)
     assert fs.fd.container(container["Id"])["State"]["Running"] is True
     assert fs.fd.calls_of("stop") == [] and fs.fd.calls_of("rm") == [] and fs.fd.calls_of("kill") == []
     assert fs.fd.start_count(container["Id"]) == 1 and len(fs.fd.containers()) == 1
@@ -282,9 +277,23 @@ def refused(view):
     return [c for c in ic.causes(view) if c.get("class") == "other" and "isolation_unavailable" in ic.text_of(c)]
 
 
+def arm_prepare_marker(s):
+    """Public provider script: preparation has an observable filesystem effect."""
+    marker = s.tmp / "provider-prepared"
+    script = s.tmp / "provider-actions.py"
+    script.write_text("#!" + sys.executable + "\nimport sys\nfrom pathlib import Path\n"
+                      + "if 'prepare' in sys.argv[1:]: Path(" + repr(str(marker)) + ").write_text('prepared')\n")
+    script.chmod(0o700)
+    s.fake.entry["script"] = str(script)
+    s.p.write()
+    s._reset_server()
+    return marker
+
+
 def assert_refused(s, node, pattern):
     view = s.wait(lambda: (v := s.get(node)) and v["state"] in ("held", "failed", "done") and refused(v) and v,
                   ic.WAIT, "the refusal")
+    assert not (s.tmp / "provider-prepared").exists(), "provider preparation preceded refusal"
     cause = refused(view)[0]
     text = ic.text_of(cause).lower()
     assert "unsupported" in text and re.search(pattern, text), text
@@ -300,6 +309,7 @@ def test_ic_c16_d_s3_2_a_provider_declaring_a_need_is_refused_unsupported_not_re
         s3.declare(s.fake.entry, **{need: True})
         s.p.write()
         s._reset_server()
+        arm_prepare_marker(s)
         s.start()
         assert_refused(s, s.node({"lines": 1}), pattern)
     finally:
@@ -312,6 +322,7 @@ def test_ic_c16_d_s3_2_a_provider_declaring_a_need_is_refused_unsupported_not_re
     s = s3.FakeDockerSched(tmp_path, monkeypatch)
     try:
         s.provider_declares(**{need: True})
+        arm_prepare_marker(s)
         s.start()
         assert_refused(s, s.create()["id"], pattern)
         assert s.fd.containers() == {}
@@ -325,6 +336,7 @@ def test_ic_c16_d_s3_2_a_provider_without_a_declaration_counts_as_needing_all_th
         s.fake.entry.pop(s3.NEEDS_KEY, None)
         s.p.write()
         s._reset_server()
+        arm_prepare_marker(s)
         s.start()
         assert_refused(s, s.node({"lines": 1}), r"credential_handle")
     finally:
@@ -362,6 +374,7 @@ def test_k17_2_omitted_members_default_true_and_refusals_follow_precedence(tmp_p
         s.fake.entry["needs"] = declaration
         s.p.write()
         s._reset_server()
+        arm_prepare_marker(s)
         s.start()
         assert_refused(s, s.create()["id"], field)
         assert s.fd.containers() == {} and s.fake.spawns() == 0

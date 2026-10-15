@@ -146,3 +146,61 @@ def test_k17_6_agent_rpc_does_not_expose_orphan_removal(fs):
     reply = fs.rpc("remove_orphan", {"container_id": cid}, timeout=ic.WAIT)
     assert reply.get("ok") is False
     assert fs.fd.container(cid) is not None
+
+
+def test_k17_5_scoped_scheduler_status_omits_host_orphan_fields(fs):
+    node = fs.create()["id"]
+    fs.wait_runs(node, 1)
+    run = fs.runs(node)[0]
+    token = fs.issue(run["run_id"], node)
+    value = fs.ok("scheduler_status", {}, token=token)
+    assert "orphans" not in value and "orphans_error" not in value
+
+
+def test_k17_5_discarded_node_resource_is_reported_with_its_reason(fs):
+    node = fs.create()["id"]
+    assert s3.wait_done(fs, node)["state"] == "done"
+    (original,) = fs.fd.containers().values()
+    labels = original["Config"]["Labels"]
+    reply = fs.rpc("dispose_node", {"id": node, "revision": fs.get(node)["revision"]}, timeout=ic.WAIT)
+    assert reply.get("ok") is True, reply
+    fs.wait(lambda: fs.fd.container(original["Id"]) is None, what="node disposal")
+    cid = fs.fd.inject("discarded-leftover", labels)
+    found = listing(fs)
+    assert any(item["container_id"] == cid and item["reason"] == "discarded_node"
+               for item in found["orphans"]), found
+
+
+def test_k17_5_creation_before_recording_the_id_is_reconciled_not_orphaned(tmp_path, monkeypatch):
+    import fake_docker as fdk
+    assert callable(getattr(ic.lifecycle(), "DockerBackend", None)), "K17.1 DockerBackend is missing"
+    s = s3.S3Sched(tmp_path, monkeypatch)
+    fd = fdk.FakeDocker(tmp_path).install(monkeypatch)
+    monkeypatch.setenv(ic.BACKEND_ENV, "ic_s3_backends:make_docker")
+    try:
+        s.start()
+        pid = s.crash_at("provision_done")
+        s.node({"lines": 1})
+        s.wait_dead(pid, timeout=ic.WAIT)
+        assert len(fd.containers()) == 1
+        s.start()
+        assert listing(s) == {"orphans": [], "orphans_error": None}
+    finally:
+        s.close()
+
+
+# The same actual workload/capture is exercised on reference and opt-in Docker.
+from test_ic_c16_stop_cancel_steer import sx  # noqa: E402,F401
+
+
+def test_ic_c18_failed_capture_retains_the_container_and_private_repository(sx):
+    sx.start()
+    node = sx.node({"write": ".git/HEAD"}, {"lines": 1})
+    view = s3.wait_done(sx, node)
+    assert view["state"] == "held" and view["hold"]["reason"] == "result_capture_failed", view
+    ev = sx.evidence(sx.runs(node)[-1]["attempt_id"])["executor"]
+    backend = sx.be()
+    identity = identity_of(ic.run(backend.find(ev["creation_key"])))
+    assert kind_of(ic.run(backend.inspect(identity))) == "exited"
+    repository = ic.run(backend.checkout_path(identity))
+    assert repository.is_dir() and (repository / ".git" / "HEAD").read_text() == "x"

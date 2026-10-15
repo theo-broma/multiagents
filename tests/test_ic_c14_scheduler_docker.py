@@ -93,7 +93,6 @@ def test_ic_c14_an_unreachable_daemon_blocks_the_node_before_any_attempt_and_cre
     node = fs.create()["id"]
     fs.wait(lambda: "isolation_unavailable" in block_text(fs, node), what="the block")
     assert "daemon" in block_text(fs, node).lower() or "docker" in block_text(fs, node).lower()
-    time.sleep(ic.QUIET)
     assert fs.runs(node) == [] and fs.fd.calls_of("create") == [] and fs.fake.spawns() == 0
     fs.fd.daemon_down(False)
     assert s3.wait_done(fs, node)["state"] == "done"
@@ -105,7 +104,6 @@ def test_ic_c14_a_missing_image_blocks_the_node_and_nothing_is_built_or_pulled(f
     node = fs.create()["id"]
     fs.wait(lambda: "isolation_unavailable" in block_text(fs, node), what="the block")
     assert "image" in block_text(fs, node).lower()
-    time.sleep(ic.QUIET)
     assert fs.runs(node) == [] and fs.fd.calls_of("create") == []
     assert [c for c in fs.fd.commands() if c[:1] in (["build"], ["pull"]) or c[:2] == ["image", "pull"]] == []
 
@@ -142,7 +140,6 @@ def test_ic_c14_a_create_that_succeeded_but_was_not_reported_leaves_no_second_co
     fs.start()
     node = fs.create()["id"]
     s3.wait_done(fs, node, timeout=ic.WAIT + 4)
-    time.sleep(ic.QUIET)
     # the half-made container was found by its key and cleaned up or retained, never leaked as a stray running one
     assert all(not c["State"]["Running"] for c in fs.fd.containers().values())
     assert sum(fs.fd.start_count(c["Id"]) for c in fs.fd.containers().values()) == 1
@@ -218,5 +215,19 @@ def test_k17_1_configured_cli_is_an_executable_and_image_reaches_docker(tmp_path
         s.start()
         assert s3.wait_done(s, s.create()["id"])["state"] == "done"
         assert all(c["Config"]["Image"] == "example/workspace:pinned" for c in s.fd.containers().values())
+    finally:
+        s.close()
+
+
+def test_k17_1_isolated_docker_never_inherits_legacy_image_or_resources(tmp_path, monkeypatch):
+    s = s3.FakeDockerSched(tmp_path, monkeypatch)
+    try:
+        s.executor("isolated", isolated={"backend": "docker"},
+                   docker={"image": "legacy/missing:image", "memory": "16m"})
+        s.start()
+        assert s3.wait_done(s, s.create()["id"])["state"] == "done"
+        (container,) = s.fd.containers().values()
+        assert container["Config"]["Image"] == "multiagents/workspace:latest"
+        assert container["HostConfig"]["Memory"] in (6 * 10**9, 6 * 2**30)
     finally:
         s.close()

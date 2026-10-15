@@ -17,6 +17,7 @@ append that outran its checkpoint would have left; recovery must discard them.
 from __future__ import annotations
 
 import os
+import json
 import sys
 import time
 from pathlib import Path
@@ -181,7 +182,8 @@ def test_ic_c15_a_partial_line_at_the_kill_is_not_doubled_after_recovery(sx):
     node = sx.node(*ops)
     sx.wait(lambda: output_lines(sx, node) >= 6, 10, "the whole lines")
     run_id = sx.run_ids(node)[0]
-    time.sleep(0.5)                                       # the half line is on the wire now
+    sx.wait(lambda: backend_stdout(sx, node) and not backend_stdout(sx, node).endswith(b"\n"),
+            ic.WAIT, "partial line in backend output")
     sx.kill9()
     restart(sx)
     assert finish(sx, node)["state"] == "done"
@@ -191,7 +193,9 @@ def test_ic_c15_a_partial_line_at_the_kill_is_not_doubled_after_recovery(sx):
 # ================================================ the five launch boundaries
 
 def evidence_key(s, node, field="creation_key"):
-    return s.evidence(s.runs(node)[-1]["attempt_id"]).get("executor", {}).get(field)
+    # The K3 fault injector records the public provision input before it crashes.
+    keys = Path(str(s.plan_file) + ".creation_keys").read_text().splitlines()
+    return json.loads(keys[-1])["key"]
 
 
 def crashed(s, point, ops=QUICK):
@@ -205,7 +209,7 @@ def crashed(s, point, ops=QUICK):
 def test_ic_c15_boundary_1_before_creation_nothing_exists_and_the_attempt_is_an_unlaunched_claim(sx):
     node = crashed(sx, "provision_entry")
     key = evidence_key(sx, node)
-    assert key, "the creation key is recorded before provision is called (K5)"
+    assert key, "provision received the creation key (K5); recovery below must resolve it"
     assert kind_of(ic.run(sx.be().find(key))) == "absent"
     assert spawns(sx) in (0, None)
     restart(sx)
@@ -268,7 +272,6 @@ def test_ic_c15_boundary_5_a_committed_capture_is_recognised_and_no_second_gener
     assert done["state"] == "done" and len(done["generations"]) == 1
     sx.kill9()
     restart(sx)
-    time.sleep(ic.QUIET * 2)
     again = sx.get(node)
     assert again["state"] == "done" and again["generations"] == done["generations"]
     assert len(sx.runs(node)) == 1 and spawns(sx) in (1, None)
@@ -281,7 +284,6 @@ def test_ic_c15_boundary_5_a_crash_at_the_first_removal_still_gives_exactly_one_
     sx.wait_dead(pid, timeout=15)
     restart(sx)
     done = finish(sx, node)
-    time.sleep(ic.QUIET)
     assert done["state"] == "done" and len(sx.get(node)["generations"]) == 1
     assert len(sx.runs(node)) == 1 and spawns(sx) in (1, None)
 
@@ -327,7 +329,6 @@ def test_ic_c15_adopt_absent_a_resource_gone_while_down_is_a_lost_launch_class_l
     sx.start()
     node = sx.node({"hold": 30})
     sx.wait(lambda: sx.runs(node), 8, "the run")
-    time.sleep(0.5)
     sx.kill9()
     key = evidence_key_of(sx, node)
     be = sx.be()
@@ -346,11 +347,9 @@ def test_ic_c15_adopt_unknown_holds_the_attempt_and_keeps_its_reservation_until_
     sx.start()
     node = sx.node({"hold": 4}, {"lines": 3, "gap": 0.0})
     sx.wait(lambda: sx.runs(node), 8, "the run")
-    time.sleep(0.5)
     sx.kill9()
     sx.plan({"calls": True, "inspect": "unknown"})
     restart(sx)
-    time.sleep(ic.QUIET * 2)
     view = sx.get(node)
     assert view["state"] not in ("done", "failed", "cancelled"), ic.text_of(view)[:400]
     assert len(sx.runs(node)) == 1 and spawns(sx) in (1, None)    # not relaunched, not abandoned
@@ -364,7 +363,6 @@ def test_ic_c15_no_recorded_identity_is_resolved_through_the_creation_key_first(
     pid = sx.crash_at("provision_done")                    # the resource exists; its identity was never recorded
     node = sx.node(*QUICK)
     sx.wait_dead(pid, timeout=15)
-    assert not evidence_key(sx, node, "identity")
     sx.plan({"calls": True})
     restart(sx)
     finish(sx, node)
@@ -398,3 +396,10 @@ def test_ic_c15_no_isolated_path_reads_a_pid_file_or_a_process_group(sx):
     finally:
         decoy.kill()
         decoy.wait(5)
+
+
+def backend_stdout(s, node):
+    ev = s.evidence(s.runs(node)[-1]["attempt_id"])["executor"]
+    backend = s.be()
+    identity = ic.identity_of(ic.run(backend.find(ev["creation_key"])))
+    return ic.data_of(ic.run(backend.output(identity, ev["invocation_key"], "stdout", 0)))

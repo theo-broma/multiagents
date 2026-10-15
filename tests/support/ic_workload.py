@@ -136,7 +136,7 @@ sys.stdout.flush()
 sys.exit(code)
 '''
 
-NEEDS_KEY = "needs"      # G-S3.1: where a provider declares what it needs (see ic_s3.declare)
+NEEDS_KEY = "needs"      # K17.2 provider needs declaration
 
 
 class WorkloadProvider(sc.FakeProvider):

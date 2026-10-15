@@ -408,7 +408,7 @@ def test_ic_c14_default_resources_hard_memory_pids_equal_cpu_weight_no_cpu_cap(w
     ha, hb = w.container(a)["HostConfig"], w.container(b)["HostConfig"]
     assert ha["Memory"] in (6 * 10 ** 9, 6 * 2 ** 30), ha["Memory"]
     assert ha["PidsLimit"] == 4096
-    assert ha["CpuShares"] == hb["CpuShares"]                       # equal weight for every run
+    assert ha["CpuShares"] == hb["CpuShares"] == 1024                       # equal weight for every run
     assert ha["NanoCpus"] == 0                                      # no cap by default
 
 
@@ -829,3 +829,21 @@ def test_ic_c14_k17_4_generated_labels_cannot_be_supplied(w, label):
 def test_ic_c14_k17_4_test_session_label_is_preserved(w):
     _, identity = w.identity(labels={ic.PROJECT_LABEL: s3.PROJECT, "multiagents.test.owner": "session-123"})
     assert w.container(identity)["Config"]["Labels"]["multiagents.test.owner"] == "session-123"
+
+
+def test_k17_4_project_label_is_reserved_even_for_direct_callers(w):
+    spec = w.spec(labels={"multiagents.project": "forged-project"})
+    assert kind_of(ic.run(w.backend.provision(spec, "forged-project"))) == "invalid_spec"
+    assert w.fd.containers() == {}
+
+
+def test_k17_1_launch_resources_override_backend_defaults(tmp_path, monkeypatch):
+    fd = fdk.FakeDocker(tmp_path).install(monkeypatch)
+    root = tmp_path / "root"
+    root.mkdir()
+    backend = s3.docker_backend(root, resources={"memory": "1g", "pids": 64, "cpu_shares": 256, "cpus": 2})
+    spec = ic.launch_spec(root, resources={"memory": "128m", "pids": 32, "cpu_shares": 512, "cpus": 0.5})
+    identity = identity_of(ic.run(backend.provision(spec, "overrides")))
+    host = fd.container(identity.id)["HostConfig"]
+    assert host["Memory"] == 128 * 2 ** 20 and host["PidsLimit"] == 32
+    assert host["CpuShares"] == 512 and host["NanoCpus"] == 500_000_000
