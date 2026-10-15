@@ -6033,3 +6033,6 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   /var/tmp/ic-s1-suite, reds -> /var/tmp/s1-suite-reds.txt). C6 teardown tester merged 3a5b5ea7.
   Ticket bug-a3d76f (wait no-id) filed; fixing in-house: tester nd-1327b273 (tests/test_wait_noid_live.py),
   then implementer + reviewer. Slice 2 contract still uncommitted (backup in scratchpad), awaiting user.
+- **Slice 2 contract committed f1b86ed5 (user yes).** Slice 2 tester nd-1ea96d2c launched
+  (tests/test_ic_c9..c13_*.py, red). Next for slice 2: merge tester, implementer-deep review-loop,
+  adversary (mandatory), full suite, merge — after slice 1 merges.
