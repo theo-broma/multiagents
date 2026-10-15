@@ -285,3 +285,7 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "real_providers: this test is about providers_view itself, so let it run")
+    config.addinivalue_line(
+        "markers",
+        "ic_milestone(n): phase 7 part 2 (IC-C*) test that cannot pass before milestone n "
+        "(3..6) of context/specs/phase7-part2-containers.md; red by design until then")
