@@ -1253,3 +1253,231 @@ CONTAINER_ID` is a host-user command. No agent RPC exposes it.
    - Matching argv in the fake is never acceptance.
 4. **reviewer**, then **adversary** (mandatory: C15 cases and container
    boundaries), then the full suite, then merge.
+
+## Slice 4A — the scoped RPC and session continuity in isolated attempts
+
+On the advisor's recommendation (2026-10-15), slice 4 is split in three:
+- **4A** (this slice): the scoped RPC reaches an isolated attempt, and a
+  session survives steer and reopen.
+- **4B**: a network per attempt, with authenticated gateways (IC-R10).
+- **4C**: credentials by provider, with renewal and revocation (IC-R4), plus
+  the live resume checks that need both credentials and a network.
+
+Until 4B and 4C land, K17.2 still refuses `needs.credentials` and
+`needs.network`. After 4A, a provider that declares only `needs.rpc` is no
+longer refused.
+
+### Decisions pinned by slice 4A
+
+- **D-S4A.1 — one private RPC endpoint per attempt (IC-R11).**
+  - **Location.** The host creates a host-owned directory per attempt that
+    holds one Unix socket. It is mounted read-only into the container at
+    `/run/multiagents/rpc/`, and the socket is `rpc.sock`. The mount is the
+    directory, never the socket inode, so a recreated socket stays visible.
+    The guest gets `MULTIAGENTS_RPC_SOCKET=/run/multiagents/rpc/rpc.sock`.
+  - **Principal.** The listener holds the attempt's host-recorded principal,
+    with the fields today's authorisation uses: `subject` (the attempt's
+    run id), `root: false` and `permissions`. Scope follows the subject's
+    current subtree, computed per request as today.
+  - **Authorisation.** Each request goes through the existing path:
+    permission checks, target checks on child nodes and runs, and mutation
+    deduplication. Deduplication is unchanged: mutations only, keyed by
+    `(subject, request_id)`, and a reused id with a different payload is
+    refused. A new attempt has a new subject.
+  - **Envelope.** The request envelope is today's, without the bearer
+    token. A request carrying a token, or any field that asserts the
+    caller's identity, is refused with `forbidden`. Target arguments, such
+    as a child node id, keep today's authorisation.
+  - **Replies and reconnects.** Replies use today's format. A client that
+    loses its connection may reconnect to the same path. Deduplication makes
+    retrying a mutation safe.
+  - **Never mounted:** the scheduler store, the root socket directory, or
+    another attempt's endpoint directory. There is no RPC over TCP or a
+    network in 4A.
+- **D-S4A.2 — the endpoint's lifetime follows the attempt's authority.**
+  - **Grant.** The endpoint is granted before the invocation starts, in the
+    IC-C15 boundary order.
+  - **Revocation.** It is revoked when the attempt ends, is cancelled, or is
+    replaced by a new attempt. Revocation is one ordering point in the
+    scheduler's store:
+    - a request committed before it keeps its effects;
+    - a request ordered after it is refused and has no effect, deferred
+      effects included;
+    - accepted connections are then closed, and new ones are refused.
+  - **Every request is checked.** Authority is checked on each request, not
+    only at connect.
+  - **Scheduler restart.** The listener is recreated for every attempt that
+    is still authorised, at the same path, without restarting the
+    container. An attempt whose authority cannot be confirmed gets no
+    listener and is held (K6).
+  - **Adoption.** Adoption (IC-C15) never mints a new principal. It
+    recreates the listener for the recorded one.
+- **D-S4A.3 — session continuity is a provider declaration.**
+  - **Schema.** A provider may declare, in `providers.yaml`:
+    `session: {mode, path, resumed_event, resume_deadline_seconds}`.
+  - **Modes.** `mode` is one of:
+    - `home`: the session lives at `path`, relative to the conversation
+      HOME;
+    - `export`: after the attempt, the host copies `path` out of the
+      attempt HOME into conversation storage, and copies it back before
+      the next attempt;
+    - `none`: no resume.
+  - **Precedence.** An explicit `session` block wins. Without one, a
+    provider that already declares `session_store` is read as
+    `mode: export`, with `path` taken from `session_store.dir` and
+    `session_store.glob`, and `forbidden_profile` kept as a forbidden
+    pattern. Any other provider is `none`.
+  - **Resume evidence.** `resumed_event` names the stream event that proves
+    the provider accepted the resumed session. Its session id must equal
+    the recorded one. `resume_deadline_seconds` defaults to 120.
+  - **Layering.** The block follows provider layering and `extends`.
+  - **Ownership.** Conversation storage belongs to the alias binding, or,
+    for an ordinary node, to the node (a per-node conversation store,
+    created on its first isolated attempt). It is reached through a
+    host-issued handle, never a path a run supplies.
+  - **Isolation from secrets.** No credential, proxy credential or endpoint
+    material is ever projected into it. A legacy profile is never imported
+    wholesale.
+- **D-S4A.4 — steer and reopen resume when they can.**
+  - Steer of an isolated attempt is a stop followed by a new attempt, as in
+    slice 3. Reopen, through `relaunch_node` or a new loop round, also
+    starts a new attempt.
+  - The new attempt resumes the recorded session only when the provider's
+    mode allows it and every check in today's alias binding holds:
+    - provider, family, account and model compatibility;
+    - availability and cooldown;
+    - no other attempt of the conversation is claimed, launched, captured
+      or suspended.
+    For an ordinary node's conversation, the same checks and the same
+    locking apply.
+  - **One confirmed-live writer per conversation.** A conversation whose
+    previous attempt is not confirmed stopped is not resumed, and the new
+    attempt is held (K14 applies to the predecessor).
+  - **Ordering.** An `export` copy completes, and is recorded, before that
+    attempt's resources may be removed (IC-C18).
+  - **Forced fresh start.** `relaunch_node(..., new_session=[...])` is the
+    existing root-only operation that forces a fresh session. It renews the
+    binding, keeps the old session store as an archive until the
+    conversation is disposed, and records `fresh`.
+- **D-S4A.5 — what is recorded.** The run records `session_resume`, with
+  one of these values:
+  - `fresh`: no session was recorded for this conversation, or a new
+    session was forced.
+  - `resumed`: the provider emitted `resumed_event` with the recorded
+    session id before the deadline.
+  - `unsupported`: the mode is `none`, or a compatibility check failed. The
+    reason is recorded.
+  - `failed`: a session was recorded but its store is missing or corrupt,
+    or the provider did not confirm it before the deadline, or the provider
+    rejected it. The reason is recorded.
+
+  A `failed` resume never silently continues as fresh. The attempt ends
+  with TF class `other`. `unsupported` caused by a compatibility change
+  holds the attempt, unless it was relaunched with `new_session`.
+
+### Behaviours
+
+**IC-C20 — the private RPC endpoint.**
+- An isolated attempt whose provider declares only `needs.rpc: true` runs.
+  It reaches the scoped RPC only through `MULTIAGENTS_RPC_SOCKET`.
+- Every RPC operation open to that agent today works through the endpoint,
+  with the recorded principal and with deduplication unchanged.
+- These requests are refused with `forbidden` and change nothing:
+  - a request carrying a token or a caller-identity field;
+  - a request targeting a node or run outside the subject's scope.
+- The endpoint directory is mounted read-only and contains only the socket.
+  From the guest, no other endpoint and no scheduler store is reachable.
+- Verified by:
+  - an RPC round trip from inside the attempt, on the reference backend and,
+    under `SG_TEST_DOCKER=1`, on Docker;
+  - forged-identity and out-of-scope requests refused;
+  - a repeated request id deduplicated, and a reused id with a new payload
+    refused;
+  - guest-side checks of what is visible.
+
+**IC-C21 — the endpoint's lifetime and revocation.**
+- After the attempt ends, is cancelled or is replaced:
+  - a new connection is refused;
+  - an open connection is closed;
+  - a request ordered after revocation is refused and has no effect.
+- After a scheduler restart, an authorised running attempt reconnects at the
+  same path and its requests succeed, with no container restart. An attempt
+  whose authority cannot be confirmed is held and gets no listener.
+- Crash tests run at each boundary: grant, start, end and revoke. A crash
+  after grant but before start leaves no live endpoint once recovery
+  completes.
+- An endpoint directory with no recorded attempt is an orphan:
+  - it is reported in `orphans` (K17.5) with reason `orphan_endpoint`;
+  - `container_id`, `name`, `labels` and `created_at` are null, and
+    `endpoint_id` names the directory;
+  - it is never served;
+  - `remove-orphan` accepts the `endpoint_id` with the K17.6 outcomes.
+- Verified by: each case with an observable outcome.
+
+**IC-C22 — the session declaration and its storage.**
+- The `session` block is validated. Each of these is a config error naming
+  the provider and the field:
+  - an unknown mode;
+  - `path` missing for `home` or `export`, or absolute, or containing `..`;
+  - a non-mapping;
+  - a non-positive deadline.
+- Conversation storage survives the attempt's discard. It is removed when
+  the conversation is disposed, either by alias disposal or by node
+  disposal.
+- Before launch, the host checks that nothing it projects into the attempt
+  HOME or the conversation storage matches the provider's forbidden
+  patterns. At export, a file matching those patterns is not copied. The
+  export is then recorded `quarantined` with the file names, and the next
+  resume is `failed`.
+- Verified by: config validation, storage lifetime, the forbidden-pattern
+  refusal at export, and the `session_store` precedence rule.
+
+**IC-C23 — resume on steer and reopen.**
+- Steer of a running isolated attempt whose provider has mode `home` or
+  `export`: the next attempt resumes the session and records `resumed`.
+- The same holds for a node relaunch and for the next round of a loop alias.
+- Mode `none` records `unsupported`.
+- A changed provider, family, account or model records `unsupported` with
+  the reason, and the attempt is held unless it was relaunched with
+  `new_session`. With `new_session`, it records `fresh` and keeps the old
+  store archived.
+- A missing or corrupt store, a provider rejection, or no `resumed_event`
+  before the deadline: `failed`, and the attempt ends (D-S4A.5).
+- If the predecessor is not confirmed stopped, there is no resume and the
+  attempt is held (K14).
+- With two concurrent reopens of one conversation, exactly one attempt runs.
+  The other is held.
+- Verified by:
+  - each case, with the probe provider declaring each mode and emitting or
+    withholding `resumed_event`;
+  - the tester updates the slice 3 `session_resume: "unsupported"` test so
+    that providers with a mode expect the new outcomes.
+
+**IC-C24 — migration (Q5 still holds).**
+- An alias moving from `local` or `docker` to `isolated` gets a fresh HOME
+  (Q5). Only the declared session payload, `path` under `session`, is
+  copied into conversation storage, through a host-issued handle.
+  Forbidden patterns are excluded.
+- If the legacy binding recorded a session id and its payload is found, the
+  attempt resumes. If the id was recorded but the payload is missing, the
+  outcome is `failed`. With no recorded id, the outcome is `fresh`.
+- Runs recorded before 4A with `session_resume: "unsupported"` are not
+  rewritten.
+- Verified by: a legacy alias with a payload migrates and resumes; one with a
+  recorded id and no payload fails; one without a recorded id starts fresh;
+  a forbidden file is never copied.
+
+### Slice 4A work split
+
+1. `tester`: IC-C20 to IC-C24. The probe provider is extended to declare
+   `needs.rpc`, each session mode and `resumed_event`. Docker cases are
+   opt-in.
+2. `implementer-deep`, then the reviewer, then the `adversary`. The endpoint
+   is a trust boundary, so the adversary covers forged principals,
+   revocation races and restarts.
+3. My real-Docker runs, then the full suite, then the merge.
+
+Ordering:
+- The tester starts once slice 3's implementation is approved, so that the
+  names it builds on exist.
+- Implementation starts after slice 3 merges.
