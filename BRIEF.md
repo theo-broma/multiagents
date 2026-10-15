@@ -6187,3 +6187,10 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - ~18:20 CEST: SLICE 1 MERGED (merge_node nd-6d1ca605 -> ad41e8c9, tip f627b016) and ticket fix
   nd-6d5460da (40fbe7d0); bug-a3d76f resolved fixed. Combined suite: only new reds = 2 C2b milestone
   + slice-2 tests; nt_r4 durability red was a flake (passed alone).
+- 2026-10-15 evening: K16 committed 55a08496; K17 (slice 3 names) ef8318c8 + K17.4 erratum 4aef941e.
+  Test fix d247b21d (predecessor factory forwards seeds). Slice 3 red suite merged b7ede3e7
+  (tester nd-8a27cb3a, tip 146fdb0f; 91 Docker-only cases need SG_TEST_DOCKER=1 on host; F70 forged-
+  identity case red = real defect). kimi removed from all fallbacks in agents.yaml (user).
+- In flight: slice 2 implementer nd-fe176cc7 (loop nd-0f41b6c3, rounds_rejected 2/3): ff to its merge
+  e51fc73c (ref orch/slice2-merge-e51fc73c in alias repo), merge d247b21d, K16, F2-F5. Then reviewer,
+  re-adversary, full suite, merge. Slice 3 implementer-deep waits for slice 2 on main (needs K15 seam).
