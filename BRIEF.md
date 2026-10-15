@@ -6220,3 +6220,12 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   * Slice 4B: advisor skeleton in .multiagents/handoff/slice4b-advisor-skeleton.md (IC-C25..C31); draft
     contract, show user, commit on yes. 4C (credentials) after.
   * Dispose done tester nodes when convenient; remove /var/tmp/ic-comb and /var/tmp/wd-comb when done.
+- Plans 2026-10-15 (ready, were missed until the user asked):
+  * monitor-scheduler-display: Apply now -> implementer nd-f99688e2 + reviewer nd-ea008a44 (depends_on),
+    deposited ~21:40. After merge: mark plan applied (applied_in = decisions commit), Next phase none -> imported.
+  * user-decisions-queue (spec context/specs/user-decisions-queue.md UD-R1..R12): NOT started. Needs my
+    contract (slices 1-5), advisor pass, user validation; runs in parallel with phase 7 except UD-R4's scoped-RPC
+    refusal which follows IC-R11 (slice 4A). Item 2: git-guard amendment exempting RFC 2606/6761 reserved
+    domains (example.com/.net/.org + subdomains, .example/.test/.invalid TLDs), adversary checks look-alikes;
+    I write the amendment to the git-guard spec, user validates. Config change (19 allow_fingerprints) is the
+    user's to apply.
