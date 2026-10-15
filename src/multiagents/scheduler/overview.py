@@ -86,12 +86,15 @@ def _row(node: dict, windows: dict, starving: set) -> dict:
 
 
 def _aliases(nodes: list[dict], bound: list[dict], config) -> list[dict]:
-    """Every session alias of the plan: its frozen binding once the first
-    activation made one, else what its nodes declare (NC-R50), unbound."""
+    """Every alias, with its frozen route or declared pins (NC-R50).
+
+    Bound means a provider session exists, not merely a frozen route.
+    """
     by_id = {n["id"]: n for n in nodes}
     shown: dict[str, dict] = {}
     for binding in bound:
-        shown[binding.get("id")] = {**{k: binding.get(k) for k in ALIAS_FIELDS}, "bound": True, "nodes": []}
+        shown[binding.get("id")] = {**{k: binding.get(k) for k in ALIAS_FIELDS},
+                                  "bound": bool(binding.get("session_id")), "nodes": []}
     for node in nodes:
         key = sessions.alias_id(node, by_id)
         if not key:
@@ -177,15 +180,26 @@ def doctor_lines(sec: dict) -> tuple[list[str], list[str]]:
         window = row.get("window") or {}
         upcoming = [f"{key.replace('_', ' ')} {window[key]}" for key in ("next_open", "next_close")
                     if window.get(key)]
-        if upcoming:
+        if row.get("window_declared") and window:
+            change = "close" if window.get("open") else "open"
             info.append(f"window {row['node_id']}: {'open' if window.get('open') else 'closed'}, "
-                        + ", ".join(upcoming))
+                        + (", ".join(upcoming) if upcoming else f"no next {change} in forecast range"))
     for lock in sec["locks"]:
         info.append(f"lock {lock['name']} held by {lock['holder_node']} (run {lock['holder_run']})")
+    live_ids = {row["node_id"] for row in sec["nodes"]
+                if row["state"] in ("open", "running", "suspended", "held")}
+    finished = 0
     for alias in sec["aliases"]:
-        binding = (f"bound to {alias['provider']} {alias['model']} ({alias['account']})" if alias["bound"]
-                   else f"not bound yet, declares {alias['provider']} {alias['model']}")
-        info.append(f"session {alias['alias']} of {alias['instance']}: {binding}")
+        node_ids = [node_id for node_id in alias["nodes"] if node_id in live_ids]
+        if not node_ids:
+            finished += 1
+            continue
+        binding = ("bound — a real provider session exists" if alias["bound"]
+                   else "unbound — no provider session created yet")
+        info.append(f"session {alias['alias']}@{str(alias['instance'])[:8]} "
+                    f"({', '.join(node_ids)}): {binding}; {alias['provider']} {alias['model']}")
+    if finished:
+        info.append(f"+{finished} finished sessions (full list in monitor or /api/state)")
     return info, problems
 
 

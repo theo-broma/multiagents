@@ -379,8 +379,26 @@ function blockedText(b) {
   return detail ? `${b.code} ${detail}` : b.code;
 }
 
+function schedulerWindow(n) {
+  if (!n.window_declared || !n.window) return "";
+  const w = n.window;
+  return w.open
+    ? (w.next_close ? `window closes ${w.next_close}` : "window open; no next close in forecast range")
+    : (w.next_open ? `window opens ${w.next_open}` : "window closed; no next open in forecast range");
+}
+
+function schedulerSession(a) {
+  return `${a.alias}@${String(a.instance || "").slice(0, 8)}: `
+    + (a.bound ? "bound — a real provider session exists" : "unbound — no provider session created yet")
+    + `; ${a.provider || "provider unspecified"} ${a.model || ""}`;
+}
+
 function schedulerPanel(sc) {
   const starving = new Set(sc.starving || []);
+  const active = (sc.nodes || []).filter((n) => ["open", "running", "suspended", "held"].includes(n.state));
+  const liveIds = new Set(active.map((n) => n.node_id));
+  const aliases = sc.aliases || [];
+  const finished = aliases.filter((a) => !(a.nodes || []).some((id) => liveIds.has(id)));
   const counts = Object.entries(sc.counts || {}).filter(([, n]) => n)
     .map(([state, n]) => `${n} ${state}`).join(" · ");
   return el("div", { class: "panel" },
@@ -390,8 +408,8 @@ function schedulerPanel(sc) {
       el("strong", {}, sc.running ? `running · pid ${sc.pid}` : "NOT RUNNING — nothing will launch"),
       el("span", { class: "right muted" }, sc.last_tick ? `last tick ${sc.last_tick}` : "")),
     counts && el("div", { class: "muted", style: "margin:4px 0" }, counts),
-    (sc.nodes || []).filter((n) => !["done", "cancelled"].includes(n.state)).map((n) =>
-      el("div", { class: "row" },
+    active.map((n) =>
+      el("div", { class: "row wrap" },
         el("span", { class: n.state === "held" ? "failed" : starving.has(n.node_id) ? "starving" : "muted" },
           n.state === "held" ? "held" : starving.has(n.node_id) ? "starving" : n.state),
         el("code", {}, n.node_id),
@@ -399,14 +417,15 @@ function schedulerPanel(sc) {
         el("span", { class: "right muted" },
           n.state === "held" && n.hold ? blockedText({ code: n.hold.reason, detail: n.hold.detail })
             : (n.blocked || []).map(blockedText).join("; ")),
-        n.window && el("span", { class: "muted" },
-          n.window.open ? `window closes ${n.window.next_close || "?"}` : `window opens ${n.window.next_open || "?"}`),
+        schedulerWindow(n) && el("span", { class: "muted" }, schedulerWindow(n)),
+        aliases.filter((a) => (a.nodes || []).includes(n.node_id)).map((a) =>
+          el("span", { class: "muted" }, schedulerSession(a))),
       )),
     (sc.locks || []).length ? el("div", { class: "muted", style: "margin-top:6px" },
       "locks: " + sc.locks.map((l) => `${l.name} ← ${l.holder_node}`).join(", ")) : null,
-    (sc.aliases || []).length ? el("div", { class: "muted" },
-      "sessions: " + sc.aliases.map((a) =>
-        `${a.alias}@${a.instance}: ${a.bound ? "" : "unbound, "}${a.provider || "?"} ${a.model || ""}`).join(", ")) : null,
+    finished.length ? details("scheduler-finished-sessions", `+${finished.length} finished sessions`,
+      finished.map((a) => el("div", { class: "muted" },
+        `${(a.nodes || []).join(", ") || "no remaining nodes"}: ${schedulerSession(a)}`))) : null,
   );
 }
 
