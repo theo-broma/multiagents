@@ -681,3 +681,371 @@ so it is not tested there. It is checked under Docker in slice 3.
 2. `implementer-deep`, then reviewer, then **adversary** (mandatory:
    provisioning and import decide what one attempt can read of another's),
    then the full suite, then merge.
+
+## Slice 3 — the executor: one container per attempt, by container identity
+
+**Status:** approved by the user 2026-10-15. Milestone 3 of `phase7-part2-containers.md`
+(IC-R6..R9, IC-R15, and C2b of IC-C2). It builds on the K1 names and the slice 2
+seed only, never on slice 1 or 2 internals.
+
+### Decisions pinned by slice 3
+
+- **D-S3.1 — scope.**
+  - Slice 3 adds:
+    - the real backend `docker` for `executor.kind: isolated`, implementing
+      IC-C4;
+    - Runner's handling of isolated attempts through that protocol and the
+      recorded identity only: adoption, liveness, output, stop, retention,
+      discard and orphan reporting (D-S1.1, C2b).
+  - The legacy `local` and `docker` executors are unchanged (IC-C8), except
+    where an IC-R15 finding lives in code both paths share (IC-C19).
+- **D-S3.2 — what an isolated attempt cannot do yet, and says so.** These are
+  refused with `Unsupported(<field>)`, i.e. TF class `other` (IC-C3), never
+  silently left out:
+  - a non-empty `credential_handle` (credentials are slice 4);
+  - a non-empty `transport_handle` (the scoped RPC, slice 4);
+  - a non-empty `session_state` (IC-R6 session hand-over moves to slice 4 with
+    the provider-specific credential work, because which files hold a
+    session is a provider adapter fact).
+  - The container has **no network** until slice 4 (IC-R10).
+  - So in slice 3 only workloads that need no credentials, no network and no
+    RPC run isolated: the C6 probe provider and the test workloads. A real
+    agent selected onto `isolated` is refused, visibly. That is the IC-D7
+    opt-in working as intended, not a gap.
+  - **The refusal predicate is the provider's declaration, not empty
+    handles.** Each provider adapter declares whether it needs credentials,
+    network or the RPC. On `isolated`, a provider that declares any of them
+    is refused with `Unsupported(<the matching field>)` in slice 3. Only
+    providers that declare none run: the probe provider and the test fakes.
+    A provider with no declaration counts as needing all three.
+  - **Steer** of an isolated attempt in slice 3 means stop, then a new
+    attempt.
+    - It keeps the authorised repository work, through the retained
+      repository and the slice 2 alias re-seed.
+    - It visibly starts without session resume: the run records
+      `session_resume: "unsupported"`.
+    - Session continuity on steer or reopen (IC-R6) is an acceptance
+      obligation of the completed part, deferred to slice 4.
+  - **Lifetime `conversation`** is `Unsupported(lifetime)` until slice 6
+    (IC-D6). In slice 3, a resource carries exactly one invocation.
+- **D-S3.3 — Docker is reached through one seam.**
+  - The backend talks to Docker only through the `docker` CLI, found by a
+    configured path (default: `docker` on the host scheduler's PATH).
+  - A test can therefore substitute a fake CLI. Agents' containers have no
+    Docker socket (unchanged), so implementers verify the backend against
+    that fake and against the reference backend. The orchestrator runs the
+    real-Docker tests on the host (`SG_TEST_DOCKER=1`) before merge and
+    hands failures back.
+- **D-S3.4 — the container is the supervisor (IC-D4).**
+  - Restart policy `no` (ST1).
+  - Every inspect, signal, stop and removal names the recorded immutable
+    container id. Names and labels are used only by `find` and
+    `list_owned`.
+  - **The agent invocation is the container's main workload.**
+    - `provision` creates the container but does not start it. Its command is
+      fixed at creation: a host-supplied entry point that reads the
+      invocation spec from a host-issued, read-only input directory and
+      runs it.
+    - `run` writes the invocation spec (argv, env, cwd, stdin file) into that
+      directory, then starts the container.
+    - The container's exit code is the invocation's, and its OOM evidence is
+      the invocation's: one attempt resource, one invocation.
+    - There is no `docker exec` for agent invocations. Exec-based turns are a
+      slice 6 matter.
+    - `inspect_invocation` therefore derives from the container's own
+      record.
+  - Nothing written inside the container (pid files, run-dir files, exit
+    files) is ever trusted for liveness, exit, OOM or stop. This closes
+    the C15 residuals for isolated attempts: forged `wrapper.pid` and
+    `container.pid`, and descendants escaping through `setsid()`.
+
+### Behaviours
+
+**IC-C14 — the Docker backend (IC-R6, IC-R7).**
+- `probe()` reports, without side effects:
+  - the Docker daemon unreachable;
+  - the configured image absent;
+  - each missing prerequisite.
+  - Any problem gives the IC-C3 block `isolation_unavailable: <reason>`.
+  - There is no image build at launch.
+- `provision(spec, key)` behaves as follows.
+  - Order (F64): validate the spec and check the image **before any side
+    effect**.
+  - Then create one container whose name is derived from `key` and recorded
+    before creation (K5 `creation_key`). It returns the immutable container
+    id as the identity.
+  - The container carries the reserved project label (K12), the owner, the
+    lifetime and the spec digest.
+  - Idempotency and `IdentityConflict` follow IC-C4. A crash between
+    `docker create` and recording the id is recovered by `find(key)`.
+- **What the container gets, and nothing else:**
+  - **Writable:** the attempt's own private storage, under a host-issued root,
+    at the guest paths for repository, HOME and temp (K1 defaults
+    `/work/repo`, `/work/home`, `/work/tmp`). The repository is the slice 2
+    fresh clone.
+  - **Read-only:** the declared toolchain mounts. A `readonly` attempt also
+    has its repository and Git metadata read-only.
+  - **Never:** the host run directory, another attempt's storage, the
+    project root, the Docker socket, or host network, pid or ipc namespaces.
+  - **Process:** no added capabilities; `no-new-privileges`; no network
+    (D-S3.2).
+  - **User and ownership.** The container runs as the uid:gid of the host
+    scheduler process, with no supplementary groups and umask 077.
+    - The host creates the private storage owned by that uid, directories
+      0700, so slice 2 capture and import read it as today.
+    - Supported Docker mode: a rootful daemon without user-namespace
+      remapping. In rootless or userns-remap mode, `probe` reports
+      `isolation_unavailable: docker user namespace mode not supported`,
+      until a later slice proves it.
+  - **Slice 2's provisioning seam.** The slice 2 backend methods beyond
+    IC-C4 are, at 3127f4f7: `checkout_path`, `attach_checkout` and
+    `prepare_input`.
+    - They become part of the protocol text as **K15**, written when slice 2
+      merges, with their observable semantics.
+    - The Docker backend implements them with identical semantics. The
+      conformance suite covers them on both backends.
+  - The prompt reaches the invocation as its stdin input file (IC-C4).
+- `run(identity, invocation, key)` starts the single agent invocation. A
+  second one is `AlreadyInvoked`, as in IC-C4.
+- `inspect` and `inspect_invocation` report from Docker's own records:
+  - state and exit code;
+  - `oom` from Docker's OOM evidence for the container;
+  - `finished_at`.
+  - A daemon error or timeout is `Unknown(reason)`, never `Absent`.
+- `output(identity, invocation_id, stream, offset)`:
+  - stdout and stderr are produced independently of any host process, so
+    output keeps being produced while the scheduler is down;
+  - they are kept outside the agent's write reach;
+  - they can be replayed from any offset up to what was written, after a
+    scheduler restart and after a machine reboot, until `remove`.
+  - If Docker's log driver is the mechanism, the container's logging
+    configuration is pinned at creation with no rotation and no size cap
+    that drops data. Silent loss is a defect.
+- `stop(identity, grace)`:
+  - graceful signal, then forced termination after `grace`;
+  - it ends every process in the container, including descendants that
+    left the process group or session;
+  - it is confirmed by a subsequent `inspect` reporting `exited`;
+  - otherwise it returns `Unknown`.
+- `remove(identity, keep_artifacts)`: as IC-C4.
+- `list_owned(project)`: the containers carrying this project's reserved label.
+- **Resources applied at create time:**
+  - a per-run hard memory limit;
+  - a pids limit;
+  - an equal CPU weight;
+  - an optional `cpus` cap, off by default;
+  - all from `executor.isolated.resources` in `project.yaml`, with stated
+    defaults (hard memory 6 GB, pids 4096, CPU weight equal, no cap).
+  - Admission against a memory budget is slice 5 (IC-R5).
+  - Values are validated (F32): 0 and negatives are config errors naming the
+    key; "unset" means the default.
+- Verified by:
+  - the IC-C5 conformance suite against this backend under
+    `SG_TEST_DOCKER=1`, including the `ic_milestone(3)` containment cases
+    (escaped descendants, sibling reads);
+  - the same suite against the fake CLI for command construction and outcome
+    parsing, without Docker.
+
+**IC-C15 — Runner on isolated attempts: adoption and output without loss or
+duplication (IC-R7, C2b).**
+- **Launch evidence (K5) is the only authority.** For an isolated attempt,
+  every Runner path consults the recorded `kind`, `backend`,
+  `backend_version`, `creation_key`, `identity` and `invocation_id`, and
+  never the current config. Those paths are adoption, liveness, output,
+  stop, steer, cancel and cleanup. None of them falls back to pid files,
+  process groups or the single project container.
+- **Adoption after a host restart** (scheduler or CLI). For each launched
+  isolated attempt:
+  - `running` → resume following output from the durably recorded
+    consumed offset of each stream. The run's output shows every byte once:
+    no loss, no duplication.
+  - `exited` → collect the exit evidence, finish as a normal end.
+  - `absent` → the resource is gone; the attempt ends with TF class `launch`,
+    as a lost launch today, and nothing is retried silently in another kind.
+  - `unknown` → the existing liveness hold (K6); reservation kept.
+  - No identity yet → resolve `find(creation_key)` first.
+- **C2b**, as already written in IC-C2: adoption uses the recorded backend.
+  - A recorded backend version that the backend does not declare compatible
+    gives `unknown` and a hold.
+  - A record without executor evidence is unknown.
+- **The replay rule** (no loss, no duplication).
+  - Runner appends consumed output to the host run output **in whole lines
+    only**. A trailing partial line waits for its newline or for the end
+    of the stream.
+  - After each append, it records a checkpoint durably, per stream: the
+    backend offset just past the last whole line consumed, and the length
+    of the host output at that point.
+  - On recovery, it first truncates the host output back to the
+    checkpointed length, then replays from the checkpointed backend offset.
+  - The same rule holds for stderr.
+  - Where the checkpoint is stored is the developer's choice: the attempt
+    journal, or the host-owned run directory.
+- **The five launch boundaries (IC-R6)**, recovered after a crash at each:
+  1. *Before creation.* The creation key is recorded and `find(key)` gives
+     `Absent`. Nothing exists, so the attempt is treated as an unlaunched
+     claim under today's rule.
+  2. *After creation, before start.* `inspect` gives `Created`. No invocation
+     ever ran. The resource is removed, without keeping artifacts, and the
+     attempt is treated as an unlaunched claim. A created container is never
+     started after the fact by recovery.
+  3. *After start, before `invocation_id` is recorded.* Resolve through the
+     recorded `invocation_key` and the container's state, then adopt as
+     `running` or `exited`. The invocation is **never run a second time**.
+  4. *After exit, before the evidence is recorded.* Drain output to the
+     end, record the exit code and OOM durably, and only then remove or
+     retain.
+  5. *After capture.* A committed capture (its generation is recorded) is
+     recognised. Recovery finishes cleanup and retention without producing
+     another generation.
+- Verified by:
+  - an injected crash at each of the five boundaries, on the reference
+    backend and under `SG_TEST_DOCKER=1`;
+  - restart tests on the reference backend, which kill and restart the
+    scheduler while an attempt is running, after it exited, and after its
+    resource was removed;
+  - a crash between a host output append and its checkpoint, including a
+    partial line, showing output byte-identical to an uninterrupted run;
+  - output byte-identical to an uninterrupted run;
+  - the same adoption tests under `SG_TEST_DOCKER=1`;
+  - the existing C2b tests (`ic_milestone(3)`).
+
+**IC-C16 — stop, cancel and steer (IC-R7).**
+- Cancel → `stop(identity, grace)`, where `grace` is today's cancellation grace.
+  - Compute reservations are released once `exited` or `absent` is
+    confirmed (K6).
+  - `Unknown` keeps the reservation and the liveness hold.
+- Steer of an isolated attempt follows D-S3.2: stop, then a new attempt.
+- **A config change applies to the next attempt.**
+  - It never stops, recreates or re-adopts running isolated containers.
+  - The legacy "config changed, recreate the project container" path does not
+    apply to them.
+  - Mount-drift detection is a legacy-container concept and is not run for
+    isolated attempts.
+- Verified by:
+  - cancel while running, including a workload that forks a `setsid()`
+    child: after confirmation, no process of the attempt survives
+    (`SG_TEST_DOCKER=1`);
+  - a workload that writes forged `wrapper.pid` and `container.pid` files:
+    stop and liveness are unaffected;
+  - a config change with a running isolated attempt: the attempt finishes
+    normally, and the next attempt uses the new config.
+
+**IC-C17 — exit, OOM and resource failures (IC-R9).**
+- `Exited(code, oom=True)` is recorded in the run's cause as OOM evidence
+  and classified by TF in the class today's OOM evidence maps to (D1,
+  LN-R6).
+- A non-zero exit without OOM keeps today's classification.
+- The attribution is per attempt: the container is the attempt's own, so no
+  shared-container occupancy reasoning applies.
+- Verified by: a workload exceeding a small hard memory limit under
+  `SG_TEST_DOCKER=1` (cause shows OOM, TF class as stated); the fake CLI for
+  the parsing.
+
+**IC-C18 — retention, discard and orphans (IC-R6, IC-R8).**
+- **Retention.** When an attempt ends, `remove(identity, keep_artifacts=True)`
+  keeps the **exited container itself** and the attempt's private storage,
+  including the repository.
+  - Docker's records stay authoritative, so later `inspect` and `output`
+    read them as before.
+  - No process keeps running.
+  - Nothing is archived elsewhere, and there is no copy step that a crash
+    could interrupt.
+  - An attempt whose capture failed is retained the same way, never
+    discarded.
+  - What stays lasts until the node is discarded, disposed, or merged and
+    cleaned up. Retention periods and quotas are slice 5.
+- **Discard** (`discard_agent`, `dispose_node`, merge cleanup) removes the
+  container and the private storage without `keep_artifacts`.
+  - It runs after capture, never before.
+  - If removal returns `Unknown`, the node is reported, not marked clean.
+- **Orphans.** An orphan is a container from `list_owned(project)` with:
+  - no recorded attempt; or
+  - a recorded attempt whose node was already discarded.
+  - Orphans are **reported**, never deleted automatically:
+    - in `scheduler_status` (a list with container id, name, labels and
+      created time);
+    - by a CLI listing.
+  - Removal is an explicit user command naming the container id.
+- Verified by:
+  - retention keeps output, exit and repository readable after the end;
+  - discard leaves nothing for that attempt in `list_owned`;
+  - a container created with the project label but no record is reported,
+    not deleted;
+  - another project's containers are never listed (K12).
+
+**IC-C19 — the deferred executor findings (IC-R15).**
+All eight findings were checked on main bfc3a230; all are still present.
+
+- **Fixed in slice 3, in code that the isolated path shares.** Each has a
+  failing test named after the finding.
+  - **F34** — `prepare_home` (`executor/base.py`, called from Runner for every
+    kind). When the target is a file, or its parent is not writable, it
+    raises an uncaught exception. Instead, it must return a launch failure
+    naming the path: TF class `launch` for isolated attempts, today's class
+    otherwise.
+  - **F70** — the generic `Handle.stop` (`executor/base.py`) re-resolves a
+    pid's process group after the timeout and SIGKILLs it. It must not
+    signal a group unless it has proven that the group is still the one it
+    started. Proof means a start-time or pidfd identity; a pid alone is not
+    proof.
+    - Isolated attempts never use this handle (IC-C16), and a test proves
+      that.
+    - The fix covers `local`, which stays after IC-D7.
+- **Hold by construction on the isolated path, each proven by a test;
+  reconsidered for the legacy code.** The legacy `docker` code keeps the
+  defect: changing it would break IC-C8, and IC-D7 removes it. When this
+  part merges, each is set to `reconsidered: legacy shared mode, removed by
+  IC-D7` in the ledger.
+  - **F31** — the isolated spec never drops a declared mount silently.
+    - A declared toolchain path that is missing is `InvalidSpec` naming it.
+    - The attempt's own storage is created before `provision`.
+  - **F32** — `executor.isolated.resources` rejects 0 and negatives
+    (IC-C14).
+  - **F35** — every isolated host path is resolved, symlinks included, and
+    must lie under a host-issued root (IC-C4). Toolchain mounts are always
+    read-only.
+  - **F64** — `provision` checks the image before any side effect (IC-C14).
+  - **F65** — an isolated attempt writes no credential file in slice 3
+    (D-S3.2). Slice 4 carries the property "no credential temp file
+    survives an interruption" as an acceptance test.
+  - **F69** — the isolated path takes no lock whose deletion is decided by a
+    pid check. A test asserts it.
+
+**IC-C6 and the milestone-3 tests.** Under `SG_TEST_DOCKER=1`, these turn green
+in slice 3:
+- the `ic_milestone(3)` isolation clauses:
+  - worktree, HOME, temp and run directory;
+  - secrets by content;
+  - refs and objects;
+  - the `readonly` attempt;
+  - the deliberate handover;
+  - the session label;
+- the C5 containment cases;
+- the C10 case;
+- the C2b tests.
+
+Milestones 4 to 6 stay red.
+
+### Slice 3 work split
+
+1. **`tester`:** the fake `docker` CLI under `tests/support/` (scriptable
+   outcomes, records argv), the IC-C14..C19 tests, and restart and adoption
+   tests on the reference backend. Red.
+2. **`implementer-deep`:** the Docker backend, and Runner's isolated paths.
+   They are cross-cutting and touch supervision invariants.
+3. **The orchestrator:** the real-Docker runs on the host (`SG_TEST_DOCKER=1`).
+   - **An early smoke run** as soon as the implementer reports create, run,
+     inspect and output working. It does not wait for the whole slice.
+   - **The full acceptance run** before review.
+   - Failures go back to step 2 with their output.
+   - **Real-Docker acceptance is defined by the tests, independently of the
+     fake.** It covers:
+     - output produced while the scheduler is down;
+     - non-zero exit;
+     - OOM;
+     - crash recovery at creation and at start;
+     - private-storage permissions through a real capture and a discard;
+     - retention.
+   - Matching argv in the fake is never acceptance.
+4. **reviewer**, then **adversary** (mandatory: C15 cases and container
+   boundaries), then the full suite, then merge.
