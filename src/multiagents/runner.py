@@ -11803,20 +11803,13 @@ class Runner(QuotaHandover):
             # call (e.g. a provider crash within the first few seconds of
             # start()) is in neither set above, so it was reported nowhere at
             # all — not here, not in already_finished, not in still_running.
-            # tree.unseen() is exactly "parentless nodes with a result nobody
-            # has been told about yet", scoped by session the same way
-            # driver.py's _busy() scopes it. Folding it in surfaces the miss
-            # through the already-finished path below, and server.py's
-            # _seen() marks it seen once reported, so it does not repeat on
-            # the next wait_for_any(None) call.
-            watched += [n.id for n in self.tree.unseen(self.session())
-                        if n.id not in watched]
+            # No-ID waits only deliver history from this exact session.
+            # Other unseen() callers still include legacy sessionless nodes.
+            session = self.session()
+            watched += [n.id for n in self.tree.unseen(session)
+                        if n.session == session and n.id not in watched]
         watched += [r["agent_id"] for r in revived.get("restarted", [])
                     if r.get("agent_id") and r["agent_id"] not in watched]
-        if not watched:
-            return {"changed": [], "reason": "no active agents",
-                    "still_running": [], "capacity": self.capacity(), **pause()}
-
         # Agents that had already finished before this call are reported, but
         # are NOT what we wait on. Without this split, calling again with the
         # same id list returns the same finished agent forever and a polling
@@ -11837,9 +11830,25 @@ class Runner(QuotaHandover):
                 })
 
         if not pending:
-            return {"changed": already, "all_finished": True,
-                    "still_running": [], "capacity": self.capacity(),
-                    "note": "every agent you named had already finished", **pause()}
+            capacity = self.capacity()
+            # bug-a3d76f: the initial active snapshot can predate a launch.
+            # Re-read live occupants separately from terminal history before
+            # deciding that there is nothing left to wait on. Use the same
+            # occupancy rules as capacity, including durable cleanup holds.
+            occupants = list(self._occupying(self.tree.read()["nodes"]))
+            if not agent_ids:
+                pending = [agent_id for agent_id, _ in occupants]
+                already = [entry for entry in already
+                           if entry["agent_id"] not in pending]
+            if not pending:
+                if not watched:
+                    return {"changed": [], "reason": "no active agents",
+                            "still_running": [], "capacity": capacity, **pause()}
+                return {"changed": already,
+                        "all_finished": not occupants and capacity["running"] == 0,
+                        "still_running": [], "capacity": capacity,
+                        **({"note": "every agent you named had already finished"}
+                           if agent_ids else {}), **pause()}
 
         # SL-R5: an agent that was ALREADY stuck-and-live when the wait began
         # is treated as running-equivalent for the whole wait — it is reported
