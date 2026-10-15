@@ -674,6 +674,42 @@ so it is not tested there. It is checked under Docker in slice 3.
 - Admission always sets a seed for a scheduler attempt under `isolated`. One
   without a seed is refused with `InvalidSpec("seed_required")`.
 
+**K16 — own launch evidence versus a predecessor's (IC-C4, K14, IC-C12/P7,
+IC-C15; 2026-10-15, adversary pass 3, finding F1).**
+
+When recovery or `start` finds launch evidence with a `creation_key` but no
+`invocation_id`, the response depends on whose evidence it is.
+
+- **Telling them apart.** Evidence is the attempt's own or a predecessor's
+  according to the host-recorded attempt identity. It is never inferred from
+  which launch fields are missing.
+- **Own evidence** (the attempt was interrupted, and the scheduler is
+  recovering it):
+  - `Absent`, or a confirmed never-invoked `Created`, follows IC-C15
+    boundaries 1 and 2. The `Created` resource is removed. The attempt
+    returns through the normal unlaunched-claim recovery; the recovery
+    path never provisions or starts it again.
+  - Before the attempt's storage is released or deleted, its P7 swap record
+    is settled: the swap is completed or rolled back, HOME is preserved, and
+    the old checkout is archived.
+  - A `Running` or `Exited` invocation is adopted or finalised (IC-C15), and
+    never run again.
+- **A predecessor's evidence** (TF retry, relaunch, steer): K14 applies
+  unchanged. The predecessor is resolved, then stopped and removed, or the
+  attempt is held on `Unknown`. The new attempt then provisions under its
+  own fresh key and never reuses the predecessor's.
+- **Any uncertainty holds** (K6). Recovery never guesses.
+- Backend-level idempotency (IC-C4: the same key and the same digest return
+  the same identity) still holds. It allows an operation to be repeated; it
+  does not oblige Runner to resume an abandoned claim.
+- Verified by:
+  - tests/test_ic_c4_predecessor.py and tests/test_ic_adv2_predecessor_hang.py,
+    green on the combined slices;
+  - test_ic_c12_p7_the_swap_recovers_across_a_scheduler_restart, still
+    green: it requires activation on a fresh repository with HOME preserved,
+    not the same attempt id;
+  - the IC-C15 boundary tests (slice 3).
+
 ### Slice 2 work split
 
 1. `tester`: IC-C9..C13 against the reference backend and the scheduler's
