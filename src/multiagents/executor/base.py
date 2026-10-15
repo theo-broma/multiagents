@@ -457,6 +457,7 @@ class Executor(ABC):
     """Starts a command and returns a :class:`Handle`."""
 
     kind = "base"
+    uses_guest_environment: bool = False
 
     @abstractmethod
     async def start(self, argv: list[str], cwd: Path, env: dict[str, str], *,
@@ -625,8 +626,7 @@ def build_env(
     _forward_env(env)
     # CW-R2b: the safe-point key is never an agent's, even when passthrough
     # or the identity names it.
-    from ..safepoint import strip_key
-    return strip_key(env)
+    return strip_run_environment(env)
 
 
 def _add_git_config_override(env: dict[str, str], key: str, value: str) -> None:
@@ -749,3 +749,17 @@ def private_file(home: Path, relative: str) -> Path:
     if target.is_symlink():
         target.unlink()
     return target
+
+
+def strip_run_environment(env: dict) -> dict:
+    """Remove host control inputs after every run-environment overlay."""
+    from ..safepoint import strip_key
+    strip_key(env)
+    for key in ("MULTIAGENTS_TEST_ISOLATED_BACKEND", "IC_TEST_PLAN", "IC_BACKEND_ROOT"):
+        env.pop(key, None)
+    return env
+
+
+def guest_environment(executor: Any) -> bool:
+    """Execution location, including older executor doubles without the property."""
+    return getattr(executor, "uses_guest_environment", getattr(executor, "kind", "") == "docker")

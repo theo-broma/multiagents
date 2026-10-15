@@ -9,6 +9,8 @@ import threading
 import time
 from pathlib import Path
 
+from ..executor.base import guest_environment
+
 from .. import scripts
 from ..paths import global_config_dir
 from ..providers import credential_owner, resolved_profile
@@ -76,9 +78,9 @@ def _target(paths, providers, executor_of, name, account):
     backing = getattr(executor, "private_state", lambda _n: {})(name) or {}
     profile = resolved_profile(action_provider)
     kind = getattr(executor, "kind", "local")
-    if kind == "docker" and vault:
+    if guest_environment(executor) and vault:
         source = ("vault", str(Path(next(iter(vault.values()))).absolute()))
-    elif kind == "docker" and backing:
+    elif guest_environment(executor) and backing:
         source = ("backing", str(Path(next(iter(backing.values()))).absolute()))
     elif profile:
         source = ("profile", str(Path(profile).absolute()))

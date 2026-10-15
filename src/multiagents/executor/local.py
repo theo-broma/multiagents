@@ -22,7 +22,7 @@ from typing import Any
 from .. import gitops, procs
 from ..agentwrap import prompt_stdin
 from ..scheduler.owner import _check as owner_alive
-from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv
+from .base import Executor, FollowHandle, Handle, turn_deadline, wrapper_argv, strip_run_environment
 
 
 # One stdout line can carry a whole file: a CLI reports a tool result as a single
@@ -63,7 +63,7 @@ class LocalExecutor(Executor):
                 raise FileNotFoundError(entry.bin_error(found))
             # H7 PS-R2a: argv[0] is the launcher, not the realpath.
             argv = [str(found.launcher), *argv[1:]]
-        env = self.adapter_env(argv, env, provider)
+        env = strip_run_environment(dict(self.adapter_env(argv, env, provider)))
         if run_dir is not None:
             return await self._start_wrapped(argv, cwd, env, run_dir, deadline,
                                              pid_file or run_dir / "agent.pid")

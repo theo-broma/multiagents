@@ -549,7 +549,7 @@ class AgentSpec:
     max_steps: int = 0                # 0 = use limits.max_steps
     writes: bool = True               # False -> branch dropped if it stays empty
     conversational: bool = False      # talked to via consult(), keeps context
-    executor: str = ""                # "" = project default; else local | docker
+    executor: str = ""                # "" = project default; else local | docker | isolated
     # LAUNCHED as an MCP client rather than spawned as a subagent. Real fields
     # rather than `extra` keys, because extras are coerced into command options
     # and `isinstance(True, int)` is True.
@@ -747,6 +747,21 @@ def _positive(value: Any) -> int | float | None:
     return int(number) if number == int(number) else number
 
 
+def _executor_section(value: Any, source: Path | None = None) -> dict:
+    """Normalize the scalar shorthand before any executor section is read."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        return {"kind": value}
+    if not isinstance(value, dict):
+        location = f"{source}: " if source else ""
+        raise ValueError(f"{location}executor must be a kind string or a mapping, "
+                         "for example executor: {kind: isolated, isolated: {backend: docker}}")
+    if "isolated" in value and value["isolated"] is None:
+        return dict(value, isolated={})
+    return value
+
+
 @dataclass
 class Config:
     project: dict[str, Any]
@@ -786,7 +801,7 @@ class Config:
 
     @property
     def executor(self) -> str:
-        return self.project.get("executor", {}).get("kind", "local")
+        return _executor_section(self.project.get("executor")).get("kind", "local")
 
     @property
     def env_passthrough(self) -> list[str]:
@@ -1218,6 +1233,8 @@ def source_version(paths: ProjectPaths | None) -> tuple:
 def read_project_layer(layer: Path, scheduler_errors: list[str] | None = None) -> dict:
     """Validate scheduler policy at its source; doctor may collect bad keys."""
     data = read_yaml_cached(layer / "project.yaml", strict=True)
+    if "executor" in data:
+        data["executor"] = _executor_section(data["executor"], layer / "project.yaml")
     if "notify" in data:
         # NT-R1: the notify section is refused at load, the way invalid
         # scheduler settings are — naming the key and the file with its line.
@@ -1414,6 +1431,15 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
         print(f"warning: {text}", file=sys.stderr)
     _warn_unknown_entry_keys(agents_raw, providers, warnings)
     executor = (merged["project.yaml"].get("executor") or {}).get("kind", "local")
+    accepted_executors = ("local", "docker", "isolated")
+    if executor not in accepted_executors:
+        raise ValueError(f"Unknown executor kind {executor!r}; expected local, docker or isolated")
+    for name, agent in agents.items():
+        if agent.executor and agent.executor not in accepted_executors:
+            raise ValueError(f"agent {name!r}: unknown executor {agent.executor!r}; expected local, docker or isolated")
+    isolated = (merged["project.yaml"].get("executor") or {}).get("isolated", {})
+    if not isinstance(isolated, dict) or isolated.get("backend", "docker") != "docker":
+        raise ValueError("executor.isolated.backend must be docker (accepted values: docker)")
     from .providers import expand_env_value
     for name, provider in providers.items():
         required = provider.home_account_executor

@@ -129,7 +129,8 @@ async def supervise(root, attempt_id, lock_fd=None):
                                     depth=node.get("depth") or (creator.depth + 1 if creator else 1),
                                     node_id=node["id"], attempt_id=attempt_id, run_id=attempt["run_id"],
                                     provider=attempt.get("binding", {}).get("provider", node["pins"].get("provider", "")),
-                                    effort=attempt.get("cleanup_effort", node["pins"].get("effort", "")))
+                                    effort=attempt.get("cleanup_effort", node["pins"].get("effort", "")),
+                                    executor_kind=(attempt.get("launch_evidence") or {}).get("executor", {}).get("kind", ""))
             try:
                 task = attempt.get("cleanup_task", node["task"])
                 if node.get("rate_limit_fresh_from"):
@@ -247,6 +248,11 @@ async def supervise(root, attempt_id, lock_fd=None):
                     current = attempts(db)[attempt_id]
                     current["steer_commands"][id]["result"] = result
                     save_attempt(db, current)
+                continue
+            if current.get("isolation_unknown"):
+                # K14: the scheduler performs delayed recovery. A stopped
+                # predecessor is not a completed or failed attempt while held.
+                await asyncio.sleep(0.2)
                 continue
             live = runner.runs.get(attempt["run_id"])
             if live is None or live.done.is_set():

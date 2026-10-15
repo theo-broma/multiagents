@@ -282,7 +282,9 @@ class Engine:
                              node_id=node["id"], attempt_id=(attempt or {}).get("attempt_id", ""),
                              run_id=(attempt or {}).get("run_id", ""),
                              provider=node["pins"].get("provider", ""),
-                             effort=node["pins"].get("effort", ""), admission_only=probe)
+                             effort=node["pins"].get("effort", ""), admission_only=probe,
+                             executor_kind=((attempt or {}).get("launch_evidence", {}).get("executor", {}).get("kind", "")
+                                            or (node.get("retry_route") or {}).get("executor_kind", "")))
 
     def window(self, node, nodes, instant=None):
         return windows.effective(node, nodes, self.runner.config.project["scheduler"].get("timezone", "Europe/Paris"),
@@ -386,7 +388,22 @@ class Engine:
             blocked = self.lock_blockers(node, nodes, journal) or self.reasons.get(node["id"], [])
         if node["state"] in {"running", "done", "cancelled"}:
             blocked = []
-        return {**copy.deepcopy(node), "ready": ready, "ready_since": node.get("ready_since"),
+        projected = copy.deepcopy(node)
+        for index, row in enumerate(projected.get("runs") or []):
+            if not isinstance(row, dict):
+                row = projected["runs"][index] = {}
+            attempt_id = row.get("attempt_id")
+            attempt = journal.get(attempt_id) if isinstance(attempt_id, str) else None
+            launch = attempt.get("launch_evidence") if isinstance(attempt, dict) else None
+            evidence = launch.get("executor") if isinstance(launch, dict) else None
+            if (not isinstance(evidence, dict)
+                    or evidence.get("kind") not in ("local", "docker", "isolated")
+                    or any(not isinstance(evidence.get(key, ""), str)
+                           for key in ("backend", "backend_version"))):
+                evidence = {"kind": "unknown"}
+            row["executor"] = {key: evidence.get(key, "")
+                               for key in ("kind", "backend", "backend_version")}
+        return {**projected, "ready": ready, "ready_since": node.get("ready_since"),
                 "eligible": ready and not blocked and not active, "blocked": copy.deepcopy(blocked),
                 "eligible_since": node.get("ready_since") if ready and not blocked else None,
                 "active_run": active if node["state"] not in {"done", "cancelled"} else None}
@@ -754,6 +771,13 @@ class Engine:
                            "state": "claimed", "locks": sorted(self.lock_set(current, current_nodes)),
                            "lock_owners": self.lock_owners(current, current_nodes),
                            "retry_count": current.get("launch_tries", 0), "at": now(), **prepared}
+                from ..executor.lifecycle import LaunchSpec, spec_digest
+                selection = dict(result.get("executor_selection") or {
+                    "kind": spec.executor or config.executor, "backend": "", "backend_version": "1"})
+                launch_spec = LaunchSpec(owner=attempt["attempt_id"], lifetime="attempt",
+                                         labels={"multiagents.project": self.paths.slug})
+                selection.update(spec_version=1, spec_digest=spec_digest(launch_spec))
+                attempt["launch_evidence"] = {"executor": selection}
                 current["launch_tries"] = attempt["retry_count"] + 1
                 # TF-R2: a retry whose route is the provider the failed
                 # attempt ran on resumes its session; a route that lands
@@ -1233,6 +1257,14 @@ class Engine:
             journal = attempt_records(db)
         settled = []
         for attempt in journal.selected("captured", "claimed", "launched"):
+            launch = attempt.get("launch_evidence")
+            executor = launch.get("executor") if isinstance(launch, dict) else None
+            if isinstance(executor, dict) and executor.get("kind") == "isolated":
+                if attempt.get("isolation_unknown"):
+                    await self.runner._recover_isolated_predecessor(attempt)
+                    continue
+                if self.runner._restore_isolated_predecessor_hold(attempt):
+                    continue
             confirm_recovery_launch(self.store, self.paths, attempt)
             if attempt["state"] == "captured":
                 self.integrate(attempt)
@@ -1404,7 +1436,7 @@ class Engine:
         if not evidence:
             return replace(predecessor, captured=False, probe_raw=_unknown_probe)
         executor = self.runner._predecessor_executor(
-            SimpleNamespace(exec_identity=evidence.get("executor", {})), None)
+            SimpleNamespace(id=attempt["run_id"], exec_identity=evidence.get("executor", {})), None)
         probe = self.runner._raw_alive_probe(executor, attempt["run_id"])
         return replace(predecessor, captured=bool(evidence.get("pid") or probe),
                        pid=evidence.get("pid"), pid_start=evidence.get("pid_start", ""),
@@ -1678,7 +1710,10 @@ class Engine:
         provider_name = (attempt.get("binding") or {}).get("provider") or getattr(tree_run, "provider", "") or ""
         model = (attempt.get("binding") or {}).get("model") or getattr(tree_run, "model", "") or ""
         from .. import failures as tf
-        if message.get("failure_cause"):
+        isolation_failure = (attempt.get("launch_evidence") or {}).get("executor", {}).get("failure")
+        if isolation_failure:
+            cause = dict(isolation_failure)
+        elif message.get("failure_cause"):
             cause = dict(message["failure_cause"])
         elif provider_name:
             cause = tf.cause_from_result(
@@ -1728,6 +1763,9 @@ class Engine:
         from .. import failures as tf
         cause = result.get("cause") or {}
         kind = cause.get("class", "other")
+        if kind == "other" and cause.get("detail_code") == "isolation_unavailable":
+            self.hold(db, node, "isolation_unavailable", cause)
+            return None
         if kind in tf.RETRYABLE:
             budget, backoff = tf.retry_policy(
                 self.service.configuration().project["scheduler"])
@@ -1860,7 +1898,9 @@ class Engine:
                     from . import control
                     control.recovery(current, attempt_records(db), True)
                     current.pop("retry_pending", None)
-                    route = {"attempt": pending.get("attempt"), "from": pending.get("from")}
+                    source = attempt_records(db).get(pending.get("attempt"), {})
+                    route = {"attempt": pending.get("attempt"), "from": pending.get("from"),
+                             "executor_kind": source.get("launch_evidence", {}).get("executor", {}).get("kind", "")}
                     if pending.get("session"):
                         route["session"] = pending["session"]
                     if pending.get("provider"):
@@ -1972,9 +2012,15 @@ class Engine:
             journal = attempt_records(db)
             current.pop("quota_hold", None)
             current.update(state="open", hold=None, revision=current["revision"] + 1)
+            source = next((journal.get(row.get("attempt_id"), {})
+                           for row in reversed(current.get("runs") or [])
+                           if isinstance(row, dict) and isinstance(row.get("attempt_id"), str)), {})
+            selection = (source.get("launch_evidence") or {}).get("executor") or {}
+            route = {"executor_kind": selection["kind"]} if selection.get("kind") else {}
             if resume and hold.get("session"):
-                current["retry_route"] = {"session": hold["session"],
-                                          "provider": hold.get("provider", "")}
+                route.update(session=hold["session"], provider=hold.get("provider", ""))
+            if route:
+                current["retry_route"] = route
             control.recovery(current, journal, True)
             self.store.save_node(db, current)
             self.store.transition(db, "quota_released", current["id"],

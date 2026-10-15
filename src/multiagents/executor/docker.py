@@ -54,7 +54,7 @@ from typing import Any
 
 from ..paths import ProjectPaths, server_install_paths, state_root
 from ..providers import credential_owner
-from ..safepoint import strip_key
+from .base import strip_run_environment as strip_key
 from .. import gitops, procs
 from ..publicsuffix import is_public_suffix, normalize as normalize_hostname
 from ..agentwrap import prompt_stdin
@@ -836,6 +836,7 @@ STREAM_LIMIT = 16 * 1024 * 1024
 
 class DockerExecutor(Executor):
     kind = "docker"
+    uses_guest_environment = True
 
     def __init__(
         self,

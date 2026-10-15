@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Measure isolated lifecycle latency; the reference backend tests bookkeeping."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+import uuid
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+STAGES = ("seed", "provision", "start", "first_output", "exit", "cleanup")
+TIMEOUT = 30
+WORKLOAD = """
+import ast
+import hashlib
+print('review started', flush=True)
+source = 'def reviewed(value):\\n    return value + 1\\n'
+for _ in range(1000):
+    ast.parse(source)
+    hashlib.sha256(source.encode()).hexdigest()
+print('review complete', flush=True)
+"""
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+async def reference_sample(backend) -> dict:
+    from multiagents.executor import lifecycle as lc
+
+    sample = {"loadavg": list(os.getloadavg()),
+              "stages": dict.fromkeys(STAGES, "unsupported")}
+    stages = sample["stages"]
+    key = uuid.uuid4().hex
+    spec = lc.LaunchSpec(owner=f"bench-{key}", lifetime="attempt",
+                         labels={"multiagents.project": "bench-isolation"})
+    identity = None
+    try:
+        began = time.perf_counter()
+        result = await backend.provision(spec, key)
+        stages["provision"] = time.perf_counter() - began
+        if not isinstance(result, lc.ResourceIdentity):
+            raise RuntimeError(f"provision failed: {result!r}")
+        identity = result
+        invocation = lc.InvocationSpec(argv=[sys.executable, "-c", WORKLOAD],
+                                       env={}, cwd=spec.guest_repo, stdin=None, kind="agent")
+        began = time.perf_counter()
+        invocation_id = await backend.run(identity, invocation, key)
+        stages["start"] = time.perf_counter() - began
+        if invocation_id != key:
+            raise RuntimeError(f"start failed: {invocation_id!r}")
+        deadline = time.monotonic() + TIMEOUT
+        first_output = False
+        while True:
+            chunk = await backend.output(identity, invocation_id, "stdout", 0)
+            if not isinstance(chunk, bytes):
+                raise RuntimeError(f"output failed: {chunk!r}")
+            if chunk and not first_output:
+                stages["first_output"] = time.perf_counter() - began
+                first_output = True
+            state = await backend.inspect_invocation(identity, invocation_id)
+            if isinstance(state, lc.Exited):
+                stages["exit"] = time.perf_counter() - began
+                if state.code != 0:
+                    raise RuntimeError(f"workload exited with status {state.code}")
+                if first_output:
+                    break
+                # An output read can race with the final write; replay once
+                # more now that exit has been observed.
+                chunk = await backend.output(identity, invocation_id, "stdout", 0)
+                if not chunk:
+                    raise RuntimeError("workload exited without output")
+                stages["first_output"] = time.perf_counter() - began
+                break
+            if not isinstance(state, lc.Running):
+                raise RuntimeError(f"cannot observe workload: {state!r}")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("workload did not finish within 30 seconds")
+            await asyncio.sleep(0.001)
+    finally:
+        if identity is not None:
+            began = time.perf_counter()
+            state = await backend.stop(identity, 0.5)
+            if not isinstance(state, (lc.Exited, lc.Absent)):
+                raise RuntimeError(f"cannot confirm termination: {state!r}")
+            state = await backend.remove(identity, False)
+            if not isinstance(state, lc.Absent):
+                raise RuntimeError(f"cleanup failed: {state!r}")
+            stages["cleanup"] = time.perf_counter() - began
+    return sample
+
+
+async def benchmark(args) -> dict:
+    document = {"backend": args.backend, "image": args.image,
+                "seed_cache": args.seed_cache, "image_status": "unsupported",
+                "samples": []}
+    # Docker's per-resource backend arrives in a later slice. Do not time the
+    # shared-container executor and present it as isolated provisioning.
+    if args.backend == "docker":
+        for _ in range(args.repetitions):
+            document["samples"].append({"loadavg": list(os.getloadavg()),
+                                        "stages": dict.fromkeys(STAGES, "unsupported")})
+        return document
+
+    from multiagents.executor.lifecycle import ReferenceBackend
+
+    with tempfile.TemporaryDirectory(prefix="multiagents-bench-") as directory:
+        backend = ReferenceBackend(Path(directory))
+        problems = await backend.probe()
+        if problems:
+            raise RuntimeError(f"reference backend unavailable: {problems!r}")
+        for _ in range(args.repetitions):
+            document["samples"].append(await reference_sample(backend))
+    return document
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=("reference", "docker"), default="reference")
+    parser.add_argument("--repetitions", type=positive_int, default=5)
+    parser.add_argument("--image", choices=("cold", "warm"), default="warm")
+    parser.add_argument("--seed-cache", choices=("cold", "warm"), default="warm")
+    args = parser.parse_args()
+    try:
+        document = asyncio.run(benchmark(args))
+    except Exception as exc:
+        print(f"bench-isolation: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(document))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -28,6 +28,8 @@ import re
 import stat
 import uuid
 
+from .executor.base import guest_environment
+
 from . import budget, gitops, procs
 from .config import AgentSpec
 from .paths import global_config_dir
@@ -224,7 +226,7 @@ def session_store_root(provider, executor):
     credential, global history or SQLite index is included in the store.
     """
     declaration = provider.session_store
-    if getattr(executor, "kind", "local") == "docker":
+    if guest_environment(executor):
         backing = list(getattr(executor, "private_state", lambda _: {})(provider.name).values())
         if len(backing) != 1:
             raise ValueError("session store needs one account-specific private profile")
@@ -511,7 +513,7 @@ class QuotaHandover:
         # A pinned vault account is known. An unpinned auth proxy may choose
         # an account per request, so guessing from the provider name is wrong.
         executor = self.executor(spec)
-        if getattr(executor, "kind", "local") == "docker":
+        if guest_environment(executor):
             pins = getattr(executor, "account_pins", lambda: {})()
             return pins.get(provider.name)
         return None

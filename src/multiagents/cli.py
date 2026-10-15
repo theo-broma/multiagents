@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+from .executor.base import guest_environment
+
 from . import auth as auth_mod
 from . import bugs
 from . import catalog as catalog_mod
@@ -2315,7 +2317,7 @@ def _auth_scope(provider, executor) -> str:
     rather than masking it. Only a provider that declares
     container_private_home authenticates inside the container.
     """
-    if getattr(executor, "kind", "local") == "docker" and \
+    if guest_environment(executor) and \
        getattr(provider, "container_private_home", None):
         return "container"
     return "host"
@@ -2465,7 +2467,7 @@ def cmd_auth(args: argparse.Namespace) -> int:
         # PS-R3: a dependent borrows the owner's login action — and says so,
         # because the browser session that follows is the owner's account.
         pinned = (getattr(provider, "container_account", "") and
-                  getattr(executor_of(name), "kind", "") == "docker" and
+                  guest_environment(executor_of(name)) and
                   not getattr(args, "host", False))
         owner, selected_provider = _credential_owner(name, providers)
         if not pinned:

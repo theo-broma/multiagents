@@ -23,6 +23,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .executor.base import guest_environment
+
 from . import scripts as _scripts
 
 AUTHENTICATED = 0
@@ -103,12 +105,12 @@ def check(provider_name: str, provider: Any, executor: Any,
         provider.name = provider_name
         provider.auth_from = owner_name
         provider.auth_owner = owner
-        if own_pin and getattr(executor, "kind", "") == "docker" and profile != HOST:
+        if own_pin and guest_environment(executor) and profile != HOST:
             provider.container_account = own_pin
     # The script's suggested login and the structured fix name the same
     # owner, unless this instance selects its own container account.
     pinned = (own_pin and
-              getattr(executor, "kind", "") == "docker" and profile != HOST)
+              guest_environment(executor) and profile != HOST)
     login_name = provider_name if pinned else owner_name or provider_name
     script = _scripts.resolve(provider_name, provider, config_dir, project_config)
     if script is None:
@@ -162,7 +164,7 @@ def check_all(providers: dict[str, Any], executor_for: Any,
         if not owner_name:
             continue
         executor = executor_for(name)
-        if getattr(provider, "container_account", "") and getattr(executor, "kind", "") == "docker":
+        if getattr(provider, "container_account", "") and guest_environment(executor):
             states[name] = check(name, provider, executor, config_dir, project_config)
             continue
         owner_state = states.get(owner_name)
@@ -190,7 +192,7 @@ def login_command(provider_name: str, provider: Any, executor: Any,
     env = dict(extra_env or {})
     owner = getattr(provider, "auth_owner", None)
     if (owner is not None and getattr(provider, "container_account", "")
-            and getattr(executor, "kind", "") == "docker" and profile != HOST):
+            and guest_environment(executor) and profile != HOST):
         import copy
         selected = copy.copy(owner)
         selected.script = getattr(owner, "script_name", "") or f"{getattr(owner, 'name', provider_name)}.sh"

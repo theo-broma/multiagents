@@ -36,7 +36,7 @@ EDITABLE = ("project.yaml", "agents.yaml", "providers.yaml")
 # Choices that cannot be derived from the data, because they are enumerated in
 # code rather than in config. Keyed by the tail of the dotted path.
 FIXED_CHOICES = {
-    "executor.kind": ["local", "docker"],
+    "executor.kind": ["local", "docker", "isolated"],
     "permission": ["full", "sandbox", "readonly"],
     "home_policy": ["per-agent", "shared", "host"],
     "role": ["", "orchestrator", "initializer"],

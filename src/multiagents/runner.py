@@ -60,7 +60,8 @@ from .paths import ProjectPaths, global_config_dir, state_root
 from .providers import (Event, Provider, expand_env_value, get_path,
                         load_providers, resolved_profile)
 from .redact import scrub
-from .safepoint import Gate, strip_key
+from .safepoint import Gate
+from .executor.base import strip_run_environment as strip_key, guest_environment
 from .auth import looks_like_auth_failure
 from .startup import StartupHealth, StartupUnavailable
 from .authority import HostAuthority
@@ -132,6 +133,7 @@ class LaunchContext:
     provider: str = ""
     effort: str = ""
     admission_only: bool = False
+    executor_kind: str = ""
 
 
 _launch_context: ContextVar[LaunchContext | None] = ContextVar("launch_context", default=None)
@@ -467,6 +469,7 @@ class _Predecessor:
     # when the capture itself failed is NOT "there was no predecessor"
     # (review r5 finding 1) — that is unknown, never death.
     captured: bool = False
+    node_id: str = ""
     pid: int | None = None
     pid_start: str = ""
     probe_raw: Any = None
@@ -1185,8 +1188,10 @@ class Runner(QuotaHandover):
         host, and forcing the whole project back to `local` for its sake would
         give up isolation for every other agent.
         """
+        context = _launch_context.get()
         return get_executor(
-            (spec.executor if spec and spec.executor else self.config.executor),
+            (context.executor_kind if context and context.executor_kind else
+             spec.executor if spec and spec.executor else self.config.executor),
             self.config.project.get("executor", {}).get("docker", {}),
             paths=self.paths,
             providers=self.providers,
@@ -1246,7 +1251,7 @@ class Runner(QuotaHandover):
         """PS-R4b: the execution context a check speaks for — whose login it
         reads. Under docker the agents' login is the CONTAINER's; anywhere
         else it is the host's own."""
-        return "container" if getattr(executor, "kind", "local") == "docker" \
+        return "container" if guest_environment(executor) \
             else "host"
 
     def _context_executor(self, context: str) -> Any:
@@ -3704,6 +3709,8 @@ class Runner(QuotaHandover):
             if self._shutdown_preserves(node_id):
                 continue
             held = raw.get("cleanup_hold") if isinstance(raw, dict) else None
+            if isinstance(held, dict) and held.get("isolation_unknown"):
+                continue                  # scheduler recovery resolves the recorded key
             if not isinstance(held, dict) or node_id in self._holds:
                 continue
             if held.get("owner") != self._hold_owner and procs.alive(
@@ -3721,6 +3728,11 @@ class Runner(QuotaHandover):
             with contextlib.suppress(Exception):
                 self._take_over_hold(node_id, raw, held)
         for node_id, hold in list(self._holds.items()):
+            if hold.record.get("isolation_unknown"):
+                raw = nodes.get(node_id) or {}
+                if not (raw.get("cleanup_hold") or {}).get("isolation_unknown"):
+                    self._holds.pop(node_id, None)  # recovery confirmed removal
+                continue
             if self._shutdown_preserves(node_id):
                 continue
             if hold.steer is not None:
@@ -4028,7 +4040,152 @@ class Runner(QuotaHandover):
         if not window["open"]:
             raise RuntimeError("node_suspended: the window closed before launch")
 
-    def _record_node_launch_evidence(self, node_id, record, *, turn_started_at=None):
+    def _node_executor_evidence(self, node_id):
+        """Read resource authority from the host attempt journal."""
+        from .scheduler.engine import attempts
+        from .scheduler.store import Store, matching_records
+        with Store(self.paths.root).transaction(write=False) as db:
+            attempt = next(iter(matching_records(attempts(db), "run_id", node_id)), {})
+        launch = attempt.get("launch_evidence") or {}
+        evidence = launch.get("executor") if isinstance(launch, dict) else None
+        return evidence if isinstance(evidence, dict) else {}
+
+    def _isolation_held(self, node_id):
+        hold = self._holds.get(node_id)
+        if hold is not None and hold.record.get("isolation_unknown"):
+            return True
+        try:
+            node = self.tree.get(node_id)
+        except Exception:
+            # This extra check must not bypass legacy cleanup's own handling
+            # of an unreadable tree (including its durable owner reservation).
+            return False
+        held = getattr(node, "cleanup_hold", None)
+        return bool(isinstance(held, dict) and held.get("isolation_unknown"))
+
+    def _hold_isolated_predecessor(self, node_id, reason, executor, *, launch_failed=False):
+        """K14: keep the attempt and its slot while resource resolution is unknown."""
+        from .scheduler.engine import attempts, save_attempt
+        from .scheduler.store import Store, matching_records
+        node = self.tree.get(node_id)
+        if node is None or not node.node_id:
+            return
+        hold = self._holds.get(node_id)
+        if hold is None:
+            hold = self._new_hold(node_id, node.provider, "", executor)
+            if isinstance(node.cleanup_hold, dict):
+                hold.record = dict(node.cleanup_hold)
+        hold.phase = "cleanup"
+        hold.record = dict(hold.record, isolation_unknown=executor.creation_key,
+                           isolation_reason=reason, isolation_launch_failed=launch_failed)
+        self.tree.update(node_id, cleanup_hold=dict(hold.record))
+        hold.durable = True
+        self._holds[node_id] = hold
+        store = Store(self.paths.root)
+        with store.transaction() as db:
+            attempt = next(iter(matching_records(attempts(db), "run_id", node_id)), None)
+            if attempt is None:
+                return
+            owner = store.nodes(db)[attempt["node_id"]]
+            marker = attempt.get("isolation_unknown")
+            if marker is None:
+                marker = {"creation_key": executor.creation_key,
+                          "prior_state": owner["state"], "launch_failed": launch_failed}
+                owner.update(state="held", revision=owner["revision"] + 1,
+                             hold={"reason": "termination_unconfirmed", "detail": reason})
+                marker["hold_revision"] = owner["revision"]
+                store.save_node(db, owner)
+                store.transition(db, "held", owner["id"], owner["hold"])
+            marker.update(reason=reason, retry_at=now() + 5)
+            attempt["isolation_unknown"] = marker
+            save_attempt(db, attempt)
+
+    def _restore_isolated_predecessor_hold(self, attempt):
+        """Recover a crash between the tree reservation and journal hold writes."""
+        launch = attempt.get("launch_evidence")
+        evidence = launch.get("executor") if isinstance(launch, dict) else None
+        if (attempt["state"] not in {"claimed", "launched"}
+                or not isinstance(evidence, dict) or evidence.get("kind") != "isolated"):
+            return False
+        node = self.tree.get(attempt["run_id"])
+        held = getattr(node, "cleanup_hold", None)
+        if not isinstance(held, dict) or not held.get("isolation_unknown"):
+            return False
+        executor = get_executor("isolated", paths=self.paths, providers=self.providers)
+        # The journal supplies the resource authority; tree data is only the
+        # interrupted hold's intent, never permission to signal a resource.
+        executor.restore(self._node_executor_evidence(attempt["run_id"]))
+        self._hold_isolated_predecessor(attempt["run_id"],
+            held.get("isolation_reason", "predecessor resolution was interrupted"), executor,
+            launch_failed=held.get("isolation_launch_failed", False))
+        return True
+
+    async def _recover_isolated_predecessor(self, attempt):
+        """A later recovery pass starts from the durable key, never a new launch."""
+        from .executor.lifecycle import Unknown
+        from .scheduler.engine import attempts, save_attempt
+        from .scheduler.store import Store
+        marker = attempt.get("isolation_unknown")
+        if not marker or marker["retry_at"] > now():
+            return
+        run_id = attempt["run_id"]
+        executor = get_executor("isolated", paths=self.paths, providers=self.providers)
+        evidence = self._node_executor_evidence(run_id)
+        executor.restore(evidence)
+        executor.record = lambda fields: self._record_node_launch_evidence(run_id, {"executor": fields})
+        if executor.backend is None:
+            reply = Unknown(f"predecessor {marker['creation_key']}: find: {executor.problem}")
+        else:
+            reply = await executor._resolve_failure(marker["creation_key"],
+                                                   evidence.get("invocation_key", ""), None)
+        # Positive resolution also frees any provider startup claim whose
+        # cleanup was held. Use its host-recorded token, never the guest env.
+        if not isinstance(reply, Unknown):
+            run = self.tree.get(run_id)
+            if run and run.provider:
+                token = self.startup.token_for(run.provider, run_id, strict=True)
+                if token and not self._retry_startup_release(run.provider, run_id, token):
+                    return
+        store = Store(self.paths.root)
+        with store.transaction() as db:
+            current = attempts(db)[attempt["attempt_id"]]
+            if current.get("isolation_unknown") != marker:
+                return
+            if isinstance(reply, Unknown):
+                current["isolation_unknown"].update(reason=reply.reason, retry_at=now() + 5)
+                owner = store.nodes(db)[current["node_id"]]
+                if owner["state"] == "held" and owner["revision"] == marker["hold_revision"]:
+                    owner["hold"]["detail"] = reply.reason
+                    store.save_node(db, owner)
+            else:
+                # Remove only this resolution hold. A concurrent operator edit
+                # or a different hold retains its own state and reservation.
+                with self.tree.transaction() as data:
+                    raw = data["nodes"].get(run_id) or {}
+                    held = raw.get("cleanup_hold") or {}
+                    if held.get("isolation_unknown") == marker["creation_key"]:
+                        raw["cleanup_hold"] = None
+                owner = store.nodes(db)[current["node_id"]]
+                if owner["state"] == "held" and owner["revision"] == marker["hold_revision"]:
+                    owner.update(state=marker["prior_state"], hold=None,
+                                 revision=owner["revision"] + 1)
+                    store.save_node(db, owner)
+                    store.transition(db, "isolation_resolved", owner["id"])
+                    for command in current.get("steer_commands", {}).values():
+                        if command.get("result", {}).get("isolation_unknown"):
+                            command.pop("result", None)
+                    if marker.get("launch_failed"):
+                        self.tree.set_status(run_id, "failed",
+                            (evidence.get("failure") or {}).get("excerpt", "launch failed"))
+                    else:
+                        run = self.tree.get(run_id)
+                        current.update(previous_turn=run.turn_started_at if run else 0,
+                                       resume_pending=now() + 60)
+                current.pop("isolation_unknown", None)
+                self._holds.pop(run_id, None)
+            save_attempt(db, current)
+
+    def _record_node_launch_evidence(self, node_id, record, *, turn_started_at=None, new_launch=False):
         context = _launch_context.get()
         run = self.tree.get(node_id) if context is None else None
         managed = context.node_id if context else run.node_id if run else ""
@@ -4040,7 +4197,24 @@ class Runner(QuotaHandover):
         store = Store(self.paths.root)
         with store.transaction() as db:
             attempt = attempts(db)[attempt_id]
-            attempt["launch_evidence"] = {k: record[k] for k in ("pid", "pid_start", "executor")}
+            evidence = attempt.setdefault("launch_evidence", {})
+            for key in ("pid", "pid_start"):
+                if key in record:
+                    evidence[key] = record[key]
+            executor = evidence.setdefault("executor", {})
+            updates = record.get("executor", {})
+            if (not new_launch and updates.get("creation_key") and executor.get("creation_key")
+                    and updates["creation_key"] != executor["creation_key"]):
+                return                         # a previous launch finished late
+            if new_launch:
+                if executor.get("creation_key"):
+                    executor.setdefault("history", []).append({
+                        key: executor.get(key, "") for key in
+                        ("creation_key", "identity", "invocation_key", "invocation_id", "spec_digest")})
+                for key in ("creation_key", "identity", "invocation_key", "invocation_id",
+                            "spec_digest", "termination_confirmed", "failure"):
+                    executor.pop(key, None)
+            executor.update(updates)
             if turn_started_at is not None:
                 attempt["turn_started_at"] = turn_started_at
             save_attempt(db, attempt)
@@ -4207,6 +4381,13 @@ class Runner(QuotaHandover):
             # configuration may restate it.
             env.update(identity)
             executor = self.executor(spec)
+            managed = self.tree.get(node_id)
+            previous_executor = self._node_executor_evidence(node_id) if managed and managed.node_id else {}
+            recorded_kind = previous_executor.get("kind")
+            if recorded_kind in ("local", "docker", "isolated") and recorded_kind != executor.kind:
+                executor = get_executor(recorded_kind,
+                    self.config.project.get("executor", {}).get("docker", {}),
+                    paths=self.paths, providers=self.providers, config_dir=global_config_dir())
 
             # LN-C2, finding 8: the provenance captured with the values at THIS
             # launch — the file and line as they are now, not as they will be when
@@ -4324,6 +4505,16 @@ class Runner(QuotaHandover):
                 "prompt_file": prompt_name, "launch_identity": prompt_identity,
             }
 
+            if executor.kind == "isolated":
+                context = _launch_context.get()
+                owner = (context.attempt_id if context and context.attempt_id else
+                         managed.attempt_id if managed and managed.attempt_id else node_id)
+                executor.bind(owner,
+                              lambda fields: self._record_node_launch_evidence(
+                                  node_id, {"executor": fields}),
+                              previous=previous_executor,
+                              begin=lambda fields: self._record_node_launch_evidence(
+                                  node_id, {"executor": fields}, new_launch=True))
             problems = executor.preflight()
             if problems:
                 raise RuntimeError("; ".join(problems))
@@ -4394,6 +4585,13 @@ class Runner(QuotaHandover):
             handle = await executor.start(argv, workdir, env, run_dir=run_dir,
                                           deadline=launched_at + wall if wall else 0,
                                           provider=provider.name)
+            from .executor.lifecycle import Unknown
+            if isinstance(handle, Unknown):
+                reason = handle.reason
+                handle = None
+                self._hold_isolated_predecessor(node_id, reason, executor,
+                    launch_failed=bool(self._node_executor_evidence(node_id).get("failure")))
+                raise RuntimeError(reason)
             launched_at = getattr(handle, "launched_at", 0) or launched_at
             supervisor.started = time.monotonic() - max(0.0, now() - launched_at)
             supervisor.last_event = supervisor.started
@@ -4405,6 +4603,9 @@ class Runner(QuotaHandover):
             self.startup.bind(provider.name, node_id, startup_token, handle.pid,
                               getattr(handle, "pid_start", "") or "")
         except BaseException:
+            if self._isolation_held(node_id):
+                self._startup_release(provider.name, node_id, startup_token)
+                raise
             if handle is None:
                 # Nothing started, so nothing is followed: a lock kept here
                 # would make the node unadoptable for this server's whole
@@ -5061,7 +5262,7 @@ class Runner(QuotaHandover):
         has confirmed the process dead (RM-R1c). Until then the status stays
         what it is: `pending` is also the slot's durable reservation should
         the hold itself not have reached the tree."""
-        if self._shutdown_preserves(node_id):
+        if self._shutdown_preserves(node_id) or self._isolation_held(node_id):
             return
         if not self._defer_while_held(node_id, "failed", reason):
             self.tree.set_status(node_id, "failed", reason)
@@ -5659,7 +5860,15 @@ class Runner(QuotaHandover):
             # taken.
             self._effort_conflict(spec, provider)
             if context and context.admission_only:
-                return {"admitted": True, "provider": provider.name, "model": spec.model}
+                executor = self.executor(spec)
+                if executor.kind == "isolated":
+                    problems = await executor.probe()
+                    if problems:
+                        return admission_block("isolation_unavailable: " + "; ".join(problems))
+                return {"admitted": True, "provider": provider.name, "model": spec.model,
+                        "executor_selection": {"kind": executor.kind,
+                            "backend": getattr(executor, "backend_name", ""),
+                            "backend_version": getattr(executor, "version", "1")}}
             try:
                 startup_token = self.startup.claim(provider.name, node_id)
             except StartupUnavailable as exc:
@@ -8701,7 +8910,16 @@ class Runner(QuotaHandover):
         """SR-R2: ask the execution backend that actually launched the turn."""
         executor = self.executor(spec)
         identity = (node.exec_identity or {}) if node else {}
-        if identity.get("kind") == "docker":
+        if identity.get("kind") == "isolated":
+            from .scheduler.engine import attempts
+            from .scheduler.store import Store
+            with Store(self.paths.root).transaction(write=False) as db:
+                attempt = next((a for a in attempts(db).values()
+                                if a["run_id"] == getattr(node, "id", "")), {})
+            evidence = attempt.get("launch_evidence", {}).get("executor", {})
+            executor = get_executor("isolated", paths=self.paths, providers=self.providers)
+            executor.restore(evidence)
+        elif identity.get("kind") == "docker":
             if (getattr(executor, "kind", "") != "docker"
                     or getattr(executor, "container", "") != identity.get("container")):
                 recorded = self._docker_for(str(identity.get("container") or ""))
@@ -8722,6 +8940,19 @@ class Runner(QuotaHandover):
         this process never launched."""
         run = self.runs.get(agent_id)
         node = self.tree.get(agent_id)
+        if node is not None and node.node_id:
+            from .scheduler.engine import attempts
+            from .scheduler.store import Store
+            with Store(self.paths.root).transaction(write=False) as db:
+                attempt = next((a for a in attempts(db).values() if a["run_id"] == agent_id), {})
+            evidence = attempt.get("launch_evidence", {}).get("executor", {})
+            if evidence.get("kind") == "isolated":
+                executor = get_executor("isolated", paths=self.paths, providers=self.providers)
+                executor.restore(evidence)
+                return _Predecessor(captured=True, node_id=agent_id,
+                    probe_raw=self._raw_alive_probe(executor, agent_id),
+                    provider=node.provider, executor=executor,
+                    handle=run.handle if run else None, run=run)
         if run is not None and run.handle is not None:
             pid = getattr(run.handle, "pid", None)
             if pid:
@@ -8748,6 +8979,14 @@ class Runner(QuotaHandover):
         """SR-R2: use SF's positive-death check, including raw Docker liveness."""
         if not predecessor.captured:
             return False
+        if getattr(predecessor.executor, "kind", "") == "isolated":
+            from .executor.lifecycle import Unknown
+            verdict = await predecessor.executor.predecessor_verdict()
+            if isinstance(verdict, Unknown):
+                self._hold_isolated_predecessor(predecessor.node_id, verdict.reason,
+                                                predecessor.executor)
+                return False
+            return verdict is False
         if predecessor.absent:
             return True
         return await self._confirm_ended(predecessor.pid, predecessor.pid_start,
@@ -8922,6 +9161,11 @@ class Runner(QuotaHandover):
         BEFORE attempting any cleanup. Settlement and adoption retry the
         same record; no suppressed exception discards a release obligation.
         """
+        if self._isolation_held(agent_id):
+            # The predecessor still owns the slot and supervision lock. Only
+            # this refused launch's startup claim can be returned neutrally.
+            self._startup_release(provider, agent_id, startup_token)
+            return False
         # Before stopping a live run, startup refusal took no new slot or
         # claim. Its active supervisor still owns the predecessor's lock.
         if live and reserved_from is None and not startup_token:
@@ -9490,6 +9734,8 @@ class Runner(QuotaHandover):
                 await self._steer_release(
                     agent_id, provider.name, startup_token, reserved_from,
                     queued, queued_id, live, predecessor)
+                if self._isolation_held(agent_id):
+                    return {"agent_id": agent_id, "steered": False, "isolation_unknown": True}
                 return {"agent_id": agent_id, "steered": False,
                         "error": "refusing to steer: the predecessor's wrapper or "
                                  "agent is not confirmed dead (liveness may be unknown)",
@@ -9539,6 +9785,7 @@ class Runner(QuotaHandover):
                 agent_id, provider.name, startup_token, reserved_from, queued,
                 queued_id, live, predecessor, failure=str(exc))
             return {"agent_id": agent_id, "steered": False, "error": str(exc),
+                    **({"isolation_unknown": True} if self._isolation_held(agent_id) else {}),
                     **({"blocked": True} if restored else {})}
         except BaseException as exc:
             # Review r1 finding 1: every other pre-spawn failure — an

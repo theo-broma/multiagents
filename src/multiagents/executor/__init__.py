@@ -30,9 +30,12 @@ def get_executor(
     adapter run (CX-C1)."""
     if kind == "local":
         return LocalExecutor(providers, paths=paths)
+    if kind == "isolated":
+        from .isolated import IsolatedExecutor
+        return IsolatedExecutor(paths, providers)
     if kind == "docker":
         return DockerExecutor(config or {}, paths, providers, config_dir)
-    raise ValueError(f"Unknown executor kind {kind!r} (expected 'local' or 'docker')")
+    raise ValueError(f"Unknown executor kind {kind!r} (expected 'local', 'docker' or 'isolated')")
 
 
 def executor_for(paths, config, providers):

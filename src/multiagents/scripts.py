@@ -62,7 +62,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .safepoint import strip_key
+from .executor.base import strip_run_environment as strip_key, guest_environment
 from .providers import Provider, expand_env_value, resolved_profile
 
 # Actions that must never take longer than a moment: they run on the hot path.
@@ -133,11 +133,12 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     })
     if getattr(executor, "kind", "local") == "docker":
         env["MULTIAGENTS_CONTAINER"] = executor.container
+    if guest_environment(executor):
         credential_name = getattr(provider, "auth_from", "") or provider_name
         # Credential storage belongs to the login owner, while script identity
         # remains the instance. Never take another provider's first directory.
         try:
-            private = executor.private_state(credential_name) or {}
+            private = getattr(executor, "private_state", lambda _n: {})(credential_name) or {}
         except TypeError:                     # an executor from before the filter
             private = executor.private_state() or {}
         for container_path, host_path in private.items():
@@ -193,7 +194,7 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     # or an action overlay, cannot turn a container read into a host read.
     # Missing executor information remains unknown rather than implying local.
     env["MULTIAGENTS_EXECUTOR"] = getattr(executor, "kind", "") or ""
-    if env["MULTIAGENTS_EXECUTOR"] == "docker":
+    if guest_environment(executor):
         # Checks and login select the same signed-routing account as launches.
         # Pins from config outrank ambient, provider and action variables.
         env.pop("MULTIAGENTS_CONTAINER_ACCOUNT", None)
@@ -207,6 +208,10 @@ def build_env(provider_name: str, provider: Any, executor: Any,
     # environment lookup. Action boundaries below refuse before running code.
     env.pop("MULTIAGENTS_CONFIG_ERROR", None)
     problems = getattr(executor, "configuration_problems", lambda: [])()
+    if (guest_environment(executor) and getattr(executor, "kind", "") != "docker"
+            and getattr(provider, "container_private_home", None)
+            and env.get("MULTIAGENTS_PROFILE") != "host"):
+        problems = [*problems, "isolated guest credential projection is unavailable"]
     if problems:
         for key in ("MULTIAGENTS_PRIVATE_HOME", "MULTIAGENTS_PRIVATE_BACKING",
                     "MULTIAGENTS_PRIVATE_VAULT"):

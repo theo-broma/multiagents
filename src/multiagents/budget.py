@@ -46,6 +46,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .executor.base import guest_environment
+
 from .providers import resolved_profile
 from .instance_strategy import validate_strategy
 from .redact import register_literal, scrub
@@ -1504,7 +1506,7 @@ def _source_reading(name: str, provider: Any, executor: Any, config_dir: Path,
     kind = getattr(executor, "kind", "") or ""
     context = (kind, getattr(executor, "container", "") or "")
     account_profiles = None
-    if kind == "docker":
+    if guest_environment(executor):
         try:
             account_profiles = getattr(executor, "budget_accounts", lambda _name: None)(name)
             if account_profiles is not None:
