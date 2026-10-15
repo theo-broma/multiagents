@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -405,6 +406,18 @@ def _world_class():
 
         def wait_state(self, node_id, state, timeout=WAIT, **kw):
             return super().wait_state(node_id, state, timeout=timeout, **kw)
+
+        def crash_paused_provision(self):
+            """Crash scheduler and the detached owner at the provisioning gate."""
+            owner = json.loads(Path(str(self.plan_file) + ".paused-owner").read_text())
+            pid, pgid = owner["pid"], owner["pgid"]
+            assert pid != os.getpid() and pgid != os.getpgrp()
+            assert os.getpgid(pid) == pgid
+            self.kill9()
+            os.killpg(pgid, signal.SIGKILL)
+            from nc_harness import DEAD_TIMEOUT, alive
+            wait_until(lambda: not alive(pid), "the paused provisioning owner to die",
+                       timeout=DEAD_TIMEOUT)
 
         def checkpoint(self):
             """Wait for independent scheduler work, never a fixed delay."""

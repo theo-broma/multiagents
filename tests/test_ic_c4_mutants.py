@@ -206,8 +206,12 @@ def test_b1_k3_host_strip_removes_backend_root_without_backend_help():
 class MutantBackend:
     version = "mutant-contract-1"
 
-    def __init__(self, root):
-        self.inner = ic.lifecycle().ReferenceBackend(Path(os.environ["IC_BACKEND_ROOT"]))
+    def __init__(self, root, seeds=None):
+        backend_root = Path(os.environ["IC_BACKEND_ROOT"])
+        if seeds is not None:
+            self.inner = ic.lifecycle().ReferenceBackend(backend_root, seeds=seeds)
+        else:
+            self.inner = ic.lifecycle().ReferenceBackend(backend_root)
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
@@ -260,8 +264,8 @@ class MutantBackend:
         return reply
 
 
-def make_mutant_backend(root):
-    return MutantBackend(root)
+def make_mutant_backend(root, seeds=None):
+    return MutantBackend(root, seeds=seeds)
 
 
 @pytest.fixture

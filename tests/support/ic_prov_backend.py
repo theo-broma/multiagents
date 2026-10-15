@@ -58,8 +58,10 @@ class Flaky:
             return await self._inner.provision(spec, key)
         if plan.get("mode") == "pause_after":
             await self._inner.provision(spec, key)
+            Path(os.environ["IC_TEST_PLAN"] + ".paused-owner").write_text(
+                json.dumps({"pid": os.getpid(), "pgid": os.getpgrp()}))
             Path(os.environ["IC_TEST_PLAN"] + ".staged").write_text(key)
-            await asyncio.Future()  # test kills the scheduler at this explicit gate
+            await asyncio.Future()  # test crashes the attempt owner at this explicit gate
         if plan.get("mode") == "raise_after":
             await self._inner.provision(spec, key)
             raise RuntimeError("ic-prov: provision failed after creating the resource")

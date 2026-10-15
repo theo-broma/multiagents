@@ -585,7 +585,7 @@ def test_ic_c5_k2_a_conflict_while_the_first_still_runs_starts_nothing_and_leave
 
 # ============================================ K9: what the reference backend implements
 
-UNIMPLEMENTED = {"seed": "seed-ref-1", "session_state": "ss-handle", "resources": {"memory_mb": 256},
+UNIMPLEMENTED = {"session_state": "ss-handle", "resources": {"memory_mb": 256},
                  "credential_handle": "cred-handle", "transport_handle": "tr-handle"}
 
 

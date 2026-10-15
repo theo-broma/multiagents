@@ -194,7 +194,7 @@ def test_ic_c12_p7_a_failed_staging_keeps_the_old_checkout_and_home(tmp_path, mo
 
 def test_ic_c12_p7_the_swap_recovers_across_a_scheduler_restart(tmp_path, monkeypatch):
     """The 4th resource (reviewer's second activation) is staged and then its
-    provisioning pauses before returning; the scheduler dies; after the restart the
+    provisioning pauses before returning; scheduler and attempt owner die; after restart the
     activation runs on a complete fresh clone, the HOME is kept, and no old
     object is there."""
     w = pair_world(tmp_path, monkeypatch, scheduler={"retries": {"backoff_seconds": [4, 4, 4]}})
@@ -207,7 +207,7 @@ def test_ic_c12_p7_the_swap_recovers_across_a_scheduler_restart(tmp_path, monkey
         staged = Path(str(w.plan_file) + ".staged")
         ip.wait_until(staged.exists, "the completed 4th clone before return", timeout=ip.ROUNDS)
         assert w.fxr.spawns() == 1
-        w.kill9()
+        w.crash_paused_provision()
         w.plan({})
         w.start_scheduler()
         w.wait_state(top, "done", timeout=ip.ROUNDS + 10)

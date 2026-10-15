@@ -27,7 +27,9 @@ from pathlib import Path
 from ic_support import lifecycle
 
 
-def make_reference(root: Path):
+def make_reference(root: Path, seeds=None):
+    if seeds is not None:
+        return lifecycle().ReferenceBackend(Path(root), seeds=seeds)
     return lifecycle().ReferenceBackend(Path(root))              # G1
 
 
@@ -106,12 +108,12 @@ class Double:
         return result
 
 
-def make(root):
+def make(root, seeds=None):
     root = Path(os.environ.get("IC_BACKEND_ROOT") or root)
     root.mkdir(parents=True, exist_ok=True)
-    return Double(make_reference(root))
+    return Double(make_reference(root, seeds=seeds))
 
 
-def boom(root):
+def boom(root, seeds=None):
     """A factory that fails (K3: a failing factory refuses isolated execution)."""
     raise RuntimeError("ic-backends: factory failed")
