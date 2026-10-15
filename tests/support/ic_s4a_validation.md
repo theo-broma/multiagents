@@ -57,16 +57,56 @@ are in `ic_s4a_docker_not_run.txt`. Two additional reference parameter instances
 of Docker containment tests are skipped deliberately. Reference backends make
 no containment claim.
 
-Pending IC-C21 cases, per the task's explicit exception:
+The IC-C21 cases originally pending here are now covered by the K18
+continuation below. No other existing test files were changed.
 
-- crash at grant;
-- crash at start;
-- crash at end;
-- crash at revoke;
-- orphan endpoint discovery and removal.
+## IC-C21 K18 continuation
 
-These await the promised crash seam and orphan endpoint location clause. No
-additional contract silence or missing toolchain was raised. There is no full
-suite run. Existing slice 3 tests were left unchanged as instructed; their
-workload declares no session mode, while new mode-aware steer tests assert the
-new continuity outcomes.
+Baseline: main `2a825f9f`. Added `tests/test_ic_c21_boundaries.py`, with nine
+reference cases and nine opt-in Docker variants:
+
+- K18.1: recovery at `provision_done`, `run_entry`, `exited_seen` (boundary 4),
+  and `remove_entry` leaves no live endpoint for any ended attempt, and does
+  not classify recorded attempts as orphan endpoints.
+- K18.1: recovery at `run_done` recreates the endpoint at the declared attempt
+  path for a running invocation, with unchanged run/attempt ids and one probe
+  report (no reinvocation).
+- K18.2: an explicitly planted endpoint directory is discovered with
+  `reason: orphan_endpoint`, its endpoint id, and null container fields;
+  CLI/status discovery agrees, does not delete it, and never serves it,
+  including after a scheduler restart.
+- K18.2 / K17.6: explicit removal deletes the directory and discovery entry;
+  repeated removal succeeds; an id prefix is refused as `invalid_id` without
+  deletion; a recorded running endpoint is refused as `not_orphan` and keeps
+  serving authorised requests.
+
+Command actually run:
+
+```sh
+PYTHONPATH=src uv run --frozen python -m pytest -q -p no:cacheprovider -n 4 \
+  --basetemp=/var/tmp/pt-98d73b --durations=15 tests/test_ic_c21_*.py
+```
+
+Observed final result: **15 setup errors, 15 skipped, 0 passed**, in **1.47 s**.
+Against main that is **15 red / 0 green**, including **9 new red / 0 new green**.
+All reference cases, both existing and new, stop at the existing deliberate
+`K17.3 provisioning seam is missing` assertion: main lacks
+`ReferenceBackend.attach_checkout`. Collection succeeds. Test bodies therefore
+remain unvalidated against an implementation and must be replayed once that
+prerequisite lands; the red result is not evidence of individual endpoint
+assertions failing. No product stubs or implementation changes were added.
+
+Docker was not opted in (`SG_TEST_DOCKER` unset): all 15 Docker cases were
+skipped, including nine new variants. No Docker command was run. No toolchain
+request was needed. Dependencies were installed only into the worktree's normal
+locked uv environment. No full suite was run.
+
+The slowest durations under `-n 4` were setup for orphan removal/idempotence
+(0.10 s), `provision_done` recovery (0.09 s), `exited_seen` recovery (0.09 s),
+and `run_done` recovery (0.08 s). Every recorded duration was below 0.11 s;
+these timings measure the missing-prerequisite guard, not endpoint behavior.
+All new explicit waits use the shared 4 s bound; there are no fixed sleeps.
+
+No K18 behavior is left pending for a missing contract seam. Cancel/replacement
+revocation is already exercised in the existing IC-C21 lifetime suite; K18's
+four required boundary points use the existing K3 injector without new seams.
