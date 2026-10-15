@@ -6105,3 +6105,19 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - Merge_node needs a clean project-root tree (stash uncommitted files first).
 - Open later: C6 isolation suite only runs under SG_TEST_DOCKER=1 (orchestrator, host);
   IC scheduler tests flake under load ~13 (tight waits) — tester round if they keep flaking.
+
+### Progress 2026-10-15 ~13:00 CEST — phase 7 part 2
+- Combined suite (slice 1 2bd77b38 + ticket acc70994): ~80 new reds in tests/test_sandbox_git_*,
+  all from the round-2 refusal of a scalar `executor:` (`executor: docker` is used there). Other
+  new red (nc_r62) passed serially: load flake. Slice 1 NOT mergeable as is.
+- Adversary 2 (nd-aa6e1fda) hit its wall clock twice without a report; its 5 tests
+  tests/test_ic_adv2_*.py are on main (a7f6459e). predecessor_hang fails (start loops forever on
+  Unknown); the other four pass. Mutant survivors never reported.
+- Contract K13 (scalar executor shorthand) + K14 (Unknown predecessor holds promptly) committed
+  a7f6459e, user-approved. Tester nd-d8a0155c writes their tests; then slice 1 loop nd-6d1ca605
+  round 3 (codex), reviewer, full suite, merge with ticket nd-6d5460da.
+- Tester nd-69b4063a branch: 79f0defe (c5 K9 seed), 231d88eb (ic_backends seeds=), now fixing
+  test_ic_c4_mutants make_mutant_backend seeds= and the c12 p7 restart fixture (kill the paused
+  detached worker too — my decision). Merge it once done (merge_node needs a user permission
+  rule; classifier denied it). Then relaunch slice 2 implementer nd-fe176cc7 (held on those
+  NEED_INFOs) with the tester's files checked out uncommitted.
