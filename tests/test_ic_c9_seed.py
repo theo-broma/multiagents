@@ -316,6 +316,8 @@ def world(tmp_path, monkeypatch):
     w.close()
 
 
+RUN_PUBLICATION_TIMEOUT = 5
+
 SEED_KEYS = {"ref", "checkout_commit", "roots", "object_format", "seed_version", "cache_key"}
 
 
@@ -372,7 +374,13 @@ def test_ic_c9_p3_every_attempt_records_the_seed_of_its_own_preparation(world):
     ip.git(world.root, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
            "commit", "-q", "--allow-empty", "-m", "main moves while the node waits")
     world.wait_spawn("S4", world.fxw)
-    runs = world.runs(node)
+    # Provider startup can precede publication of its run in the node journal.
+    def published_runs():
+        runs = world.runs(node)
+        return runs if len(runs) >= 2 else None
+
+    runs = world.until(published_runs, what="both attempt runs to be published",
+                       timeout=RUN_PUBLICATION_TIMEOUT)
     seeds = [world.evidence(r["attempt_id"])["executor"]["seed"] for r in runs]
     assert len(seeds) >= 2
     for run, seed in zip(runs, seeds):
