@@ -358,3 +358,250 @@ the backend confirms the resource is gone").**
    recording, refusal, the protocol, the reference backend, the benchmark.
 3. reviewer, then adversary (IC-C2/C3 decide what runs where), then the full
    suite, then merge.
+
+## Slice 2 — provisioning: seed, fresh repository, import, alias re-seed
+
+**Status:** approved by the user 2026-10-15. Milestone 2 of
+`phase7-part2-containers.md` (IC-R1..R3). It builds on the K1 names only, never
+on slice 1 internals.
+
+### Decisions pinned by slice 2
+
+- **D-S2.1 — scope: isolated attempts only.** The seed and the fresh clone
+  apply to `executor.kind: isolated` (in this slice: through the reference
+  backend). The legacy `local` and `docker` paths keep `clone --shared` and are
+  unchanged (IC-C8 still holds). They are removed with the shared mode
+  (IC-D7), not converted in this slice. Removing alternates from the shared
+  Docker mode alone would not isolate it, because its other mounts stay.
+- **D-S2.2 — the seed is the prepared input, frozen.**
+  - What is authorised is what `Results.prepare()` actually produces for the
+    attempt:
+    - the base, the accumulated branch, the synthetic merge of the inputs and
+      any RR recovery merge;
+    - not a list re-derived from the node.
+  - The seed records:
+    - `checkout_commit` = the attempt's recorded `input_commit`;
+    - the authorised root object ids;
+    - the object format;
+    - the seed format version.
+- **D-S2.3 — import keeps its mechanism, gains validation before promotion.**
+  - The host keeps reading the result through the existing guarded,
+    host-owned quarantine (capture, H3, RP, generations).
+  - It never runs Git against the attempt repository's configuration or
+    hooks.
+  - Slice 2 moves the ancestry and validity checks *before* any object reaches
+    the host's object store. Today they run after the copy.
+  - Whether the transfer itself is a bundle or a guarded object copy is the
+    developer's choice.
+- **D-S2.4 — no external payloads.** There is no recursive submodule
+  checkout and no automatic LFS or network hydration. Gitlinks are kept as
+  recorded commit ids. The seed carries complete history of the authorised
+  ancestry, never a shallow cut.
+
+### Behaviours
+
+**IC-C9 — the seed (IC-R1).**
+- The host builds, for an isolated attempt, a **self-contained** Git bundle:
+  - no prerequisites;
+  - exactly the objects reachable from the authorised roots (D-S2.2);
+  - one ref pointing at `checkout_commit`.
+  - No other refs, no alternates, no unreachable or unrelated objects.
+- It is handed to the backend as an opaque `SeedRef` in `LaunchSpec.seed`.
+  - The handle resolves only through the host's seed registry.
+  - A backend never accepts a bundle path supplied by a run.
+  - A missing, corrupt or unauthorised handle is `InvalidSpec(reason)`.
+- **Cache.** Seeds are cached by a digest of the sorted authorised object ids,
+  the object format and the seed format version.
+  - An entry is published atomically, complete and verified. A reader never
+    sees a partial bundle, and a failed build leaves no usable handle.
+  - An entry in use by a provisioning in progress is never evicted.
+  - An evicted entry is rebuilt from its pinned, still-authorised ids, or the
+    provisioning fails `InvalidSpec("seed_unavailable: …")`. It never falls
+    back to something else.
+- Verified by:
+  - the bundle's objects equal the reachable set of the authorised roots;
+  - a sibling attempt's unmerged commit object is absent;
+  - a second attempt with the same inputs reuses the entry;
+  - two concurrent builds of one key yield one entry;
+  - a corrupt entry is refused;
+  - an unauthorised handle is refused.
+
+**IC-C10 — the fresh repository (IC-R1).**
+- The backend clones the seed into the stable guest repository path
+  (`guest_repo`). The clone has its own object store and checks out
+  `checkout_commit`. It has:
+  - no alternates;
+  - no shared `.git`;
+  - no linked worktree;
+  - no remote pointing at the host repository.
+- Provisioning is idempotent by creation key (IC-C4).
+  - A retry finds the same completed clone.
+  - A retry safely removes and rebuilds an incomplete clone.
+  - A retry never resets a running checkout.
+- The reference backend implements `seed` from this slice on. K9's list of
+  unsupported fields loses `seed`.
+- Verified by: conformance tests on the reference backend for each point
+  above, including absent sibling refs, objects and reflogs.
+
+**IC-C11 — import with validation before promotion (IC-R2).**
+- The result is read from the attempt's own repository. Before any object
+  enters the host's object store, the host checks:
+  - the designated result descends from the attempt's recorded `input_commit`;
+  - every object it reaches is present, well-formed and bounded in total
+    size, decompressed size and time;
+  - the source has no alternates, and its config and hooks are never executed
+    by the host.
+- Objects not reachable from the designated result are discarded, not
+  promoted.
+- A failure leaves the host store untouched and the attempt's result
+  quarantined with a reason, as capture reports today.
+- New commits and blobs made by the attempt are of course accepted. Import is
+  not restricted to seed objects.
+- `nodes/<id>`, generations, capture, quarantine, RP restoration and
+  retained-result replay behave as today. H1 holds with the attempt as the
+  domain.
+- Verified by:
+  - a result descending from `input_commit` is imported;
+  - a result not descending from it is refused, with the host store unchanged;
+  - an unreachable extra object is not promoted;
+  - a source with alternates is refused;
+  - a hook or config in the source is never run;
+  - an oversized object is refused within bounds.
+
+**IC-C12 — alias re-seed (IC-R3).**
+- Each activation of a session alias gets a fresh clone from its attempt's
+  seed (IC-C9, IC-C10) at the alias's stable guest path. It carries:
+  - no old objects;
+  - no old refs;
+  - no old reflogs.
+  - The conversation HOME is kept.
+- The existing sequence is kept:
+  - `check_clean` archives a dirty checkout and **refuses** the activation,
+    with the hold reported as today (TB2-R6);
+  - cleanup is a separate recorded operation.
+- Only when the checkout is clean and the predecessor is confirmed dead is the
+  fresh clone staged and swapped in atomically. The old attempt's recovery
+  artefacts stay host-side.
+- The archive and the old `.git` are never mounted into the next activation.
+- Alias exclusivity holds as today.
+- **Stated limit:** the conversation itself remembers earlier inputs.
+- Verified by:
+  - a second activation sees none of the first's objects, refs or reflogs,
+    and keeps HOME;
+  - a dirty checkout holds the activation and swaps nothing;
+  - a live predecessor blocks the swap.
+
+**IC-C13 — migration and coexistence.**
+- Upgrading never replaces an active legacy checkout or alias repository.
+  An alias moves to a seeded repository at its next eligible activation under
+  `isolated`. Dirty holds and frozen captures made before the upgrade are
+  preserved.
+- Legacy `local`/`docker` attempts keep their current provisioning.
+- Verified by:
+  - an alias activated under `local`, then reconfigured to `isolated`, is
+    re-seeded at its next activation;
+  - its earlier dirty hold survives the upgrade.
+
+### Slice 2 precisions (advisor pass on the draft)
+
+**P1 — seed authority and names.**
+- Seeds live in `multiagents.provision.seeds`:
+  - `SeedRegistry.build(attempt_id, input_commit) -> SeedRef`;
+  - `SeedRegistry.resolve(ref, attempt_id) -> path`.
+  - `SeedRef` is frozen and opaque, with `.id`.
+- Only the host's admission path builds a seed, from the attempt's recorded
+  preparation.
+- A handle is bound to one attempt of one project. `resolve` with any other
+  attempt id is refused, even when the cache entry behind it is shared.
+
+**P2 — one root.**
+- The authorised root set is exactly `[input_commit]`.
+- `Results.prepare()` already folds the base, the accumulated branch, the
+  inputs and any RR recovery into that commit.
+- Anything not reachable from it is not authorised.
+- The bundle therefore has one ref and one root.
+
+**P3 — the durable record.**
+- `launch_evidence.executor.seed` holds `{ref, checkout_commit, roots,
+  object_format, seed_version, cache_key}`. It is written before `provision`,
+  with the creation key.
+- A retry or restart rebuilds the handle from this record, never from the
+  node's current state.
+- The cache entry for `cache_key` is pinned by a host ref
+  `refs/multiagents/seeds/<cache_key>` while any unfinished attempt records
+  it. It may be evicted afterwards.
+- The handle's authorisation lasts as long as its attempt. Cache lifetime and
+  object pinning are separate from that.
+
+**P4 — bounds and failure classes.**
+- Config `isolation.import`:
+  - `max_bytes`, default 2 GiB;
+  - `max_inflated_bytes`, default 8 GiB;
+  - `timeout_seconds`, default 300.
+  - Tests set small values.
+- Failure classes:
+  - Seed build I/O failure: TF class `launch` (retryable).
+  - A corrupt cache entry is rebuilt once from its pinned id. If the rebuild
+    fails, or pinned objects are missing, the attempt fails with
+    `InvalidSpec("seed_unavailable: …")`, TF class `other`.
+  - An invalid result (any IC-C11 check fails) is refused through capture's
+    existing quarantine path, with reason codes `import_ancestry`,
+    `import_bounds`, `import_malformed` and `import_alternates`. It is not
+    retried.
+
+**P5 — failure atomicity.**
+- A refusal at validation leaves the host object store byte-for-byte
+  unchanged.
+- An interruption *during* promotion may leave validated, unreferenced
+  objects in the host store (ordinary `gc` removes them). It never leaves a
+  ref, a generation or a published branch.
+- A refused result is kept for inspection in the attempt's retained artefacts
+  (`remove(keep_artifacts=True)`), never in the host store.
+
+**P6 — clone completion and retries.**
+- A clone is complete only when a host-owned completion marker records it.
+  The marker lives outside every path the run can write.
+- A non-empty destination without a marker is removed and cloned again.
+- Two provisionings under one key are serialised and yield one clone.
+- The run can neither read the cache directory nor write the cache, the
+  registry or the marker.
+
+**P7 — the alias swap.**
+- The alias record carries a durable swap intent:
+  `{state: staging|swapping|done, old, new}`.
+- After a restart:
+  - a complete staged clone is swapped forward;
+  - an incomplete one is discarded.
+- The old repository is deleted only after `done` is recorded and its
+  recovery artefacts are archived host-side.
+- A failed staging or swap keeps the prior clean checkout and the HOME.
+- Cleanup of a dirty alias is a host-side operation on the **old** repository.
+  It runs before any re-seed and never inside a fresh activation.
+
+**P8 — what "no old objects" means.**
+- The fresh repository contains no object, ref or reflog that is not
+  reachable from its own seed's root.
+- Objects that activation one also had, and that are still authorised, may be
+  present.
+- **Stated limit:** HOME is kept, so files a previous activation left there
+  remain, beyond what the conversation remembers.
+
+**P9 — migration direction and Git payloads.**
+- When a run returns to `local` or `docker` from `isolated`, it gets today's
+  legacy checkout. The seeded repository is never reused by a legacy
+  activation.
+- Pending TF retries keep their recorded selection (IC-C2).
+- The clone and the import run with:
+  - system and global Git config ignored;
+  - no hooks;
+  - every `filter.*`, smudge and clean driver disabled.
+- LFS pointers stay pointer files. Submodule directories stay empty, with
+  their gitlinks recorded.
+
+### Slice 2 work split
+
+1. `tester`: IC-C9..C13 against the reference backend and the scheduler's
+   public entry points (C10 extends the IC-C5 conformance suite). Red.
+2. `implementer-deep`, then reviewer, then **adversary** (mandatory:
+   provisioning and import decide what one attempt can read of another's),
+   then the full suite, then merge.
