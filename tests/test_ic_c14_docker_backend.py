@@ -831,10 +831,11 @@ def test_ic_c14_k17_4_test_session_label_is_preserved(w):
     assert w.container(identity)["Config"]["Labels"]["multiagents.test.owner"] == "session-123"
 
 
-def test_k17_4_project_label_is_reserved_even_for_direct_callers(w):
-    spec = w.spec(labels={"multiagents.project": "forged-project"})
-    assert kind_of(ic.run(w.backend.provision(spec, "forged-project"))) == "invalid_spec"
-    assert w.fd.containers() == {}
+def test_k17_4_host_supplies_project_ownership_through_spec_labels(w):
+    _, identity = w.identity(labels={"multiagents.project": "host-project"})
+    assert w.container(identity)["Config"]["Labels"]["multiagents.project"] == "host-project"
+    assert identity in ic.run(w.backend.list_owned("host-project"))
+    assert identity not in ic.run(w.backend.list_owned("another-project"))
 
 
 def test_k17_1_launch_resources_override_backend_defaults(tmp_path, monkeypatch):

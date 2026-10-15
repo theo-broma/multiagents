@@ -66,6 +66,21 @@ def _journal(op: str) -> None:
 
 
 class Crashy(ic_backends.Double):
+    async def checkout_path(self, identity):
+        if ic_backends._plan().get("seam_unknown") == "checkout_path":
+            return ic_backends.lifecycle().Unknown("ic-double: checkout_path uncertain")
+        return await self._inner.checkout_path(identity)
+
+    async def attach_checkout(self, identity, checkout, home=None):
+        if ic_backends._plan().get("seam_unknown") == "attach_checkout":
+            return ic_backends.lifecycle().Unknown("ic-double: attach_checkout uncertain")
+        return await self._inner.attach_checkout(identity, checkout, home)
+
+    async def prepare_input(self, identity, source):
+        if ic_backends._plan().get("seam_unknown") == "prepare_input":
+            return ic_backends.lifecycle().Unknown("ic-double: prepare_input uncertain")
+        return await self._inner.prepare_input(identity, source)
+
     async def provision(self, spec, key):
         _journal("provision")
         with open(str(_plan_path()) + ".creation_keys", "a") as keys:

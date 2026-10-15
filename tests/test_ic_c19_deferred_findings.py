@@ -1,8 +1,4 @@
-"""IC-C19: deferred findings at the public isolated boundary.
-
-F70's PID-reassignment race needs an identity seam: a real test cannot force
-kernel PID reuse safely and no process fake is authorised by D-S3.3.
-"""
+"""IC-C19: deferred findings at the public isolated and local boundaries."""
 from pathlib import Path
 import sys
 import pytest
@@ -88,3 +84,56 @@ def test_ic_c19_f69_launch_never_deletes_a_host_provider_lock_using_its_pid(tmp_
         assert lock.read_bytes() == b"999999999\n"
     finally:
         s.close()
+
+
+STOP_WAIT = 3
+
+
+@pytest.mark.parametrize("identity_mismatch", [False, True], ids=["reaped", "identity-mismatch"])
+def test_ic_c19_f70_stale_local_handle_never_signals_its_recorded_pid_or_group(
+        tmp_path, monkeypatch, identity_mismatch):
+    """Observe real syscalls without faking process execution or signals.
+
+    Forging the public pid_start identity is authorised by the F70 clarification.
+    """
+    import asyncio
+    import os
+    import signal
+    from multiagents.executor.local import LocalExecutor
+
+    async def scenario():
+        handle = await LocalExecutor().start(
+            [sys.executable, "-c", "import signal; signal.pause()" if identity_mismatch else "pass"],
+            tmp_path, dict(os.environ))
+        pid = handle.pid
+        real_kill, real_killpg = os.kill, os.killpg
+        observed = []
+
+        def kill(target, sig):
+            observed.append(("pid", target, sig))
+            return real_kill(target, sig)
+
+        def killpg(target, sig):
+            observed.append(("pgid", target, sig))
+            return real_killpg(target, sig)
+
+        try:
+            if identity_mismatch:
+                handle.pid_start = "0"  # impossible identity for this live process
+            else:
+                assert await asyncio.wait_for(handle.wait(), STOP_WAIT) == 0
+            with monkeypatch.context() as spies:
+                spies.setattr(os, "kill", kill)
+                spies.setattr(os, "killpg", killpg)
+                await asyncio.wait_for(handle.stop(grace=0.01), STOP_WAIT)
+            assert not [(kind, target, sig) for kind, target, sig in observed
+                        if target in (pid, -pid) and sig != 0], observed
+        finally:
+            if handle.returncode is None:
+                try:
+                    real_killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            await asyncio.wait_for(handle.wait(), STOP_WAIT)
+
+    asyncio.run(scenario())
