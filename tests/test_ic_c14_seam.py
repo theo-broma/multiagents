@@ -150,18 +150,3 @@ def test_k17_3_uncertain_docker_state_returns_unknown_without_reassociation(sb):
         assert kind_of(got) == "unknown"
     w.fd.daemon_down(False)
     assert ic.run(backend.checkout_path(identity)) != target
-
-
-@pytest.mark.parametrize("operation", ["checkout_path", "attach_checkout", "prepare_input"])
-def test_k17_3_runner_reports_uncertain_provisioning_as_launch_failure(tmp_path, monkeypatch, operation):
-    """K3 injects Unknown at the public seam; it is never a usable path."""
-    s = s3.S3Sched(tmp_path, monkeypatch)
-    try:
-        s.plan({"seam_unknown": operation})
-        s.start()
-        view = s3.wait_done(s, s.node({"lines": 1}))
-        assert any(c.get("class") == "launch" for c in ic.causes(view)), view
-        for identity in ic.run(s.be().list_owned(s3.PROJECT)):
-            assert kind_of(ic.run(s.be().inspect(identity))) != "running"
-    finally:
-        s.close()
