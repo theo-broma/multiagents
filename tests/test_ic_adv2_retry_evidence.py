@@ -51,6 +51,10 @@ def test_ic_adv2_retry_records_evidence_on_its_own_attempt_not_predecessor(ics):
     att2_id = runs[1]["attempt_id"]
     assert att1_id != att2_id
 
+    # Attempt 2's run row exists before its provisioning finishes: wait for the
+    # post-provision identity (bounded) before reading its evidence.
+    ics.wait(lambda: ics.evidence(att2_id).get("executor", {}).get("identity"),
+             what="attempt 2's identity in its evidence")
     ev1 = ics.evidence(att1_id).get("executor", {})
     ev2 = ics.evidence(att2_id).get("executor", {})
 

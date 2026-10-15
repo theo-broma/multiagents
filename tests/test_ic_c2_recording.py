@@ -113,7 +113,8 @@ def test_ic_c2a_k5_later_evidence_writes_do_not_drop_the_executor_fields(ics):
 def test_ic_c2a_k5_a_provision_failure_leaves_the_creation_key_and_no_identity(ics):
     ics.plan({"provision": "raise", "times": 1})
     ics.start()
-    run = first_run(ics, ics.create()["id"])
+    # The failed provision is complete once the retry's attempt exists.
+    run = ics.wait_runs(ics.create()["id"], 2)[0]
     ex = ics.evidence(run["attempt_id"])["executor"]
     assert ex.get("creation_key")
     assert not ex.get("identity") and not ex.get("invocation_id")
@@ -122,7 +123,10 @@ def test_ic_c2a_k5_a_provision_failure_leaves_the_creation_key_and_no_identity(i
 def test_ic_c2a_k5_a_start_failure_leaves_the_invocation_key_but_no_invocation_id(ics):
     ics.plan({"start": "raise", "times": 1})
     ics.start()
-    run = first_run(ics, ics.create()["id"])
+    node = ics.create()["id"]
+    # The failed start is complete once the retry's attempt exists; reading
+    # earlier can catch the evidence mid-provisioning.
+    run = ics.wait_runs(node, 2)[0]
     ex = ics.evidence(run["attempt_id"])["executor"]
     assert ex.get("creation_key") and ex.get("identity") and ex.get("invocation_key")
     assert not ex.get("invocation_id")
