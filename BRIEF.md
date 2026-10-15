@@ -6064,3 +6064,7 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - Slice 1 round 2 implementer ag-c01c90 done (8edaf662..2bd77b38), reviewer next. Ticket fix ag-dfa8ee
   done (acc70994), reviewer next. Mutant tests merged 4b8763b7 (25 pass on ed990978; M1 pid-reuse only
   partially covered, mutants not re-executed — adversary re-check later).
+- Slice 2 tests merged cbab0a5b (tester nd-1ea96d2c closed approved; seedless admission: injected
+  refusal test is enough, no fault-injection seam). Ticket loop nd-6d5460da APPROVED (acc70994), not
+  merged: plan = one full suite on a combined tree (slice 1 round 2 + ticket) then merge both.
+  Slice 2 implementer starts after slice 1 merges (it builds on lifecycle.py).
