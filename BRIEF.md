@@ -6036,3 +6036,5 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - **Slice 2 contract committed f1b86ed5 (user yes).** Slice 2 tester nd-1ea96d2c launched
   (tests/test_ic_c9..c13_*.py, red). Next for slice 2: merge tester, implementer-deep review-loop,
   adversary (mandatory), full suite, merge — after slice 1 merges.
+- **Slice 1 reviewer ag-900c98: approved, no findings.** Adversary nd-750860bb launched on ed990978
+  (verifies ag-2602a9). Merge of nd-6d1ca605 waits for adversary + full suite (bg de21cb932710).
