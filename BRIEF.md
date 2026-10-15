@@ -5970,3 +5970,7 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
 - Contract slice 1 drafted: context/specs/phase7-part2-contract.md (uncommitted,
   advisor turns 21-22 applied; backup in session scratchpad contract-draft.md).
   Shown to the user, commit on yes; then tester (slice 1 work split).
+- 2026-10-15: user approved contract slice 1, committed 6200cf4c. Tester
+  nd-8860c8a3 launched (IC-C1..C7). Next: read its uncovered/silent list,
+  merge tester, implementer-deep (pin codex gpt-6.1-sol) in a review-loop with
+  agy reviewer, adversary, full suite, merge. Cleanup batch still waits on the user.
