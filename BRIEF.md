@@ -6176,3 +6176,11 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   explains its stale reply; add to ticket bug-30623f.
 - Slice 1 r3 and slice 2 conflict in executor/isolated.py and runner.py: slice 2 implementer must
   reconcile when slice 1 is merged into it.
+- ~17:20 CEST: slice 2 adversary (nd-b08f43ef, ag-25dbf8) REJECTED: F1 slices 1+2 conflict on
+  creation_key-without-invocation_id (17 c4 tests red on merged tree) -> draft K16
+  (.multiagents/handoff/k16.md, advisor ag-662db9 turn 2 agreed; awaiting user yes). F2 tag result
+  promoted before refusal, F3 pre-upgrade docker alias loses HOME (sessions.py freeze default),
+  F4 non-alias swap crash resume fails, F5 inflation bound reads commits/trees fully. Tests on main
+  aa179f2b (tests/test_ic_adv3_*.py; 5 red on 3127f4f7). Slice 2 round: merge main (slice 1 once merged),
+  apply K16, fix F2-F5. Never merge_node the adversary branch.
+- Slice 3 contract committed 25fdac6f; tester nd-8a27cb3a running.
