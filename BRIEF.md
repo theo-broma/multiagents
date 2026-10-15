@@ -6038,3 +6038,6 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   adversary (mandatory), full suite, merge — after slice 1 merges.
 - **Slice 1 reviewer ag-900c98: approved, no findings.** Adversary nd-750860bb launched on ed990978
   (verifies ag-2602a9). Merge of nd-6d1ca605 waits for adversary + full suite (bg de21cb932710).
+- **Ticket bug-a3d76f:** regression test merged e10818a3 (decided: legacy ""-session unseen history
+  is not imported into a no-ID wait). Fix review-loop nd-6d5460da (implementer-quick nd-d32ff131 codex,
+  reviewer nd-683cedee). At merge: resolve_ticket fixed (never submit).
