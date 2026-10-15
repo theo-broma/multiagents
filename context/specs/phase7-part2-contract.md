@@ -1467,6 +1467,34 @@ longer refused.
   recorded id and no payload fails; one without a recorded id starts fresh;
   a forbidden file is never copied.
 
+### Slice 4A clarifications
+
+**K18 — where the endpoint boundaries sit, and where endpoints live
+(IC-C21; the tester's NEED_INFO on nd-d5f03257).**
+- **K18.1 — ordering against the backend calls.** The endpoint boundaries are
+  fixed relative to the backend operations, so the existing K3 crash points
+  reach them and no new test seam is needed:
+  - The grant happens after `provision` returns and before `run` is
+    called. So a crash at `provision_done` is before the grant, and a crash
+    at `run_entry` is after the grant and before the start.
+  - The revoke happens after the attempt's end is recorded and before
+    `remove` is called. So a crash at boundary 4 (the exit is seen but its
+    evidence is not recorded) is before the revoke, and a crash at
+    `remove_entry` is after it.
+  - Cancel and replacement revoke before calling `stop`.
+  - In every case, recovery leaves no live endpoint for an attempt that is
+    not running, and recreates the endpoint for one that is (D-S4A.2).
+- **K18.2 — the location.** Endpoint directories are host-owned, at
+  `ProjectPaths(root).scheduler / "endpoints" / <endpoint_id>`. The
+  `<endpoint_id>` is the attempt id.
+  - A directory there with no recorded attempt is an orphan endpoint
+    (IC-C21).
+  - A test may create one to simulate an orphan.
+  - Nothing else in the project is ever served as an endpoint.
+- Verified by: the IC-C21 crash cases at `provision_done`, `run_entry`,
+  boundary 4 and `remove_entry`, and the orphan-endpoint case using that
+  location.
+
 ### Slice 4A work split
 
 1. `tester`: IC-C20 to IC-C24. The probe provider is extended to declare
