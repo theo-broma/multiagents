@@ -6146,3 +6146,18 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   the 13:16 reset; at the 13:20 wake, if it launched on codex, fine.
 - Never tell an alias-session implementer to check out files uncommitted: it causes a
   dirty_worktree hold (cleared by hand in the alias worktree this time).
+
+### Progress 2026-10-15 ~14:45 CEST
+- Slice 1 loop nd-6d1ca605 round 3 APPROVED, tip 9b9ed3ef (K13 36beb4b9, K14 463667a5/9b9ed3ef).
+  Combined full suite running: /var/tmp/ic-comb = bfc3a230 + 9b9ed3ef + acc70994 (bg eb83aaf6f624,
+  reds -> /var/tmp/comb-suite-reds.txt); compare with base.txt / s1reds.txt, then merge_node
+  nd-6d1ca605 + nd-6d5460da, resolve bug-a3d76f.
+- Slice 2 loop nd-0f41b6c3 APPROVED, tip 3127f4f7, but NOT done: 5 reds (K14 -> slice 1; 2 C2b
+  milestone; 2 timing tests -> tester nd-b4d783f3). Its 3127f4f7 omits retention refs for
+  non-writing isolated results (implementer's choice, made against the old broad C11 test): check
+  in the full suite / adversary. Next: merge slice 1 tip into it, tester fix, mandatory adversary,
+  full suite, merge_node.
+- Main bfc3a230: tester's C11 scoping fix (nd-333b6ed3; its own branch also carries slice 2 commits:
+  never merge_node it, dispose).
+- Tickets open, to fix in-house after the slices: bug-a3d76f, bug-30623f, bug-d3bf10 (blocking).
+- Rule (user 2026-10-15): codex exhausted -> codex-b automatically, glm only if both are out.
