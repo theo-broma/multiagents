@@ -5974,3 +5974,12 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   nd-8860c8a3 launched (IC-C1..C7). Next: read its uncovered/silent list,
   merge tester, implementer-deep (pin codex gpt-6.1-sol) in a review-loop with
   agy reviewer, adversary, full suite, merge. Cleanup batch still waits on the user.
+- 2026-10-15 cleanup done (user allowed dispose_node): 207 top-level nodes disposed
+  in dependency order. Branches 2,083 -> 845 (unmerged 1,586 -> 793). Worktrees
+  unchanged at 60: legacy `agents/*` conversation worktrees (incl. the live advisor
+  ag-aa1387), detached run/alias worktrees and agent scratch trees; not touched,
+  list in .multiagents/handoff/cleanup-worktrees-2026-10-15.txt for the user.
+  Kept for the user: 161 nodes with content not on main
+  (.multiagents/handoff/cleanup-human-2026-10-15.txt) and ~15 safe nodes still
+  referenced by those. `multiagents clean --branches` not run (would hit live
+  consult conversations' branches).
