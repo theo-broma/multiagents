@@ -6184,3 +6184,6 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   aa179f2b (tests/test_ic_adv3_*.py; 5 red on 3127f4f7). Slice 2 round: merge main (slice 1 once merged),
   apply K16, fix F2-F5. Never merge_node the adversary branch.
 - Slice 3 contract committed 25fdac6f; tester nd-8a27cb3a running.
+- ~18:20 CEST: SLICE 1 MERGED (merge_node nd-6d1ca605 -> ad41e8c9, tip f627b016) and ticket fix
+  nd-6d5460da (40fbe7d0); bug-a3d76f resolved fixed. Combined suite: only new reds = 2 C2b milestone
+  + slice-2 tests; nt_r4 durability red was a flake (passed alone).
