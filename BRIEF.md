@@ -6024,3 +6024,7 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   its own networks/volumes. Review-loop nd-6d1ca605: implementer-deep nd-3855912d (codex
   gpt-6.1-sol), reviewer nd-800aefe5 (task patched: no full suite). Then adversary, full
   suite (bg run), merge.
+- **2026-10-15 ~08:45 CEST, in parallel with the slice 1 loop:** slice 2 contract drafted
+  (context/specs/phase7-part2-contract.md "Slice 2", IC-C9..C13 + P1..P9 after advisor turns
+  24-25), UNCOMMITTED, awaiting user yes. Also running: tester nd-309ae146 (C6 teardown removes
+  own resources), bug-reporter nd-b027058b (wait_for_agents no-id ticket).
