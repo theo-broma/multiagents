@@ -88,6 +88,21 @@ def finish(w, top, rv, timeout=WAIT_ROUNDS):
     return w.until(probe, timeout, what="the loop to finish")
 
 
+def held_dirty(w, top, rv, timeout=WAIT_ROUNDS):
+    """Wait for the reviewer to be held for dirty_worktree. A loop child is
+    briefly done after a rejected round, before its next activation, so only
+    a terminal loop makes the hold impossible."""
+    def probe():
+        node = w.get(rv)
+        if node["state"] == "held" and (node["hold"] or {}).get("reason") == "dirty_worktree":
+            return node
+        loop = w.get(top)
+        if loop["state"] in ("done", "cancelled"):
+            raise AssertionError(f"the loop finished before cleanup held the reviewer: {loop}")
+        return None
+    return w.until(probe, timeout, what="the reviewer held for dirty_worktree")
+
+
 def cleanup_started(w, rv, count=2, timeout=WAIT_ROUNDS):
     def probe():
         if len(w.fxr.calls()) >= count:
@@ -311,7 +326,7 @@ def test_tb2_r6_a_cleanup_that_leaves_the_file_holds_dirty_worktree_with_the_arc
     worker_two_rounds(w)
     w.fxr.queue(dirtying(), {}, approve())
     top, wk, rv = start(w)
-    held = w.wait_held(rv, "dirty_worktree", timeout=WAIT_ROUNDS)
+    held = held_dirty(w, top, rv)
     w.quiet(2)
     assert w.fxr.spawns() == 2, "a second cleanup or a launch followed the failed cleanup"
     assert w.get(rv)["state"] == "held"
@@ -328,7 +343,7 @@ def test_tb2_r6_a_cleanup_run_that_fails_holds_dirty_worktree_and_starts_no_fres
     worker_two_rounds(w)
     w.fxr.queue(dirtying(), {"crash": True}, approve())
     top, wk, rv = start(w)
-    held = w.wait_held(rv, "dirty_worktree", timeout=WAIT_ROUNDS)
+    held = held_dirty(w, top, rv)
     w.quiet(2)
     assert w.fxr.spawns() == 2
     assert [c["resume"] for c in w.fxr.calls()][1] == w.fxr.calls()[0]["session"]
@@ -357,9 +372,9 @@ def test_tb2_r6_a_scheduler_restart_after_the_cleanup_does_not_start_another(w):
     # A listening socket alone does not prove the restarted scheduler has
     # evaluated the persisted cleanup. The next tick proves its first
     # reconciliation/admission pass finished, however slow the host is.
-    first_tick = w.until(lambda: w.status().get("last_tick"), WAIT,
+    first_tick = w.until(lambda: w.status().get("last_tick"), WAIT_ROUNDS,
                          what="the restarted scheduler's first tick")
-    w.until(lambda: w.status().get("last_tick") != first_tick, WAIT,
+    w.until(lambda: w.status().get("last_tick") != first_tick, WAIT_ROUNDS,
             what="the restarted scheduler to finish its first tick")
     assert w.fxr.spawns() == 2, "the restart granted a second cleanup"
     assert len(cleanup_calls(w)) == 1
@@ -390,7 +405,7 @@ def test_tb2_r6_relaunch_node_allows_a_new_cleanup(w):
     worker_two_rounds(w)
     w.fxr.queue(dirtying(), {}, cleaner(), approve())
     top, wk, rv = start(w)
-    w.wait_held(rv, "dirty_worktree", timeout=WAIT_ROUNDS)
+    held_dirty(w, top, rv)
     assert w.fxr.spawns() == 2
     reply = w.root_op("relaunch_node", rv)
     assert reply.get("ok") is True, reply

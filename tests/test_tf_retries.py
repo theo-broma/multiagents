@@ -99,6 +99,8 @@ def test_tf_r2_loop_crash_uses_shared_budget_without_advancing_round_or_sibling(
     finally:
         w.gate('extra', w.fxw)
 
+LOADED_WAIT = 20  # per-step bound for tests that chain several launches
+
 
 def test_tf_r2_a_successful_round_does_not_restore_the_retry_budget(w):
     """TF-R2: "a successful launch does not restore it", and only a root
@@ -111,7 +113,11 @@ def test_tf_r2_a_successful_round_does_not_restore_the_retry_budget(w):
     w.fxr.queue(verdict_entry('rejected', [finding('round 2 please')]))
     w.start_scheduler()
     loop, worker, reviewer = mkloop(w)
-    wait_attempts(w, worker, 5)
+    # Each launch is bounded separately, with headroom for a loaded host.
+    for expected in range(1, 6):
+        w.until(lambda: (n if len(n['runs']) >= expected else None)
+                if (n := w.get(worker)) else None, LOADED_WAIT,
+                what=f'attempt {expected} of 5')
     # A loop child may be done between rounds while its reviewer runs;
     # that intermediate success is not the end of this activation.
     def exhausted():
@@ -120,7 +126,7 @@ def test_tf_r2_a_successful_round_does_not_restore_the_retry_budget(w):
             return n
         assert w.get(loop)['state'] not in {'done', 'cancelled'}, \
             'the loop ended before exhausting the shared retry budget'
-    held = w.until(exhausted, WAIT, what='round 2 to exhaust the shared retry budget')
+    held = w.until(exhausted, LOADED_WAIT, what='round 2 to exhaust the shared retry budget')
     assert len(held['runs']) == 5, \
         'a successful launch or a new round restored the retry budget'
     assert len(w.fxw.calls()) == 5
