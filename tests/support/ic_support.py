@@ -157,6 +157,10 @@ class IcSched(nch.Sched):
         super().__init__(tmp_path, monkeypatch, enabled=True, scheduler={
             "tick_seconds": 0.1, "admission_timeout_seconds": 5,
             "retries": {"backoff_seconds": [0.1, 0.1, 0.1]}, **(scheduler or {})})
+        # K17.2: fixture CLIs need no credentials, external network or agent RPC.
+        for entry in self.p.providers.values():
+            entry["needs"] = {"credentials": False, "network": False, "rpc": False}
+        self.p.write()
         self.fake = self.p.fakes["acme"]
         self.plan_file = tmp_path / "ic-plan.json"
         self.plan({})

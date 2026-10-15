@@ -304,6 +304,8 @@ class ProbeProvider(sc.FakeProvider):
 
     def __init__(self, tmp: Path, name: str, **extra):
         super().__init__(tmp, name, **extra)
+        # K17.2: network/RPC probes attempt forbidden access; neither is required to launch.
+        self.entry["needs"] = {"credentials": False, "network": False, "rpc": False}
         script = Path(self.entry["bin"])
         script.write_text(PROBE_CLI)
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
