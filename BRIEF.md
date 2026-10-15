@@ -6073,3 +6073,35 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   reds -> /var/tmp/comb-suite-reds.txt); slice 1 adversary pass 2 nd-aa6e1fda (verifies ag-c01c90);
   slice 2 review-loop nd-0f41b6c3 (implementer-deep nd-fe176cc7 codex, base 2bd77b38; reviewer
   nd-feb2ec0f). Merge slice 1 + ticket once suite clean and adversary 2 has no blocking finding.
+
+### HANDOFF 2026-10-15 ~10:30 CEST (context wind-down) — phase 7 part 2, slices 1-2 in parallel
+
+- **Main** has: contract slices 1+2 incl. K1..K12, P1..P9, Q1..Q7 (87ac225c); all IC tests (slice 1
+  9af2a955, adversary 0ac5678a, mutants 4b8763b7; slice 2 cbab0a5b; C6 teardown 3a5b5ea7; ticket
+  regression e10818a3). No IC implementation on main yet.
+- **Slice 1** loop nd-6d1ca605 APPROVED round 2, tip 2bd77b38 (not merged).
+- **Ticket bug-a3d76f** loop nd-6d5460da APPROVED, tip acc70994 (not merged). At merge:
+  resolve_ticket(bug-a3d76f, "fixed", commit); never submit_ticket.
+- **In flight:**
+  1. full suite on combined tree /var/tmp/ic-comb (main fb0166f1 + 2bd77b38 + acc70994), bg job
+     097231794854; reds -> /var/tmp/comb-suite-reds.txt. Compare with
+     context/ts/manifests/baseline-reds.txt (70) + expected: 2 ic_milestone(3) c2b reds + the
+     slice 2 red tests (cbab0a5b is NOT in that tree — fb0166f1 is after cbab0a5b? check with
+     `git merge-base --is-ancestor cbab0a5b fb0166f1`; if included, all c8..c13 slice-2 reds are expected).
+     Rerun unexpected reds serially before judging (load flakes are common).
+  2. slice 1 adversary pass 2 nd-aa6e1fda (run ag-3b67b3, verifies ag-c01c90): new tests
+     tests/test_ic_adv2_*.py. If blocking findings -> relaunch loop nd-6d1ca605 round 3 (children
+     need {"revision": N, "task": ...}); commit its new test files to main by
+     `git checkout nodes/nd-aa6e1fda -- tests/test_ic_adv2_*.py` (its branch contains a src merge,
+     never merge_node it).
+  3. slice 2 loop nd-0f41b6c3: implementer-deep nd-fe176cc7 run ag-696b01 DONE (round 1, built on
+     2bd77b38); reviewer nd-feb2ec0f next (task patched, no full suite).
+  4. tester nd-69b4063a (remove `seed` from test_ic_c5 k9 unsupported parametrization; add
+     seed_unavailable-no-registry assertion) FAILED exit 1 with no output (ag-dac512) — relaunch it.
+     Slice 2 implementer was told to treat that one test id as an expected red.
+- **Merge order when ready:** slice 1 (merge_node nd-6d1ca605) + ticket (nd-6d5460da) after a clean
+  combined suite and no blocking adversary-2 finding; then the c5 test fix; then slice 2 needs its
+  own adversary (mandatory) + full suite before merge_node nd-0f41b6c3.
+- Merge_node needs a clean project-root tree (stash uncommitted files first).
+- Open later: C6 isolation suite only runs under SG_TEST_DOCKER=1 (orchestrator, host);
+  IC scheduler tests flake under load ~13 (tight waits) — tester round if they keep flaking.
