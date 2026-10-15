@@ -141,7 +141,8 @@ def test_ic_c11_a_refused_result_is_not_retried_and_no_retention_ref_is_publishe
     refused_with(w, view, snap, "import_ancestry")
     w.checkpoint()
     assert len(w.runs(node)) == 1 and w.fxw.spawns() == 1
-    assert not [r for r in w.host_refs() if "node-results" in r]
+    attempt_id = w.runs(node)[0]["attempt_id"]                       # the checkpoint node's own (successful) attempt may keep its retention ref
+    assert not [r for r in w.host_refs() if "node-results" in r and attempt_id in r]
 
 
 def test_ic_c11_a_refused_result_stays_in_the_attempts_own_repository_for_inspection(w):
