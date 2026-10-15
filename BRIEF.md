@@ -6061,3 +6061,6 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   c2a k5) — tester to make waits load-tolerant if they stay flaky.
 - **Slice 2 clarifications Q1..Q7 committed 87ac225c (user yes).** Slice 2 tester nd-1ea96d2c relaunched
   (round 2, rev 4) to align; then merge it.
+- Slice 1 round 2 implementer ag-c01c90 done (8edaf662..2bd77b38), reviewer next. Ticket fix ag-dfa8ee
+  done (acc70994), reviewer next. Mutant tests merged 4b8763b7 (25 pass on ed990978; M1 pid-reuse only
+  partially covered, mutants not re-executed — adversary re-check later).
