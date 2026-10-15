@@ -108,9 +108,13 @@ class SchedulerPredecessorBackend:
     """K3 double; uncertainty starts at predecessor lookup, after steer stops."""
     version = "predecessor-scheduler-1"
 
-    def __init__(self, root):
+    def __init__(self, root, seeds=None):
         import os
-        self.inner = ic.lifecycle().ReferenceBackend(Path(os.environ["IC_BACKEND_ROOT"]))
+        backend_root = Path(os.environ["IC_BACKEND_ROOT"])
+        if seeds is not None:
+            self.inner = ic.lifecycle().ReferenceBackend(backend_root, seeds=seeds)
+        else:
+            self.inner = ic.lifecycle().ReferenceBackend(backend_root)
         self.resolving = False
 
     def __getattr__(self, name):
@@ -143,8 +147,8 @@ class SchedulerPredecessorBackend:
         return await self.inner.remove(identity, keep_artifacts)
 
 
-def make_scheduler_predecessor(root):
-    return SchedulerPredecessorBackend(root)
+def make_scheduler_predecessor(root, seeds=None):
+    return SchedulerPredecessorBackend(root, seeds=seeds)
 
 
 @pytest.mark.parametrize("operation", ["find", "stop", "inspect", "remove"])
