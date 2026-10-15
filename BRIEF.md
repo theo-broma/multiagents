@@ -6121,3 +6121,22 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   detached worker too — my decision). Merge it once done (merge_node needs a user permission
   rule; classifier denied it). Then relaunch slice 2 implementer nd-fe176cc7 (held on those
   NEED_INFOs) with the tester's files checked out uncommitted.
+
+### HANDOFF 2026-10-15 ~11:30 CEST — phase 7 part 2, waiting on codex quota
+- Merged on main: tester nd-69b4063a (12774e06: c5 K9 seed, ic_backends seeds=, c4_mutants
+  seeds=, c12 p7 fixture kills the paused worker) and K13/K14 tests nd-d8a0155c (04d6acd6:
+  tests/test_ic_c1_selection.py K13, tests/test_ic_c4_predecessor.py K14; 21 red / 8 green vs 2bd77b38).
+- Slice 1 loop nd-6d1ca605 relaunched for round 3 (work nd-3855912d, review nd-800aefe5; tasks
+  set: merge 04d6acd6, fix K13 + K14). Slice 2 work nd-fe176cc7 relaunched (merge 12774e06, fix
+  P7 restart recovery `launch_hold_taken_over`). Both open, refused admission: codex 5h quota
+  exhausted, resets 13:16 CEST. Their sessions are bound to account codex (alias A), so they
+  stay pinned codex/gpt-6.1-sol; a bg sleep (928de29fce21) wakes me at 13:20 CEST.
+- On wake: check both nodes launched (get_node blocked); arm watch-node.sh on nd-fe176cc7
+  nd-3855912d nd-800aefe5 (scratchpad). When slice 1 round 3 is approved: combined full suite
+  (main + slice 1 tip + ticket acc70994) in /var/tmp worktree via bg, compare reds with
+  base.txt/s1reds.txt (scratchpad), then merge_node nd-6d1ca605 + nd-6d5460da and
+  resolve_ticket bug-a3d76f. Then slice 2: merge slice 1 tip into it, reviewer nd-feb2ec0f,
+  adversary (mandatory), full suite, merge_node nd-0f41b6c3.
+- merge_node is now allowed by a local permission rule (user-run script).
+- Never tell an alias-session implementer to check out files uncommitted: it causes a
+  dirty_worktree hold (cleared by hand in the alias worktree this time).
