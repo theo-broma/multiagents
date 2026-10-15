@@ -350,6 +350,41 @@ the backend confirms the resource is gone").**
 - Reaping at session start removes only resources whose owning test session is
   verifiably dead. A live concurrent suite's resources are never touched.
 
+**K13 — the scalar `executor:` form (IC-C1; 2026-10-15, after the combined
+full suite).** `executor: <kind>` in `project.yaml` is shorthand for
+`executor: {kind: <kind>}`, at every reader of that section. The shorthand
+already exists: `executor: docker` is written by the sandbox-git tests. The
+round-2 change that refused any non-mapping turned about 80 of those tests red.
+- A null section is `{}`, as before.
+- A list, a number or a boolean is refused with the same `ValueError`,
+  naming the file.
+- A string kind goes through the same validation as a `kind:` key. An
+  unknown kind is refused as it would be in the mapping form. `isolated`
+  given as a string selects isolated execution; it never falls back to local.
+- Verified by: tests/test_sandbox_git_mounts.py and
+  tests/test_sandbox_git_protect_project.py green unchanged, plus an IC-C1
+  test of `executor: isolated` (scalar) selecting isolated execution and of
+  `executor: [docker]` being refused.
+
+**K14 — Unknown while resolving a predecessor (IC-C4, K6, K7; 2026-10-15,
+adversary pass 2).** Before provisioning, `start` resolves the predecessor
+recorded in `previous`. If `find`, `stop`, `inspect` or `remove` returns
+`Unknown`, `start` does not loop on it:
+- It stops promptly, within one backend round trip plus the stop grace, and
+  provisions nothing. It surfaces an `Unknown(reason)` outcome naming the
+  predecessor's creation key and the failing operation. No new resource is
+  created and no new key is recorded.
+- The caller treats that outcome as K6's unknown: the reservation and the
+  liveness hold are kept, and the attempt is held, not failed and not
+  retried in a tight loop.
+- Resolution is retried only by a later activation or recovery pass, which
+  starts again from the recorded predecessor key.
+- A predecessor confirmed `Exited` or `Absent` and removed is resolved, as
+  today.
+- Verified by: tests/test_ic_adv2_predecessor_hang.py (the adversary's test,
+  unchanged), plus a tester test that the held attempt keeps its
+  reservation and records the predecessor key and the failing operation.
+
 ### Slice 1 work split
 
 1. `tester`: IC-C1..C3 (C2b marked milestone 3), IC-C5 conformance suite,
