@@ -598,6 +598,47 @@ on slice 1 internals.
 - LFS pointers stay pointer files. Submodule directories stay empty, with
   their gitlinks recorded.
 
+### Slice 2 clarifications (after the tester's first pass)
+
+**Q1 — constructor.** `SeedRegistry(paths: ProjectPaths)`, built by the host
+only.
+
+**Q2 — wiring.**
+- The reference backend is `ReferenceBackend(root, *, seeds=None)`.
+- The host calls the K3 test factory as `factory(root, seeds=registry)`. Slice
+  2 extends K3's signature this way.
+- A backend given no registry refuses any non-empty `seed` with
+  `InvalidSpec("seed_unavailable: no registry")`.
+
+**Q3 — refusal type.**
+- Registry failures raise `SeedError(code, reason)` from
+  `multiagents.provision.seeds`. Codes are `unauthorised`, `seed_unavailable`
+  and `corrupt`.
+- The backend turns them into `InvalidSpec("<code>: <reason>")`.
+
+**Q4 — where import reasons appear.**
+- P4's reason codes appear in the `capture_error` detail of the existing
+  `result_capture_failed` hold.
+- An attempt counts as isolated by its recorded `launch_evidence.executor.kind`.
+
+**Q5 — HOME.**
+- K9's private HOME per invocation applies to resources with `attempt`
+  lifetime.
+- A `conversation`-lifetime resource (an alias) keeps one HOME across its
+  invocations and activations, as IC-C12 requires.
+- A change of kind gives a fresh HOME. The legacy HOME is never carried into
+  an isolated resource; conversation continuity goes through the
+  session-state handle.
+
+**Q6 — stable guest path.** It cannot be observed on the reference backend,
+so it is not tested there. It is checked under Docker in slice 3.
+
+**Q7 — empty seed.**
+- `LaunchSpec.seed` empty means no repository is created at `guest_repo` (an
+  empty directory). Slice 1's conformance tests rely on this.
+- Admission always sets a seed for a scheduler attempt under `isolated`. One
+  without a seed is refused with `InvalidSpec("seed_required")`.
+
 ### Slice 2 work split
 
 1. `tester`: IC-C9..C13 against the reference backend and the scheduler's
