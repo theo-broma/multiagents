@@ -12,6 +12,7 @@ every container that mounts or names this test's directory, even on failure.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
@@ -91,9 +92,10 @@ def owner_is_dead(label: str) -> bool:
         return False
 
 
-def reap_dead_sessions(binary: str | None = None) -> list[str]:
-    """Remove containers, networks and volumes labelled by DEAD test sessions
-    and nothing else. Returns what it removed."""
+def _sweep(binary: str | None, wanted) -> list[str]:
+    """Remove containers, networks and volumes whose owner label satisfies
+    `wanted(label)`. Returns what it removed; removes nothing without an
+    answering daemon."""
     binary = binary or shutil.which("docker")
     removed: list[str] = []
     if not binary:
@@ -114,13 +116,35 @@ def reap_dead_sessions(binary: str | None = None) -> list[str]:
                           else item.get("Labels")) or {}
                 label = labels.get(OWNER_LABEL)
                 ident = item.get("Id") or item.get("Name")
-                if isinstance(label, str) and ident and owner_is_dead(label):
+                if isinstance(label, str) and ident and wanted(label):
                     rm = [binary, kind, "rm", *(["-f"] if kind != "volume" else []), ident]
                     if subprocess.run(rm, capture_output=True, text=True, timeout=DOCKER_CMD).returncode == 0:
                         removed.append(f"{kind}:{ident}")
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             continue                                    # no authority to remove anything
     return removed
+
+
+def reap_dead_sessions(binary: str | None = None) -> list[str]:
+    """Remove resources labelled by DEAD test sessions and nothing else."""
+    return _sweep(binary, owner_is_dead)
+
+
+def remove_session_resources(owner: str, binary: str | None = None) -> list[str]:
+    """Teardown: remove every resource carrying exactly this session's label.
+    Other sessions' resources, live or dead, are never touched."""
+    return _sweep(binary, lambda label: label == owner)
+
+
+_registered: set[str] = set()
+
+
+def register_session_finalizer(owner: str) -> None:
+    """Also remove this session's resources at interpreter exit (interrupted
+    runs), once per owner."""
+    if owner not in _registered:
+        _registered.add(owner)
+        atexit.register(remove_session_resources, owner)
 
 
 _reaped = False
@@ -177,6 +201,7 @@ class IsolationWorld(ic.IcSched):
         shim = write_label_shim(tmp_path / "ic-label-shim", owner)
         monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ.get('PATH', '')}")
         reap_once()
+        register_session_finalizer(owner)
         self.tmp_marker = str(tmp_path)
         probe = ic_probe.ProbeProvider(tmp_path, "acme")
         self.p.fakes["acme"] = probe
@@ -264,6 +289,7 @@ def cleanup(world: IsolationWorld) -> None:
     """Finalizer: the scheduler (by Sched.close), then every container this
     test or this session owns."""
     world.close()
+    remove_session_resources(world.owner)
     ids = set(referencing(world.tmp_marker))
     for cid in ids:
         docker("rm", "-f", cid)

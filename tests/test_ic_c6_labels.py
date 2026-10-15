@@ -138,3 +138,62 @@ def test_ic_c6_k12_an_unavailable_daemon_gives_no_authority_to_remove_anything(s
     stub.script(**{"ps -aq": "c1"})                     # inspect answers nothing parseable
     assert dk.reap_dead_sessions(stub.bin) == []
     assert not [c for c in stub.calls() if "rm" in c]
+
+
+# ---------------------------------------------------------------- teardown
+
+@pytest.mark.parametrize("kind,ls", [("container", "ps -aq"), ("network", "network ls"),
+                                     ("volume", "volume ls")])
+def test_ic_c6_teardown_removes_this_sessions_resource_and_no_one_elses(stub, kind, ls):
+    entries = [("mine", OWNER), ("live-other", alive_label()), ("dead-other", dead_label()),
+               ("unlabelled", None)]
+    stub.script(**{ls: "\n".join(i for i, _ in entries), f"{kind} inspect": inspect_reply(kind, entries)})
+    removed = dk.remove_session_resources(OWNER, stub.bin)
+    assert removed == [f"{kind}:mine"]
+    assert [c[-1] for c in stub.calls() if "rm" in c] == ["mine"]
+
+
+def test_ic_c6_teardown_removes_container_network_and_volume_together(stub):
+    stub.script(**{"ps -aq": "c1", "container inspect": inspect_reply("container", [("c1", OWNER)]),
+                   "network ls": "n1", "network inspect": inspect_reply("network", [("n1", OWNER)]),
+                   "volume ls": "v1", "volume inspect": inspect_reply("volume", [("v1", OWNER)])})
+    assert sorted(dk.remove_session_resources(OWNER, stub.bin)) == \
+        ["container:c1", "network:n1", "volume:v1"]
+
+
+def test_ic_c6_teardown_with_an_unavailable_daemon_removes_nothing(stub):
+    stub.script(**{"ps -aq": "c1"})
+    assert dk.remove_session_resources(OWNER, stub.bin) == []
+    assert not [c for c in stub.calls() if "rm" in c]
+
+
+def test_ic_c6_start_reaping_still_spares_the_current_session(stub):
+    entries = [("mine", alive_label()), ("dead1", dead_label())]
+    stub.script(**{"ps -aq": "mine\ndead1", "container inspect": inspect_reply("container", entries)})
+    assert dk.reap_dead_sessions(stub.bin) == ["container:dead1"]
+
+
+def test_ic_c6_teardown_runs_after_a_failing_test(stub, tmp_path):
+    """A fixture shaped like the isolation world's, under a real pytest run
+    whose test fails: its teardown still removes this session's container."""
+    stub.script(**{"ps -aq": "mine", "container inspect": inspect_reply("container", [("mine", OWNER)])})
+    test = tmp_path / "test_inner.py"
+    test.write_text(
+        "import sys, pytest\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent / 'support')!r})\n"
+        "import ic_docker as dk\n"
+        "class W:\n"
+        f"    owner = {OWNER!r}; tmp_marker = 'nowhere-ic-c6'\n"
+        "    def close(self): pass\n"
+        "@pytest.fixture\n"
+        "def world():\n"
+        "    yield W()\n"
+        "    dk.cleanup(W())\n"
+        "def test_fails(world):\n"
+        "    assert False\n")
+    run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                          "-p", "no:xdist", "--rootdir", str(tmp_path), str(test)],
+                         env=dict(stub.env, PYTHONPATH=os.environ.get("PYTHONPATH", "")),
+                         capture_output=True, text=True, timeout=60, cwd=tmp_path)
+    assert "1 failed" in run.stdout, run.stdout
+    assert [c[-1] for c in stub.calls() if c[:2] == ["container", "rm"]] == ["mine"]
