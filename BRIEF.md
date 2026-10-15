@@ -6161,3 +6161,9 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   never merge_node it, dispose).
 - Tickets open, to fix in-house after the slices: bug-a3d76f, bug-30623f, bug-d3bf10 (blocking).
 - Rule (user 2026-10-15): codex exhausted -> codex-b automatically, glm only if both are out.
+- ~15:45 CEST: combined suite 120 failed / 44 errors; vs base: 90 slice-2 tests (expected, slice 2
+  not in the combo), 1 C2b milestone, and 3 REAL regressions tests/test_nc_m2_adv2_{crash_midlaunch,
+  unconfirmed_death_keeps_locks,worker_crash_before_tree_leaks}: engine.reconcile calls
+  runner._restore_isolated_predecessor_hold unconditionally (463667a5, K14) -> AttributeError on
+  DummyRunner. Slice 1 loop relaunched (round 4 task). After it: rerun combined suite (or those files +
+  IC + sandbox-git) then merge. Adversary on slice 2 running: nd-b08f43ef; tester timing: nd-b4d783f3.
