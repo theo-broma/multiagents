@@ -5983,3 +5983,30 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   (.multiagents/handoff/cleanup-human-2026-10-15.txt) and ~15 safe nodes still
   referenced by those. `multiagents clean --branches` not run (would hit live
   consult conversations' branches).
+
+### HANDOFF 2026-10-15 (context wind-down) — phase 7 part 2, slice 1
+
+- **Done:** plan 2026-10-13-phase7-part2-containers applied (890e14ad); cleanup done
+  (counts above); contract slice 1 committed 6200cf4c (user yes).
+- **Tester nd-8860c8a3 (run ag-92f394) DONE, not merged.** Red suite for IC-C1..C7,
+  support in tests/support/ic_support.py and ic_backends.py. Its guesses, each
+  isolated in one support file — the contract must settle them (draft a "Slice 1
+  clarifications" section, show the user, commit on yes, then a tester round to align):
+  1. lifecycle Python names (ReferenceBackend(root).version, LaunchSpec fields,
+     InvocationSpec(argv, env, cwd, stdin, kind), InvalidSpec/Unsupported,
+     guest paths /work/...);
+  2. test injection of the reference backend into a scheduler process (it assumed
+     env MULTIAGENTS_TEST_ISOLATED_BACKEND=module:callable);
+  3. scripts/bench-isolation flags and JSON keys (assumed --backend --repetitions
+     --image --seed-cache);
+  4. docker test shim labels only `docker run`, isolated launch is `docker create`;
+  5. runs[].executor.backend value when the reference backend is injected (assumed "docker");
+  6. TF retry bound (assumed 2..5 runs).
+  Silences: which spec fields the reference backend implements; the recorded
+  creation-key field name; reservation release before confirmed removal; the D-S1.2
+  executor property name; unexpected exception -> unknown(reason) is caller-side.
+- **Next:** write the clarifications (advisor ag-aa1387 knows the contract, turns
+  21-22), user yes, tester round on nd-8860c8a3's branch, merge tester, then
+  implementer-deep (pin codex gpt-6.1-sol) review-loop with agy gemini-3.8-flash-high
+  reviewer, adversary, full suite via bg run, merge.
+- Nothing running.
