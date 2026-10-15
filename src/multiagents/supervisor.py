@@ -90,6 +90,8 @@ class Supervisor:
     # completion carries the output (or confirms there is none).
     _pending_calls: dict[str, Event] = field(default_factory=dict)
     _pending_unidentified: deque[Event] = field(default_factory=deque)
+    _pending_started: dict[str, float] = field(default_factory=dict)
+    _unidentified_started: deque[float] = field(default_factory=deque)
     _completed_calls: dict[str, None] = field(default_factory=dict)
     # A changed result breaks both repeat and cycle streaks. Keep it separate
     # from the argument digest so oscillating outputs of ONE command cannot
@@ -158,33 +160,58 @@ class Supervisor:
         elif event.kind == "step":
             self.steps += 1
 
+        # A terminal result ends the turn without needing a tool id. Error
+        # notices without terminal status may be retries and leave calls open.
+        terminal = (event.kind == "result" or event.kind == "error" and not event.tool_id and
+                    (event.status or event.state).lower() in {"failed", "error", "cancelled", "failure"})
+        if terminal:
+            self._pending_calls = {key: call for key, call in self._pending_calls.items()
+                                   if event.turn and call.turn and call.turn != event.turn}
+            self._pending_started = {key: stamp for key, stamp in self._pending_started.items()
+                                     if key in self._pending_calls}
+            kept = [(call, stamp) for call, stamp in
+                    zip(self._pending_unidentified, self._unidentified_started)
+                    if event.turn and call.turn and call.turn != event.turn]
+            self._pending_unidentified = deque(call for call, _ in kept)
+            self._unidentified_started = deque(stamp for _, stamp in kept)
+            if not (self._pending_calls or self._pending_unidentified or self.live_descendants):
+                self._activity_suppressed = False
+                self._logged_activity = ""
+
         call = event
-        completed = event.state.lower() in {"completed", "failed", "done", "error", "cancelled"}
+        completed = not terminal and event.state.lower() in {"completed", "failed", "done", "error", "cancelled"}
         # Some streams deliver only the call id and result on a later step,
         # without repeating the lifecycle state. A matching result completes
         # an open call just as an explicit terminal state does. Unmatched
         # results cannot close another call (ST5-R1/R2).
         completed = completed or bool(
-            not event.state and event.result and event.kind != "tool" and (
+            not terminal and not event.state and event.result and event.kind != "tool" and (
                 event.tool_id in self._pending_calls if event.tool_id
                 else self._pending_unidentified))
         if event.kind == "tool" and event.state.lower() in {"in_progress", "active", "running", "pending"}:
             if event.tool_id:
-                if len(self._pending_calls) >= 256:
-                    del self._pending_calls[next(iter(self._pending_calls))]
+                if event.tool_id not in self._pending_calls and len(self._pending_calls) >= 256:
+                    oldest = next(iter(self._pending_calls))
+                    del self._pending_calls[oldest]
+                    self._pending_started.pop(oldest, None)
+                self._pending_started.setdefault(event.tool_id, self.last_event)
                 self._pending_calls[event.tool_id] = event
                 self._completed_calls.pop(event.tool_id, None)
             else:
                 if len(self._pending_unidentified) >= 256:
                     self._pending_unidentified.popleft()
+                    self._unidentified_started.popleft()
                 self._pending_unidentified.append(event)
+                self._unidentified_started.append(self.last_event)
             call = None
         elif event.tool_id in self._pending_calls and completed:
             started = self._pending_calls.pop(event.tool_id)
+            self._pending_started.pop(event.tool_id, None)
             call = Event(kind="tool", name=started.name, args=started.args,
                          tool_id=event.tool_id, step=started.step, result=event.result)
         elif not event.tool_id and completed and self._pending_unidentified:
             started = self._pending_unidentified.popleft()
+            self._unidentified_started.popleft()
             call = Event(kind="tool", name=started.name, args=started.args,
                          step=started.step, result=event.result)
         if completed and not (self._pending_calls or self._pending_unidentified or self.live_descendants):
@@ -396,9 +423,9 @@ class Supervisor:
         event has arrived (see observe), never from tree movement alone.
         """
         now = time.monotonic()
-        if not self._timeout_reported and now - self.started > self.wall_timeout:
-            self._timeout_reported = True
-            return Trip("timeout", f"exceeded {self.wall_timeout:.0f}s wall clock")
+        timeout = self.check_wall_timer()
+        if timeout:
+            return timeout
         evidence = self.activity_evidence
         if evidence:
             if now - self.last_event > self.silence_timeout and evidence != self._logged_activity:
@@ -408,8 +435,10 @@ class Supervisor:
             return None
         if self._activity_suppressed:
             # An unavailable observation is not proof the child ended, and
-            # must not grant a fresh silence window as an exemption.
-            if not self.descendant_observation_failed:
+            # must not grant a fresh silence window as an exemption. Neither
+            # does an expired tool exemption with no completion event.
+            if not (self.descendant_observation_failed or
+                    self._pending_calls or self._pending_unidentified):
                 self.last_event = now
                 self.progress_when_last_quiet = None
                 self._silence_pending = False
@@ -449,13 +478,26 @@ class Supervisor:
             return Trip("silence", f"no stream event for {quiet:.0f}s")
         return None
 
+    def check_wall_timer(self) -> Trip | None:
+        """Check the hard deadline independently of best-effort observations."""
+        if not self._timeout_reported and self.elapsed > self.wall_timeout:
+            self._timeout_reported = True
+            return Trip("timeout", f"exceeded {self.wall_timeout:.0f}s wall clock")
+        return None
+
     # ---------------------------------------------------------------- status --
 
     @property
     def activity_evidence(self) -> str:
         activity = []
-        if self._pending_calls or self._pending_unidentified:
-            ids = ", ".join(self._pending_calls)
+        # Missing completions allow five minutes beyond the silence window,
+        # capped by the run's wall budget. Lifecycle updates do not renew it.
+        window = min(self.wall_timeout, self.silence_timeout + 300.0)
+        now = time.monotonic()
+        ids = ", ".join(key for key, stamp in self._pending_started.items()
+                        if now - stamp <= window)
+        unidentified = any(now - stamp <= window for stamp in self._unidentified_started)
+        if ids or unidentified:
             activity.append(f"open tool call ({ids or 'without call id'})")
         if self.live_descendants:
             activity.append("live CLI descendant child")

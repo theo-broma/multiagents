@@ -7626,73 +7626,98 @@ class Runner(QuotaHandover):
         last_observation_error = ""
         last_activity_evidence = ""
         node = self.tree.get(run.node_id)
-        progress_dir = (Path(node.worktree) if node and node.worktree
-                        and gitops.is_repo(Path(node.worktree)) else None)
-        # The working tree at launch is the first reading silence compares
-        # against, so a run that has said nothing and changed nothing since it
-        # started trips at the first quiet poll rather than the second. Any
-        # stream event drops it (`Supervisor.observe`), so a long tool call
-        # later in the run still gets its first look.
-        if progress_dir is not None:
-            with contextlib.suppress(Exception):
-                run.supervisor.progress_when_last_quiet = await asyncio.to_thread(
-                    _worktree_state, progress_dir, self.paths.root)
-        while True:
-            await asyncio.sleep(self.WATCH_POLL_SECONDS)
-            if self._shutdown_preserves(run.node_id):
-                return
+        progress_dir = Path(node.worktree) if node and node.worktree else None
+        probes = {}
+        # Anchor the first reading only if the stream has not advanced while
+        # it was sampled. A failed initial probe cannot postpone timer checks.
+        initial_event = run.supervisor.last_event
+        initial_progress = True
+
+        async def probe(name, function, *args):
+            # Bound the entire tick's observation time to at most one poll.
+            # Keep timed-out probes: cancelling to_thread cannot stop git, and
+            # launching a fresh thread each tick would pile up stuck probes.
+            task = probes.get(name)
+            if task is None:
+                task = asyncio.create_task(asyncio.to_thread(function, *args))
+                probes[name] = task
             try:
+                return await asyncio.wait_for(asyncio.shield(task),
+                                              min(1.0, self.WATCH_POLL_SECONDS / 2))
+            finally:
+                if task.done():
+                    probes.pop(name, None)
+
+        def report(trip):
+            self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
+            self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
+            self._trip_notice(run, trip)
+            run.trip_kind = trip.reason
+            run.trip_signature = run.supervisor.last_digest
+            run.trip_progress = run.supervisor.current_progress
+            run.trip_opaque_calls = run.supervisor.opaque_calls
+
+        try:
+            while True:
+                await asyncio.sleep(self.WATCH_POLL_SECONDS)
+                if self._shutdown_preserves(run.node_id):
+                    return
                 try:
-                    if executor is None:
-                        executor = self.executor(run.spec)
-                    descendants = await asyncio.to_thread(executor.has_live_descendants, run.node_id)
-                    observation_error = ("CLI descendant observation unavailable"
-                                         if descendants is None else "")
+                    # Hard deadlines never wait for git or executor inspection.
+                    trip = run.supervisor.check_wall_timer()
+                    if trip:
+                        report(trip)
+                    try:
+                        if executor is None:
+                            executor = self.executor(run.spec)
+                        descendants = await probe("descendants", executor.has_live_descendants, run.node_id)
+                        observation_error = ("CLI descendant observation unavailable"
+                                             if descendants is None else "")
+                    except Exception as exc:
+                        descendants = None
+                        observation_error = f"CLI descendant observation failed: {type(exc).__name__}: {exc}"
+                    if observation_error and observation_error != last_observation_error:
+                        self.tree.emit(run.node_id, "watchdog_observation_error", detail=observation_error)
+                    last_observation_error = observation_error
+                    run.supervisor.live_descendants = descendants is True
+                    run.supervisor.descendant_observation_failed = descendants is None
+                    evidence = run.supervisor.activity_evidence
+                    if (evidence and evidence != last_activity_evidence
+                            and run.supervisor.quiet_for >= run.supervisor.silence_timeout):
+                        self.tree.emit(run.node_id, "watchdog_activity",
+                                       detail=f"silence suppressed by {evidence}")
+                        last_activity_evidence = evidence
+                    elif not evidence and last_activity_evidence:
+                        self.tree.emit(run.node_id, "watchdog_activity",
+                                       detail=(f"silence suppression ended: {observation_error}" if observation_error
+                                               else f"silence restarts after {last_activity_evidence} ended"))
+                        last_activity_evidence = ""
+                    if progress_dir is not None and (initial_progress or
+                            run.supervisor.quiet_for >= run.supervisor.silence_timeout):
+                        try:
+                            state = await probe("worktree", _worktree_state, progress_dir, self.paths.root)
+                            # Empty readings mean observation failed, not work.
+                            if state:
+                                run.supervisor.note_progress(state)
+                                if initial_progress and run.supervisor.last_event == initial_event:
+                                    run.supervisor.progress_when_last_quiet = state
+                            initial_progress = False
+                        except Exception as exc:
+                            self.tree.emit(run.node_id, "watchdog_poll_error",
+                                           detail=f"{type(exc).__name__}: {exc}")
+                    trip = run.supervisor.check_timers()
+                    if trip:
+                        report(trip)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
-                    descendants = None
-                    observation_error = f"CLI descendant observation failed: {type(exc).__name__}: {exc}"
-                if observation_error and observation_error != last_observation_error:
-                    self.tree.emit(run.node_id, "watchdog_observation_error", detail=observation_error)
-                last_observation_error = observation_error
-                run.supervisor.live_descendants = descendants is True
-                run.supervisor.descendant_observation_failed = descendants is None
-                evidence = run.supervisor.activity_evidence
-                if (evidence and evidence != last_activity_evidence
-                        and run.supervisor.quiet_for >= run.supervisor.silence_timeout):
-                    self.tree.emit(run.node_id, "watchdog_activity",
-                                   detail=f"silence suppressed by {evidence}")
-                    last_activity_evidence = evidence
-                elif not evidence and last_activity_evidence:
-                    self.tree.emit(run.node_id, "watchdog_activity",
-                                   detail=(f"silence suppression ended: {observation_error}" if observation_error
-                                           else f"silence restarts after {last_activity_evidence} ended"))
-                    last_activity_evidence = ""
-                # Only while the agent is quiet, and only if it has a tree of
-                # its own. The silence check needs a CURRENT reading to tell a
-                # long tool call from a stall, and `_consume` refreshes this on
-                # tool events, which is exactly what a silent agent is not
-                # producing. Threaded, because a blocking git call on this loop
-                # would stop the pipe from being drained — a deadlock, not a
-                # slowdown.
-                if (progress_dir is not None
-                        and run.supervisor.quiet_for >= run.supervisor.silence_timeout):
-                    run.supervisor.note_progress(
-                        await asyncio.to_thread(_worktree_state, progress_dir,
-                                                self.paths.root))
-                trip = run.supervisor.check_timers()
-                if trip:
-                    self.tree.set_status(run.node_id, "stuck", f"{trip.reason}: {trip.detail}")
-                    self.tree.emit(run.node_id, "stuck", reason=trip.reason, detail=trip.detail)
-                    self._trip_notice(run, trip)
-                    run.trip_kind = trip.reason
-                    run.trip_signature = run.supervisor.last_digest
-                    run.trip_progress = run.supervisor.current_progress
-                    run.trip_opaque_calls = run.supervisor.opaque_calls
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.tree.emit(run.node_id, "watchdog_poll_error",
-                               detail=f"{type(exc).__name__}: {exc}")
+                    self.tree.emit(run.node_id, "watchdog_poll_error",
+                                   detail=f"{type(exc).__name__}: {exc}")
+        finally:
+            for task in probes.values():
+                task.cancel()
+            if probes:
+                await asyncio.gather(*probes.values(), return_exceptions=True)
 
     def _did_work(self, run: Run) -> bool:
         """Is there anything to show for this run besides its silence?"""
