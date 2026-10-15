@@ -173,3 +173,56 @@ def test_ic_c1_a_config_change_applies_only_to_attempts_not_yet_recorded(ics):
     again = ics.runs(first)
     assert again[0]["executor"] == before
     assert ics.get(first)["state"] not in ("done", "failed", "cancelled")
+
+
+@pytest.mark.parametrize("kind", ["local", "docker", "isolated"])
+def test_ic_c1_k13_scalar_kind_uses_config_accessors(tmp_path, monkeypatch, kind):
+    paths, cfg = load(tmp_path, monkeypatch, kind)
+    assert cfg.executor == kind
+    assert config_mod.load_project_section(paths, "executor")["kind"] == kind
+    assert all(ex.kind == kind for ex in build_all(paths, cfg))
+
+
+def test_ic_c1_k13_scalar_isolated_selects_isolated_in_scheduler(ics):
+    ics.p.project["executor"] = "isolated"
+    ics.p.write()
+    ics._reset_server()
+    ics.start()
+    node = ics.create()["id"]
+    assert first_executor(ics, node).get("kind") == "isolated"
+    ex = ics.evidence(ics.runs(node)[0]["attempt_id"])["executor"]
+    assert ex["kind"] == "isolated"
+    assert ex["backend"] == "reference"
+
+
+def test_ic_c1_k13_scalar_docker_mount_computation(tmp_path, monkeypatch):
+    import c1_harness as h
+    import c3_harness as root_h
+    root_h.as_root(monkeypatch)
+    p = sc.Project(tmp_path)
+    p.project["executor"] = "docker"
+    p.write()
+    ex = h.make_docker_executor(p.root, mount_cli_from_host=False)
+    mounts = ex.mounts()
+    assert (p.root, True) in mounts
+
+
+def test_ic_c1_k13_null_executor_is_an_empty_section(tmp_path, monkeypatch):
+    paths, cfg = load(tmp_path, monkeypatch, {})
+    (paths.config / "project.yaml").write_text("executor:\n")
+    assert config_mod.read_project_layer(paths.config)["executor"] == {}
+    assert config_mod.load(paths, seed=False).executor == "local"
+
+
+@pytest.mark.parametrize("value", [["docker"], 3, True])
+def test_ic_c1_k13_non_string_non_mapping_executor_names_file(tmp_path, monkeypatch, value):
+    with pytest.raises(ValueError, match="project.yaml"):
+        load(tmp_path, monkeypatch, value)
+
+
+@pytest.mark.parametrize("kind", ["podman", "Isolated", "", "isolated "])
+def test_ic_c1_k13_unknown_scalar_uses_kind_validation(tmp_path, monkeypatch, kind):
+    with pytest.raises(ValueError):
+        load(tmp_path / "mapping", monkeypatch, {"kind": kind})
+    with pytest.raises(ValueError):
+        load(tmp_path / "scalar", monkeypatch, kind)
