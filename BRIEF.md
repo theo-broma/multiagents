@@ -6059,3 +6059,5 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   regression + these. Mutant-killing tests: tester nd-6d69606a (tests/test_ic_c4_mutants.py).
   Note: several IC scheduler tests time out under load (k10 [start-3]/[provision-3], k3 other kinds,
   c2a k5) — tester to make waits load-tolerant if they stay flaky.
+- **Slice 2 clarifications Q1..Q7 committed 87ac225c (user yes).** Slice 2 tester nd-1ea96d2c relaunched
+  (round 2, rev 4) to align; then merge it.
