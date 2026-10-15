@@ -6028,3 +6028,8 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   (context/specs/phase7-part2-contract.md "Slice 2", IC-C9..C13 + P1..P9 after advisor turns
   24-25), UNCOMMITTED, awaiting user yes. Also running: tester nd-309ae146 (C6 teardown removes
   own resources), bug-reporter nd-b027058b (wait_for_agents no-id ticket).
+- **~09:10 CEST:** slice 1 implementer done (ed990978, 159 IC pass, 3 milestone-3 reds allowed);
+  reviewer nd-800aefe5 next; full suite started early on ed990978 (bg de21cb932710, worktree
+  /var/tmp/ic-s1-suite, reds -> /var/tmp/s1-suite-reds.txt). C6 teardown tester merged 3a5b5ea7.
+  Ticket bug-a3d76f (wait no-id) filed; fixing in-house: tester nd-1327b273 (tests/test_wait_noid_live.py),
+  then implementer + reviewer. Slice 2 contract still uncommitted (backup in scratchpad), awaiting user.
