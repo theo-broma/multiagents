@@ -6167,3 +6167,12 @@ Plan: `context/plans/2026-10-13-phase7-part2-containers.md` (applied
   runner._restore_isolated_predecessor_hold unconditionally (463667a5, K14) -> AttributeError on
   DummyRunner. Slice 1 loop relaunched (round 4 task). After it: rerun combined suite (or those files +
   IC + sandbox-git) then merge. Adversary on slice 2 running: nd-b08f43ef; tester timing: nd-b4d783f3.
+- ~16:40 CEST: slice 1 round 4 approved (f627b016: isolated recovery calls gated on recorded
+  kind isolated). Combined suite rerunning on /var/tmp/ic-comb = a59b2225 + f627b016 + acc70994
+  (bg 954f1927f837). Main a59b2225 has the tester timing fix (5bad4627).
+- Slice 3 contract DRAFT (not committed; waiting for user yes): .multiagents/handoff/slice3-draft.md
+  (IC-C14..C19, D-S3.1..4), revised after advisor ag-662db9 turn 1. Old advisor ag-aa1387 discarded:
+  its conversation carried an opencode session id onto codex-b ("session id is not UUID-shaped") —
+  explains its stale reply; add to ticket bug-30623f.
+- Slice 1 r3 and slice 2 conflict in executor/isolated.py and runner.py: slice 2 implementer must
+  reconcile when slice 1 is merged into it.
