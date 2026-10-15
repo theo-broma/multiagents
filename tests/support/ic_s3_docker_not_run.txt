@@ -1,4 +1,4 @@
-# SG_TEST_DOCKER was not set; these 91 real-Docker test instances were not run.
+# Final run 2026-10-15: SG_TEST_DOCKER was not set; these 91 real-Docker test instances were not run.
 tests/test_ic_c14_docker_conformance.py::test_ic_c4_a_conversation_resource_carries_one_invocation_per_turn[docker]
 tests/test_ic_c14_docker_conformance.py::test_ic_c4_a_forged_pid_file_cannot_redirect_a_stop[docker]
 tests/test_ic_c14_docker_conformance.py::test_ic_c4_a_host_path_outside_the_host_issued_root_is_invalid_spec[docker]
