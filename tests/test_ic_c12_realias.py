@@ -65,12 +65,15 @@ def test_ic_c12_the_conversation_home_is_kept(tmp_path, monkeypatch):
         w.close()
 
 
-def test_ic_c12_the_second_activation_resumes_the_session_on_the_new_input(tmp_path, monkeypatch):
+def test_ic_c12_the_second_activation_continues_on_the_new_input_without_resuming_an_undeclared_session(tmp_path, monkeypatch):
+    # Slice 4A (D-S4A.3/4/5): a provider with no `session` declaration is mode
+    # `none`; the second activation is not resumed and records `unsupported`.
     w = pair_world(tmp_path, monkeypatch)
     try:
         w, runs, r1, r2, _ = run_reseed_in(w)
         first, second = w.fxr.calls()
-        assert second["resume"] == first["session"]
+        assert second["resume"] is None
+        assert runs[1]["session_resume"] == "unsupported"
         assert second["head"] == runs[1]["input_commit"] != first["head"]
         assert "b.txt" in second["files"]
     finally:

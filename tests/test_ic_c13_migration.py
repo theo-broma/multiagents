@@ -59,7 +59,9 @@ def test_ic_c13_a_local_alias_is_reseeded_at_its_next_activation_under_isolated(
         ghost, blob = (w.fxr.dir / "junk").read_text().split()
         assert ghost not in r2["objects"] and not [r for r in r2["refs"] if "junk" in r]
         first, again = w.fxr.calls()
-        assert again["resume"] == first["session"]              # the conversation goes on
+        # 4A (D-S4A.3/4/5): the provider declares no session, so mode `none`: no resume.
+        assert again["resume"] is None
+        assert w.runs(rv)[1]["session_resume"] == "unsupported"
     finally:
         w.close()
 

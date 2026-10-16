@@ -220,8 +220,8 @@ def test_ic_c14_f64_an_invalid_spec_means_no_side_effect_at_all(w):
 
 # ---- what the spec may not ask for (D-S3.2) and may not be
 
-@pytest.mark.parametrize("field,value", [("credential_handle", "handle-1"), ("transport_handle", "handle-2"),
-                                         ("session_state", "handle-3")])
+@pytest.mark.parametrize("field,value", [("credential_handle", "handle-1"),
+                                         ("session_state", "handle-3")])  # transport_handle: slice 4A, D-S4A.1
 def test_ic_c14_d_s3_2_a_handle_the_slice_does_not_implement_is_unsupported(w, field, value):
     w.warm()
     got = ic.run(w.backend.provision(w.spec(**{field: value}), "key-1"))

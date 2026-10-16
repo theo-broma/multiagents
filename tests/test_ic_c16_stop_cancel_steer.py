@@ -270,7 +270,8 @@ def test_ic_c16_steer_stops_the_attempt_starts_a_new_one_and_records_that_the_se
 
 # ========================================== D-S3.2 refusals by declaration
 
-NEEDS = [("credentials", r"credential_handle"), ("network", r"network"), ("rpc", r"transport_handle")]
+# K17.2 after slice 4A: `needs.rpc` alone is no longer refused (IC-C20 covers it running).
+NEEDS = [("credentials", r"credential_handle"), ("network", r"network")]
 
 
 def refused(view):
@@ -365,7 +366,6 @@ def test_ic_c16_d_s3_2_the_refusal_is_for_isolated_only_a_local_pinned_agent_sti
 @pytest.mark.parametrize("declaration,field", [
     ({}, "credential_handle"),
     ({"credentials": False}, "network"),
-    ({"credentials": False, "network": False}, "transport_handle"),
     ({"credentials": True, "network": True, "rpc": True}, "credential_handle"),
 ])
 def test_k17_2_omitted_members_default_true_and_refusals_follow_precedence(tmp_path, monkeypatch, declaration, field):

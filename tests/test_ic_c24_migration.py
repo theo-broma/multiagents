@@ -18,16 +18,17 @@ def test_ic_c24_local_alias_migration_preserves_only_declared_payload(tmp_path, 
         w.fxr.queue(verdict_entry('rejected',[finding('redo')],tag='R1',gate='upgrade'),
                     verdict_entry('approved',tag='R2'))
         top,wk,rv = ip.start_pair(w)
-        w.wait_spawn('R1',w.fxr,timeout=a.WAIT)
+        w.wait_spawn('R1',w.fxr,timeout=a.LOOP_WAIT)
+        w.until(lambda: w.runs(rv), a.LOOP_WAIT, what='the first attempt of the reviewer')
         before_resume = w.runs(rv)[0].get('session_resume')
         w.set_executor('isolated')
         w.gate('upgrade', w.fxr)
-        w.until(lambda: len(w.runs(rv)) >= 2, a.WAIT, what='migrated attempt')
-        w.until(lambda: 'session_resume' in w.runs(rv)[-1], a.WAIT, what='migration outcome')
+        w.until(lambda: len(w.runs(rv)) >= 2, a.LOOP_WAIT, what='migrated attempt')
+        w.until(lambda: 'session_resume' in w.runs(rv)[-1], a.LOOP_WAIT, what='migration outcome')
         assert w.runs(rv)[-1]['session_resume'] == outcome, w.get(rv)
         assert w.runs(rv)[0].get('session_resume') == before_resume, 'migration rewrote old resume evidence'
         if outcome != 'failed':
-            w.until(lambda: len(a.loop_reports(w)) == 2, a.WAIT, what='second payload report')
+            w.until(lambda: len(a.loop_reports(w)) == 2, a.LOOP_WAIT, what='second payload report')
             first, second = a.loop_reports(w)
             assert first['home'] != second['home']
             assert 'unrelated-profile' not in second['files']

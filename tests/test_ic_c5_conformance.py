@@ -592,8 +592,9 @@ def test_ic_c5_k2_a_conflict_while_the_first_still_runs_starts_nothing_and_leave
 
 # ============================================ K9: what the reference backend implements
 
+# `transport_handle` is implemented from slice 4A (D-S4A.1); IC-C20/C21 cover it.
 UNIMPLEMENTED = {"session_state": "ss-handle", "resources": {"memory_mb": 256},
-                 "credential_handle": "cred-handle", "transport_handle": "tr-handle"}
+                 "credential_handle": "cred-handle"}
 
 
 @pytest.mark.parametrize("name", sorted(UNIMPLEMENTED))

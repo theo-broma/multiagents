@@ -141,6 +141,7 @@ def test_ic_c23_incompatible_binding_is_unsupported_and_held(tmp_path, monkeypat
         if change == 'provider':
             other = w.provider('other')
             other.entry.update(w.fxr.entry)
+            other.entry['models_include'] = ['other/*']  # the copy must allow its own route's model
             w.agents['rv']['provider'] = 'other'
             w.agents['rv']['model'] = 'other/m1'
         elif change == 'model':
@@ -149,7 +150,7 @@ def test_ic_c23_incompatible_binding_is_unsupported_and_held(tmp_path, monkeypat
         else: w.fxr.entry['container_account'] = 'changed-account'
         w.write_config()
         w.gate('change',w.fxr)
-        view = w.until(lambda: (v:=w.get(rv)) and v['state']=='held' and v, a.WAIT, what='incompatible session hold')
+        view = w.until(lambda: (v:=w.get(rv)) and v['state']=='held' and v, a.LOOP_WAIT, what='incompatible session hold')
         text = ic.text_of(view)
         assert 'unsupported' in text and change in text, view
         assert len(a.loop_reports(w)) == 1

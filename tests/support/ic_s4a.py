@@ -230,6 +230,17 @@ with open(base + '/sessions.jsonl','a') as report:
 '''.replace('PAYLOAD', repr(payload)).replace('PLANT_FORBIDDEN', repr(plant_forbidden))
     marker = 'emit("step_start",'
     source = source.replace(marker, extra+'\n'+marker, 1)
+    # D-S4A.1: an isolated attempt reaches the RPC only through
+    # MULTIAGENTS_RPC_SOCKET, and its request carries no token field at all.
+    # (A local attempt is given a token and keeps the root socket with it.)
+    old_req = 'req = {"op": "give_verdict", "token": token, "args": args, "request_id"'
+    assert old_req in source
+    source = source.replace(old_req,
+        'req = {"op": "give_verdict", "args": args, "request_id"', 1)
+    source = source.replace('        s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(sock_path)',
+        '        if token: sock, req["token"] = sock_path, token\n'
+        '        else: sock = os.environ["MULTIAGENTS_RPC_SOCKET"]\n'
+        '        s = socket.socket(socket.AF_UNIX); s.settimeout(20); s.connect(sock)', 1)
     if not recorded:
         source = source.replace('dict(part, sessionID=session)', 'dict(part)').replace('"sessionID": session, ', '')
     script.write_text(source)

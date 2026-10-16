@@ -37,9 +37,10 @@ def test_ic_c21_authority_revoked_for_new_and_existing_connections(world, ending
             assert reply.get('ok') is True, reply
             world.wait_runs(node, 2, a.WAIT)
         else:
-            # stop_run terminates the provider normally through the public lifecycle.
-            reply = world.rpc('stop_run', {'run_id':world.runs(node)[-1]['run_id']})
-            assert reply.get('ok') is True, reply
+            # The stop CLI ends the attempt through the public lifecycle
+            # (`stop_run` is an admission helper, not the user's way to stop).
+            result = world.cli('stop', world.runs(node)[-1]['run_id'], timeout=a.WAIT)
+            assert result.returncode == 0, result.stderr
         if ending != 'replacement': s3.wait_done(world, node, a.WAIT)
         with pytest.raises((OSError, ConnectionError)):
             a.exchange(existing, a.request('create_node', {'kind':'simple','agent':'worker','task':'must not run'}))

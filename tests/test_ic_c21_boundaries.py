@@ -42,10 +42,10 @@ def test_k18_1_nonrunning_attempt_has_no_live_endpoint_after_boundary_recovery(w
     pid = world.crash_at(point)
     node = world.launch('scoped_rpc', requests=[a.request()])
     world.wait_dead(pid, timeout=a.WAIT)
+    world.plan({'calls': True})
+    world.start()  # the dead scheduler cannot answer: recover, then read the record
     attempts = {row['attempt_id'] for row in world.runs(node)}
     assert attempts, 'the crash must leave a recorded attempt to recover'
-    world.plan({'calls': True})
-    world.start()
     assert s3.wait_done(world, node, a.WAIT)['state'] == 'done'
     attempts.update(row['attempt_id'] for row in world.runs(node))
     for attempt in attempts:
@@ -60,11 +60,11 @@ def test_k18_1_started_attempt_recreates_endpoint_without_reinvocation(world):
     pid = world.crash_at('run_done')
     node = world.launch('scoped_rpc', requests=[a.request()], hold=True)
     world.wait_dead(pid, timeout=a.WAIT)
+    world.plan({'calls': True})
+    world.start()  # the dead scheduler cannot answer: recover, then read the record
     before = world.runs(node)
     assert len(before) == 1
     path = endpoint_dir(world, before[0]['attempt_id']) / 'rpc.sock'
-    world.plan({'calls': True})
-    world.start()
     report = world.report(node)
     assert Path(a.host_endpoint(world, report['endpoint'])) == path
     with a.connect(str(path)) as conn:
