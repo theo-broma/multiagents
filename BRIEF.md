@@ -6334,3 +6334,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-16 ~19:10 CEST. RB tests applied to main (7 red as expected). RB implementer nd-82bd1b7c relaunched on codex; reviewer nd-16d677bc follows it.
 - 2026-10-16 ~19:20 CEST. Real Docker with the fixture: 6 failed, 341 passed. Five c23 failures come from the probe session id 'ses_ic_<pid>', which is the same PID in every fresh container (a fixture artefact). The sixth, c21 provision_done, is a scheduler stop timeout. Tester nd-fa1e6c39 was relaunched for both. When done: apply its tests patch to main, then rerun Docker on the final 4A tip.
 - 2026-10-16 ~19:45 CEST. RB implementer nd-82bd1b7c done (ag-7e7bc0): results.py only, +34/-8, the targeted files green. Reviewer nd-16d677bc next. Then a full suite, then merge.
+- RB full suite: bg 205dc4ec2ff3 on 05d6f0fb (/var/tmp/rb-comb). Reds go to /var/tmp/rb-suite-reds.txt; compare them with base.s.
