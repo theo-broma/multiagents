@@ -59,6 +59,9 @@ def provisioned(be, key="key-1", **over):
     return spec, identity_of(run(backend.provision(spec, key)))
 
 
+DOCKER_OP = 30         # one operation against a real container (start + run + exit)
+
+
 def wait_for(fn, what, timeout=ic.OP):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -79,8 +82,8 @@ def state_of_invocation(be, ident, inv):
     return kind_of(run(be[0].inspect_invocation(ident, inv)))
 
 
-def finished(be, ident, inv):
-    wait_for(lambda: state_of_invocation(be, ident, inv) == "exited", "the invocation to exit")
+def finished(be, ident, inv, timeout=ic.OP):
+    wait_for(lambda: state_of_invocation(be, ident, inv) == "exited", "the invocation to exit", timeout)
     return run(be[0].inspect_invocation(ident, inv))
 
 
@@ -397,9 +400,13 @@ def test_ic_c4_a_sibling_resource_is_not_readable(be):
     _, b = provisioned(be, "key-b", owner="att_b")
     started(be, "open('/work/home/secret','w').write('B-SECRET'); import time; time.sleep(60)",
             key="inv-b", ident=b)
-    started(be, "import glob,sys\nprint([p for p in glob.glob('/**/secret', recursive=True)])",
+    # search the roots a sibling's data could appear under; walking / would
+    # descend into /proc and /sys, which takes minutes in a real container
+    started(be, "import glob\n"
+                "roots = ('/work', '/tmp', '/home', '/root', '/var', '/mnt', '/run', '/srv', '/opt')\n"
+                "print([p for r in roots for p in glob.glob(r + '/**/secret', recursive=True)])",
             key="inv-a", ident=a)
-    finished(be, a, "inv-a")
+    finished(be, a, "inv-a", DOCKER_OP if be[2] == "docker" else ic.OP)
     assert b"B-SECRET" not in out(be, a, "inv-a")
 
 

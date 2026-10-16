@@ -8,6 +8,8 @@ import ic_support as ic
 import ic_docker as dk
 from ic_support import kind_of
 
+DOCKER_WAIT = 60       # scheduler launch + container start + OOM kill on a real daemon
+
 
 @pytest.mark.parametrize("code,oom", [(0, False), (7, False), (137, False), (137, True)])
 def test_ic_c17_inspect_keeps_exit_code_and_oom_separate(tmp_path, monkeypatch, code, oom):
@@ -49,7 +51,7 @@ def test_ic_c17_real_docker_hard_memory_limit_reports_oom(tmp_path, monkeypatch,
         s.executor("isolated", isolated={"backend": "docker", "resources": {"memory": "64m"}})
         s.start()
         node = s.node({"alloc_mb": 256, "hold": 0})
-        view = s3.wait_done(s, node)
+        view = s3.wait_done(s, node, DOCKER_WAIT)
         causes = ic.causes(view)
         assert any(c.get("class") == "crash" and "oom" in ic.text_of(c).lower() for c in causes), causes
     finally:
