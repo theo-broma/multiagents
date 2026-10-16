@@ -1904,6 +1904,10 @@ No allowlist entry or new external host is added by this slice.
     does `MULTIAGENTS_TEST_GATEWAY_BACKEND`. When the variable is unset,
     the real check runs. The code never detects fake Docker by itself
     (implementer nd-4fa20bcc).
+  - The keyword is `GatewayRegistry(..., readiness_probe=None)`. A probe is
+    a callable that takes the gateway's identity details as keyword
+    arguments and returns truthy when the gateway is ready. A factory loaded
+    from the variable takes no arguments and returns such a probe.
   - The K4B.7 stripping test checks environment *values* only, meaning the
     container and child environments. Trusted code may contain the
     variable's name.

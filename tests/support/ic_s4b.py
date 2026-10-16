@@ -35,6 +35,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import os
 import re
 import socket
 import threading
@@ -49,6 +50,8 @@ WAIT = 6                    # a bounded wait for anything the scheduler does aga
 SHORT = 3                   # a bounded wait for a local socket
 GATEWAY_IMAGE = "multiagents/workspace:latest"
 ALLOW = ["example.com"]
+PROBE_ENV = "MULTIAGENTS_TEST_GATEWAY_PROBE"          # K4B.2
+PROBE_SPEC = "ic_s4b_probe:factory"
 SECRET_URL = re.compile(r"ma1-[^:@/\s\"']+:[^@/\s\"']+@")
 PASSWORD = re.compile(r"^[0-9a-f]{64}$")
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
@@ -89,8 +92,12 @@ class NetSched(s3.FakeDockerSched):
     """
 
     def __init__(self, tmp_path, monkeypatch, *, network=None, allowlist=ALLOW, gateway_image=None,
-                 isolated: dict | None = None, rpc=False, images=None, **kw):
+                 isolated: dict | None = None, rpc=False, images=None, probe=True, **kw):
         super().__init__(tmp_path, monkeypatch, images=images, **kw)
+        if probe:
+            monkeypatch.setenv(PROBE_ENV, PROBE_SPEC)       # fake Docker has no listener: inject the probe
+        else:
+            monkeypatch.delenv(PROBE_ENV, raising=False)    # the real authenticated check runs
         self.provider_declares(network=True, rpc=rpc)
         self.configure(network=network, allowlist=allowlist, gateway_image=gateway_image, **(isolated or {}))
         self.fd.workload(runs=True)
@@ -161,6 +168,10 @@ class NetSched(s3.FakeDockerSched):
         cls = have("GatewayRegistry")
         paths = ProjectPaths(self.root)
         loaded = config_mod.load(paths, seed=False)
+        if os.environ.get(PROBE_ENV):
+            module, _, name = os.environ[PROBE_ENV].partition(":")
+            return cls(paths, config=loaded, providers=loaded.providers,
+                       readiness_probe=getattr(importlib.import_module(module), name)())
         return cls(paths, config=loaded, providers=loaded.providers)
 
     def rows(self) -> list[dict]:

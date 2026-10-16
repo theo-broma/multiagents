@@ -18,6 +18,7 @@ Two kinds of test:
 """
 import base64
 import json
+import time
 import os
 import shutil
 import subprocess
@@ -352,7 +353,40 @@ def test_d_s4b_7_the_test_variable_is_stripped_from_every_run_environment(tmp_pa
         s.start()
         container = s.running(s.launch())
         assert UNPRIVILEGED not in s.invocation(container)["env"]
-        everything = json.dumps(container, default=str) + json.dumps(s.invocation(container))
-        assert UNPRIVILEGED not in everything, "the test-mode switch reached the container or the guest"
+        # environment VALUES only: trusted code (CreateArgv, the entrypoint source) may name the variable
+        container_env = container["Config"].get("Env") or []
+        assert not any(e.partition("=")[0] == UNPRIVILEGED for e in container_env), \
+            "the test-mode switch reached the container environment"
+        assert UNPRIVILEGED not in s.invocation(container)["env"]
+    finally:
+        s.close()
+
+
+def test_k4b_2_the_gateway_probe_variable_is_stripped_from_every_run_environment(tmp_path, monkeypatch):
+    s = nb.NetSched(tmp_path, monkeypatch)       # sets MULTIAGENTS_TEST_GATEWAY_PROBE on the host
+    try:
+        s.start()
+        container = s.running(s.launch())
+        env = container["Config"].get("Env") or []
+        assert not any(e.partition("=")[0] == nb.PROBE_ENV for e in env)
+        assert nb.PROBE_ENV not in s.invocation(container)["env"]
+    finally:
+        s.close()
+
+
+def test_k4b_2_without_the_probe_the_real_check_runs_and_nothing_starts(tmp_path, monkeypatch):
+    s = nb.NetSched(tmp_path, monkeypatch, probe=False)
+    try:
+        s.start()
+        node = s.launch()
+        deadline = time.monotonic() + nb.WAIT
+        while time.monotonic() < deadline and s.get(node)["state"] not in ("held", "failed", "done", "cancelled"):
+            time.sleep(0.05)
+        # fake Docker gives no HTTP listener: readiness fails, so the attempt's workload never starts
+        owners = {r["attempt_id"] for r in s.runs(node)}
+        started = [c for c in s.fd.containers().values()
+                   if c["Config"]["Labels"].get("multiagents.owner") in owners
+                   and (c["State"]["Running"] or c.get("StartSnapshots"))]
+        assert not started, "an attempt started although the real readiness check cannot succeed under fake Docker"
     finally:
         s.close()
