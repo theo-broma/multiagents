@@ -6385,3 +6385,8 @@ Pending user: RB-R1 re-wording (above).
   * UD slice 1 contract (user-decisions-contract.md), with advisor turn 13 precisions P1..P10.
   * GG-R10 (scratchpad gg-r10-draft.md): narrow, recommended.
   Researcher nd-175a5138 is checking D-S4B.7 feasibility (where a streaming redactor can sit before Docker's log).
+- 2026-10-17 00:20 CEST.
+  * D-S4B.7 placement added to the 4B draft, still uncommitted: the redactor sits in the PID-1 entrypoint before framing, under a separate UID, and checkpoints count sanitised length only. Source: researcher nd-175a5138 (ag-c58cb9).
+  * Scheduler defect found by researcher nd-b8600d6a (ag-e012be). update_node on a node whose launch is in flight edits the task, but the worker launches the old task (worker.py:98-151). The run ag-fd3ac0 then died from an unexplained SIGTERM after 8 s; the suspect is the owner reaper (owner.py:215/308/339), which is unproven. The node settled as done/failed.
+    Proposed fix: update_node refuses a task change while an attempt is claimed or launched (`active_runs; use steer_run or relaunch_node`). This narrows NC-R59, so the user must say yes first.
+    Workaround in the meantime: never update_node right after start_agent; give the full task at creation.
