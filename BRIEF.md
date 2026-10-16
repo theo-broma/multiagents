@@ -6336,3 +6336,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-16 ~19:45 CEST. RB implementer nd-82bd1b7c done (ag-7e7bc0): results.py only, +34/-8, the targeted files green. Reviewer nd-16d677bc next. Then a full suite, then merge.
 - RB full suite: bg 205dc4ec2ff3 on 05d6f0fb (/var/tmp/rb-comb). Reds go to /var/tmp/rb-suite-reds.txt; compare them with base.s.
 - 2026-10-16 ~19:55 CEST. 4A adversary fixes done: nd-905bbdf0 tip 1eabec3c (ag-dfb262); the adversary files pass, and the batch flakes pass alone. Reviewer nd-9a075d32 next. Full suite: bg 6dbcdf5fbde9 (/var/tmp/s4a-comb, reds in /var/tmp/s4a-suite-reds.txt). Real Docker on 1eabec3c comes after the tester nd-fa1e6c39 fixture patch.
+- 2026-10-16 ~20:30 CEST. Second docker fixture patch from nd-fa1e6c39 is on main (unique probe session ids, c21 bounds). Real Docker on 1eabec3c + that patch: bg 1c47ff523ee6 (/var/tmp/s4d.log).
