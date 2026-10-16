@@ -414,6 +414,15 @@ def cmd_create(state, args):
          "StartCount": 0, "CreateArgv": list(args), "UnknownOptions": [], "HostSources": sources,
          "_stdout": "", "_stderr": ""}}
     c.update(cfg)
+    c["NetworkSettings"] = {{"Networks": {{}}}}
+    mode = cfg["HostConfig"]["NetworkMode"]
+    if mode in ("none", "host"):
+        c["NetworkSettings"]["Networks"][mode] = {{"NetworkID": "", "Aliases": []}}
+    elif mode not in ("default", "bridge"):
+        net = net_find(state, mode)
+        if net is None:
+            fail("docker: Error response from daemon: network %s not found" % mode, 125)
+        attach(state, net, c, allof(multi, "--network-alias"))
     state["containers"][cid] = c
     print(cid)
 
@@ -438,6 +447,11 @@ def cmd_start(state, args):
             continue
         if not c["State"]["Running"]:
             check_log_size(c)
+            # What the container is attached to at the moment it starts (slice 4B).
+            c.setdefault("StartSnapshots", []).append({{
+                n["Name"]: {{cid: bool(state["containers"].get(cid, {{}}).get("State", {{}}).get("Running"))
+                             for cid in sorted(n["Containers"])}}
+                for n in state.get("networks", {{}}).values() if c["Id"] in n["Containers"]}})
             c["StartCount"] += 1
             apply_workload(state, c)
         print(ref)
@@ -478,6 +492,8 @@ def cmd_rm(state, args):
             sys.stderr.write("Error response from daemon: cannot remove container \"%s\": container is running: stop the container before removing or force remove\n" % ref)
             bad = 1
             continue
+        for net in state.setdefault("networks", {{}}).values():
+            net["Containers"].pop(c["Id"], None)
         del state["containers"][c["Id"]]
         print(ref)
     if bad:
@@ -603,6 +619,153 @@ def cmd_resource_create(state, args, kind):
     state.setdefault("resources", []).append({{"kind": kind, "argv": args, "name": rest[-1] if rest else ""}})
     print(rest[-1] if rest else "x")
 
+# ------------------------------------------------------------- networks (4B)
+def net_find(state, ref):
+    nets = state.setdefault("networks", {{}})
+    if ref in nets:
+        return nets[ref]
+    named = [n for n in nets.values() if n["Name"] == ref]
+    if named:
+        return named[0]
+    pref = [n for n in nets.values() if len(ref) >= 4 and n["Id"].startswith(ref)]
+    return pref[0] if len(pref) == 1 else None
+
+def attach(state, net, c, aliases):
+    net["Containers"][c["Id"]] = {{"Name": c["Name"].lstrip("/"), "EndpointID": hashlib.sha256((net["Id"] + c["Id"]).encode()).hexdigest(),
+                                  "IPv4Address": "10.%d.0.%d/16" % (len(net["Containers"]) % 200 + 1, len(net["Containers"]) + 2)}}
+    c.setdefault("NetworkSettings", {{"Networks": {{}}}}).setdefault("Networks", {{}})[net["Name"]] = {{
+        "NetworkID": net["Id"], "Aliases": list(aliases)}}
+
+def detach(state, net, c):
+    net["Containers"].pop(c["Id"], None)
+    c.get("NetworkSettings", {{}}).get("Networks", {{}}).pop(net["Name"], None)
+
+def cmd_network_create(state, args):
+    vals, rest, flags = opt_values(args, {{"--label", "--driver", "-d", "--subnet", "--opt", "-o", "--ip-range", "--gateway"}})
+    name = rest[-1] if rest else ""
+    nets = state.setdefault("networks", {{}})
+    if not name:
+        fail("\"docker network create\" requires exactly 1 argument.", 1)
+    if any(n["Name"] == name for n in nets.values()):
+        fail("Error response from daemon: network with name %s already exists" % name, 1)
+    labels = {{}}
+    for item in vals.get("--label", []):
+        k, _, v = item.partition("=")
+        labels[k] = v
+    state["seq"] += 1
+    nid = hashlib.sha256(("net-%d-%s" % (state["seq"], name)).encode()).hexdigest()
+    nets[nid] = {{"Id": nid, "Name": name, "Created": now(), "Driver": canon(("--driver", "-d"), vals) or "bridge",
+                 "Internal": "--internal" in flags, "Labels": labels, "Containers": {{}}, "Options": {{}}}}
+    state.setdefault("resources", []).append({{"kind": "network", "argv": args, "name": name}})
+    print(nid)
+
+def cmd_network_connect(state, args):
+    vals, rest, flags = opt_values(args, {{"--alias", "--ip", "--link"}})
+    if len(rest) != 2:
+        fail("\"docker network connect\" requires exactly 2 arguments.", 1)
+    net, c = net_find(state, rest[0]), find(state, rest[1])
+    if net is None:
+        fail("Error response from daemon: network %s not found" % rest[0], 1)
+    if c is None:
+        fail("Error response from daemon: No such container: " + rest[1], 1)
+    if c["Id"] in net["Containers"]:
+        fail("Error response from daemon: endpoint with name %s already exists in network %s" % (c["Name"].lstrip("/"), net["Name"]), 1)
+    attach(state, net, c, vals.get("--alias", []))
+
+def cmd_network_disconnect(state, args):
+    vals, rest, flags = opt_values(args, set())
+    if len(rest) != 2:
+        fail("\"docker network disconnect\" requires exactly 2 arguments.", 1)
+    net, c = net_find(state, rest[0]), find(state, rest[1])
+    if net is None:
+        fail("Error response from daemon: network %s not found" % rest[0], 1)
+    if c is None:
+        fail("Error response from daemon: No such container: " + rest[1], 1)
+    if c["Id"] not in net["Containers"]:
+        fail("Error response from daemon: container %s is not connected to network %s" % (c["Id"], net["Name"]), 1)
+    detach(state, net, c)
+
+def net_view(n):
+    return dict(n)
+
+def cmd_network_inspect(state, args):
+    vals, rest, _ = opt_values(args, {{"--format", "-f", "--type"}})
+    fmt = canon(("--format", "-f"), vals)
+    found, missing = [], []
+    for ref in rest:
+        n = net_find(state, ref)
+        (found if n else missing).append(n or ref)
+    if fmt:
+        for n in found:
+            print(render(fmt, net_view(n)))
+    else:
+        print(json.dumps([net_view(n) for n in found], indent=4))
+    if missing:
+        fail("Error response from daemon: network %s not found" % missing[0], 1)
+
+def cmd_network_ls(state, args):
+    vals, rest, flags = opt_values(args, {{"--filter", "-f", "--format"}})
+    quiet = "-q" in flags or "--quiet" in flags
+    trunc = "--no-trunc" not in flags
+    fmt = canon(("--format",), vals)
+    rows = []
+    for n in sorted(state.setdefault("networks", {{}}).values(), key=lambda n: (n["Created"], n["Id"])):
+        ok = True
+        for flt in vals.get("--filter", []) + vals.get("-f", []):
+            k, _, v = flt.partition("=")
+            if k == "label":
+                lk, eq, lv = v.partition("=")
+                ok = ok and lk in n["Labels"] and (not eq or n["Labels"][lk] == lv)
+            elif k == "name":
+                ok = ok and re.search(v, n["Name"]) is not None
+            elif k == "id":
+                ok = ok and n["Id"].startswith(v)
+            elif k == "driver":
+                ok = ok and n["Driver"] == v
+        if ok:
+            rows.append(n)
+    for n in rows:
+        nid = n["Id"][:12] if trunc else n["Id"]
+        if quiet:
+            print(nid)
+        elif fmt:
+            print(render(fmt, {{"ID": nid, "Name": n["Name"], "Driver": n["Driver"], "Internal": n["Internal"],
+                               "Labels": ",".join("%s=%s" % kv for kv in sorted(n["Labels"].items())),
+                               "CreatedAt": n["Created"]}}))
+        else:
+            print(nid, n["Name"], n["Driver"])
+
+def cmd_network_rm(state, args):
+    vals, rest, flags = opt_values(args, set())
+    bad = 0
+    for ref in rest:
+        n = net_find(state, ref)
+        if n is None:
+            sys.stderr.write("Error response from daemon: network %s not found\n" % ref)
+            bad = 1
+        elif n["Containers"]:
+            sys.stderr.write("Error response from daemon: error while removing network: network %s has active endpoints\n" % n["Name"])
+            bad = 1
+        else:
+            del state["networks"][n["Id"]]
+            print(ref)
+    if bad:
+        save(state)
+        sys.exit(1)
+
+def cmd_run(state, args):
+    # `docker run -d`: create, then start; the id is printed once.
+    import io
+    keep, sys.stdout = sys.stdout, io.StringIO()
+    try:
+        cmd_create(state, [a for a in args if a not in ("-d", "--detach")])
+        cid = sys.stdout.getvalue().strip()
+        sys.stdout = io.StringIO()
+        cmd_start(state, [cid])
+    finally:
+        sys.stdout = keep
+    print(cid)
+
 # ------------------------------------------------------------------ the rules
 def matches(rule, tokens):
     m = rule.get("match") or []
@@ -634,7 +797,7 @@ def main():
             save(state); f.close()
             time.sleep(rule.get("seconds", 60))
             sys.exit(rule.get("code", 1))
-        if effect == "after_effect":
+        if effect in ("after_effect", "hang_after"):
             effect_after = rule
             break
         save(state)
@@ -649,6 +812,12 @@ def main():
              rule.get("stdout", ""))
     code = dispatch(state, tokens)
     save(state)
+    if effect_after is not None and effect_after.get("effect") == "hang_after":
+        # The operation happened; the CLI then stalls (a crash window after the effect).
+        sys.stdout.flush()
+        f.close()
+        time.sleep(effect_after.get("seconds", 5))
+        sys.exit(code or 0)
     if effect_after is not None:
         fail(effect_after.get("stderr", "fake docker: connection lost after the operation"),
              effect_after.get("code", 1))
@@ -682,8 +851,22 @@ def dispatch(state, t):
         cmd_ps(state, t[1:])
     elif head == "wait":
         cmd_wait(state, t[1:])
-    elif t[:2] in (["network", "create"], ["volume", "create"]):
+    elif t[:2] == ["network", "create"]:
+        cmd_network_create(state, t[2:])
+    elif t[:2] == ["network", "connect"]:
+        cmd_network_connect(state, t[2:])
+    elif t[:2] == ["network", "disconnect"]:
+        cmd_network_disconnect(state, t[2:])
+    elif t[:2] == ["network", "inspect"]:
+        cmd_network_inspect(state, t[2:])
+    elif t[:2] in (["network", "ls"], ["network", "list"]):
+        cmd_network_ls(state, t[2:])
+    elif t[:2] in (["network", "rm"], ["network", "remove"]):
+        cmd_network_rm(state, t[2:])
+    elif t[:2] == ["volume", "create"]:
         cmd_resource_create(state, t[2:], t[0])
+    elif head == "run":
+        cmd_run(state, t[1:])
     else:
         state.setdefault("unsupported", []).append(t)
         sys.stderr.write("fake docker: unsupported subcommand: %s\n" % " ".join(t[:2]))
@@ -812,7 +995,7 @@ class FakeDocker:
     def rule(self, *match: str, effect: str = "fail", times: int | None = None, after: int = 0,
              stderr: str | None = None, code: int = 1, contains: str | None = None, **extra) -> None:
         """Script an outcome for commands starting with `match`.
-        effects: fail | daemon_down | hang(seconds=) | garbage | empty | after_effect."""
+        effects: fail | daemon_down | hang(seconds=) | garbage | empty | after_effect | hang_after(seconds=)."""
         rule = {"match": list(match), "effect": effect, "after": after, "code": code, **extra}
         if times is not None:
             rule["times"] = times
@@ -901,6 +1084,55 @@ class FakeDocker:
                                "LogConfig": {"Type": "json-file", "Config": {}}, "LogConfigPinned": False}}
             return cid
         return self._mutate(go)
+
+    # -- networks (slice 4B) --------------------------------------------------
+    def networks(self) -> dict[str, dict]:
+        return dict(self.state().get("networks", {}))
+
+    def network(self, ref: str) -> dict | None:
+        for nid, n in self.networks().items():
+            if ref in (nid, n["Name"]):
+                return n
+        return None
+
+    def members(self, ref: str) -> list[str]:
+        """Container ids attached to the network `ref` (id or name)."""
+        n = self.network(ref)
+        return sorted(n["Containers"]) if n else []
+
+    def networks_of(self, ref: str) -> dict[str, dict]:
+        """`NetworkSettings.Networks` of a container, by network name."""
+        c = self.container(ref)
+        return dict((c or {}).get("NetworkSettings", {}).get("Networks", {}))
+
+    def inject_network(self, name: str, labels: dict[str, str] | None = None, *, internal: bool = True,
+                       members: list[str] | None = None, created: str | None = None) -> str:
+        """A network that exists in Docker behind the backend's back."""
+        import hashlib
+        def go(s):
+            s["seq"] += 1
+            nid = hashlib.sha256(f"injected-net-{s['seq']}-{name}".encode()).hexdigest()
+            stamp = created or time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime())
+            net = {"Id": nid, "Name": name, "Created": stamp, "Driver": "bridge", "Internal": internal,
+                   "Labels": dict(labels or {}), "Containers": {}, "Options": {}}
+            for ref in members or []:
+                c = self._find(s, ref)
+                net["Containers"][c["Id"]] = {"Name": c["Name"].lstrip("/"), "EndpointID": "x", "IPv4Address": "10.0.0.2/16"}
+                c.setdefault("NetworkSettings", {"Networks": {}}).setdefault("Networks", {})[name] = {
+                    "NetworkID": nid, "Aliases": []}
+            s.setdefault("networks", {})[nid] = net
+            return nid
+        return self._mutate(go)
+
+    def attach(self, network: str, container: str, aliases: list[str] | None = None) -> None:
+        """Attach a container to a network behind the backend's back."""
+        def go(s):
+            net = next(n for n in s["networks"].values() if network in (n["Id"], n["Name"]))
+            c = self._find(s, container)
+            net["Containers"][c["Id"]] = {"Name": c["Name"].lstrip("/"), "EndpointID": "x", "IPv4Address": "10.9.0.2/16"}
+            c.setdefault("NetworkSettings", {"Networks": {}}).setdefault("Networks", {})[net["Name"]] = {
+                "NetworkID": net["Id"], "Aliases": list(aliases or [])}
+        self._mutate(go)
 
     def remove_behind_its_back(self, ref: str) -> None:
         def go(s):
