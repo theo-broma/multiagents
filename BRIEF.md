@@ -6283,3 +6283,4 @@ In flight (all deposited in scheduler; watcher scripts in scratchpad watch-node.
 Pending user decisions: (1) 4A WIP rescue; (2) K19 contract clarification (TF retry of isolated attempt reuses RECORDED executor settings incl. image; refused admission → held, never silent block) + QS spec additions (QS-R5 reason `wip_snapshot_unavailable` with detail ref + missing|corrupt; QS-R4 tested via durable intermediate state).
 Seek automation (memory rule): K10 integration_conflict — relaunch input was the recovery commit on an older base, not the node branch tip; ask a researcher why.
 Codex 5h resets 09:56 CEST; codex-b in use.
+- 2026-10-16 ~09:20 CEST — K10 re-review nd-862255d0 APPROVED (12162629, no defects). Next after compaction: full suite on main+nodes/nd-e00b53a9 in /var/tmp/s3-comb, then merge_node nd-e00b53a9.
