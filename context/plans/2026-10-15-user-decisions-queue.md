@@ -1,5 +1,6 @@
 ---
-status: ready
+status: applied
+applied_in: fa3a5928
 ---
 # User decisions queue, and git-guard reserved domains
 

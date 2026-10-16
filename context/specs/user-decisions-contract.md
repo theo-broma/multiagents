@@ -1,5 +1,7 @@
 # User decisions queue — interface contract
 
+Approved by the user on 2026-10-17.
+
 Requirements: `context/specs/user-decisions-queue.md` (UD-D1..D4,
 UD-R1..R12). Plan: `context/plans/2026-10-15-user-decisions-queue.md`.
 
