@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 import uuid
 
 from ..provision.git import git_command, git_env
@@ -126,6 +126,9 @@ class Backend(Protocol):
     async def stop(self, identity: ResourceIdentity, grace: float) -> State: ...
     async def remove(self, identity: ResourceIdentity, keep_artifacts: bool) -> State: ...
     async def list_owned(self, project: str) -> list[ResourceIdentity]: ...
+    async def checkout_path(self, identity: ResourceIdentity) -> Path | Absent | Unknown: ...
+    async def attach_checkout(self, identity: ResourceIdentity, checkout: Path, home: Path | None = None) -> ResourceIdentity | Absent | InvalidSpec | Unknown: ...
+    async def prepare_input(self, identity: ResourceIdentity, source: BinaryIO) -> str | Absent | InvalidSpec | Unknown: ...
 
 
 def spec_digest(spec: LaunchSpec | InvocationSpec) -> str:
@@ -202,6 +205,7 @@ class ReferenceBackend:
     def __init__(self, root: Path, *, seeds=None):
         self.root = Path(root).resolve()
         self.seeds = seeds
+        self._attachment_paths: set[Path] = set()
 
     @contextlib.contextmanager
     def _locked(self):
@@ -387,7 +391,7 @@ class ReferenceBackend:
         git("-C", str(repo), "remote", "remove", "origin")
         git("-C", str(repo), "checkout", "--detach", commit)
 
-    async def checkout_path(self, identity: ResourceIdentity) -> Path | Absent:
+    async def checkout_path(self, identity: ResourceIdentity) -> Path | Absent | Unknown:
         """Host adapter: locate the checkout for capture or an alias swap."""
         with self._locked() as control:
             path = self._resource(control, identity)
@@ -396,32 +400,54 @@ class ReferenceBackend:
             record = _read(path / "resource.json")
             return Path(record.get("repo_path", self._guest_resource(identity) / "repo"))
 
-    async def attach_checkout(self, identity: ResourceIdentity, checkout: Path, home: Path | None = None):
+    async def attach_checkout(self, identity: ResourceIdentity, checkout: Path,
+                              home: Path | None = None) -> ResourceIdentity | Absent | InvalidSpec | Unknown:
         """Host adapter after a durable swap; never called using guest input."""
         with self._locked() as control:
             path = self._resource(control, identity)
             if path is None:
                 return Absent()
-            if isinstance(self._state(path), (Running, Unknown)):
+            state = self._state(path)
+            if isinstance(state, Unknown):
+                return state
+            if isinstance(state, Running):
                 return InvalidSpec("cannot attach a live checkout")
-            record = _read(path / "resource.json")
-            record["repo_path"] = str(Path(checkout).resolve())
+            associations = {"repo_path": checkout}
             if home is not None:
-                record["home_path"] = str(Path(home).resolve())
+                associations["home_path"] = home
+            resolved = {}
+            for name, value in associations.items():
+                if not isinstance(value, (str, Path)):
+                    return InvalidSpec(f"{name}: unauthorised host path {value}")
+                try:
+                    target = Path(value).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    return InvalidSpec(f"{name}: invalid host path {value}")
+                if not self._host_path(str(value)) and target not in self._attachment_paths:
+                    return InvalidSpec(f"{name}: unauthorised host path {value}")
+                if not target.is_dir():
+                    return InvalidSpec(f"{name}: directory is missing: {value}")
+                resolved[name] = str(target)
+            record = _read(path / "resource.json")
+            record.update(resolved)
             _write(path / "resource.json", record)
             return identity
 
-    async def prepare_input(self, identity: ResourceIdentity, source):
+    async def prepare_input(self, identity: ResourceIdentity, source: BinaryIO) -> str | Absent | InvalidSpec | Unknown:
         """Host adapter: snapshot a bounded, already-framed prompt for stdin."""
         with self._locked() as control:
             path = self._resource(control, identity)
             if path is None:
-                raise ValueError("resource disappeared before input preparation")
-            directory = self.root / "inputs"
-            directory.mkdir(mode=0o700, exist_ok=True)
+                return Absent()
+            directory = self.root / "inputs" / identity.id
+            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
             target = directory / uuid.uuid4().hex
-            with target.open("xb") as output:
-                shutil.copyfileobj(source, output)
+            try:
+                with target.open("xb") as output:
+                    shutil.copyfileobj(source, output)
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
             return str(target)
 
     async def find(self, key: str):
@@ -670,6 +696,9 @@ class ReferenceBackend:
                         item.chmod(item.stat().st_mode | 0o700)
                 shutil.rmtree(guest)
             shutil.rmtree(path)
+            inputs = self.root / "inputs" / identity.id
+            if inputs.exists():
+                shutil.rmtree(inputs)
             for key in list(self._records):
                 if key[:2] == (str(self.root), path.name):
                     self._records.pop(key)
@@ -680,3 +709,6 @@ class ReferenceBackend:
             return [ResourceIdentity(path.parent.name)
                     for path in sorted(control.glob("*/resource.json"))
                     if _read(path)["spec"]["labels"].get("multiagents.project") == project]
+
+
+from .docker_lifecycle import DockerBackend  # noqa: E402,F401

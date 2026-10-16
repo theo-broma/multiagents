@@ -188,6 +188,11 @@ def finish_operations(engine):
 
 
 def dispose(engine, results, intent, nodes):
+    from .orphans import discard
+    from .store import records
+    with engine.store.transaction(write=False) as db:
+        journal = [a for a in records(db, "attempts").values() if a["node_id"] in intent["scope"]]
+    discard(engine.paths, engine.service.configuration(), journal)
     for ref in intent["refs"]:
         if results.tip(ref):
             results.git("update-ref", "--no-deref", "-d", ref, check=True)

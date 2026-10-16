@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import shutil
 import subprocess
@@ -40,11 +41,13 @@ class IsolatedExecutor(Executor):
     kind = "isolated"
     uses_guest_environment = True
 
-    def __init__(self, paths=None, providers=None):
+    def __init__(self, paths=None, providers=None, config=None):
         self.paths = paths
         self.providers = providers or {}
         self.backend = None
+        self.config = dict(config or {})
         self.creation_key = ""
+        self.identity = ""
         self.termination_confirmed = False
         self.backend_name = "docker"
         self.version = "unavailable"
@@ -53,6 +56,8 @@ class IsolatedExecutor(Executor):
         from ..provision.seeds import SeedRegistry
         self.seeds = SeedRegistry(paths) if paths else None
         target = os.environ.get("MULTIAGENTS_TEST_ISOLATED_BACKEND")
+        if not target:
+            self._configure(self.config)
         if target:
             try:
                 module, factory = target.split(":", 1)
@@ -70,19 +75,42 @@ class IsolatedExecutor(Executor):
             except Exception as exc:
                 self.problem = f"backend factory failed: {type(exc).__name__}: {exc}"
 
+    def _configure(self, settings):
+        from .lifecycle import DockerBackend
+        self.config = dict(settings or {})
+        self.backend_name = self.config.get("backend", "docker")
+        self.backend = None
+        if self.backend_name != "docker":
+            self.problem = f"unknown isolated backend: {self.backend_name}"
+            return
+        docker = self.config.get("docker") or {}
+        root = self.paths.data / "isolated" if self.paths else Path.cwd() / ".isolated"
+        self.backend = DockerBackend(root, seeds=self.seeds,
+            cli=docker.get("cli", "docker"), image=docker.get("image", "multiagents/workspace:latest"),
+            resources=self.config.get("resources"))
+        self.version, self.problem = self.backend.version, ""
+
     def restore(self, evidence):
         # These keys come from the host attempt store, never from a pid file.
+        if evidence.get("backend") == "docker" and not os.environ.get("MULTIAGENTS_TEST_ISOLATED_BACKEND"):
+            self._configure(evidence.get("backend_config", self.config))
+        if evidence.get("backend") and evidence["backend"] != self.backend_name:
+            self.backend, self.problem = None, "recorded backend is unavailable"
+        if evidence.get("backend_version") and evidence["backend_version"] != self.version:
+            self.backend, self.problem = None, "recorded backend version is incompatible"
         self.creation_key = evidence.get("creation_key", "")
+        self.identity = evidence.get("identity", "")
         self.termination_confirmed = evidence.get("termination_confirmed", False)
 
     def wrapper_verdict(self, run_id):
-        if not self.creation_key and self.termination_confirmed:
+        if not self.creation_key and not self.identity and self.termination_confirmed:
             return False
-        if self.backend is None or not self.creation_key:
+        if self.backend is None or not (self.creation_key or self.identity):
             return None
 
         async def inspect():
-            identity = await outcome(self.backend.find, self.creation_key)
+            identity = (ResourceIdentity(self.identity) if self.identity else
+                        await outcome(self.backend.find, self.creation_key))
             if isinstance(identity, Absent):
                 return False
             if not isinstance(identity, ResourceIdentity):
@@ -104,10 +132,14 @@ class IsolatedExecutor(Executor):
         self.record = record
         self.begin = begin or record
         self.previous = dict(previous or {})
-        self.restore(self.previous)
+        self.creation_key = self.previous.get("creation_key", "")
+        self.identity = self.previous.get("identity", "")
+        self.termination_confirmed = self.previous.get("termination_confirmed", False)
         self.attempt, self.checkout, self.branch, self.authority = attempt, checkout, branch, authority
-        self.spec = LaunchSpec(owner=owner, lifetime="conversation" if (attempt or {}).get("alias_id") else "attempt",
+        self.spec = LaunchSpec(owner=owner, lifetime="attempt",
                                labels={"multiagents.project": self.paths.slug if self.paths else ""})
+        if attempt and attempt.get("writes") is False:
+            self.spec.labels["multiagents.repo_readonly"] = "true"
 
     async def _install_checkout(self, identity):
         """Bridge the reference guest storage to the host's guarded capture path."""
@@ -134,6 +166,7 @@ class IsolatedExecutor(Executor):
                                    env=git_env(), check=True, capture_output=True)
                     swap_intent(self.paths, self.attempt, path, staged, complete=True)
             install_checkout(self.paths, self.authority, path, staged, self.attempt)
+        self.backend._attachment_paths.update(value.resolve() for value in (path, home) if value is not None)
         reply = await self.backend.attach_checkout(identity, path, home)
         if not isinstance(reply, ResourceIdentity):
             raise RuntimeError(getattr(reply, "reason", "checkout attachment failed"))
@@ -144,11 +177,12 @@ class IsolatedExecutor(Executor):
 
     async def predecessor_verdict(self):
         """Probe recorded resource liveness without polling an unknown backend."""
-        if not self.creation_key and self.termination_confirmed:
+        if not self.creation_key and not self.identity and self.termination_confirmed:
             return False
-        if self.backend is None or not self.creation_key:
+        if self.backend is None or not (self.creation_key or self.identity):
             return self._uncertain(self.creation_key, "find", "backend or key unavailable")
-        identity = await outcome(self.backend.find, self.creation_key)
+        identity = (ResourceIdentity(self.identity) if self.identity else
+                    await outcome(self.backend.find, self.creation_key))
         if isinstance(identity, Absent):
             return False
         if not isinstance(identity, ResourceIdentity):
@@ -162,6 +196,11 @@ class IsolatedExecutor(Executor):
         # Find even when provision raised: it may have created before raising.
         # K14: one resolution pass; Unknown retains the recorded key for recovery.
         identity = await outcome(self.backend.find, creation_key)
+        if self.identity and creation_key == self.creation_key:
+            if isinstance(identity, Absent):
+                identity = ResourceIdentity(self.identity)
+            elif isinstance(identity, ResourceIdentity) and identity.id != self.identity:
+                return self._uncertain(creation_key, "find", "recorded identity differs")
         if not isinstance(identity, Absent):
             if not isinstance(identity, ResourceIdentity):
                 return self._uncertain(creation_key, "find", identity)
@@ -196,11 +235,12 @@ class IsolatedExecutor(Executor):
                 return resolved
         launch_id = uuid.uuid4().hex
         creation_key = self.creation_key = "resource-" + launch_id
+        self.identity = ""
         invocation_key = "invocation-" + launch_id
         self.termination_confirmed = False
         fields = {"kind": self.kind, "attempt_id": self.spec.owner, "backend": self.backend_name,
-                    "backend_version": self.version, "spec_version": self.spec.spec_version,
-                    "creation_key": creation_key}
+                    "backend_version": self.version, "backend_config": self.config, "spec_version": self.spec.spec_version,
+                    "creation_key": creation_key, "session_resume": "unsupported"}
         try:
             if self.attempt:
                 if self.previous.get("seed") and self.previous.get("attempt_id") == self.spec.owner:
@@ -244,6 +284,7 @@ class IsolatedExecutor(Executor):
             failure = {"class": "launch", "detail_code": "isolation_unavailable",
                        "excerpt": getattr(identity, "reason", str(identity))}
         else:
+            self.identity = identity.id
             self.record({"identity": identity.id, "invocation_key": invocation_key})
             try:
                 await self._install_checkout(identity)
@@ -263,6 +304,33 @@ class IsolatedExecutor(Executor):
                     stdin = await self.backend.prepare_input(identity, source)
                 finally:
                     source.close()
+                if not isinstance(stdin, str):
+                    self.record({"failure": {"class": "launch", "detail_code": "isolation_unavailable",
+                                              "excerpt": getattr(stdin, "reason", "input preparation failed")}})
+                    resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
+                    if isinstance(resolved, Unknown):
+                        return resolved
+                    raise RuntimeError("isolation_unavailable: input preparation failed")
+            for name in ("MULTIAGENTS_RPC_TOKEN", "MULTIAGENTS_RPC_SOCKET"):
+                environment.pop(name, None)
+            mappings = {str(Path.home()): self.spec.guest_home, str(cwd): self.spec.guest_repo}
+            if environment.get("HOME"):
+                mappings[environment["HOME"]] = self.spec.guest_home
+            if environment.get("TMPDIR"):
+                mappings[environment["TMPDIR"]] = self.spec.guest_temp
+            for key, value in environment.items():
+                for source in sorted(mappings, key=len, reverse=True):
+                    if value == source or value.startswith(source.rstrip("/") + "/"):
+                        environment[key] = mappings[source] + value[len(source):]
+                        break
+            for name in ("MULTIAGENTS_USER_HOME", "MULTIAGENTS_ROOT", "MULTIAGENTS_PROJECT"):
+                environment.pop(name, None)
+            environment.update(HOME=self.spec.guest_home, TMPDIR=self.spec.guest_temp)
+            environment.update(XDG_CONFIG_HOME=self.spec.guest_home + "/.config",
+                               XDG_DATA_HOME=self.spec.guest_home + "/.local/share",
+                               XDG_CACHE_HOME=self.spec.guest_home + "/.cache",
+                               XDG_STATE_HOME=self.spec.guest_home + "/.local/state",
+                               XDG_RUNTIME_DIR=self.spec.guest_home + "/.runtime")
             invocation = InvocationSpec(argv=list(argv), env=environment, cwd=self.spec.guest_repo,
                                         stdin=stdin, kind="agent")
             reply = await outcome(self.backend.run, identity, invocation, invocation_key)
@@ -299,48 +367,102 @@ class LifecycleHandle:
         self._state = await outcome(self.backend.inspect, self.identity)
         return self._state
 
-    async def lines(self):
-        offset, pending = 0, b""
+    def _resume_stream(self, stream):
+        name = "output.ndjson" if stream == "stdout" else "stderr.log"
+        offset = length = 0
+        existing = b""
+        if self.run_dir:
+            directory = gitops._open_beneath(*gitops.beneath(self.run_dir), create=True)
+            try:
+                try:
+                    fd = os.open("checkpoint-" + stream + ".json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                    with os.fdopen(fd) as source:
+                        record = json.load(source)
+                    if record.get("invocation") == self.invocation:
+                        offset, length = record["offset"], record["length"]
+                except (OSError, ValueError, TypeError):
+                    pass
+                fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                with os.fdopen(fd, "r+b") as target:
+                    target.truncate(length)
+                    existing = target.read()
+            finally:
+                os.close(directory)
+        return offset, length, existing
+
+    def _append_stream(self, stream, data, offset, length):
+        if not self.run_dir:
+            return
+        name = "output.ndjson" if stream == "stdout" else "stderr.log"
+        # A detached supervisor may survive the scheduler restart. Restore
+        # its last committed length too, before appending the next chunk.
+        fd = gitops._open_file_beneath(*gitops.beneath(self.run_dir), name,
+                                      os.O_WRONLY, create=True)
+        try:
+            os.ftruncate(fd, length - len(data))
+        finally:
+            os.close(fd)
+        _write_run_file(self.run_dir, name, data, append=True)
+        # The append reaches disk before its atomic checkpoint. Recovery
+        # truncates any uncheckpointed append before replaying backend bytes.
+        directory = gitops._open_beneath(*gitops.beneath(self.run_dir), create=True)
+        temporary = ".checkpoint-" + uuid.uuid4().hex
+        try:
+            output = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                os.fsync(output)
+            finally:
+                os.close(output)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+            with os.fdopen(fd, "w") as target:
+                json.dump({"invocation": self.invocation, "offset": offset, "length": length}, target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.rename(temporary, "checkpoint-" + stream + ".json", src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    async def _stream(self, stream):
+        offset, length, existing = self._resume_stream(stream)
+        # Replay checkpointed bytes to rebuild the provider parser, without
+        # appending them again. Runner's follow checkpoint suppresses effects.
+        for line in existing.splitlines(keepends=True):
+            yield line
+        pending = b""
         while True:
             state = await self._inspect()
-            chunk = await outcome(self.backend.output, self.identity, self.invocation, "stdout", offset)
+            chunk = await outcome(self.backend.output, self.identity, self.invocation, stream, offset + len(pending))
             if isinstance(chunk, bytes) and chunk:
-                offset += len(chunk)
-                if self.run_dir:
-                    _write_run_file(self.run_dir, "output.ndjson", chunk, append=True)
                 pending += chunk
                 while b"\n" in pending:
                     line, pending = pending.split(b"\n", 1)
-                    self.offset += len(line) + 1
-                    yield line.decode(errors="replace").rstrip("\r")
+                    data = line + b"\n"
+                    offset += len(data)
+                    length += len(data)
+                    self._append_stream(stream, data, offset, length)
+                    yield data
                 continue
-            if isinstance(chunk, Unknown):
+            if isinstance(chunk, Unknown) or isinstance(state, Unknown):
                 await asyncio.sleep(0.05)
                 continue
             if isinstance(state, (Exited, Absent)):
                 if pending:
-                    self.offset += len(pending)
-                    yield pending.decode(errors="replace")
+                    offset += len(pending)
+                    length += len(pending)
+                    self._append_stream(stream, pending, offset, length)
+                    yield pending
                 return
             await asyncio.sleep(0.05)
 
+    async def lines(self):
+        async for data in self._stream("stdout"):
+            self.offset += len(data)
+            yield data.decode(errors="replace").rstrip("\r\n")
+
     async def drain_stderr(self):
-        offset = 0
-        while True:
-            state = await self._inspect()
-            chunk = await outcome(self.backend.output, self.identity, self.invocation, "stderr", offset)
-            if isinstance(chunk, bytes) and chunk:
-                offset += len(chunk)
-                self._stderr = (self._stderr + chunk)[-65536:]
-                if self.run_dir:
-                    _write_run_file(self.run_dir, "stderr.log", chunk, append=True)
-                continue
-            if isinstance(chunk, Unknown):
-                await asyncio.sleep(0.05)
-                continue
-            if isinstance(state, (Exited, Absent)):
-                return
-            await asyncio.sleep(0.05)
+        async for data in self._stream("stderr"):
+            self._stderr = (self._stderr + data)[-65536:]
 
     @property
     def stderr_tail(self):
@@ -354,7 +476,12 @@ class LifecycleHandle:
         while True:
             state = await self._inspect()
             if isinstance(state, (Exited, Absent)):
-                self.record({"termination_confirmed": True})
+                if isinstance(state, Absent):
+                    self.record({"failure": {"class": "launch", "retryable": True,
+                        "excerpt": "isolated resource is absent: lost launch " + self.identity.id}})
+                self.record({"termination_confirmed": True, "exit_code": getattr(state, "code", None),
+                             "oom": bool(getattr(state, "oom", False)),
+                             "finished_at": getattr(state, "finished_at", None)})
                 code = state.code if isinstance(state, Exited) else None
                 if self.run_dir and code is not None:
                     _write_run_file(self.run_dir, "exit_status", str(code).encode())
@@ -363,5 +490,7 @@ class LifecycleHandle:
             await asyncio.sleep(0.05)
 
     async def stop(self, grace=3.0):
-        await outcome(self.backend.stop, self.identity, grace)
-        await self.wait()
+        state = await outcome(self.backend.stop, self.identity, grace)
+        if not isinstance(state, (Exited, Absent)):
+            return state
+        return await self.wait()

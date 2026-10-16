@@ -32,7 +32,7 @@ def get_executor(
         return LocalExecutor(providers, paths=paths)
     if kind == "isolated":
         from .isolated import IsolatedExecutor
-        return IsolatedExecutor(paths, providers)
+        return IsolatedExecutor(paths, providers, config=config)
     if kind == "docker":
         return DockerExecutor(config or {}, paths, providers, config_dir)
     raise ValueError(f"Unknown executor kind {kind!r} (expected 'local', 'docker' or 'isolated')")
@@ -53,7 +53,7 @@ def executor_for(paths, config, providers):
                 kind = spec.executor
                 break
         return get_executor(
-            kind, config.project.get("executor", {}).get("docker", {}),
+            kind, config.project.get("executor", {}).get("isolated" if kind == "isolated" else "docker", {}),
             paths=paths, providers=providers, config_dir=_gcd(),
         )
     return build

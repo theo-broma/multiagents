@@ -35,6 +35,29 @@ class Handle:
     pid: int
     _proc: asyncio.subprocess.Process
     _stderr: list[str] = field(default_factory=list)
+    pid_start: str = field(default="", kw_only=True)
+    _pgid: int | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        self.pid_start = self.pid_start or procs.start_time(self.pid)
+        if self.pid_start:
+            with contextlib.suppress(OSError):
+                self._pgid = os.getpgid(self.pid)
+
+    def _signal_owned(self, sig: int) -> bool:
+        # A bare pid, including one retained after wait(), proves no ownership.
+        # Recheck the start identity before each signal, including escalation.
+        if (self._proc.returncode is not None or not self.pid_start
+                or procs.start_time(self.pid) != self.pid_start):
+            return False
+        try:
+            if self._pgid == self.pid and os.getpgid(self.pid) == self._pgid:
+                os.killpg(self._pgid, sig)
+            else:
+                os.kill(self.pid, sig)
+        except OSError:
+            return False
+        return True
 
     async def lines(self) -> AsyncIterator[str]:
         """Yield stdout lines as they arrive.
@@ -98,27 +121,12 @@ class Handle:
         Agent CLIs start children of their own (shells, test runners), so we
         signal the whole process group; killing only the parent orphans them.
         """
-        if self._proc.returncode is not None:
+        if not self._signal_owned(signal.SIGTERM):
             return
-        try:
-            os.killpg(os.getpgid(self.pid), 15)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                self._proc.terminate()
-            except ProcessLookupError:
-                return
         try:
             await asyncio.wait_for(self._proc.wait(), timeout=grace)
         except (asyncio.TimeoutError, TimeoutError):
-            try:
-                os.killpg(os.getpgid(self.pid), 9)
-            except (ProcessLookupError, PermissionError, OSError):
-                with_suppress = getattr(self._proc, "kill", None)
-                if with_suppress:
-                    try:
-                        self._proc.kill()
-                    except ProcessLookupError:
-                        pass
+            self._signal_owned(signal.SIGKILL)
 
 
 # --------------------------------------------------------------------------

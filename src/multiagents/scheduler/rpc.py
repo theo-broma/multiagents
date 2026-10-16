@@ -130,6 +130,9 @@ class Service:
                     extra = self.engine.status(nodes, attempts(connection), connection, at)
         if scope is not None and "windows" in extra:
             extra["windows"] = [window for window in extra["windows"] if window["node_id"] in scope]
+        if scope is None:
+            from .orphans import discover
+            extra.update(discover(self.paths, self.configuration(), self.store, db))
         return {"pid": os.getpid(), "since": self.since, "gate": True, "counts": counts, **extra}
 
     @staticmethod

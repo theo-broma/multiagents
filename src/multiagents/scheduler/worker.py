@@ -138,7 +138,8 @@ async def supervise(root, attempt_id, lock_fd=None):
                                     node_id=node["id"], attempt_id=attempt_id, run_id=attempt["run_id"],
                                     provider=attempt.get("binding", {}).get("provider", node["pins"].get("provider", "")),
                                     effort=attempt.get("cleanup_effort", node["pins"].get("effort", "")),
-                                    executor_kind=(attempt.get("launch_evidence") or {}).get("executor", {}).get("kind", ""))
+                                    executor_kind=(attempt.get("launch_evidence") or {}).get("executor", {}).get("kind", ""),
+                                    executor_evidence=(attempt.get("launch_evidence") or {}).get("executor", {}))
             try:
                 task = attempt.get("cleanup_task", node["task"])
                 if node.get("rate_limit_fresh_from"):
@@ -244,6 +245,16 @@ async def supervise(root, attempt_id, lock_fd=None):
                     current = attempts(db)[attempt_id]
                     current["cancel_confirmed"] = result.get("predecessor_death_confirmed", False)
                     current.pop("launch_in_progress", None)
+                    if (current["cancel_confirmed"]
+                            and current.get("launch_evidence", {}).get("executor", {}).get("kind") == "isolated"):
+                        owner = store.nodes(db)[current["node_id"]]
+                        if (owner["state"] == "held"
+                                and owner["revision"] == current.get("cancel_hold_revision")
+                                and (owner.get("hold") or {}).get("reason") == "termination_unconfirmed"):
+                            owner.update(state="cancelled", hold=None, outcome=None,
+                                         revision=owner["revision"] + 1)
+                            store.save_node(db, owner)
+                            store.transition(db, "cancelled", owner["id"])
                     if current["cancel_confirmed"] and (current.get("window_resumed_at") or current.get("window_resume")):
                         suspension.cancelled(store, db, current)
                     save_attempt(db, current)

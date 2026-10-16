@@ -329,6 +329,8 @@ class Store:
                     (id TEXT PRIMARY KEY, record TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS attempts_active ON attempts
                     (json_extract(record, '$.state'), json_extract(record, '$.run_id'));
+                CREATE INDEX IF NOT EXISTS attempts_executor_kind ON attempts
+                    (json_extract(record, '$.launch_evidence.executor.kind'));
                 CREATE INDEX IF NOT EXISTS nodes_state ON nodes
                     (json_extract(record, '$.state'));
                 CREATE TABLE IF NOT EXISTS record_changes

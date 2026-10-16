@@ -278,14 +278,17 @@ class Engine:
         if "run_parent" not in node and node["created_by"] != "root":
             parent = node["created_by"]
         creator = self.runner.tree.get(parent) if parent else None
+        evidence = ((attempt or {}).get("launch_evidence", {}).get("executor", {})
+                    or (node.get("retry_route") or {}).get("executor", {}))
         return LaunchContext(caller=node.get("launch_caller", parent), run_parent=parent,
                              depth=node.get("depth") or (creator.depth + 1 if creator else 1),
                              node_id=node["id"], attempt_id=(attempt or {}).get("attempt_id", ""),
                              run_id=(attempt or {}).get("run_id", ""),
                              provider=node["pins"].get("provider", ""),
                              effort=node["pins"].get("effort", ""), admission_only=probe,
-                             executor_kind=((attempt or {}).get("launch_evidence", {}).get("executor", {}).get("kind", "")
-                                            or (node.get("retry_route") or {}).get("executor_kind", "")))
+                             executor_kind=(evidence.get("kind", "")
+                                            or (node.get("retry_route") or {}).get("executor_kind", "")),
+                             executor_evidence=evidence)
 
     def window(self, node, nodes, instant=None):
         return windows.effective(node, nodes, self.runner.config.project["scheduler"].get("timezone", "Europe/Paris"),
@@ -681,6 +684,17 @@ class Engine:
             with self.service.changed:
                 self.reasons[node["id"]] = blocked
             if not result.get("admitted") or self.stopped.is_set():
+                route = node.get("retry_route") or {}
+                if (route.get("executor_kind") == "isolated" and not result.get("admitted")
+                        and not self.stopped.is_set() and (blocked or result.get("error"))):
+                    detail = blocked or result["error"]
+                    reason = ("isolation_unavailable" if "isolation_unavailable" in str(detail)
+                              else "admission_refused")
+                    with self.service.changed, self.store.transaction() as db:
+                        current = self.store.node_records(db)[node["id"]]
+                        if current["state"] == "open" and current.get("retry_route") == route:
+                            current.pop("retry_route", None)
+                            self.hold(db, current, reason, detail)
                 # AN-R2: a ready node the probe refused. Only a refusal with
                 # a reason counts; a transport error carries none. The clock
                 # of the first consecutive refusal is what the anomaly ages.
@@ -1273,6 +1287,16 @@ class Engine:
                 if attempt.get("isolation_unknown"):
                     await self.runner._recover_isolated_predecessor(attempt)
                     continue
+                if (attempt["state"] in {"claimed", "launched"} and executor.get("backend_version")
+                        and (executor.get("creation_key") or executor.get("identity"))):
+                    from ..executor import get_executor
+                    recorded = get_executor("isolated", paths=self.paths,
+                        providers=getattr(self.runner, "providers", None))
+                    recorded.restore(executor)
+                    if recorded.backend is None:
+                        self.runner._hold_isolated_predecessor(attempt["run_id"],
+                            recorded.problem, recorded, adoption=True)
+                        continue
                 if self.runner._restore_isolated_predecessor_hold(attempt):
                     continue
             confirm_recovery_launch(self.store, self.paths, attempt)
@@ -1866,6 +1890,23 @@ class Engine:
         Anything unreadable is unknown, never death."""
         if not run_id:
             return "dead"
+        with self.store.transaction(write=False) as db:
+            journal = attempt_records(db)
+            attempt = (journal.get(attempt_id) if attempt_id else
+                       next(iter(matching_records(journal, "run_id", run_id)), None))
+        if attempt and attempt["run_id"] == run_id:
+            evidence = attempt.get("launch_evidence", {}).get("executor", {})
+            if evidence.get("kind") == "isolated":
+                from ..executor import get_executor
+                from .orphans import _run
+                executor = get_executor("isolated", paths=self.paths,
+                                        providers=getattr(self.runner, "providers", None))
+                executor.restore(evidence)
+                try:
+                    verdict = _run(executor.predecessor_verdict())
+                except Exception:
+                    return "unknown"
+                return "dead" if verdict is False else "alive" if verdict is True else "unknown"
         from ..runner import _positively_ended, _recorded_wrapper
         run_dir = self.paths.run_dir(run_id)
         try:
@@ -1918,7 +1959,8 @@ class Engine:
                     current.pop("retry_pending", None)
                     source = attempt_records(db).get(pending.get("attempt"), {})
                     route = {"attempt": pending.get("attempt"), "from": pending.get("from"),
-                             "executor_kind": source.get("launch_evidence", {}).get("executor", {}).get("kind", "")}
+                             "executor_kind": source.get("launch_evidence", {}).get("executor", {}).get("kind", ""),
+                             "executor": source.get("launch_evidence", {}).get("executor", {})}
                     if pending.get("session"):
                         route["session"] = pending["session"]
                     if pending.get("provider"):
@@ -2034,7 +2076,7 @@ class Engine:
                            for row in reversed(current.get("runs") or [])
                            if isinstance(row, dict) and isinstance(row.get("attempt_id"), str)), {})
             selection = (source.get("launch_evidence") or {}).get("executor") or {}
-            route = {"executor_kind": selection["kind"]} if selection.get("kind") else {}
+            route = {"executor_kind": selection["kind"], "executor": selection} if selection.get("kind") else {}
             if resume and hold.get("session"):
                 route.update(session=hold["session"], provider=hold.get("provider", ""))
             if route:
@@ -2225,6 +2267,20 @@ class Engine:
                             self.hold(db, loop, "run_failed", node["id"])
                 if current.get("alias_id") and tree_run and tree_run.reason == "session_lost":
                     self.hold(db, node, "session_lost", current["run_id"])
+                if current.get("steer_restart") and node["state"] != "held":
+                    restart = current["steer_restart"]
+                    node.update(state="open", outcome=None, hold=None,
+                                task=node["task"] + "\n\n" + restart["message"],
+                                session_resume="unsupported", revision=node["revision"] + 1)
+                    if current.get("alias_id"):
+                        bound = sessions.aliases(db)[current["alias_id"]]
+                        bound["session_id"] = ""
+                        sessions.save_alias(db, bound)
+                    entry = next((r for r in node["runs"] if r["attempt_id"] == current["attempt_id"]), None)
+                    if entry is not None:
+                        entry["session_resume"] = "unsupported"
+                    self.store.transition(db, "steered", node["id"], {
+                        "run_id": current["run_id"], "session_resume": "unsupported"})
                 self.store.save_node(db, node)
                 self.service.changed.notify_all()
             return
@@ -2432,6 +2488,8 @@ class Engine:
                 decided[attempt["node_id"]] = True
             if attempt["node_id"] in ids and attempt["state"] in {"claimed", "launched"}:
                 attempt["cancel_requested"] = True
+                if attempt.get("launch_evidence", {}).get("executor", {}).get("kind") == "isolated":
+                    attempt["cancel_hold_revision"] = nodes[attempt["node_id"]]["revision"] + 1
                 if attempt.get("window_resume") or attempt.get("window_stop") or attempt.get("rate_limit_resume"):
                     attempt["cancel_kind"] = "node"
                 save_attempt(db, attempt)

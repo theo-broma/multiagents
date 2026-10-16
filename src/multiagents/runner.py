@@ -135,6 +135,7 @@ class LaunchContext:
     effort: str = ""
     admission_only: bool = False
     executor_kind: str = ""
+    executor_evidence: dict | None = None
 
 
 _launch_context: ContextVar[LaunchContext | None] = ContextVar("launch_context", default=None)
@@ -1192,14 +1193,18 @@ class Runner(QuotaHandover):
         give up isolation for every other agent.
         """
         context = _launch_context.get()
-        return get_executor(
-            (context.executor_kind if context and context.executor_kind else
-             spec.executor if spec and spec.executor else self.config.executor),
-            self.config.project.get("executor", {}).get("docker", {}),
+        kind = (context.executor_kind if context and context.executor_kind else
+                spec.executor if spec and spec.executor else self.config.executor)
+        executor = get_executor(
+            kind,
+            self.config.project.get("executor", {}).get("isolated" if kind == "isolated" else "docker", {}),
             paths=self.paths,
             providers=self.providers,
             config_dir=global_config_dir(),
         )
+        if kind == "isolated" and context and context.executor_evidence:
+            executor.restore(context.executor_evidence)
+        return executor
 
     def agent_git(self, node: Node) -> gitops.Git:
         """Where this agent's own commits run, and their hooks (SG-R3): its
@@ -4114,7 +4119,8 @@ class Runner(QuotaHandover):
         if not self._claim(node.id):
             return False
         try:
-            identity = await outcome(executor.backend.find, evidence["creation_key"])
+            identity = (ResourceIdentity(evidence["identity"]) if evidence.get("identity") else
+                        await outcome(executor.backend.find, evidence["creation_key"]))
             if isinstance(identity, ResourceIdentity):
                 state = await outcome(executor.backend.inspect, identity)
                 invocation = (await outcome(executor.backend.inspect_invocation, identity,
@@ -4137,7 +4143,10 @@ class Runner(QuotaHandover):
                                      exec_identity={"kind": "isolated"})
                     self._holds.pop(node.id, None)
                     return False             # ordinary adoption follows
-                if not isinstance(state, Created) or not isinstance(invocation, Absent):
+                if (isinstance(state, Absent) and isinstance(invocation, Absent)
+                        and not evidence.get("invocation_id")):
+                    identity = Absent()
+                elif not isinstance(state, Created) or not isinstance(invocation, Absent):
                     return uncertain(getattr(invocation if isinstance(invocation, Unknown) else state,
                                              "reason", "invocation state is not confirmed"))
                 if evidence.get("invocation_id"):
@@ -4149,11 +4158,12 @@ class Runner(QuotaHandover):
             # No invocation exists. Finish or roll back the swap while all
             # storage still exists, including the old checkout and the HOME.
             try:
+                self.paths.worktrees.mkdir(parents=True, exist_ok=True)
                 settle_checkout(self.paths, self.authority, Path(node.worktree), attempt)
             except Exception as exc:
                 return uncertain(f"checkout recovery: {exc}")
             if isinstance(identity, ResourceIdentity):
-                removed = await outcome(executor.backend.remove, identity, True)
+                removed = await outcome(executor.backend.remove, identity, False)
                 if not isinstance(removed, (Absent, Exited)):
                     return uncertain("remove: " + getattr(removed, "reason", str(removed)))
             self._record_node_launch_evidence(node.id, {"executor": {"termination_confirmed": True}})
@@ -4203,7 +4213,7 @@ class Runner(QuotaHandover):
         held = getattr(node, "cleanup_hold", None)
         return bool(isinstance(held, dict) and held.get("isolation_unknown"))
 
-    def _hold_isolated_predecessor(self, node_id, reason, executor, *, launch_failed=False, own_recovery=False):
+    def _hold_isolated_predecessor(self, node_id, reason, executor, *, launch_failed=False, own_recovery=False, adoption=False):
         """K14: keep the attempt and its slot while resource resolution is unknown."""
         from .scheduler.engine import attempts, save_attempt
         from .scheduler.store import Store, matching_records
@@ -4236,9 +4246,13 @@ class Runner(QuotaHandover):
             if marker is None:
                 marker = {"creation_key": executor.creation_key,
                           "prior_state": owner["state"], "launch_failed": launch_failed,
-                          "own_recovery": own_recovery}
+                          "prior_hold": owner.get("hold"),
+                          "own_recovery": own_recovery, "adoption": adoption}
+                cancelling = attempt.get("cancel_hold_revision") == owner["revision"]
                 owner.update(state="held", revision=owner["revision"] + 1,
                              hold={"reason": "termination_unconfirmed", "detail": reason})
+                if cancelling:
+                    attempt["cancel_hold_revision"] = owner["revision"]
                 marker["hold_revision"] = owner["revision"]
                 store.save_node(db, owner)
                 store.transition(db, "held", owner["id"], owner["hold"])
@@ -4276,6 +4290,42 @@ class Runner(QuotaHandover):
         if not marker or marker["retry_at"] > now():
             return
         run_id = attempt["run_id"]
+        if marker.get("adoption"):
+            executor = get_executor("isolated", paths=self.paths, providers=self.providers)
+            executor.restore(self._node_executor_evidence(run_id))
+            from .executor.isolated import outcome
+            from .executor.lifecycle import Absent, Exited, ResourceIdentity, Running
+            evidence = self._node_executor_evidence(run_id)
+            state = Unknown(executor.problem or "executor evidence unavailable")
+            if executor.backend and evidence.get("invocation_id"):
+                identity = (ResourceIdentity(evidence["identity"]) if evidence.get("identity") else
+                            await outcome(executor.backend.find, evidence.get("creation_key", "")))
+                if isinstance(identity, ResourceIdentity):
+                    if not evidence.get("identity"):
+                        self._record_node_launch_evidence(run_id, {"executor": {"identity": identity.id}})
+                    state = await outcome(executor.backend.inspect_invocation,
+                                          identity, evidence["invocation_id"])
+                else:
+                    state = identity
+            if not isinstance(state, (Absent, Running, Exited)):
+                return
+            with Store(self.paths.root).transaction() as db:
+                current = attempts(db)[attempt["attempt_id"]]
+                if current.get("isolation_unknown") != marker:
+                    return
+                owner = Store(self.paths.root).nodes(db)[current["node_id"]]
+                if owner["state"] == "held" and owner["revision"] == marker["hold_revision"]:
+                    cancelling = current.get("cancel_hold_revision") == owner["revision"]
+                    owner.update(state=marker["prior_state"], hold=marker.get("prior_hold"),
+                                 revision=owner["revision"] + 1)
+                    if cancelling:
+                        current["cancel_hold_revision"] = owner["revision"]
+                    Store(self.paths.root).save_node(db, owner)
+                current.pop("isolation_unknown", None)
+                save_attempt(db, current)
+            self.tree.update(run_id, cleanup_hold=None)
+            self._holds.pop(run_id, None)
+            return
         if marker.get("own_recovery"):
             node = self.tree.get(run_id)
             if node:
@@ -4473,8 +4523,30 @@ class Runner(QuotaHandover):
                         False, predecessor)
                 raise
         try:
+            executor = self.executor(spec)
+            managed = self.tree.get(node_id)
+            previous_executor = self._node_executor_evidence(node_id) if managed and managed.node_id else {}
+            recorded_kind = previous_executor.get("kind")
+            if recorded_kind in ("local", "docker", "isolated") and recorded_kind != executor.kind:
+                executor = get_executor(recorded_kind,
+                    self.config.project.get("executor", {}).get(
+                        "isolated" if recorded_kind == "isolated" else "docker", {}),
+                    paths=self.paths, providers=self.providers, config_dir=global_config_dir())
+                if recorded_kind == "isolated":
+                    executor.restore(previous_executor)
+            if executor.kind == "isolated":
+                needs = getattr(provider, "needs", {})
+                for need, field in (("credentials", "credential_handle"),
+                                    ("network", "network"), ("rpc", "transport_handle")):
+                    if needs.get(need, True):
+                        detail = f"isolation_unavailable: Unsupported({field})"
+                        self._record_node_launch_evidence(node_id, {"executor": {
+                            "kind": "isolated", "termination_confirmed": True,
+                            "failure": {"class": "other", "retryable": False,
+                                "detail_code": "isolation_unavailable", "excerpt": detail}}})
+                        raise RuntimeError(detail)
             home = None
-            if self.config.home_policy == "per-agent":
+            if self.config.home_policy == "per-agent" or executor.kind == "isolated":
                 # PS-R2: a provider that borrows its credentials gets the
                 # owner's credential files in its private HOME too — the
                 # owner's links and copies first, then its own.
@@ -4483,6 +4555,10 @@ class Runner(QuotaHandover):
                     [*(owner.home_links if owner else []), *provider.home_links]))
                 copies = list(dict.fromkeys(
                     [*(owner.home_copy if owner else []), *provider.home_copy]))
+                if executor.kind == "isolated":
+                    # Slice 3 has no credential transport, even for providers
+                    # declaring that they need no credentials.
+                    links, copies = [], []
                 home_id = node_id
                 context = _launch_context.get()
                 if context and context.node_id:
@@ -4490,8 +4566,19 @@ class Runner(QuotaHandover):
                     from .scheduler.engine import attempts
                     with Store(self.paths.root).transaction(write=False) as db:
                         home_id = attempts(db)[context.attempt_id].get("alias_home", node_id)
-                home = prepare_home(self.paths.home(home_id), links,
-                                    "per-agent", agent=spec.name, copies=copies)
+                home_path = self.paths.home(home_id)
+                try:
+                    home = prepare_home(home_path, links,
+                                        "per-agent", agent=spec.name, copies=copies)
+                except OSError as exc:
+                    if executor.kind == "isolated":
+                        detail = f"prepare_home {home_path}: {exc}"
+                        self._record_node_launch_evidence(node_id, {"executor": {
+                            "kind": "isolated", "termination_confirmed": True,
+                            "failure": {"class": "launch", "retryable": True,
+                                "excerpt": detail}}})
+                        raise RuntimeError(detail) from exc
+                    raise
             identity = {
                 "MULTIAGENTS_AGENT_ID": node_id,
                 "MULTIAGENTS_PARENT_ID": parent or "",
@@ -4533,14 +4620,6 @@ class Runner(QuotaHandover):
             # Identity last: it is what the server's gates trust (SM-R3), so no
             # configuration may restate it.
             env.update(identity)
-            executor = self.executor(spec)
-            managed = self.tree.get(node_id)
-            previous_executor = self._node_executor_evidence(node_id) if managed and managed.node_id else {}
-            recorded_kind = previous_executor.get("kind")
-            if recorded_kind in ("local", "docker", "isolated") and recorded_kind != executor.kind:
-                executor = get_executor(recorded_kind,
-                    self.config.project.get("executor", {}).get("docker", {}),
-                    paths=self.paths, providers=self.providers, config_dir=global_config_dir())
 
             # LN-C2, finding 8: the provenance captured with the values at THIS
             # launch — the file and line as they are now, not as they will be when
@@ -4593,7 +4672,7 @@ class Runner(QuotaHandover):
                 _run_write(run_dir, "prompt.md", prompt, mode=0o600)
             argv = provider.build_command(
                 prompt=prompt, prompt_file=str(run_dir / prompt_name),
-                model=spec.model, workdir=str(workdir),
+                model=spec.model, workdir=("/work/repo" if executor.kind == "isolated" else str(workdir)),
                 permission=spec.permission, session_id=session_id, options=options,
                 timeout=int(wall),
             )
@@ -4628,7 +4707,9 @@ class Runner(QuotaHandover):
                 env["MULTIAGENTS_RPC_SOCKET"] = str(transport_directory(self.paths.root) / "rpc.sock")
                 env["MULTIAGENTS_NODE_PERMISSIONS"] = ",".join(sorted(permissions))
             # Managed runs always have their scoped node server (NC-R58).
-            if spec.can_spawn or managed and (managed.node_id or managed.reviewed_commit):
+            if executor.kind == "isolated":
+                pass                       # scoped RPC and its HOME files are slice 4
+            elif spec.can_spawn or managed and (managed.node_id or managed.reviewed_commit):
                 server_argv, server_env = self._hand_server(node_id, provider, env, home, run_dir)
                 argv += server_argv
                 env.update(server_env)
@@ -6027,6 +6108,7 @@ class Runner(QuotaHandover):
                 return {"admitted": True, "provider": provider.name, "model": spec.model,
                         "executor_selection": {"kind": executor.kind,
                             "backend": getattr(executor, "backend_name", ""),
+                            **({"backend_config": executor.config} if executor.kind == "isolated" else {}),
                             "backend_version": getattr(executor, "version", "1")}}
             try:
                 startup_token = self.startup.claim(provider.name, node_id)
@@ -6717,6 +6799,9 @@ class Runner(QuotaHandover):
                     or asyncio.current_task().cancelling()):
                 self._startup_finish(provider.name, node_id, run.startup_token)
 
+        if (run.internal_stop and self._node_executor_evidence(node_id).get("kind") == "isolated"):
+            return                         # steer records this stopped attempt
+
         # Everything after the stream is guarded, because nothing else releases
         # this run. `consult` waits on `run.done` for the agent's whole timeout
         # and then reports "no reply within Ns" — an unresponsive-agent verdict
@@ -7100,6 +7185,9 @@ class Runner(QuotaHandover):
             "turn_started_at": run.launched_at, "usage": usage, "text": text, "stderr_tail": stderr,
             "final_text": run.final_assistant_message,
         }
+        executor_evidence = self._node_executor_evidence(node_id) if isolated else {}
+        if executor_evidence.get("oom"):
+            record["oom"] = True
         if status == "rate_limited":
             record.update(cause="rate_limited", retry_after=self._retry_after(stderr))
         # TF-R1: every attempt that does not end `done` durably records a
@@ -7121,6 +7209,10 @@ class Runner(QuotaHandover):
                 retry_after=record.get("retry_after"),
                 resets_at=run.final_resets_at or "",
                 launched=not failed_launch)
+            if executor_evidence.get("oom") and record["failure_cause"]["class"] in {"crash", "other", "transient"}:
+                record["failure_cause"].update(
+                    **{"class": "crash", "oom": True,
+                       "excerpt": "isolated attempt OOM: " + record["failure_cause"]["excerpt"]})
             if run.final_resets_at:
                 record["resets_at"] = run.final_resets_at
         warnings = [event["warning"] for event in run.events if event.get("warning")]
@@ -8655,14 +8747,36 @@ class Runner(QuotaHandover):
         isolated_live = False
         if isolated:
             from .executor.isolated import LifecycleHandle, outcome
-            from .executor.lifecycle import Exited, ResourceIdentity, Running
+            from .executor.lifecycle import Absent, Exited, ResourceIdentity, Running
             evidence = self._node_executor_evidence(node.id)
             invocation = evidence.get("invocation_id")
-            if not executor.backend or not invocation or not evidence.get("identity"):
+            if not executor.backend or not invocation:
+                self._hold_isolated_predecessor(node.id,
+                    executor.problem or "recorded executor evidence is incomplete", executor, adoption=True)
                 return False
-            identity = ResourceIdentity(evidence["identity"])
-            state = await outcome(executor.backend.inspect_invocation, identity, invocation)
+            identity = (ResourceIdentity(evidence["identity"]) if evidence.get("identity") else
+                        await outcome(executor.backend.find, evidence.get("creation_key", "")))
+            if isinstance(identity, ResourceIdentity):
+                if not evidence.get("identity"):
+                    self._record_node_launch_evidence(node.id, {"executor": {"identity": identity.id}})
+            elif not isinstance(identity, Absent):
+                self._hold_isolated_predecessor(node.id,
+                    getattr(identity, "reason", "recorded resource identity is unavailable"), executor, adoption=True)
+                return False
+            state = (await outcome(executor.backend.inspect_invocation, identity, invocation)
+                     if isinstance(identity, ResourceIdentity) else identity)
+            if isinstance(state, Absent):
+                detail = "isolated resource is absent: lost launch " + getattr(identity, "id", evidence.get("creation_key", ""))
+                failure = {"class": "launch", "retryable": True, "excerpt": detail}
+                self._record_node_launch_evidence(node.id, {"executor": {
+                    "termination_confirmed": True, "failure": failure}})
+                self.tree.set_status(node.id, "failed", detail)
+                _run_write(run_dir, "result.json", json.dumps({
+                    "status": "failed", "failure_cause": failure, "session_id": ""}))
+                return False
             if not isinstance(state, (Running, Exited)):
+                self._hold_isolated_predecessor(node.id,
+                    getattr(state, "reason", str(state)), executor, adoption=True)
                 return False
             isolated_live = isinstance(state, Running)
             isolated_handle = LifecycleHandle(executor.backend, identity, invocation, run_dir,
@@ -8873,6 +8987,19 @@ class Runner(QuotaHandover):
         SV-R10: a wrapped agent is ended through its wrapper and its recorded
         process group, escalating to KILL, so an agent that ignores TERM goes.
         """
+        evidence = self._node_executor_evidence(node.id) if node.node_id else {}
+        if evidence.get("kind") == "isolated":
+            from .executor.isolated import outcome
+            from .executor.lifecycle import Absent, Exited, ResourceIdentity
+            executor = get_executor("isolated", paths=self.paths, providers=self.providers)
+            executor.restore(evidence)
+            if not executor.backend or not evidence.get("identity"):
+                return bool(evidence.get("termination_confirmed"))
+            async def stop_resource():
+                resource = ResourceIdentity(evidence["identity"])
+                await outcome(executor.backend.stop, resource, 3.0)
+                return await outcome(executor.backend.inspect, resource)
+            return isinstance(asyncio.run(stop_resource()), (Absent, Exited))
         identity = getattr(node, "exec_identity", None) or {}
         kind = identity.get("kind")
         if kind == "docker":
@@ -8978,6 +9105,39 @@ class Runner(QuotaHandover):
         """
         if self._shutdown_preserves(agent_id):
             return {"agent_id": agent_id, "detached": True}
+        node = self.tree.get(agent_id)
+        evidence = self._node_executor_evidence(agent_id) if node and node.node_id else {}
+        if evidence.get("kind") == "isolated":
+            from .executor.isolated import outcome
+            from .executor.lifecycle import Absent, Exited, ResourceIdentity, Unknown
+            executor = self._predecessor_executor(node, self.config.agents.get(node.agent))
+            state = Unknown(executor.problem or "recorded resource identity is unavailable")
+            if executor.backend and evidence.get("identity"):
+                identity = ResourceIdentity(evidence["identity"])
+                await outcome(executor.backend.stop, identity, 3.0)
+                state = await outcome(executor.backend.inspect, identity)
+            elif evidence.get("termination_confirmed"):
+                state = Absent()
+            if not isinstance(state, (Exited, Absent)):
+                self._hold_isolated_predecessor(agent_id,
+                    getattr(state, "reason", str(state)), executor, adoption=True)
+                return {"agent_id": agent_id, "status": "held",
+                        "predecessor_death_confirmed": False}
+            self._record_node_launch_evidence(agent_id, {"executor": {"termination_confirmed": True}})
+            run = self.runs.get(agent_id)
+            if run:
+                run.stop_requested = True
+                run.internal_stop = internal
+                if run.task and not run.task.done():
+                    run.task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await run.task
+                run.done.set()
+            if internal:
+                return {"agent_id": agent_id, "status": "stopping", "predecessor_death_confirmed": True}
+            self.tree.set_status(agent_id, "cancelled", "stopped by parent")
+            self._release(agent_id)
+            return {"agent_id": agent_id, "status": "cancelled", "predecessor_death_confirmed": True}
         if not internal:
             node = self.tree.get(agent_id)
             if node and node.node_id and not getattr(self, "_scheduler_supervisor", False):
@@ -9138,6 +9298,9 @@ class Runner(QuotaHandover):
         """SR-R2: ask the execution backend that actually launched the turn."""
         executor = self.executor(spec)
         identity = (node.exec_identity or {}) if node else {}
+        if node and getattr(node, "node_id", None):
+            evidence = self._node_executor_evidence(node.id)
+            identity = evidence if evidence else {"kind": "unknown"}
         if identity.get("kind") == "isolated":
             from .scheduler.engine import attempts
             from .scheduler.store import Store
@@ -9580,6 +9743,38 @@ class Runner(QuotaHandover):
         if node is None:
             return {"agent_id": agent_id, "steered": False,
                     "error": "entry id differs from its key"}
+        evidence = self._node_executor_evidence(agent_id) if node.node_id else {}
+        if evidence.get("kind") == "isolated" and not window_resume and not rate_limit_resume:
+            from .executor.lifecycle import Unknown
+            from .scheduler.engine import attempts, save_attempt
+            from .scheduler.store import Store
+            executor = self._predecessor_executor(node, self.config.agents.get(node.agent))
+            executor.record = lambda fields: self._record_node_launch_evidence(agent_id, {"executor": fields})
+            run = self.runs.get(agent_id)
+            if run:
+                run.stop_requested, run.internal_stop = True, True
+            resolved = (await executor._resolve_failure(evidence.get("creation_key", ""),
+                        evidence.get("invocation_key", ""), None) if executor.backend else
+                        Unknown(executor.problem or "recorded backend unavailable"))
+            if isinstance(resolved, Unknown):
+                self._hold_isolated_predecessor(agent_id, resolved.reason, executor)
+                return {"agent_id": agent_id, "steered": False, "isolation_unknown": True,
+                        "error": resolved.reason}
+            stopped = await self.stop(agent_id, internal=True)
+            if not stopped.get("predecessor_death_confirmed"):
+                return {"agent_id": agent_id, "steered": False, "isolation_unknown": True,
+                        "error": "isolated predecessor termination is unconfirmed"}
+            store = Store(self.paths.root)
+            with store.transaction() as db:
+                current = attempts(db)[node.attempt_id]
+                current["steer_restart"] = {"message": message, "session_resume": "unsupported"}
+                current.pop("resume_pending", None)
+                save_attempt(db, current)
+            _run_write(self.paths.run_dir(agent_id), "result.json", json.dumps({
+                "status": "done", "session_id": "", "session_resume": "unsupported"}))
+            self.tree.update(agent_id, status="done", session_id="", reason="steered to a new isolated attempt")
+            self._release(agent_id)
+            return {"agent_id": agent_id, "steered": True, "session_resume": "unsupported"}
         if not self.unrecorded_branch_ok(node, "steer"):
             return {"agent_id": agent_id, "steered": False,
                     "error": "branch is outside the container domain"}

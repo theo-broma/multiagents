@@ -762,6 +762,61 @@ def _executor_section(value: Any, source: Path | None = None) -> dict:
     return value
 
 
+def validate_isolated_resources(resources: Any) -> dict[str, Any]:
+    """K17.1/F32: validate limits and resolve omitted or null defaults."""
+    defaults = {"memory": "6g", "pids": 4096, "cpu_shares": 1024, "cpus": None}
+    if resources is None:
+        return defaults
+    if not isinstance(resources, dict):
+        raise ValueError("executor.isolated.resources must be a mapping")
+    result = dict(defaults)
+    for key, value in resources.items():
+        field = f"executor.isolated.resources.{key}"
+        if key not in defaults:
+            raise ValueError(f"{field} is an unknown resource")
+        if value is None:
+            continue
+        valid = False
+        if not isinstance(value, bool):
+            if key == "memory" and isinstance(value, (str, int, float)):
+                # Docker's byte sizes accept a number and an optional binary
+                # unit, for example 512m, 1.5g or a plain byte count.
+                match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[bB]|[kKmMgGtTpP][bB]?)?", str(value))
+                valid = bool(match and math.isfinite(float(match[1])) and float(match[1]) > 0)
+            elif key in ("pids", "cpu_shares"):
+                valid = ((isinstance(value, int) and value > 0)
+                         or (isinstance(value, str) and bool(re.fullmatch(r"[0-9]+", value))
+                             and int(value) > 0))
+            elif key == "cpus" and isinstance(value, (str, int, float)):
+                if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)", str(value)):
+                    number = float(value)
+                    valid = math.isfinite(number) and number > 0
+        if not valid:
+            raise ValueError(f"{field} must be a positive valid resource value")
+        result[key] = value
+    return result
+
+
+def _validate_isolated_section(isolated: Any) -> None:
+    if not isinstance(isolated, dict) or isolated.get("backend", "docker") != "docker":
+        raise ValueError("executor.isolated.backend must be docker (accepted values: docker)")
+    docker = isolated.get("docker")
+    if docker is None:
+        docker = {}
+    if not isinstance(docker, dict):
+        raise ValueError("executor.isolated.docker must be a mapping")
+    cli = docker.get("cli", "docker")
+    if (not isinstance(cli, str) or not cli or "\x00" in cli
+            or (not Path(cli).is_absolute()
+                and ("/" in cli or any(char.isspace() for char in cli)))):
+        raise ValueError("executor.isolated.docker.cli must be an executable name or absolute path")
+    image = docker.get("image", "multiagents/workspace:latest")
+    if (not isinstance(image, str) or not image or "\x00" in image
+            or any(char.isspace() for char in image)):
+        raise ValueError("executor.isolated.docker.image must be a non-empty image name")
+    validate_isolated_resources(isolated.get("resources"))
+
+
 @dataclass
 class Config:
     project: dict[str, Any]
@@ -1438,8 +1493,7 @@ def load(paths: ProjectPaths | None, seed: bool = True, *,
         if agent.executor and agent.executor not in accepted_executors:
             raise ValueError(f"agent {name!r}: unknown executor {agent.executor!r}; expected local, docker or isolated")
     isolated = (merged["project.yaml"].get("executor") or {}).get("isolated", {})
-    if not isinstance(isolated, dict) or isolated.get("backend", "docker") != "docker":
-        raise ValueError("executor.isolated.backend must be docker (accepted values: docker)")
+    _validate_isolated_section(isolated)
     from .providers import expand_env_value
     for name, provider in providers.items():
         required = provider.home_account_executor

@@ -155,8 +155,12 @@ def freeze(db, node, nodes, result, paths, config):
     # Old bindings predate isolated resources. Their HOME belongs to the
     # legacy activation, whichever of the two legacy executors it uses.
     previous_kind = bound.get("executor_kind", kind if kind in {"local", "docker"} else "local")
-    if previous_kind != kind:
+    if previous_kind != kind or (kind == "isolated" and bound.get("isolated_home_version") != 1):
         bound["home_id"] = "alias-" + key[:24] + "-" + kind + "-" + uuid.uuid4().hex[:12]
+    if kind == "isolated":
+        # Homes prepared before F65 could contain host credential copies.
+        # Preserve that store on the host, but never attach it to a guest.
+        bound["isolated_home_version"] = 1
     bound["executor_kind"] = kind
     save_alias(db, bound)
     return {"alias_id": key, "alias_worktree": bound["worktree"], "alias_home": bound["home_id"],

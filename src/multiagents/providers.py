@@ -285,6 +285,10 @@ class Provider:
     # DJ-R5: the root launch script accepts detached-job Stop hook settings.
     root_bg_hook: bool = False
     auth: dict[str, Any] = field(default_factory=dict)
+    # K17.2: an undeclared requirement is needed, so isolation never silently
+    # drops credentials, network or RPC from an existing provider.
+    needs: dict[str, bool] = field(default_factory=lambda: {
+        "credentials": True, "network": True, "rpc": True})
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
     # Sent to the model, verbatim, as its own prompt section — unlike `notes`,
@@ -467,6 +471,7 @@ class Provider:
             compaction=(dict(data["compaction"]) if isinstance(data.get("compaction"), dict) else {}),
             root_bg_hook=root_bg_hook,
             auth=data.get("auth", {}) or {},
+            needs=_provider_needs(name, data),
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
             agent_guidance=data.get("agent_guidance") or "",
@@ -877,6 +882,21 @@ def _container_account(data: dict) -> str:
         return ""
     from .authproxy import validate_label
     return validate_label(value)
+
+
+def _provider_needs(name: str, data: dict) -> dict[str, bool]:
+    defaults = {"credentials": True, "network": True, "rpc": True}
+    if "needs" not in data:
+        return defaults
+    needs = data["needs"]
+    if not isinstance(needs, dict):
+        raise ValueError(f"provider {name!r}: needs must be a mapping")
+    for key, value in needs.items():
+        if key not in defaults:
+            raise ValueError(f"provider {name!r}: needs.{key} is an unknown field")
+        if not isinstance(value, bool):
+            raise ValueError(f"provider {name!r}: needs.{key} must be a boolean")
+    return {**defaults, **needs}
 
 
 def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:
