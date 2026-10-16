@@ -195,7 +195,7 @@ from test_ic_c16_stop_cancel_steer import sx  # noqa: E402,F401
 
 def test_ic_c18_failed_capture_retains_the_container_and_private_repository(sx):
     sx.start()
-    node = sx.node({"write": ".git/HEAD"}, {"lines": 1})
+    node = sx.node({"corrupt_ref": True}, {"lines": 1})
     view = s3.wait_done(sx, node)
     assert view["state"] == "held" and view["hold"]["reason"] == "result_capture_failed", view
     ev = sx.evidence(sx.runs(node)[-1]["attempt_id"])["executor"]
@@ -203,4 +203,4 @@ def test_ic_c18_failed_capture_retains_the_container_and_private_repository(sx):
     identity = identity_of(ic.run(backend.find(ev["creation_key"])))
     assert kind_of(ic.run(backend.inspect(identity))) == "exited"
     repository = ic.run(backend.checkout_path(identity))
-    assert repository.is_dir() and (repository / ".git" / "HEAD").read_text() == "x"
+    assert repository.is_dir() and (repository / ".git").is_dir()

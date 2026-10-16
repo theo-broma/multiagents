@@ -53,10 +53,16 @@ def steer(s, run_id, message):
 
 
 def test_ic_adv_an_isolated_run_can_be_steered_twice(ics):
-    _, run = launched(ics)
+    node, run = launched(ics)
     first = steer(ics, run["run_id"], "continue once")
     assert first.get("steered") is True, first
-    second = steer(ics, run["run_id"], "continue twice")
+    # Steering an isolated attempt is stop + a new attempt (D-S3/IC-C16): the
+    # second steer targets the node's current run, the successor.
+    successor = ics.wait(lambda: next((r for r in ics.runs(node) if r["run_id"] != run["run_id"]), None),
+                         timeout=ic.WAIT * 2, what="the successor run")
+    ics.wait(lambda: ics.evidence(successor["attempt_id"]).get("executor", {}).get("invocation_id"),
+             timeout=ic.WAIT * 2, what="the successor invocation to be recorded")
+    second = steer(ics, successor["run_id"], "continue twice")
     assert second.get("steered") is True and not second.get("error"), second
 
 

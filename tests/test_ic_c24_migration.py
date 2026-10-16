@@ -7,6 +7,9 @@ import ic_s4a as a
 import ic_prov as ip
 from nc_fixture.m4_world import commit_entry, finding, verdict_entry
 
+# Slice 4A (D-S4A.3/4: session continuity, scoped RPC): refused by slice 3 by design.
+pytestmark = pytest.mark.ic_milestone(4)
+
 @pytest.mark.parametrize('recorded,payload,outcome', [(True,True,'resumed'),(True,False,'failed'),(False,True,'fresh')])
 def test_ic_c24_local_alias_migration_preserves_only_declared_payload(tmp_path, monkeypatch, recorded, payload, outcome):
     w = a.loop_world(tmp_path, monkeypatch, kind='local', payload=payload, recorded=recorded, plant_forbidden=True)

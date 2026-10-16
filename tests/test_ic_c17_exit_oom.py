@@ -21,14 +21,22 @@ def test_ic_c17_inspect_keeps_exit_code_and_oom_separate(tmp_path, monkeypatch, 
 
 
 def test_ic_c17_oom_cause_is_attributed_to_the_attempt(tmp_path, monkeypatch):
+    # Retries after an OOM crash are allowed, so the node need not end: the
+    # cause is read from the OOM attempt's own record as soon as it exists.
     s = s3.FakeDockerSched(tmp_path, monkeypatch)
     try:
         s.fd.workload(exit_code=137, oom=True)
         s.start()
         node = s.create()["id"]
-        view = s3.wait_done(s, node)
-        causes = ic.causes(view)
-        assert any(c.get("class") == "crash" and "oom" in ic.text_of(c).lower() for c in causes), causes
+
+        def oom_attempt():
+            return next((r for r in s.runs(node)
+                         if isinstance(r.get("cause"), dict) and r["cause"].get("class") == "crash"), None)
+
+        run = s.wait(oom_attempt, ic.WAIT, f"the crash cause of an attempt of {node}")
+        assert run.get("attempt_id"), run
+        assert run["cause"].get("oom") is True, run
+        assert "oom" in ic.text_of(run["cause"]).lower(), run
     finally:
         s.close()
 

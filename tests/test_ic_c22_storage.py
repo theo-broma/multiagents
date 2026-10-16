@@ -7,6 +7,9 @@ import ic_s4a as a
 import ic_s3 as s3
 import ic_support as ic
 
+# Slice 4A (D-S4A.3/4: session continuity, scoped RPC): refused by slice 3 by design.
+pytestmark = pytest.mark.ic_milestone(4)
+
 @pytest.fixture(params=['reference', a.DOCKER])
 def world(request, tmp_path, monkeypatch, st_live_docker):
     yield from a.make_world(request, tmp_path, monkeypatch)

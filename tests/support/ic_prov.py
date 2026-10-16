@@ -346,6 +346,8 @@ def _provider_class():
             super().__init__(tmp, name, sock, **extra)
             script = self.dir / "agent.py"
             script.write_text(patch_agent_script(script.read_text()))
+            # K17.2: a provider that declares nothing is refused by slice 3.
+            self.entry["needs"] = {"credentials": False, "network": False, "rpc": False}
 
         def reports(self, tag: str | None = None, when: str | None = None) -> list[dict]:
             path = self.dir / "reports.jsonl"

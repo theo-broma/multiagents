@@ -30,6 +30,8 @@ Ops, run in order (`{"ops": [...]}`):
   {"net": "host:port"}           try to connect (2 s) and report `NET {"ok": bool}`.
   {"write": path, "mode": ...}   create the file with default umask and report its mode
         as `WROTE {"path", "mode", "dir_mode"}`.
+  {"corrupt_ref": true}         overwrite the loose ref of the checked-out branch (the
+        ref the host reads as the attempt's result) with junk, so result capture fails.
   {"marker": "name"}             create `$TMPDIR/name` (a file in the attempt's
         private temp) and `<cwd>/name` (in its repository).
 """
@@ -129,6 +131,11 @@ for op in spec["ops"]:
         open(path, "w").write("x")
         out(event("WROTE " + json.dumps({"path": path, "mode": os.stat(path).st_mode & 0o7777,
                                          "dir_mode": os.stat(os.path.dirname(path)).st_mode & 0o7777})))
+    elif op.get("corrupt_ref"):
+        head = open(".git/HEAD").read().strip()
+        assert head.startswith("ref: refs/heads/"), head
+        open(".git/" + head[len("ref: "):], "w").write("x")
+        out(event("CORRUPTED " + head))
     elif "marker" in op:
         for d in (os.environ.get("TMPDIR") or "/tmp", os.getcwd()):
             open(os.path.join(d, op["marker"]), "w").write("x")
