@@ -6349,3 +6349,4 @@ Pending user: RB-R1 re-wording (above).
   (5) file counts and byte totals are unbounded; deferred to slice 5.
   Tester nd-e1665169 writes tests for 1-4 (tests/test_ic_s4a_gaps_*.py). Then: apply them to main and relaunch implementer nd-905bbdf0 (codex-b, inputs=[]). Then the reviewer, real Docker, and the suite.
 - 2026-10-16 ~23:30 CEST. 4A gaps tests on main (7ba03c8f, 6 red on 1eabec3c). Implementer nd-905bbdf0 relaunched for round 3 (codex-b). Reviewer nd-88b23036 depends on it. Then: real Docker (s4d-run.sh on the new tip), the full suite, merge.
+- 2026-10-16 ~23:40 CEST. User approved the RB-R2 scope addition (spec 86942add). Tester nd-63f185dd adds the nested-loop reviewer tests. Then: apply them to main, relaunch RB implementer nd-82bd1b7c (fix prepare: own tip, verdict child on the exact generation, the merge inside the RecoveryConflict try), then a new reviewer and a new suite. The current RB suite 205dc4ec2ff3 is a baseline only.
