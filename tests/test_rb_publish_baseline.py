@@ -15,7 +15,9 @@ uses the reason `recovery_conflict` that a conflicting recovery already has.
 Seam assumed (named): to give a node a branch tip that differs from what the
 dead run's checkout started from, the conflict test advances the node's branch
 ref and its stored `branch_tip` together on the host, the way the RR tests
-edit stored attempt records.
+edit stored attempt records. The nested-review tests also advance the root
+ref/tip together; their conflict case advances the loop's reviewed snapshot
+while retaining a genuine recovery from the prior snapshot.
 
 RB-R3 needs no test of its own: the RP and RR files stay green.
 """
@@ -332,3 +334,157 @@ def test_rb_r2_recovery_conflicting_with_the_branch_tip_holds_and_never_launches
     assert attempt in json.dumps(held["hold"]["detail"]), held["hold"]
     assert len(w.fxw.calls()) == calls, "a conflicting recovery must not launch a provider"
     assert w.git("rev-parse", ref).stdout.strip() == advanced, "the held node's branch must not move"
+
+
+NESTED_REVIEW = """\
+template: rb-nested-review
+version: 1
+params: {}
+root:
+  key: root
+  kind: group
+  children:
+    - key: loop
+      kind: loop
+      verdict_child: review
+      max_rounds: 2
+      children:
+        - {key: work, kind: simple, agent: wk, task: implement}
+        - {key: review, kind: simple, agent: rv, task: review}
+    - {key: sibling, kind: simple, agent: sb, task: sibling work}
+"""
+
+
+def nested_review(w, *, recovery, conflict=False):
+    """Advance the host-recorded root independently of the reviewed generation.
+
+    As in the existing RB-R2 conflict fixture, git refs and their stored tip
+    move together. This models sibling publication after the loop's generation
+    was recorded, without making that sibling part of the reviewed snapshot.
+    """
+    from multiagents.scheduler.rpc import Service
+    from multiagents.tree import now
+    import os
+    import subprocess
+    sibling_fx = w.provider("fxs")
+    w.agent("sb", "fxs", writes=True)
+    w.fxw.queue(commit_entry("reviewed.txt", "reviewed\n"))
+    sibling_fx.queue({"gate": "sibling"})
+    w.fxr.queue(commit_entry("reviewed.txt" if conflict else "notes.txt", "recovery\n", **DEAD) if recovery
+                else {"gate": "first-review", **DEAD})
+    w.start_scheduler()
+    w.register_ok(NESTED_REVIEW)
+    root = w.instantiate_ok("rb-nested-review")
+    loop, sibling = w.children(root)
+    _, reviewer = w.children(loop)
+    w.until(lambda: bool(w.get(loop)["generations"]), WAIT, what="reviewed generation")
+    reviewed = w.get(loop)["generations"][-1]
+    w.until(lambda: len(w.fxr.calls()) == 1, WAIT, what="initial reviewer")
+    base = w.fxw.calls()[0]["head"]
+    if not recovery:
+        w.gate("first-review", w.fxr)
+    w.until(lambda: w.get(loop)["state"] == "held", WAIT, what="failed reviewer")
+    assert w.get(loop)["hold"]["reason"] == "run_failed"
+    # A synthetic host integration uses the sibling's starting baseline,
+    # not the loop's unpublished reviewed generation.
+    env = {**os.environ, "GIT_INDEX_FILE": str(w.tmp / "sibling-index")}
+    def git(*args, **kwargs):
+        return subprocess.run(["git", "-C", str(w.root), *args], env=env,
+                              capture_output=True, text=True, check=True, **kwargs).stdout.strip()
+    if conflict:
+        # The reviewer's saved edit conflicts with a newer reviewed snapshot.
+        # The divergent root also conflicts with that snapshot, exposing an
+        # error before the recovery merge if preparation uses the root tip.
+        git("read-tree", reviewed["commit"])
+        updated_blob = git("hash-object", "-w", "--stdin", input="new reviewed\n")
+        git("update-index", "--add", "--cacheinfo", f"100644,{updated_blob},reviewed.txt")
+        updated = git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                      "commit-tree", git("write-tree"), "-p", reviewed["commit"],
+                      "-m", "reviewed generation advances while recovery is pending")
+        store = Service(w.root, now()).store
+        with store.transaction() as db:
+            record = json.loads(json.dumps(store.node_records(db)[loop]))
+            record["generations"][-1]["commit"] = updated
+            record["branch_tip"] = updated
+            store.save_node(db, record)
+        reviewed = {**reviewed, "commit": updated}
+    git("read-tree", base)
+    blob = git("hash-object", "-w", "--stdin", input="sibling\n")
+    path = "reviewed.txt" if conflict else "sibling.txt"
+    git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    tip = git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+              "commit-tree", git("write-tree"), "-p", base, "-m", "sibling integration")
+    git("update-ref", f"refs/heads/nodes/{root}", tip)
+    store = Service(w.root, now()).store
+    with store.transaction() as db:
+        record = json.loads(json.dumps(store.node_records(db)[root]))
+        record["branch_tip"] = tip
+        store.save_node(db, record)
+    assert w.show(f"{tip}:{path}") == "sibling\n"
+    assert w.show(f"{reviewed['commit']}:reviewed.txt") == ("new reviewed\n" if conflict else "reviewed\n")
+    assert w.show(f"{reviewed['commit']}:sibling.txt") is None
+    return root, loop, reviewer, reviewed
+
+
+def test_rb_r2_nested_reviewer_recovery_excludes_advanced_root_sibling_work(w):
+    """RB-R2 Scope: a recovered reviewer still reviews its exact generation."""
+    from nc_fixture.m4_world import verdict_entry
+    _, loop, reviewer, reviewed = nested_review(w, recovery=True)
+    w.fxr.queue(verdict_entry("approved", gate="recovered-review"))
+    try:
+        reply = w.root_op("relaunch_node", reviewer)
+        assert reply.get("ok"), reply
+        assert unwrap(reply["result"]).get("recovered_from"), reply
+        w.until(lambda: len(w.fxr.calls()) == 2, WAIT, what="recovered reviewer")
+        call = w.fxr.calls()[-1]
+        assert descends(w, reviewed["commit"], call["head"])
+        assert w.show(f"{call['head']}:reviewed.txt") == "reviewed\n"
+        assert w.show(f"{call['head']}:notes.txt") == "recovery\n"
+        assert w.show(f"{call['head']}:sibling.txt") is None, "root sibling leaked into review input"
+        assert f"generation_seq={reviewed['seq']} commit={reviewed['commit']}" in call["prompt"]
+    finally:
+        w.gate("recovered-review", w.fxr)
+    assert w.wait_state(loop, "done", timeout=WAIT)["outcome"] == "approved"
+
+
+def test_rb_r2_nested_reviewer_conflict_at_reviewed_base_holds_without_launch(w):
+    """RB-R2 Scope: conflict at the reviewed-generation merge is recovery_conflict."""
+    _, _, reviewer, reviewed = nested_review(w, recovery=True, conflict=True)
+    attempt = w.get(reviewer)["runs"][-1]["attempt_id"]
+    captured = w.git("rev-parse", f"refs/heads/node-results/{attempt}").stdout.strip()
+    assert captured
+    assert w.show(f"{captured}:reviewed.txt") == "recovery\n"
+    assert w.git("merge-tree", "--write-tree", reviewed["commit"], captured).returncode != 0
+    reply = w.root_op("relaunch_node", reviewer)
+    assert reply.get("ok"), reply
+    def held():
+        node = w.get(reviewer)
+        if node["state"] == "held":
+            assert node["hold"]["reason"] == "recovery_conflict", node["hold"]
+            return node
+        assert len(w.fxr.calls()) == 1, "conflicting recovery launched a reviewer"
+        return None
+    node = w.until(held, WAIT, what="reviewer recovery conflict")
+    assert attempt in json.dumps(node["hold"]["detail"])
+    assert len(w.fxr.calls()) == 1
+
+
+def test_rb_r2_nested_ordinary_reviewer_uses_exact_generation_after_root_advances(w):
+    """RB-R2 Scope: an ordinary review round ignores the advanced root tip."""
+    try:
+        _, loop, reviewer, reviewed = nested_review(w, recovery=False)
+        from nc_fixture.m4_world import verdict_entry
+        w.fxr.queue(verdict_entry("approved", gate="reviewer"))
+        reply = w.root_op("relaunch_node", reviewer, recover_wip=False)
+        assert reply.get("ok"), reply
+        def launched():
+            node = w.get(reviewer)
+            assert node["state"] != "held", node.get("hold")
+            return w.fxr.calls()[1:] or None
+        calls = w.until(launched, WAIT, what="ordinary reviewer")
+        assert calls[0]["head"] == reviewed["commit"]
+        assert w.show(f"{calls[0]['head']}:sibling.txt") is None
+        assert f"generation_seq={reviewed['seq']} commit={reviewed['commit']}" in calls[0]["prompt"]
+    finally:
+        w.gate("reviewer", w.fxr)
+    assert w.wait_state(loop, "done", timeout=WAIT)["outcome"] == "approved"
