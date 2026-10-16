@@ -111,8 +111,8 @@ class Provider(probe.ProbeProvider):
         if mode != 'none': self.entry['session']['path'] = 'sessions'
         script = Path(self.entry['bin'])
         source = probe.PROBE_CLI.replace('if probe == "plant":\n', EXTRA, 1)
-        source = source.replace('SES = "ses_ic_%d" % os.getpid()',
-            'SES = (sys.argv[sys.argv.index("-s")+1] if "-s" in sys.argv else "ses_ic_%d" % os.getpid())')
+        source = source.replace('SES = "ses_ic_%d_%s" % (os.getpid(), __import__("uuid").uuid4().hex[:8])',
+            'SES = (sys.argv[sys.argv.index("-s")+1] if "-s" in sys.argv else "ses_ic_%d_%s" % (os.getpid(), __import__("uuid").uuid4().hex[:8]))')
         script.write_text(source)
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
         if guest: wl.guest_runnable(self.entry)  # the host path of the script is not in the guest
@@ -134,6 +134,10 @@ class World(s3.S3Sched):
         self.p.agents['worker'].update(can_spawn=True, max_children=8)
         self.p.write()
         self._reset_server()
+
+    def bound(self, timeout=WAIT):
+        # Same scaling as wait(): stopping or crashing a scheduler with a provisioned container is slower on real Docker.
+        return max(timeout, DOCKER_WAIT) if self.backend_name == 'docker' else timeout
 
     def wait(self, predicate, timeout=WAIT, what='condition'):
         # Real Docker needs far longer than the reference backend for the same step.

@@ -35,13 +35,13 @@ def test_ic_c21_authority_revoked_for_new_and_existing_connections(world, ending
             run = world.runs(node)[-1]
             reply = world.rpc('steer_run', {'run_id':run['run_id'], 'message':'finish'})
             assert reply.get('ok') is True, reply
-            world.wait_runs(node, 2, a.WAIT)
+            world.wait_runs(node, 2, world.bound())
         else:
             # The stop CLI ends the attempt through the public lifecycle
             # (`stop_run` is an admission helper, not the user's way to stop).
-            result = world.cli('stop', world.runs(node)[-1]['run_id'], timeout=a.WAIT)
+            result = world.cli('stop', world.runs(node)[-1]['run_id'], timeout=world.bound())
             assert result.returncode == 0, result.stderr
-        if ending != 'replacement': s3.wait_done(world, node, a.WAIT)
+        if ending != 'replacement': s3.wait_done(world, node, world.bound())
         with pytest.raises((OSError, ConnectionError)):
             a.exchange(existing, a.request('create_node', {'kind':'simple','agent':'worker','task':'must not run'}))
         with pytest.raises(OSError):
@@ -77,7 +77,7 @@ def test_ic_c21_mutation_committed_before_revocation_keeps_its_effect(world):
         assert created.get('ok') is True, created
         child = created['result']['id']
         assert world.cancel_raw(node).get('ok') is True
-        s3.wait_done(world,node,a.WAIT)
+        s3.wait_done(world,node,world.bound())
         assert world.get(child)['task'] == 'committed-before-revocation'
 
 

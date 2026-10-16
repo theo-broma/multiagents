@@ -28,7 +28,7 @@ def refuses(path):
 
 
 def listing(world):
-    result = world.cli('scheduler', 'orphans', timeout=a.WAIT)
+    result = world.cli('scheduler', 'orphans', timeout=world.bound())
     assert result.returncode == 0, result.stderr
     value = json.loads(result.stdout)
     assert value['orphans_error'] is None, value
@@ -41,12 +41,12 @@ def test_k18_1_nonrunning_attempt_has_no_live_endpoint_after_boundary_recovery(w
     world.start()
     pid = world.crash_at(point)
     node = world.launch('scoped_rpc', requests=[a.request()])
-    world.wait_dead(pid, timeout=a.WAIT)
+    world.wait_dead(pid, timeout=world.bound())
     world.plan({'calls': True})
     world.start()  # the dead scheduler cannot answer: recover, then read the record
     attempts = {row['attempt_id'] for row in world.runs(node)}
     assert attempts, 'the crash must leave a recorded attempt to recover'
-    assert s3.wait_done(world, node, a.WAIT)['state'] == 'done'
+    assert s3.wait_done(world, node, world.bound())['state'] == 'done'
     attempts.update(row['attempt_id'] for row in world.runs(node))
     for attempt in attempts:
         refuses(endpoint_dir(world, attempt) / 'rpc.sock')
@@ -59,7 +59,7 @@ def test_k18_1_started_attempt_recreates_endpoint_without_reinvocation(world):
     world.start()
     pid = world.crash_at('run_done')
     node = world.launch('scoped_rpc', requests=[a.request()], hold=True)
-    world.wait_dead(pid, timeout=a.WAIT)
+    world.wait_dead(pid, timeout=world.bound())
     world.plan({'calls': True})
     world.start()  # the dead scheduler cannot answer: recover, then read the record
     before = world.runs(node)
@@ -106,7 +106,7 @@ def test_k18_2_remove_orphan_endpoint_is_explicit_and_idempotent(world):
     world.start()
     assert any(r.get('endpoint_id') == endpoint_id for r in listing(world))
     for _ in range(2):
-        result = world.cli('scheduler', 'remove-orphan', endpoint_id, timeout=a.WAIT)
+        result = world.cli('scheduler', 'remove-orphan', endpoint_id, timeout=world.bound())
         assert result.returncode == 0, result.stderr
         value = json.loads(result.stdout)
         assert value.get('ok') is True and value.get('state') == 'absent', value
@@ -119,7 +119,7 @@ def test_k18_2_remove_orphan_rejects_endpoint_id_prefix_without_deleting(world):
     world.configure(rpc=True)
     endpoint_id, directory = orphan(world)
     world.start()
-    result = world.cli('scheduler', 'remove-orphan', endpoint_id[:-1], timeout=a.WAIT)
+    result = world.cli('scheduler', 'remove-orphan', endpoint_id[:-1], timeout=world.bound())
     assert result.returncode != 0
     value = json.loads(result.stdout)
     assert value.get('ok') is False and value.get('error') == 'invalid_id', value
@@ -135,7 +135,7 @@ def test_k18_2_remove_orphan_refuses_recorded_running_endpoint(world):
     report = world.report(node)
     endpoint_id = world.runs(node)[-1]['attempt_id']
     path = a.host_endpoint(world, report['endpoint'])
-    result = world.cli('scheduler', 'remove-orphan', endpoint_id, timeout=a.WAIT)
+    result = world.cli('scheduler', 'remove-orphan', endpoint_id, timeout=world.bound())
     assert result.returncode != 0
     value = json.loads(result.stdout)
     assert value.get('ok') is False and value.get('error') == 'not_orphan', value

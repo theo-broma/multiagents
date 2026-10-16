@@ -54,7 +54,7 @@ import json, os, re, socket, subprocess, sys, time, hashlib
 prompt = sys.stdin.read()
 m = re.search(r"IC-PROBE (\{.*\})", prompt)
 ins = json.loads(m.group(1)) if m else {}
-SES = "ses_ic_%d" % os.getpid()
+SES = "ses_ic_%d_%s" % (os.getpid(), __import__("uuid").uuid4().hex[:8])
 def emit(kind, part):
     part = dict(part, sessionID=SES)
     print(json.dumps({"type": kind, "sessionID": SES, "part": part})); sys.stdout.flush()
