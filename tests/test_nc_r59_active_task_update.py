@@ -57,7 +57,7 @@ def assert_refused_untouched(reply, before, after):
     assert after == before, "a refused update changed the node"
 
 
-@pytest.mark.parametrize("attempt_state", ["claimed", "launched"])
+@pytest.mark.parametrize("attempt_state", ["claimed", "launched", "captured", "suspended"])
 def test_r59a_task_update_is_refused_while_an_attempt_is_active(local, attempt_state):
     world, engine = local
     node = deposit(engine)
@@ -129,10 +129,11 @@ def test_r59a_an_ended_attempt_does_not_block_a_task_update(local):
     assert reply.get("ok"), reply
 
 
-def test_r59a_a_claimed_node_still_accepts_a_pins_update(local):
+@pytest.mark.parametrize("attempt_state", ["claimed", "captured", "suspended"])
+def test_r59a_an_active_node_still_accepts_a_pins_update(local, attempt_state):
     world, engine = local
     node = deposit(engine)
-    claim(engine, node)
+    claim(engine, node, state=attempt_state)
     rev = get(world, engine, node["id"])["revision"]
     reply = rpc(world, engine, "update_node", id=node["id"], revision=rev,
                 pins={"effort": "high"})
