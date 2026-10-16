@@ -6371,3 +6371,4 @@ Pending user: RB-R1 re-wording (above).
   - payload file-count and byte bounds;
   - no reaper for crash-left `.export-*`/`.payload-*` staging dirs, and old export snapshots kept until conversations.dispose() (storage accounting);
   - RB capture's base-history scan has no fixed bound (search newest-first, stop when every anchor is found).
+- 2026-10-17 ~06:00 CEST. RB fix 644403fd: the nc_r69 guard. Reviewer nd-39b5890c approved. RB tip combined with main (4A) in /var/tmp/rb-comb as 21132007, no conflicts. Final full suite running in bg (rb-suite.sh). Merge_node nd-82bd1b7c if no unexpected reds.
