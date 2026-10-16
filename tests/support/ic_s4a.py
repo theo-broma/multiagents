@@ -2,7 +2,9 @@
 import json
 import os
 import socket
+import shutil
 import stat
+import tempfile
 import uuid
 from pathlib import Path
 import pytest
@@ -82,6 +84,23 @@ elif probe == "session":
 elif probe == "plant":
 '''
 
+def short_state_root(monkeypatch, length=0):
+    """Point the machine state root at a short directory and return a cleanup.
+
+    AF_UNIX allows 107 bytes of path; under xdist with a long --basetemp the
+    default per-test state root puts endpoint sockets past that. Nothing here
+    is asserted: only where the state lives changes. Call before the scheduler
+    world is built.
+    """
+    base = Path(tempfile.mkdtemp(prefix='s4a-', dir='/tmp'))
+    root = base
+    if length:  # deliberately long (K18.3): exactly `length` bytes
+        root = base / ('p' * (length - len(str(base)) - 1))
+        root.mkdir()
+    monkeypatch.setenv('MULTIAGENTS_STATE_DIR', str(root))
+    return lambda: shutil.rmtree(base, ignore_errors=True)
+
+
 class Provider(probe.ProbeProvider):
     def __init__(self, tmp, name, *, mode='none', rpc=False):
         super().__init__(tmp, name)
@@ -96,6 +115,14 @@ class Provider(probe.ProbeProvider):
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
 class World(s3.S3Sched):
+    def __init__(self, tmp_path, monkeypatch, state_length=0, **kw):
+        self._cleanup_state = short_state_root(monkeypatch, state_length)
+        super().__init__(tmp_path, monkeypatch, **kw)
+
+    def close(self):
+        try: super().close()
+        finally: self._cleanup_state()
+
     def configure(self, mode='none', rpc=False):
         provider = Provider(self.tmp, 'acme', mode=mode, rpc=rpc)
         self.p.fakes['acme'] = provider
@@ -168,7 +195,13 @@ def exchange(c, req):
 # fixture controls; containment is tested separately on Docker.
 def loop_world(tmp_path, monkeypatch, mode='export', kind='isolated', payload=True, recorded=True, plant_forbidden=False):
     import ic_prov as ip
+    cleanup = short_state_root(monkeypatch)
     w = ip.make_world(tmp_path, monkeypatch, kind=kind)
+    close = w.close
+    def close_and_clean():
+        try: close()
+        finally: cleanup()
+    w.close = close_and_clean
     w.pair()
     for provider in (w.fxw, w.fxr):
         s3.declare(provider.entry, rpc=True)
@@ -210,14 +243,20 @@ def loop_reports(w):
 
 
 def payload_files(root, session):
-    """Find a probe's exact payload without assuming a storage layout."""
+    """Find a probe's exact payload without assuming a storage layout: under
+    `root` and under every machine root the scheduler is configured with."""
+    roots = [Path(root)]
+    for name in ('MULTIAGENTS_STATE_DIR', 'MULTIAGENTS_CONFIG_DIR', 'HOME', 'IC_BACKEND_ROOT'):
+        if os.environ.get(name): roots.append(Path(os.environ[name]))
     found = []
-    for path in Path(root).rglob('payload.json'):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            continue
-        if data.get('session') == session: found.append(path)
+    for base in roots:
+        if not base.exists(): continue
+        for path in base.rglob('payload.json'):
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if data.get('session') == session and path not in found: found.append(path)
     return found
 
 

@@ -78,3 +78,19 @@ def test_ic_c21_mutation_committed_before_revocation_keeps_its_effect(world):
         assert world.cancel_raw(node).get('ok') is True
         s3.wait_done(world,node,a.WAIT)
         assert world.get(child)['task'] == 'committed-before-revocation'
+
+
+def test_ic_c21_k18_3_endpoint_over_107_bytes_serves_a_round_trip(tmp_path, monkeypatch):
+    """K18.3: the endpoint is served and reachable from the attempt whatever the
+    length of its absolute host path (the AF_UNIX limit is 107 bytes)."""
+    w = a.World(tmp_path, monkeypatch, state_length=63)
+    try:
+        # The scheduler's own socket still fits; any endpoint socket does not.
+        assert len(str(w.sock)) <= 107
+        assert len(str(w.state_dir / 'endpoints' / 'x' / 'rpc.sock')) > 107
+        w.configure(rpc=True); w.start()
+        node = w.launch('scoped_rpc', requests=[a.request()])
+        report = w.report(node)
+        assert report['replies'][0].get('ok') is True, report
+    finally:
+        w.close()
