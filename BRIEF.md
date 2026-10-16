@@ -6284,3 +6284,5 @@ Pending user decisions: (1) 4A WIP rescue; (2) K19 contract clarification (TF re
 Seek automation (memory rule): K10 integration_conflict — relaunch input was the recovery commit on an older base, not the node branch tip; ask a researcher why.
 Codex 5h resets 09:56 CEST; codex-b in use.
 - 2026-10-16 ~09:20 CEST — K10 re-review nd-862255d0 APPROVED (12162629, no defects). Next after compaction: full suite on main+nodes/nd-e00b53a9 in /var/tmp/s3-comb, then merge_node nd-e00b53a9.
+
+- 2026-10-16 ~09:30 CEST: K10 branch nodes/nd-e00b53a9 reverts main's newer test edits in test_ic_c14/c17/c5 (stale base). Full suite running (bg 3a4c1f14e46f) on main+K10 src with main's tests restored (/var/tmp/s3-comb). Merge plan: merge_node nd-e00b53a9, then immediately commit `git checkout <pre-merge main> -- tests/` so main keeps its tests.
