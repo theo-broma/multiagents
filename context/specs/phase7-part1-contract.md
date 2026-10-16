@@ -652,6 +652,10 @@ reopened only through `relaunch_node` (resolves the NC-R6/NC-R33 conflict).
       claimed with;
     - the same update on an `open`, unclaimed node succeeds;
     - a `pins` update during a run behaves as today.
+  - Clarification (2026-10-17, answering tester nd-e9676460): "claimed,
+    launching or running" means every attempt state in the scheduler's
+    existing active set, `captured` and `suspended` included. A suspended
+    attempt would otherwise resume with the old task.
 
 **NC-R60 — idempotency for every mutating op (amends NC-R8).** Every mutating
 op (create, update, cancel, instantiate, register, verdict, relaunch, close,
