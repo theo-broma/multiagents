@@ -42,11 +42,13 @@ On 2026-10-15, the slice 3 implementer (run ag-6dab78, node nd-61aa817a) was cut
   - no second snapshot is made;
   - no work in progress is lost;
   - the worktree ends clean at the binding commit, with the recovery recorded.
+- The test drives the restart through the durable intermediate state (snapshot recorded, worktree not yet reset), not only through a plain relaunch. (Added 2026-10-16, approved by the user.)
 - Verified by: tests/test_qs_dirty_infra_resume.py.
 
 **QS-R5 — a missing or corrupt snapshot holds.**
 - If the snapshot ref is missing or corrupt at resume, the node is held with a reason that names the problem.
 - It never launches on a partial tree.
+- The hold reason is `wip_snapshot_unavailable`. Its detail names the snapshot ref and says whether it is `missing` or `corrupt`. (Added 2026-10-16, approved by the user.)
 - Verified by: tests/test_qs_dirty_infra_resume.py.
 
 **QS-R6 — no publication, and other ends unchanged.**

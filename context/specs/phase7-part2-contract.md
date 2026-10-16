@@ -1495,6 +1495,16 @@ longer refused.
   boundary 4 and `remove_entry`, and the orphan-endpoint case using that
   location.
 
+**K19 — a retry of an isolated attempt keeps its recorded settings (TF,
+IC-C15).** Approved by the user on 2026-10-16.
+- A TF retry of an attempt recorded as `isolated` reuses the executor
+  settings recorded for that attempt, image included, and not the current
+  configuration.
+- If admission refuses the retry, the node is held with a reason naming the
+  refusal. It never waits silently.
+- Verified by: a retry after the configured image changed runs on the
+  recorded image; a refused retry admission ends held with its reason.
+
 ### Slice 4A work split
 
 1. `tester`: IC-C20 to IC-C24. The probe provider is extended to declare
