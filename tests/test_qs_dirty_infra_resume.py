@@ -428,8 +428,12 @@ def test_qs_r4_a_restart_after_the_cut_makes_no_second_snapshot_and_loses_nothin
     snap = wait_cut_settled(w, head0)
     pending_retry(w, rv)
     w.restart_scheduler()
-    first_tick = w.until(lambda: w.status().get("last_tick"), WAIT, what="first tick")
-    w.until(lambda: w.status().get("last_tick") != first_tick, WAIT, what="second tick")
+    w.until(lambda: w.status().get("last_tick"), WAIT, what="first tick")
+    # last_tick is taken from the fixed fake clock, so move the clock (far inside
+    # the backoff) twice and wait until each new instant has been evaluated.
+    for _ in range(2):
+        w.advance(seconds=1)
+        w.until(lambda: w._names(w._last_tick() or "", w.now), WAIT, what="a tick at the new instant")
     assert snapshots(w, head0) == [snap], "a restart made another snapshot"
     assert is_reset(cwd_of(first), head0)
     assert w.fxr.spawns() == 1
