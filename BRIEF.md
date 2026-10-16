@@ -6361,3 +6361,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~03:20 CEST. 4A final tip 85c3ce11 (c22/c23/gaps/adv green, one loop flake passes alone). Reviewer nd-88b23036 next. Suite bg 0f3c5d66ee50 (/var/tmp/s4a-comb). Real Docker bg 9efc56ec6a95 (/var/tmp/s4d.log). Merge when all three are clean.
 - 2026-10-17 ~03:35 CEST. Real Docker on 4A 85c3ce11: 347 passed, 0 failed.
 - 2026-10-17 ~03:50 CEST. 4A round 3 reviewer nd-88b23036 approved with no findings. Waiting on suite 0f3c5d66ee50. Then a short advisor check on the round 3 delta, then merge_node nd-905bbdf0.
+- 2026-10-17 ~05:10 CEST. RB suite on 215c352b found a regression: nc_r69 TypeError at results.py:257 (parent['loop'] read on a non-loop parent). It fails alone on RB and passes 3/3 on main. The other reds are expected (4A tests, c12/c13) or flakes. nd-82bd1b7c relaunched to fix. Reviewer nd-39b5890c depends on it. Then a targeted rerun of the RB suite reds, then merge.
