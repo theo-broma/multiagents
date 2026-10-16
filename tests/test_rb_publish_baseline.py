@@ -33,6 +33,7 @@ from nc_fixture.m4_world import commit_entry, unwrap  # noqa: E402
 from test_lr_loop_resume import make_world  # noqa: E402
 from test_rp_readonly_restore_provenance import (  # noqa: E402,F401
     SRC, TEST, Harness, done, h, merged)
+from test_rp_second_amendment import resolved  # noqa: E402
 
 WAIT = 5
 DEAD = dict(exit=1, stderr="Error: invalid task syntax\n")
@@ -77,23 +78,61 @@ def test_rb_r1_every_step_of_a_multi_commit_main_history_is_judged_as_main(h):
     assert not h.result(impl).get("readonly_reverted")
 
 
-def test_rb_r1_a_conflicting_merge_resolved_to_mains_version_is_kept(h):
-    """The run's input already carried another version of the path (a
-    tester generation it was given), so the input is not the merge base's
-    version; the content the run ends with is a base-branch commit's."""
+def squashed_input(h, text):
+    """An input whose content for TEST is `text`, as a tester generation
+    wrote it. Returns the node id the run declares as its input."""
     tester = h.launch(["src/**"])
-    h.write(tester, {TEST: "from tester\n"})
+    h.write(tester, {TEST: text})
     assert done(h, h.finish(tester))
-    impl = h.launch(["tests/**"], inputs=[tester.id])
-    assert h.blob(impl.input, TEST) == "from tester"
-    main = h.base_commit({TEST: "from main\n"}, "main edits the test too")
-    h.sh(impl, f"git merge -q --no-edit -X theirs {main}")
+    return tester.id
+
+
+def test_rb_r1_an_input_whose_content_is_itself_an_older_base_commits_does_not_pin_the_path(h):
+    """K10 shape, reconstructed: the input's TEST equals what an earlier base
+    commit holds (the input's own node was squash-published, so the base
+    commit is not in the input's ancestry and the merge base still has the
+    old text). The input carries no version of its own; main's newer commit,
+    merged by the run, is kept."""
+    node = squashed_input(h, "v1\n")
+    impl = h.launch(["tests/**"], inputs=[node])
+    assert h.blob(impl.input, TEST) == "v1"
+    h.base_commit({TEST: "v1\n"}, "main publishes the same text (squash)")
+    newer = h.base_commit({TEST: "v2\n"}, "main edits the test again")
+    resolved(h, impl, newer, TEST, "theirs")
+    assert h.sh(impl, f"cat {TEST}") == "v2"
     h.write(impl, {SRC: "impl\n"})
     generation = done(h, h.finish(impl))
     result = h.result(impl)
-    assert h.blob(generation["commit"], TEST) == "from main"
+    assert h.blob(generation["commit"], TEST) == "v2"
     assert not result.get("readonly_reverted")
     assert "readonly_reverted" not in generation
+
+
+def test_rb_r1_a_version_of_the_inputs_own_is_not_overridden_by_a_different_base_commit(h):
+    """Guard (RP-R11 / Decision 11): the tester's text matches no base
+    commit, so main's newer text, even merged, is restored to the input's."""
+    node = squashed_input(h, "strict\n")
+    impl = h.launch(["tests/**"], inputs=[node])
+    h.base_commit({TEST: "main one\n"})
+    newer = h.base_commit({TEST: "main two\n"})
+    resolved(h, impl, newer, TEST, "theirs")
+    assert h.sh(impl, f"cat {TEST}") == "main two"
+    h.write(impl, {SRC: "impl\n"})
+    generation = done(h, h.finish(impl))
+    assert h.entry(generation["commit"], TEST) == h.entry(impl.input, TEST)
+    assert h.result(impl)["readonly_reverted"] == [TEST]
+
+
+def test_rb_r1_an_input_matching_a_base_commit_the_run_edits_is_still_reverted(h):
+    """An agent's own edit is never kept, even when the input's content is
+    base content."""
+    node = squashed_input(h, "v1\n")
+    impl = h.launch(["tests/**"], inputs=[node])
+    h.base_commit({TEST: "v1\n"})
+    h.write(impl, {TEST: "edited by impl\n", SRC: "impl\n"})
+    generation = done(h, h.finish(impl))
+    assert h.entry(generation["commit"], TEST) == h.entry(impl.input, TEST)
+    assert h.result(impl)["readonly_reverted"] == [TEST]
 
 
 def test_rb_r1_a_fast_forward_onto_a_newer_base_commit_is_kept(h):
