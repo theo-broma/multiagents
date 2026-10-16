@@ -11,8 +11,10 @@ import pytest
 import ic_probe as probe
 import ic_s3 as s3
 import ic_docker as dk
+import ic_workload as wl
 
 WAIT = 4
+DOCKER_WAIT = 60  # launch + container start + python startup on a real daemon (as ic_docker START_WAIT/PROBE_WAIT, c17 DOCKER_WAIT)
 LOOP_WAIT = 8  # several launches and loop transitions, still bounded
 DOCKER = pytest.param('docker', marks=pytest.mark.skipif(not dk.OPT_IN, reason='SG_TEST_DOCKER=1 required'))
 
@@ -102,7 +104,7 @@ def short_state_root(monkeypatch, length=0):
 
 
 class Provider(probe.ProbeProvider):
-    def __init__(self, tmp, name, *, mode='none', rpc=False):
+    def __init__(self, tmp, name, *, mode='none', rpc=False, guest=False):
         super().__init__(tmp, name)
         self.entry['needs'] = {'credentials':False, 'network':False, 'rpc':rpc}
         self.entry['session'] = {'mode':mode, 'resumed_event':'session_resumed', 'resume_deadline_seconds':0.25}
@@ -113,6 +115,7 @@ class Provider(probe.ProbeProvider):
             'SES = (sys.argv[sys.argv.index("-s")+1] if "-s" in sys.argv else "ses_ic_%d" % os.getpid())')
         script.write_text(source)
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        if guest: wl.guest_runnable(self.entry)  # the host path of the script is not in the guest
 
 class World(s3.S3Sched):
     def __init__(self, tmp_path, monkeypatch, state_length=0, **kw):
@@ -124,13 +127,18 @@ class World(s3.S3Sched):
         finally: self._cleanup_state()
 
     def configure(self, mode='none', rpc=False):
-        provider = Provider(self.tmp, 'acme', mode=mode, rpc=rpc)
+        provider = Provider(self.tmp, 'acme', mode=mode, rpc=rpc, guest=self.backend_name == 'docker')
         self.p.fakes['acme'] = provider
         self.p.providers['acme'] = provider.entry
         self.fake = provider
         self.p.agents['worker'].update(can_spawn=True, max_children=8)
         self.p.write()
         self._reset_server()
+
+    def wait(self, predicate, timeout=WAIT, what='condition'):
+        # Real Docker needs far longer than the reference backend for the same step.
+        if self.backend_name == 'docker': timeout = max(timeout, DOCKER_WAIT)
+        return super().wait(predicate, timeout, what)
 
     def launch(self, kind, **fields):
         return self.create(task=probe.instruction(kind, **fields))['id']
