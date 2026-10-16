@@ -6327,3 +6327,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-16 ~16:40 CEST — Docker-fixture tester nd-fa1e6c39 DONE (not yet read). Next after compaction: read its result, apply `git diff main...nodes/nd-fa1e6c39 -- tests` to main, rerun /var/tmp/s4d-run.sh on 02bce369 + those tests.
 - 2026-10-16 ~16:50 CEST — 4A adversary nd-947e6815 DONE (not yet read; never merge_node it — take only its tests/test_ic_s4a_adv_*.py). Next after compaction: read its findings table + verdict; failing tests go to a 4A implementer (codex-b, input nd-905bbdf0).
 - 2026-10-16 ~17:00 CEST — full suite on 4A 02bce369 done: 76 reds, list saved /var/tmp/s4a-02bce369-reds.txt; compare after compaction with `comm -23 … base.s` (RB reds expected).
+  Unexpected vs base.s besides RB: test_ic_c15…boundary_2…[reference-provision_done] (suspect: K18.1 grant near provision_done — rerun alone on 02bce369 and main) and nc_r12 (known flake).
