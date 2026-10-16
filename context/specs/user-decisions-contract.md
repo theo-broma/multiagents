@@ -299,6 +299,54 @@ These override the behaviours above where they differ.
   dev dependencies (`pyproject.toml` and `uv.lock`). It is not relied on
   as a transitive dependency of `mcp`.
 
+### Slice 1 clarifications (2026-10-17, answering tester nd-2630921f)
+
+- **Q1 — errors.**
+  - `DecisionError(code, **details)` exposes `.code`, and each detail as an
+    attribute: `field`, `status`, `superseded_by`, `revision`.
+  - The codes are `unknown`, `invalid_record`, `invalid_answer`,
+    `invalid_argument`, `not_open`, `bad_transition`, `stale_revision`,
+    `conflicting_answer`, `invalid_cursor` and `wrong_mode`.
+- **Q2 — the schema location** is `src/multiagents/schemas/decision.schema.json`,
+  so it ships with the package. This replaces `schemas/` in UD-C1.
+- **Q3 — operation errors.**
+  - An empty `withdraw` reason, a bad `outcome`, a missing required
+    `mark_handled` reason, or a `superseded_by` that is unknown, not open or
+    the decision itself each raise `invalid_argument` naming the field.
+  - `withdraw`, `supersede` and `escalate` on a decision that is not `open`
+    raise `not_open`.
+  - `mark_handled` on a decision that is not `answered` raises
+    `bad_transition`.
+  - `escalate` on a decision whose audience is already `user` raises
+    `bad_transition`.
+- **Q4 — limits on `list`.** A `limit` outside 1..200 raises
+  `invalid_argument` with `field="limit"`.
+- **Q5 — odd legacy records.** The projection keeps the schema's bounds:
+  - `topic` is the first line of the old topic, cut to 60 characters (59
+    plus "…"), or `(no topic)` if empty;
+  - `title` follows the same rule at 200 characters;
+  - `context` is the full old question, or `(no question)` if empty.
+- **Q6 — `add_question` never refuses.**
+  - It keeps today's acceptance of any input, so UD-C5's "creates through
+    UD-C2" is narrowed.
+  - It stores the record in the new shape, normalised by Q5's rules. The
+    full question is kept in `context`.
+  - `create()`'s limits apply only to `create()`.
+- **Q7 — empty text.** Whitespace-only free text, comment or reason counts as
+  empty.
+- **Q8 — `tree.answer_question` on a non-`free_text` decision** raises
+  `DecisionError("wrong_mode")`, and its message names `decisions.answer`.
+- **Q9 — `min` and `max`** outside `multi` mode raise `invalid_record`, naming
+  the field.
+- **Confirmed tester assumptions:**
+  - an option and free text together are `invalid_answer`;
+  - a comment alone is an empty answer;
+  - a cut title is 199 characters plus "…";
+  - ties are ordered by ascending id;
+  - `tree.render()`, the monitor and MCP `list_questions` exclude `d-`
+    records;
+  - `add_question` returns exactly the 10 legacy keys.
+
 ### Slice 1 work split
 
 1. tester: `tests/test_ud_c1_schema.py` .. `tests/test_ud_c5_compat.py`,
