@@ -504,6 +504,7 @@ def test_ic_c14_run_with_the_same_key_and_another_spec_is_identity_conflict_and_
 
 def test_ic_c14_a_second_agent_invocation_on_an_attempt_resource_is_already_invoked(w):
     _, identity = w.identity()
+    w.fd.workload(runs=True)                                       # the first invocation is still running
     w.invoke(identity, key="inv-1")
     got = ic.run(w.backend.run(identity, ic.invocation(["/bin/true"]), "inv-2"))
     assert kind_of(got) == "already_invoked"
