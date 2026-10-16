@@ -168,15 +168,29 @@ def _orphan(s, status="exited", **extra):
 
 
 def test_adv_k17_6_remove_orphan_never_reports_absent_for_a_container_that_still_exists(fs):
-    """A project that has not run an isolated attempt yet (config `local`):
-    `remove-orphan` must not answer `state: absent` for a container of this
-    project that Docker still has."""
+    """A project that has not run an isolated attempt yet (config `local`).
+    The removal attempt fails and the container survives: `remove-orphan` must
+    not answer `state: absent`; it answers a failure with `unknown`, and the
+    container is still reported as an orphan."""
     fs.executor("local")
     fs.start()
-    cid = _orphan(fs, status="running")
+    cid = _orphan(fs)
+    fs.fd.rule("rm", effect="fail", stderr="Error response from daemon: removal in progress is stuck")
     code, value = remove_orphan(fs, cid)
     assert fs.fd.container(cid) is not None
     assert not (value.get("ok") is True and value.get("state") == "absent"), value
+    assert code != 0 and value.get("ok") is False and value.get("error") == "unknown", value
+    fs.fd.clear_rules()
+    assert any(o["container_id"] == cid for o in listing(fs)["orphans"] or [])
+
+
+def test_adv_k17_6_remove_orphan_reports_absent_once_the_removal_really_happened(fs):
+    fs.executor("local")
+    fs.start()
+    cid = _orphan(fs)
+    code, value = remove_orphan(fs, cid)
+    assert fs.fd.container(cid) is None
+    assert code == 0 and value == {"ok": True, "container_id": cid, "state": "absent"}, value
 
 
 def test_adv_k17_5_orphans_of_a_project_not_configured_isolated_are_not_an_empty_success(fs):

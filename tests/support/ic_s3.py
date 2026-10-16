@@ -186,6 +186,8 @@ class S3Sched(ShortRPC, ic.IcSched):
             dk.register_session_finalizer(owner)
             self.owner = owner
         work = wl.WorkloadProvider(tmp_path, "acme")
+        if backend == "docker":
+            wl.guest_runnable(work.entry)           # the host path of its script is not in the guest
         self.p.fakes["acme"] = work
         self.p.providers["acme"] = work.entry
         self.fake = work

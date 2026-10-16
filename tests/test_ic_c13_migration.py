@@ -20,7 +20,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
 import ic_prov as ip  # noqa: E402
-from nc_fixture.m4_world import commit_entry, finding, verdict_entry  # noqa: E402
+from nc_fixture.m4_world import commit_entry, finding  # noqa: E402
+from ic_prov import text_verdict_entry as verdict_entry  # noqa: E402
 JUNK = ip.JUNK
 
 

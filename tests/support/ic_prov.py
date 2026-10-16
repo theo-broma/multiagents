@@ -590,6 +590,15 @@ def reachability_problems(rep: dict, host: Path, commit: str) -> list[str]:
 
 # The first activation of an alias leaves this behind (IC-C12): a ref and a tag on an
 # unreferenced commit, a dangling blob, a marker inside .git and a file in HOME.
+def text_verdict_entry(verdict: str, findings=None, **more) -> dict:
+    """A reviewer entry that gives its verdict in its final text (the
+    `VERDICT(...)` line), not over the scheduler RPC: an isolated attempt of
+    slice 3 has no RPC (`needs.rpc: false`). Findings are carried as a count."""
+    n = len(findings or [])
+    count = f", {n}" if verdict == "rejected" and n else ""
+    return {"text": f"\nVERDICT({verdict}{count}): {verdict}", **more}
+
+
 JUNK = r'''
 env = dict(os.environ, GIT_AUTHOR_NAME="a", GIT_AUTHOR_EMAIL="a@b", GIT_COMMITTER_NAME="a", GIT_COMMITTER_EMAIL="a@b")
 tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()

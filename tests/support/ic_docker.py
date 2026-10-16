@@ -27,6 +27,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ic_workload as wl  # noqa: E402
 import ic_probe  # noqa: E402
 from st_container_guard import process_start  # noqa: E402
 import ic_support as ic  # noqa: E402
@@ -205,6 +206,7 @@ class IsolationWorld(ic.IcSched):
         register_session_finalizer(owner)
         self.tmp_marker = str(tmp_path)
         probe = ic_probe.ProbeProvider(tmp_path, "acme")
+        wl.guest_runnable(probe.entry)              # the host path of its script is not in the guest
         self.p.fakes["acme"] = probe
         self.p.providers["acme"] = probe.entry
         self.p.add_agent("reader", "acme", "acme/m1", permission="readonly", writes=False)

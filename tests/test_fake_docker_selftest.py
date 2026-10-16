@@ -121,3 +121,37 @@ def test_memory_and_log_helpers():
     assert may_lose_log_data(fake("local")) and not may_lose_log_data(fake("local", **{"max-size": "-1"}))
     assert may_lose_log_data(fake("json-file", **{"max-size": "10m"})) and not may_lose_log_data(fake("json-file"))
     assert may_lose_log_data(fake("syslog")) and may_lose_log_data(fake("none"))
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("1t", 2 ** 40), (".5g", 2 ** 29), ("512mb", 512 * 2 ** 20), ("6GB", 6 * 2 ** 30),
+    ("64M", 64 * 2 ** 20), ("1k", 1024), ("100b", 100), ("2KB", 2048), ("1.5g", 3 * 2 ** 29),
+])
+def test_memory_formats_docker_accepts_are_accepted(fd, text, expected):
+    assert memory_bytes(text) == expected
+    cid = create(fd, "--memory", text)
+    assert fd.container(cid)["HostConfig"]["Memory"] == expected
+
+
+@pytest.mark.parametrize("text", ["", "g", "1x", "1gg", "one", "1.2.3m"])
+def test_memory_formats_docker_rejects_are_rejected(fd, text):
+    out = docker(fd, "create", "--memory", text, "img:1")
+    assert out.returncode == 125 and "invalid size" in out.stderr
+
+
+def test_a_negative_max_size_fails_the_start_and_the_log_read_as_docker_does(fd):
+    cid = create(fd, "--log-driver", "local", "--log-opt", "max-size=-1")
+    started = docker(fd, "start", cid)
+    assert started.returncode != 0
+    assert "failed to initialize logging driver: invalid size: '-1'" in started.stderr
+    assert json.loads(docker(fd, "inspect", cid).stdout)[0]["State"]["Status"] == "created"
+    read = docker(fd, "logs", cid)
+    assert read.returncode != 0 and "invalid size: '-1'" in read.stderr
+
+
+def test_a_valid_max_size_starts_and_reads_normally(fd):
+    fd.workload(exit_code=0, stdout=b"hi\n")
+    cid = create(fd, "--log-driver", "json-file", "--log-opt", "max-size=10m")
+    assert docker(fd, "start", cid).returncode == 0
+    logs = docker(fd, "logs", cid)
+    assert logs.returncode == 0 and logs.stdout == "hi\n"

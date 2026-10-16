@@ -155,6 +155,19 @@ class WorkloadProvider(sc.FakeProvider):
         self.entry[NEEDS_KEY] = {"credentials": False, "network": False, "rpc": False}
 
 
+def guest_runnable(entry: dict) -> dict:
+    """Make a script provider runnable in a container guest. The entry's `bin`
+    is a host path (in the test's tmp dir) that is not mounted into the guest,
+    where only the attempt's checkout, HOME and TMPDIR exist. The interpreter
+    is in the image, so run it with the script's text: `python3 -c SCRIPT ...`
+    (the script sees the same `sys.argv[1:]`, the prompt arrives on stdin)."""
+    text = Path(entry["bin"]).read_text()
+    spawn = dict(entry["spawn"])
+    spawn["args"] = ["-c", text, *spawn["args"]]
+    entry["bin"], entry["spawn"] = "python3", spawn
+    return entry
+
+
 def task(*ops: dict) -> str:
     """The task text that tells the workload what to do."""
     return "IC-W " + json.dumps({"ops": list(ops)})

@@ -46,6 +46,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -187,10 +188,10 @@ def size(text):
     if text is None:
         return 0
     t = str(text).strip().lower()
-    m = re.fullmatch(r"(-?\d+(?:\.\d+)?)([bkmg]?)b?", t)
+    m = re.fullmatch(r"(-?(?:\d+(?:\.\d*)?|\.\d+)) ?([kmgtp])?i?b?", t)
     if not m:
         fail("invalid size: " + str(text), 125)
-    unit = {{"": 1, "b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}}[m.group(2)]
+    unit = 1024 ** (" kmgtp".index(m.group(2)) if m.group(2) else 0)
     return int(float(m.group(1)) * unit)
 
 def parse_mount(spec):
@@ -416,6 +417,16 @@ def cmd_create(state, args):
     state["containers"][cid] = c
     print(cid)
 
+def check_log_size(c):
+    """The logging driver is initialised at start and at read time; a max-size
+    that is not a size (`-1`) makes both fail, as in Docker."""
+    log = c["HostConfig"]["LogConfig"]
+    if log["Type"] in ("json-file", "local"):
+        v = (log.get("Config") or {{}}).get("max-size")
+        if v is not None and not re.fullmatch(r"(?:\d+(?:\.\d+)?|\.\d+) ?[kKmMgGtTpP]?[bB]?", v):
+            sys.stderr.write("Error response from daemon: failed to initialize logging driver: invalid size: '%s'\n" % v)
+            sys.exit(1)
+
 def cmd_start(state, args):
     vals, rest, _ = opt_values(args, {{"--detach-keys"}})
     bad = 0
@@ -426,6 +437,7 @@ def cmd_start(state, args):
             bad = 1
             continue
         if not c["State"]["Running"]:
+            check_log_size(c)
             c["StartCount"] += 1
             apply_workload(state, c)
         print(ref)
@@ -494,6 +506,7 @@ def cmd_logs(state, args):
     c = find(state, rest[0])
     if c is None:
         fail("Error response from daemon: No such container: " + rest[0], 1)
+    check_log_size(c)
     follow = "-f" in flags or "--follow" in flags
     stamps = "-t" in flags or "--timestamps" in flags
     tail = canon(("--tail", "-n"), vals)
@@ -917,8 +930,10 @@ def mounts_of(container: dict) -> list[dict]:
 
 def memory_bytes(text: str) -> int:
     t = text.strip().lower()
-    unit = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}.get(t[-1:], 1)
-    return int(float(t[:-1] if t[-1:] in "kmg" else t) * unit)
+    m = re.fullmatch(r"(-?(?:\d+(?:\.\d*)?|\.\d+)) ?([kmgtp])?i?b?", t)
+    if not m:
+        raise ValueError("invalid size: " + text)
+    return int(float(m.group(1)) * 1024 ** (" kmgtp".index(m.group(2)) if m.group(2) else 0))
 
 
 def may_lose_log_data(container: dict) -> bool:
