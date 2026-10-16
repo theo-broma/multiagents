@@ -6409,3 +6409,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~02:40 CEST. UD implementer nd-b5c9b0fd done (b0ef8d45): 315 UD tests pass, plus the existing question/monitor/ntfy files. Reviewer nd-c8dd83cd next.
 - 2026-10-17 ~02:55 CEST. NC-R59 implementer nd-0299acdd done (6dd8540f, src 718a4335): amendment 16/16. Its regression batch had 23 failures and 7 errors under resource exhaustion; the two rerun alone passed. Check them in the full suite before merging. Reviewer nd-57cd21d4 next.
 - 2026-10-17 ~03:10 CEST. 4B.1 tests on main (11340e70: 10 files, +3570; fake_docker.py extended additively). Chain: implementer-deep nd-4fa20bcc, then reviewer nd-66ee19f1, then adversary nd-4c12a544. In parallel with the adversary: real Docker for tests/test_ic_s4b_docker.py on the host (the tester expects small probe fixes).
+- 2026-10-17 ~03:20 CEST. GG-R10 reviewer nd-3dc973b1 approved with no findings. Adversary nd-b9aa08d9 next.
