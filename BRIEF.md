@@ -6341,3 +6341,10 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-16 ~21:35 CEST. Docker on 1eabec3c + fixture 2: 6 new flaky c22/c23 failures where session_resume is 'failed' although the resume happened (resume_deadline 0.25s?). Tester nd-fa1e6c39 relaunched to find where the deadline's clock starts: fixture (a) or src defect (b, NEED_INFO).
 - 2026-10-16 ~22:20 CEST. Resume-deadline cause was case (a), fixture only: the clock starts at docker exec (runner.py:4931 / docker.py:3468). Docker deadline is now 10 s, on main. Rerunning docker c22/c23: bg 78a9ede77591 (/var/tmp/s4d-c2223.log). Suites 205dc4ec2ff3 (RB) and 6dbcdf5fbde9 (4A) still running.
 - 2026-10-16 ~22:40 CEST. 4A whole-diff reviewer nd-9a075d32 approved with no findings. Docker c22/c23 with the 10 s deadline: 35 passed, 0 failed. Advisor consult on the 4A diff is in flight. Remaining before merge: the full suite 6dbcdf5fbde9 and the advisor reply.
+- 2026-10-16 ~23:00 CEST. HOLD the 4A merge. Advisor (ag-662db9 turn 10) found:
+  (1) the production MCP client (server.py _node_rpc, scheduler.call) does not use the scoped endpoint: it needs a token and uses the root socket. The fixture rewrites the client, so IC-C20 is untested on the real path.
+  (2) runner.py:6877 marks a resume 'failed' on any nonzero exit after a confirmed resume.
+  (3) export is not atomic (conversations.py:327).
+  (4) the IC-C24 legacy migration ignores profile_env/profile_default.
+  (5) file counts and byte totals are unbounded; deferred to slice 5.
+  Tester nd-e1665169 writes tests for 1-4 (tests/test_ic_s4a_gaps_*.py). Then: apply them to main and relaunch implementer nd-905bbdf0 (codex-b, inputs=[]). Then the reviewer, real Docker, and the suite.
