@@ -6377,3 +6377,11 @@ Pending user: RB-R1 re-wording (above).
   * Slice 4B: advisor (consult, background) is writing .multiagents/handoff/slice4b-draft.md (IC-C25..C31, D-S4B, user-level choices). Next: read it, decide, write into phase7-part2-contract.md, show user.
   * UD slice 1 contract: context/specs/user-decisions-contract.md (UD-C1..C6, uncommitted). Next: advisor pass, then show user.
   * Git-guard GG-R10 (plan item 2) draft in the orchestrator scratchpad. It deviates from the plan: the whole .test/.invalid TLDs are NOT exempt, because the 2026-10-06 decision withdrew that over `<first>.<last>@<company>.invalid`. Only example.* names are exempt. Needs the user's choice.
+- 2026-10-17 00:00 CEST. Awaiting the user's yes on three uncommitted drafts:
+  * 4B section in phase7-part2-contract.md, from advisor turn 12, draft copy at .multiagents/handoff/slice4b-draft.md. Split into 4B.1 (network + authenticated egress, C25/C26/C27/C29/C30 for egress, C31, D-S4B.7) and 4B.2 (auth gateway C28, C29/C30 for auth). Advisor turn 13: C30's egress part must be in 4B.1. User-level choices, with my recommendation:
+    (1) redact gateway credentials before durable logging, so replay addresses the sanitised stream (yes);
+    (2) refuse private, host or attempt destinations even for an approved host (yes);
+    (3) gateway replacement may interrupt connections, attempts reconnect (yes).
+  * UD slice 1 contract (user-decisions-contract.md), with advisor turn 13 precisions P1..P10.
+  * GG-R10 (scratchpad gg-r10-draft.md): narrow, recommended.
+  Researcher nd-175a5138 is checking D-S4B.7 feasibility (where a streaming redactor can sit before Docker's log).
