@@ -240,12 +240,18 @@ def test_d_s4b_5_known_network_values_load(tmp_path, monkeypatch, value):
 
 
 def test_d_s4b_5_an_invalid_network_value_launches_nothing(tmp_path, monkeypatch):
+    # An unknown value is a configuration error naming the key: the scheduler may refuse to start, or
+    # start and refuse the launch; either way the key is named and nothing is created.
     s = nb.NetSched(tmp_path, monkeypatch, network="bridge")
     try:
-        s.start()
-        node = s.launch()
-        view = s.wait(lambda: (v := s.get(node)) and v["state"] in ENDED and v, nb.WAIT, "a decision")
-        assert "executor.isolated.network" in ic.text_of(view), "the config error must name the key"
+        try:
+            s.start()
+        except AssertionError as refused:
+            assert "executor.isolated.network" in str(refused), "the startup refusal must name the key"
+        else:
+            node = s.launch()
+            view = s.wait(lambda: (v := s.get(node)) and v["state"] in ENDED and v, nb.WAIT, "a decision")
+            assert "executor.isolated.network" in ic.text_of(view), "the config error must name the key"
         nothing_happened(s)
     finally:
         s.close()

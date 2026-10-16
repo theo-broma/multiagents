@@ -323,12 +323,18 @@ def test_d_s4b_7_the_isolated_attempt_with_gateway_credentials_starts_as_root_wi
 
 
 def test_d_s4b_7_a_host_uid_of_zero_is_refused_with_isolation_unavailable(tmp_path, monkeypatch):
+    # The scheduler is a separate process: its interpreter loads support/uid_site, which makes the host
+    # UID read by the executor code report 0 while the flag file exists.
+    flag = tmp_path / "host-uid-is-zero"
+    monkeypatch.setenv("MA_TEST_HOST_UID_FLAG", str(flag))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+        [str(Path(__file__).resolve().parent / "support" / "uid_site"), os.environ.get("PYTHONPATH", "")]))
     s = nb.NetSched(tmp_path, monkeypatch)
     try:
         s.start()
         s.running(s.launch())                      # positive control: a non-root host is served
         created = len(s.fd.calls_of("create"))
-        monkeypatch.setattr(os, "getuid", lambda: 0)
+        flag.write_text("")
         node = s.launch()
         s.wait(lambda: "isolation_unavailable" in ic_text(s, node) or None, nb.WAIT, "the refusal")
         assert len(s.fd.calls_of("create")) == created, "no container may be created for a root host"

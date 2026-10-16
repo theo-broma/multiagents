@@ -185,7 +185,7 @@ def test_ic_c25_the_network_exists_before_the_container_and_membership_is_part_o
     argv = " ".join(container["CreateArgv"])
     assert network["Name"] in argv or network["Id"] in argv, "the container is created on its network"
     created = [c for c in ns.fd.commands() if c[:1] == ["create"]]
-    assert len(created) == 1 or any(network["Name"] in " ".join(c) for c in created)
+    assert len(created) == 1 or any(network["Id"] in " ".join(c) or network["Name"] in " ".join(c) for c in created)
     first_net = next(i for i, c in enumerate(ns.fd.commands()) if c[:2] == ["network", "create"])
     attempt_create = next(i for i, c in enumerate(ns.fd.commands())
                           if c[:1] in (["create"], ["run"]) and f"multiagents.owner={run['attempt_id']}" in " ".join(c))
