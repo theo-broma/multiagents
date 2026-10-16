@@ -204,6 +204,7 @@ def test_ic_c3_k3_the_variable_is_ignored_for_other_kinds(tmp_path, monkeypatch)
         monkeypatch.setenv(ic.BACKEND_ENV, "ic_backends:boom")
         s.start()
         run = s.wait_runs(s.create()["id"], 1)[0]
+        s.wait(lambda: s.fake.spawns() >= 1, what="the provider to be spawned")
         assert run["executor"]["kind"] == "local" and s.fake.spawns() >= 1
     finally:
         s.close()
