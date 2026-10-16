@@ -6427,3 +6427,47 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~02:15 CEST. GG-R10 round 2 done (nd-d228148e): 559 gg tests pass. Its branch also carries stale-daemon readonly reverts of the 4B.1 tests. Apply src only (git_guard.py), never merge_node. Reviewer nd-29d79627 next.
 - 2026-10-17 ~02:30 CEST. GG-R10 round 2 reviewer nd-29d79627 approved. Suite: bg on /var/tmp/gg-comb (main + git_guard.py src only). If it is clean: apply the src diff to main, close_node nd-d228148e approved.
 - 2026-10-17 ~03:00 CEST. 4B.1 implementer at 711f0063: 1449 passed, 30 failed. Remaining: c29 11, c31 5, c25 2, c26 1, config 1. Three more fixture defects accepted (C29/C31 waits against TF-R2 retries, C26 invocation race, probe PYTHONPATH); tester relaunched. Implementer relaunched on retry exhaustion, replacement, C31 and the invalid-network diagnostic.
+- **HANDOFF 2026-10-17 ~03:20 CEST** (orchestrator context wind-down; real clock, see the 01:00 note).
+  In flight:
+  1. **NC-R59**
+     - Status: approved (reviewer nd-57cd21d4).
+     - Suite: bg 3a82a4911ef2 on /var/tmp/r59-comb (main + rpc.py src, main's tests). Reds go to /var/tmp/r59-suite-reds.txt.
+     - If it is clean:
+       1. `git diff main...nodes/nd-0299acdd -- src | git apply --index` on main and commit, citing NC-R59;
+       2. close_node nd-0299acdd approved.
+     - NEVER merge_node it: its branch has stale-daemon readonly reverts of the tests.
+  2. **UD slice 1**
+     - Status: approved (reviewer nd-c8dd83cd). The branch is clean, src only.
+     - Suite: bg 06a18ce0bde7 on /var/tmp/ud-comb. Reds go to /var/tmp/ud-suite-reds.txt.
+     - If it is clean:
+       1. audit for personal data;
+       2. merge_node nd-b5c9b0fd;
+       3. check that `git diff --stat HEAD~1 HEAD -- tests` is empty.
+  3. **GG-R10**
+     - Status: round 2 approved (reviewer nd-29d79627).
+     - Suite: bg 4ad6a5ba2016 on /var/tmp/gg-comb (main + git_guard.py src only). Reds go to /var/tmp/gg-suite-reds.txt.
+     - If it is clean:
+       1. apply `git diff main...nodes/nd-d228148e -- src` to main;
+       2. close_node nd-d228148e approved.
+     - Never merge_node it (readonly reverts).
+     - Optional: a light adversary re-pass on round 2.
+  4. **4B.1**
+     - Implementer nd-4fa20bcc, run ag-c0e6ef, on codex-b, is fixing its own failures: retry exhaustion, C29/C30 replacement, C31, invalid-network diagnostic. At 711f0063 it stood at 1449 passed, 30 failed.
+     - It was steered to merge main 5c361769 (tester fixture fixes, round 3).
+     - Chained after it: reviewer nd-66ee19f1, then adversary nd-4c12a544, both depends_on.
+     - After the adversary:
+       - take its test files only;
+       - run the real Docker tests on the host: `SG_TEST_DOCKER=1 tests/test_ic_s4b_docker.py` plus the older ic docker set (see /var/tmp/s4d-run.sh for the pattern);
+       - run the suite;
+       - apply the src diff only if the branch shows readonly reverts.
+  How to classify suite reds:
+  - Compare against base.sorted in the orchestrator scratchpad. Expected: phase2 reds (about 70) and known flakes.
+  - Rerun suspects alone on the combination and on main (/var/tmp/k19-wt).
+  - Ack each bg job after handling it.
+  Pending:
+  - **Restart the scheduler daemon** (pid 1882903, which predates RB 257dec59) the first moment no agent runs, so RB-R1 goes live.
+  - steer_agent twice returned `scheduler_unavailable` while scheduler_status worked. It was transient, so maybe a defect: give bug-reporter or a researcher the evidence (01:00 CEST, run ag-184c80).
+  - UD slices 2-5 contract: write it after slice 1 merges. Plan 2026-10-15-user-decisions-queue is applied; its Next phase is imported when UD is done.
+  - 4B.2 (auth gateway) after 4B.1. Tell the user that K4B.7 amends slice 3's no-capabilities rule (done in chat, 02:20).
+  - codex quota is out until 2026-10-22 08:16 CEST; codex-b is in use.
+  - Clean up /var/tmp/{r59,ud,gg}-comb after merging.
