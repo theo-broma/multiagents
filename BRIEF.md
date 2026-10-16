@@ -6348,3 +6348,4 @@ Pending user: RB-R1 re-wording (above).
   (4) the IC-C24 legacy migration ignores profile_env/profile_default.
   (5) file counts and byte totals are unbounded; deferred to slice 5.
   Tester nd-e1665169 writes tests for 1-4 (tests/test_ic_s4a_gaps_*.py). Then: apply them to main and relaunch implementer nd-905bbdf0 (codex-b, inputs=[]). Then the reviewer, real Docker, and the suite.
+- 2026-10-16 ~23:30 CEST. 4A gaps tests on main (7ba03c8f, 6 red on 1eabec3c). Implementer nd-905bbdf0 relaunched for round 3 (codex-b). Reviewer nd-88b23036 depends on it. Then: real Docker (s4d-run.sh on the new tip), the full suite, merge.
