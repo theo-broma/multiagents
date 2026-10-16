@@ -3,7 +3,7 @@
 A seeded property test drives `Results.readonly_decision` directly on random
 commit graphs (merges, criss-cross bases, deletions, mode changes, commits on
 the base first-parent chain that are also recorded generations) and compares
-it with an oracle written from the spec text (RP7 steps 1-4, RP10, RP11),
+it with an oracle written from the spec text (RP7 steps 1-4, RP10, RP11, RB-R1),
 independent of the implementation.
 
 Every generation whose producer policy is unreadable (missing record, no
@@ -128,6 +128,8 @@ def readable(policies):
 
 def oracle(repo, inp, tip, paths, gens, base_chain):
     """RP7/RP10/RP11 from the spec text, with every policy readable."""
+    # RB-R1: newest-first frozen base chain; matching anchors are per path.
+    chain = repo.git("rev-list", "--first-parent", "main").split()
     history = repo.git("rev-list", "--topo-order", tip, "--not", inp).split()
     candidates = [c for c in history if c in base_chain or c in gens]
 
@@ -147,8 +149,12 @@ def oracle(repo, inp, tip, paths, gens, base_chain):
         allowed = [c for c in candidates if c in base_chain or all(
             not matches_any(policy, path) for records in gens[c].values() for policy in records)]
         remaining = [c for c in allowed if not any(d != c and is_ancestor(c, d) for d in allowed)]
-        vouching = [c for c in remaining if bases(c) and all(
-            entry(c, path) != entry(b, path) and entry(inp, path) == entry(b, path) for b in bases(c))]
+        anchor = next((i for i, c in enumerate(chain)
+                       if entry(c, path) == entry(inp, path)), None)
+        newer_base = set(chain[:anchor]) if anchor is not None else set()
+        # RP7 supersession still applies; only merged candidates qualify.
+        vouching = [c for c in remaining if c in newer_base or (bases(c) and all(
+            entry(c, path) != entry(b, path) and entry(inp, path) == entry(b, path) for b in bases(c)))]
         t = entry(tip, path)
         matches = [c for c in vouching if entry(c, path) == t]
         if matches:

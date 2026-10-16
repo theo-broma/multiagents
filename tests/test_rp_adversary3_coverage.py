@@ -18,16 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from multiagents.scheduler.engine import attempts  # noqa: E402
 from test_rp_amendment import owner_of  # noqa: E402
 from test_rp_readonly_restore_provenance import SRC, TEST, done, h, merged  # noqa: E402,F401
-from test_rp_second_amendment import capture_failed, restored  # noqa: E402
+from test_rp_second_amendment import capture_failed  # noqa: E402
 
 
 @pytest.mark.parametrize("input_side", ["b1", "b2"])
-def test_rp11_criss_cross_input_matching_one_merge_base_only_does_not_let_the_source_vouch(h, input_side):
-    """RP11: the input's entry differs from the entry at one merge base of
-    the source and the input (two merge bases, criss-cross). The base commit
-    y changed the test from both bases, so RP7 alone would let it vouch.
-    Kills: RP11 checked with any() over the merge bases, or against the
-    first merge base only (either order of `merge-base --all`)."""
+def test_rb_r1_criss_cross_newer_merged_base_vouches_despite_rp11(h, input_side):
+    """RB-R1 re-wording: a newer merged base vouches despite RP-R11
+    when the input entry matches a base-chain snapshot on either side.
+    """
     base = "refs/heads/" + h.world.base
     root = h.git("rev-parse", base)
     b1 = h.plumb(root, {"b1.txt": "1\n"}, "b1", [root])
@@ -41,7 +39,10 @@ def test_rp11_criss_cross_input_matching_one_merge_base_only_does_not_let_the_so
     assert sorted(h.git("merge-base", "--all", x, y).split()) == sorted([b1, b2])
     h.sh(impl, f"git merge -q --no-ff --no-commit {y} || true; printf 'v2\\n' > {TEST}; git add -A; git commit -q -m m")
     assert h.sh(impl, f"cat {TEST}") == "v2"
-    restored(h, impl, TEST, impl.input)
+    generation = done(h, h.finish(impl))
+    assert h.entry(generation["commit"], TEST) == h.entry(y, TEST)
+    assert h.result(impl)["readonly_kept"] == [{"path": TEST, "source": y}]
+    assert not h.result(impl).get("readonly_reverted")
 
 
 def test_rp10_rp6_vouching_is_per_path_not_over_every_selected_source(h):

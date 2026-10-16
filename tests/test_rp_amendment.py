@@ -165,21 +165,23 @@ def criss_cross(h):
     return impl, s
 
 
-def test_rp7_criss_cross_a_source_vouches_only_where_it_differs_from_every_merge_base(h):
+def test_rb_r1_criss_cross_newer_merged_base_vouches_for_base_valued_inputs(h):
+    """RB-R1 permits the newer merged base despite disagreeing merge bases.
+    Both input test entries match older snapshots of the base chain.
+    """
     impl, s = criss_cross(h)
     merged(h, impl, s)
-    # The recursive merge keeps the input's side on both test paths and
-    # brings S's SRC.
     assert h.sh(impl, f"cat {TEST} {OTHER} {SRC}").split() == ["v0", "other", "s2"]
-    # S's TEST equals merge base X's, its test_other equals merge base Y's:
-    # it brought neither. Whichever single merge base an implementation
-    # picks, one of these two edits would be vouched for.
-    h.write(impl, {TEST: "v1\n", OTHER: "o1\n"}, "impl writes the versions of S")
-    generation, result = restored_to(h, impl, impl.input, paths=(TEST, OTHER))
-    # SRC differs from both merge bases: S brought it, and it is kept.
-    assert h.blob(generation["commit"], SRC) == "s2"
-    assert result["readonly_kept"] == [{"path": SRC, "source": s}]
-    assert generation["readonly_kept"] == [{"path": SRC, "source": s}]
+    h.write(impl, {TEST: "v1\n", OTHER: "o1\n"}, "impl writes merged S versions")
+    generation = done(h, h.finish(impl))
+    result = h.result(impl)
+    for path in (TEST, OTHER, SRC):
+        assert h.entry(generation["commit"], path) == h.entry(s, path)
+    expected = [{"path": path, "source": s} for path in (SRC, TEST, OTHER)]
+    assert sorted(result["readonly_kept"], key=lambda item: item["path"]) == sorted(
+        expected, key=lambda item: item["path"])
+    assert generation["readonly_kept"] == result["readonly_kept"]
+    assert not result.get("readonly_reverted")
 
 
 def test_rp7_an_earlier_generation_of_a_multi_generation_node_merged_alone_vouches(h):

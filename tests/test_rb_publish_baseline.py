@@ -179,6 +179,33 @@ def test_rb_r1_content_equal_to_an_unmerged_base_commit_is_not_vouched_for(h):
     assert h.result(impl)["readonly_reverted"] == [TEST]
 
 
+def test_rb_r1_a_rollback_to_an_older_base_chain_version_is_restored(h):
+    """RB-R1: ancestor content alone cannot authorise a rollback."""
+    h.base_commit({TEST: "older base\n"})
+    newer = h.base_commit({TEST: "newer base\n"})
+    impl = h.launch(["tests/**"])
+    assert h.entry(impl.input, TEST) == h.entry(newer, TEST)
+    h.write(impl, {TEST: "older base\n", SRC: "impl\n"})
+    generation = done(h, h.finish(impl))
+    assert h.entry(generation["commit"], TEST) == h.entry(newer, TEST)
+    assert h.result(impl)["readonly_reverted"] == [TEST]
+    assert generation["readonly_reverted"] == [TEST]
+
+
+def test_rb_r1_an_unmerged_tip_copy_after_a_base_merge_is_restored(h):
+    """RB-R1: restoration uses the eligible merged source, not the tip."""
+    impl = h.launch(["tests/**"])
+    eligible = h.base_commit({TEST: "merged base\n"})
+    merged(h, impl, eligible)
+    tip = h.base_commit({TEST: "unmerged tip\n"})
+    h.write(impl, {TEST: "unmerged tip\n", SRC: "impl\n"})
+    assert h.sh(impl, f"if git merge-base --is-ancestor {tip} HEAD; then echo merged; else echo unmerged; fi") == "unmerged"
+    generation = done(h, h.finish(impl))
+    assert h.entry(generation["commit"], TEST) == h.entry(eligible, TEST)
+    assert h.result(impl)["readonly_reverted"] == [TEST]
+    assert generation["readonly_reverted"] == [TEST]
+
+
 def test_rb_r1_kept_and_edited_paths_in_one_run_are_judged_separately(h):
     other = "tests/test_other.py"
     impl = h.launch(["tests/**"])
