@@ -6359,3 +6359,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~02:40 CEST. RB round 3 reviewer nd-c78f37a9 approved with no findings. A verdict child takes the loop's last generation; nested workers use the root tip, the only branch nested nodes have. Waiting on suite 6255ad7aa40f, then merge_node nd-82bd1b7c.
 - 2026-10-17 ~03:00 CEST. Probe reject-order fix on main (5e2eff5f). nd-905bbdf0 relaunched to merge main and recheck c22/c23/gaps/adv. Then reviewer nd-88b23036, real Docker, the full suite, merge.
 - 2026-10-17 ~03:20 CEST. 4A final tip 85c3ce11 (c22/c23/gaps/adv green, one loop flake passes alone). Reviewer nd-88b23036 next. Suite bg 0f3c5d66ee50 (/var/tmp/s4a-comb). Real Docker bg 9efc56ec6a95 (/var/tmp/s4d.log). Merge when all three are clean.
+- 2026-10-17 ~03:35 CEST. Real Docker on 4A 85c3ce11: 347 passed, 0 failed.
