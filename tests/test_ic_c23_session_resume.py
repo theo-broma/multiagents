@@ -252,7 +252,7 @@ root:
 
 
 def test_ic_c23_unconfirmed_live_resume_ends_at_declared_deadline(world):
-    # A live provider never confirms; the configured 0.25 s deadline, rather
+    # A live provider never confirms; the declared resume deadline, rather
     # than provider exit, must end it. The test polls the resulting state.
     node, _ = first(world,'export',confirm=False,resume_hold=True)
     world.reopen(node)

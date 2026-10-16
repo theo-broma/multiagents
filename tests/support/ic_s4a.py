@@ -14,6 +14,9 @@ import ic_docker as dk
 import ic_workload as wl
 
 WAIT = 4
+# The scheduler's resume clock starts when the launch begins (docker exec spawn), so exec + python startup count against it.
+RESUME_DEADLINE = 0.25
+DOCKER_RESUME_DEADLINE = 10
 DOCKER_WAIT = 60  # launch + container start + python startup on a real daemon (as ic_docker START_WAIT/PROBE_WAIT, c17 DOCKER_WAIT)
 LOOP_WAIT = 8  # several launches and loop transitions, still bounded
 DOCKER = pytest.param('docker', marks=pytest.mark.skipif(not dk.OPT_IN, reason='SG_TEST_DOCKER=1 required'))
@@ -107,7 +110,7 @@ class Provider(probe.ProbeProvider):
     def __init__(self, tmp, name, *, mode='none', rpc=False, guest=False):
         super().__init__(tmp, name)
         self.entry['needs'] = {'credentials':False, 'network':False, 'rpc':rpc}
-        self.entry['session'] = {'mode':mode, 'resumed_event':'session_resumed', 'resume_deadline_seconds':0.25}
+        self.entry['session'] = {'mode':mode, 'resumed_event':'session_resumed', 'resume_deadline_seconds':DOCKER_RESUME_DEADLINE if guest else RESUME_DEADLINE}
         if mode != 'none': self.entry['session']['path'] = 'sessions'
         script = Path(self.entry['bin'])
         source = probe.PROBE_CLI.replace('if probe == "plant":\n', EXTRA, 1)
