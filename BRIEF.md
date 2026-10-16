@@ -6390,3 +6390,10 @@ Pending user: RB-R1 re-wording (above).
   * Scheduler defect found by researcher nd-b8600d6a (ag-e012be). update_node on a node whose launch is in flight edits the task, but the worker launches the old task (worker.py:98-151). The run ag-fd3ac0 then died from an unexplained SIGTERM after 8 s; the suspect is the owner reaper (owner.py:215/308/339), which is unproven. The node settled as done/failed.
     Proposed fix: update_node refuses a task change while an attempt is claimed or launched (`active_runs; use steer_run or relaunch_node`). This narrows NC-R59, so the user must say yes first.
     Workaround in the meantime: never update_node right after start_agent; give the full task at creation.
+- 2026-10-17 ~00:40 CEST. The user approved all four: 4B contract (choices 1-3 yes), UD slice 1, GG-R10, NC-R59 amendment. Specs fa3a5928; UD plan marked applied (e6d8c98c). Testers deposited:
+  4B.1 nd-754de4be, UD slice 1 nd-2630921f, GG-R10 nd-a9527f1c, NC-R59 nd-e9676460.
+  Per item, next: apply the tests to main as a patch, then implementer, then reviewer.
+  * 4B.1: implementer-deep, then reviewer, then adversary, then real Docker.
+  * UD: default implementer, then reviewer.
+  * GG: implementer-quick, then reviewer, then adversary (look-alikes).
+  * NC-R59: implementer, then reviewer.
