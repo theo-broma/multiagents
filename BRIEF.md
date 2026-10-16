@@ -6302,3 +6302,4 @@ Codex 5h resets 09:56 CEST; codex-b in use.
   NEXT: draft a small spec (RB-R*) for both, show the user, then tester → implementer → reviewer. Not started.
 - 2026-10-16 ~11:35 CEST — codex-b 5h exhausted until 13:41 CEST. QS fix nd-1e16be17 re-pinned to codex → running ag-606436. 4A nd-ab7110eb kept on codex-b (session A bound there; WIP recovered as 19a4888f, recovery pending) — resumes after 13:41 CEST. RB spec drafted (context/specs/rb-publish-baseline.md, UNCOMMITTED) awaiting user OK.
 - 2026-10-16 ~11:45 CEST — USER approved RB (158b0a34). Tester nd-888d8a91 writes tests/test_rb_publish_baseline.py. Implementer RB to be deposited after the tests are on main AND QS is merged (both touch results.py), then reviewer.
+- 2026-10-16 ~11:50 CEST — RB tests on main (4 red / 8 green as expected; RB-R2 conflict pinned to existing reason recovery_conflict + attempt id). Implementer RB next, after QS merges.
