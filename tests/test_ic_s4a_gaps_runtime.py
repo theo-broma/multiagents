@@ -50,8 +50,9 @@ elif probe == "plant":
     assert report['rc'] == 0, report
     reply = json.loads(report['out'])
     assert 'plan_revision' in reply['visible'], reply
-    assert node in json.dumps(reply['visible']), reply
-    assert outside not in json.dumps(reply['visible']), reply
+    visible_ids = {listed['id'] for listed in reply['visible']['nodes']}
+    assert node in visible_ids, reply
+    assert outside not in visible_ids, reply
     assert 'forbidden' in json.dumps(reply['outside']), reply
 
 
