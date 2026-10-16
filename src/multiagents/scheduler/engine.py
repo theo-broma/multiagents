@@ -25,7 +25,7 @@ from ..tree import now, new_id
 from ..tree import ACTIVE, PAUSED
 from . import model
 from .store import encode, records, select_records, matching_records
-from .results import Results, RecoveryConflict, input_generation, recording_loops, top_node
+from .results import Results, RecoveryConflict, WipSnapshotUnavailable, input_generation, recording_loops, top_node
 from . import sessions, effects, windows
 from .. import notify_sender
 from .. import gitops
@@ -561,6 +561,7 @@ class Engine:
         await self.runner.adopt(exclude=managed)
         await self.evaluate_windows()
         await self.reconcile()
+        self.reconcile_snapshots()
         self.evaluate_rate_limits()
         # TF-R2: settle pending retries (liveness, backoff) before admission.
         await self.evaluate_retries()
@@ -758,7 +759,9 @@ class Engine:
                     self.hold(db, current, *clean_failure)
                     continue
                 if preparation_failure:
-                    if isinstance(preparation_failure, RecoveryConflict):
+                    if isinstance(preparation_failure, WipSnapshotUnavailable):
+                        self.hold(db, current, "wip_snapshot_unavailable", str(preparation_failure))
+                    elif isinstance(preparation_failure, RecoveryConflict):
                         self.hold(db, current, "recovery_conflict", {
                             "attempt": current["recovery"]["attempt"], "cause": str(preparation_failure)})
                     else:
@@ -1865,8 +1868,12 @@ class Engine:
             used += 1
             node["tf_retries"] = used
             node.update(state="open", outcome=None, revision=node["revision"] + 1)
+            # Alias checks can clear ignored dirt without a snapshot. That
+            # cleanup can be observed before settlement finishes, so keep
+            # the evaluation's deadline whenever the WIP check ran.
+            instant = self.window_instant if current.get("wip_checked") else self.instant()
             node["retry_pending"] = {
-                "at": self.instant() + tf.backoff_for(backoff, used),
+                "at": instant + tf.backoff_for(backoff, used),
                 "from": current["run_id"], "attempt": current["attempt_id"],
                 "used": used, "kind": kind,
                 "session": result.get("session_id") or "",
@@ -1878,7 +1885,8 @@ class Engine:
         if kind == "quota":
             reset = cause.get("reset_time") or ""
             epoch_reset = datetime.fromisoformat(reset).timestamp() if reset else 0.0
-            recheck = epoch_reset or (self.instant() + self.quota_interval())
+            instant = self.window_instant if current.get("wip_checked") else self.instant()
+            recheck = epoch_reset or (instant + self.quota_interval())
             node["quota_hold"] = {"provider": cause.get("provider", ""),
                                   "account": cause.get("account", ""),
                                   "reset": reset or None,
@@ -2082,6 +2090,12 @@ class Engine:
                 continue
             usable = bool(reading.known and reading.headroom is not None
                           and reading.headroom >= reserve)
+            recovery = node.get("recovery") or {}
+            if recovery.get("pending") and recovery.get("snapshot_ref"):
+                # QS-R2: only a dirty infra-cut alias may retry unknown usage
+                # after its recheck. Ordinary quota holds still need proof.
+                usable = bool(reading.usable and (not reading.known or reading.headroom is None
+                                                 or reading.headroom >= reserve))
             if usable:
                 self.release_quota(node, hold, resume=True)
                 continue
@@ -2141,6 +2155,39 @@ class Engine:
         with effects.serialized(self.store):
             self._integrate(attempt)
 
+    def reconcile_snapshots(self):
+        """QS-R4: finish a reset even while backoff or quota blocks admission."""
+        with effects.serialized(self.store):
+            with self.store.transaction(write=False) as db:
+                nodes, journal, bindings = self.store.node_records(db), attempt_records(db), sessions.aliases(db)
+                pending = [n for n in nodes.selected("open", "running", "suspended", "held")
+                           if (n.get("recovery") or {}).get("pending")
+                           and n["recovery"].get("snapshot_ref")]
+                busy_aliases = {a.get("alias_id") for a in
+                                journal.selected("claimed", "launched", "captured", "suspended")}
+            for node in pending:
+                source = node["recovery"]
+                if source["alias_id"] in busy_aliases:
+                    continue
+                try:
+                    Results(self.paths, self.service.configuration()).recovery_commit(source)
+                    # A failed recovery launch may already have advanced the
+                    # binding to its prepared input. Check that current tree,
+                    # rather than treating the carried WIP as fresh dirt.
+                    binding = bindings[source["alias_id"]]
+                    try:
+                        sessions.check_clean(self.paths, binding, self.runner.authority)
+                    except model.Refused as exc:
+                        if exc.result["error"] != "dirty_worktree":
+                            raise
+                        sessions.reset_snapshot(self.paths, binding, self.runner.authority)
+                except effects.FAILURES as exc:
+                    reason = "wip_snapshot_unavailable" if isinstance(exc, WipSnapshotUnavailable) else "reseat_failed"
+                    with self.service.changed, self.store.transaction() as db:
+                        current = self.store.node_records(db)[node["id"]]
+                        if current.get("recovery") == source and (current.get("hold") or {}).get("reason") != reason:
+                            self.hold(db, current, reason, str(exc))
+
     def _integrate(self, attempt):
         # Snapshot, compute, journal, apply, checkpoint. Every Git call runs
         # after its store transaction has closed, including retention refs.
@@ -2151,6 +2198,23 @@ class Engine:
                 nodes = self.store.node_records(db)
             if current["state"] != "captured":
                 return
+            if (current.get("alias_id") and not current.get("wip_checked")
+                    and current["result"].get("cause", {}).get("class") in {"quota", "crash", "signal"}
+                    and not current["result"].get("capture_error")
+                    and current.get("launch_evidence", {}).get("executor", {}).get("kind") != "isolated"):
+                try:
+                    sessions.snapshot_infra(self.store, self.runner, current,
+                                            Results(self.paths, self.service.configuration()))
+                except effects.FAILURES as exc:
+                    reason = "wip_snapshot_unavailable" if isinstance(exc, WipSnapshotUnavailable) else "reseat_failed"
+                    with self.service.changed, self.store.transaction() as db:
+                        self.hold(db, self.store.node_records(db)[current["node_id"]], reason, str(exc))
+                    return
+                with self.store.transaction() as db:
+                    current = attempt_records(db)[attempt["attempt_id"]]
+                    current["wip_checked"] = True
+                    save_attempt(db, current)
+                continue
             node = nodes[current["node_id"]]
             result = current["result"]
             parent = nodes.get(node.get("parent"))

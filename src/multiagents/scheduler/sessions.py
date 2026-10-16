@@ -211,10 +211,11 @@ def checkout_git(paths, binding, authority, *, include_objects=False):
             alternates += str(copied) + "\n"
         (private / "objects" / "info" / "alternates").write_text(alternates)
         (private / "HEAD").write_text(binding["commit"] + "\n")
-        def git(*args, index=None, **kwargs):
+        def git(*args, index=None, env=None, **kwargs):
             with gitops._host_scope(paths.root):
                 return gitops.run(paths.root, *args, env={"GIT_DIR": str(private), "GIT_COMMON_DIR": str(private),
-                    "GIT_WORK_TREE": str(pinned), "GIT_INDEX_FILE": str(index or metadata / "index")}, **kwargs)
+                    "GIT_WORK_TREE": str(pinned), "GIT_INDEX_FILE": str(index or metadata / "index"),
+                    **(env or {})}, **kwargs)
         yield pinned, git
 
 
@@ -266,7 +267,7 @@ def archive_untracked(pinned, names, destination, *, metadata=(), prefix=""):
                 os.close(parent)
 
 
-def check_clean(paths, binding, authority):
+def check_clean(paths, binding, authority, *, on_dirty=None):
     if not binding.get("commit"):
         return
     with checkout_git(paths, binding, authority, include_objects=True) as (pinned, git):
@@ -310,7 +311,76 @@ def check_clean(paths, binding, authority):
                                   metadata=[archive / name for name in ("status.txt", "tracked.diff", "staged.diff")],
                                   prefix="untracked/")
                 (paths.scheduler / ("dirty-" + binding["id"] + ".diff")).write_text(status + "\n" + staged + "\n" + tracked + staged_diff)
+                if on_dirty:
+                    return on_dirty(git, index, str(recovery))
                 raise Refused("dirty_worktree", detail=str(recovery))
+
+
+def reset_snapshot(paths, binding, authority):
+    """Replay only after the snapshot ref and its recovery record are durable."""
+    with checkout_git(paths, binding, authority) as (pinned, git):
+        git("reset", "--hard", binding["commit"], check=True)
+        git("clean", "-ffdx", check=True)
+        gitops._write_beneath(pinned, (".git",), "HEAD", (binding["commit"] + "\n").encode())
+
+
+def snapshot_infra(store, runner, attempt, results):
+    """QS-R1/R4: retain dirty alias WIP before resetting, replaying one ref."""
+    from ..config import matches_any
+    from .engine import attempts, save_attempt
+
+    with store.transaction(write=False) as db:
+        binding = aliases(db)[attempt["alias_id"]]
+    # Capture has imported the checkout's committed ancestry. It becomes the
+    # binding at settlement, just as for an ordinary failed attempt.
+    binding = dict(binding, commit=attempt["result"].get("checkout_commit", attempt["input_commit"]))
+    source = attempt.get("wip_snapshot")
+
+    def snapshot(git, index, archive):
+        ref = "refs/multiagents/wip/" + attempt["attempt_id"]
+        captured = results.tip(ref)
+        if not captured:
+            # A fresh host index ignores agent flags. Retain staged additions
+            # even if now ignored, then let the filesystem supply final bytes.
+            for entry in git("ls-files", "--stage", "-z", check=True, strip=False).out.split("\0"):
+                if entry:
+                    metadata, name = entry.split("\t", 1)
+                    mode, oid, stage = metadata.split()
+                    if stage != "0":
+                        raise gitops.GitError("cannot snapshot an unmerged alias index")
+                    git("update-index", "--add", "--cacheinfo", f"{mode},{oid},{name}", index=index, check=True)
+            # New immutable objects go directly to host storage; the private
+            # gitdir still supplies quarantined staged blobs through alternates.
+            env = {"GIT_OBJECT_DIRECTORY": str(store.paths.root / ".git" / "objects"),
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES": git("rev-parse", "--git-path", "objects", check=True).out}
+            git("add", "-A", "--", ".", index=index, env=env, check=True)
+            tree = git("write-tree", index=index, env=env, check=True).out
+            changed = results.git("diff", "--name-only", "--no-renames", "-z", binding["commit"], tree,
+                                  strip=False, check=True).out.split("\0")
+            protected = [{"path": path, "outcome": "reverted", "source": binding["commit"]}
+                         for path in changed if path and matches_any(attempt.get("readonly_paths", []), path)]
+            tree = results.restored_tree(tree, protected) if protected else tree
+            captured = results.commit(tree, [binding["commit"]], "multiagents: snapshot dirty alias " + attempt["attempt_id"])
+            results.move(ref, captured, "")
+        recovery = {"attempt": attempt["attempt_id"], "commit": captured,
+                    "input_commit": binding["commit"], "snapshot_ref": ref,
+                    "alias_id": binding["id"], "archive": archive, "pending": True}
+        results.recovery_commit(recovery)
+        with store.transaction() as db:
+            current = attempts(db)[attempt["attempt_id"]]
+            node = store.node_records(db)[current["node_id"]]
+            current["wip_snapshot"] = recovery
+            node["recovery"] = dict(recovery)
+            save_attempt(db, current)
+            store.save_node(db, node)
+        return recovery
+
+    if source:
+        results.recovery_commit(source)
+    else:
+        source = check_clean(store.paths, binding, runner.authority, on_dirty=snapshot)
+    if source:
+        reset_snapshot(store.paths, binding, runner.authority)
 
 
 def cleanup_message(detail):

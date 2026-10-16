@@ -80,6 +80,13 @@ async def supervise(root, attempt_id, lock_fd=None):
                         if not provider.spawn.get("resume") or runner._missing_session(previous, spec, provider, Path(checked_binding["worktree"])):
                             raise Refused("dirty_worktree", detail=checked_attempt["cleanup_archive"])
                     else:
+                        recovery = checked_node.get("recovery") or {}
+                        if recovery.get("pending") and recovery.get("snapshot_ref"):
+                            from .results import Results, WipSnapshotUnavailable
+                            try:
+                                Results(paths, configuration).recovery_commit(recovery)
+                            except WipSnapshotUnavailable as exc:
+                                raise Refused("wip_snapshot_unavailable", detail=str(exc)) from exc
                         sessions.check_clean(paths, checked_binding, runner.authority)
                 except (Refused, gitops.GitError, OSError, ValueError, KeyError, RuntimeError) as exc:
                     preflight_failure = (exc.result if isinstance(exc, Refused)

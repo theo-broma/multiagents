@@ -21,6 +21,10 @@ class RecoveryConflict(gitops.GitError):
     """Captured WIP cannot safely be used with the current inputs."""
 
 
+class WipSnapshotUnavailable(RecoveryConflict):
+    """A recorded dirty-alias snapshot has lost its retention ref or objects."""
+
+
 class MissingCheckout(gitops.GitError):
     """The recorded checkout is absent, rather than present but unreadable."""
 
@@ -210,6 +214,29 @@ class Results:
             args.extend(["-p", parent])
         return self.git(*args, "-m", message, check=True).out
 
+    def recovery_commit(self, recovery):
+        captured = recovery["commit"]
+        ref = recovery.get("snapshot_ref") or "refs/heads/node-results/" + recovery["attempt"]
+        if recovery.get("snapshot_ref"):
+            try:
+                if not self.git("show-ref", "--verify", "--quiet", ref).ok:
+                    raise WipSnapshotUnavailable(f"snapshot ref {ref} is missing or corrupt")
+                if self.tip(ref) != captured:
+                    raise gitops.GitError("ref differs from the recorded commit")
+                self.git("fsck", "--strict", "--no-reflogs", "--no-dangling", captured, check=True)
+                parents = self.git("rev-list", "--parents", "-n", "1", captured, check=True).out.split()
+                if parents != [captured, recovery["input_commit"]]:
+                    raise gitops.GitError("snapshot parent differs from the binding commit")
+            except WipSnapshotUnavailable:
+                raise
+            except gitops.GitError as exc:
+                raise WipSnapshotUnavailable(f"snapshot ref {ref} is corrupt: {exc}") from exc
+        elif self.tip(ref) != captured:
+            raise gitops.GitError("captured ref is missing or differs from the recorded commit")
+        if not self.git("merge-base", "--is-ancestor", recovery["input_commit"], captured).ok:
+            raise gitops.GitError("captured commit does not descend from the attempt's input")
+        return captured
+
     def prepare(self, node, nodes):
         top = top_node(node, nodes)
         branch = "refs/heads/nodes/" + top["id"]
@@ -240,12 +267,10 @@ class Results:
                     and parent["generations"]):
                 commit = parent["generations"][-1]["commit"]
             try:
-                captured = recovery["commit"]
-                if self.tip("refs/heads/node-results/" + recovery["attempt"]) != captured:
-                    raise gitops.GitError("captured ref is missing or differs from the recorded commit")
-                if not self.git("merge-base", "--is-ancestor", recovery["input_commit"], captured).ok:
-                    raise gitops.GitError("captured commit does not descend from the attempt's input")
+                captured = self.recovery_commit(recovery)
                 commit = self.merge_commit(commit, captured, "multiagents: recover " + node["id"])
+            except WipSnapshotUnavailable:
+                raise
             except gitops.GitError as exc:
                 raise RecoveryConflict(str(exc)) from exc
         top.update(branch=branch, branch_tip=tip)
