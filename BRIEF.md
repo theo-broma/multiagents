@@ -6403,3 +6403,6 @@ Pending user: RB-R1 re-wording (above).
   * NC-R59 captured/suspended tests on main (663d7ac8). Implementer ag-ad0fd9 steered to merge main.
   * UD slice 1 tests on main (6430170c, 315 tests, mostly red; jsonschema now a dev dependency). Clarifications Q1..Q9 answer the tester's silences. Implementer nd-b5c9b0fd, then reviewer nd-c8dd83cd.
 - 2026-10-17 ~01:55 CEST. GG-R10 implementer nd-d228148e done (91324f7e, +15/-7 git_guard.py, 543 gg tests pass). Reviewer nd-3dc973b1 then adversary nd-b9aa08d9 chained.
+- 2026-10-17 ~02:20 CEST. 4B.1 tester nd-754de4be first pass: 387 tests, red as expected, plus 5 NEED_INFOs. Answered in the contract as K4B.1..K4B.7 (9845c48f).
+  K4B.7 amends slice 3's 'no added capabilities' rule, on advisor turn 14's advice: the entrypoint starts as uid 0 with only SETUID/SETGID and no-new-privileges, forks before the drop, puts the redactor on its own UID and the child on the host UID, and uses a signal relay. It fails closed, and its test mode is explicit only. Tell the user in the next report.
+  Tester relaunched to align. Next: apply its tests to main, then implementer-deep, then reviewer, then adversary, then real Docker.
