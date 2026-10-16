@@ -65,14 +65,14 @@ elif probe == "session":
     except Exception: prior = None
     if resumed and ins.get("corrupt") and prior is None:
         print("corrupt session payload", file=sys.stderr); sys.exit(1)
+    if resumed and ins.get("reject"):
+        print("session rejected", file=sys.stderr); sys.exit(1)
     if resumed and ins.get("confirm", True):
         if ins.get("wrong_confirmation"):
             recorded = SES; SES = "ses_wrong"
             emit("session_resumed", {"id":"resume", "type":"session-resumed"}); SES = recorded
         else:
             emit("session_resumed", {"id":"resume", "type":"session-resumed"})
-    if resumed and ins.get("reject"):
-        print("session rejected", file=sys.stderr); sys.exit(1)
     os.makedirs(store, exist_ok=True)
     json.dump({"session":SES, "nonce":ins.get("nonce", "payload")}, open(payload,"w"))
     if ins.get("forbidden"):
