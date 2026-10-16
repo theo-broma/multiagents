@@ -124,6 +124,14 @@ def test_ic_c26_each_attempt_has_its_own_user_and_a_fresh_password(ns):
     assert ua.endswith(ns.runs(na)[-1]["attempt_id"]) and ub.endswith(ns.runs(nb_)[-1]["attempt_id"])
 
 
+def invocation_written(ns, container):
+    try:
+        ns.invocation(container)
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
+
+
 def test_ic_c26_a_retry_of_the_same_node_gets_a_fresh_credential(ns):
     ns.start()
     node = ns.launch()
@@ -132,7 +140,9 @@ def test_ic_c26_a_retry_of_the_same_node_gets_a_fresh_credential(ns):
     assert reply.get("ok") is True, reply
     runs = ns.wait_runs(node, 2, nb.WAIT)
     second_container = ns.wait(lambda: ns.container_of(runs[-1]["attempt_id"]), nb.WAIT, "the second container")
-    second = nb.proxy_url(ns.invocation(second_container)["env"])
+    second = nb.proxy_url(ns.wait(lambda: ns.invocation(second_container).get("env") or None
+                                  if invocation_written(ns, second_container) else None,
+                                  nb.WAIT, "the second invocation.json"))
     assert first[0] != second[0] and first[1] != second[1]
 
 

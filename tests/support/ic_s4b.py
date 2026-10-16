@@ -94,6 +94,9 @@ class NetSched(s3.FakeDockerSched):
     def __init__(self, tmp_path, monkeypatch, *, network=None, allowlist=ALLOW, gateway_image=None,
                  isolated: dict | None = None, rpc=False, images=None, probe=True, **kw):
         super().__init__(tmp_path, monkeypatch, images=images, **kw)
+        # the scheduler subprocess imports the probe: do not depend on the caller's PYTHONPATH
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+            p for p in (str(Path(__file__).resolve().parent), os.environ.get("PYTHONPATH", "")) if p))
         if probe:
             monkeypatch.setenv(PROBE_ENV, PROBE_SPEC)       # fake Docker has no listener: inject the probe
         else:

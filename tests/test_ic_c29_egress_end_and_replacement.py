@@ -72,7 +72,7 @@ def test_ic_c29_normal_end_removes_the_network_and_keeps_the_exited_container(ns
 def test_ic_c29_disconnects_container_and_gateway_before_removing_the_network(ns):
     node, run, container, network = running_pair(ns)
     gw = gateway(ns)
-    ns.fd.finish(container["Id"], 0)
+    ns.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
     nb.wait_done(ns, node)
     ns.wait(lambda: ns.fd.network(network["Id"]) is None or None, nb.WAIT, "network removal")
     commands = ns.fd.commands()

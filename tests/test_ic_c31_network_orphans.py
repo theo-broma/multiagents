@@ -78,7 +78,7 @@ def ended_attempt_with_stuck_network(s):
     (network,) = s.attempt_networks(run["attempt_id"])
     s.fd.rule("network", "rm", effect="fail", stderr="Error response from daemon: stuck")
     s.fd.rule("network", "remove", effect="fail", stderr="Error response from daemon: stuck")
-    s.fd.finish(container["Id"], 0)
+    s.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
     nb.wait_done(s, node)
     s.wait(lambda: any(o.get("resource_id") == network["Id"] for o in (listing(s)["orphans"] or [])) or None,
            nb.WAIT, "the stuck network to be reported")
