@@ -6421,3 +6421,4 @@ Pending user: RB-R1 re-wording (above).
   * Suite running: bg 3a82a4911ef2 on /var/tmp/r59-comb (main + NC-R59 src, main's tests).
   * Restart the scheduler daemon at the next moment no agent runs, so RB goes live; the owner reaper would kill running workers otherwise. Until then, check every implementer branch for readonly reverts before merging.
   * The other branches are clean so far: UD, GG, 4B.1.
+- 2026-10-17 ~01:25 CEST. UD reviewer nd-c8dd83cd approved with no findings. The branch is clean: src only, no readonly reverts. Suite: bg 06a18ce0bde7 on /var/tmp/ud-comb. If it is clean: audit for personal data, merge_node nd-b5c9b0fd, check the publish touched no tests.
