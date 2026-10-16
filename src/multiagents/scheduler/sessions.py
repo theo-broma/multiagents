@@ -61,6 +61,21 @@ def pin_changed(node, binding, config):
                 "family", provider_family(binding["provider"], config)))
 
 
+def isolated_incompatibility(node, binding, config):
+    if not binding or binding.get("executor_kind") != "isolated" or binding.get("renew"):
+        return ""
+    spec = config.agents.get(node["agent"])
+    provider = node["pins"].get("provider") or (spec.provider if spec else binding["provider"])
+    model = node["pins"].get("model") or (spec.model if spec else binding["model"])
+    declaration = config.providers.get(provider, {})
+    current = {"provider": provider, "family": provider_family(provider, config),
+               "account": declaration.get("container_account") or provider, "model": model}
+    for field, value in current.items():
+        if binding.get(field, value) != value:
+            return field + " changed"
+    return ""
+
+
 def validate_attachments(nodes, original, journal, bindings):
     launched = {alias_id(node, original) for node in original.values() if node["runs"]}
     launched.update(key for key, binding in bindings.items() if binding.get("last_run"))
@@ -155,6 +170,7 @@ def freeze(db, node, nodes, result, paths, config):
     # Old bindings predate isolated resources. Their HOME belongs to the
     # legacy activation, whichever of the two legacy executors it uses.
     previous_kind = bound.get("executor_kind", kind if kind in {"local", "docker"} else "local")
+    legacy_home = str(paths.home(bound["home_id"])) if previous_kind != "isolated" and kind == "isolated" else None
     if previous_kind != kind or (kind == "isolated" and bound.get("isolated_home_version") != 1):
         bound["home_id"] = "alias-" + key[:24] + "-" + kind + "-" + uuid.uuid4().hex[:12]
     if kind == "isolated":
@@ -165,6 +181,7 @@ def freeze(db, node, nodes, result, paths, config):
     save_alias(db, bound)
     return {"alias_id": key, "alias_worktree": bound["worktree"], "alias_home": bound["home_id"],
             "previous_executor_kind": previous_kind,
+            **({"legacy_home": legacy_home} if legacy_home else {}),
             **({"reason": "provider_changed"} if not bound["session_id"] and bound.get("reason") == "provider_changed" else {}),
             "session_id": bound["session_id"], "binding": {k: bound[k] for k in ("provider", "account", "model")}}
 

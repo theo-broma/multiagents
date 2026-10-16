@@ -174,6 +174,12 @@ payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
 exit_path = pathlib.Path(sys.argv[2])
 signal.signal(signal.SIGTERM, lambda *_: None)
 try:
+    transport = payload.get('transport_directory')
+    if transport and len(os.fsencode(payload['env'].get('MULTIAGENTS_RPC_SOCKET', ''))) > 107:
+        # Keep this descriptor in the surviving supervisor, just as a guest
+        # mount keeps the endpoint directory reachable across host restarts.
+        transport_fd = os.open(transport, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        payload['env']['MULTIAGENTS_RPC_SOCKET'] = '/proc/%d/fd/%d/rpc.sock' % (os.getpid(), transport_fd)
     source = open(payload['stdin'], 'rb') if payload['stdin'] else subprocess.DEVNULL
     with open(payload['stdout'], 'wb') as out, open(payload['stderr'], 'wb') as err:
         child = subprocess.Popen(payload['argv'], cwd=payload['cwd'], env=payload['env'],
@@ -206,6 +212,7 @@ class ReferenceBackend:
         self.root = Path(root).resolve()
         self.seeds = seeds
         self._attachment_paths: set[Path] = set()
+        self._transport_paths: set[Path] = set()
 
     @contextlib.contextmanager
     def _locked(self):
@@ -269,7 +276,21 @@ class ReferenceBackend:
             for other in guests[index + 1:]:
                 if PurePosixPath(guest).is_relative_to(other) or PurePosixPath(other).is_relative_to(guest):
                     return InvalidSpec("guest paths must not overlap")
-        for name in ("session_state", "resources", "credential_handle", "transport_handle"):
+        if spec.transport_handle is not None:
+            handle = spec.transport_handle
+            if (not isinstance(handle, dict) or set(handle) != {"directory", "attempt_id"}
+                    or not isinstance(handle.get("directory"), str)
+                    or not isinstance(handle.get("attempt_id"), str)):
+                return InvalidSpec("transport_handle must be a host-issued endpoint")
+            try:
+                directory = Path(handle["directory"])
+                if (not directory.is_absolute() or directory.is_symlink()
+                        or directory.resolve() not in self._transport_paths
+                        or directory.name != handle["attempt_id"] or not directory.is_dir()):
+                    return InvalidSpec("transport_handle is outside the host-issued authority")
+            except (OSError, ValueError, RuntimeError):
+                return InvalidSpec("invalid transport_handle")
+        for name in ("session_state", "resources", "credential_handle"):
             if getattr(spec, name):
                 return Unsupported(name)
         try:
@@ -534,6 +555,8 @@ class ReferenceBackend:
             mappings = {spec["guest_repo"]: resource.get("repo_path", str(guest / "repo")),
                         spec["guest_home"]: resource.get("home_path", str(home)),
                         spec["guest_temp"]: str(inv_guest / "tmp")}
+            if spec.get("transport_handle"):
+                mappings["/run/multiagents/rpc"] = spec["transport_handle"]["directory"]
             for value in spec["writable_paths"]:
                 mappings[value] = value
             for index, value in enumerate(spec["readonly_paths"]):
@@ -567,6 +590,8 @@ class ReferenceBackend:
                        "cwd": cwd, "env": env,
                        "stdin": invocation.stdin, "stdout": str(inv_path / "stdout"),
                        "stderr": str(inv_path / "stderr")}
+            if spec.get("transport_handle"):
+                payload["transport_directory"] = spec["transport_handle"]["directory"]
             _write(inv_path / "payload.json", payload)
             proc = subprocess.Popen([sys.executable, "-c", _SUPERVISOR,
                                      str(inv_path / "payload.json"), str(inv_path / "exit.json")],

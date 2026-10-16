@@ -193,6 +193,17 @@ def dispose(engine, results, intent, nodes):
     with engine.store.transaction(write=False) as db:
         journal = [a for a in records(db, "attempts").values() if a["node_id"] in intent["scope"]]
     discard(engine.paths, engine.service.configuration(), journal)
+    from . import conversations
+    conversations.dispose(engine.paths, node_ids=intent["scope"], alias_ids=intent["aliases"])
+    # The backend's retained HOME is separate from the persistent store.
+    for attempt in journal:
+        home = attempt.get("conversation_home")
+        if home:
+            import shutil
+            path = Path(home)
+            if path.is_relative_to(engine.paths.homes) and path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+
     for ref in intent["refs"]:
         if results.tip(ref):
             results.git("update-ref", "--no-deref", "-d", ref, check=True)

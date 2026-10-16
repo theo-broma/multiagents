@@ -23,9 +23,9 @@ from .store import RecordView, matching_records, select_records, Store, encode, 
 OPS = {"create_node", "update_node", "cancel_node", "get_node", "list_nodes",
        "instantiate_template", "register_template", "list_templates", "wait_for_nodes",
        "ack_nodes", "give_verdict", "relaunch_node", "close_node", "merge_node",
-       "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_consult", "admit_agent", "steer_run", "steer_result", "stop_run", "admit_window_resume"}
+       "dispose_node", "scheduler_status", "start_agent", "admit_run", "admit_consult", "admit_agent", "steer_run", "steer_result", "stop_run", "admit_window_resume", "grant_endpoint", "revoke_endpoint"}
 MUTATING = OPS - {"get_node", "list_nodes", "list_templates", "wait_for_nodes", "scheduler_status", "admit_agent", "steer_result", "admit_window_resume"}
-ROOT_ONLY = {"register_template", "ack_nodes", "relaunch_node", "close_node", "merge_node", "dispose_node", "admit_window_resume"}
+ROOT_ONLY = {"register_template", "ack_nodes", "relaunch_node", "close_node", "merge_node", "dispose_node", "admit_window_resume", "grant_endpoint", "revoke_endpoint"}
 
 
 def _alias_pins(args: dict) -> list[str]:
@@ -101,6 +101,8 @@ class Service:
         self.engine = None
         self._config = None
         self._config_version = None
+        from .endpoints import Listeners
+        self.endpoints = Listeners(self)
 
     def configuration(self):
         version = source_version(self.paths)
@@ -233,14 +235,19 @@ class Service:
             if id not in scope:
                 raise Refused("forbidden")
 
-    def request(self, request):
+    def request(self, request, endpoint_id=None):
         request_id = request.get("request_id") if isinstance(request, dict) else None
         reply = {"request_id": request_id if isinstance(request_id, str) else None, "ok": False}
         try:
             if not isinstance(request, dict):
                 invalid("request: expected JSON object")
+            if endpoint_id is not None and set(request) - {"op", "args", "request_id"}:
+                raise Refused("forbidden")
             validate_wire_value(request)
             op, args = request.get("op"), request.get("args", {})
+            if (endpoint_id is not None and isinstance(args, dict)
+                    and args.keys() & {"token", "subject", "root", "permissions", "principal"}):
+                raise Refused("forbidden")
             after = []
             deposited = []
             clock = self.engine.instant() if self.engine else None
@@ -264,7 +271,8 @@ class Service:
             # holding the notification condition while reserving the store.
             with self.changed if isinstance(op, str) and op in MUTATING else nullcontext():
                 with self.store.transaction(write=isinstance(op, str) and op in MUTATING) as db:
-                    principal = self.authenticate(db, request.get("token"))
+                    principal = (self.endpoints.authenticate(db, endpoint_id) if endpoint_id is not None
+                                 else self.authenticate(db, request.get("token")))
                     if not isinstance(op, str) or not isinstance(args, dict):
                         invalid("request: expected op string and args object")
                     validate_arguments(args, op=op)
@@ -288,6 +296,8 @@ class Service:
                         if previous[0] != payload:
                             raise Refused("request_id_reused")
                         reply = json.loads(previous[1])
+                        if op == "grant_endpoint" and reply.get("ok"):
+                            after.append({"kind": op, "attempt_id": args["attempt_id"]})
                     elif op != "wait_for_nodes":
                         before = set(nodes.added_ids) if isinstance(nodes, RecordView) else set(nodes)
                         result = self.dispatch(db, principal, op, args, nodes, after, clock, config)
@@ -298,7 +308,7 @@ class Service:
                             db.execute("INSERT INTO requests VALUES (?, ?, ?, ?)",
                                        (principal["subject"], request_id, payload, encode(reply)))
                 if op == "wait_for_nodes":
-                    reply.update(ok=True, result=self.wait(request, principal, args))
+                    reply.update(ok=True, result=self.wait(request, principal, args, endpoint_id=endpoint_id))
                 elif op in MUTATING:
                     try:
                         self.store.mirror()
@@ -316,7 +326,15 @@ class Service:
                 if reply.get("ok"):
                     self.engine.observe(deposited)
             for pending in after:
-                if pending.get("kind") == "spawn":
+                if pending.get("kind") == "grant_endpoint":
+                    try:
+                        self.endpoints.start(pending["attempt_id"])
+                    except Exception as exc:
+                        raise Refused("endpoint_unavailable", endpoint=pending["attempt_id"],
+                                      detail=str(exc)) from exc
+                elif pending.get("kind") == "revoke_endpoint":
+                    self.endpoints.close(pending["attempt_id"])
+                elif pending.get("kind") == "spawn":
                     self.engine.spawn(pending["attempt"])
                 elif pending.get("kind") == "window_admission":
                     reply["result"] = self.engine.window_launch_admission(pending["run_id"], pending["instant"])
@@ -332,6 +350,20 @@ class Service:
         return reply
 
     def dispatch(self, db, principal, op, args, nodes, after=None, clock=None, config=None):
+        if op in {"grant_endpoint", "revoke_endpoint"}:
+            from .endpoints import handle
+            model.check_fields(args, {"attempt_id", "run_id"}, set())
+            attempt_id = args.get("attempt_id")
+            try:
+                result = handle(self.paths.root, attempt_id)
+            except ValueError as exc:
+                invalid(str(exc))
+            if op == "grant_endpoint":
+                self.endpoints.record(db, attempt_id, args.get("run_id"))
+            else:
+                self.endpoints.revoke(db, attempt_id)
+            after.append({"kind": op, "attempt_id": attempt_id})
+            return result
         config = config or self._config
         plan_revision = int(self.store.meta(db, "plan_revision"))
         def view(node):
@@ -774,7 +806,7 @@ class Service:
                 self.changed.notify_all()
         return reply
 
-    def wait(self, request, principal, args):
+    def wait(self, request, principal, args, endpoint_id=None):
         from ..waits import bounded_timeout
         try:
             timeout, clamp = bounded_timeout(args.get("timeout", 0))
@@ -792,7 +824,8 @@ class Service:
         while True:
             with self.store.transaction(write=False) as db:
                 # A wait cannot outlive revocation as an authenticated reader.
-                principal = self.authenticate(db, request.get("token"))
+                principal = (self.endpoints.authenticate(db, endpoint_id) if endpoint_id is not None
+                             else self.authenticate(db, request.get("token")))
                 nodes = self.store.nodes(db)
                 self.authorize(principal, "wait_for_nodes", args, nodes, db)
                 after = (cursor if cursor is not None else
@@ -835,6 +868,20 @@ class Service:
 
 
 class Handler(socketserver.StreamRequestHandler):
+    def setup(self):
+        super().setup()
+        if hasattr(self.server, "connections"):
+            with self.server.connections_lock:
+                self.server.connections.add(self.connection)
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            if hasattr(self.server, "connections"):
+                with self.server.connections_lock:
+                    self.server.connections.discard(self.connection)
+
     def handle(self):
         self.connection.settimeout(60)
         while True:
@@ -856,7 +903,7 @@ class Handler(socketserver.StreamRequestHandler):
                     request = json.loads(line)
                 except (ValueError, UnicodeError, RecursionError):
                     request = None
-                reply = self.server.service.request(request)
+                reply = self.server.service.request(request, endpoint_id=getattr(self.server, "endpoint_id", None))
                 self.wfile.write(encode(reply).encode() + b"\n")
                 self.wfile.flush()
             except (OSError, TimeoutError):

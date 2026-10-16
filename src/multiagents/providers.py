@@ -18,6 +18,7 @@ import atexit
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -322,6 +323,10 @@ class Provider:
     instance_strategy: str | None = None
     handover_mode: dict[str, str] = field(default_factory=dict)
     session_store: dict[str, str] = field(default_factory=dict)
+    # D-S4A.3: the effective declaration after layering and legacy fallback.
+    session: dict[str, Any] = field(default_factory=lambda: {
+        "mode": "none", "path": "", "resumed_event": "",
+        "resume_deadline_seconds": 120})
     env: dict[str, str] = field(default_factory=dict)
     # PS-R1/R5: providers that share tooling but keep their own models and
     # quota. `auth_from` names the credential OWNER — this provider logs in
@@ -482,6 +487,7 @@ class Provider:
             instance_strategy=data.get("instance_strategy"),
             handover_mode=data.get("handover_mode") or {},
             session_store=dict(data.get("session_store") or {}),
+            session=_provider_session(name, data),
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             auth_from=_owner_key(name, "auth_from", data),
             budget_from=_owner_key(name, "budget_from", data),
@@ -897,6 +903,50 @@ def _provider_needs(name: str, data: dict) -> dict[str, bool]:
         if not isinstance(value, bool):
             raise ValueError(f"provider {name!r}: needs.{key} must be a boolean")
     return {**defaults, **needs}
+
+
+def _provider_session(name: str, data: dict) -> dict[str, Any]:
+    """Normalise the isolated-session declaration without importing a profile."""
+    if "session" in data:
+        declaration = data["session"]
+        if not isinstance(declaration, dict):
+            raise ValueError(f"provider {name!r}: session must be a mapping")
+    elif data.get("session_store"):
+        # The glob and forbidden pattern remain in session_store for the host
+        # copy policy; path is always a directory relative to the attempt HOME.
+        declaration = {"mode": "export",
+                       "path": data["session_store"].get("dir", "")}
+    else:
+        declaration = {"mode": "none"}
+    fields = {"mode", "path", "resumed_event", "resume_deadline_seconds"}
+    for key in declaration:
+        if key not in fields:
+            raise ValueError(f"provider {name!r}: session.{key} is an unknown field")
+    mode = declaration.get("mode")
+    if mode not in ("home", "export", "none"):
+        raise ValueError(f"provider {name!r}: session.mode must be home, export or none")
+    path = declaration.get("path", "")
+    if not isinstance(path, str):
+        raise ValueError(f"provider {name!r}: session.path must be a string")
+    if mode != "none" or path:
+        if (not isinstance(path, str) or not path.strip() or "\0" in path
+                or Path(path).is_absolute() or not Path(path).parts
+                or ".." in Path(path).parts):
+            raise ValueError(
+                f"provider {name!r}: session.path must be a non-empty relative "
+                "subdirectory without '..'")
+    resumed_event = declaration.get("resumed_event", "")
+    if not isinstance(resumed_event, str) or (
+            "resumed_event" in declaration and not resumed_event.strip()):
+        raise ValueError(f"provider {name!r}: session.resumed_event must be a non-empty string")
+    deadline = declaration.get("resume_deadline_seconds", 120)
+    if (isinstance(deadline, bool) or not isinstance(deadline, (int, float))
+            or (isinstance(deadline, float) and not math.isfinite(deadline))
+            or deadline <= 0):
+        raise ValueError(
+            f"provider {name!r}: session.resume_deadline_seconds must be a positive number")
+    return {"mode": mode, "path": path if mode != "none" else "",
+            "resumed_event": resumed_event, "resume_deadline_seconds": deadline}
 
 
 def resolve_inheritance(raw: dict[str, Any]) -> dict[str, Any]:

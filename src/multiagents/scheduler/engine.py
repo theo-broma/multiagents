@@ -53,6 +53,31 @@ def save_attempt(db, record):
     db.execute("INSERT OR REPLACE INTO attempts VALUES (?, ?)", (record["attempt_id"], encode(record)))
 
 
+def record_session(paths, attempt_id, outcome, reason="", **fields):
+    """Publish continuity evidence on the attempt and its public run entry."""
+    from .store import Store
+    store = Store(paths.root)
+    with store.transaction() as db:
+        current = attempts(db)[attempt_id]
+        current.update(fields)
+        if outcome is not None:
+            current["session_resume"] = outcome
+        if reason:
+            current["session_resume_reason"] = reason
+            current["session_resume_detail"] = {"reason": reason}
+        save_attempt(db, current)
+        node = store.nodes(db)[current["node_id"]]
+        for entry in node["runs"]:
+            if entry["attempt_id"] == attempt_id:
+                entry.update(fields)
+                if outcome is not None:
+                    entry["session_resume"] = outcome
+                if reason:
+                    entry["session_resume_reason"] = reason
+                    entry["session_resume_detail"] = {"reason": reason}
+        store.save_node(db, node)
+
+
 def consume_recovery(store, db, attempt):
     """RR-R3: called only after the host has recorded an actual process launch."""
     if attempt.get("cleanup"):
@@ -100,6 +125,9 @@ def record_launch(store, db, attempt, run):
     if not any(r["attempt_id"] == attempt["attempt_id"] for r in node["runs"]):
         node["runs"].append({"run_id": run.id, "attempt_id": attempt["attempt_id"],
                              "activation_id": attempt["activation_id"],
+                             **({"session_resume": current["session_resume"]} if "session_resume" in current else {}),
+                             **({"session_resume_reason": current["session_resume_reason"]} if current.get("session_resume_reason") else {}),
+                             **({"session_resume_detail": current["session_resume_detail"]} if current.get("session_resume_detail") else {}),
                              **({"reason": "provider_changed"} if current.get("reason") == "provider_changed" else {}),
                              **({"input_commit": attempt["input_commit"]} if "input_commit" in attempt else {})})
     if node["state"] == "open":
@@ -311,14 +339,13 @@ class Engine:
             # TF-R2: an automatic retry is pending — its backoff has not
             # elapsed, or the predecessor's death is not yet established.
             return [{"code": "retry_backoff", "detail": node["retry_pending"]}]
-        # Delegated nodes can run after their creator finishes. A done simple
-        # ancestor therefore imposes no composite gate on them (NC-R12).
+        # Completed ancestors allow explicit child reopens and delegation
+        # after a simple creator finishes (NC-R12/NC-R36).
         cur = node
         while cur:
             if cur.get("completion_pending") or cur.get("disposal_pending"):
                 return [{"code": "ancestor", "detail": cur["id"]}]
-            if cur is not node and (cur["state"] in {"held", "cancelled", "suspended"}
-                    or cur["kind"] != "simple" and cur["state"] == "done"):
+            if cur is not node and cur["state"] in {"held", "cancelled", "suspended"}:
                 return [{"code": "ancestor", "detail": cur["id"]}]
             for ref in cur["depends_on"]:
                 other = nodes.get(ref["node"])
@@ -612,6 +639,11 @@ class Engine:
             session_blocked = self.session_blockers(node, nodes, journal)
             if session_blocked and session_blocked[0]["code"] in {"session_busy", "session_binding"}:
                 self.reasons[node["id"]] = session_blocked
+                if node["runs"] and (config.agents[node["agent"]].executor or config.executor) == "isolated":
+                    with self.service.changed, self.store.transaction() as db:
+                        current = self.store.node_records(db)[node["id"]]
+                        if current["state"] == "open":
+                            self.hold(db, current, "session_busy", session_blocked[0]["detail"])
                 self.admission_refusals.pop(node["id"], None)
                 continue
             with self.store.transaction(write=False) as db:
@@ -619,6 +651,15 @@ class Engine:
                 checked_binding = sessions.aliases(db).get(alias_key)
                 checked_attempts = {a["attempt_id"]: a for a in
                                     matching_records(attempt_records(db), "alias_id", alias_key)} if alias_key else {}
+            from . import conversations
+            incompatible = (sessions.isolated_incompatibility(node, checked_binding, config)
+                            if checked_binding else conversations.incompatibility(self.paths, node, config))
+            if incompatible and not node.get("new_session_pending"):
+                with self.service.changed, self.store.transaction() as db:
+                    current = self.store.node_records(db)[node["id"]]
+                    if current["state"] == "open":
+                        self.hold(db, current, "unsupported", incompatible)
+                continue
             clean_failure = None
             try:
                 if checked_binding:
@@ -804,7 +845,8 @@ class Engine:
                 current["activation_id"] = activation
                 attempt = {"attempt_id": uuid.uuid4().hex, "activation_id": activation,
                            "node_id": node["id"], "run_id": new_id(self.store.paths, db),
-                           "state": "claimed", "locks": sorted(self.lock_set(current, current_nodes)),
+                           "state": "claimed", "new_session": current.pop("new_session_pending", False),
+                           "locks": sorted(self.lock_set(current, current_nodes)),
                            "lock_owners": self.lock_owners(current, current_nodes),
                            "retry_count": current.get("launch_tries", 0), "at": now(), **prepared}
                 from ..executor.lifecycle import LaunchSpec, spec_digest
@@ -2386,16 +2428,8 @@ class Engine:
             restart = current["steer_restart"]
             node.update(state="open", outcome=None, hold=None,
                         task=node["task"] + "\n\n" + restart["message"],
-                        session_resume="unsupported", revision=node["revision"] + 1)
-            if current.get("alias_id"):
-                bound = sessions.aliases(db)[current["alias_id"]]
-                bound["session_id"] = ""
-                sessions.save_alias(db, bound)
-            entry = next((r for r in node["runs"] if r["attempt_id"] == current["attempt_id"]), None)
-            if entry is not None:
-                entry["session_resume"] = "unsupported"
-            self.store.transition(db, "steered", node["id"], {
-                "run_id": current["run_id"], "session_resume": "unsupported"})
+                        revision=node["revision"] + 1)
+            self.store.transition(db, "steered", node["id"], {"run_id": current["run_id"]})
         self.store.save_node(db, node)
         self.service.changed.notify_all()
 

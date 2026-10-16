@@ -35,8 +35,10 @@ def pending_nodes(project_root: Path) -> list[str]:
 def call(project_root: Path, op: str, args: dict, token: str | None,
          request_id: str | None = None) -> dict:
     """A fresh connection per call also reconnects after scheduler restarts."""
-    request = {"op": op, "args": args, "token": token,
-               "request_id": request_id or uuid.uuid4().hex}
+    rpc_socket = os.environ.get("MULTIAGENTS_RPC_SOCKET")
+    request = {"op": op, "args": args, "request_id": request_id or uuid.uuid4().hex}
+    if not rpc_socket or token:
+        request["token"] = token
     timeout = args.get("timeout", 0) if op == "wait_for_nodes" else 0
     if type(timeout) not in (int, float) or timeout < 0:
         timeout = 0
@@ -44,7 +46,7 @@ def call(project_root: Path, op: str, args: dict, token: str | None,
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
                 conn.settimeout(max(10, timeout + 10))
-                conn.connect(str(transport_directory(project_root) / "rpc.sock"))
+                conn.connect(rpc_socket or str(transport_directory(project_root) / "rpc.sock"))
                 conn.sendall(encode(request).encode() + b"\n")
                 with conn.makefile("rb") as reader:
                     line = reader.readline()
@@ -57,6 +59,27 @@ def call(project_root: Path, op: str, args: dict, token: str | None,
             # The first request may already have committed. Reconnect with
             # exactly the same request id and payload to reconcile its reply.
             time.sleep(0.05)
+
+
+def endpoint_handle(project_root, attempt_id):
+    from .endpoints import handle
+    return handle(project_root, attempt_id)
+
+
+def grant_endpoint(project_root, attempt_id, run_id):
+    reply = call(project_root, "grant_endpoint", {"attempt_id": attempt_id, "run_id": run_id},
+                 root_capability(project_root))
+    if not reply.get("ok"):
+        raise ValueError("endpoint grant refused: " + str(reply.get("error")))
+    return reply["result"]
+
+
+def revoke_endpoint(project_root, attempt_id, run_id=None):
+    reply = call(project_root, "revoke_endpoint", {"attempt_id": attempt_id, "run_id": run_id},
+                 root_capability(project_root))
+    if not reply.get("ok"):
+        raise ValueError("endpoint revocation refused: " + str(reply.get("error")))
+    return reply["result"]
 
 
 def status(project_root: Path) -> dict:
@@ -182,6 +205,7 @@ def _serve(project_root: Path, clock_file=None) -> None:
                 with store.transaction() as db:
                     store.transition(db, "scheduler_started")
                 mirror()
+                service.endpoints.recover()
                 service.engine.start()
                 retry_at = time.monotonic() + 1
                 while not stopped.is_set():
@@ -197,6 +221,7 @@ def _serve(project_root: Path, clock_file=None) -> None:
                     mirror()
                     service.changed.notify_all()
         finally:
+            service.endpoints.close_all()
             sock.unlink(missing_ok=True)
             record.unlink(missing_ok=True)
 
@@ -205,7 +230,7 @@ def submit(project_root, agent, task, *, caller=None, request_id=None, **kwargs)
     """Deposit work and wait for the first bounded admission result (NC-R51)."""
     run_server = "MULTIAGENTS_AGENT_ID" in os.environ or caller is not None
     token = os.environ.get("MULTIAGENTS_RPC_TOKEN") if run_server else None
-    if run_server and not token:
+    if run_server and not token and not os.environ.get("MULTIAGENTS_RPC_SOCKET"):
         return {"error": "unauthenticated"}
     try:
         token = token if run_server else root_capability(project_root)

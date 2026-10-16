@@ -2291,7 +2291,10 @@ def _node_rpc(op: str, args: dict, ctx=None) -> dict:
     if not gate:
         pending = scheduler.pending_nodes(paths.root)
         return {"error": "scheduler_disabled", **({"pending_nodes": len(pending)} if pending else {})}
-    if "MULTIAGENTS_AGENT_ID" in os.environ:
+    if (os.environ.get("MULTIAGENTS_RPC_SOCKET")
+            and not os.environ.get("MULTIAGENTS_RPC_TOKEN")):
+        token = None  # The private endpoint supplies the attempt's principal.
+    elif "MULTIAGENTS_AGENT_ID" in os.environ:
         token = os.environ.get("MULTIAGENTS_RPC_TOKEN")
         if not token:
             return {"error": "unauthenticated"}

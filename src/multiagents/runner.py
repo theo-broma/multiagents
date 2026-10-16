@@ -4309,6 +4309,12 @@ class Runner(QuotaHandover):
                     state = identity
             if not isinstance(state, (Absent, Running, Exited)):
                 return
+            if isinstance(state, Running) and executor.endpoint:
+                from .scheduler import grant_endpoint
+                try:
+                    await asyncio.to_thread(grant_endpoint, self.paths.root, attempt["attempt_id"], run_id)
+                except Exception:
+                    return
             with Store(self.paths.root).transaction() as db:
                 current = attempts(db)[attempt["attempt_id"]]
                 if current.get("isolation_unknown") != marker:
@@ -4537,7 +4543,7 @@ class Runner(QuotaHandover):
             if executor.kind == "isolated":
                 needs = getattr(provider, "needs", {})
                 for need, field in (("credentials", "credential_handle"),
-                                    ("network", "network"), ("rpc", "transport_handle")):
+                                    ("network", "network")):
                     if needs.get(need, True):
                         detail = f"isolation_unavailable: Unsupported({field})"
                         self._record_node_launch_evidence(node_id, {"executor": {
@@ -4545,6 +4551,7 @@ class Runner(QuotaHandover):
                             "failure": {"class": "other", "retryable": False,
                                 "detail_code": "isolation_unavailable", "excerpt": detail}}})
                         raise RuntimeError(detail)
+            session_plan = None
             home = None
             if self.config.home_policy == "per-agent" or executor.kind == "isolated":
                 # PS-R2: a provider that borrows its credentials gets the
@@ -4579,6 +4586,49 @@ class Runner(QuotaHandover):
                                 "excerpt": detail}}})
                         raise RuntimeError(detail) from exc
                     raise
+            if executor.kind == "isolated" and managed and managed.node_id:
+                from .scheduler.store import Store
+                from .scheduler.engine import attempts, record_session
+                from .scheduler import conversations
+                with Store(self.paths.root).transaction(write=False) as db:
+                    launch_attempt = attempts(db)[managed.attempt_id]
+                launch_attempt["conversation_home"] = str(home_path)
+                launch_attempt.setdefault("binding", {"provider": provider.name, "model": spec.model})
+                try:
+                    store = provider.session_store or {}
+                    if (launch_attempt.get("legacy_home") and launch_attempt.get("session_id")
+                            and "session" not in self.config.providers.get(provider.name, {})
+                            and (store.get("profile_env") or store.get("profile_default")
+                                 or providers_mod.resolved_profile(provider)
+                                 or launch_attempt.get("previous_executor_kind") == "docker")):
+                        from .quota_handover import session_store_root
+                        legacy_executor = get_executor(
+                            launch_attempt.get("previous_executor_kind", "local"),
+                            self.config.project.get("executor", {}).get("docker", {}),
+                            paths=self.paths, providers=self.providers, config_dir=global_config_dir())
+                        try:
+                            root = session_store_root(provider, legacy_executor)
+                        except ValueError as exc:
+                            raise conversations.ConversationError(str(exc)) from exc
+                        # The resolver supplies the profile root; prepare still
+                        # imports only the declared path and selected session.
+                        for _ in Path(provider.session["path"]).parts:
+                            root = root.parent
+                        launch_attempt["legacy_home"] = str(root)
+                    session_plan = conversations.prepare(self.paths, launch_attempt, provider,
+                                                         home=home_path, config=self.config)
+                except conversations.ConversationError as exc:
+                    record_session(self.paths, managed.attempt_id, exc.outcome, str(exc))
+                    self._record_node_launch_evidence(node_id, {"executor": {
+                        "kind": "isolated", "termination_confirmed": True,
+                        "failure": {"class": "other", "retryable": False, "excerpt": str(exc)}}})
+                    raise RuntimeError(str(exc)) from exc
+                session_id = session_plan["session_id"] or None
+                session_plan.update(attempt=launch_attempt, home=home_path,
+                                    expected=session_id, confirmed=not bool(session_id))
+                record_session(self.paths, managed.attempt_id, session_plan.get("outcome"),
+                               session_plan.get("reason", ""), conversation_handle=session_plan["handle"],
+                               conversation_home=str(home_path), session_expected_id=session_id or "")
             identity = {
                 "MULTIAGENTS_AGENT_ID": node_id,
                 "MULTIAGENTS_PARENT_ID": parent or "",
@@ -4747,6 +4797,8 @@ class Runner(QuotaHandover):
                 from .scheduler.engine import attempts
                 with Store(self.paths.root).transaction(write=False) as db:
                     launch_attempt = attempts(db).get(owner)
+                if session_plan:
+                    launch_attempt["conversation_home"] = str(session_plan["home"])
                 executor.bind(owner,
                               lambda fields: self._record_node_launch_evidence(
                                   node_id, {"executor": fields}),
@@ -4755,6 +4807,17 @@ class Runner(QuotaHandover):
                               branch=branch, authority=self.authority,
                               begin=lambda fields: self._record_node_launch_evidence(
                                   node_id, {"executor": fields}, new_launch=True))
+                if session_plan:
+                    executor.session_plan = session_plan
+                    async def export_conversation(identity):
+                        export = conversations.finish(self.paths, session_plan["attempt"], provider,
+                            session_plan.get("observed") or session_plan.get("expected") or "",
+                            home=session_plan["home"])
+                        with Store(self.paths.root).transaction(write=False) as db:
+                            current = attempts(db)[owner]
+                        record_session(self.paths, owner, current.get("session_resume"),
+                                       session_export=export)
+                    executor.before_remove = export_conversation
             problems = executor.preflight()
             if problems:
                 raise RuntimeError("; ".join(problems))
@@ -4883,6 +4946,9 @@ class Runner(QuotaHandover):
         )
         if env.get("MULTIAGENTS_RPC_TOKEN"):
             run.capability_hash = hashlib.sha256(env["MULTIAGENTS_RPC_TOKEN"].encode()).hexdigest()
+        run.session_plan = session_plan
+        if session_plan:
+            session_plan["resume_started_at"] = getattr(handle, "launched_at", time.time())
         self.runs[node_id] = run
         try:
             previous = self.tree.get(node_id)
@@ -6431,6 +6497,19 @@ class Runner(QuotaHandover):
         stderr_task = asyncio.create_task(handle.drain_stderr())
         watchdog = asyncio.create_task(self._watch_timers(run))
         capwatch = asyncio.create_task(self._watch_spend_caps(run))
+        session_plan = getattr(run, "session_plan", None)
+        async def resume_deadline():
+            if session_plan and session_plan.get("expected"):
+                remaining = provider.session["resume_deadline_seconds"]
+                if session_plan.get("resume_started_at") is not None:
+                    remaining = max(0, session_plan["resume_started_at"] + remaining - time.time())
+                await asyncio.sleep(remaining)
+                if not session_plan["confirmed"]:
+                    session_plan["failure"] = "provider did not confirm the resumed session before the deadline"
+                    from .scheduler.engine import record_session
+                    record_session(self.paths, session_plan["attempt"]["attempt_id"], "failed", session_plan["failure"])
+                    await handle.stop()
+        resumewatch = asyncio.create_task(resume_deadline())
         usage: dict[str, Any] = {}
         cost_total = 0.0
         session_id = ""
@@ -6516,6 +6595,18 @@ class Runner(QuotaHandover):
                 event = provider.parse_line(line)
                 if event is None:
                     continue
+                if session_plan:
+                    if event.session_id:
+                        session_plan["observed"] = event.session_id
+                    expected = session_plan.get("expected")
+                    evidence = provider.session.get("resumed_event", "")
+                    if (expected and event.session_id == expected
+                            and (not evidence or evidence in {
+                                event.raw.get("type"), event.raw.get("event"), event.kind, event.name})
+                            and not session_plan.get("failure")):
+                        session_plan["confirmed"] = True
+                        from .scheduler.engine import record_session
+                        record_session(self.paths, session_plan["attempt"]["attempt_id"], "resumed")
                 # SV-R6/R7: a line the server before us already accounted for.
                 # It rebuilds what this run knows — text, usage, session,
                 # step count, loop signatures — and nothing else: it is not
@@ -6787,6 +6878,7 @@ class Runner(QuotaHandover):
         finally:
             watchdog.cancel()
             capwatch.cancel()
+            resumewatch.cancel()
             # RC-R2 (bug-1213a0): stderr is drained to EOF before the run is
             # classified, so the verdict does not depend on how much of it the
             # async drain got to before the process was reaped. Bounded: a
@@ -6801,6 +6893,12 @@ class Runner(QuotaHandover):
 
         if (run.internal_stop and self._node_executor_evidence(node_id).get("kind") == "isolated"):
             return                         # steer records this stopped attempt
+
+        if session_plan and session_plan.get("expected"):
+            if not session_plan["confirmed"]:
+                session_plan["failure"] = session_plan.get("failure") or "provider rejected or did not confirm the resumed session"
+                from .scheduler.engine import record_session
+                record_session(self.paths, session_plan["attempt"]["attempt_id"], "failed", session_plan["failure"])
 
         # Everything after the stream is guarded, because nothing else releases
         # this run. `consult` waits on `run.done` for the agent's whole timeout
@@ -7185,6 +7283,9 @@ class Runner(QuotaHandover):
             "turn_started_at": run.launched_at, "usage": usage, "text": text, "stderr_tail": stderr,
             "final_text": run.final_assistant_message,
         }
+        session_failure = (getattr(run, "session_plan", None) or {}).get("failure")
+        if session_failure:
+            status = record["status"] = "failed"
         executor_evidence = self._node_executor_evidence(node_id) if isolated else {}
         if executor_evidence.get("oom"):
             record["oom"] = True
@@ -7213,6 +7314,8 @@ class Runner(QuotaHandover):
                 record["failure_cause"].update(
                     **{"class": "crash", "oom": True,
                        "excerpt": "isolated attempt OOM: " + record["failure_cause"]["excerpt"]})
+            if session_failure:
+                record["failure_cause"].update(**{"class": "other", "retryable": False, "excerpt": session_failure})
             if run.final_resets_at:
                 record["resets_at"] = run.final_resets_at
         warnings = [event["warning"] for event in run.events if event.get("warning")]
@@ -8786,7 +8889,8 @@ class Runner(QuotaHandover):
                 return False
             isolated_live = isinstance(state, Running)
             isolated_handle = LifecycleHandle(executor.backend, identity, invocation, run_dir,
-                lambda fields: self._record_node_launch_evidence(node.id, {"executor": fields}))
+                lambda fields: self._record_node_launch_evidence(node.id, {"executor": fields}),
+                revoke=executor.revoke_endpoint)
         stopper = probe = None
         if getattr(executor, "kind", "local") == "docker" and not executor.inside():
             # The pid on the node is the host's `docker exec` client, which
@@ -8872,6 +8976,27 @@ class Runner(QuotaHandover):
                   prompt_file=self.launch_limits.prompt_file(node.id),
                   startup_token=self.startup.token_for(provider.name, node.id),
                   limits=limits if isinstance(limits, dict) else {})
+        if isolated:
+            from .scheduler import conversations
+            from .scheduler.engine import attempts, record_session
+            from .scheduler.store import Store
+            with Store(self.paths.root).transaction(write=False) as db:
+                session_attempt = attempts(db)[node.attempt_id]
+            if session_attempt.get("conversation_home"):
+                expected = session_attempt.get("session_expected_id") or ""
+                plan = run.session_plan = {
+                    "attempt": session_attempt, "home": Path(session_attempt["conversation_home"]),
+                    "expected": expected, "observed": node.session_id,
+                    "confirmed": not expected or session_attempt.get("session_resume") == "resumed",
+                    "resume_started_at": evidence.get("started_at", launched)}
+                async def export_adopted(identity):
+                    export = conversations.finish(self.paths, session_attempt, provider,
+                        plan.get("observed") or expected, home=plan["home"])
+                    with Store(self.paths.root).transaction(write=False) as db:
+                        current = attempts(db)[node.attempt_id]
+                    record_session(self.paths, node.attempt_id, current.get("session_resume"),
+                                   session_export=export)
+                isolated_handle.before_remove = export_adopted
         reader = getattr(executor, "oom_kill_count", None)
         if callable(reader):
             # LN-C5, finding 2: a docker run taken over mid-flight gets the
@@ -9118,6 +9243,7 @@ class Runner(QuotaHandover):
             from .executor.lifecycle import Absent, Exited, ResourceIdentity, Unknown
             executor = self._predecessor_executor(node, self.config.agents.get(node.agent))
             state = Unknown(executor.problem or "recorded resource identity is unavailable")
+            await asyncio.to_thread(executor.revoke_endpoint)
             if executor.backend and evidence.get("identity"):
                 identity = ResourceIdentity(evidence["identity"])
                 await outcome(executor.backend.stop, identity, 3.0)
@@ -9759,6 +9885,17 @@ class Runner(QuotaHandover):
             run = self.runs.get(agent_id)
             if run:
                 run.stop_requested, run.internal_stop = True, True
+            from .scheduler import conversations
+            with Store(self.paths.root).transaction(write=False) as db:
+                session_attempt = attempts(db)[node.attempt_id]
+            if session_attempt.get("conversation_home"):
+                async def export_stopped(identity):
+                    export = conversations.finish(self.paths, session_attempt, self.providers[node.provider],
+                        node.session_id, home=Path(session_attempt["conversation_home"]))
+                    from .scheduler.engine import record_session
+                    record_session(self.paths, node.attempt_id,
+                        session_attempt.get("session_resume", "fresh"), session_export=export)
+                executor.before_remove = export_stopped
             resolved = (await executor._resolve_failure(evidence.get("creation_key", ""),
                         evidence.get("invocation_key", ""), None) if executor.backend else
                         Unknown(executor.problem or "recorded backend unavailable"))
@@ -9773,12 +9910,12 @@ class Runner(QuotaHandover):
             store = Store(self.paths.root)
             with store.transaction() as db:
                 current = attempts(db)[node.attempt_id]
-                current["steer_restart"] = {"message": message, "session_resume": "unsupported"}
+                current["steer_restart"] = {"message": message}
                 current.pop("resume_pending", None)
                 save_attempt(db, current)
             _run_write(self.paths.run_dir(agent_id), "result.json", json.dumps({
-                "status": "done", "session_id": "", "session_resume": "unsupported"}))
-            self.tree.update(agent_id, status="done", session_id="", reason="steered to a new isolated attempt")
+                "status": "done", "session_id": node.session_id}))
+            self.tree.update(agent_id, status="done", reason="steered to a new isolated attempt")
             self._release(agent_id)
             return {"agent_id": agent_id, "steered": True, "session_resume": "unsupported"}
         if not self.unrecorded_branch_ok(node, "steer"):

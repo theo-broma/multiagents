@@ -187,7 +187,7 @@ class DockerBackend(ReferenceBackend):
             return InvalidSpec("a LaunchSpec is required")
         # Preserve structural validation's precedence over unsupported fields.
         refusal = super()._valid_spec(dataclasses.replace(
-            spec, resources={}, credential_handle=None, transport_handle=None,
+            spec, resources={}, credential_handle=None,
             session_state=None))
         if refusal is not None:
             return refusal
@@ -209,7 +209,7 @@ class DockerBackend(ReferenceBackend):
                 if (Path(writable).resolve().is_relative_to(Path(readonly).resolve()) or
                         Path(readonly).resolve().is_relative_to(Path(writable).resolve())):
                     return InvalidSpec("writable and read-only mounts must not overlap")
-        for name in ("credential_handle", "transport_handle", "session_state"):
+        for name in ("credential_handle", "session_state"):
             if getattr(spec, name):
                 return Unsupported(name)
         if spec.lifetime == "conversation":
@@ -380,6 +380,9 @@ class DockerBackend(ReferenceBackend):
                                 ("tmp", spec.guest_temp)):
                 readonly = ",readonly" if name == "repo" and spec.labels.get("multiagents.repo_readonly") == "true" else ""
                 args += ["--mount", f"type=bind,source={storage / name},target={guest}{readonly}"]
+            if spec.transport_handle:
+                source = spec.transport_handle["directory"]
+                args += ["--mount", f"type=bind,source={source},target=/run/multiagents/rpc,readonly"]
             for source in spec.writable_paths:
                 args += ["--mount", f"type=bind,source={source},target={source}"]
             for source in spec.readonly_paths:

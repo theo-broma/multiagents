@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
+import shutil
 
 from ..executor import get_executor
 from ..executor.isolated import outcome
@@ -105,10 +106,29 @@ async def _discover(paths, config, journal, nodes):
     return {"orphans": [found[key] for key in sorted(found)], "orphans_error": None}, owners, targets
 
 
+def endpoint_orphans(paths, store, db=None):
+    if db is None:
+        with store.transaction(write=False) as connection:
+            return endpoint_orphans(paths, store, connection)
+    directory = paths.scheduler / "endpoints"
+    rows = []
+    if directory.is_dir():
+        for entry in sorted(directory.iterdir()):
+            if (entry.is_symlink() or not entry.is_dir()
+                    or db.execute("SELECT 1 FROM attempts WHERE id=?", (entry.name,)).fetchone()):
+                continue
+            rows.append({"endpoint_id": entry.name, "reason": "orphan_endpoint",
+                         "container_id": None, "name": None, "labels": None, "created_at": None,
+                         "project": paths.slug, "attempt_id": None})
+    return rows
+
+
 def discover(paths, config, store, db=None):
     try:
         journal, nodes = _snapshot(store, db)
-        return _run(_discover(paths, config, journal, nodes))[0]
+        result = _run(_discover(paths, config, journal, nodes))[0]
+        result["orphans"].extend(endpoint_orphans(paths, store, db))
+        return result
     except Exception as exc:
         return {"orphans": None, "orphans_error": {"reason": str(exc) or type(exc).__name__}}
 
@@ -120,6 +140,26 @@ def remove(project_root, container_id):
 
     if os.environ.get("MULTIAGENTS_CONTAINER") or os.environ.get("MULTIAGENTS_AGENT_ID"):
         return failure("unknown", "orphan removal is available only to the host user")
+    from .endpoints import ENDPOINT_ID
+    paths = ProjectPaths(project_root)
+    plain_name = (isinstance(container_id, str) and container_id not in {"", ".", ".."}
+                  and "/" not in container_id and "\x00" not in container_id)
+    if plain_name and (ENDPOINT_ID.fullmatch(container_id)
+                       or (paths.scheduler / "endpoints" / container_id).is_dir()):
+        store = Store(project_root)
+        try:
+            # An exact recorded id is never an orphan, even after it ends.
+            with store.transaction() as db:
+                if db.execute("SELECT 1 FROM attempts WHERE id=?", (container_id,)).fetchone():
+                    return failure("not_orphan", "endpoint belongs to a recorded attempt")
+                directory = paths.scheduler / "endpoints" / container_id
+                if directory.is_symlink():
+                    return failure("invalid_id", "endpoint directory cannot be a symlink")
+                if directory.exists():
+                    shutil.rmtree(directory)
+                return {"ok": True, "endpoint_id": container_id, "state": "absent"}
+        except Exception as exc:
+            return failure("unknown", str(exc) or type(exc).__name__)
     if not isinstance(container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", container_id):
         return failure("invalid_id", "an exact full container id is required")
     from ..config import load

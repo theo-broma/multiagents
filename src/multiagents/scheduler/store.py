@@ -320,6 +320,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS capabilities
                     (hash TEXT PRIMARY KEY, subject TEXT NOT NULL, node_id TEXT NOT NULL,
                      permissions TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS endpoint_authority
+                    (attempt_id TEXT PRIMARY KEY, capability TEXT NOT NULL,
+                     revoked INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS requests
                     (subject TEXT NOT NULL, request_id TEXT NOT NULL, payload TEXT NOT NULL,
                      reply TEXT NOT NULL, PRIMARY KEY(subject, request_id));

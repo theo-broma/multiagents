@@ -137,12 +137,13 @@ def decide(service, db, op, args, nodes, config=None):
     pins = args.get("pins", {})
     if not isinstance(pins, dict):
         invalid("pins: expected pins by child id")
-    targets = {node["id"]: pins} if node["kind"] == "simple" else dict(pins)
+    targets = ({node["id"]: pins} if node["kind"] == "simple"
+               and not set(pins) - {"model", "provider", "effort"} else dict(pins))
     if any(id not in scope or nodes[id]["kind"] != "simple" for id in targets):
         invalid("pins: unknown simple child")
     new = args.get("new_session", [])
-    if not isinstance(new, list) or any(not isinstance(id, str) or id not in scope or not nodes[id]["session"] for id in new):
-        invalid("new_session: expected aliased child ids")
+    if not isinstance(new, list) or any(not isinstance(id, str) or id not in scope or nodes[id]["kind"] != "simple" for id in new):
+        invalid("new_session: expected simple child ids")
     if set(children) & (set(targets) | set(new)):
         invalid("children: a child cannot also appear in pins or new_session")
     new = list(new)
@@ -158,10 +159,14 @@ def decide(service, db, op, args, nodes, config=None):
                 invalid("children.new_session: expected an aliased child")
             new.append(id)
         patched.add(id)
+    for id in new:
+        nodes[id]["new_session_pending"] = True
+        patched.add(id)
     new_keys = {sessions.alias_id(nodes[id], nodes) for id in new}
+    new_keys.discard(None)
     if node["kind"] == "simple" and not failed_loop:
         key = sessions.alias_id(node, nodes)
-        if key:
+        if key and bindings.get(key, {}).get("executor_kind") != "isolated":
             new_keys.add(key)
     changed_bindings = set()
     for id, values in targets.items():
@@ -184,7 +189,7 @@ def decide(service, db, op, args, nodes, config=None):
             raise Refused("active_runs")
         # Keep the checkout and dirty-file protection; renew only the binding.
         if key in bindings:
-            bindings[key].update(session_id=None, renew=True)
+            bindings[key].update(renew=True)
             changed_bindings.add(key)
     if node["kind"] == "loop":
         if "loop" in args:

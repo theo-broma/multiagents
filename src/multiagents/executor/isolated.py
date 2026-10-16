@@ -53,6 +53,9 @@ class IsolatedExecutor(Executor):
         self.version = "unavailable"
         self.problem = "isolated docker lifecycle is not implemented yet"
         self.record = lambda fields: None
+        self.before_remove = None
+        self.prepare_session = None
+        self.endpoint = None
         from ..provision.seeds import SeedRegistry
         self.seeds = SeedRegistry(paths) if paths else None
         target = os.environ.get("MULTIAGENTS_TEST_ISOLATED_BACKEND")
@@ -101,6 +104,10 @@ class IsolatedExecutor(Executor):
         self.creation_key = evidence.get("creation_key", "")
         self.identity = evidence.get("identity", "")
         self.termination_confirmed = evidence.get("termination_confirmed", False)
+        self.endpoint = None
+        if evidence.get("endpoint_id"):
+            from ..scheduler import endpoint_handle
+            self.endpoint = endpoint_handle(self.paths.root, evidence["endpoint_id"])
 
     def wrapper_verdict(self, run_id):
         if not self.creation_key and not self.identity and self.termination_confirmed:
@@ -148,7 +155,8 @@ class IsolatedExecutor(Executor):
         from ..scheduler.sessions import checkout_swap, install_checkout, swap_intent
         from ..provision.git import git_command, git_env
         path = Path(self.checkout)
-        home = self.paths.home(self.attempt["alias_home"]) if self.attempt.get("alias_id") else None
+        home = (Path(self.attempt["conversation_home"]) if self.attempt.get("conversation_home") else
+                self.paths.home(self.attempt["alias_home"]) if self.attempt.get("alias_id") else None)
         if not self.attempt.get("cleanup"):
             staged = path.with_name(".seed-" + self.attempt["attempt_id"])
             intent = checkout_swap(self.paths, self.attempt)
@@ -170,6 +178,15 @@ class IsolatedExecutor(Executor):
         reply = await self.backend.attach_checkout(identity, path, home)
         if not isinstance(reply, ResourceIdentity):
             raise RuntimeError(getattr(reply, "reason", "checkout attachment failed"))
+
+    def revoke_endpoint(self):
+        if self.endpoint:
+            from ..scheduler import revoke_endpoint
+            revoke_endpoint(self.paths.root, self.endpoint["attempt_id"])
+
+    async def _before_remove(self, identity):
+        if callable(self.before_remove):
+            await self.before_remove(identity)
 
     def _uncertain(self, creation_key, operation, reply):
         return Unknown(f"predecessor {creation_key}: {operation}: "
@@ -208,12 +225,16 @@ class IsolatedExecutor(Executor):
             state = await outcome(self.backend.inspect_invocation, identity, invocation_key)
             if not isinstance(state, (Absent, Unknown)):
                 self.record({"invocation_id": invocation_key})
+            self.revoke_endpoint()
             stopped = await outcome(self.backend.stop, identity, 0.5)
             if isinstance(stopped, Unknown):
                 return self._uncertain(creation_key, "stop", stopped)
             state = await outcome(self.backend.inspect, identity)
             if not isinstance(state, (Exited, Absent)):
                 return self._uncertain(creation_key, "inspect", state)
+            self.record({"termination_confirmed": True})
+            self.revoke_endpoint()
+            await self._before_remove(identity)
             removed = await outcome(self.backend.remove, identity, True)
             if not isinstance(removed, (Exited, Absent)):
                 return self._uncertain(creation_key, "remove", removed)
@@ -241,6 +262,21 @@ class IsolatedExecutor(Executor):
         fields = {"kind": self.kind, "attempt_id": self.spec.owner, "backend": self.backend_name,
                     "backend_version": self.version, "backend_config": self.config, "spec_version": self.spec.spec_version,
                     "creation_key": creation_key, "session_resume": "unsupported"}
+        declaration = self.providers.get(provider)
+        if self.attempt and declaration and declaration.needs.get("rpc"):
+            from ..scheduler import endpoint_handle
+            try:
+                self.endpoint = endpoint_handle(self.paths.root, self.attempt["attempt_id"])
+                self.spec.transport_handle = self.endpoint
+                self.backend._transport_paths.add(Path(self.endpoint["directory"]).resolve())
+            except Exception as exc:
+                detail = f"endpoint {self.attempt['attempt_id']}: {exc}"
+                self.begin({**fields, "termination_confirmed": True, "failure": {
+                    "class": "other", "retryable": False,
+                    "detail_code": "isolation_unavailable", "excerpt": detail}})
+                raise RuntimeError("isolation_unavailable: " + detail) from exc
+        if self.endpoint:
+            fields["endpoint_id"] = self.endpoint["attempt_id"]
         try:
             if self.attempt:
                 if self.previous.get("seed") and self.previous.get("attempt_id") == self.spec.owner:
@@ -288,6 +324,8 @@ class IsolatedExecutor(Executor):
             self.record({"identity": identity.id, "invocation_key": invocation_key})
             try:
                 await self._install_checkout(identity)
+                if callable(self.prepare_session):
+                    await self.prepare_session(identity)
             except Exception as exc:
                 failure = {"class": "launch", "detail_code": "isolation_unavailable", "excerpt": str(exc)}
                 self.record({"failure": failure})
@@ -331,15 +369,29 @@ class IsolatedExecutor(Executor):
                                XDG_CACHE_HOME=self.spec.guest_home + "/.cache",
                                XDG_STATE_HOME=self.spec.guest_home + "/.local/state",
                                XDG_RUNTIME_DIR=self.spec.guest_home + "/.runtime")
+            if self.endpoint:
+                from ..scheduler import grant_endpoint
+                try:
+                    grant_endpoint(self.paths.root, self.endpoint["attempt_id"], self.attempt["run_id"])
+                except Exception as exc:
+                    detail = f"endpoint {self.endpoint['directory']}/rpc.sock: {exc}"
+                    self.record({"failure": {"class": "other", "retryable": False,
+                        "detail_code": "isolation_unavailable", "excerpt": detail}})
+                    resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
+                    if isinstance(resolved, Unknown):
+                        return resolved
+                    raise RuntimeError("isolation_unavailable: " + detail) from exc
+                environment["MULTIAGENTS_RPC_SOCKET"] = "/run/multiagents/rpc/rpc.sock"
             invocation = InvocationSpec(argv=list(argv), env=environment, cwd=self.spec.guest_repo,
                                         stdin=stdin, kind="agent")
             reply = await outcome(self.backend.run, identity, invocation, invocation_key)
             if reply == invocation_key:
-                self.record({"invocation_id": reply})
+                self.record({"invocation_id": reply, "started_at": time.time()})
                 self.previous = {"creation_key": creation_key, "identity": identity.id,
                                  "invocation_key": invocation_key, "invocation_id": reply}
                 return LifecycleHandle(self.backend, identity, reply, run_dir,
-                    lambda fields: self.record({**fields, "creation_key": creation_key}))
+                    lambda fields: self.record({**fields, "creation_key": creation_key}),
+                    revoke=self.revoke_endpoint, before_remove=self._before_remove)
             failure = {"class": "other" if isinstance(reply, (InvalidSpec, Unsupported)) else "launch",
                        "detail_code": "isolation_unavailable", "excerpt": getattr(reply, "reason", str(reply))}
         self.record({"failure": failure})
@@ -356,9 +408,11 @@ class LifecycleHandle:
     timed_out = False
     offset = 0
 
-    def __init__(self, backend, identity, invocation, run_dir, record):
+    def __init__(self, backend, identity, invocation, run_dir, record, *, revoke=None, before_remove=None):
         self.backend, self.identity, self.invocation = backend, identity, invocation
         self.run_dir, self.record = run_dir, record
+        self.revoke = revoke
+        self.before_remove = before_remove
         self.launched_at = time.time()
         self._state = None
         self._stderr = b""
@@ -485,11 +539,17 @@ class LifecycleHandle:
                 code = state.code if isinstance(state, Exited) else None
                 if self.run_dir and code is not None:
                     _write_run_file(self.run_dir, "exit_status", str(code).encode())
+                if self.revoke:
+                    self.revoke()
+                if self.before_remove:
+                    await self.before_remove(self.identity)
                 await outcome(self.backend.remove, self.identity, True)
                 return code
             await asyncio.sleep(0.05)
 
     async def stop(self, grace=3.0):
+        if self.revoke:
+            self.revoke()
         state = await outcome(self.backend.stop, self.identity, grace)
         if not isinstance(state, (Exited, Absent)):
             return state
