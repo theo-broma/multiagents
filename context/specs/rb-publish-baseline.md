@@ -68,6 +68,19 @@ researcher run ag-df5ffe confirmed from the code:
   integrates without `integration_conflict`; a conflicting recovery holds the
   node.
 
+- **Scope (2026-10-16, approved by the user).** The "branch tip" is the tip
+  of the node's own branch. A loop's verdict child (the reviewer) always
+  reviews exactly the reviewed generation. Its relaunch, with or without a
+  pending recovery, starts from that generation, and never from a root
+  branch tip that contains sibling work. A recovery that conflicts with
+  that base, including at the merge of the reviewed generation, holds the
+  node `recovery_conflict` and never launches.
+- Verified by: a reviewer in a nested loop has a pending recovery while the
+  root advances through a sibling's work, and sees the reviewed generation
+  plus its recovery, without the sibling's work; a recovery conflict for
+  that reviewer holds `recovery_conflict`; an ordinary loop round with no
+  recovery is unaffected by an advanced root tip.
+
 **RB-R3 — nothing else changes.**
 - A first launch, a node without a branch tip, and a publication with no
   read-only paths touched behave as today.
