@@ -325,12 +325,23 @@ def evidence_key_of(s, node):
     return evidence_key(s, node)
 
 
+def provisioned_key(s, node, timeout=15):
+    """The creation key, once the backend holds a resource for it (the claim alone is not enough)."""
+    def found():
+        try:
+            key = evidence_key(s, node)
+        except (FileNotFoundError, IndexError, ValueError):
+            return None
+        return key if kind_of(ic.run(s.be().find(key))) != "absent" else None
+    return s.wait(found, timeout, "the provisioned resource")
+
+
 def test_ic_c15_adopt_absent_a_resource_gone_while_down_is_a_lost_launch_class_launch_never_another_kind(sx):
     sx.start()
     node = sx.node({"hold": 30})
     sx.wait(lambda: sx.runs(node), 8, "the run")
+    key = provisioned_key(sx, node)                        # kill only once provisioning left evidence
     sx.kill9()
-    key = evidence_key_of(sx, node)
     be = sx.be()
     ident = ic.identity_of(ic.run(be.find(key)))
     ic.run(be.stop(ident, 0.2), timeout=20)
