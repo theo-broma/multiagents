@@ -27,6 +27,13 @@ researcher run ag-df5ffe confirmed from the code:
   run's input commit.
 - An edit to a read-only path that matches no such commit is still restored,
   and still recorded as `readonly_reverted`, exactly as today.
+- **Clarification (2026-10-16, approved by the user).** This applies only
+  when the run's input carried no version of its own for that path, that is,
+  when the input's content for the path is itself the content of a
+  base-branch commit (the input was just an older base). When the input
+  carries its own version, for example a test a tester wrote, that version
+  still wins over the base branch: Decision 11 of
+  context/specs/readonly-restore-provenance.md (RP-R11) is unchanged.
 - Verified by: an agent merges a newer base-branch commit that changed a
   read-only test, and publication keeps it with no `readonly_reverted` entry;
   an agent's own edit to the same path is still reverted.
