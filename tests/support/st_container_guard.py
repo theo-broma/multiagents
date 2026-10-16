@@ -96,6 +96,7 @@ self_dir = Path(__file__).parent.resolve()
 search = os.pathsep.join(p for p in os.environ.get('PATH', '').split(os.pathsep)
                          if Path(p or '.').resolve() != self_dir)
 target = shutil.which('docker', path=search)
+os.environ['PATH'] = search  # the next shim must not find this one again
 # Live containers are test infrastructure: ownership and no restart are set
 # here even when the application under test has not implemented ST1 yet.
 if args[:1] == ['run'] and target and real_docker and os.environ.get('ST_TEST_DOCKER_LIVE') == '1' and Path(target).resolve() == Path(real_docker).resolve():

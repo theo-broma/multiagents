@@ -57,6 +57,7 @@ mine = Path(__file__).parent.resolve()
 path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep)
                        if Path(p or ".").resolve() != mine)
 target = shutil.which("docker", path=path)
+os.environ["PATH"] = path  # the next shim must not find this one again
 if not target:
     print("docker is not installed", file=sys.stderr); sys.exit(127)
 label = {label!r}
