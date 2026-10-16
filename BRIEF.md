@@ -6413,3 +6413,11 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~03:40 CEST. 4B.1 implementer nd-4fa20bcc stopped on two valid test defects (probe injection, stripping-test scope). Settled in K4B.2 (de763b0f). Tester nd-754de4be relaunched to fix both. Implementer relaunched to implement meanwhile; its task says 'from your original task', which is in .multiagents/runs/ag-64a6b2/prompt.md if it lost context. When the tester is done: apply to main, then steer the implementer to merge main.
 - 2026-10-17 ~03:55 CEST. GG-R10 adversary nd-b9aa08d9 rejected, 2 medium findings: IDNA dot-equivalents and NFD/invisible characters cut the domain short and hide the real suffix. Its 17 tests are on main (81660b28). Implementer nd-d228148e relaunched for round 2, then reviewer nd-29d79627. Then the suite, then merge.
 - 2026-10-17 01:00 CEST, real clock. My entries above dated 01:05 to 03:55 CEST ran ahead of the clock; the real span is about 23:40 to 01:00. 4B.1 tester fixes are on main (d05f945d); K4B.2 now pins the readiness_probe= keyword. Tester nd-754de4be is held needs_info on that keyword, which is now answered; close it. steer_agent ag-184c80, implementer nd-4fa20bcc, returned scheduler_unavailable twice. So when it ends: if its branch lacks d05f945d, relaunch it to merge main and finish the 4B.1 set.
+- 2026-10-17 ~01:15 CEST.
+  * NC-R59 reviewer nd-57cd21d4 approved with no findings.
+  * The branch carries a 'restore readonly paths' commit (6dd8540f). It reverted tests/test_nc_r59_active_task_update.py to its pre-captured/suspended version, although the agent had merged 663d7ac8 from main. This is the RB-R1 defect.
+  * Cause: the scheduler daemon (pid 1882903, up 3.6 days) predates the RB merge 257dec59.
+  * So: do NOT merge_node nd-0299acdd. Apply its src diff only (scheduler/rpc.py +8) to main after the suite, then close_node approved.
+  * Suite running: bg 3a82a4911ef2 on /var/tmp/r59-comb (main + NC-R59 src, main's tests).
+  * Restart the scheduler daemon at the next moment no agent runs, so RB goes live; the owner reaper would kill running workers otherwise. Until then, check every implementer branch for readonly reverts before merging.
+  * The other branches are clean so far: UD, GG, 4B.1.
