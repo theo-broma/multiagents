@@ -8750,6 +8750,12 @@ class Runner(QuotaHandover):
             from .executor.lifecycle import Absent, Exited, ResourceIdentity, Running
             evidence = self._node_executor_evidence(node.id)
             invocation = evidence.get("invocation_id")
+            if (not invocation and evidence.get("failure")
+                    and evidence.get("termination_confirmed")):
+                # IC-C3 K10: the scheduler settles this failed launch from
+                # its journal. Missing invocation evidence is expected here,
+                # and must not turn confirmed termination into a liveness hold.
+                return False
             if not executor.backend or not invocation:
                 self._hold_isolated_predecessor(node.id,
                     executor.problem or "recorded executor evidence is incomplete", executor, adoption=True)

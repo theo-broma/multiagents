@@ -479,9 +479,18 @@ class Engine:
         # status can precede confirmed wrapper death; consuming that first
         # wakeup would leave subsequent rounds waiting for the periodic tick.
         with self.store.transaction(write=False) as db:
-            active = {run_id for (run_id,) in db.execute(
-                "SELECT json_extract(record, '$.run_id') FROM attempts "
-                "WHERE json_extract(record, '$.state') IN ('claimed', 'launched')")}
+            pending = list(db.execute(
+                "SELECT json_extract(record, '$.run_id'), "
+                "json_extract(record, '$.launch_evidence.executor.kind') = 'isolated' "
+                "AND json_extract(record, '$.launch_evidence.executor.failure') IS NOT NULL "
+                "AND json_extract(record, '$.launch_evidence.executor.termination_confirmed') = 1 "
+                "FROM attempts "
+                "WHERE json_extract(record, '$.state') IN ('claimed', 'launched')"))
+        # Only signal here: reconciliation owns settlement. The active-state
+        # index bounds this query by live attempts, even with a long history.
+        if any(failed for _, failed in pending):
+            return True
+        active = {run_id for run_id, _ in pending}
         if not active:
             return False
         runs = self.runner.tree.read()["nodes"]
@@ -1284,6 +1293,8 @@ class Engine:
             launch = attempt.get("launch_evidence")
             executor = launch.get("executor") if isinstance(launch, dict) else None
             if isinstance(executor, dict) and executor.get("kind") == "isolated":
+                if self.settle_isolated_launch_failure(attempt):
+                    continue
                 if attempt.get("isolation_unknown"):
                     await self.runner._recover_isolated_predecessor(attempt)
                     continue
@@ -1568,6 +1579,39 @@ class Engine:
         loop["pending_verdict"] = verdict
         self.store.save_node(db, loop)
 
+    def settle_isolated_launch_failure(self, attempt):
+        """IC-C3 K10: a confirmed, unstarted failure has no result to capture.
+
+        Settle from the host's launch evidence before adoption can supervise
+        the failed launch. Recording and TF accounting share one transaction,
+        so neither capture nor a worker's watchdog teardown gates the retry.
+        """
+        with self.service.changed, self.store.transaction() as db:
+            current = attempt_records(db)[attempt["attempt_id"]]
+            evidence = current.get("launch_evidence", {}).get("executor", {})
+            if (current["state"] not in {"claimed", "launched", "captured"}
+                    or evidence.get("kind") != "isolated" or not evidence.get("failure")
+                    or not evidence.get("termination_confirmed") or evidence.get("invocation_id")
+                    or current.get("cleanup") or current.get("isolation_unknown")
+                    or current.get("cancel_requested") or current.get("window_stop")
+                    or current.get("window_stop_started") or current.get("window_resume")
+                    or current.get("rate_limit_resume")):
+                return False
+            record_launch(self.store, db, current, SimpleNamespace(id=current["run_id"]))
+            current = attempt_records(db)[attempt["attempt_id"]]
+            current.pop("launch_in_progress", None)
+            current.pop("resume_pending", None)
+            result = {"status": "failed", "session_id": "", "need_info": [],
+                      "run_dir": str(self.paths.run_dir(current["run_id"])),
+                      "cause": dict(evidence["failure"])}
+            current.update(state="captured", result=result, ended_at=now())
+            db.execute("UPDATE capabilities SET revoked=1 WHERE subject=?", (current["run_id"],))
+            self.store.transition(db, "run_finished", current["node_id"],
+                                  {"run_id": current["run_id"], "status": "failed"})
+            nodes = self.store.node_records(db)
+            self.record_result(db, nodes, nodes[current["node_id"]], current, result)
+            return True
+
     def finished(self, attempt, run):
         """Journal confirmed death, capture outside the lock, then save its result.
 
@@ -1577,6 +1621,8 @@ class Engine:
         """
         if attempt.get("cleanup"):
             self.finished_cleanup(attempt, run)
+            return
+        if self.settle_isolated_launch_failure(attempt):
             return
         confirm_recovery_launch(self.store, self.paths, attempt)
         from . import suspension
@@ -2213,77 +2259,81 @@ class Engine:
                     self.store.transition(db, "integrated", node["id"], generation)
                 elif reviewer:
                     self.store.transition(db, "reviewer_commits_ignored", parent["id"], {"run_id": current["run_id"]})
-                # Legacy launch journals have no immutable input identity. Keep
-                # their abandoned state after missing-tree recovery; modern runs
-                # retain their captured result as a recorded attempt.
-                current["state"] = ("abandoned" if current.get("completion_proven") == "missing_tree"
-                                    and "input_commit" not in current else "recorded")
-                save_attempt(db, current)
-                if current.get("alias_id"):
-                    bound = sessions.aliases(db)[current["alias_id"]]
-                    if result.get("session_id"):
-                        bound["session_id"] = result["session_id"]
-                    if result.get("commit"):
-                        bound["commit"] = result.get("checkout_commit", result["commit"])
-                    bound["last_run"] = current["run_id"]
-                    sessions.save_alias(db, bound)
-                tree_run = self.runner.tree.get(current["run_id"])
-                node.pop("rate_limit_attempts", None)
-                node.pop("rate_limit_fresh_from", None)
-                # TF-R1: the classified cause travels with the run entry the
-                # public views show, whatever settles below.
-                if result.get("cause"):
-                    entry = next((r for r in node["runs"]
-                                  if r["attempt_id"] == current["attempt_id"]), None)
-                    if entry is not None:
-                        entry["cause"] = result["cause"]
-                # TB-R1: hold in the settlement transaction, before any node
-                # can see this attempt as a successful dependency.
-                if (node["state"] not in {"cancelled", "held"} and result.get("need_info")
-                        and not verdict and not (tree_run and tree_run.verdict)):
-                    self.hold(db, node, "needs_info", markers=result["need_info"])
-                if node["state"] not in {"cancelled", "held"}:
-                    loop = nodes.get(node.get("parent"))
-                    while loop and loop["kind"] != "loop":
-                        loop = nodes.get(loop["parent"])
-                    if result["status"] != "done" and loop:
-                        loop.pop("pending_verdict", None)
-                        self.store.save_node(db, loop)
-                    outcome = None
-                    if result["status"] != "done":
-                        outcome = self.settle_failure(db, nodes, node, loop, current, result)
-                    if outcome is None and result["status"] == "done":
-                        outcome = "completed"
-                    if outcome is not None:
-                        if verdict:
-                            verdict["settled"] = True
-                            self.record_round(db, loop, nodes, verdict)
-                            self.store.transition(db, "verdict_settled", loop["id"], verdict)
-                            outcome = verdict["verdict"]
-                        node.update(state="done", outcome=outcome,
-                                    revision=node["revision"] + 1)
-                        self.store.transition(db, "done", node["id"], {"outcome": node["outcome"]})
-                        if result["status"] != "done" and loop and loop["state"] not in {"held", "cancelled", "done"}:
-                            self.hold(db, loop, "run_failed", node["id"])
-                if current.get("alias_id") and tree_run and tree_run.reason == "session_lost":
-                    self.hold(db, node, "session_lost", current["run_id"])
-                if current.get("steer_restart") and node["state"] != "held":
-                    restart = current["steer_restart"]
-                    node.update(state="open", outcome=None, hold=None,
-                                task=node["task"] + "\n\n" + restart["message"],
-                                session_resume="unsupported", revision=node["revision"] + 1)
-                    if current.get("alias_id"):
-                        bound = sessions.aliases(db)[current["alias_id"]]
-                        bound["session_id"] = ""
-                        sessions.save_alias(db, bound)
-                    entry = next((r for r in node["runs"] if r["attempt_id"] == current["attempt_id"]), None)
-                    if entry is not None:
-                        entry["session_resume"] = "unsupported"
-                    self.store.transition(db, "steered", node["id"], {
-                        "run_id": current["run_id"], "session_resume": "unsupported"})
-                self.store.save_node(db, node)
-                self.service.changed.notify_all()
+                self.record_result(db, nodes, node, current, result, verdict)
             return
+
+    def record_result(self, db, nodes, node, current, result, verdict=None):
+        """Record the attempt and settle its owner in the same transaction."""
+        # Legacy launch journals have no immutable input identity. Keep
+        # their abandoned state after missing-tree recovery; modern runs
+        # retain their captured result as a recorded attempt.
+        current["state"] = ("abandoned" if current.get("completion_proven") == "missing_tree"
+                            and "input_commit" not in current else "recorded")
+        save_attempt(db, current)
+        if current.get("alias_id"):
+            bound = sessions.aliases(db)[current["alias_id"]]
+            if result.get("session_id"):
+                bound["session_id"] = result["session_id"]
+            if result.get("commit"):
+                bound["commit"] = result.get("checkout_commit", result["commit"])
+            bound["last_run"] = current["run_id"]
+            sessions.save_alias(db, bound)
+        tree_run = self.runner.tree.get(current["run_id"])
+        node.pop("rate_limit_attempts", None)
+        node.pop("rate_limit_fresh_from", None)
+        # TF-R1: the classified cause travels with the run entry the
+        # public views show, whatever settles below.
+        if result.get("cause"):
+            entry = next((r for r in node["runs"]
+                          if r["attempt_id"] == current["attempt_id"]), None)
+            if entry is not None:
+                entry["cause"] = result["cause"]
+        # TB-R1: hold in the settlement transaction, before any node
+        # can see this attempt as a successful dependency.
+        if (node["state"] not in {"cancelled", "held"} and result.get("need_info")
+                and not verdict and not (tree_run and tree_run.verdict)):
+            self.hold(db, node, "needs_info", markers=result["need_info"])
+        if node["state"] not in {"cancelled", "held"}:
+            loop = nodes.get(node.get("parent"))
+            while loop and loop["kind"] != "loop":
+                loop = nodes.get(loop["parent"])
+            if result["status"] != "done" and loop:
+                loop.pop("pending_verdict", None)
+                self.store.save_node(db, loop)
+            outcome = None
+            if result["status"] != "done":
+                outcome = self.settle_failure(db, nodes, node, loop, current, result)
+            if outcome is None and result["status"] == "done":
+                outcome = "completed"
+            if outcome is not None:
+                if verdict:
+                    verdict["settled"] = True
+                    self.record_round(db, loop, nodes, verdict)
+                    self.store.transition(db, "verdict_settled", loop["id"], verdict)
+                    outcome = verdict["verdict"]
+                node.update(state="done", outcome=outcome,
+                            revision=node["revision"] + 1)
+                self.store.transition(db, "done", node["id"], {"outcome": node["outcome"]})
+                if result["status"] != "done" and loop and loop["state"] not in {"held", "cancelled", "done"}:
+                    self.hold(db, loop, "run_failed", node["id"])
+        if current.get("alias_id") and tree_run and tree_run.reason == "session_lost":
+            self.hold(db, node, "session_lost", current["run_id"])
+        if current.get("steer_restart") and node["state"] != "held":
+            restart = current["steer_restart"]
+            node.update(state="open", outcome=None, hold=None,
+                        task=node["task"] + "\n\n" + restart["message"],
+                        session_resume="unsupported", revision=node["revision"] + 1)
+            if current.get("alias_id"):
+                bound = sessions.aliases(db)[current["alias_id"]]
+                bound["session_id"] = ""
+                sessions.save_alias(db, bound)
+            entry = next((r for r in node["runs"] if r["attempt_id"] == current["attempt_id"]), None)
+            if entry is not None:
+                entry["session_resume"] = "unsupported"
+            self.store.transition(db, "steered", node["id"], {
+                "run_id": current["run_id"], "session_resume": "unsupported"})
+        self.store.save_node(db, node)
+        self.service.changed.notify_all()
 
     def integration_failed(self, attempt, nodes, current, node, exc):
         """Hold the node on a ref that is not as journalled; True to re-read."""

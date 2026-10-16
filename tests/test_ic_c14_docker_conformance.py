@@ -98,16 +98,18 @@ def test_ic_c5_k9_each_invocation_gets_a_private_home_and_tmpdir(be):
     probe_write = ("import os, pathlib\n"
                    "for var in ('HOME', 'TMPDIR'):\n"
                    "    pathlib.Path(os.environ[var], 'only-in-a').write_text('a')\n"
-                   "print(sorted(var for var in ('HOME', 'TMPDIR')"
-                   " if pathlib.Path(os.environ[var], 'only-in-a').exists()), flush=True)")
+                   "print('written', flush=True)")
     probe_look = ("import os, pathlib\n"
                   "print(sorted(var for var in ('HOME', 'TMPDIR')"
                   " if pathlib.Path(os.environ[var], 'only-in-a').exists()), flush=True)")
     _, a = provisioned(be)
     started(be, probe_write, key="inv-1", ident=a)
-    finished(be, a, "inv-1", conformance.DOCKER_OP)
-    assert out(be, a, "inv-1") == b"['HOME', 'TMPDIR']\n"            # sanity: visible where written
+    finished(be, a, "inv-1")
+    assert out(be, a, "inv-1") == b"written\n"
+    started(be, probe_look, key="inv-2", ident=a)                     # sanity: visible where written
+    finished(be, a, "inv-2")
+    assert out(be, a, "inv-2") == b"['HOME', 'TMPDIR']\n"
     _, b = provisioned(be, "key-2", owner="att_other")
     started(be, probe_look, key="inv-1", ident=b)
-    finished(be, b, "inv-1", conformance.DOCKER_OP)
+    finished(be, b, "inv-1")
     assert out(be, b, "inv-1") == b"[]\n"
