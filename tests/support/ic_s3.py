@@ -23,6 +23,7 @@ import ic_workload as wl  # noqa: E402
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 PROJECT = "ic-test"
+DOCKER_RESOURCES_ENV = "IC_DOCKER_RESOURCES"
 NEEDS_KEY = wl.NEEDS_KEY
 
 
@@ -174,8 +175,9 @@ class S3Sched(ShortRPC, ic.IcSched):
         required = "DockerBackend" if backend == "docker" else "ReferenceBackend"
         cls = getattr(ic.lifecycle(), required, None)
         assert callable(cls) and callable(getattr(cls, "attach_checkout", None)), "K17.3 provisioning seam is missing"
-        super().__init__(tmp_path, monkeypatch, inject=True, kind="isolated", scheduler=scheduler)
+        self._monkeypatch = monkeypatch
         self.backend_name = backend
+        super().__init__(tmp_path, monkeypatch, inject=True, kind="isolated", scheduler=scheduler)
         monkeypatch.setenv(ic.BACKEND_ENV, "ic_s3_backends:make_docker" if backend == "docker"
                            else "ic_s3_backends:make")
         if backend == "docker":
@@ -194,6 +196,14 @@ class S3Sched(ShortRPC, ic.IcSched):
         self.p.write()
         self._reset_server()
         self.plan({"calls": True})
+
+    def executor(self, kind: str, **extra) -> None:
+        """As `IcSched.executor`; the configured `isolated.resources` also reach
+        the injected Docker backend (its factory takes only a root and seeds)."""
+        resources = (extra.get("isolated") or {}).get("resources")
+        if getattr(self, "backend_name", None) == "docker" and resources:
+            self._monkeypatch.setenv(DOCKER_RESOURCES_ENV, json.dumps(resources))
+        super().executor(kind, **extra)
 
     # -- nodes ------------------------------------------------------------
     def node(self, *ops: dict, **fields) -> str:

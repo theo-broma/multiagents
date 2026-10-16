@@ -141,7 +141,7 @@ def resume(s, node):
 def make_world(request, tmp_path, monkeypatch):
     owner = None
     if request.param == 'docker':
-        dk.require_docker(); owner = request.config.st_docker_owner
+        dk.require_docker(); owner = dk.test_owner(request)
     s = World(tmp_path, monkeypatch, backend=request.param, owner=owner)
     try:
         yield s

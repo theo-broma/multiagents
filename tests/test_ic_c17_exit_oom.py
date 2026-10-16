@@ -44,7 +44,7 @@ def test_ic_c17_oom_cause_is_attributed_to_the_attempt(tmp_path, monkeypatch):
 @pytest.mark.skipif(not dk.OPT_IN, reason="real Docker is opt-in: SG_TEST_DOCKER=1")
 def test_ic_c17_real_docker_hard_memory_limit_reports_oom(tmp_path, monkeypatch, request, st_live_docker):
     dk.require_docker()
-    s = s3.S3Sched(tmp_path, monkeypatch, backend="docker", owner=request.config.st_docker_owner)
+    s = s3.S3Sched(tmp_path, monkeypatch, backend="docker", owner=dk.test_owner(request))
     try:
         s.executor("isolated", isolated={"backend": "docker", "resources": {"memory": "64m"}})
         s.start()
@@ -54,4 +54,4 @@ def test_ic_c17_real_docker_hard_memory_limit_reports_oom(tmp_path, monkeypatch,
         assert any(c.get("class") == "crash" and "oom" in ic.text_of(c).lower() for c in causes), causes
     finally:
         s.close()
-        dk.remove_session_resources(request.config.st_docker_owner)
+        dk.remove_session_resources(dk.test_owner(request))

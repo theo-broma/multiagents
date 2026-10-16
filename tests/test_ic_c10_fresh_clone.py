@@ -502,7 +502,7 @@ def test_ic_c10_the_docker_guest_repository_home_and_temp_have_stable_paths(
         tmp_path, monkeypatch, st_live_docker, request):
     import ic_docker as dk
     dk.require_docker()
-    w = dk.IsolationWorld(tmp_path, monkeypatch, request.config.st_docker_owner)
+    w = dk.IsolationWorld(tmp_path, monkeypatch, dk.test_owner(request))
     try:
         w.start()
         node = w.probe_node("plant", nonce=w.nonce("stable"), hold=0)

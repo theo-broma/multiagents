@@ -44,7 +44,7 @@ def sx(request, tmp_path, monkeypatch, st_live_docker):
     owner = None
     if request.param == "docker":
         dk.require_docker()
-        owner = request.config.st_docker_owner
+        owner = dk.test_owner(request)
     s = s3.S3Sched(tmp_path, monkeypatch, backend=request.param, owner=owner)
     s.counts_spawns = request.param == "reference"
     yield s

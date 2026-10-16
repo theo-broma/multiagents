@@ -120,4 +120,7 @@ def make_docker(root, seeds=None):
     import ic_s3
     root = Path(os.environ.get("IC_BACKEND_ROOT") or root)
     root.mkdir(parents=True, exist_ok=True)
-    return Crashy(ic_s3.docker_backend(root, seeds=seeds))
+    settings = {}
+    if os.environ.get("IC_DOCKER_RESOURCES"):             # the configured executor.isolated.resources
+        settings["resources"] = json.loads(os.environ["IC_DOCKER_RESOURCES"])
+    return Crashy(ic_s3.docker_backend(root, seeds=seeds, **settings))

@@ -25,10 +25,10 @@ def executable_backend(request, tmp_path, monkeypatch, st_live_docker):
     owner = None
     if request.param == "docker":
         dk.require_docker()
-        owner = request.config.st_docker_owner
+        owner = dk.test_owner(request)
         shim = dk.write_label_shim(tmp_path / "shim", owner)
         monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ.get('PATH', '')}")
-        backend = s3.docker_backend(root)
+        backend = dk.keyed(s3.docker_backend(root), owner)
     else:
         backend = ic_backends.make_reference(root)
     assert callable(getattr(backend, "attach_checkout", None)), "K17.3 attach_checkout is missing"

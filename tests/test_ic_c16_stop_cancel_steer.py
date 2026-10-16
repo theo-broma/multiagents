@@ -38,7 +38,7 @@ def sx(request, tmp_path, monkeypatch, st_live_docker):
     owner = None
     if request.param == "docker":
         dk.require_docker()
-        owner = request.config.st_docker_owner
+        owner = dk.test_owner(request)
     s = s3.S3Sched(tmp_path, monkeypatch, backend=request.param, owner=owner)
     yield s
     s.close()
@@ -135,7 +135,7 @@ def test_ic_c16_k6_an_unconfirmed_stop_keeps_the_hold_and_the_attempt_is_not_dec
 @pytest.mark.skipif(not dk.OPT_IN, reason="containment is claimed by real backends only (IC-C5): SG_TEST_DOCKER=1")
 def test_ic_c16_cancel_leaves_no_process_of_the_attempt_even_a_setsid_child(tmp_path, monkeypatch, st_live_docker, request):
     dk.require_docker()
-    owner = request.config.st_docker_owner
+    owner = dk.test_owner(request)
     s = s3.S3Sched(tmp_path, monkeypatch, backend="docker", owner=owner)
     tag = "IC-TAG-" + uuid.uuid4().hex
     try:

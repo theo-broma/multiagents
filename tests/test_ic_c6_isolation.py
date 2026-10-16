@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(not dk.OPT_IN,
 @pytest.fixture
 def world(tmp_path, monkeypatch, st_live_docker, request):
     dk.require_docker()                                  # fails, never skips, under the switch
-    w = dk.IsolationWorld(tmp_path, monkeypatch, request.config.st_docker_owner)
+    w = dk.IsolationWorld(tmp_path, monkeypatch, dk.test_owner(request))
     w.start()
     yield w
     dk.cleanup(w)

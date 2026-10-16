@@ -33,6 +33,9 @@ def containers_to_remove(listing):
             continue
         try:
             host, pid_text, started = label.rsplit(':', 2)
+            started, slash, token = started.partition('/')    # per-test suffix: <start>/<token>
+            if slash and not token.isalnum():
+                continue
             pid = int(pid_text)
             if host != socket.gethostname() or pid <= 0 or not started.isdecimal():
                 continue

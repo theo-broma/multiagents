@@ -13,6 +13,8 @@ every container that mounts or names this test's directory, even on failure.
 from __future__ import annotations
 
 import atexit
+import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -78,11 +80,63 @@ def write_label_shim(directory: Path, owner: str) -> Path:
     return directory
 
 
+def test_owner(request) -> str:
+    """The owner label of ONE test: the session's label plus a token of the
+    test id, so a fixture's sweep (`remove_session_resources`) can only remove
+    what this test created, never another xdist worker's containers."""
+    token = hashlib.sha1(request.node.nodeid.encode()).hexdigest()[:10]
+    return f"{request.config.st_docker_owner}/{token}"
+
+
+def test_token(owner: str) -> str:
+    return owner.rpartition("/")[2]
+
+
+class KeyedBackend:
+    """A real Docker backend whose creation keys and project
+    label values are private to one test. The daemon is shared by every xdist
+    worker and `find(key)` is daemon-wide, so tests that reuse a literal key
+    ("key-1") or project ("ic-test") would otherwise find each other's
+    containers. Everything else is delegated untouched; the same token on a
+    second backend over the same root keeps same-root recovery working."""
+
+    def __init__(self, inner, token: str):
+        self._inner, self._token = inner, token
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def _key(self, key):
+        return f"{key}-{self._token}" if isinstance(key, str) and key else key
+
+    def _project(self, value):
+        return f"{value}-{self._token}" if isinstance(value, str) and value else value
+
+    async def provision(self, spec, key):
+        labels = getattr(spec, "labels", None)
+        if isinstance(labels, dict) and ic.PROJECT_LABEL in labels:
+            spec = dataclasses.replace(spec, labels={**labels, ic.PROJECT_LABEL: self._project(labels[ic.PROJECT_LABEL])})
+        return await self._inner.provision(spec, self._key(key))
+
+    async def find(self, key):
+        return await self._inner.find(self._key(key))
+
+    async def list_owned(self, project):
+        return await self._inner.list_owned(self._project(project))
+
+
+def keyed(backend, owner: str):
+    return KeyedBackend(backend, test_token(owner))
+
+
 def owner_is_dead(label: str) -> bool:
     """True only when the owning session is verifiably gone (same host, pid
     absent or reused). Anything unparseable or foreign is kept."""
     try:
         host, pid_text, started = label.rsplit(":", 2)
+        started, slash, token = started.partition("/")       # per-test suffix: <start>/<token>
+        if slash and not token.isalnum():
+            return False
         pid = int(pid_text)
         if host != socket.gethostname() or pid <= 0 or not started.isdecimal():
             return False
