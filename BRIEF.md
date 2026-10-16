@@ -6362,3 +6362,12 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~03:35 CEST. Real Docker on 4A 85c3ce11: 347 passed, 0 failed.
 - 2026-10-17 ~03:50 CEST. 4A round 3 reviewer nd-88b23036 approved with no findings. Waiting on suite 0f3c5d66ee50. Then a short advisor check on the round 3 delta, then merge_node nd-905bbdf0.
 - 2026-10-17 ~05:10 CEST. RB suite on 215c352b found a regression: nc_r69 TypeError at results.py:257 (parent['loop'] read on a non-loop parent). It fails alone on RB and passes 3/3 on main. The other reds are expected (4A tests, c12/c13) or flakes. nd-82bd1b7c relaunched to fix. Reviewer nd-39b5890c depends on it. Then a targeted rerun of the RB suite reds, then merge.
+- 2026-10-17 ~05:40 CEST. **Slice 4A MERGED** (5e1e8254, nd-905bbdf0, src only, no test files touched). Evidence:
+  - final suite on 85c3ce11: only expected reds, plus flakes (c15 replay passes alone 2/2);
+  - real Docker: 347 passed;
+  - reviewers nd-9a075d32 and nd-88b23036 approved;
+  - advisor turn 11 found no blocker.
+  Deferred to slice 5 (advisor):
+  - payload file-count and byte bounds;
+  - no reaper for crash-left `.export-*`/`.payload-*` staging dirs, and old export snapshots kept until conversations.dispose() (storage accounting);
+  - RB capture's base-history scan has no fixed bound (search newest-first, stop when every anchor is found).
