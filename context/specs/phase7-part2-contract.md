@@ -1882,6 +1882,84 @@ No allowlist entry or new external host is added by this slice.
   evidence. Until the user-level choice above is resolved, no test may claim
   that display-only redaction satisfies the no-credential-logging requirement.
 
+### Slice 4B.1 clarifications (2026-10-17, answering tester nd-754de4be; advisor turn 14)
+
+- **K4B.1 — egress handler seam.** The handler is served by
+  `multiagents.scheduler.gateways.serve_egress(listen, allowlist, grants,
+  resolver, connect, forbidden_networks)`:
+  - `grants` is {grant_id: {username, password, networks}};
+  - `resolver(host, port)` returns a list of addresses;
+  - `connect(addr, port)` returns a socket.
+
+  It returns an object with `.address`, `.revoke(grant_id)` and `.close()`.
+  Production wires the real resolver and dialer; tests inject controlled
+  ones. This is a test seam, not a public API.
+- **K4B.2 — readiness under the fake CLI.** `GatewayRegistry` takes an
+  optional readiness probe, a callable that defaults to the real
+  authenticated HTTP check. Under the fake CLI, tests inject a probe. The
+  inspect-based identity and attachment checks still run.
+- **K4B.3 — the network handle.**
+  - `LaunchSpec.network_handle` carries `NetworkHandle.id`, a string.
+  - A handle that is not host-issued gives `InvalidSpec`.
+  - The reference backend may answer `Unsupported("network_handle")` or
+    `InvalidSpec`.
+- **K4B.4 — the registry.**
+  - `prepare` or `grant` for an attempt the journal does not own gives
+    `InvalidSpec`.
+  - `reconcile()` returns exactly one row per attempt known to the registry,
+    with state `ready` while the attempt is live and authorised.
+- **K4B.5 — status codes.** A CONNECT to a port other than 443 gives 403
+  (policy). A malformed or ambiguous authority, or a Host header that
+  conflicts with the request authority, gives 400. The contract's 403, 407
+  and 502 cases are unchanged.
+- **K4B.6 — redaction.**
+  - A credential-bearing proxy URL is replaced whole by `[REDACTED]`.
+  - An incomplete secret prefix at the end of a stream is emitted unchanged.
+  - The secrets the redactor needs are delivered with the invocation input.
+- **K4B.7 — privilege separation in the entrypoint (amends slice 3's "no
+  added capabilities" rule for isolated attempts that carry gateway
+  credentials).**
+  - **Start.** The backend starts the entrypoint as uid 0 inside the
+    container, with:
+    - `--cap-drop ALL --cap-add SETUID --cap-add SETGID`;
+    - `SETPCAP` only if clearing the bounding set requires it;
+    - `--security-opt no-new-privileges`.
+
+    A host UID of 0 is refused.
+  - **Setup.** Trusted setup forks *before* any permanent drop, and no guest
+    code runs during it:
+    - access to the 0700 host-owned input and storage directories is
+      arranged before the drop, and the child's `chdir` happens under the
+      host UID;
+    - the redactor branch moves to a dedicated redactor UID/GID;
+    - the child branch moves to the host UID/GID.
+  - **The drop.** Each branch clears:
+    - its supplementary groups;
+    - its real, effective and saved IDs;
+    - its effective, permitted, inheritable and ambient capabilities.
+  - **Exec.** The child's `exec` waits until the redactor confirms its own
+    drop.
+  - **Pipes.** The child writes its stdout and stderr *into* the redactor's
+    pipes. It never inherits or can reopen the redactor's raw log
+    descriptors (`/proc/1/fd/*`).
+  - **Stopping.** A graceful stop goes through a trusted signal relay,
+    because a capability-free redactor under another UID cannot signal the
+    child.
+  - **Failing closed.** If the separation cannot be established, production
+    startup fails closed: the attempt is refused with `isolation_unavailable`.
+  - **Unprivileged test mode.** It exists only when explicitly selected by
+    `MULTIAGENTS_TEST_REDACTOR_UNPRIVILEGED=1`. It is never inferred from a
+    non-root start. The host strips that variable from every run
+    environment. In that mode, the redaction runs without the separation,
+    for local tests that run the extracted script.
+  - **Verification.** A fake-CLI test asserts the privileged argv. Real
+    Docker tests prove each of these:
+    - the child cannot signal or ptrace the redactor;
+    - the child cannot read `/proc/1/fd/*` or regain capabilities;
+    - a graceful stop works;
+    - files the child writes keep the host UID;
+    - the host can read the output.
+
 ### Slice 4B work split (orchestrator, 2026-10-16)
 
 4B ships in two sub-slices, each with its own tester → implementer-deep →
