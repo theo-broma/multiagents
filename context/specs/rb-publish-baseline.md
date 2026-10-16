@@ -34,9 +34,27 @@ researcher run ag-df5ffe confirmed from the code:
   carries its own version, for example a test a tester wrote, that version
   still wins over the base branch: Decision 11 of
   context/specs/readonly-restore-provenance.md (RP-R11) is unchanged.
+- **Re-wording (2026-10-16, approved by the user; supersedes the
+  clarification above where they differ).** For an input entry whose content
+  for a path matches a base-chain snapshot, a newer *merged* base snapshot may
+  vouch for the result's content despite RP-R11, subject to RP-R7
+  supersession.
+  - "Base chain" is the frozen first-parent chain of the base branch. "Newer"
+    is measured against the newest base-chain snapshot matching the input
+    entry, per path. This works with squash publication.
+  - The current base tip does not vouch by itself: a copy of base content the
+    result never merged stays an edit.
+  - Restoration targets use the same eligible base source.
+  - The rules for generation sources (a tester's own version) are unchanged:
+    that version still wins over the base branch.
+  - A result that rolls a path back to an *older* base-chain version than
+    the input's is not vouched for: it is restored.
+  - Known limitation: a tester who deliberately restores an old base version
+    is classified as base content.
 - Verified by: an agent merges a newer base-branch commit that changed a
   read-only test, and publication keeps it with no `readonly_reverted` entry;
-  an agent's own edit to the same path is still reverted.
+  an agent's own edit to the same path is still reverted; a rollback to an
+  older base version is reverted.
 
 **RB-R2 — a relaunch input descends from the branch tip.**
 - When a node with a recorded branch tip is relaunched, its prepared input
