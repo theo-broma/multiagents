@@ -6398,3 +6398,4 @@ Pending user: RB-R1 re-wording (above).
   * GG: implementer-quick, then reviewer, then adversary (look-alikes).
   * NC-R59: implementer, then reviewer.
 - 2026-10-17 ~01:05 CEST. GG-R10 tests on main (ffd50b6f, 219 tests, 87 red). Chain: implementer-quick nd-d228148e, then reviewer nd-3dc973b1, then adversary nd-b9aa08d9. Then take the adversary's tests, have them fixed, run the suite, merge. Testers still running: 4B.1 nd-754de4be, UD nd-2630921f, NC-R59 nd-e9676460.
+- 2026-10-17 ~01:15 CEST. NC-R59 tests on main (9d819308, 7 red). Spec clarification: captured and suspended are refused too. Tester nd-e9676460 relaunched to add those cases. Implementer nd-0299acdd, then reviewer nd-57cd21d4. Take the tester's extra cases to main when it is done.
