@@ -1494,6 +1494,17 @@ longer refused.
 - Verified by: the IC-C21 crash cases at `provision_done`, `run_entry`,
   boundary 4 and `remove_entry`, and the orphan-endpoint case using that
   location.
+- **K18.3 — the endpoint path length.** Approved by the user on 2026-10-16.
+  - The endpoint must be served, and reachable from the guest at
+    `/run/multiagents/rpc/rpc.sock`, whatever the length of its absolute
+    host path. Linux limits a Unix socket address to 107 bytes, and a host
+    path under a long project root can exceed that.
+  - A path that is too long is never a silent failure. If the endpoint
+    cannot be served, the attempt does not start, and the node is held with
+    a reason that names the endpoint.
+  - The K18.2 location is unchanged.
+  - Verified by: an endpoint whose absolute host path exceeds 107 bytes
+    serves a round trip on the fake backend.
 
 **K19 — a retry of an isolated attempt keeps its recorded settings (TF,
 IC-C15).** Approved by the user on 2026-10-16.
