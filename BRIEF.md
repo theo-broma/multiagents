@@ -6406,3 +6406,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~02:20 CEST. 4B.1 tester nd-754de4be first pass: 387 tests, red as expected, plus 5 NEED_INFOs. Answered in the contract as K4B.1..K4B.7 (9845c48f).
   K4B.7 amends slice 3's 'no added capabilities' rule, on advisor turn 14's advice: the entrypoint starts as uid 0 with only SETUID/SETGID and no-new-privileges, forks before the drop, puts the redactor on its own UID and the child on the host UID, and uses a signal relay. It fails closed, and its test mode is explicit only. Tell the user in the next report.
   Tester relaunched to align. Next: apply its tests to main, then implementer-deep, then reviewer, then adversary, then real Docker.
+- 2026-10-17 ~02:40 CEST. UD implementer nd-b5c9b0fd done (b0ef8d45): 315 UD tests pass, plus the existing question/monitor/ntfy files. Reviewer nd-c8dd83cd next.
