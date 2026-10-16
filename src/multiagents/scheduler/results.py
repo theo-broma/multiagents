@@ -251,21 +251,24 @@ class Results:
         while cur:
             refs[0:0] = cur["inputs"]
             cur = nodes.get(cur["parent"])
-        commit = tip
-        if refs:
+        parent = nodes.get(node["parent"])
+        reviewed = (parent["generations"][-1]["commit"]
+                    if (parent and parent["kind"] == "loop" and parent["loop"]
+                        and parent["loop"]["verdict_child"] == node["id"]
+                        and parent["generations"]) else None)
+        # The shared integration branch may contain sibling work. A reviewer
+        # starts from exactly its generation, including when recovering WIP.
+        commit = reviewed or tip
+        if refs and reviewed is None:
             inputs = [input_generation(nodes.get(ref["node"]), ref, nodes, consumer=node) for ref in refs]
             if any(generation is None for generation in inputs):
                 raise gitops.GitError("input generation is unavailable")
-            commit = inputs[0]["commit"]
-            for generation in inputs[1:]:
+            if top.get("branch_tip") is None:
+                commit = inputs.pop(0)["commit"]
+            for generation in inputs:
                 commit = self.merge_commit(commit, generation["commit"], "multiagents: combined node inputs")
         recovery = node.get("recovery")
         if recovery and recovery.get("pending"):
-            # A reviewer resumes from the generation it currently reviews.
-            parent = nodes.get(node["parent"])
-            if (parent and parent["kind"] == "loop" and parent["loop"]["verdict_child"] == node["id"]
-                    and parent["generations"]):
-                commit = parent["generations"][-1]["commit"]
             try:
                 captured = self.recovery_commit(recovery)
                 commit = self.merge_commit(commit, captured, "multiagents: recover " + node["id"])
@@ -316,7 +319,9 @@ class Results:
         # Intersect the two host-owned source sets with the attempt's new
         # ancestry. Neither a generation's ancestors nor base side parents
         # acquire authority from their descendant's record.
-        base_chain = set(self.git("rev-list", "--first-parent", base_commit, check=True).out.splitlines())
+        base_history = self.git("rev-list", "--first-parent", base_commit, check=True).out.splitlines()
+        base_order = {source: index for index, source in enumerate(base_history)}
+        base_chain = set(base_history)
         input_commit = attempt["input_commit"]
         history = [line.split() for line in self.git(
             "rev-list", "--topo-order", "--parents", commit, "--not", input_commit,
@@ -335,6 +340,20 @@ class Results:
         commits = dict.fromkeys([input_commit, commit, *candidates,
                                 *(base for bases in merge_bases.values() for base in bases)])
         entries = {source: self.tree_entries(source, paths) for source in commits}
+        # Squash publication can put the input's entry on the base branch
+        # without putting that base commit in the input's ancestry (RB-R1).
+        # Locate the newest matching snapshot, including unchanged stretches
+        # of the chain. The tip and the parent of each path change cover the
+        # newest end of every stretch without reading every base tree.
+        base_versions = self.git("--literal-pathspecs", "rev-list", "--first-parent", base_commit, "--", *paths,
+                                 check=True).out.splitlines()
+        snapshots = {base_commit, *base_versions}
+        snapshots.update(base_history[base_order[source] + 1] for source in base_versions
+                         if base_order[source] + 1 < len(base_history))
+        base_snapshots = sorted(snapshots, key=base_order.__getitem__)
+        for source in base_snapshots:
+            if source not in entries:
+                entries[source] = self.tree_entries(source, paths)
         tip = entries[commit]
         producer_policies = {}
 
@@ -355,10 +374,17 @@ class Results:
 
         decisions = []
         for path in paths:
-            could_vouch = {source for source in candidates if merge_bases[(source, input_commit)]
-                           and all(entries[source][path] != entries[base][path]
-                                   and entries[input_commit][path] == entries[base][path]
-                                   for base in merge_bases[(source, input_commit)])}
+            anchor = next((base_order[source] for source in base_snapshots
+                           if entries[input_commit][path] == entries[source][path]), None)
+            # RB-R1 lets a newer merged base snapshot vouch even across
+            # conflicting merge bases. Generation sources retain RP11, and
+            # the same supersession pass below governs both kinds of source.
+            could_vouch = {source for source in candidates
+                           if (anchor is not None and source in base_chain and base_order[source] < anchor)
+                           or (merge_bases[(source, input_commit)]
+                               and all(entries[source][path] != entries[base][path]
+                                       and entries[input_commit][path] == entries[base][path]
+                                       for base in merge_bases[(source, input_commit)]))}
             allowed, ancestors = set(), {}
             # Parents precede descendants here. A policy matters only for
             # a possible vouch or a source that could supersede an allowed
