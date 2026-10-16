@@ -6325,3 +6325,4 @@ In flight (watchers armed; re-arm with scratchpad watch-node.sh if lost):
   ASKED USER to approve this RB-R1 re-wording; after yes: write into the RB spec, tester revises tests, relaunch nd-82bd1b7c (its reviewer nd-16d677bc follows).
 Pending user: RB-R1 re-wording (above).
 - 2026-10-16 ~16:40 CEST — Docker-fixture tester nd-fa1e6c39 DONE (not yet read). Next after compaction: read its result, apply `git diff main...nodes/nd-fa1e6c39 -- tests` to main, rerun /var/tmp/s4d-run.sh on 02bce369 + those tests.
+- 2026-10-16 ~16:50 CEST — 4A adversary nd-947e6815 DONE (not yet read; never merge_node it — take only its tests/test_ic_s4a_adv_*.py). Next after compaction: read its findings table + verdict; failing tests go to a 4A implementer (codex-b, input nd-905bbdf0).
