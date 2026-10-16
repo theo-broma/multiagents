@@ -638,6 +638,20 @@ edit or cancel its own node. `state`, `hold`, `outcome`, `revision`,
 `generations`, `runs`, bindings, `created_*`, attempts and `template` are
 never client-writable; only scheduler transitions write them. A `done` node is
 reopened only through `relaunch_node` (resolves the NC-R6/NC-R33 conflict).
+- **Amendment (2026-10-17, approved by the user).**
+  - Root may change `task` only while no attempt of the node is claimed,
+    launching or running.
+  - Otherwise `update_node` refuses with `active_runs`, naming
+    `steer_run` and `relaunch_node`, and changes nothing.
+  - Why: an update raced an in-flight launch, and the run started with the
+    old task (worker.py, around lines 98-151; researcher nd-b8600d6a).
+  - The other fields are unchanged.
+  - Verified by:
+    - an update that changes `task` on a node whose attempt is claimed but
+      not yet recorded is refused, and the launch uses the task it was
+      claimed with;
+    - the same update on an `open`, unclaimed node succeeds;
+    - a `pins` update during a run behaves as today.
 
 **NC-R60 — idempotency for every mutating op (amends NC-R8).** Every mutating
 op (create, update, cancel, instantiate, register, verdict, relaunch, close,

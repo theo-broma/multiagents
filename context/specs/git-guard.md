@@ -209,3 +209,43 @@ rule in `git.md`.
 - **Fingerprints.**
   - A fingerprint is 16 lowercase hex characters.
   - ~~An `allow_fingerprints` entry of any other shape is refused at load.~~ Withdrawn 2026-10-06, after implementer ag-61d397 found the clash with the tests: an entry is only checked to be a string. A malformed entry matches nothing, so the push stays blocked, which fails closed.
+## Amendment (2026-10-16, approved by the user 2026-10-17): reserved example domains
+
+Source: plan context/plans/2026-10-15-user-decisions-queue.md, item 2 (user,
+2026-10-14). The guard exempts only four exact email domains today
+(`git_guard.py` `_EXAMPLE_DOMAINS`). On 2026-10-14, a push was blocked on 22
+fictional test addresses, and the user had to allow each one by fingerprint.
+
+**GG-R10. Reserved example domains are not email findings.**
+- An email address is not a finding when its domain, compared without case
+  and with any trailing dot removed, is one of the following:
+  - `example.com`, `example.net` or `example.org`, or a subdomain of one
+    (RFC 2606 second-level names);
+  - `example`, or any name under the `.example` TLD;
+  - `example.test` or `example.invalid`, or a subdomain of one.
+- The *whole* `.test` and `.invalid` TLDs are **not** exempt. The
+  2026-10-06 decision keeps applying: an address like
+  `<first>.<last>@<company>.invalid` names a company, and so does
+  `<company>.test`.
+- The exemption is decided by label boundaries, never by substring. All of
+  these stay findings:
+  - `example.com.evil.io` (the reserved name is not the suffix);
+  - `corp-example.com` and `myexample.org` (not a label boundary);
+  - `example.co`;
+  - `example.com.au`;
+  - `examp1e.com`;
+  - IDN or Unicode look-alikes of `example`.
+- **Unchanged.**
+  - The other categories (`token`, `private-key`, `private`, tailnet).
+    A credential-shaped token is a finding whatever domain sits beside it.
+  - The repo's `user.email`, `allowed_emails`, agent identities and
+    `noreply`.
+  - GG-R8 fingerprints. The commits already in history still need the 19
+    fingerprints the plan proposes. The user adds them.
+- **Verified by:**
+  - one test per exempt form: an apex domain, a subdomain, mixed case and a
+    trailing dot;
+  - the look-alike list above, each still reported;
+  - `<first>.<last>@<company>.invalid` and `<first>.<last>@<company>.test`
+    (written with concrete fictional labels), still reported.
+  - The adversary adds look-alikes of its own.

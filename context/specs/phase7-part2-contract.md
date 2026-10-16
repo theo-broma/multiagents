@@ -1530,3 +1530,380 @@ Ordering:
 - The tester starts once slice 3's implementation is approved, so that the
   names it builds on exist.
 - Implementation starts after slice 3 merges.
+
+## Slice 4B — per-attempt networks, authenticated egress and the auth gateway
+
+**Status:** approved by the user on 2026-10-17, with choices (1) redact, (2) block private destinations and (3) interruptions allowed. Extends slices 3 and 4A, implements IC-R10,
+and carries the network half of IC-R4. IC-R11 remains the 4A Unix transport.
+No allowlist entry or new external host is added by this slice.
+
+### Decisions pinned by slice 4B
+
+- **D-S4B.1 — scope and refusal.**
+  - `needs.network` is no longer refused once authenticated network
+    provisioning is available. `needs.credentials` still gives
+    `Unsupported("credential_handle")` until 4C; 4B never silently clears it.
+  - `needs.rpc` continues through 4A's endpoint. Network authority does not
+    require a provider to declare RPC and grants no RPC permissions.
+  - Attempts declaring no network retain `--network none`. A network-enabled
+    attempt gets the topology below; there is no isolated `bridge` or
+    unrestricted mode and no fallback to the legacy project network.
+  - Legacy `local` and shared `docker` behaviour stays unchanged. Shared
+    gateways may reuse code, but isolated and legacy authority are distinct.
+- **D-S4B.2 — topology and ownership.**
+  - One internal Docker network per network-enabled attempt. Its only
+    members are that attempt's container and the trusted egress and auth
+    gateways. The auth gateway may have no active grant for that attempt.
+  - Gateways are project-scoped and attached to several attempt networks;
+    they alone have a route to external services. Per-network aliases are
+    `ma-egress` and `ma-auth`. Neither gateway forwards arbitrary IP traffic
+    between interfaces. No gateway management port is reachable by a run.
+  - No published attempt ports, host network/pid/ipc namespaces, host RPC
+    socket, sibling mounts or Docker socket are given to a run. The scoped
+    RPC remains `/run/multiagents/rpc/rpc.sock`, never TCP.
+- **D-S4B.3 — unchanged hostname policy, checked destinations.**
+  - The sole hostname policy source remains the effective existing
+    `executor.docker.egress_allowlist`, through today's layered configuration,
+    normalization and validation. No second list or shipped entry is added.
+  - Preserve today's `_proxy_filter` semantics: case-insensitive exact
+    approved domain or any descendant; an approved canonical IPv4 entry is
+    exact. No wildcard entries, public suffixes, implicit new hosts or
+    sibling-name exceptions. Approval is still the user's action.
+  - A matching hostname is necessary but not sufficient: IC-C27 checks the
+    actual destination. The address prohibition applies even to an approved
+    literal IP. Existing forbidden addresses gain no grandfathered access.
+  - `ma-auth` is an internal gateway alias, not an egress allowlist entry.
+    Its fixed existing upstream does not broaden generic egress permission.
+- **D-S4B.4 — authority is issued by the host.**
+  - The host binds each grant to project, attempt, run, immutable container
+    and network identities, provider and gateway service (`egress` or `auth`).
+  - Gateway authority is separate from the 4A `endpoint_authority` table,
+    which refers to an RPC capability. It follows the same transactional
+    grant/revoke discipline but cannot be used as an RPC capability.
+  - Credentials identify a grant; they cannot select a different account,
+    provider, node or network through request fields. Each request also
+    proves membership in its grant's source network. Caller-supplied
+    `Forwarded`, `X-Forwarded-For`, Host or identity fields prove nothing.
+  - New attempts get fresh grants and credentials. Restart/adoption reuses
+    recorded grants and never resurrects revoked ones or mints a new identity.
+- **D-S4B.5 — configuration and prerequisites.**
+  - Add `executor.isolated.network: allowlist|none`, default `allowlist`.
+    `none` with `needs.network: true` is a visible non-retryable refusal;
+    unknown values are config errors naming the key.
+  - Add `executor.isolated.docker.gateway_image`, default
+    `multiagents/workspace:latest`, running trusted host-supplied gateway code.
+    No image build or pull happens at launch. Docker commands use K17.1's
+    configured CLI; no separate daemon or implicit socket is selected.
+  - Missing image/daemon/support for the topology gives the existing
+    `isolation_unavailable` refusal. A gateway image is validated before
+    launch side effects. No provider refresh/login action is introduced.
+  - Gateway lifecycle settings are recorded with executor settings for K19.
+    The shared allowlist is reconciled as ST2 policy; it is not a frozen
+    per-attempt copy. A policy change never grants hosts not approved by the user.
+- **D-S4B.6 — supervision and replacement.**
+  - Extend ST2's durable receipt, lock and reconciliation discipline to
+    both isolated gateways. A successful CLI command alone is not readiness.
+  - Gateways may be replaced without stopping/recreating attempts. Existing
+    connections may fail; stable aliases and unchanged credentials permit
+    reconnect. There is never an unauthenticated interval.
+  - Reconstruct desired attachments from host-recorded active attempts, not
+    by trusting the union of whatever Docker currently has attached.
+- **D-S4B.7 — secrets and evidence.**
+  - No credential material appears in logs, events, argv diagnostics, error
+    bodies, policy receipts, labels, public status or attempt evidence.
+    Guest credentials exist only in host-private secret storage and the
+    attempt's invocation input/environment, never its conversation store.
+  - Before durable capture, replace literal issued gateway passwords, auth
+    bearer values, their Basic header encodings and credential-bearing proxy
+    URLs with `[REDACTED]`. Match across write/chunk boundaries. No raw Docker
+    log copy may persist those values. This is a logging-producer requirement,
+    not only a display filter. Keep the redaction knowledge for retained logs.
+  - **Placement (orchestrator, after researcher nd-175a5138).** The
+    redactor sits in the existing PID-1 entrypoint, before base64 framing
+    (`docker_lifecycle.py` around lines 32-76).
+    - It keeps a per-stream tail of undecided bytes across reads.
+    - It runs under a UID other than the agent child's, so the child
+      cannot signal it, trace it or write its pipes.
+    - Docker's json-file log then holds only sanitised frames. Adoption
+      and `docker logs` replay are unchanged.
+    - A checkpoint records only the sanitised durable length. Bytes held
+      back as a possible secret prefix are never appended and then
+      rewritten.
+    - Host-side `--log-driver none` capture and a logging plugin are not
+      used: both break adoption or retention.
+  - Output replay/checkpoints operate on the sanitised streams. Non-secret
+    bytes retain slice 3's ordering and exactly-once replay. The trusted
+    logging path must remain outside the run's write/control authority.
+  - This does not claim detection of arbitrary third-party secrets or all
+    encodings a hostile workload invents. Provider credential projection and
+    renewal, and its additional redaction requirements, belong to 4C.
+
+### Behaviours
+
+**IC-C25 — network creation, identity and recovery (IC-R6, IC-R10).**
+- Add optional `LaunchSpec.network_handle`, default `None`, containing an
+  opaque host-issued network reference. A non-empty handle without host
+  authority is `InvalidSpec`; backends lacking support return
+  `Unsupported("network_handle")`. No run-supplied network name is authority.
+- The field participates in the canonical digest when non-empty. With it
+  unset, preserve the existing v1 canonical digest for recorded specs. Record
+  and declare backend compatibility explicitly; old attempts remain adoptable.
+- Before the first network create, durably record
+  `launch_evidence.executor.network` with `creation_key`, then immutable `id`
+  after create; before `run`, add `policy_digest` and `gateway_generation`.
+  Keys and names are host-generated and bound to the attempt. Network labels
+  use K17.4's project/owner/creation-key names and preserve the test label.
+- A host-only registry in `multiagents.scheduler.gateways` exposes
+  `GatewayRegistry(paths, *, config, providers)`, with async operations:
+  `prepare(attempt_id, run_id)`, `grant(attempt_id, container_identity)`,
+  `revoke(attempt_id)`, `cleanup(attempt_id)`, and `reconcile()`.
+  `prepare` returns a frozen `NetworkHandle` with `.id` (an opaque registry
+  reference, not the Docker network id). Successful grant returns a host-only
+  frozen `GatewayGrant` with `.id` and `.environment` (IC-C26/28's invocation
+  variables); never serialise it to public RPC or evidence. Successful
+  revoke/cleanup returns `None`; `Absent` also means successful cleanup.
+  Successful reconcile returns non-secret `{attempt_id, state, reason}` rows,
+  state `ready|revoked|absent|unknown`. Construction has no side effects.
+- The registry validates attempt/project ownership from the host journal.
+  Repeated prepare/grant uses the same recorded identity and immutable
+  binding; incompatible reuse gives `IdentityConflict` without mutation.
+- Network preparation precedes backend `provision`, since container network
+  membership is part of creation. `grant` follows confirmed provision and
+  precedes `run`, alongside K18's endpoint grant. Created containers have no
+  usable gateway grant until then. All readiness is confirmed before start.
+- Recovery resolves creation keys when ids were not recorded, completes or
+  reports partial attachments, and applies IC-C15's five launch boundaries.
+  Created/unlaunched attempts are never started by network recovery.
+- Registry outcomes use the lifecycle vocabulary: invalid authority/config
+  gives `InvalidSpec`/`Unsupported`; ambiguous daemon or authority state is
+  `Unknown(reason)`. A confirmed missing object is `Absent`. Confirmed
+  operational launch failure is TF `launch`; unknown state holds under K6.
+- Verified by: fake-CLI command ordering, key recovery, duplicate operations,
+  wrong-project handles, invalid config, old-spec digest/adoption and each
+  crash boundary; real Docker for internal network membership and no bypass.
+
+**IC-C26 — authenticated egress and guest environment (IC-R10).**
+- On grant, the host generates HTTP Basic credentials: username
+  `ma1-<attempt_id>`, password 32 cryptographically random bytes represented
+  as 64 lowercase hexadecimal characters. Never derive the password from
+  an id or copy another attempt's credential.
+- Host-only durable gateway authority records contain the grant id,
+  project/attempt/run/container/network/provider binding, service, generation
+  and revoked flag. Authentication uses a credential verifier. Any recoverable
+  raw secret is stored separately under host-private authority, never a
+  public evidence field. No run can read the registry or gateway secret store.
+- The host sets all four variables, after overlays and passthrough:
+  `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` =
+  `http://ma1-<attempt_id>:<password>@ma-egress:8888`.
+  `NO_PROXY` and `no_proxy` = `localhost,127.0.0.1,::1,ma-auth`.
+  Remove conflicting `ALL_PROXY`/`all_proxy` values. Network-disabled attempts
+  receive no gateway credentials or inherited proxy variables.
+- Missing/bad/revoked credentials, or a valid credential presented from a
+  different attempt network, give HTTP 407 without opening an upstream
+  connection. Compare verifiers without timing-dependent string comparison.
+- Check authority on each request. Strip `Proxy-Authorization` before
+  forwarding and never echo it in an error. Authenticated CONNECT tunnels
+  remain bound to the grant for their whole lifetime (IC-C29).
+- RPC permissions, including delegate/verdict, do not determine egress
+  rights. A network-only probe can use egress without obtaining an RPC grant.
+- Verified by: fake/unit tests of format, fresh second-attempt credentials,
+  environment precedence, 407 and redaction; real Docker for valid forwarding,
+  copied-credential rejection, forged forwarding headers and two simultaneous
+  attempt networks. Test actual client proxy-auth support, not only curl.
+
+**IC-C27 — allowlist parity and destination enforcement (IC-R10).**
+- Reuse today's allowlist entry validation and hostname matcher. Preserve
+  HTTP forwarding and CONNECT to port 443 only. Match request authority,
+  not URL paths, substring suffixes, or a conflicting caller Host header.
+  Refuse malformed/ambiguous authorities and unsupported tunnel forms.
+- A hostname mismatch or forbidden destination gives HTTP 403 and no dial.
+  DNS/dial failure gives a scrubbed HTTP 502; no direct/unfiltered retry.
+- Resolve at the gateway. Reject a resolution containing any non-global
+  unicast address, including private, loopback, link-local, multicast,
+  unspecified and IPv4-mapped equivalents, or any host, gateway-management
+  or Docker attempt-network address even if otherwise globally numbered.
+  Apply the same test to literal addresses and every selected A/AAAA answer.
+- Mixed allowed/forbidden answer sets are refused. Dial only the checked
+  numeric address: no second unchecked resolution. New connections resolve
+  and check again. Any gateway-followed redirect is re-authorised; client
+  redirects naturally require another checked request.
+- Gateways expose no general relay between attempt networks and no route to
+  sibling services, credentials or RPC endpoints. Direct external TCP/UDP,
+  host-service access and cross-network traffic must not bypass them. DNS
+  service supplied to the run cannot become an arbitrary external DNS tunnel;
+  any required resolution is scoped to internal aliases or handled by the
+  gateway. No host approval is added to make a test pass.
+- Verified by: golden matcher parity, descendants/lookalikes, canonical IPs,
+  IDNA/public-suffix/wildcard validation, mixed-answer and rebinding tests;
+  real Docker for sibling/host/metadata/direct TCP/UDP/DNS bypass attempts and
+  positive forwarding. Controlled DNS/upstreams are test-side dependencies,
+  never production allowlist edits or new external hosts.
+
+**IC-C28 — the auth gateway's attempt authority (IC-R10).**
+- Preserve the existing fixed `https://api.anthropic.com` upstream, safe
+  request-target construction, provider routing and account pinning of
+  `authproxy.py`. It is not a CONNECT proxy and cannot target another host.
+- For an isolated auth grant the host generates a separate bearer value
+  `ma-auth-v1.<64 lowercase hex characters>` from fresh 32 random bytes.
+  Map its verifier to the host-recorded attempt/provider/account-routing
+  authority and source network, not to request-supplied identity.
+- Missing, forged, revoked or wrong-network authority gives HTTP 401 before
+  selecting an account or opening an upstream connection. Legacy signed
+  v1/v2 agent/provider claims alone cannot authorise isolated ingress.
+  The legacy listener must not be reachable from attempt networks.
+- An attempt receives `ANTHROPIC_BASE_URL=http://ma-auth:8930` and
+  `ANTHROPIC_AUTH_TOKEN=<bearer>` only when its host-selected provider is
+  eligible for this auth protocol. Scrub inherited Anthropic auth/base-url
+  overrides otherwise. Egress and auth credentials are not interchangeable.
+- Add provider declaration `gateway_auth: none|anthropic`, default `none`,
+  following normal provider layering/extends and validated at load time.
+  This selects a trusted upstream protocol, never an account or arbitrary URL.
+  It does not override `needs.credentials`: real providers remain refused
+  until 4C. Offline test providers may declare only network plus this protocol.
+- 4B uses a host-only injected synthetic account/upstream factory for tests,
+  available only through `MULTIAGENTS_TEST_GATEWAY_BACKEND=module:factory`.
+  Strip that variable last from all run environments. No project.yaml or
+  guest request can install a test upstream. The public factory signature is
+  `factory(root: Path, *, project: str)`, returning an adapter with synchronous
+  `open(method: str, path: str, headers: dict[str, str], body: bytes,
+  *, provider: str, run_id: str) -> response`. The response exposes integer
+  `.status`, string mapping `.headers`, `.read(size: int) -> bytes`, and
+  `.close()`. It receives a validated fixed-upstream path and synthetic account
+  material, never a caller-selected URL or production vault secret. Its close
+  unblocks pending reads, so revocation can be tested with an active stream.
+  A factory failure refuses launch, never falls back.
+- No access-token projection, refresh, login, credential migration or live
+  provider acceptance is implemented here. 4C supplies the real credential
+  service; 4B never mounts its vault into an attempt.
+- Verified by: auth claim/routing/pinning regression tests and synthetic
+  upstream calls; real Docker for forged/cross-network claims and assurance
+  that no gateway can relay to sibling credentials or endpoints. Live vendor
+  checks remain 4C and cannot be marked passing by these synthetic tests.
+
+**IC-C29 — end, cancellation, revocation and cleanup (IC-R6, IC-R8, IC-R10).**
+- Normal end records termination before revocation and backend removal, as
+  K18.1. Cancel/replacement revokes before `stop`. Transactional authority
+  ordering matches 4A: requests authorised/forwarded before revocation may
+  already have upstream effects; later requests have none.
+- Revocation affects new requests and accepted tunnels/streams, closes their
+  connections and stops further forwarding. It does not revoke another
+  attempt's authority, even when accounts or gateways are shared.
+- `revoke` returns success only when gateway acknowledgement or confirmed
+  ingress isolation proves enforcement. Unknown enforcement stays reported
+  and held; the host still attempts to stop its own attempt container, so
+  gateway failure cannot strand a deliberately cancelled process.
+- Recovery serves only confirmed-running authorised attempts. Unknown
+  liveness/authority grants no access and retains the liveness hold. It
+  reconciles grants that were published before start or left after exit.
+  Secrets/identities do not rotate merely because the scheduler restarted.
+- Once termination is confirmed, disconnect the attempt container and the
+  gateways from its network, then remove that network even if the exited
+  container, output and repository remain retained. Retention grants no
+  network resurrection. Missing objects are idempotent; unrelated members or
+  unknown ownership stop deletion and remain reported.
+- Partial launch rollback revokes only that attempt's grants and cleans only
+  its confirmed resources. Store cleanup intent before deletion. Keep no raw
+  credential once it is no longer needed for recovery; preserve only the
+  redaction knowledge required for retained output.
+- Verified by: fake-CLI crash/retry cases at network preparation, provision,
+  grant, start, observed exit, revocation and detach/remove; real Docker for
+  closing live CONNECT/auth streams, cancellation during a gateway outage,
+  restart/adoption, retained-container isolation and unaffected siblings.
+
+**IC-C30 — ST2 gateway replacement across all active networks (IC-R10).**
+- Reuse ST2's host-side serialisation and durable applied-receipt discipline
+  for both gateways, preserving legacy behaviour where code is shared.
+  Receipts carry immutable gateway container id, start time, policy/config
+  digest, authority generation and the desired immutable network-id set.
+- Persist the intended set and invalidate readiness before replacement.
+  Reconcile concurrent prepare/end/revoke against the host journal; policy
+  application and authority revocation cannot undo one another.
+- A gateway is ready only after inspect and an authenticated readiness
+  check confirm its identity, applied policy/authority generation and all
+  desired attachments. Stale receipts, incomplete attachments and unknown
+  inspect results cannot authorise a launch. No anonymous readiness bypass
+  exposes upstream routing.
+- Keep `ma-egress`/`ma-auth` aliases and active credentials stable. Replacement
+  reconnects every authorised running attempt network and excludes stale
+  networks. Do not force-disconnect unknown external members to make the
+  desired state appear correct: report the conflict and refuse readiness.
+- Existing requests may break; retrying transport never re-runs the agent
+  invocation. Attempt containers are never recreated by gateway replacement.
+  Gateway restart policy follows ST1; recorded receipts remain the authority
+  for adoption, not a successful `docker start` alone.
+- Verified by: fake-CLI failures after receipt invalidation, removal, create,
+  each attachment and final receipt; stale ids/start times/generations;
+  concurrent network addition/removal; real Docker replacement with several
+  active networks, reconnect using unchanged credentials and no open interval.
+
+**IC-C31 — network orphans and explicit removal (IC-R8, K17.5).**
+- Extend all orphan rows additively with `resource_kind` and `resource_id`:
+  containers use `container`/container id, endpoints use `endpoint`/endpoint
+  id, networks use `network`/network id. Preserve existing nullable fields.
+  Sort mixed rows by `(resource_kind, resource_id)`; existing container and
+  endpoint removal commands retain their outcomes.
+- Network rows are `{resource_kind: "network", resource_id, network_id,
+  container_id: null, name, labels, created_at, project, attempt_id, reason}`.
+  Names/labels/creation time come from Docker; creation time is RFC 3339 and
+  `attempt_id` is nullable. Reasons are `unrecorded_attempt`, `discarded_node`
+  or `ended_attempt_network` (cleanup of a confirmed-ended attempt remains).
+- Discover only this project's reserved-label resources; reconcile creation
+  keys and recorded ids before classifying. A prepare/create crash window is
+  not automatically an orphan. Active/unknown attempts' networks are never
+  classified as safe to delete. Gateway infrastructure is not an attempt
+  orphan and is not reaped by an attempt cleanup.
+- Root `scheduler_status` and `scheduler orphans` return the same discovery
+  result. Non-root status omits orphan fields. Incomplete discovery gives
+  `orphans: null, orphans_error: {reason}`, never a misleading empty list;
+  error reasons obey D-S4B.7. Listing deletes nothing.
+- `multiagents scheduler remove-orphan-network NETWORK_ID` is host-user-only,
+  accepts an exact full immutable id, and rechecks ownership, journal and
+  membership before mutation. Revoke any stale grant, then disconnect only
+  confirmed owned ended-attempt/gateway memberships and remove the network.
+  Unexpected members or uncertain state refuse removal; never stop a live
+  attempt to satisfy this command. No agent RPC exposes network removal.
+- Success: `{ok: true, network_id, state: "absent"}`, including already
+  absent. Failure: `{ok: false, network_id, error, reason}`, non-zero exit;
+  `error` is `invalid_id`, `wrong_project`, `not_orphan` or `unknown`.
+- Verified by: fake-CLI row/status parity, sorting, project filtering,
+  reconciliation, unknown discovery and each removal refusal; real Docker
+  orphan creation, stale attachments, explicit removal, repeated removal,
+  retained-container cleanup and refusal of live/foreign networks.
+
+### Slice 4B test prerequisites
+
+- **Test upstream adapter.** IC-C28's protocol is new. Test blocking-read and
+  close controls independently before using it to prove revocation; it is
+  never a production upstream-host override.
+- **Registry results.** `GatewayGrant.environment` is an invocation secret
+  boundary. Assert that record/error serialisation never includes it,
+  including a failed grant followed by recovery.
+- **Logging approval.** D-S4B.7 is a deliberate change to original-byte
+  evidence. Until the user-level choice above is resolved, no test may claim
+  that display-only redaction satisfies the no-credential-logging requirement.
+
+### Slice 4B work split (orchestrator, 2026-10-16)
+
+4B ships in two sub-slices, each with its own tester → implementer-deep →
+reviewer → adversary (mandatory) → real Docker → suite → merge.
+
+- **4B.1 — the network and authenticated egress:** D-S4B.1..D-S4B.5 and
+  D-S4B.7, IC-C25, IC-C26, IC-C27, IC-C29 (for the egress gateway) and
+  IC-C31.
+  - Before the tester starts, a researcher checks whether producer-side
+    redaction (D-S4B.7) is feasible on the current Docker log path, and
+    reports the options.
+  - The authenticated egress gateway reconciles its authority generation,
+    its revocations and every active attempt network from the first day
+    (advisor, turn 13). ST2's current receipt does not cover these: it
+    covers only the filter and the container, and keeps the attachments it
+    observes.
+- **4B.2 — the auth gateway:** IC-C28, IC-C29 (for the auth gateway),
+  IC-C30 (for the auth gateway) and D-S4B.6 extended to it.
+
+Both sub-slices follow these rules:
+- The tester follows the test prerequisites above.
+- Fake-CLI passes are never evidence of containment.
+- The orchestrator runs real Docker under `SG_TEST_DOCKER=1` on the host,
+  and a missing prerequisite with the switch set fails.
+- The allowlist contents stay unchanged, and no external host is added.
