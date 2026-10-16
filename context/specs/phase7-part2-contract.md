@@ -1898,6 +1898,15 @@ No allowlist entry or new external host is added by this slice.
   optional readiness probe, a callable that defaults to the real
   authenticated HTTP check. Under the fake CLI, tests inject a probe. The
   inspect-based identity and attachment checks still run.
+  - Registries the scheduler creates take the probe from
+    `MULTIAGENTS_TEST_GATEWAY_PROBE=module:factory`, read only on the host
+    side. The host strips that variable from every run environment, as it
+    does `MULTIAGENTS_TEST_GATEWAY_BACKEND`. When the variable is unset,
+    the real check runs. The code never detects fake Docker by itself
+    (implementer nd-4fa20bcc).
+  - The K4B.7 stripping test checks environment *values* only, meaning the
+    container and child environments. Trusted code may contain the
+    variable's name.
 - **K4B.3 — the network handle.**
   - `LaunchSpec.network_handle` carries `NetworkHandle.id`, a string.
   - A handle that is not host-issued gives `InvalidSpec`.
