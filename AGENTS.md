@@ -14,6 +14,13 @@ into timeouts. A full run takes close to an hour.
   - the test files that import the changed modules (find them with `rg`);
   - the test families of the subsystem they changed, for example every
     `test_ap_*` for an auth-proxy change.
+- **Tier 2, before handing back** (user, 2026-10-18; plan 2026-10-17-test-tiers, risk
+  threshold reached). Implementers also run:
+  - the test files of the modules that import a changed module, one level
+    deep, found with `rg`;
+  - whenever the change touches `scheduler/`, `runner.py`, `server.py` or
+    `executor/`, these cross-cutting families: `tests/test_core.py`,
+    `tests/test_nc_m*.py`, `tests/test_st6*.py` and `tests/test_tb*.py`.
 - They report exactly what they ran.
 - The orchestrator runs ONE full suite per final candidate tree, including
   the tester's files, from a `/var/tmp` worktree with `multiagents bg run`.
