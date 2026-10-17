@@ -141,6 +141,10 @@ def start(project_root: Path, foreground=False, clock_file=None) -> dict:
     return {"error": "scheduler_unavailable"}
 
 
+def _refused(reason: str) -> dict:
+    return {"stopped": False, "error": "stop_refused", "reason": reason}
+
+
 def stop(project_root: Path) -> dict:
     from .. import procs
     from .engine import Engine
@@ -150,12 +154,54 @@ def stop(project_root: Path) -> dict:
         pid, start_time = info["pid"], info["pid_start"]
     except (OSError, ValueError, KeyError):
         return {"stopped": True}
-    if not procs.living(pid, start_time):
+    if not procs.living(pid):
         return {"stopped": True}
+    # Hold the process through a pidfd, so the PID cannot be reused between
+    # the checks below and the signal.
+    pidfd = None
+    if hasattr(os, "pidfd_open"):
+        try:
+            pidfd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return {"stopped": True}
+        except OSError:
+            pidfd = None
     try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return {"stopped": True}
+        if not procs.living(pid, start_time) or procs.start_time(pid) != start_time:
+            return {"stopped": True}
+        missing = [key for key in ("project", "nonce") if not isinstance(info.get(key), str) or not info[key]]
+        if missing:
+            return _refused("process.json lacks " + ", ".join(missing)
+                            + "; it does not identify its scheduler, so nothing was signalled")
+        if info["project"] != str(Path(project_root).resolve()):
+            return _refused(f"process.json belongs to project {info['project']}; nothing was signalled")
+        # A missing local capability store must not prevent asking the socket
+        # for its identity. The reply still has to prove the recorded nonce.
+        try:
+            token = root_capability(project_root)
+        except FileNotFoundError:
+            token = None
+        try:
+            reply = call(project_root, "scheduler_status", {}, token)
+            result = reply.get("result") if reply.get("ok") else None
+            reported = result.get("nonce") if isinstance(result, dict) else None
+        except (OSError, ValueError):
+            reported = None
+        if not procs.living(pid, start_time) or procs.start_time(pid) != start_time:
+            return {"stopped": True}
+        if reported != info["nonce"]:
+            return _refused(f"the scheduler answering on this project's socket is not the instance "
+                            f"process.json names (pid {pid}); nothing was signalled")
+        try:
+            if pidfd is not None:
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return {"stopped": True}
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
     # Allow both engine joins and the daemon's final RPC/store cleanup.
     deadline = time.monotonic() + Engine.STOP_TIMEOUT + Engine.NOTIFIER_STOP_TIMEOUT + 5
     while procs.living(pid, start_time) and time.monotonic() < deadline:
@@ -194,7 +240,8 @@ def _serve(project_root: Path, clock_file=None) -> None:
         signal.signal(signal.SIGTERM, lambda *_: stopped.set())
         signal.signal(signal.SIGINT, lambda *_: stopped.set())
         record = store.directory / "process.json"
-        record.write_text(encode({"pid": os.getpid(), "pid_start": procs.start_time(os.getpid()), "since": since}))
+        record.write_text(encode({"pid": os.getpid(), "pid_start": procs.start_time(os.getpid()), "since": since,
+                                  "project": str(Path(project_root).resolve()), "nonce": service.nonce}))
 
         def mirror():
             try:

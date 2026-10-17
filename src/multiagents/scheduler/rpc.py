@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import socketserver
+import secrets
 import threading
 import time
 import uuid
@@ -96,6 +97,7 @@ class Service:
         self.paths = ProjectPaths(project_root)
         self.store = Store(project_root)
         self.since = since
+        self.nonce = secrets.token_hex(16)
         self.changed = threading.Condition(threading.RLock())
         self.stopping = False
         self.engine = None
@@ -450,6 +452,8 @@ class Service:
             return self.view(node, plan_revision + 1)
         if op == "scheduler_status":
             result = self.status(nodes, db, clock, scope=None if principal["root"] else model.subtree(nodes, principal["node_id"]))
+            if principal["root"]:
+                result["nonce"] = self.nonce
             result["launch_context"] = principal["root"] or bool(
                 self.engine and self.engine.runner.tree.get(principal["subject"]))
             return result
