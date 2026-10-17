@@ -31,8 +31,18 @@ def load(tmp_path, monkeypatch, **fields):
     import c3_harness as h
     h.as_root(monkeypatch)
     child = fields.pop("child", None)
+    prereq = fields.pop("prereq", True)
     p = sc.Project(tmp_path)
     p.add_provider("acme")
+    if prereq:
+        # K4C.4: gateway needs `gateway_auth: anthropic`, projection a declared path (`container_private_home`).
+        # The parent carries what the modes of the parent and of the extending child need; an extending provider
+        # inherits the prerequisite through `extends` layering (it is checked on the effective provider).
+        wanted = {fields.get("isolated_credentials"), (child or {}).get("isolated_credentials")}
+        if "gateway" in wanted:
+            p.providers["acme"]["gateway_auth"] = "anthropic"
+        if "projection" in wanted:
+            p.providers["acme"]["container_private_home"] = [".acme"]
     p.providers["acme"].update(fields)
     if child is not None:
         p.providers["child"] = dict(child, extends="acme")
@@ -126,11 +136,69 @@ def test_c32_an_invalid_value_in_an_extending_provider_is_a_config_error_naming_
 
 
 def test_c32_the_field_adds_no_url_account_or_proxy_setting_to_the_provider(tmp_path, monkeypatch):
-    plain = load_providers(*(lambda c: (c.providers, c.provider_sources))(load(tmp_path / "p", monkeypatch)))["acme"]
-    marked_config = load(tmp_path / "m", monkeypatch, isolated_credentials="gateway")
+    # like with like: the gateway prerequisite is on both sides, only the mode differs
+    plain_config = load(tmp_path / "p", monkeypatch, gateway_auth="anthropic")
+    plain = load_providers(plain_config.providers, plain_config.provider_sources)["acme"]
+    marked_config = load(tmp_path / "m", monkeypatch, isolated_credentials="gateway", gateway_auth="anthropic")
     marked = load_providers(marked_config.providers, marked_config.provider_sources)["acme"]
     for field in ("env", "needs", "auth", "docker", "gateway_auth"):
         assert getattr(marked, field, None) == getattr(plain, field, None), field
+
+
+def test_k4c4_gateway_without_gateway_auth_anthropic_is_a_config_error_naming_the_key(tmp_path, monkeypatch):
+    with pytest.raises(ValueError) as caught:
+        load(tmp_path, monkeypatch, prereq=False, isolated_credentials="gateway")
+    assert "gateway_auth" in str(caught.value)
+
+
+@pytest.mark.parametrize("auth", ["none", "anthropic"])
+def test_k4c4_gateway_needs_exactly_anthropic(tmp_path, monkeypatch, auth):
+    fields = dict(prereq=False, isolated_credentials="gateway", gateway_auth=auth)
+    if auth == "none":
+        with pytest.raises(ValueError) as caught:
+            load(tmp_path, monkeypatch, **fields)
+        assert "gateway_auth" in str(caught.value)
+    else:
+        assert declared(load(tmp_path, monkeypatch, **fields)) == "gateway"
+
+
+@pytest.mark.parametrize("path", [None, []])
+def test_k4c4_projection_without_a_declared_path_is_a_config_error_naming_the_key(tmp_path, monkeypatch, path):
+    extra = {} if path is None else {"container_private_home": path}
+    with pytest.raises(ValueError) as caught:
+        load(tmp_path, monkeypatch, prereq=False, isolated_credentials="projection", **extra)
+    assert "container_private_home" in str(caught.value)
+
+
+def test_k4c4_projection_with_a_declared_path_loads(tmp_path, monkeypatch):
+    loaded = load(tmp_path, monkeypatch, prereq=False, isolated_credentials="projection",
+                  container_private_home=[".acme"])
+    assert declared(loaded) == "projection"
+
+
+def test_k4c4_unsupported_needs_no_prerequisite(tmp_path, monkeypatch):
+    assert declared(load(tmp_path, monkeypatch, prereq=False, isolated_credentials="unsupported")) == "unsupported"
+
+
+def test_k4c4_an_inherited_mode_inherits_its_prerequisite(tmp_path, monkeypatch):
+    # chosen: the prerequisite is checked on the effective (layered) provider, so `extends` carries both
+    loaded = load(tmp_path, monkeypatch, isolated_credentials="gateway", gateway_auth="anthropic", child={})
+    assert declared(loaded, "child") == "gateway"
+    loaded = load(tmp_path / "b", monkeypatch, isolated_credentials="projection", container_private_home=[".acme"],
+                  child={})
+    assert declared(loaded, "child") == "projection"
+
+
+def test_k4c4_a_child_overriding_into_a_mode_without_the_prerequisite_is_a_config_error(tmp_path, monkeypatch):
+    # parent is unsupported and has neither prerequisite; the child's effective provider lacks it
+    with pytest.raises(ValueError) as caught:
+        load(tmp_path, monkeypatch, prereq=False, isolated_credentials="unsupported",
+             child={"isolated_credentials": "gateway"})
+    assert "gateway_auth" in str(caught.value)
+    with pytest.raises(ValueError) as caught:
+        load(tmp_path / "b", monkeypatch, prereq=False, isolated_credentials="unsupported",
+             child={"isolated_credentials": "projection"})
+    assert "container_private_home" in str(caught.value)
 
 
 def test_c32_the_shipped_providers_declare_their_modes(tmp_path, monkeypatch):
