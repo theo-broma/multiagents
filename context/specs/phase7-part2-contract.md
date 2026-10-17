@@ -2114,3 +2114,39 @@ Verification:
 5. real Docker on the host;
 6. the suite;
 7. merge.
+
+- **K4B2.8 — clarifications (2026-10-17, answering tester nd-2d001b19).**
+  - **Handler seam.** `multiagents.scheduler.gateways.serve_auth(listen,
+    grants, backend)` returns an object with `.address`, `.revoke(grant_id)`
+    and `.close()`.
+    - `grants` is {grant_id: {`verifier`, `networks`, `provider`, `run_id`}}.
+    - `verifier` is the lowercase hex SHA-256 of the full bearer string.
+    - The gateway never receives a plaintext bearer. Tests compute the
+      verifier themselves.
+    - `backend` is the adapter that the K4B2.5 factory returns.
+  - **Registry keyword.** `GatewayRegistry(..., service="egress"|"auth")`,
+    default `egress`. The gateway label is `multiagents.gateway=<service>`.
+  - **No `gateway_auth`.** For a provider without `gateway_auth: anthropic`,
+    the auth registry's `grant()` returns `None`. That is not an error: the
+    attempt runs with egress only.
+  - **The real-Docker test seam.** When `MULTIAGENTS_TEST_GATEWAY_BACKEND`
+    is set host-side:
+    - the registry resolves the module file host-side and mounts it
+      read-only into the auth gateway container at a fixed path;
+    - it sets the variable for the gateway process only;
+    - it never reaches an attempt.
+  - **Factory failure.** A failing factory refuses the launch at grant
+    time, before `run`: the attempt is held or failed, no container is
+    started, and there is no fallback.
+  - **Scrubbing.** EVERY inherited `ANTHROPIC_*` variable is scrubbed from
+    every isolated attempt, not only the three that K4B2.3 names. Granted
+    attempts then get `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
+  - **The auth receipt.** It has the same keys as egress (container id,
+    start time, `policy_digest`, `gateway_generation`, desired networks),
+    recorded under the service name in the evidence.
+  - **Policy changes.**
+    - Grants and revocations are applied in place.
+    - A changed gateway image or code digest triggers a replacement,
+      through IC-C30's steps.
+  - **Streaming cut.** On revoke, the guest connection ends (EOF or reset)
+    and no further upstream bytes are forwarded.
