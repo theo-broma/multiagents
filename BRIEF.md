@@ -6625,3 +6625,4 @@ Pending user: RB-R1 re-wording (above).
   - Orchestrator-suite round counter: 1 round, for this candidate, out of the candidates checked so far.
   - The advisor fix lives in the runner. It takes effect for scheduler runs after a daemon restart, and for consult calls after the MCP server restarts, which means a session restart. Restart the daemon at the next quiet moment.
   - SI tests on main (ceb2d5a0); SI implementer nd-60d73226 launches now.
+- 2026-10-18 ~04:00 CEST. 4B.2 implementer at 1a7f5c52: cleanup covers both services and deletes secrets even when the network is absent; orphan removal checks both. Held on a test contradiction (the orphan test expects gateways still attached after IC-C29's detach); tester nd-2d001b19 relaunched. Then: close the implementer approved if green, run a NEW reviewer on the whole diff (the old one, nd-fc207bca, rejected), the adversary (nd-944cd061, status to check), real Docker, the suite, the merge.
