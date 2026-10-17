@@ -2155,3 +2155,108 @@ Verification:
       through IC-C30's steps.
   - **Streaming cut.** On revoke, the guest connection ends (EOF or reset)
     and no further upstream bytes are forwarded.
+
+## Slice 4C — credentials for isolated attempts (IC-R4)
+
+Approved by the user on 2026-10-18: choices 1-4 (Claude through the gateway only; the codex access-only experiment is authorised; agy unsupported in isolated mode; the opencode key residual is accepted). Grounded in researcher nd-da5451e7.
+
+### What the code does today
+
+- **Refresh is host-owned for Docker private profiles.**
+  `refresh_private_credentials` refreshes before spawn, from the vault, under
+  a lock per owner and provider. That lock is not per account
+  (docker.py around lines 1668-1762).
+- **Claude projects an access-only token** (claude.sh, `project_token`).
+- **Codex reads `CODEX_HOME/auth.json`.** Its adapter has no projection and
+  no refresh action, so access-only use is unproven.
+- **agy holds an opaque keyring token,** with no split between access and
+  refresh tokens.
+- **opencode and its variants read one API-key store**
+  (`opencode/auth.json`). It holds no refresh token.
+- **The isolated backend refuses `needs.credentials`** with
+  `Unsupported("credential_handle")` (docker_lifecycle.py, around line 177).
+
+### Decisions pinned by slice 4C
+
+- **D-S4C.1 — one credential mode per provider, declared and recorded.**
+  - Each provider declares `isolated_credentials: gateway | projection |
+    unsupported`.
+  - Every attempt records the mode it ran under.
+  - `unsupported` keeps the visible refusal `Unsupported("credential_handle")`.
+  - There is never a fallback to shared mode (IC-D7).
+- **D-S4C.2 — Claude goes through the 4B.2 auth gateway only.**
+  - The gateway's host adapter selects the pinned account. It reads the
+    account's access token from the vault and refreshes it host-side,
+    without the guest ever holding it.
+  - The guest holds only its `ma-auth-v1` bearer, and no Anthropic token
+    reaches an isolated attempt.
+- **D-S4C.3 — projection providers.**
+  - **Which providers.** `projection` is allowed only for a provider whose
+    credential works with no refresh material in the guest:
+    - opencode and its variants (API keys);
+    - codex, only if IC-C34 proves it.
+  - **Placement.** The projection is built in a private host directory,
+    then placed by atomic rename into the attempt's private HOME at the
+    provider's path, before the CLI starts.
+  - **Mounts.** The projection is mounted as a directory, never as a file
+    bind, because a file bind pins the inode.
+  - **Contents.** It never contains refresh material, so the CLI cannot
+    refresh by itself.
+- **D-S4C.4 — renewal and concurrency.**
+  - A host worker renews per `(provider, account)` under a lock keyed on
+    exactly that pair.
+  - A projection is renewed during the run by atomic replacement inside the
+    mounted directory.
+  - A token being replaced stays valid until it expires. Attempts are never
+    cut for a rotation.
+- **D-S4C.5 — redaction.** Every projected secret, and every value the
+  gateway uses, joins the D-S4B.7 redactor's secret list for that attempt.
+- **D-S4C.6 — revocation.**
+  - At the attempt's end, the projection is deleted on every end path,
+    idempotently, even when the network or container is already gone.
+  - The auth grant is revoked.
+  - **Residual risk, stated (IC-R4):** an API key projected for opencode
+    stays valid upstream after the attempt ends. It is long-lived by
+    nature.
+
+### Behaviours
+
+- **IC-C32 — credential mode declaration.** Covers the provider field, its
+  validation, the recorded mode, and the `unsupported` refusal.
+  - Verified by: config tests, and a fake-CLI launch per mode.
+- **IC-C33 — Claude through the gateway with real accounts.**
+  - The adapter selects the pinned account and refreshes host-side.
+  - The guest never holds a vault token.
+  - The legacy claude projection is never used in isolated mode.
+  - Verified by: synthetic upstream tests, plus a real-Docker live check
+    against the real Anthropic API. That check needs the user's go-ahead,
+    because it spends quota.
+- **IC-C34 — codex access-only proof.**
+  - A measured experiment: run the codex CLI with an `auth.json` stripped
+    of refresh material, for longer than one access-token lifetime, while
+    the host renews.
+  - If it works, codex is `projection`.
+  - If it does not, codex is `unsupported` in isolated mode. The result and
+    the stated fallback are recorded.
+  - Verified by: the recorded experiment, and a test that pins whichever
+    mode results.
+- **IC-C35 — projection mechanics.** Covers the atomic placement,
+  directory mounts, renewal during a run, the `(provider, account)` lock,
+  deletion on every end path, and redaction registration.
+  - Verified by: fake-CLI tests and real-Docker tests.
+- **IC-C36 — agy is `unsupported` in isolated mode** until a gateway exists
+  for it, with a stated reason.
+  - Verified by: the refusal test.
+
+### Slice 4C work split
+
+1. Researcher: the IC-C34 codex experiment, on the host, with the user's
+   go-ahead, because it uses a real account.
+2. Tester.
+3. Implementer-deep.
+4. Reviewer.
+5. Adversary, mandatory: token leaks, refresh races, cross-account
+   confusion, a guest-side refresh attempt.
+6. Real Docker.
+7. The suite.
+8. Merge.
