@@ -6509,3 +6509,4 @@ Pending user: RB-R1 re-wording (above).
   - Step 2: apply its tests to main.
   - Step 3: relaunch nd-4fa20bcc as a fresh scoped run: Created-container rollback, predecessor liveness, bounded retry and exhaustion, replacement recovery that keeps attempts and grants. Keep c26, c27 and the redaction work green.
   - Then the reviewer nd-66ee19f1 and adversary nd-4c12a544 chain, and real Docker.
+- 2026-10-17 ~04:00 CEST. 4B.1 fixture cleanup on main (95e88581). On the implementer tip only the 5 C29/C30 implementation failures remain. nd-4fa20bcc relaunched as a scoped run on Created-container rollback, predecessor liveness and replacement recovery. If it fails, escalate to opus. Next: reviewer nd-66ee19f1, then adversary nd-4c12a544 (depends_on, automatic), then real Docker on the host, the suite and the merge.
