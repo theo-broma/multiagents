@@ -200,13 +200,25 @@ def test_ic_c29_unrelated_members_stop_deletion_and_are_reported(ns):
 
 # ============================================================= IC-C30: replacement
 
+# A launch whose attachment keeps failing runs the node's whole TF retry budget:
+# 1 + RETRY_BUDGET attempts (default budget 3), each given up to nb.WAIT to
+# launch and fail, plus the fixture's configured backoff (ic_support: 0.1 s) before
+# each retry. The wait is bounded by that sum; a launch that is never decided
+# still fails, just not before every attempt has had its time.
+RETRY_BUDGET = 3
+RETRY_BACKOFF = 0.1
+DECIDED_WAIT = (1 + RETRY_BUDGET) * nb.WAIT + RETRY_BUDGET * RETRY_BACKOFF
+
+
 def decided(s, node):
-    """The launch has either started its container or been stopped by a failure."""
+    """The launch has either started its container or ended for good (held, or
+    done after exhausting its retries, whatever the outcome)."""
     def ready():
         runs = s.runs(node)
         c = runs and s.container_of(runs[-1]["attempt_id"])
-        return (c and c["StartCount"] > 0) or s.get(node)["state"] in ("held", "failed", "cancelled") or None
-    return s.wait(ready, nb.WAIT, f"{node}'s launch to be decided")
+        view = s.get(node)
+        return (c and c["StartCount"] > 0) or view["state"] in ("held", "done") or None
+    return s.wait(ready, DECIDED_WAIT, f"{node}'s launch to be decided")
 
 
 def changed_policy(s, extra="second.example.org"):
