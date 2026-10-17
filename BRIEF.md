@@ -6500,3 +6500,4 @@ Pending user: RB-R1 re-wording (above).
   - **Scheduler daemon restarted** (now pid 2465426) on current main, editable install, while no agent ran. RB-R1, NC-R59 and the rest are now live, so new branches should stop showing stale readonly reverts.
   - Still open: 4B.1 implementer nd-4fa20bcc, held. See the 03:45 entry for the decision to take with the advisor.
   - UD slices 2-5 contract: next to write.
+- 2026-10-17 ~03:20 CEST. Advisor consult on the 4B.1 stuck decision in flight (task k35fms3rg; it does not survive a session restart). If it is lost, re-ask: options (a), (b) or (c) from the 03:45 entry, and investigate the c29/c25 failures on nodes/nd-4fa20bcc at 32f8b59e.
