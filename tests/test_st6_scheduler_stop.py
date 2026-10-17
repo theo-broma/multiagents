@@ -21,14 +21,29 @@ from nc_fixture.world import World  # noqa: E402
 
 from multiagents import cli, procs, scheduler
 
+NONCE = "0123456789abcdef0123456789abcdef"
 READY_BOUND = 8
 RETURN_BOUND = 2
 
 PARKED_DAEMON = r'''
-import json, os, signal, sys
+import json, os, signal, socket, sys, threading
 from pathlib import Path
 from multiagents.procs import start_time
 record, mode = Path(sys.argv[1]), sys.argv[2]
+project, sock_path, nonce = sys.argv[3], sys.argv[4], sys.argv[5]
+Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
+Path(sock_path).unlink(missing_ok=True)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(sock_path)
+server.listen(8)
+def serve():
+    while True:
+        conn, _ = server.accept()
+        with conn:
+            conn.makefile("rb").readline()
+            reply = {"ok": True, "result": {"pid": os.getpid(), "nonce": nonce}}
+            conn.sendall(json.dumps(reply).encode() + b"\n")
+threading.Thread(target=serve, daemon=True).start()
 def terminate(*args):
     if mode == "exit-retaining-record":
         raise SystemExit(0)
@@ -39,7 +54,8 @@ if mode == "ignore":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 else:
     signal.signal(signal.SIGTERM, terminate)
-record.write_text(json.dumps({"pid": os.getpid(), "pid_start": start_time(os.getpid())}))
+record.write_text(json.dumps({"pid": os.getpid(), "pid_start": start_time(os.getpid()),
+                              "project": project, "nonce": nonce}))
 print("ready", flush=True)
 while True:
     signal.pause()
@@ -76,7 +92,10 @@ def daemon(world, mode):
     if mode == "slow-engine":
         command = [sys.executable, "-c", SLOW_SCHEDULER, str(world.root)]
     else:
-        command = [sys.executable, "-c", PARKED_DAEMON, str(record), mode]
+        command = [sys.executable, "-c", PARKED_DAEMON, str(record), mode,
+                   str(world.root.resolve()),
+                   str(scheduler.transport_directory(world.root) / "rpc.sock"),
+                   NONCE]
     proc = subprocess.Popen(command, cwd=world.root, env=world.daemon_env(),
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True)
@@ -187,7 +206,9 @@ def test_st6_r2_a_reused_pid_with_a_different_start_time_is_already_stopped(worl
     with daemon(world, "ignore") as (proc, record):
         current = procs.start_time(proc.pid)
         assert current, "this identity test requires Linux /proc start times"
-        record.write_text(json.dumps({"pid": proc.pid, "pid_start": str(int(current) - 1)}))
+        record.write_text(json.dumps({
+            "pid": proc.pid, "pid_start": str(int(current) - 1),
+            "project": str(world.root.resolve()), "nonce": NONCE}))
         result = stop(world, monkeypatch, capsys, proc, "ignore")
         assert result.get("stopped") is True, result
         assert proc.poll() is None, "a different process with the old pid was signalled"

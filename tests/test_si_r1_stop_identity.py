@@ -104,3 +104,17 @@ def test_si_r1_normal_stop_still_works(world, surface):
     assert result.get("stopped") is True, result
     assert not procs.living(pid)
     assert not world.sock_answers()
+
+
+@pytest.mark.parametrize("missing", ["project", "nonce", "both"])
+def test_si_r1_old_format_record_is_refused_fail_closed(world, missing):
+    """A record without project or nonce (older scheduler, test fake) is refused."""
+    pid = world.start_scheduler()
+    info = json.loads(record(world).read_text())
+    for key in ("project", "nonce") if missing == "both" else (missing,):
+        info.pop(key, None)
+    record(world).write_text(json.dumps(info))
+    result = scheduler.stop(world.root)
+    assert procs.living(pid), f"stop signalled a scheduler with a record lacking {missing}"
+    assert world.sock_answers(), "the scheduler must remain available"
+    refuse(result)
