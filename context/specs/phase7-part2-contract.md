@@ -2294,3 +2294,36 @@ Approved by the user on 2026-10-18: choices 1-4 (Claude through the gateway only
 6. Real Docker.
 7. The suite.
 8. Merge.
+
+### Slice 4C rulings (2026-10-18, answering adversary nd-b5f8bbea)
+
+- **Renewal lock key (D-S4C.4 amended).**
+  - "`(provider, account)`" means the resolved credential store, not the
+    provider's name. That is the owner after `auth_from` and
+    `container_account` resolution: the vault file being renewed.
+  - Every renewer of one store takes the same lock:
+    - the isolated projection worker;
+    - the Claude gateway adapter;
+    - the shared-mode Docker executor's renewal (`DockerExecutor._refresh_lock`).
+  - Two providers that resolve to one store renew it once.
+- **The gateway attaches the account token to the model API only
+  (D-S4C.2, K4B2.2).**
+  - The token is attached to `api.anthropic.com` paths under `/v1/` only.
+  - Any other path, including every `/api/oauth/*` path, is refused with 403
+    and is never forwarded with a credential.
+  - If the real Docker run shows that the Claude CLI needs another read-only
+    path, it is added by name to this list, through a contract change. No
+    path that mints or changes a credential is ever added.
+- **Projection copies the provider's own credential kind only (D-S4C.3).**
+  - opencode projects only its `type: api` entries.
+  - An OAuth entry of any vendor in the same store is never projected, never
+    joins the secret list, and never makes the attempt fail.
+- **Bridge directory.**
+  - The bridge directory is created, or accepted, only if all of these hold:
+    - it is a real directory, not a symlink, checked with `lstat` or
+      `O_NOFOLLOW` on the opened descriptor;
+    - it is owned by the current uid;
+    - it has mode 0700.
+  - Anything else is refused with a message, and no socket is created.
+- **A declared `isolated_projection_path` wins** over a
+  `container_private_home` entry. The projection lands at the declared path.
