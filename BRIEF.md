@@ -6666,3 +6666,8 @@ Pending user: RB-R1 re-wording (above).
   - Verdict after the original expiry (2026-10-27 13:03Z): projection or unsupported.
 - UD slice 3: reviewer approved; adversary rejected with 3 findings (tests ee4801d3). Implementer nd-83907cc8 relaunched with those findings, plus the run-id actor check.
 - SI merged (ba4017a8, nd-60d73226) and the tier-2 default brief (d214e1e2, nd-62ed4f40), after combined suite 8d8c17bdeaaa. The 6 unexplained reds passed serially. nc_r35 failed 1 of 12 runs on the combination and also failed on the UD branch, which has no SI, so it is a load flake. The scheduler daemon still needs a restart at a quiet moment to load SI and bug-535139.
+- 2026-10-18: UD slice 3 combined suite 6d71d6552803 (u3-comb 3ad32447): 170 failed, 15189 passed. Three reds are not in the baseline:
+  - nt_r4[url] and tf_r5 are flakes: each passed twice serially, both on the combination and on main.
+  - test_c12_two_concurrent_watchers fails deterministically, on main too. The cause is a test-harness defect: `spawn_watch` closes stdin, then `communicate()` flushes it and raises ValueError.
+  - Tester nd-47d8d9fd is fixing it.
+  - Decision: once the fix is applied, re-run only tests/test_ud_*.py on u3-comb, not the full suite. The fix is a test-only one-liner and cannot affect src. Then merge nd-83907cc8.
