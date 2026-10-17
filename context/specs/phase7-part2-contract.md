@@ -2144,6 +2144,8 @@ Verification:
   - **The auth receipt.** It has the same keys as egress (container id,
     start time, `policy_digest`, `gateway_generation`, desired networks),
     recorded under the service name in the evidence.
+    The path is `launch_evidence.executor.gateways.<service>`, so the auth
+    receipt is at `launch_evidence.executor.gateways.auth`.
   - **Policy changes.**
     - Grants and revocations are applied in place.
     - A changed gateway image or code digest triggers a replacement,
