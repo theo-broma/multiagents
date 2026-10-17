@@ -6554,3 +6554,8 @@ Pending user: RB-R1 re-wording (above).
   - Implementer nd-4fa20bcc relaunched; it must also validate the untested 2851f727. Tester nd-754de4be relaunched.
   - bug-535139 implementer nd-81a1e751 is on part 2. Its reviewer nd-26e7257c, stopped earlier, needs a relaunch after it.
 - 2026-10-17 ~11:40 CEST. 4B.1 implementer at 8fcf02cd: the grant is bound to the attempt network's subnet (K4B.10 added to the contract); the relay is a subreaper and drains the group. It is held needs_info on a capset test defect (syscall 125 is capget). Tester nd-754de4be is fixing capset and the stale c18 exact-key test. Full real-Docker -k docker set running on /var/tmp/b41-chk (2665588a), bg job, log /var/tmp/b41d.log.
+- 2026-10-17 ~12:20 CEST. 4B.1 real-Docker -k docker run (bg 46b47bc97437): 5 failed, 355 passed. All remaining failures are TEST defects, checked on the host:
+  - c26 evil requests send 'Host: x', which conflicts with the authority and correctly gets 400 under K4B.5;
+  - capset was already fixed on main after this run started;
+  - guest_files searches world.root, but the guest writes into <state>/worktrees/proj-*/ag-<run>/. The ic-term marker says 'graceful', so the relay WORKS.
+  Tester nd-754de4be relaunched for these. Next: real Docker again; if green, close nd-4fa20bcc approved, then a reviewer on the whole diff (implementer runs since the first review), the suite, merge (src only if readonly reverts appear), and the plan for 4B.2.
