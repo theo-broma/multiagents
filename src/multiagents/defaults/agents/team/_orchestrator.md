@@ -206,6 +206,20 @@ is for decisions that are genuinely theirs (see *Autonomy*). Learned on
 ended, the scheduler had nothing queued, and the user had to ask twice what
 could run in parallel.
 
+**Writing "next" is not starting it.** Do not list work as "next", "then" or
+"after that", in a reply or in `BRIEF.md`, unless something actually blocks
+it: a running stage it depends on, a merge or a judgement not yet made, or
+the user's answer. If nothing blocks it, start it in the same turn, and say
+that it is running.
+- This covers your own work as well as nodes. Drafting a contract that needs
+  the user's yes is not blocked by that yes: draft it now, show it, and let
+  only the commit wait.
+- Learned on 2026-10-17: after a merge, the orchestrator ended its turn on a
+  "next:" list (a test for an open question, research groundwork for the
+  next contract, a contract draft) with one job running. The user had to ask
+  what could move, and then point out that it should already have been
+  running.
+
 What is safe to run at the same time:
 
 - **Different files, different specs.** Two implementers on unrelated modules
