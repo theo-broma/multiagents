@@ -5387,6 +5387,22 @@ class Runner(QuotaHandover):
         provider = self.providers.get(name)
         return (getattr(provider, "family", "") or name) if provider else name
 
+    def _family_session(self, node, provider) -> str:
+        """bug-535139: the newest session id `node` recorded under
+        `provider`'s family, or "" for none. A session id is never resumed
+        under another family: a quota handover leaves the node holding the
+        target's id, and a retry on the source must find its own instead."""
+        family = provider.family or provider.name
+        # Legacy sessions have no explicit provenance. As at turn admission,
+        # their recorded provider is the evidence of which family owns them.
+        session_family = node.session_provider_family or self._family_of(node.provider)
+        if node.session_id and session_family == family:
+            return node.session_id
+        for segment in reversed(node.segments or []):
+            if segment.get("session_id") and self._family_of(segment.get("provider", "")) == family:
+                return segment["session_id"]
+        return ""
+
     def _pin_problem(self, spec: AgentSpec) -> dict | None:
         provider = self.providers.get(spec.provider)
         if provider is None or not provider.enabled:
@@ -11466,7 +11482,13 @@ class Runner(QuotaHandover):
                     error=f"{agent_name}'s turn failed ({kind}); the consult's "
                           f"deadline passed before its retry could be launched")
             delay = backoff_for(backoff, tries + 1)
-            if final.reason == "session_lost" or not final.session_id:
+            # bug-535139: the retry launches on `provider`; a session another
+            # family recorded during this turn (a failed quota-handover
+            # segment) is never handed to it.
+            own_session = self._family_session(final, provider) if final.session_id else ""
+            if final.session_id and not own_session:
+                provider_changed = True
+            if final.reason == "session_lost" or not own_session:
                 # TF-R5: the session did not survive — the retry goes to a
                 # fresh one, and the reply says so.
                 session_id = None
@@ -11480,7 +11502,7 @@ class Runner(QuotaHandover):
                                    requested_session=final.requested_session,
                                    provider=provider.name)
             else:
-                session_id = final.session_id
+                session_id = own_session
             tries += 1
             if not await self._failure_sleep(delay, deadline):
                 return self._consult_result(

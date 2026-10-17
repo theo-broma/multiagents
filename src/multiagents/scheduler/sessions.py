@@ -61,6 +61,56 @@ def pin_changed(node, binding, config):
                 "family", provider_family(binding["provider"], config)))
 
 
+def family_switch(node, binding, runner):
+    """bug-30623f: an unpinned node changes family too. When the alias's
+    provider now declares another family, or its cooldown or spend cap lasts
+    beyond the reset wait and the agent's only available routes lie in another
+    family, the turn runs there without resuming the old family's session id.
+    A same-family route, an account change, or no route at all keeps the alias
+    waiting for its provider, as before."""
+    pins = node["pins"]
+    if not binding or binding.get("renew") or pins.get("provider") or pins.get("model"):
+        return False
+    provider = runner.providers.get(binding["provider"])
+    # A disabled provider or changed account keeps its binding unavailable;
+    # neither authorizes moving the alias (bug-535139, NC-R30).
+    if (provider is None or not provider.enabled
+            or (provider.container_account or provider.name) != binding["account"]):
+        return False
+    config = runner.config
+    family = binding.get("family", provider_family(binding["provider"], config))
+    if provider_family(binding["provider"], config) != family:
+        return True
+    spec = config.agents.get(node["agent"])
+    if not spec:
+        return False
+    cooldown = runner.tree.cooldown(binding["provider"]) or {}
+    cap = runner._cap_refusal(binding["provider"], binding["model"]) or {}
+    until = max(cooldown.get("until", 0), cap.get("until", 0))
+    wait = float(config.project.get("budget", {}).get("wait_for_reset_seconds", 1800))
+    if until <= now() + wait:
+        return False
+
+    def routable(name, resume=False):
+        # The bound provider resolves as a recorded destination (FS-R2).
+        provider = runner.providers.get(name)
+        if provider is None or not provider.enabled or runner.tree.cooldown(name):
+            return False
+        routed = runner._usable_spec(spec, name, resume=resume)
+        return bool(routed and not runner._cap_refusal(name, routed.model))
+
+    if routable(binding["provider"], resume=True):
+        return False
+    elsewhere = False
+    for name in runner.providers:
+        if name == binding["provider"] or not routable(name):
+            continue
+        if provider_family(name, config) == family:
+            return False
+        elsewhere = True
+    return elsewhere
+
+
 def isolated_incompatibility(node, binding, config):
     if not binding or binding.get("executor_kind") != "isolated" or binding.get("renew"):
         return ""
@@ -99,11 +149,11 @@ def blockers(node, nodes, journal, bindings, runner):
     changed = pin_changed(node, binding, runner.config) if binding else False
     if any(a.get("alias_id") == key and a["state"] in {"claimed", "launched", "captured", "suspended"}
            for a in select_records(journal, "claimed", "launched", "captured", "suspended")):
-        if changed:
+        if changed or family_switch(node, binding, runner):
             return [{"code": "session_binding", "detail": binding["provider"]}]
         return [{"code": "session_busy", "detail": node["session"]}]
     if binding and not binding.get("renew") and not changed:
-        if unavailable(binding, runner):
+        if unavailable(binding, runner) and not family_switch(node, binding, runner):
             return [{"code": "session_unavailable", "detail": binding["provider"]}]
     return []
 
@@ -118,14 +168,18 @@ def unavailable(binding, runner):
             or bool(runner.tree.cooldown(binding["provider"])))
 
 
-def freeze(db, node, nodes, result, paths, config):
+def freeze(db, node, nodes, result, paths, config, switch=False):
     key = alias_id(node, nodes)
     if not key:
         return {}
     bound = aliases(db).get(key)
     provider = result["provider"]
     family = provider_family(provider, config)
-    changed = pin_changed(node, bound, config)
+    # `switch`: admission found the unpinned node leaving the alias family
+    # (family_switch). The admitted route must confirm it (bug-30623f).
+    changed = pin_changed(node, bound, config) or bool(
+        switch and bound and not bound.get("renew") and family != bound.get(
+            "family", provider_family(bound["provider"], config)))
     # Recheck at activation: an accepted assignment may have outlived its
     # provider declaration. Its actual route must still match the alias family.
     for other in nodes.values():
@@ -133,8 +187,9 @@ def freeze(db, node, nodes, result, paths, config):
             continue
         spec = config.agents.get(other.get("agent"))
         declared = other["pins"].get("provider") or (spec.provider if spec else None)
-        if other["id"] == node["id"] and other["pins"].get("model"):
-            # A model-only pin can select a configured fallback family.
+        if other["id"] == node["id"] and (other["pins"].get("model") or changed):
+            # A model-only pin can select a configured fallback family, and
+            # so can an unpinned switch that renews the alias (bug-30623f).
             declared = provider
         if declared:
             other_family = provider_family(declared, config)

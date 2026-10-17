@@ -700,7 +700,8 @@ class Engine:
                 continue
             binding = checked_binding
             probe = self.context(node, probe=True)
-            renew_for_pin = sessions.pin_changed(node, binding, config)
+            renew_for_pin = (sessions.pin_changed(node, binding, config)
+                             or sessions.family_switch(node, binding, self.runner)) if binding else False
             if binding and (binding.get("renew") or renew_for_pin):
                 binding = None
             if binding:
@@ -812,7 +813,8 @@ class Engine:
                 top.update(branch=prepared_nodes[top["id"]]["branch"], branch_tip=prepared_nodes[top["id"]]["branch_tip"])
                 self.store.save_node(db, top)
                 try:
-                    alias = sessions.freeze(db, current, current_nodes, result, self.paths, config)
+                    alias = sessions.freeze(db, current, current_nodes, result, self.paths, config,
+                                            switch=sessions.family_switch(current, checked_binding, self.runner))
                     if alias:
                         bound = sessions.aliases(db)[alias["alias_id"]]
                         if bound.get("commit"):
