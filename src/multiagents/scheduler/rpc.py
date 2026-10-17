@@ -629,6 +629,14 @@ class Service:
             raise Refused("not_implemented")
         if not config.project["scheduler"]["enabled"]:
             raise Refused("scheduler_disabled", pending_nodes=len(self.store.pending()))
+        if op == "update_node" and principal["root"] and "task" in args:
+            from .control import ACTIVE_ATTEMPTS
+            from .engine import attempts
+            # NC-R59: the claim check shares the update's write transaction,
+            # so no worker can claim the old task between this check and save.
+            if any(a["state"] in ACTIVE_ATTEMPTS
+                   for a in matching_records(attempts(db), "node_id", args.get("id"))):
+                raise Refused("active_runs", detail="use steer_run or relaunch_node to change the task")
         if op == "update_node" and nodes.get(args.get("id"), {}).get("completion_pending"):
             raise Refused("active")
         if any(n.get("disposal_pending") and (n["id"] == args.get("id") or n["id"] == args.get("parent")
