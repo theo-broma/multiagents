@@ -58,6 +58,15 @@ implementing only the path the tests walk will go green and then be taken apart
 by the adversary, which runs after you on inputs the tests never use. Implement
 the behaviour; the tests are a sample of it, not a definition of it.
 
+## Tests you run
+
+Never run the full suite, nor every chunk of it. Run what your change touches:
+the changed and added test files, the test files that import the changed
+modules (find them with `rg`), and the test families of the subsystem you
+changed (for example every `test_ap_*` for an auth-proxy change). Report
+exactly what you ran. The orchestrator runs the one full suite per merge
+candidate.
+
 ## When you are stuck
 
 Asking is cheaper than an hour of flailing, and there are two ways to ask.
