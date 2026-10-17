@@ -84,4 +84,10 @@ def test_automatic_switch_to_another_family_clears_the_alias_session(w):
     assert after["reason"] == "provider_changed"
     assert after["session_id"] != before["session_id"]
     assert any(a["session_id"] == before["session_id"] for a in after["archives"])
-    assert w.get(rv)["runs"][-1]["reason"] == "provider_changed"
+    # Provider receipt precedes the scheduler committing the new launch.
+    runs = w.until(
+        lambda: (runs if len(runs := w.get(rv)["runs"]) >= 2
+                 and "reason" in runs[-1] else None),
+        timeout=BOUND, what="the other-family launch to be recorded",
+    )
+    assert runs[-1]["reason"] == "provider_changed"
