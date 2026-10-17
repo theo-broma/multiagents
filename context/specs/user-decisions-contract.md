@@ -514,6 +514,16 @@ Approved by the user on 2026-10-17.
     inside the root after resolving the directory path, and within the
     size limit.
   - Hashing and the snapshot use that same descriptor.
+- **Round 3 (2026-10-18, adversary nd-fbd40e50, second pass).**
+  - **Intermediate directories.** Containment is proven on the OPENED
+    descriptor, for example by checking the realpath of
+    `/proc/self/fd/<fd>`, or by an `openat` walk with `O_NOFOLLOW` on every
+    component. A directory swapped for a symlink between the check and the
+    open is refused.
+  - **Empty RPC token.** A present but empty `MULTIAGENTS_RPC_TOKEN` also
+    means `mcp_run`.
+  - **The legacy tool's return value** reports the same `answered_by` actor
+    as the stored record.
 - **Below the bar, left as they are:** a hardlink to an outside file; the
   CLI's channel name `legacy` (slice 4 gives the CLI its `cli` channel).
 
