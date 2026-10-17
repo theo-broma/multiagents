@@ -6520,3 +6520,4 @@ Pending user: RB-R1 re-wording (above).
   - The adversary nd-4c12a544 and the tester (c25 wait) run meanwhile.
   - 4B.1 must NOT merge until real Docker passes.
 - 2026-10-17 ~05:50 CEST. Tester's shared retry-budget wait (c25 create_failure) is on main (09a8140b). Waiting on adversary nd-4c12a544 and the advisor's Docker triage (kn2n3f2ni).
+- 2026-10-17 ~06:10 CEST. TOOLING DEFECT: consult('advisor') fails with exit 20. 'codex: ValueError: session id is not UUID-shaped: ses_...' (run ag-5d0962): an opencode-format session id is handed to codex. The advisor is unusable until this is fixed. Bug-reporter nd-bbf8b1ea is writing the ticket and a proposed fix; fix it in-house (implementer, then reviewer). Researcher nd-9193e451 is triaging the 4B.1 real-Docker failures in the advisor's place.
