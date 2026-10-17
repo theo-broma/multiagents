@@ -855,6 +855,9 @@ class Engine:
                 launch_spec = LaunchSpec(owner=attempt["attempt_id"], lifetime="attempt",
                                          labels={"multiagents.project": self.paths.slug})
                 selection.update(spec_version=1, spec_digest=spec_digest(launch_spec))
+                provider = self.runner.providers.get(result.get("provider"))
+                if selection["kind"] == "isolated" and provider and provider.needs.get("network"):
+                    selection["network"] = {"creation_key": "network-" + uuid.uuid4().hex}
                 attempt["launch_evidence"] = {"executor": selection}
                 current["launch_tries"] = attempt["retry_count"] + 1
                 # TF-R2: a retry whose route is the provider the failed

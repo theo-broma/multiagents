@@ -3498,6 +3498,9 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     elif args.scheduler_command == "remove-orphan":
         from .scheduler.orphans import remove
         result = remove(paths.root, args.container_id)
+    elif args.scheduler_command == "remove-orphan-network":
+        from .scheduler.orphans import remove_network
+        result = remove_network(paths.root, args.network_id)
     elif args.scheduler_command == "orphans":
         status = scheduler.status(paths.root)
         result = {key: status[key] for key in ("orphans", "orphans_error") if key in status}
@@ -3506,7 +3509,7 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     else:
         result = scheduler.status(paths.root)
     print(json.dumps(result))
-    if args.scheduler_command == "remove-orphan":
+    if args.scheduler_command in {"remove-orphan", "remove-orphan-network"}:
         return 0 if result.get("ok") else 1
     return 1 if result.get("error") == "scheduler_unavailable" and args.scheduler_command == "start" else 0
 
@@ -3554,11 +3557,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scheduler", help="manage the host plan scheduler")
     p.set_defaults(func=cmd_scheduler)
     scheduler_sub = p.add_subparsers(dest="scheduler_command", required=True)
-    for action in ("start", "status", "stop", "orphans", "remove-orphan"):
+    for action in ("start", "status", "stop", "orphans", "remove-orphan", "remove-orphan-network"):
         command = scheduler_sub.add_parser(action)
         command.set_defaults(func=cmd_scheduler, foreground=False)
         if action == "remove-orphan":
             command.add_argument("container_id")
+        if action == "remove-orphan-network":
+            command.add_argument("network_id")
         if action == "start":
             command.add_argument("--foreground", action="store_true")
             command.add_argument("--clock-file", help=argparse.SUPPRESS)

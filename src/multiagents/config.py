@@ -800,6 +800,9 @@ def validate_isolated_resources(resources: Any) -> dict[str, Any]:
 def _validate_isolated_section(isolated: Any) -> None:
     if not isinstance(isolated, dict) or isolated.get("backend", "docker") != "docker":
         raise ValueError("executor.isolated.backend must be docker (accepted values: docker)")
+    network = isolated.get("network", "allowlist")
+    if not isinstance(network, str) or network not in ("allowlist", "none"):
+        raise ValueError("executor.isolated.network must be allowlist or none")
     docker = isolated.get("docker")
     if docker is None:
         docker = {}
@@ -814,6 +817,10 @@ def _validate_isolated_section(isolated: Any) -> None:
     if (not isinstance(image, str) or not image or "\x00" in image
             or any(char.isspace() for char in image)):
         raise ValueError("executor.isolated.docker.image must be a non-empty image name")
+    image = docker.get("gateway_image", "multiagents/workspace:latest")
+    if (not isinstance(image, str) or not image or "\x00" in image
+            or any(char.isspace() for char in image)):
+        raise ValueError("executor.isolated.docker.gateway_image must be a non-empty image name")
     validate_isolated_resources(isolated.get("resources"))
 
 

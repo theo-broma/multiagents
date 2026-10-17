@@ -763,7 +763,9 @@ def strip_run_environment(env: dict) -> dict:
     """Remove host control inputs after every run-environment overlay."""
     from ..safepoint import strip_key
     strip_key(env)
-    for key in ("MULTIAGENTS_TEST_ISOLATED_BACKEND", "IC_TEST_PLAN", "IC_BACKEND_ROOT"):
+    for key in ("MULTIAGENTS_TEST_ISOLATED_BACKEND", "IC_TEST_PLAN", "IC_BACKEND_ROOT",
+                "MULTIAGENTS_TEST_GATEWAY_BACKEND", "MULTIAGENTS_TEST_GATEWAY_PROBE",
+                "MULTIAGENTS_TEST_REDACTOR_UNPRIVILEGED"):
         env.pop(key, None)
     return env
 

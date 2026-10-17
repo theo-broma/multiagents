@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import gitops
 from .base import Executor, strip_run_environment
-from .lifecycle import (Absent, Exited, InvalidSpec, InvocationSpec, LaunchSpec,
+from .lifecycle import (Absent, Created, Exited, InvalidSpec, InvocationSpec, LaunchSpec,
                         ResourceIdentity, Unknown, Unsupported, spec_digest)
 
 
@@ -56,6 +56,8 @@ class IsolatedExecutor(Executor):
         self.before_remove = None
         self.prepare_session = None
         self.endpoint = None
+        self.gateways = None
+        self.network_attempt = None
         from ..provision.seeds import SeedRegistry
         self.seeds = SeedRegistry(paths) if paths else None
         target = os.environ.get("MULTIAGENTS_TEST_ISOLATED_BACKEND")
@@ -104,6 +106,7 @@ class IsolatedExecutor(Executor):
         self.creation_key = evidence.get("creation_key", "")
         self.identity = evidence.get("identity", "")
         self.termination_confirmed = evidence.get("termination_confirmed", False)
+        self.network_attempt = evidence.get("attempt_id") if evidence.get("network") else None
         self.endpoint = None
         if evidence.get("endpoint_id"):
             from ..scheduler import endpoint_handle
@@ -133,6 +136,19 @@ class IsolatedExecutor(Executor):
             return [self.problem]
         result = await outcome(self.backend.probe)
         return [result.reason] if isinstance(result, Unknown) else result
+
+    def gateway_registry(self):
+        if self.gateways is None:
+            from ..config import load
+            from ..scheduler.gateways import GatewayRegistry
+            loaded = load(self.paths, seed=False)
+            self.gateways = GatewayRegistry(self.paths, config=loaded, providers=self.providers)
+        if self.backend is not None:
+            self.backend.network_registry = self.gateways
+        return self.gateways
+
+    async def network_probe(self):
+        return await self.gateway_registry().probe()
 
     def bind(self, owner, record, *, previous=None, begin=None, attempt=None,
              checkout=None, branch="", authority=None):
@@ -183,10 +199,15 @@ class IsolatedExecutor(Executor):
         if self.endpoint:
             from ..scheduler import revoke_endpoint
             revoke_endpoint(self.paths.root, self.endpoint["attempt_id"])
+        if self.network_attempt:
+            from ..scheduler.orphans import _run
+            return _run(self.gateway_registry().revoke(self.network_attempt))
 
     async def _before_remove(self, identity):
         if callable(self.before_remove):
             await self.before_remove(identity)
+        if self.network_attempt:
+            return await self.gateway_registry().cleanup(self.network_attempt)
 
     def _uncertain(self, creation_key, operation, reply):
         return Unknown(f"predecessor {creation_key}: {operation}: "
@@ -225,20 +246,25 @@ class IsolatedExecutor(Executor):
             state = await outcome(self.backend.inspect_invocation, identity, invocation_key)
             if not isinstance(state, (Absent, Unknown)):
                 self.record({"invocation_id": invocation_key})
-            self.revoke_endpoint()
+            await asyncio.to_thread(self.revoke_endpoint)
             stopped = await outcome(self.backend.stop, identity, 0.5)
             if isinstance(stopped, Unknown):
                 return self._uncertain(creation_key, "stop", stopped)
             state = await outcome(self.backend.inspect, identity)
-            if not isinstance(state, (Exited, Absent)):
+            if not isinstance(state, (Exited, Absent, Created)):
                 return self._uncertain(creation_key, "inspect", state)
             self.record({"termination_confirmed": True})
-            self.revoke_endpoint()
+            await asyncio.to_thread(self.revoke_endpoint)
             await self._before_remove(identity)
-            removed = await outcome(self.backend.remove, identity, True)
+            # Created proves the invocation never started. Docker stop leaves
+            # that state unchanged, so discard this resource rather than retain
+            # a Created predecessor that would block the bounded launch retry.
+            removed = await outcome(self.backend.remove, identity, not isinstance(state, Created))
             if not isinstance(removed, (Exited, Absent)):
                 return self._uncertain(creation_key, "remove", removed)
         self.record({"termination_confirmed": True})
+        if self.network_attempt:
+            await self.gateway_registry().cleanup(self.network_attempt)
         if run_dir is not None:
             _write_run_file(run_dir, "exit_status", b"1")
 
@@ -299,7 +325,26 @@ class IsolatedExecutor(Executor):
                        "detail_code": "isolation_unavailable", "excerpt": str(exc)}
             self.begin({**fields, "failure": failure, "termination_confirmed": True})
             raise RuntimeError("isolation_unavailable: " + str(exc)) from exc
+        if self.attempt and declaration and declaration.needs.get("network"):
+            # Publish the network creation intent with the launch reservation,
+            # before the run becomes visible or Docker can create anything.
+            network = self.attempt.get("launch_evidence", {}).get("executor", {}).get("network") or {}
+            fields["network"] = {"creation_key": network.get("creation_key") or "network-" + uuid.uuid4().hex}
         self.begin(fields)
+        if self.attempt and declaration and declaration.needs.get("network"):
+            self.network_attempt = self.attempt["attempt_id"]
+            handle = await outcome(self.gateway_registry().prepare, self.network_attempt, self.attempt["run_id"])
+            from ..scheduler.gateways import NetworkHandle
+            if not isinstance(handle, NetworkHandle):
+                reason = getattr(handle, "reason", getattr(handle, "field", "network preparation failed"))
+                self.record({"failure": {"class": "launch", "retryable": True,
+                    "detail_code": "isolation_unavailable", "excerpt": reason}})
+                resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
+                if isinstance(resolved, Unknown):
+                    return resolved
+                raise RuntimeError("isolation_unavailable: " + reason)
+            self.spec.network_handle = handle.id
+            self.record({"spec_digest": spec_digest(self.spec)})
         if run_dir is not None:
             directory = gitops._open_beneath(*gitops.beneath(run_dir), create=True)
             try:
@@ -334,6 +379,9 @@ class IsolatedExecutor(Executor):
                     return resolved
                 raise RuntimeError("isolation_unavailable: " + str(exc)) from exc
             environment = strip_run_environment(dict(self.adapter_env(argv, env, provider)))
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                         "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+                environment.pop(name, None)
             from ..agentwrap import prompt_stdin
             source = prompt_stdin(environment)
             stdin = None
@@ -382,6 +430,18 @@ class IsolatedExecutor(Executor):
                         return resolved
                     raise RuntimeError("isolation_unavailable: " + detail) from exc
                 environment["MULTIAGENTS_RPC_SOCKET"] = "/run/multiagents/rpc/rpc.sock"
+            if self.network_attempt:
+                from ..scheduler.gateways import GatewayGrant
+                grant = await outcome(self.gateway_registry().grant, self.network_attempt, identity)
+                if not isinstance(grant, GatewayGrant):
+                    detail = getattr(grant, "reason", "gateway grant unavailable")
+                    self.record({"failure": {"class": "launch", "retryable": True,
+                        "detail_code": "isolation_unavailable", "excerpt": detail}})
+                    resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
+                    if isinstance(resolved, Unknown):
+                        return resolved
+                    raise RuntimeError("isolation_unavailable: " + detail)
+                environment.update(grant.environment)
             invocation = InvocationSpec(argv=list(argv), env=environment, cwd=self.spec.guest_repo,
                                         stdin=stdin, kind="agent")
             reply = await outcome(self.backend.run, identity, invocation, invocation_key)
@@ -416,9 +476,14 @@ class LifecycleHandle:
         self.launched_at = time.time()
         self._state = None
         self._stderr = b""
+        self._inspection = None
 
     async def _inspect(self):
-        self._state = await outcome(self.backend.inspect, self.identity)
+        # The exit waiter and both output readers need the same observation.
+        # Share only an in-flight call; a completed result never caches liveness.
+        if self._inspection is None or self._inspection.done():
+            self._inspection = asyncio.create_task(outcome(self.backend.inspect, self.identity))
+        self._state = await asyncio.shield(self._inspection)
         return self._state
 
     def _resume_stream(self, stream):
@@ -540,7 +605,7 @@ class LifecycleHandle:
                 if self.run_dir and code is not None:
                     _write_run_file(self.run_dir, "exit_status", str(code).encode())
                 if self.revoke:
-                    self.revoke()
+                    await asyncio.to_thread(self.revoke)
                 if self.before_remove:
                     await self.before_remove(self.identity)
                 await outcome(self.backend.remove, self.identity, True)
@@ -549,7 +614,7 @@ class LifecycleHandle:
 
     async def stop(self, grace=3.0):
         if self.revoke:
-            self.revoke()
+            await asyncio.to_thread(self.revoke)
         state = await outcome(self.backend.stop, self.identity, grace)
         if not isinstance(state, (Exited, Absent)):
             return state

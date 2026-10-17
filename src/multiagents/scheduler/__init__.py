@@ -97,6 +97,13 @@ def start(project_root: Path, foreground=False, clock_file=None) -> dict:
     current = status(project_root)
     if "error" not in current:
         return current
+    # Validate before detaching so a configuration refusal reaches the caller,
+    # rather than being hidden behind a generic scheduler_unavailable result.
+    from ..config import load
+    try:
+        load(ProjectPaths(project_root), seed=False)
+    except ValueError as exc:
+        return {"error": "invalid_config", "reason": str(exc)}
     if foreground:
         serve(project_root, clock_file=clock_file)
         return {}

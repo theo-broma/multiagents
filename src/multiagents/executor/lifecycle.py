@@ -41,6 +41,7 @@ class LaunchSpec:
     resources: dict = dataclasses.field(default_factory=dict)
     credential_handle: Any = None
     transport_handle: Any = None
+    network_handle: str | None = None
 
 
 @dataclasses.dataclass
@@ -134,6 +135,8 @@ class Backend(Protocol):
 def spec_digest(spec: LaunchSpec | InvocationSpec) -> str:
     """SHA-256 of the schema's canonical UTF-8 JSON representation."""
     value = dataclasses.asdict(spec)
+    if isinstance(spec, LaunchSpec) and spec.network_handle is None:
+        value.pop("network_handle")
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -290,7 +293,7 @@ class ReferenceBackend:
                     return InvalidSpec("transport_handle is outside the host-issued authority")
             except (OSError, ValueError, RuntimeError):
                 return InvalidSpec("invalid transport_handle")
-        for name in ("session_state", "resources", "credential_handle"):
+        for name in ("session_state", "resources", "credential_handle", "network_handle"):
             if getattr(spec, name):
                 return Unsupported(name)
         try:

@@ -4542,8 +4542,7 @@ class Runner(QuotaHandover):
                     executor.restore(previous_executor)
             if executor.kind == "isolated":
                 needs = getattr(provider, "needs", {})
-                for need, field in (("credentials", "credential_handle"),
-                                    ("network", "network")):
+                for need, field in (("credentials", "credential_handle"),):
                     if needs.get(need, True):
                         detail = f"isolation_unavailable: Unsupported({field})"
                         self._record_node_launch_evidence(node_id, {"executor": {
@@ -4551,6 +4550,13 @@ class Runner(QuotaHandover):
                             "failure": {"class": "other", "retryable": False,
                                 "detail_code": "isolation_unavailable", "excerpt": detail}}})
                         raise RuntimeError(detail)
+                if needs.get("network", True) and executor.config.get("network", "allowlist") == "none":
+                    detail = "isolation_unavailable: executor.isolated.network is none"
+                    self._record_node_launch_evidence(node_id, {"executor": {
+                        "kind": "isolated", "termination_confirmed": True,
+                        "failure": {"class": "other", "retryable": False,
+                            "detail_code": "isolation_unavailable", "excerpt": detail}}})
+                    raise RuntimeError(detail)
             session_plan = None
             home = None
             if self.config.home_policy == "per-agent" or executor.kind == "isolated":
@@ -6169,6 +6175,10 @@ class Runner(QuotaHandover):
                 executor = self.executor(spec)
                 if executor.kind == "isolated":
                     problems = await executor.probe()
+                    if (not problems and provider.needs.get("network")
+                            and not provider.needs.get("credentials")
+                            and executor.config.get("network", "allowlist") != "none"):
+                        problems = await executor.network_probe()
                     if problems:
                         return admission_block("isolation_unavailable: " + "; ".join(problems))
                 return {"admitted": True, "provider": provider.name, "model": spec.model,
@@ -8890,7 +8900,7 @@ class Runner(QuotaHandover):
             isolated_live = isinstance(state, Running)
             isolated_handle = LifecycleHandle(executor.backend, identity, invocation, run_dir,
                 lambda fields: self._record_node_launch_evidence(node.id, {"executor": fields}),
-                revoke=executor.revoke_endpoint)
+                revoke=executor.revoke_endpoint, before_remove=executor._before_remove)
         stopper = probe = None
         if getattr(executor, "kind", "local") == "docker" and not executor.inside():
             # The pid on the node is the host's `docker exec` client, which

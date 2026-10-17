@@ -29,52 +29,7 @@ _GENERATED = ("owner", "lifetime", "creation_key", "spec_digest")
 _INPUT = "/multiagents-input"
 # The input mount is host-controlled and read-only. Frame bytes before Docker's
 # JSON logger can replace invalid UTF-8; only the host decodes the durable logs.
-_ENTRYPOINT = r'''
-import base64, json, os, selectors, signal, subprocess
-os.umask(0o077)
-with open('/multiagents-input/invocation.json') as stream:
-    invocation = json.load(stream)
-os.chdir(invocation['cwd'])
-source = invocation.get('stdin')
-child = None
-signals = []
-def forward(signum, frame):
-    if child is None:
-        signals.append(signum)
-    else:
-        try:
-            child.send_signal(signum)
-        except ProcessLookupError:
-            pass
-for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-    signal.signal(signum, forward)
-with open(source if source else '/dev/null', 'rb') as stdin:
-    child = subprocess.Popen(invocation['argv'], env=invocation['env'],
-                             stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-for signum in signals:
-    forward(signum, None)
-prefix = invocation['output_prefix'].encode('ascii')
-selector = selectors.DefaultSelector()
-for pipe, fd in ((child.stdout, 1), (child.stderr, 2)):
-    selector.register(pipe, selectors.EVENT_READ, fd)
-while selector.get_map():
-    ready = selector.select(0.05)
-    if not ready and child.poll() is not None:
-        # Descendants can retain pipe descriptors after the command exits.
-        # Docker ends them when this supervisor exits, as with an exec entrypoint.
-        break
-    for key, events in ready:
-        data = os.read(key.fd, 2048)
-        if not data:
-            selector.unregister(key.fileobj)
-            key.fileobj.close()
-            continue
-        framed = prefix + base64.b64encode(data) + b'\n'
-        while framed:
-            framed = framed[os.write(key.data, framed):]
-code = child.wait()
-raise SystemExit(code if code >= 0 else 128 - code)
-'''
+from .log_entrypoint import ENTRYPOINT as _ENTRYPOINT
 
 
 class DockerBackend(ReferenceBackend):
@@ -96,6 +51,8 @@ class DockerBackend(ReferenceBackend):
         self.image = image
         self.resources = dict(resources or {})
         self._attachment_paths: set[Path] = set()
+        self.network_registry = None
+        self._log_reads = {}
 
     @property
     def _control(self):
@@ -188,9 +145,17 @@ class DockerBackend(ReferenceBackend):
         # Preserve structural validation's precedence over unsupported fields.
         refusal = super()._valid_spec(dataclasses.replace(
             spec, resources={}, credential_handle=None,
-            session_state=None))
+            session_state=None, network_handle=None))
         if refusal is not None:
             return refusal
+        if spec.network_handle is not None:
+            if self.network_registry is None:
+                return InvalidSpec("network_handle is outside the host authority")
+            network = self.network_registry.resolve(spec.network_handle, spec.owner)
+            if not isinstance(network, str):
+                return network
+            if os.getuid() == 0:
+                return InvalidSpec("gateway isolation requires a non-root host UID")
         if any("multiagents." + key in spec.labels for key in _GENERATED):
             return InvalidSpec("generated multiagents labels are reserved")
         for value in spec.writable_paths + spec.readonly_paths:
@@ -367,10 +332,17 @@ class DockerBackend(ReferenceBackend):
                       "repo_path": str(repo), "home_path": str(storage / "home")}
             _write(path / "resource.json", record)
             name = "multiagents-" + hashlib.sha256(key.encode()).hexdigest()
+            network = (self.network_registry.resolve(spec.network_handle, spec.owner)
+                       if spec.network_handle is not None else "none")
+            if not isinstance(network, str):
+                return network
             args = ["create", "--name", name, "--pull", "never", "--restart", "no",
-                    "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+                    "--network", network, "--user", "0:0" if spec.network_handle else f"{os.getuid()}:{os.getgid()}",
                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true",
                     "--log-driver", "json-file"]
+            if spec.network_handle:
+                args += ["--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP",
+                         "--dns", "127.0.0.1"]
             labels = dict(spec.labels)
             labels.update({"multiagents.owner": spec.owner, "multiagents.lifetime": spec.lifetime,
                            "multiagents.creation_key": key, "multiagents.spec_digest": digest})
@@ -521,6 +493,9 @@ class DockerBackend(ReferenceBackend):
             payload = {"argv": invocation.argv, "env": env, "cwd": invocation.cwd,
                        "stdin": _INPUT + "/" + Path(stdin).name if stdin else None,
                        "output_prefix": "multiagents-output-" + uuid.uuid4().hex + ":"}
+            if spec.get("network_handle"):
+                from ..scheduler.gateways import redaction_values
+                payload.update(redaction_secrets=redaction_values(env), uid=os.getuid(), gid=os.getgid())
             _write(path / "input" / "invocation.json", payload)
             record["invocation"] = {"key": key, "digest": digest,
                                     "output_prefix": payload["output_prefix"]}
@@ -554,7 +529,13 @@ class DockerBackend(ReferenceBackend):
             return Absent()
         # Logs itself reports absence and daemon uncertainty. An extra inspect
         # adds no authority here and delays draining both streams after exit.
-        result = await self._cli("logs", identity.id)
+        # Docker returns both streams together. Concurrent readers can share
+        # the command without retaining a stale log snapshot between polls.
+        read = self._log_reads.get(identity.id)
+        if read is None or read.done():
+            read = asyncio.create_task(self._cli("logs", identity.id))
+            self._log_reads[identity.id] = read
+        result = await asyncio.shield(read)
         if self._missing(result):
             return Absent()
         if result[0]:
@@ -580,6 +561,8 @@ class DockerBackend(ReferenceBackend):
         state = await self.inspect(identity)
         if isinstance(state, (Absent, Exited, Unknown)):
             return state
+        if isinstance(state, Created):
+            return Exited(None)
         # Docker stop sends TERM and then KILL after the requested grace.
         await self._cli("stop", "--time", str(max(0, math.ceil(grace))), identity.id)
         state = await self.inspect(identity)
