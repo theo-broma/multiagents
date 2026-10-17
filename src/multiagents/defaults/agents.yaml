@@ -151,7 +151,9 @@ agents:
       # Deliberately NOT agy here. With claude gone, the two implementers that
       # fall back land on agy; sending the tester there too would put the
       # contract and the code it holds on one provider at the worst moment.
-      opencode-go: opencode-go/kimi-k2.6
+      # 2026-10-18: kimi removed; moved to opencode-go/qwen3.6-plus on the $60 tier
+      # to preserve cross-provider fallback without collapsing checking pairs.
+      opencode-go: opencode-go/qwen3.6-plus
     description: >-
       Writes the black-box behavioural test suite that defines done, before the
       implementation exists. Red is success.
@@ -287,7 +289,8 @@ agents:
     model: gemini-3.8-flash-high
     instructions: team/dev-advisor.md
     models:
-      opencode-go: opencode-go/kimi-k2.7-code
+      # 2026-10-18: kimi removed; empty model disables route (RT-R1)
+      opencode-go: ""
     description: >-
       Second opinion for the deep implementer, mid-task. Names the problem,
       suggests an approach, never writes the implementation.
@@ -431,8 +434,9 @@ agents:
   # run in parallel and must not fight over shared fixtures, and none of them
   # may quietly adjust the system it is measuring.
   characterizer:
-    provider: opencode-go
-    model: opencode-go/kimi-k2.7-code
+    # 2026-10-18: kimi removed; moved to claude/sonnet
+    provider: claude
+    model: sonnet
     instructions: team/characterizer.md
     # No `models:` entry at all, deliberately. NOT gemini-3.8-flash-high, which is
     # where the auditor lands: the auditor partly judges what this agent chose
