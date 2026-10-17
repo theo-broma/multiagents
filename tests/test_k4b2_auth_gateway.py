@@ -189,7 +189,10 @@ def test_k4b2_3_inherited_anthropic_overrides_are_scrubbed_for_every_isolated_at
         if mode == "networkless":
             s.provider_declares(network=False)
         elif mode == "undeclared":
-            s.provider_declares_nothing()
+            # Only the auth protocol is undeclared: omitted needs would require
+            # credentials by default (K17.2), which 4B.2 still refuses.
+            s.provider_declares(network=True, credentials=False)
+            s.set_gateway_auth(None)
         s.start()
         env = s.invocation(s.running(s.launch()))["env"]
         assert "ANTHROPIC_API_KEY" not in env, "an inherited API key reached the guest"
