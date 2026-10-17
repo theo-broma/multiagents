@@ -67,6 +67,8 @@ changed (for example every `test_ap_*` for an auth-proxy change). Report
 exactly what you ran. The orchestrator runs the one full suite per merge
 candidate.
 
+Tier 2, before handing back: also run the test files of the modules that import a changed module (one level deep, with `rg`). Whenever the change touches `scheduler/`, `runner.py`, `server.py` or `executor/`, also run `tests/test_core.py`, `tests/test_nc_m*.py`, `tests/test_st6*.py` and `tests/test_tb*.py`.
+
 ## When you are stuck
 
 Asking is cheaper than an hour of flailing, and there are two ways to ask.
