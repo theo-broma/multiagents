@@ -6631,3 +6631,4 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-18 ~05:10 CEST. 4B.2 orphan fixture fix on main (25e55fba). Implementer nd-38242c3f launches (finding 3, auth stream lock). A new full reviewer is deposited after it.
 - 2026-10-18 ~05:30 CEST. tb_r3 snapshot_cancelled has been red on main since 6df131c0 (2026-10-07, _wait_with_holds; already noted in BRIEF around line 4963). The code is wrong, not the test (researcher nd-67024dd3). Implementer nd-3885aaf9, then reviewer, deposited.
 - 2026-10-18 ~06:00 CEST. 4B.2 implementer at d501086c (auth stream writes outside the lock, 15 s write timeout): 613 passed locally. Reviewer nd-b7d0d820 launching; real Docker rerun on /var/tmp/b42-chk, bg job.
+- 2026-10-18 ~06:20 CEST. Default briefs updated (nd-99f9222f, 606fc7b2); reviewer nd-6c802b1f next. Plan: combine the small candidates (briefs, kimi defaults nd-46089cf2, TB-R3 fix nd-3885aaf9) into ONE full suite once all are approved.
