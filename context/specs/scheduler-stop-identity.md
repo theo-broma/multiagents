@@ -81,3 +81,18 @@ What the code does today:
 - **Test fakes:** the ST6 fake daemons are migrated to write and report the
   nonce. That is test code, so the tester does it, after this
   clarification.
+
+## Clarification (2026-10-18, after the combined suite on SI + main)
+
+SI-R1 must keep ST6-R2.
+- **A stale record means already stopped.** The record names a PID that is
+  dead, or one now owned by another process (its start time differs). In
+  both cases the recorded scheduler no longer exists. `stop()` returns
+  `stopped: true` and signals NOTHING, as ST6-R2 requires.
+- **A refusal (`stop_refused`) is only for a LIVE process** that matches
+  the recorded PID and start time, but whose project or nonce does not
+  match. That is the case where signalling could hit the wrong scheduler.
+- **The nonce is read from the RPC result envelope**:
+  `{"ok": true, "result": {..., "nonce": ...}}`.
+- SI-R1's "a record with a mismatched start time is refused" is amended
+  to "is reported as already stopped, and nothing is signalled".
