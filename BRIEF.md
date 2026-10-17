@@ -6586,3 +6586,7 @@ Pending user: RB-R1 re-wording (above).
   - reviewer nd-fc207bca, then adversary nd-944cd061.
   When the tester finishes, also apply its tests to main as a patch. Real Docker and the suite come after the adversary.
   Also running: flake tester nd-ead6d6bc (c23 loop_alias, nt_r4) and the bug-535139 suite 2a9f0277ac8b. The UD slices 2-3 draft stays uncommitted, awaiting the advisor and the user.
+- 2026-10-17 ~17:30 CEST. The user approved UD slices 2 and 3 (7a01be6b). Deposited:
+  - slice 2: tester nd-b66bf1b3, then implementer nd-c4fbed89 (inputs from the tester), then reviewer nd-5ad992a8 and adversary nd-fbd40e50, both depending on the implementer;
+  - slice 3: tester nd-9d1a6412 started now; its implementer waits for the slice 2 merge (both touch decisions.py).
+  Apply each tester's tests to main as a patch when it finishes. 4B.2 chain, flake tester and bug-535139 suite also running.
