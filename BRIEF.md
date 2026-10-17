@@ -6553,3 +6553,4 @@ Pending user: RB-R1 re-wording (above).
   - Test: the guest_files path; 'cancelled' missing from a wait.
   - Implementer nd-4fa20bcc relaunched; it must also validate the untested 2851f727. Tester nd-754de4be relaunched.
   - bug-535139 implementer nd-81a1e751 is on part 2. Its reviewer nd-26e7257c, stopped earlier, needs a relaunch after it.
+- 2026-10-17 ~11:40 CEST. 4B.1 implementer at 8fcf02cd: the grant is bound to the attempt network's subnet (K4B.10 added to the contract); the relay is a subreaper and drains the group. It is held needs_info on a capset test defect (syscall 125 is capget). Tester nd-754de4be is fixing capset and the stale c18 exact-key test. Full real-Docker -k docker set running on /var/tmp/b41-chk (2665588a), bg job, log /var/tmp/b41d.log.
