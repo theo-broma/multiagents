@@ -34,7 +34,7 @@ def test_c7_the_five_tools_are_registered_with_their_signatures():
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
     for name in TOOLS:
         assert name in tools, name
-    props = lambda n: set(tools[n].inputSchema.get("properties", {}))
+    props = lambda n: set((getattr(tools[n], "input_schema", None) or tools[n].inputSchema).get("properties", {}))
     assert props("ask_user") == {"topic", "title", "context", "implications", "mode", "options",
                                  "min", "max", "recommended", "allow_free_text", "refs",
                                  "audience", "supersedes"}
@@ -443,6 +443,6 @@ def test_c7_answer_decision_error_codes(world):
 
 
 def test_c7_answer_decision_free_text_on_a_free_text_decision(world):
-    rec = make(world, "free_text", by=ROOT_INIT, audience="orchestrator")
+    rec = make(world, mode="free_text", by=ROOT_INIT, audience="orchestrator")
     succeeded(call("answer_decision", id=rec["id"], revision=1, free_text="ship it"))
     assert D.get(world.tree, rec["id"])["answer"]["free_text"] == "ship it"
