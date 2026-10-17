@@ -45,11 +45,12 @@ def test_c6_no_decisions_route_on_the_monitor():
 
 
 def test_c6_no_instruction_text_mentions_the_new_tool():
-    # Slice 2 puts the tool's definition in server.py; instruction text (slice 5) stays clean.
+    # Slice 5 (UD-C20) deliberately puts ask_user into _orchestrator.md and _initializer.md
+    # (tests/test_ud_c20_instructions.py); every other file stays clean.
+    allowed = {"decisions.py", "server.py", "_orchestrator.md", "_initializer.md"}
     offenders = []
     for path in (REPO / "src" / "multiagents").rglob("*"):
-        if path.is_file() and path.suffix in {".md", ".txt", ".yaml", ".py"} \
-                and path.name not in {"decisions.py", "server.py"}:
+        if path.is_file() and path.suffix in {".md", ".txt", ".yaml", ".py"} and path.name not in allowed:
             if re.search(r"\bask_user\b", path.read_text(errors="ignore")):
                 offenders.append(str(path.relative_to(REPO)))
     assert offenders == []
