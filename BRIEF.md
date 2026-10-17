@@ -6580,3 +6580,9 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~16:10 CEST. User: tasks that need no decision must start without being asked; memory updated. UD slices 2 and 3 drafted in user-decisions-contract.md (UD-C7..C13), UNCOMMITTED, awaiting the user's yes. The advisor pass comes after bug-535139 merges (advisor down).
 - 2026-10-17 ~16:30 CEST. 4B.1 DNS-bypass question CLOSED: test_ic_c27_docker_no_dns_server_reaches_a_host_resolver_or_resolves_an_external_name (66a6ec5c) PASSES on the host under real Docker. Limit: the host-side canary on :53 is unarmed when not root, so the proof is guest-side (no answer from 127.0.0.1, 127.0.0.11 or the bridge gateway, no external libc resolution).
 - 2026-10-17 ~16:50 CEST. The orchestrator brief now says that writing 'next' is not starting it (c59e84ac, user feedback). 4B.2 decisions K4B2.1-K4B2.7 drafted in phase7-part2-contract.md, UNCOMMITTED, from researcher nd-d025efcd. UD slices 2-3 draft is also uncommitted. Both await the advisor pass (after bug-535139 merges) and then the user's yes. bug-535139 suite 2a9f0277ac8b still running.
+- 2026-10-17 ~17:10 CEST. The user approved the 4B.2 contract (80f6fbcb). The whole chain is deposited ahead:
+  - tester nd-2d001b19;
+  - implementer-deep nd-38242c3f, which depends on and takes inputs from the tester;
+  - reviewer nd-fc207bca, then adversary nd-944cd061.
+  When the tester finishes, also apply its tests to main as a patch. Real Docker and the suite come after the adversary.
+  Also running: flake tester nd-ead6d6bc (c23 loop_alias, nt_r4) and the bug-535139 suite 2a9f0277ac8b. The UD slices 2-3 draft stays uncommitted, awaiting the advisor and the user.
