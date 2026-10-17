@@ -6543,3 +6543,8 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~09:20 CEST. bug-535139 tests are on main (822ab12a). The red repro shows the cx fake gets '--resume ses_...' on the retry after a failed handover segment. Implementer-deep nd-81a1e751, then reviewer nd-26e7257c. After that: the suite, apply src (or merge_node if the branch has no readonly reverts), resolve_ticket bug-535139 fixed. 4B.1 tester and implementer still running.
 - 2026-10-17 ~09:40 CEST. The 4B.1 tester's s4b docker test fixes are on main (no secrets in the probe, host-side credentials, capset errno, guest storage path). Waiting for implementer nd-4fa20bcc (setsid/killpg/K4B.9), then real Docker.
 - 2026-10-17 ~10:10 CEST. 4B.1 implementer nd-4fa20bcc delivered setsid, killpg and K4B.9 (tip 2851f727, commit message 'work in progress', untested by it). s4b real Docker on the branch + main (b2fe4217): 6 failed, 7 passed. Failures: 407 instead of 403, capset success, SIGTERM relay, workspace files, a 120 s end timeout. Log: .multiagents/handoff/b41d-real-docker-4-long.log. Researcher nd-bdfc3a3c is triaging. bug-535139 implementer nd-81a1e751 still running.
+- 2026-10-17 ~10:40 CEST.
+  - bug-535139 implementer nd-81a1e751: part 1 fixed (Runner._family_session, bf328654). It is relaunched for part 2 (unpinned alias across families) plus validation and a commit citing the bug.
+  - Reviewer nd-26e7257c had started on the partial work; I stopped it (ag-3fe6b9). Relaunch it once the implementer is done.
+  - implementer-deep runs now land on claude opus. agents.yaml allows that as the fallback after codex-b, so codex-b is probably exhausted too.
+  - Researcher nd-bdfc3a3c is triaging 4B.1 Docker round 4.
