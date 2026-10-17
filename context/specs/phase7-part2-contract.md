@@ -2009,3 +2009,108 @@ Both sub-slices follow these rules:
 - The orchestrator runs real Docker under `SG_TEST_DOCKER=1` on the host,
   and a missing prerequisite with the switch set fails.
 - The allowlist contents stay unchanged, and no external host is added.
+
+### Slice 4B.2 decisions (approved by the user on 2026-10-17)
+
+Grounded in researcher nd-d025efcd (main at 0e1fa433). 4B.1 left these facts
+in the code:
+- `GatewayRegistry` is egress-only. Its filenames, label, alias, port and
+  gateway program all serve egress.
+- No auth credential is issued, and `ma-auth` is attached to no attempt
+  network.
+- The redactor's secret list holds only the egress values.
+- The isolated launch strips proxy variables, but not inherited
+  `ANTHROPIC_*` variables.
+- The legacy auth proxy (`authproxy.py`) has no ST2 receipt, and it accepts
+  the signed v1/v2 claims.
+
+- **K4B2.1 — two services, one registry discipline.**
+  - `GatewayRegistry` is parameterised by service, `egress` or `auth`.
+  - Each service has its own gateway container, label, alias (`ma-egress` /
+    `ma-auth`), port (8888 / 8930), runtime directory, policy file, grant
+    namespace, and IC-C30 receipt.
+  - Each reuses 4B.1's mechanics: host-journal binding, K4B.8 grant
+    publication, K4B.10 subnet source binding, authenticated readiness, and
+    in-place policy updates.
+  - An attempt's grants are issued, published and revoked per service:
+    - revoking one service never touches the other's grant;
+    - ending the attempt revokes both;
+    - cleanup checks the ownership of both gateways' memberships.
+- **K4B2.2 — the isolated auth gateway is a new listener, not the legacy
+  one.**
+  - It reuses authproxy's fixed upstream (`https://api.anthropic.com`), its
+    safe request-target construction, provider routing and account pinning,
+    through a shared library.
+  - Ingress accepts only `Authorization: Bearer ma-auth-v1.<64hex>`, checked
+    against a stored verifier with a timing-safe comparison, and only from
+    the grant's source subnets.
+  - Legacy `mxa_` / `mxa2_` claims get 401 on this listener.
+  - The legacy listener is never attached to an attempt network.
+  - Methods are as in authproxy: GET, HEAD and POST, never CONNECT.
+- **K4B2.3 — issuing the bearer.**
+  - `grant()` issues an auth grant only when the attempt's host-selected
+    provider declares `gateway_auth: anthropic`.
+  - The bearer is fresh, from 32 random bytes, and is never derived from an
+    id. The registry stores a verifier plus the provider and
+    account-routing binding.
+  - The guest gets `ANTHROPIC_BASE_URL=http://ma-auth:8930` and
+    `ANTHROPIC_AUTH_TOKEN=<bearer>`.
+  - Every isolated attempt has inherited `ANTHROPIC_API_KEY`,
+    `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` scrubbed, whether or not
+    it gets an auth grant.
+  - The bearer and its `Bearer …` header form join the redactor's secret
+    list (D-S4B.7).
+  - Egress and auth credentials are not interchangeable: each gives 407/401
+    at the other gateway.
+- **K4B2.4 — the `gateway_auth` provider field.**
+  - Values are `none` (the default) or `anthropic`. It follows provider
+    layering and `extends`, and is validated at load: any other value is a
+    config error naming the key.
+  - It selects a trusted upstream protocol, never an account or a URL.
+  - It does not lift `needs.credentials`. Real providers stay refused until
+    4C, and only offline test providers declare network plus
+    `gateway_auth`.
+- **K4B2.5 — the test backend seam, exactly IC-C28's.**
+  - `MULTIAGENTS_TEST_GATEWAY_BACKEND=module:factory` is read host-side
+    only. It is already stripped from run environments.
+  - `factory(root, *, project)` returns an adapter with
+    `open(method, path, headers, body, *, provider, run_id) -> response`
+    (`.status`, `.headers`, `.read(size)`, `.close()`).
+  - When it is unset, the real upstream is used. A factory failure refuses
+    the launch.
+  - No `project.yaml` or guest input can install it.
+- **K4B2.6 — revocation closes auth streams.** The auth listener tracks
+  every accepted request and stream by grant. A revoke closes that grant's
+  in-flight upstream reads, including streaming responses, and refuses new
+  requests (IC-C29). Other grants are untouched.
+- **K4B2.7 — room left for 4C.**
+  - The backend receives host-selected provider and account material through
+    the adapter boundary, never through request fields.
+  - The guest's bearer semantics stay fixed when 4C plugs in real credential
+    projection and refresh behind that boundary.
+  - No vault secret is ever mounted into an attempt or the auth gateway.
+
+Verification:
+- fake-CLI tests for issuance, environment and scrubbing, config validation,
+  the receipt and replacement steps, and the independent revocation of the
+  two services;
+- real handler tests, through the seam, for 401 on missing, forged, legacy,
+  revoked and wrong-subnet bearers, with no account selection and no
+  upstream open before authentication, and for a streaming response cut on
+  revoke;
+- real Docker for:
+  - the guest reaching `ma-auth`;
+  - a copied bearer from another attempt network getting 401;
+  - an egress password at ma-auth and a bearer at ma-egress being refused;
+  - the legacy listener being unreachable;
+  - the bearer being redacted from the logs;
+  - auth gateway replacement with no unauthenticated window.
+
+4B.2 work split:
+1. tester;
+2. implementer-deep;
+3. reviewer;
+4. adversary (mandatory);
+5. real Docker on the host;
+6. the suite;
+7. merge.
