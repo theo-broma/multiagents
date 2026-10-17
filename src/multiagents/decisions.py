@@ -8,10 +8,15 @@ from __future__ import annotations
 import base64
 import builtins
 import copy
+import hashlib
 import json
 import math
+import os
 import re
+import stat
+import subprocess
 import uuid
+from pathlib import Path
 
 from .redact import scrub
 from .tree import now
@@ -83,20 +88,210 @@ def _emit(tree, rec, transition):
               asker_role=asker["role"])
 
 
-def _insert(tree, rec):
+def _insert(tree, rec, supersedes=None, enforce=False):
+    old = None
     with tree.transaction() as data:
+        if supersedes is not None:
+            index, old = _find(data, supersedes)
+            if old["status"] != "open":
+                _not_open(old)
+            if enforce:
+                authorize(old, rec["history"][0]["by"], "supersede")
         used = {q["id"] for q in data["questions"]}
         prefix, length = ("q-", 6) if rec["id"].startswith("q-") else ("d-", 8)
         while rec["id"] in used:
             rec["id"] = prefix + uuid.uuid4().hex[:length]
+        if old is not None:
+            _advance(old, rec["history"][0]["by"], "superseded", superseded_by=rec["id"])
+            data["questions"][index] = old
         data["questions"].append(rec)
     _emit(tree, rec, "created")
+    if old is not None:
+        _emit(tree, old, "superseded")
     return copy.deepcopy(rec)
+
+
+MAX_REF_BYTES = 1024 * 1024
+MAX_REFS = 8
+
+
+def authorize(record, actor, operation, *, delegate=False):
+    """The single authority function (D-UD2.2): None if `actor` may perform
+    `operation` on `record`, else DecisionError("forbidden", reason=...).
+    `delegate` lets a run answer an orchestrator question through the legacy
+    answer_question path; it never opens a user decision."""
+    ok = (isinstance(actor, dict) and set(actor) == {"role", "agent", "channel"}
+          and all(isinstance(v, str) for v in actor.values()))
+    role, channel = (actor["role"], actor["channel"]) if ok else ("", "")
+    if operation == "answer":
+        if ok and role == "user" and channel in ("cli", "monitor"):
+            return None
+        if record["audience"] == "orchestrator":
+            if ok and channel == "mcp_root" and role == "orchestrator":
+                return None
+            if ok and delegate and channel == "mcp_run" and role == "agent":
+                return None
+            raise DecisionError("forbidden", reason="not_answerable_here")
+        raise DecisionError("forbidden", reason="not_answerable_here" if channel == "mcp_run" else "user_only")
+    asker = record["asked_by"]["role"]
+    if ok and channel == "mcp_root" and role in ("orchestrator", "initializer"):
+        if operation in ("withdraw", "supersede") and role == asker:
+            return None
+        if operation == "mark_handled" and (role == asker or (role == "orchestrator" and asker == "agent")):
+            return None
+        if operation == "escalate" and role == "orchestrator":
+            return None
+    raise DecisionError("forbidden", reason="not_asker")
+
+
+def _root(tree):
+    return Path(tree.path).parent.parent
+
+
+def _refs_dir(tree):
+    return _root(tree) / ".multiagents" / "decisions" / "snapshots"
+
+
+def _resolve(root, path):
+    """The regular file `path` names inside `root`, or None."""
+    if (not isinstance(path, str) or not path.strip() or "\0" in path
+            or os.path.isabs(path) or ".." in path.split("/")):
+        return None
+    try:
+        base = (root).resolve(strict=True)
+        target = (base / path).resolve(strict=True)
+        target.relative_to(base)
+        if not target.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return target
+
+
+def _read(root, target):
+    """The bytes of `target`, read through one descriptor: opened without
+    following a symlink or blocking on a FIFO, then checked with fstat (a
+    regular file) and against `root` (by the descriptor's own realpath)."""
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        # O_NOFOLLOW guards only the last component: prove containment on the
+        # opened descriptor, not on a name that may have been swapped.
+        Path(os.path.realpath(f"/proc/self/fd/{handle.fileno()}")).relative_to(
+            root.resolve(strict=True))
+        return handle.read(MAX_REF_BYTES + 1)
+
+
+def _commit(root, spelling):
+    if (not isinstance(spelling, str) or not spelling or spelling.startswith("-")
+            or any(c.isspace() or ord(c) < 32 for c in spelling)):
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CEILING_DIRECTORIES"] = str(root.parent)
+    try:
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                              "--end-of-options", spelling + "^{commit}"],
+                             capture_output=True, text=True, env=env, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    sha = out.stdout.strip()
+    return sha if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) else None
+
+
+def _bind_refs(tree, refs):
+    """Validated refs as recorded, plus the snapshots to store."""
+    if len(refs) > MAX_REFS:
+        raise DecisionError("invalid_record", field="refs")
+    root, bound, snapshots = _root(tree), [], {}
+    for i, ref in enumerate(refs):
+        field = f"refs[{i}]"
+        if not isinstance(ref, dict) or set(ref) not in ({"path"}, {"path", "sha256"}, {"commit"}):
+            raise DecisionError("invalid_record", field=field)
+        if "commit" in ref:
+            sha = _commit(root, ref["commit"])
+            if sha is None:
+                raise DecisionError("invalid_record", field=field)
+            bound.append({"commit": sha})
+            continue
+        target = _resolve(root, ref["path"])
+        try:
+            data = _read(root, target) if target else None
+        except (OSError, RuntimeError, ValueError):
+            data = None
+        if data is None or len(data) > MAX_REF_BYTES:
+            raise DecisionError("invalid_record", field=field)
+        digest = hashlib.sha256(data).hexdigest()
+        if ref.get("sha256", digest) != digest:
+            raise DecisionError("invalid_record", field=field)
+        snapshots[digest] = data
+        bound.append({"path": ref["path"], "sha256": digest})
+    return bound, snapshots
+
+
+def _store(tree, snapshots):
+    if not snapshots:
+        return
+    directory = _refs_dir(tree)
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    for digest, data in snapshots.items():
+        final = directory / digest
+        try:
+            if hashlib.sha256(final.read_bytes()).hexdigest() == digest:
+                continue
+        except OSError:
+            pass
+        tmp = directory / f".{digest}.{uuid.uuid4().hex[:8]}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, final)
+
+
+def check_refs(tree, id):
+    """Do the approved path refs still hold the bytes they were approved with?"""
+    rec = get(tree, id)
+    if rec is None:
+        raise DecisionError("unknown")
+    changed, missing = [], []
+    for ref in rec["refs"]:
+        if "path" not in ref:
+            continue
+        root = _root(tree)
+        target = _resolve(root, ref["path"])
+        try:
+            data = _read(root, target) if target else None
+        except (OSError, RuntimeError, ValueError):
+            data = None
+        if data is None:
+            missing.append(ref["path"])
+        elif len(data) > MAX_REF_BYTES or hashlib.sha256(data).hexdigest() != ref["sha256"]:
+            changed.append(ref["path"])
+    return {"ok": not changed and not missing, "changed": changed, "missing": missing}
+
+
+def snapshot(tree, id, path):
+    """The bytes stored for `path` when decision `id` was asked."""
+    rec = get(tree, id)
+    if rec is None:
+        raise DecisionError("unknown")
+    ref = next((r for r in rec["refs"] if r.get("path") == path), None)
+    if ref is None:
+        raise DecisionError("invalid_argument", field="path")
+    try:
+        data = (_refs_dir(tree) / ref["sha256"]).read_bytes()
+    except OSError:
+        raise DecisionError("unknown", field="snapshot") from None
+    if hashlib.sha256(data).hexdigest() != ref["sha256"]:
+        raise DecisionError("unknown", field="snapshot")
+    return data
 
 
 def create(tree, *, by, audience, topic, title, context, implications, mode,
            options=(), min=None, max=None, recommended=(), allow_free_text=True,
-           default_text="", refs=()):
+           default_text="", refs=(), supersedes=None, enforce=False):
     by = _actor(by, asker=True)
     for field, value, limit in (("topic", topic, 60), ("title", title, 200),
                                  ("context", context, 20000)):
@@ -149,16 +344,16 @@ def create(tree, *, by, audience, topic, title, context, implications, mode,
     refs = _struct(refs, "refs")
     if not isinstance(refs, (builtins.list, tuple)):
         raise DecisionError("invalid_record", field="refs")
-    for ref in refs:
-        if (not isinstance(ref, dict) or set(ref) not in ({"path", "sha256"}, {"commit"})
-                or any(not isinstance(v, str) for v in ref.values())):
-            raise DecisionError("invalid_record", field="refs")
+    refs, snapshots = _bind_refs(tree, refs)
+    if supersedes is not None and not isinstance(supersedes, str):
+        raise DecisionError("invalid_argument", field="supersedes")
     rec = _record("d-" + uuid.uuid4().hex[:8], by, audience, now(), topic, title,
                   context, scrub(implications), mode, opts, builtins.list(recommended),
                   allow_free_text, scrub(default_text), builtins.list(refs))
     if mode == "multi":
         rec.update(min=min, max=max)
-    return _insert(tree, rec)
+    _store(tree, snapshots)
+    return _insert(tree, rec, supersedes, enforce)
 
 
 def get(tree, id):
@@ -228,10 +423,12 @@ def _advance(rec, by, status, **details):
 
 
 def _answer(tree, id, *, revision, by, options=(), comment="", free_text="",
-            request_id=None, legacy=False):
+            request_id=None, legacy=False, enforce=False, delegate=False):
     duplicate = False
     with tree.transaction() as data:
         index, rec = _find(data, id)
+        if enforce:
+            authorize(rec, by, "answer", delegate=delegate)
         if legacy and rec["mode"] != "free_text":
             raise DecisionError("wrong_mode")
         if rec["status"] in ("withdrawn", "superseded"):
@@ -280,6 +477,8 @@ def _answer(tree, id, *, revision, by, options=(), comment="", free_text="",
             rec["answer"] = dict(options=builtins.list(options), comment=comment,
                                  free_text=free_text, answered_by=by, answered_at=now(),
                                  revision=rec["revision"], request_id=request_id)
+            if rec["refs"]:
+                rec["answer"]["approved_refs"] = copy.deepcopy(rec["refs"])
             _advance(rec, by, "answered")
             data["questions"][index] = rec
     if not duplicate:
@@ -287,14 +486,22 @@ def _answer(tree, id, *, revision, by, options=(), comment="", free_text="",
     return {"decision": copy.deepcopy(rec), "already_answered": duplicate}
 
 
-def answer(tree, id, *, revision, by, options=(), comment="", free_text="", request_id=None):
+def answer(tree, id, *, revision, by, options=(), comment="", free_text="", request_id=None,
+           enforce=False):
     return _answer(tree, id, revision=revision, by=by, options=options, comment=comment,
-                   free_text=free_text, request_id=request_id)
+                   free_text=free_text, request_id=request_id, enforce=enforce)
 
 
-def _transition(tree, id, revision, by, operation, *, reason="", outcome=None, superseded_by=None):
+_OPERATION = {"withdrawn": "withdraw", "superseded": "supersede", "handled": "mark_handled",
+              "escalated": "escalate"}
+
+
+def _transition(tree, id, revision, by, operation, *, reason="", outcome=None,
+                superseded_by=None, enforce=False):
     with tree.transaction() as data:
         index, rec = _find(data, id)
+        if enforce:
+            authorize(rec, by, _OPERATION[operation])
         if operation == "handled":
             if rec["status"] != "answered":
                 raise DecisionError("bad_transition", status=rec["status"])
@@ -329,20 +536,21 @@ def _transition(tree, id, revision, by, operation, *, reason="", outcome=None, s
     return copy.deepcopy(rec)
 
 
-def withdraw(tree, id, *, revision, by, reason):
-    return _transition(tree, id, revision, by, "withdrawn", reason=reason)
+def withdraw(tree, id, *, revision, by, reason, enforce=False):
+    return _transition(tree, id, revision, by, "withdrawn", reason=reason, enforce=enforce)
 
 
 def supersede(tree, id, *, revision, by, superseded_by):
     return _transition(tree, id, revision, by, "superseded", superseded_by=superseded_by)
 
 
-def mark_handled(tree, id, *, revision, by, outcome, reason=""):
-    return _transition(tree, id, revision, by, "handled", outcome=outcome, reason=reason)
+def mark_handled(tree, id, *, revision, by, outcome, reason="", enforce=False):
+    return _transition(tree, id, revision, by, "handled", outcome=outcome, reason=reason,
+                       enforce=enforce)
 
 
-def escalate(tree, id, *, revision, by):
-    return _transition(tree, id, revision, by, "escalated")
+def escalate(tree, id, *, revision, by, enforce=False):
+    return _transition(tree, id, revision, by, "escalated", enforce=enforce)
 
 
 def _legacy(rec):
@@ -385,11 +593,12 @@ def add_question(tree, agent_id, topic, question, proposed=""):
     return result
 
 
-def answer_question(tree, id, text, answered_by="user"):
+def answer_question(tree, id, text, answered_by="user", actor=None, delegate=False):
     try:
         out = _answer(tree, id, revision=None,
-                      by={"role": answered_by, "agent": "", "channel": "legacy"},
-                      free_text=text, legacy=True)
+                      by=actor or {"role": answered_by, "agent": "", "channel": "legacy"},
+                      free_text=text, legacy=True, enforce=actor is not None,
+                      delegate=delegate)
     except DecisionError as exc:
         if exc.code == "unknown":
             return None

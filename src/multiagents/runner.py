@@ -11592,18 +11592,40 @@ class Runner(QuotaHandover):
             **({"ticket": run.ticket, "tickets": run.tickets} if run.ticket else {}),
         }
 
+    def _descends(self, agent_id: str, ancestor: str) -> bool:
+        """Is `agent_id` a strict descendant of `ancestor` in the run tree?"""
+        seen = set()
+        node = self.tree.get(agent_id)
+        while node is not None and node.parent and node.parent not in seen:
+            if node.parent == ancestor:
+                return True
+            seen.add(node.parent)
+            node = self.tree.get(node.parent)
+        return False
+
     @_admitted("the answer")
     async def answer_question(self, question_id: str, answer: str,
-                              answered_by: str = "orchestrator") -> dict[str, Any]:
+                              answered_by: str = "orchestrator",
+                              actor: dict | None = None) -> dict[str, Any]:
         """Answer a parked agent's question and resume it with its context.
 
         The record is claimed inside the tree's lock before the agent is
         resumed, so two processes cannot both decide they are the one restarting
         it.
         """
+        from .decisions import DecisionError, authorize, get as get_decision
         record = self.tree.get_question(question_id)
         if record is None:
             return {"error": f"unknown question {question_id!r}"}
+        actor = actor or {"role": answered_by, "agent": "",
+                          "channel": "monitor" if answered_by == "user" else "mcp_root"}
+        # UD-C8: the authority check comes before any resume check.
+        try:
+            authorize(get_decision(self.tree, question_id), actor, "answer",
+                      delegate=actor["channel"] == "mcp_run"
+                      and self._descends(record["agent"], actor["agent"]))
+        except DecisionError as exc:
+            return {"error": f"forbidden: {exc.reason}", "reason": exc.reason}
         if record.get("status") in {"answered", "handled"}:
             return {"error": f"{question_id} was already answered by "
                              f"{record.get('answered_by') or 'someone'}",
@@ -11635,9 +11657,9 @@ class Runner(QuotaHandover):
                                               agent_id, self.self_id())
             if refusal.get("error") or refusal.get("blocked"):
                 return refusal
-        from .decisions import DecisionError
         try:
-            claimed = self.tree.answer_question(question_id, answer, answered_by)
+            claimed = self.tree.answer_question(question_id, answer, answered_by, actor=actor,
+                                                delegate=actor["channel"] == "mcp_run")
         except DecisionError as exc:
             return {"error": f"{question_id}: {exc}"}
         if (claimed is None or claimed.get("already_answered")
@@ -11653,7 +11675,8 @@ class Runner(QuotaHandover):
         )
         result = await self.steer(agent_id, message)
         return {"question_id": question_id, "agent_id": agent_id,
-                "answered_by": answered_by, "resumed": result.get("steered", False),
+                "answered_by": claimed.get("answered_by") or answered_by,
+                "resumed": result.get("steered", False),
                 **({"error": result["error"]} if result.get("error") else {})}
 
     def _idle_capacity_note(self) -> dict[str, Any]:

@@ -1919,8 +1919,140 @@ async def answer_question(question_id: str, answer: str) -> dict:
     restarted. Answer only what you can genuinely settle: guessing here defeats
     the reason the agent stopped.
     """
-    run = runner()
-    return _ok(await run.answer_question(question_id, answer, answered_by="orchestrator"))
+    actor, refusal = _decision_caller("not_answerable_here")
+    if refusal:
+        return refusal
+    return _ok(await runner().answer_question(question_id, answer, answered_by="orchestrator",
+                                              actor=actor))
+
+
+# UD-C7: the decision tools. The caller is the channel (D-UD2.1), never an argument.
+_stray_arguments: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "stray_arguments", default=())
+
+
+def _decision_caller(reason: str = "root_only") -> tuple[dict | None, dict | None]:
+    """(actor, refusal) of an MCP decision tool call."""
+    stray = _stray_arguments.get()
+    if stray:
+        return None, {"error": "invalid_argument", "field": stray[0],
+                      "message": f"{', '.join(stray)} cannot be passed: the caller is derived "
+                                 f"from the channel"}
+    if "MULTIAGENTS_AGENT_ID" in os.environ or "MULTIAGENTS_RPC_TOKEN" in os.environ:
+        agent = runner().self_id()
+        if not agent:
+            return None, {"error": "forbidden", "reason": reason}
+        if reason == "not_answerable_here":
+            # The legacy answer_question: a run answers as an agent, scoped by the runner.
+            return {"role": "agent", "agent": agent, "channel": "mcp_run"}, None
+        return None, {"error": "forbidden", "reason": reason}
+    role = os.environ.get("MULTIAGENTS_ROLE") or "orchestrator"
+    if role not in ("orchestrator", "initializer"):
+        return None, {"error": "forbidden", "reason": reason}
+    return {"role": role, "agent": "", "channel": "mcp_root"}, None
+
+
+def _decision_call(fn, reason: str = "root_only"):
+    """Run `fn(actor)`, turning a DecisionError into a tool error result."""
+    from .decisions import DecisionError
+    actor, refusal = _decision_caller(reason)
+    if refusal:
+        return refusal
+    try:
+        return _ok(fn(actor))
+    except DecisionError as exc:
+        return {"error": exc.code, **{k: v for k, v in vars(exc).items() if k != "code"}}
+
+
+def _decision_view(rec: dict, **extra) -> dict:
+    return {"id": rec["id"], "revision": rec["revision"], "status": rec["status"], **extra}
+
+
+@_tool()
+def ask_user(topic: str, title: str, context: str, implications: dict, mode: str,
+             options: list[dict] | None = None, min: int | None = None, max: int | None = None,
+             recommended: list[str] | None = None, allow_free_text: bool = True,
+             refs: list[dict] | None = None, audience: str = "user",
+             supersedes: Any = None) -> dict:
+    """Park a decision for the user (or the orchestrator) and return at once.
+
+    Never blocks: the answer arrives later. `refs` bind the answer to exact
+    bytes: {path} (a file in the project) or {commit}. `supersedes` replaces
+    one of your own open decisions in the same step.
+    """
+    from . import decisions
+
+    def ask(actor):
+        rec = decisions.create(
+            runner().tree, by={**actor, "agent": ""}, audience=audience, topic=topic,
+            title=title, context=context, implications=implications, mode=mode,
+            options=options or [], min=min, max=max, recommended=recommended or [],
+            allow_free_text=allow_free_text, refs=refs or [], supersedes=supersedes,
+            enforce=True)
+        return _decision_view(rec, refs=rec["refs"])
+    return _decision_call(ask)
+
+
+@_tool()
+def withdraw_decision(id: str, revision: int, reason: str) -> dict:
+    """Withdraw an open decision you asked, with the reason."""
+    from . import decisions
+    return _decision_call(lambda actor: _decision_view(decisions.withdraw(
+        runner().tree, id, revision=revision, by=actor, reason=reason, enforce=True)))
+
+
+@_tool()
+def mark_decision_handled(id: str, revision: int, outcome: str, reason: str = "") -> dict:
+    """Record that you acted on an answered decision: applied, not_applied or error."""
+    from . import decisions
+    return _decision_call(lambda actor: _decision_view(decisions.mark_handled(
+        runner().tree, id, revision=revision, by=actor, outcome=outcome, reason=reason,
+        enforce=True)))
+
+
+@_tool()
+def escalate_decision(id: str, revision: int) -> dict:
+    """Turn an open orchestrator decision into one for the user."""
+    from . import decisions
+    return _decision_call(lambda actor: _decision_view(decisions.escalate(
+        runner().tree, id, revision=revision, by=actor, enforce=True)))
+
+
+@_tool()
+def answer_decision(id: str, revision: int, options: list[str] | None = None,
+                    comment: str = "", free_text: str = "", request_id: str | None = None) -> dict:
+    """Answer an open orchestrator decision. Decisions for the user are not yours to answer."""
+    from . import decisions
+
+    def answer(actor):
+        out = decisions.answer(runner().tree, id, revision=revision, by=actor,
+                               options=options or [], comment=comment, free_text=free_text,
+                               request_id=request_id, enforce=True)
+        return _decision_view(out["decision"], already_answered=out["already_answered"])
+    return _decision_call(answer, "not_answerable_here")
+
+
+def _reject_identity_arguments() -> None:
+    """The SDK drops an argument a tool does not declare. For the decision tools
+    that would hide a forged `by` or `role`, so the dropped names are kept for
+    `_decision_caller` to refuse."""
+    manager = mcp._tool_manager
+    declared = {fn.__name__: set(inspect.signature(fn).parameters)
+                for fn in (ask_user, withdraw_decision, mark_decision_handled,
+                           escalate_decision, answer_decision, answer_question)}
+    call_tool = manager.call_tool
+
+    async def guarded(name, arguments, *args, **kwargs):
+        stray = tuple(sorted(set(arguments or {}) - declared[name])) if name in declared else ()
+        token = _stray_arguments.set(stray)
+        try:
+            return await call_tool(name, arguments, *args, **kwargs)
+        finally:
+            _stray_arguments.reset(token)
+    manager.call_tool = guarded
+
+
+_reject_identity_arguments()
 
 
 @_tool()

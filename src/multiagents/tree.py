@@ -1263,9 +1263,11 @@ class Tree:
         return decisions.get_question(self, question_id)
 
     def answer_question(self, question_id: str, answer: str,
-                        answered_by: str = "user") -> dict | None:
+                        answered_by: str = "user", actor: dict | None = None,
+                        delegate: bool = False) -> dict | None:
         from . import decisions
-        return decisions.answer_question(self, question_id, answer, answered_by)
+        return decisions.answer_question(self, question_id, answer, answered_by,
+                                         actor=actor, delegate=delegate)
 
     # -------------------------------------------------------------- tickets --
     #

@@ -157,7 +157,9 @@ def answer_question(paths, question_id: str = "", answer: str = "", **_) -> dict
     if not answer.strip():
         return {"ok": False, "message": "an empty answer would unblock nothing"}
     try:
-        result = _await(_runner(paths).answer_question(question_id, answer))
+        result = _await(_runner(paths).answer_question(
+            question_id, answer, answered_by="user",
+            actor={"role": "user", "agent": "", "channel": "monitor"}))
     except Exception as exc:
         return {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
     return {"ok": True, "message": f"answered {question_id}", "result": result}

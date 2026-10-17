@@ -294,6 +294,41 @@
                   "type": "string"
                 }
               ]
+            },
+            "approved_refs": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "sha256": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "sha256"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "commit": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "commit"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
             }
           },
           "required": [
