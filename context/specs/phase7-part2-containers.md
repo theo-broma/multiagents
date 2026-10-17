@@ -173,6 +173,10 @@ by the host scheduler. Intermediate per-agent uids were rejected.
     protect other services on the host. It is off by default.
   - `-n 4` stays the rule in AGENTS.md. Adapting `-n` to the host's load is
     out of scope.
+  - **Exception (TQ-D5, 2026-10-17, plan 2026-10-17-test-tiers).**
+    Test-lane jobs (`context/specs/test-tiers-and-queues.md`) have system
+    caps on CPU, memory and process count. Agent runs never do: for them,
+    the weight-not-cap rule above stands.
 - pids limit per run.
 
 ### Lifecycle, supervision and adoption (PAC-R7, R8, R12; C15 residuals)

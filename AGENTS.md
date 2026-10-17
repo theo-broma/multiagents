@@ -5,9 +5,19 @@ Fast path: run the whole suite in one process with pytest-xdist, about
 2026-10-14: 3163 s, about 12,650 worker-seconds). Use `-n 4`, not `-n auto`:
 up to six agents run suites at the same time on these 16 cores, and `-n auto`
 from each of them starves the others
-into timeouts. A full run takes close to an hour: root sessions should use
-`multiagents bg run`, and agents should prefer targeted files unless the task
-asks for a full run.
+into timeouts. A full run takes close to an hour.
+
+**Agents never run the full suite, nor every chunk of it** (plan
+2026-10-17-test-tiers).
+- Implementers and reviewers run what their change touches:
+  - the changed and added test files;
+  - the test files that import the changed modules (find them with `rg`);
+  - the test families of the subsystem they changed, for example every
+    `test_ap_*` for an auth-proxy change.
+- They report exactly what they ran.
+- The orchestrator runs ONE full suite per final candidate tree, including
+  the tester's files, from a `/var/tmp` worktree with `multiagents bg run`.
+  Any later change to the code or the tests invalidates that result.
 
     scripts/test-chunk.sh 1 1 -q -p no:cacheprovider -n 4 --basetemp=/var/tmp/pt-<hex-part-of-your-id>
 
@@ -31,8 +41,9 @@ inside the worktree turns 53 of them red. Leave the `ag-` prefix out of the
 path: `test_core.py::test_uninstall_prunes_the_registrations_it_orphans`
 asserts that `ag-1` is absent from a listing that includes the basetemp.
 
-Otherwise run the full suite chunk by chunk with `scripts/test-chunk.sh K N`; chunking
-avoids the slow or timed-out single pytest process that agents otherwise hit.
+The orchestrator may also run its full suite chunk by chunk with
+`scripts/test-chunk.sh K N`; chunking avoids a slow or timed-out single
+pytest process.
 Use `scripts/test-chunk.sh --list K N` to print a chunk's test-file list.
 
 If this worktree's `.venv` lacks pytest, run:

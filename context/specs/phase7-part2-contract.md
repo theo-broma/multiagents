@@ -873,6 +873,9 @@ seed only, never on slice 1 or 2 internals.
   - all from `executor.isolated.resources` in `project.yaml`, with stated
     defaults (hard memory 6 GB, pids 4096, CPU weight equal, no cap).
   - Admission against a memory budget is slice 5 (IC-R5).
+  - **Exception (TQ-D5, 2026-10-17, plan 2026-10-17-test-tiers):** a
+    test-lane job's container gets the lane's CPU, memory and pids caps.
+    Agent-run containers keep the defaults above, with no CPU cap.
   - Values are validated (F32): 0 and negatives are config errors naming the
     key; "unset" means the default.
 - Verified by:
