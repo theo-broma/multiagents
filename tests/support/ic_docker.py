@@ -271,6 +271,13 @@ class IsolationWorld(ic.IcSched):
     def nonce(self, tag: str) -> str:
         return self.nonces.setdefault(tag, f"{tag}{uuid.uuid4().hex}")
 
+    def host_output(self, run_id: str) -> tuple[bytes, bytes]:
+        """Host output: (stdout, stderr) as the host recorded them for the run."""
+        from multiagents.paths import ProjectPaths
+        d = ProjectPaths(self.root).run_dir(run_id)
+        read = lambda n: (d / n).read_bytes() if (d / n).is_file() else b""  # noqa: E731
+        return read("output.ndjson"), read("stderr.log")
+
     # -- nodes ------------------------------------------------------------
     def probe_node(self, probe: str, agent: str = "worker", **fields) -> str:
         extra = {k: fields.pop(k) for k in ("depends_on", "inputs") if k in fields}

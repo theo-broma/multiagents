@@ -845,3 +845,115 @@ def test_k4b2_5_a_provider_overlay_cannot_install_a_failing_backend(tmp_path, mo
         assert ab.bearer_of(s.invocation(container)["env"]), "a guest-controlled variable changed the launch"
     finally:
         s.close()
+
+
+# ============================== reviewer nd-fc207bca: the auth bearer file is removed on every end
+
+def auth_secret_files(s) -> list[str]:
+    """The auth gateway's plaintext bearer files on the host (named by attempt id)."""
+    from multiagents.paths import ProjectPaths
+    root = ProjectPaths(s.root).scheduler / "gateways" / "auth" / "secrets"
+    return sorted(p.name for p in root.iterdir()) if root.is_dir() else []
+
+
+def no_auth_authority(s, attempt_id):
+    return s.state_of("auth", attempt_id) in (None, "absent", "revoked")
+
+
+def secret_gone(s, name, what):
+    return s.wait(lambda: name not in auth_secret_files(s) or None, nb.WAIT, what)
+
+
+def test_k4b2_cleanup_a_normal_end_leaves_no_auth_secret_file_and_revokes_the_grant(asd):
+    node, run, container, network = asd.pair()
+    attempt = run["attempt_id"]
+    assert attempt in auth_secret_files(asd), "precondition: a running auth attempt holds its bearer file"
+    asd.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
+    assert nb.wait_done(asd, node)["state"] == "done"
+    asd.wait(lambda: asd.fd.network(network["Id"]) is None or None, nb.WAIT, "the network to be removed")
+    secret_gone(asd, attempt, "the auth bearer file to be removed")
+    assert no_auth_authority(asd, attempt)
+
+
+@pytest.mark.parametrize("code", [1, 137])
+def test_k4b2_cleanup_a_failing_exit_leaves_no_auth_secret_file(asd, code):
+    node, run, container, network = asd.pair()
+    asd.fd.finish(container["Id"], code)
+    asd.wait(lambda: asd.fd.network(network["Id"]) is None or None, nb.WAIT, "the network to be removed")
+    secret_gone(asd, run["attempt_id"], "the auth bearer file to be removed")
+    assert no_auth_authority(asd, run["attempt_id"])
+
+
+def test_k4b2_cleanup_a_failed_launch_leaves_no_auth_secret_file_and_no_grant(asd):
+    asd.start()
+    asd.fd.rule("network", "connect", contains="ma-auth", effect="fail", times=12,
+                stderr="Error response from daemon: cannot attach")
+    node = asd.launch()
+    decided(asd, node)
+    runs = asd.runs(node)
+    asd.wait(lambda: not auth_secret_files(asd) or None, nb.WAIT, "no auth bearer file to remain after the failed launch")
+    for r in runs:
+        assert no_auth_authority(asd, r["attempt_id"])
+        c = asd.container_of(r["attempt_id"])
+        assert c is None or c["StartCount"] == 0, "an attempt whose auth attachment failed was started"
+
+
+def test_k4b2_cleanup_a_launch_failing_after_the_auth_gateway_is_attached_leaves_no_auth_secret_file(asd):
+    asd.start()
+    asd.fd.rule("start", effect="fail", times=12, stderr="Error response from daemon: cannot start")
+    node = asd.launch()
+    decided(asd, node)
+    runs = asd.runs(node)
+    asd.wait(lambda: not auth_secret_files(asd) or None, nb.WAIT, "no auth bearer file to remain after the failed start")
+    for r in runs:
+        assert no_auth_authority(asd, r["attempt_id"])
+
+
+def test_k4b2_cleanup_a_cancelled_attempt_leaves_no_auth_secret_file_and_the_grant_revoked(asd):
+    node, run, container, network = asd.pair()
+    attempt = run["attempt_id"]
+    assert attempt in auth_secret_files(asd), "precondition: a running auth attempt holds its bearer file"
+    assert asd.cancel_raw(node)["ok"] is True
+    asd.wait(lambda: not asd.fd.container(container["Id"])["State"]["Running"] or None, nb.WAIT, "the attempt to stop")
+    asd.wait(lambda: asd.get(node)["state"] == "cancelled" or None, nb.WAIT, "the node to be cancelled")
+    secret_gone(asd, attempt, "the auth bearer file to be removed")
+    assert no_auth_authority(asd, attempt)
+
+
+def test_k4b2_cleanup_after_the_egress_cleanup_removed_the_network_the_auth_file_still_goes(asd):
+    """Cleanup order: the egress registry finishes first and Docker's network is already Absent."""
+    node, run, container, network = asd.pair()
+    attempt = run["attempt_id"]
+    asd.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
+    ic.run(asd.registry().cleanup(attempt))             # idempotent beside the scheduler's own cleanup
+    asd.wait(lambda: asd.fd.network(network["Id"]) is None or None, nb.WAIT, "the network to be gone")
+    secret_gone(asd, attempt, "the auth bearer file to be removed although the network was already gone")
+    assert no_auth_authority(asd, attempt)
+
+
+def test_k4b2_cleanup_the_auth_registry_removes_its_file_when_the_network_is_already_absent(asd):
+    from multiagents.paths import ProjectPaths
+    node, run, container, network = asd.pair()
+    attempt = run["attempt_id"]
+    asd.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
+    nb.wait_done(asd, node)
+    asd.wait(lambda: asd.fd.network(network["Id"]) is None or None, nb.WAIT, "the network to be gone")
+    secret_gone(asd, attempt, "the scheduler's own cleanup to remove the file")
+    stray = ProjectPaths(asd.root).scheduler / "gateways" / "auth" / "secrets" / attempt
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("stale-bearer-file")               # as left by a cleanup that stopped at an Absent network
+    ic.run(asd.registry("auth").cleanup(attempt))
+    ic.run(asd.registry("auth").cleanup(attempt))       # and repeating it is harmless
+    assert attempt not in auth_secret_files(asd)
+
+
+def test_k4b2_cleanup_one_attempts_end_keeps_another_attempts_auth_secret_file(asd):
+    asd.start()
+    a, b = asd.launch(), asd.launch()
+    ca, cb = asd.running(a), asd.running(b)
+    ra, rb = asd.runs(a)[-1], asd.runs(b)[-1]
+    asd.fd.finish(ca["Id"], 0, stdout=s3.events_stdout())
+    nb.wait_done(asd, a)
+    secret_gone(asd, ra["attempt_id"], "A's bearer file to be removed")
+    assert rb["attempt_id"] in auth_secret_files(asd)
+    assert asd.state_of("auth", rb["attempt_id"]) == "ready"

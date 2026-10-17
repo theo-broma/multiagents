@@ -342,3 +342,67 @@ def test_ic_c31_existing_container_removal_outcomes_are_unchanged(ns):
     reply = ns.cli("scheduler", "remove-orphan", cid, timeout=nb.WAIT)
     assert reply.returncode == 0 and json.loads(reply.stdout) == {"ok": True, "container_id": cid, "state": "absent"}
     assert ns.fd.container(cid) is None
+
+
+# ----------------------------------------- K4B2.1: a network that also holds the auth gateway
+
+def ended_auth_attempt_with_stuck_network(tmp_path, monkeypatch):
+    import ic_s4b2 as ab
+    s = ab.AuthSched(tmp_path, monkeypatch)
+    s.start()
+    node = s.launch()
+    container = s.running(node)
+    run = s.runs(node)[-1]
+    (network,) = s.attempt_networks(run["attempt_id"])
+    s.gateway_ids = {"egress": s.gateway("egress")["Id"], "auth": s.gateway("auth")["Id"]}
+    assert set(s.gateway_ids.values()) <= set(s.fd.members(network["Id"])), "precondition: both gateways are members"
+    s.fd.rule("network", "rm", effect="fail", stderr="Error response from daemon: stuck")
+    s.fd.rule("network", "remove", effect="fail", stderr="Error response from daemon: stuck")
+    s.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
+    nb.wait_done(s, node)
+    s.wait(lambda: any(o.get("resource_id") == network["Id"] for o in (listing(s)["orphans"] or [])) or None,
+           nb.WAIT, "the stuck network to be reported")
+    s.fd.clear_rules()
+    return s, node, run, container, network
+
+
+def test_k4b2_1_an_ended_attempts_network_holding_both_gateways_is_removable(tmp_path, monkeypatch):
+    s, node, run, container, network = ended_auth_attempt_with_stuck_network(tmp_path, monkeypatch)
+    try:
+        code, value = remove(s, network["Id"])
+        assert code == 0 and value == {"ok": True, "network_id": network["Id"], "state": "absent"}, value
+        assert s.fd.network(network["Id"]) is None
+        assert s.fd.container(container["Id"]) is not None, "retention keeps the exited container"
+        for service, cid in s.gateway_ids.items():
+            assert s.fd.container(cid)["State"]["Running"], f"removal must not stop the {service} gateway"
+        assert listing(s) == {"orphans": [], "orphans_error": None}
+        for service in ("egress", "auth"):
+            assert s.state_of(service, run["attempt_id"]) in (None, "absent", "revoked"), service
+    finally:
+        s.close()
+
+
+def test_k4b2_1_removing_an_auth_network_checks_both_gateway_memberships(tmp_path, monkeypatch):
+    s, node, run, container, network = ended_auth_attempt_with_stuck_network(tmp_path, monkeypatch)
+    try:
+        stranger = s.fd.inject("stranger", {"somebody": "else"}, status="running")
+        s.fd.attach(network["Name"], stranger)
+        refused(s, network["Id"], {"not_orphan", "unknown"})
+        assert s.fd.network(network["Id"]) is not None and stranger in s.fd.members(network["Id"])
+        assert s.fd.container(stranger)["State"]["Running"]
+        for cid in s.gateway_ids.values():
+            assert cid in s.fd.members(network["Id"]), "a refused removal must not detach a gateway"
+    finally:
+        s.close()
+
+
+def test_k4b2_1_removal_revokes_the_stale_auth_grant_and_removes_its_bearer_file(tmp_path, monkeypatch):
+    from multiagents.paths import ProjectPaths
+    s, node, run, container, network = ended_auth_attempt_with_stuck_network(tmp_path, monkeypatch)
+    try:
+        assert remove(s, network["Id"])[0] == 0
+        assert s.state_of("auth", run["attempt_id"]) in (None, "absent", "revoked")
+        secrets_dir = ProjectPaths(s.root).scheduler / "gateways" / "auth" / "secrets"
+        assert not (secrets_dir / run["attempt_id"]).exists()
+    finally:
+        s.close()
