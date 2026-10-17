@@ -72,3 +72,13 @@ the agents declaring `models: {}`, and that change is the intended one.
 3. reviewer;
 4. full suite;
 5. merge, then resolve bug-d491e8 as fixed.
+
+## Clarifications (2026-10-18, answering tester nd-3c5f28d8)
+
+- **Any other non-mapping value is also a config error under MR-R3.** This
+  covers a scalar such as `models: codex`, a number or a boolean. The only
+  accepted forms are a mapping, `[]` and `null`.
+- **Each layer is validated as written.** A non-empty list is an error even
+  in a layer that a higher layer overrides.
+- **The message wording** is free, as long as it names the agent and says
+  that `models` must be a provider-to-model mapping or empty.
