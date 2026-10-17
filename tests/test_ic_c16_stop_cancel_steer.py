@@ -271,7 +271,8 @@ def test_ic_c16_steer_stops_the_attempt_starts_a_new_one_and_records_that_the_se
 # ========================================== D-S3.2 refusals by declaration
 
 # K17.2 after slice 4A: `needs.rpc` alone is no longer refused (IC-C20 covers it running).
-NEEDS = [("credentials", r"credential_handle"), ("network", r"network")]
+# D-S4B.1 lifts the `network` refusal: only `credentials` stays refused until 4C.
+NEEDS = [("credentials", r"credential_handle")]
 
 
 def refused(view):
@@ -331,6 +332,19 @@ def test_ic_c16_d_s3_2_a_provider_declaring_a_need_is_refused_unsupported_not_re
         s.close()
 
 
+def test_ic_c16_d_s4b_1_a_provider_needing_only_the_network_is_not_refused_for_it(tmp_path, monkeypatch):
+    s = s3.FakeDockerSched(tmp_path, monkeypatch)
+    try:
+        s.provider_declares(network=True, credentials=False, rpc=False)
+        arm_prepare_marker(s)
+        s.start()
+        node = s.create()["id"]
+        view = s.wait(lambda: (v := s.get(node)) and (refused(v) or s.runs(node)) and v, ic.WAIT, "a launch or a refusal")
+        assert not [c for c in refused(view) if "network" in ic.text_of(c).lower()], refused(view)
+    finally:
+        s.close()
+
+
 def test_ic_c16_d_s3_2_a_provider_without_a_declaration_counts_as_needing_all_three(tmp_path, monkeypatch):
     s = s3.S3Sched(tmp_path, monkeypatch)
     try:
@@ -365,7 +379,7 @@ def test_ic_c16_d_s3_2_the_refusal_is_for_isolated_only_a_local_pinned_agent_sti
 
 @pytest.mark.parametrize("declaration,field", [
     ({}, "credential_handle"),
-    ({"credentials": False}, "network"),
+    # D-S4B.1: `network` is no longer a refusal ({"credentials": False} alone is not refused).
     ({"credentials": True, "network": True, "rpc": True}, "credential_handle"),
 ])
 def test_k17_2_omitted_members_default_true_and_refusals_follow_precedence(tmp_path, monkeypatch, declaration, field):

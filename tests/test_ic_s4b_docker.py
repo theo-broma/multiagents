@@ -153,18 +153,35 @@ elif probe == "plant":
 
 
 class NetworkWorld(dk.IsolationWorld):
+    """The isolated world whose `acme` provider runs the s4b probes (egress,
+    privsep) and needs the per-attempt network. Its probes are reached through
+    the writable `s4b` agent: the default `worker` runs the stock probe, which
+    answers `unknown probe` to both."""
+
+    AGENT = "s4b"
+
     def __init__(self, tmp_path, monkeypatch, owner):
         super().__init__(tmp_path, monkeypatch, owner)
         probe = self.p.fakes["acme"]
-        script = Path(probe.entry["bin"])
         source = ic_probe.PROBE_CLI.replace('if probe == "plant":\n', EXTRA, 1)
         if "import base64" not in source:
             source = "import base64\n" + source
+        # the base class already made the entry guest-runnable (`python3 -c TEXT`):
+        # put the host script back, then make the new text guest-runnable again
+        spawn = dict(probe.entry["spawn"])
+        spawn["args"] = spawn["args"][2:]
+        script = tmp_path / "ic-s4b-probe.py"
         script.write_text(source)
+        probe.entry["bin"], probe.entry["spawn"] = str(script), spawn
+        wl.guest_runnable(probe.entry)
         probe.entry["needs"] = {"credentials": False, "network": True, "rpc": False}
+        self.p.add_agent(self.AGENT, "acme", "acme/m1")
         self.p.project.setdefault("executor", {})
         self.p.write()
         self._reset_server()
+
+    def probe_node(self, probe: str, agent: str = AGENT, **fields) -> str:
+        return super().probe_node(probe, agent, **fields)
 
 
 @pytest.fixture
@@ -244,7 +261,8 @@ def test_ic_c31_docker_orphan_network_lifecycle_and_refusals(world):
     slug = world.slug
     def create(project, owner="att_" + "0" * 32):
         out = dk.docker("network", "create", "--internal", "--label", f"multiagents.project={project}",
-                        "--label", f"multiagents.owner={owner}", "--label", f"{dk.OWNER_LABEL}={world.owner}",
+                        "--label", f"multiagents.owner={owner}",
+                        "--label", f"multiagents.creation_key=key-{owner[-6:]}{project[-4:]}", "--label", f"{dk.OWNER_LABEL}={world.owner}",
                         "ic-orphan-" + owner[-6:] + project[-4:])
         assert out.returncode == 0, out.stderr
         return dk.docker("network", "inspect", out.stdout.strip(), "--format", "{{.Id}}").stdout.strip()

@@ -97,8 +97,10 @@ def test_ic_c4_digest_is_sha256_of_canonical_json(be):
     spec = launch_spec(be[1])
     digest = ic.digest_of(spec)
     import dataclasses
-    assert digest == ic.canonical_digest(dataclasses.asdict(spec) if dataclasses.is_dataclass(spec)
-                                         else spec.to_dict())
+    value = dataclasses.asdict(spec) if dataclasses.is_dataclass(spec) else spec.to_dict()
+    if value.get("network_handle") is None:             # IC-C25: an unset handle keeps the v1 digest
+        value.pop("network_handle", None)
+    assert digest == ic.canonical_digest(value)
 
 
 def test_ic_c4_digest_ignores_key_order_and_changes_with_any_field(be):
