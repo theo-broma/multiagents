@@ -6559,3 +6559,4 @@ Pending user: RB-R1 re-wording (above).
   - capset was already fixed on main after this run started;
   - guest_files searches world.root, but the guest writes into <state>/worktrees/proj-*/ag-<run>/. The ic-term marker says 'graceful', so the relay WORKS.
   Tester nd-754de4be relaunched for these. Next: real Docker again; if green, close nd-4fa20bcc approved, then a reviewer on the whole diff (implementer runs since the first review), the suite, merge (src only if readonly reverts appear), and the plan for 4B.2.
+- 2026-10-17 ~12:50 CEST. **4B.1 real Docker GREEN**: 360 passed, 2 skipped (bg 676ebb5f4e1b, /var/tmp/b41-chk 65dff7da). nd-4fa20bcc closed approved (tip 8fcf02cd). Reviewer nd-66ee19f1 relaunched for a second full review. Full suite running on /var/tmp/b41-chk (reds go to /var/tmp/b41-suite-reds.txt). Merge after both; check the branch for readonly reverts and apply src only if any. bug-535139 implementer nd-81a1e751 still running.
