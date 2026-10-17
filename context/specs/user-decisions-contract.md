@@ -620,7 +620,261 @@ Approved by the user on 2026-10-17.
    - delivery to the wrong role;
    - secrets in a comment, scrubbed on write and never in ntfy.
 
-## Slices 4–5
+## Slice 4 — reading and answering surfaces (UD-R9, R10)
 
-These are written after slice 3 merges: the readers, CLI/MCP/monitor/ntfy
-(UD-R9, R10), and the instructions (UD-R12).
+Approved by the user on 2026-10-18. Facts gathered by researcher nd-66914635; critique by researcher nd-d14abee4.
+
+What exists already:
+- `decisions.get` and `decisions.list` (status and audience filters, open
+  decisions first, keyset cursor, `limit` 1..200);
+- `decisions.answer`, `authorize`, `check_refs` and `snapshot`;
+- the MCP write tools from slice 2;
+- `decision` events in `events.jsonl`.
+
+What is missing:
+- every reader: the CLI, the MCP read tools and the monitor;
+- the CLI's own `cli` channel, since `multiagents ask` still answers as
+  `legacy`;
+- the ntfy decision events.
+
+### Decisions pinned by slice 4
+
+- **D-UD4.1 — one shape.**
+  - Every surface returns records exactly as `decisions.get` serializes them.
+    That shape is the one `schemas/decision.schema.json` describes.
+  - A list is `{"decisions": [...], "next": <cursor or null>}`, the shape of
+    `decisions.list`.
+  - Surfaces never read `tree.json` themselves.
+- **D-UD4.2 — the user answers through the CLI and the monitor only.**
+  - The CLI answers with channel `cli` and the monitor with channel
+    `monitor`, both as role `user`.
+  - The residual risk of UD-R4 is unchanged.
+  - The name `legacy` remains readable in old records, and no new answer
+    writes it.
+- **D-UD4.3 — a recommendation is never pre-selected.**
+  - Every surface marks the recommended options.
+  - No surface submits them unless they are chosen explicitly (UD-D3).
+  - An empty input never submits anything.
+
+### Behaviours
+
+**UD-C14 — `multiagents decisions` (UD-R9).**
+- `multiagents decisions [--status S] [--audience A] [--limit N] [--cursor C] [--json]`.
+  - It lists through `decisions.list`.
+  - The text output gives one line per decision: id, status, audience,
+    asker role, `asked_at` and title. When there is a further page, it ends
+    with the cursor to pass.
+  - `--json` prints the D-UD4.1 envelope.
+- `multiagents decisions show <id> [--json] [--diff]`.
+  - It prints the whole record.
+  - It also prints each file ref's state from `check_refs`: unchanged,
+    changed or missing.
+  - `--diff` adds a unified diff from each changed ref's snapshot to the
+    current file.
+  - An unknown id exits 1 with a message.
+- Any status or audience value outside the schema's enums exits 2 and names
+  the accepted values.
+- Verified by:
+  - filters;
+  - ordering, open first;
+  - pagination across two pages, with no duplicate and no gap;
+  - `--json` validates against the schema;
+  - `show` on an unknown id;
+  - `--diff` on a draft edited after the question was asked.
+
+**UD-C15 — `multiagents ask` becomes interactive over decisions (UD-R9).**
+- **What it shows.**
+  - Without an id, it walks the open decisions: audience `user` first, then
+    `orchestrator`, oldest first within each.
+  - With an id, it shows only that decision.
+  - `--agent` keeps filtering by the asker's agent.
+  - `--list` keeps listing without answering, now over decisions.
+- **What a decision shows.**
+  - Its title, context and implications.
+  - Its options, numbered, each with its description and `implies`. The
+    recommended ones are marked.
+  - The state of its refs (UD-C14). A changed or missing ref is shown as a
+    warning before the prompt.
+- **The prompt, by mode.**
+  - `single`: one number.
+  - `multi`: comma-separated numbers, between `min` and `max`.
+  - `o` for free text, when `allow_free_text`.
+  - `s` skips to the next decision.
+  - Then an optional comment.
+  - `free_text` mode asks for the text only.
+- **Invalid input.** It is refused with the reason, and the same decision is
+  asked again. Nothing is submitted.
+  - Spaces around numbers are accepted.
+  - A duplicate number, a non-number or an unknown number is invalid.
+- **End of input or Ctrl-C.** Nothing is submitted for the current decision,
+  and the command exits 130. Answers already submitted stay.
+- **No TTY needed.** `ask` reads lines from stdin, so it works without a
+  TTY. The residual risk of UD-R4 is unchanged.
+- **Untrusted text is sanitised.** Every piece of record text the CLI
+  prints has its control characters removed: C0 and C1, ESC sequences, and
+  everything but newline and tab. This applies to the title, context,
+  options, comments, free text and ref paths, in `ask` and in
+  `decisions` alike. No such helper exists yet, so one is written for this.
+- **Submission.**
+  - It calls `decisions.answer` with the `revision` that was shown, a fresh
+    `request_id`, and channel `cli`.
+  - On a revision conflict, the current record is shown again and nothing
+    is submitted.
+  - When the decision was answered meanwhile, it says by whom, through which
+    channel, and what.
+- **Verified by:**
+  - each mode;
+  - out-of-range numbers;
+  - `multi` below `min` and above `max`;
+  - free text refused when `allow_free_text` is false;
+  - an empty line submits nothing;
+  - the stored `answered_by.channel` is `cli`;
+  - a decision answered from the monitor between display and submission;
+  - legacy `q-` questions are still answerable;
+  - `--list`.
+
+**UD-C16 — MCP read tools (UD-R9).**
+- `list_decisions(status?, audience?, cursor?, limit?)` and
+  `get_decision(id)` return the D-UD4.1 shapes.
+- **Scope.**
+  - On `mcp_root`, the orchestrator and the initializer see every decision.
+  - On `mcp_run`, an agent sees only decisions asked by its own run or a
+    descendant run, the same rule as the legacy answer.
+  - A decision outside an agent's scope is answered
+    `{"error": "forbidden", "reason": "out_of_scope"}`, consistent with
+    slice 2's write tools. An unknown id is `not_found`.
+- Identity arguments are refused with `invalid_argument` (D-UD2.1).
+- Verified by:
+  - root sees all;
+  - an agent sees its own and its descendants' decisions, never a sibling's
+    or the orchestrator's `d-` decisions;
+  - pagination;
+  - identity arguments refused.
+
+**UD-C17 — monitor routes and page (UD-R9).**
+- **Routes.**
+  - `GET /api/decisions?status=&audience=&cursor=&limit=`
+  - `GET /api/decisions/<id>`, which includes the per-ref state of UD-C14.
+  - `GET /api/decisions/<id>/diff`: the unified diff for its changed refs,
+    capped at 256 KiB for the whole response, all refs together. When it is
+    cut, it ends with the line `… truncated (<N> bytes omitted)`.
+- **Answering.** `POST /api/action` with
+  `{"action": "answer_decision", id, revision, options, comment, free_text, request_id}`
+  answers as role `user` on channel `monitor`.
+- **Authentication.** Every new route and the new action go through the
+  existing checks, `_authorised` (the page token, C20) and, for POST,
+  `_origin_is_ours`.
+  - A missing or wrong token gets 401 and reveals nothing.
+  - A foreign Origin gets 403.
+- **Compatibility.** The `answer_question` action and `/api/state`'s
+  `questions` keep their current behaviour (UD-R11).
+- **The `answer_decision` action's reply.**
+  - Success is HTTP 200, `{"ok": true, "decision": <record>, "already_answered": <bool>}`.
+    An identical repeat is a success with `already_answered: true`.
+  - A refusal is `{"ok": false, "error": <code>, ...details}`, using the
+    codes `decisions.answer` raises. The page shows the refusal:
+
+    | code | HTTP status |
+    |---|---|
+    | `stale_revision` | 409 |
+    | `conflicting_answer` | 409 |
+    | `not_open` | 409 |
+    | `invalid_answer` | 400 |
+    | `forbidden` | 403 |
+  - The other actions keep their reply shape.
+- **The TUI** (`monitor/tui.py`) lists open decisions, both `q-` and `d-`,
+  through the decisions module. It is read-only.
+- **The page.**
+  - A Decisions panel: open `user` decisions first, then open `orchestrator`
+    ones, then a paginated history.
+  - Options are radio buttons or checkboxes depending on the mode. The
+    recommended ones are marked, never pre-checked.
+  - Free text and a comment.
+  - Changed refs are shown with a link to the diff.
+- **Verified by:**
+  - every route, with and without the token;
+  - answering through the action;
+  - a stale revision gives 409;
+  - a CLI-versus-monitor race gives one answer, with the second either
+    idempotent (the same answer) or refused (a different one);
+  - the legacy action still works;
+  - the diff cap.
+
+**UD-C18 — ntfy decision events (UD-R10).**
+- A notification of a new kind `decision` is sent when a decision becomes
+  open with audience `user`: either created so, or escalated to `user`.
+- It carries the decision id, `audience` and `asker_role` only. Never the
+  title, context, options, comment or free text.
+- It is sent at most once per decision, through the existing outbox.
+  - The mark is persistent, like today's `notify_q:<id>` keys, and is not
+    dropped when the decision closes.
+  - Because of the mark, a restart, a later scan or any transition never
+    resends it.
+- Agent questions with audience `orchestrator` keep today's `question`
+  notification unchanged.
+- Verified by:
+  - creation and escalation each notify once;
+  - an `orchestrator` decision sends no `decision` notification;
+  - a decision whose title and comment hold a sentinel string sends a
+    payload without it;
+  - a restart does not resend.
+
+**UD-C19 — nothing else changes in slice 4.**
+- `list_questions`, `answer_question` and the slice 1-3 tools and tests
+  stay green.
+- Verified by: the existing UD, DJ, NT and monitor tests.
+
+### Slice 4 work split
+1. tester: tests/test_ud_c14_*.py to tests/test_ud_c19_*.py.
+2. implementer (default tier).
+3. reviewer.
+4. **adversary, mandatory:**
+   - monitor answering without, or with a forged, token;
+   - a cross-origin POST to `/api/action`;
+   - an agent reading another run's decision;
+   - text leaking into ntfy;
+   - a CLI-versus-monitor race;
+   - a terminal escape sequence in a title or option rendered by the CLI.
+
+## Slice 5 — instructions (UD-R12, and the wake reading of UD-R7)
+
+Approved by the user on 2026-10-18.
+
+**UD-C20 — `_orchestrator.md` and `_initializer.md`.** Both say:
+- **How to wait on the user.** Every wait on the user is a decision created
+  with `ask_user`. Whenever the choice is not open-ended, it carries options
+  with their `implies`, a recommendation and its implications.
+  - BRIEF may mention the wait, citing its `d-` id.
+  - Asking in chat alone is not a wait.
+- **At every wake**, they read the open and answered decisions through
+  `list_decisions`, since the Stop hook does not fire after an interrupt.
+- **Before acting on an answer**, they check its refs with the digest check
+  (UD-R5). A changed draft gets a new decision that supersedes the old one,
+  never an action on the earlier yes.
+- **After acting**, they mark the decision handled with
+  `mark_decision_handled`: `applied`, `not_applied` with a reason, or
+  `error`.
+- **They never answer a `user` decision**, and never run `multiagents ask`
+  or the monitor's answer action on the user's behalf.
+- **The orchestrator answers agent questions within its remit** with
+  `answer_question`, as today. It escalates the user's ones with
+  `escalate_decision`, never by copying them.
+- **The initializer** creates its own waits with `ask_user` instead of
+  `NEED_DECISION`.
+- The text tells the user to answer with `multiagents ask` or the monitor.
+
+Verified by:
+- each tool named in the two files exists in the MCP registry;
+- the files no longer tell the initializer to use `NEED_DECISION` for its
+  own waits;
+- the required points above are each present (a short presence test per
+  point, not a wording test).
+
+**UD-C21 — nothing else changes in slice 5.**
+
+### Slice 5 work split
+1. tester.
+2. implementer-quick.
+3. reviewer.
+
+There is no adversary: the slice changes only instructions.
