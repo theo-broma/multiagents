@@ -6671,3 +6671,4 @@ Pending user: RB-R1 re-wording (above).
   - test_c12_two_concurrent_watchers fails deterministically, on main too. The cause is a test-harness defect: `spawn_watch` closes stdin, then `communicate()` flushes it and raises ValueError.
   - Tester nd-47d8d9fd is fixing it.
   - Decision: once the fix is applied, re-run only tests/test_ud_*.py on u3-comb, not the full suite. The fix is a test-only one-liner and cannot affect src. Then merge nd-83907cc8.
+- 2026-10-18: UD slice 3 MERGED (da07d64b, nd-83907cc8) after the c12 harness fix 2a89ea6c. Validation: tests/test_ud_*.py on u3-comb plus the fix gave 685 passed. Next for UD: the contract for slices 4-5.
