@@ -381,7 +381,7 @@ def test_ic_c25_cleanup_of_an_unknown_attempt_is_success_or_absent(ns):
 
 def test_ic_c25_cleanup_after_the_attempt_ended_removes_the_network_and_repeats(ns):
     node, run, container, network = started(ns)
-    ns.fd.finish(container["Id"], 0)
+    ns.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
     nb.wait_done(ns, node)
     registry = ns.registry()
     for _ in range(2):

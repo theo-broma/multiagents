@@ -94,7 +94,7 @@ def test_ic_c29_the_gateway_survives_the_end_of_an_attempt_and_other_attempts_ar
     ra, rb = ns.runs(a)[-1], ns.runs(b)[-1]
     (na,), (nb_,) = ns.attempt_networks(ra["attempt_id"]), ns.attempt_networks(rb["attempt_id"])
     before_env = ns.invocation(cb)["env"]
-    ns.fd.finish(ca["Id"], 0)
+    ns.fd.finish(ca["Id"], 0, stdout=s3.events_stdout())
     nb.wait_done(ns, a)
     ns.wait(lambda: ns.fd.network(na["Id"]) is None or None, nb.WAIT, "A's network to be removed")
     assert ns.fd.container(cb["Id"])["State"]["Running"] and ns.fd.network(nb_["Id"]) is not None
@@ -107,8 +107,11 @@ def test_ic_c29_the_gateway_survives_the_end_of_an_attempt_and_other_attempts_ar
 @pytest.mark.parametrize("code", [0, 1, 137])
 def test_ic_c29_every_kind_of_exit_leaves_no_network_and_no_ready_grant(ns, code):
     node, run, container, network = running_pair(ns)
-    ns.fd.finish(container["Id"], code)
-    ns.wait(lambda: (v := ns.get(node)) and v["state"] in ("done", "held", "failed") or None, nb.WAIT, "the end")
+    # An empty-output exit is a crash and is retried (TF-R2); the contract is about the original
+    # attempt, so only the clean end (with its completion events) is awaited as a node outcome.
+    ns.fd.finish(container["Id"], code, stdout=s3.events_stdout() if code == 0 else b"")
+    if code == 0:
+        ns.wait(lambda: (v := ns.get(node)) and v["state"] in ("done", "held", "failed") or None, nb.WAIT, "the end")
     ns.wait(lambda: ns.fd.network(network["Id"]) is None or None, nb.WAIT, "the network to be removed")
     assert row_state(ns, run["attempt_id"]) in (None, "absent", "revoked")
 
@@ -185,7 +188,7 @@ def test_ic_c29_unrelated_members_stop_deletion_and_are_reported(ns):
     node, run, container, network = running_pair(ns)
     intruder = ns.fd.inject("intruder", {"unrelated": "yes"}, status="running")
     ns.fd.attach(network["Name"], intruder)
-    ns.fd.finish(container["Id"], 0)
+    ns.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
     nb.wait_done(ns, node)
     def reported():
         listing = json.loads(ns.cli("scheduler", "orphans", timeout=nb.WAIT).stdout)
@@ -305,7 +308,7 @@ def test_ic_c30_an_ending_attempt_and_a_new_one_reconcile_against_the_journal(ns
     nodes = [ns.launch() for _ in range(3)]
     containers = [ns.running(n) for n in nodes]
     networks = [ns.attempt_networks(ns.runs(n)[-1]["attempt_id"])[0] for n in nodes]
-    ns.fd.finish(containers[0]["Id"], 0)
+    ns.fd.finish(containers[0]["Id"], 0, stdout=s3.events_stdout())
     newest = ns.launch()
     ns.running(newest)
     ns.wait(lambda: ns.fd.network(networks[0]["Id"]) is None or None, nb.WAIT, "the ended attempt's network to go")

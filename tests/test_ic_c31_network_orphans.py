@@ -76,6 +76,7 @@ def ended_attempt_with_stuck_network(s):
     container = s.running(node)
     run = s.runs(node)[-1]
     (network,) = s.attempt_networks(run["attempt_id"])
+    s.gateway_id = s.egress_gateways()[0]["Id"]  # captured before cleanup detaches it
     s.fd.rule("network", "rm", effect="fail", stderr="Error response from daemon: stuck")
     s.fd.rule("network", "remove", effect="fail", stderr="Error response from daemon: stuck")
     s.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
@@ -189,7 +190,7 @@ def test_ic_c31_after_a_clean_end_nothing_remains_to_report_gateway_infrastructu
     ns.start()
     node = ns.launch()
     container = ns.running(node)
-    ns.fd.finish(container["Id"], 0)
+    ns.fd.finish(container["Id"], 0, stdout=s3.events_stdout())
     nb.wait_done(ns, node)
     ns.wait(lambda: not ns.fd.networks() or None, nb.WAIT, "network cleanup")
     assert listing(ns) == {"orphans": [], "orphans_error": None}
@@ -245,7 +246,7 @@ def test_ic_c31_incomplete_discovery_is_unknown_not_empty(ns, effect):
 
 def test_ic_c31_removal_of_an_ended_attempts_network_keeps_the_gateway_and_the_retained_container(ns):
     node, run, container, network = ended_attempt_with_stuck_network(ns)
-    gateway = ns.egress_gateways()[0]
+    gateway = {"Id": ns.gateway_id}
     code, value = remove(ns, network["Id"])
     assert code == 0 and value == {"ok": True, "network_id": network["Id"], "state": "absent"}, value
     assert ns.fd.network(network["Id"]) is None
