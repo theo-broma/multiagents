@@ -6489,3 +6489,14 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~03:55 CEST. NC-R59 suite 3a82a4911ef2 finished ('lost' status, 690 failed). Almost all are expected reds: phase2, plus the UD/4B.1/GG-R10 tests now on main without their src. 12 others remain (/tmp scratchpad r59.s); rerunning them alone on r59-comb and on main in the background (task bjc96evf4).
 - 2026-10-17 ~04:00 CEST. UD suite 06a18ce0bde7 done: every UD test is green. 9 unexpected reds (scratchpad ud.s); rerunning them alone in the background (task baac4nkfs).
 - 2026-10-17 ~04:05 CEST. GG suite 4ad6a5ba2016 done: no gg test red. 8 unexpected reds (scratchpad gg.s); rerunning them alone in the background (task b0kpwj41x).
+- 2026-10-17 ~03:10 CEST, real clock. **Three merges done.**
+  - **UD slice 1** merged via merge_node: ed538078, nd-b5c9b0fd. The publish touched no tests.
+  - **NC-R59 amendment** applied src-only: 04e71a76, from nd-0299acdd.
+  - **GG-R10** applied src-only: e6a49541, from nd-d228148e, round 2.
+  - Suites: every unexpected red passed alone, except nt_r4 a_401, which is also red on main (known flake).
+  - On main: UD + NC-R59 + GG-R10 tests, 567 passed.
+  - nd-0299acdd and nd-d228148e stay done/completed; close_node refuses done nodes.
+  - Combination worktrees removed.
+  - **Scheduler daemon restarted** (now pid 2465426) on current main, editable install, while no agent ran. RB-R1, NC-R59 and the rest are now live, so new branches should stop showing stale readonly reverts.
+  - Still open: 4B.1 implementer nd-4fa20bcc, held. See the 03:45 entry for the decision to take with the advisor.
+  - UD slices 2-5 contract: next to write.
