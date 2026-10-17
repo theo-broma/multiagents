@@ -368,16 +368,20 @@ def remove_network(project_root, network_id):
                 return failure("not_orphan", "network is not a confirmed attempt orphan")
             target, attempt = owners[network_id]
 
-            def authority():
+            def authority(service):
+                root = paths.scheduler / "gateways"
+                if service == "auth":
+                    root /= "auth"
                 try:
-                    with (paths.scheduler / "gateways" / "authority.json").open() as source:
+                    with (root / "authority.json").open() as source:
                         return json.load(source)
                 except FileNotFoundError:
                     return {}
 
             async def members(metadata, current_attempt):
                 allowed = []
-                gateway_id = (authority().get("gateway") or {}).get("id")
+                gateway_ids = {(authority(service).get("gateway") or {}).get("id"): service
+                               for service in ("egress", "auth")}
                 for member in metadata["Containers"]:
                     if not re.fullmatch(r"[0-9a-f]{64}", member):
                         raise ValueError("network has invalid member identities")
@@ -387,7 +391,7 @@ def remove_network(project_root, network_id):
                     labels = value.get("Config", {}).get("Labels") or {}
                     if labels.get("multiagents.project") != paths.slug:
                         return None
-                    if member == gateway_id and labels.get("multiagents.gateway"):
+                    if labels.get("multiagents.gateway") == gateway_ids.get(member) and member in gateway_ids:
                         allowed.append(member)
                         continue
                     if not current_attempt or labels.get("multiagents.owner") != current_attempt["attempt_id"]:
@@ -408,17 +412,27 @@ def remove_network(project_root, network_id):
                 return success()
             if await members(metadata, attempt) is None:
                 return failure("not_orphan", "network contains an unexpected or live member")
-            stale = [aid for aid, record in authority().get("attempts", {}).items()
-                     if record.get("network_id") == network_id]
-            if attempt and attempt["attempt_id"] not in stale:
-                stale.append(attempt["attempt_id"])
-            if stale:
-                from .gateways import GatewayRegistry
-                registry = GatewayRegistry(paths, config=config, providers=config.providers)
-                for attempt_id in stale:
-                    result = await registry.revoke(attempt_id)
+            from .gateways import GatewayRegistry
+            stale = []
+            for service in ("auth", "egress"):
+                attempts = {aid for aid, record in authority(service).get("attempts", {}).items()
+                            if record.get("network_id") == network_id}
+                if attempt:
+                    attempts.add(attempt["attempt_id"])
+                registry = GatewayRegistry(paths, config=config, providers=config.providers, service=service)
+                stale.extend((registry, aid) for aid in sorted(attempts))
+            replies = [await outcome(registry.revoke, aid) for registry, aid in stale]
+            if any(result is not None and not isinstance(result, Absent) for result in replies):
+                return failure("unknown", "network grant revocation is unconfirmed")
+
+            async def cleaned():
+                # The network may have disappeared during revocation. Each
+                # service still has its own durable cleanup and secret file.
+                replies = [await outcome(registry.cleanup, aid) for registry, aid in stale]
+                for result in replies:
                     if result is not None and not isinstance(result, Absent):
-                        return failure("unknown", "network grant revocation is unconfirmed")
+                        return failure("unknown", "network authority cleanup is unconfirmed")
+                return success()
 
             # Re-read after revocation. Avoid holding a scheduler transaction
             # while waiting for the authority lock or a Docker command.
@@ -426,12 +440,12 @@ def remove_network(project_root, network_id):
             _, owners = await _network_orphans(paths, targets, journal, nodes)
             if network_id not in owners:
                 if isinstance(await _network_metadata(target, network_id), Absent):
-                    return success()
+                    return await cleaned()
                 return failure("not_orphan", "network is no longer a confirmed attempt orphan")
             target, attempt = owners[network_id]
             metadata = await _network_metadata(target, network_id)
             if isinstance(metadata, Absent):
-                return success()
+                return await cleaned()
             allowed = await members(metadata, attempt)
             if allowed is None:
                 return failure("not_orphan", "network contains an unexpected or live member")
@@ -439,18 +453,18 @@ def remove_network(project_root, network_id):
                 await target._cli("network", "disconnect", network_id, member)
                 current = await _network_metadata(target, network_id)
                 if isinstance(current, Absent):
-                    return success()
+                    return await cleaned()
                 if member in current["Containers"]:
                     return failure("unknown", "network member disconnection is unconfirmed")
             current = await _network_metadata(target, network_id)
             if isinstance(current, Absent):
-                return success()
+                return await cleaned()
             if current["Containers"]:
                 return failure("not_orphan", "network has unexpected members")
             await target._cli("network", "rm", network_id)
             if not isinstance(await _network_metadata(target, network_id), Absent):
                 return failure("unknown", "network removal is unconfirmed")
-            return success()
+            return await cleaned()
 
         return _run(operation())
     except Exception:

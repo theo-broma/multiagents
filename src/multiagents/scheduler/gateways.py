@@ -29,6 +29,7 @@ from ..executor.lifecycle import (Absent, Exited, IdentityConflict, InvalidSpec,
                                  ResourceIdentity, Running, Unknown, Unsupported,
                                  _read, _write)
 from .egress import serve_egress
+from .auth_gateway import serve_auth
 from .store import Store, private_directory
 
 _ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -49,6 +50,9 @@ def redaction_values(environment):
     """Literals needed by the trusted logging producer, never public evidence."""
     from urllib.parse import urlsplit
     values = set()
+    bearer = environment.get("ANTHROPIC_AUTH_TOKEN")
+    if bearer:
+        values.update((bearer, "Bearer " + bearer))
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         url = environment.get(name)
         if not url:
@@ -61,18 +65,32 @@ def redaction_values(environment):
 
 
 class GatewayRegistry:
-    def __init__(self, paths, *, config, providers, readiness_probe=None):
+    def __init__(self, paths, *, config, providers, readiness_probe=None, service="egress"):
         from ..executor.docker_lifecycle import DockerBackend
+        if service not in {"egress", "auth"}:
+            raise ValueError("unknown gateway service")
+        self.service = service
         self.paths, self.config, self.providers = paths, config, providers
+        if any(isinstance(provider, dict) for provider in providers.values()):
+            from ..providers import load_providers
+            self.providers = load_providers(providers, getattr(config, "provider_sources", None))
         self.root = paths.scheduler / "gateways"
+        if service == "auth":
+            self.root /= "auth"
         project = config.project if hasattr(config, "project") else config
         self.settings = dict(project.get("executor", {}).get("isolated", {}))
         docker = self.settings.get("docker") or {}
         self.image = docker.get("gateway_image", "multiagents/workspace:latest")
         self.backend = DockerBackend(paths.data / "isolated", cli=docker.get("cli", "docker"), image=self.image)
         self.allowlist, self.diagnostics = DockerExecutor(project.get("executor", {}).get("docker", {})).allowlist_entries()
-        self.policy_digest = hashlib.sha256(json.dumps({"allowlist": self.allowlist, "image": self.image},
+        files = [Path(__file__), Path(__file__).with_name("egress.py")]
+        if service == "auth":
+            files += [Path(__file__).with_name("auth_gateway.py"), Path(__file__).parent.parent / "auth_upstream.py"]
+        self.policy_digest = hashlib.sha256(json.dumps({"allowlist": self.allowlist, "image": self.image,
+            "service": service, "code": [hashlib.sha256(p.read_bytes()).hexdigest() for p in files]},
             sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.test_backend = os.environ.get("MULTIAGENTS_TEST_GATEWAY_BACKEND") if service == "auth" else None
+        self.test_backend_file = None
         self.readiness_probe = readiness_probe
         target = os.environ.get("MULTIAGENTS_TEST_GATEWAY_PROBE")
         if readiness_probe is None and target:
@@ -102,6 +120,33 @@ class GatewayRegistry:
 
     def _save(self, state):
         _write(self.root / "authority.json", state)
+
+    def _gateway_ids(self):
+        ids = set()
+        root = self.paths.scheduler / "gateways"
+        for path in (root / "authority.json", root / "auth" / "authority.json"):
+            try:
+                receipt = _read(path).get("gateway") or {}
+                if receipt.get("id"):
+                    ids.add(receipt["id"])
+            except FileNotFoundError:
+                pass
+        return ids
+
+    def _uses_auth(self, attempt):
+        provider = self.providers.get(attempt.get("provider"))
+        return (provider is not None and getattr(provider, "gateway_auth", "none") == "anthropic"
+                and provider.needs.get("network"))
+
+    def _check_backend(self):
+        if self.test_backend:
+            module, factory = self.test_backend.split(":", 1)
+            loaded = importlib.import_module(module)
+            path = Path(loaded.__file__).resolve(strict=True)
+            adapter = getattr(loaded, factory)(self.root, project=self.paths.slug)
+            if not callable(getattr(adapter, "open", None)):
+                raise ValueError("gateway backend has no open operation")
+            self.test_backend_file = path
 
     def _journal(self, attempt_id):
         with Store(self.paths.root).transaction(write=False) as db:
@@ -160,6 +205,24 @@ class GatewayRegistry:
         attempt = self._journal(attempt_id)
         if not attempt:
             return InvalidSpec("attempt is outside the host journal")
+        if self.service == "auth":
+            if not self._uses_auth(attempt):
+                return None
+            egress = GatewayRegistry(self.paths, config=self.config, providers=self.providers,
+                                     readiness_probe=self.readiness_probe)
+            handle = await egress.prepare(attempt_id, run_id)
+            if not isinstance(handle, NetworkHandle):
+                return handle
+            async with self._locked():
+                state = self._load()
+                if attempt_id not in state["attempts"]:
+                    network = egress._load()["attempts"][attempt_id]
+                    state["attempts"][attempt_id] = {key: network[key] for key in
+                        ("handle", "key", "run_id", "provider", "project", "network_id")}
+                    state["attempts"][attempt_id]["account"] = attempt.get("account", network.get("account", ""))
+                    state["attempts"][attempt_id]["revoked"] = False
+                    self._save(state)
+            return handle
         async with self._locked():
             state = self._load()
             record = state["attempts"].get(attempt_id)
@@ -180,6 +243,7 @@ class GatewayRegistry:
                 record = {"handle": "nh-" + uuid.uuid4().hex,
                           "key": evidence.get("creation_key") or "network-" + uuid.uuid4().hex,
                           "run_id": run_id, "provider": attempt.get("provider", ""),
+                          "account": attempt.get("account", ""),
                           "project": self.paths.slug, "revoked": False}
                 state["attempts"][attempt_id] = record
                 self._save(state)
@@ -223,10 +287,12 @@ class GatewayRegistry:
         path = self.root / "secrets" / attempt_id
         if not path.exists() and create:
             with path.open("x") as output:
-                output.write(secrets.token_hex(32))
+                output.write(("ma-auth-v1." if self.service == "auth" else "") + secrets.token_hex(32))
         return path.read_text()
 
     def _environment(self, attempt_id, password):
+        if self.service == "auth":
+            return {"ANTHROPIC_BASE_URL": "http://ma-auth:8930", "ANTHROPIC_AUTH_TOKEN": password}
         url = f"http://ma1-{attempt_id}:{password}@ma-egress:8888"
         return {**{name: url for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")},
                 "NO_PROXY": "localhost,127.0.0.1,::1,ma-auth", "no_proxy": "localhost,127.0.0.1,::1,ma-auth"}
@@ -257,7 +323,7 @@ class GatewayRegistry:
                 if attempt_id == preparing:
                     return Unknown("attempt network unavailable")
                 continue
-            known = {record.get("container_id"), (state.get("gateway") or {}).get("id")}
+            known = {record.get("container_id"), *self._gateway_ids()}
             if set(network["Containers"]) - known:
                 if attempt_id == preparing:
                     return Unknown("unexpected network member")
@@ -273,8 +339,7 @@ class GatewayRegistry:
             record = state["attempts"][attempt_id]
             if network is None:
                 if record.get("grant_id") and not record.get("revoked"):
-                    grants[record["grant_id"]] = {"username": "ma1-" + attempt_id,
-                        "password": self._password(attempt_id), "networks": list(record.get("sources", []))}
+                    grants[record["grant_id"]] = self._published_grant(attempt_id, record, list(record.get("sources", [])))
                 continue
             for entry in network.get("IPAM", {}).get("Config", []):
                 if entry.get("Subnet"):
@@ -286,17 +351,23 @@ class GatewayRegistry:
                 record["sources"] = sources
                 recorded = True
             if record.get("grant_id") and not record.get("revoked"):
-                grants[record["grant_id"]] = {"username": "ma1-" + attempt_id,
-                    "password": self._password(attempt_id), "networks": sources}
+                grants[record["grant_id"]] = self._published_grant(attempt_id, record, sources)
         if recorded:
             self._save(state)
         private_directory(self.root / "runtime")
         config = {"allowlist": self.allowlist, "grants": grants, "forbidden_networks": sorted(forbidden),
-                  "generation": state["generation"], "policy_digest": self.policy_digest}
+                  "generation": state["generation"], "policy_digest": self.policy_digest,
+                  "project": self.paths.slug}
         _write(self.root / "runtime" / "policy.json", config)
         management = self.root / "runtime" / "management"
         if not management.exists():
             management.write_text(secrets.token_hex(32))
+
+    def _published_grant(self, attempt_id, record, sources):
+        if self.service == "auth":
+            return {"verifier": record["verifier"], "networks": sources,
+                    "provider": record["provider"], "run_id": record["run_id"]}
+        return {"username": "ma1-" + attempt_id, "password": self._password(attempt_id), "networks": sources}
 
     async def _probe(self, receipt):
         if self.readiness_probe:
@@ -333,6 +404,7 @@ class GatewayRegistry:
                    or metadata["State"].get("StartedAt") != receipt.get("started_at"))
         # Inspect every desired network before attaching or replacing anything.
         known = {r.get("container_id") for r in state["attempts"].values()}
+        known.update(self._gateway_ids())
         if receipt:
             known.add(receipt["id"])
         attached = [n for n in desired.values() if n is not None]
@@ -353,7 +425,10 @@ class GatewayRegistry:
             private_directory(self.root / "code")
             import shutil
             shutil.copyfile(Path(__file__).with_name("egress.py"), self.root / "code" / "egress.py")
-            (self.root / "code" / "main.py").write_text(_GATEWAY_MAIN)
+            if self.service == "auth":
+                shutil.copyfile(Path(__file__).with_name("auth_gateway.py"), self.root / "code" / "auth_gateway.py")
+                shutil.copyfile(Path(__file__).parent.parent / "auth_upstream.py", self.root / "code" / "auth_upstream.py")
+            (self.root / "code" / "main.py").write_text(_AUTH_GATEWAY_MAIN if self.service == "auth" else _GATEWAY_MAIN)
             state["generation"] += 1
             state["gateway"] = None
             self._save(state)
@@ -361,15 +436,23 @@ class GatewayRegistry:
             key = "gateway-" + uuid.uuid4().hex
             state["gateway_key"] = key
             self._save(state)
-            args = ["create", "--name", "multiagents-egress-" + uuid.uuid4().hex,
+            args = ["create", "--name", "multiagents-" + self.service + "-" + uuid.uuid4().hex,
                 "--pull", "never", "--restart", "unless-stopped", "--cap-drop", "ALL",
                 "--user", f"{os.getuid()}:{os.getgid()}",
                 "--security-opt", "no-new-privileges=true", "--sysctl", "net.ipv4.ip_forward=0",
                 "--label", "multiagents.project=" + self.paths.slug,
-                "--label", "multiagents.gateway=egress", "--label", "multiagents.creation_key=" + key,
+                "--label", "multiagents.gateway=" + self.service, "--label", "multiagents.creation_key=" + key,
                 "--mount", f"type=bind,source={self.root / 'code'},target=/gateway,readonly",
-                "--mount", f"type=bind,source={self.root / 'runtime'},target=/authority,readonly",
-                "--entrypoint", "python3", self.image, "/gateway/main.py"]
+                "--mount", f"type=bind,source={self.root / 'runtime'},target=/authority,readonly"]
+            if self.test_backend:
+                if self.test_backend_file is None:
+                    try:
+                        self._check_backend()
+                    except Exception:
+                        return Unknown("auth gateway backend factory failed")
+                args += ["--mount", f"type=bind,source={self.test_backend_file},target=/gateway-backend.py,readonly",
+                         "--env", "MULTIAGENTS_TEST_GATEWAY_BACKEND=" + self.test_backend]
+            args += ["--entrypoint", "python3", self.image, "/gateway/main.py"]
             result = await self.backend._cli(*args)
             found = await self.backend.find(key)
             if not isinstance(found, ResourceIdentity):
@@ -386,7 +469,7 @@ class GatewayRegistry:
                 return Unknown("gateway start failed")
         for network in attached:
             if receipt["id"] not in network["Containers"]:
-                result = await self.backend._cli("network", "connect", "--alias", "ma-egress", network["Id"], receipt["id"])
+                result = await self.backend._cli("network", "connect", "--alias", "ma-" + self.service, network["Id"], receipt["id"])
                 checked = await self.network_metadata(network["Id"])
                 if not isinstance(checked, dict) or receipt["id"] not in checked["Containers"]:
                     return Unknown("gateway attachment failed")
@@ -399,12 +482,34 @@ class GatewayRegistry:
             return Unknown("authenticated gateway readiness unavailable")
         state["ready"] = True
         self._save(state)
+        from .engine import save_attempt
+        with Store(self.paths.root).transaction() as db:
+            for attempt_id in desired:
+                row = db.execute("SELECT record FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+                if row:
+                    attempt = json.loads(row[0])
+                    gateways = attempt.setdefault("launch_evidence", {}).setdefault("executor", {}).setdefault("gateways", {})
+                    gateways[self.service] = {"id": receipt["id"], "started_at": receipt["started_at"],
+                        "policy_digest": receipt["policy_digest"], "gateway_generation": receipt["generation"],
+                        "networks": list(receipt["networks"])}
+                    save_attempt(db, attempt)
         return None
 
     async def grant(self, attempt_id, container_identity):
         attempt = self._journal(attempt_id)
         if not attempt:
             return InvalidSpec("attempt is outside the host journal")
+        if self.service == "auth":
+            if not self._uses_auth(attempt):
+                return None
+            try:
+                self._check_backend()
+            except Exception:
+                return InvalidSpec("auth gateway backend factory failed")
+            if attempt_id not in self._load()["attempts"]:
+                prepared = await self.prepare(attempt_id, attempt["run_id"])
+                if not isinstance(prepared, NetworkHandle):
+                    return prepared
         async with self._locked():
             state = self._load()
             record = state["attempts"].get(attempt_id)
@@ -425,8 +530,8 @@ class GatewayRegistry:
             record["container_id"] = container_identity.id
             if not record.get("grant_id"):
                 password = self._password(attempt_id, create=True)
-                record.update(grant_id="gg-" + uuid.uuid4().hex,
-                              verifier=hashlib.sha256(password.encode()).hexdigest(), service="egress")
+                record.update(grant_id="gg-" + self.service + "-" + uuid.uuid4().hex,
+                              verifier=hashlib.sha256(password.encode()).hexdigest(), service=self.service)
                 state["generation"] += 1
                 record["generation"] = state["generation"]
                 self._save(state)
@@ -441,7 +546,8 @@ class GatewayRegistry:
                 return result
             network = {"creation_key": record["key"], "id": record["network_id"],
                 "policy_digest": self.policy_digest, "gateway_generation": state["generation"]}
-            self._evidence(attempt_id, network)
+            if self.service == "egress":
+                self._evidence(attempt_id, network)
             return GatewayGrant(record["grant_id"], MappingProxyType(self._environment(attempt_id, self._password(attempt_id))))
 
     async def revoke(self, attempt_id):
@@ -486,11 +592,17 @@ class GatewayRegistry:
 
     async def cleanup(self, attempt_id):
         reply = await self.revoke(attempt_id)
-        if isinstance(reply, Unknown):
-            return reply
         async with self._locked():
             state = self._load()
             record = state["attempts"].get(attempt_id)
+            if record:
+                record["cleanup"] = True
+                self._save(state)
+            # A revoked grant cannot be recovered. Its raw credential is no
+            # longer needed, even if network deletion fails or already ran.
+            (self.root / "secrets" / attempt_id).unlink(missing_ok=True)
+            if isinstance(reply, Unknown):
+                return reply
             if not record or not record.get("network_id"):
                 return Absent()
             network = await self.network_metadata(record["network_id"])
@@ -500,8 +612,7 @@ class GatewayRegistry:
                 return network
             if not self._owns_network(network, attempt_id, record):
                 return InvalidSpec("network ownership cannot be confirmed")
-            receipt = state.get("gateway") or {}
-            known = {record.get("container_id"), receipt.get("id")}
+            known = {record.get("container_id"), *self._gateway_ids()}
             if set(network["Containers"]) - known:
                 return Unknown("unexpected network member prevents cleanup")
             if record.get("container_id"):
@@ -509,8 +620,6 @@ class GatewayRegistry:
                 from ..executor.lifecycle import Exited, Created
                 if not isinstance(live, (Absent, Exited, Created)):
                     return Unknown("attempt termination cannot be confirmed")
-            record["cleanup"] = True
-            self._save(state)
             for member in network["Containers"]:
                 result = await self.backend._cli("network", "disconnect", network["Id"], member)
                 if result[0]:
@@ -519,7 +628,6 @@ class GatewayRegistry:
             after = await self.network_metadata(network["Id"])
             if not isinstance(after, Absent):
                 return Unknown("network removal unconfirmed")
-            (self.root / "secrets" / attempt_id).unlink(missing_ok=True)
             return None
 
     async def reconcile(self):
@@ -634,3 +742,23 @@ while True:
         if handle: handle.close(); handle = None
     time.sleep(.05)
 '''
+
+_AUTH_GATEWAY_MAIN = _GATEWAY_MAIN.replace(
+    "from egress import serve_egress",
+    """import importlib.util, os, sys
+from auth_gateway import serve_auth, UpstreamBackend
+backend = UpstreamBackend()
+target = os.environ.get('MULTIAGENTS_TEST_GATEWAY_BACKEND')
+if target:
+    module, factory = target.split(':', 1)
+    spec = importlib.util.spec_from_file_location(module, '/gateway-backend.py')
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules[module] = loaded
+    spec.loader.exec_module(loaded)
+    project = json.loads(pathlib.Path('/authority/policy.json').read_bytes())['project']
+    backend = getattr(loaded, factory)(pathlib.Path('/authority'), project=project)
+""").replace(
+    "handle.update(value['allowlist'], value['grants'], value['forbidden_networks'])",
+    "handle.update(value['grants'])").replace(
+    "serve_egress(('0.0.0.0', 8888), value['allowlist'], value['grants'], resolver, connect, value['forbidden_networks'])",
+    "serve_auth(('0.0.0.0', 8930), value['grants'], backend)")

@@ -290,6 +290,7 @@ class Provider:
     # drops credentials, network or RPC from an existing provider.
     needs: dict[str, bool] = field(default_factory=lambda: {
         "credentials": True, "network": True, "rpc": True})
+    gateway_auth: str = "none"
     docker: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
     # Sent to the model, verbatim, as its own prompt section — unlike `notes`,
@@ -433,6 +434,9 @@ class Provider:
     def from_dict(cls, name: str, data: dict) -> Provider:
         validate_strategy(data.get("instance_strategy"), nullable=True,
                           source=f"provider {name!r}")
+        gateway_auth = data.get("gateway_auth", "none")
+        if not isinstance(gateway_auth, str) or gateway_auth not in ("none", "anthropic"):
+            raise ValueError(f"provider {name!r}: gateway_auth must be none or anthropic")
         # PS-R1a: a relative explicit `bin` (one containing "/") is refused at
         # config load, exactly as a relative `bin_search` entry is — never
         # later, as a ValueError raised from `resolve_bin` mid-operation.
@@ -477,6 +481,7 @@ class Provider:
             root_bg_hook=root_bg_hook,
             auth=data.get("auth", {}) or {},
             needs=_provider_needs(name, data),
+            gateway_auth=gateway_auth,
             docker=data.get("docker", {}) or {},
             notes=data.get("notes", ""),
             agent_guidance=data.get("agent_guidance") or "",

@@ -4800,9 +4800,15 @@ class Runner(QuotaHandover):
                 owner = (context.attempt_id if context and context.attempt_id else
                          managed.attempt_id if managed and managed.attempt_id else node_id)
                 from .scheduler.store import Store
-                from .scheduler.engine import attempts
-                with Store(self.paths.root).transaction(write=False) as db:
+                from .scheduler.engine import attempts, save_attempt
+                with Store(self.paths.root).transaction() as db:
                     launch_attempt = attempts(db).get(owner)
+                    if launch_attempt is not None:
+                        # Freeze the actual host-selected route before either
+                        # gateway can issue authority for this attempt.
+                        launch_attempt.update(provider=provider.name,
+                                              account=provider.container_account or provider.name)
+                        save_attempt(db, launch_attempt)
                 if session_plan:
                     launch_attempt["conversation_home"] = str(session_plan["home"])
                 executor.bind(owner,

@@ -57,6 +57,7 @@ class IsolatedExecutor(Executor):
         self.prepare_session = None
         self.endpoint = None
         self.gateways = None
+        self.auth_gateway = None
         self.network_attempt = None
         from ..provision.seeds import SeedRegistry
         self.seeds = SeedRegistry(paths) if paths else None
@@ -137,15 +138,20 @@ class IsolatedExecutor(Executor):
         result = await outcome(self.backend.probe)
         return [result.reason] if isinstance(result, Unknown) else result
 
-    def gateway_registry(self):
-        if self.gateways is None:
+    def gateway_registry(self, service="egress"):
+        registry = self.gateways if service == "egress" else self.auth_gateway
+        if registry is None:
             from ..config import load
             from ..scheduler.gateways import GatewayRegistry
             loaded = load(self.paths, seed=False)
-            self.gateways = GatewayRegistry(self.paths, config=loaded, providers=self.providers)
-        if self.backend is not None:
-            self.backend.network_registry = self.gateways
-        return self.gateways
+            registry = GatewayRegistry(self.paths, config=loaded, providers=self.providers, service=service)
+            if service == "egress":
+                self.gateways = registry
+            else:
+                self.auth_gateway = registry
+        if self.backend is not None and service == "egress":
+            self.backend.network_registry = registry
+        return registry
 
     async def network_probe(self):
         return await self.gateway_registry().probe()
@@ -201,13 +207,22 @@ class IsolatedExecutor(Executor):
             revoke_endpoint(self.paths.root, self.endpoint["attempt_id"])
         if self.network_attempt:
             from ..scheduler.orphans import _run
-            return _run(self.gateway_registry().revoke(self.network_attempt))
+            async def revoke():
+                replies = [await outcome(self.gateway_registry(service).revoke, self.network_attempt)
+                           for service in ("auth", "egress")]
+                return next((r for r in replies if r is not None), None)
+            return _run(revoke())
 
     async def _before_remove(self, identity):
         if callable(self.before_remove):
             await self.before_remove(identity)
+        return await self._cleanup_network()
+
+    async def _cleanup_network(self):
         if self.network_attempt:
-            return await self.gateway_registry().cleanup(self.network_attempt)
+            replies = [await outcome(self.gateway_registry(service).cleanup, self.network_attempt)
+                       for service in ("auth", "egress")]
+            return next((r for r in replies if r is not None and not isinstance(r, Absent)), None)
 
     def _uncertain(self, creation_key, operation, reply):
         return Unknown(f"predecessor {creation_key}: {operation}: "
@@ -263,8 +278,7 @@ class IsolatedExecutor(Executor):
             if not isinstance(removed, (Exited, Absent)):
                 return self._uncertain(creation_key, "remove", removed)
         self.record({"termination_confirmed": True})
-        if self.network_attempt:
-            await self.gateway_registry().cleanup(self.network_attempt)
+        await self._cleanup_network()
         if run_dir is not None:
             _write_run_file(run_dir, "exit_status", b"1")
 
@@ -379,6 +393,9 @@ class IsolatedExecutor(Executor):
                     return resolved
                 raise RuntimeError("isolation_unavailable: " + str(exc)) from exc
             environment = strip_run_environment(dict(self.adapter_env(argv, env, provider)))
+            for name in list(environment):
+                if name.startswith("ANTHROPIC_"):
+                    environment.pop(name)
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
                          "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
                 environment.pop(name, None)
@@ -432,16 +449,19 @@ class IsolatedExecutor(Executor):
                 environment["MULTIAGENTS_RPC_SOCKET"] = "/run/multiagents/rpc/rpc.sock"
             if self.network_attempt:
                 from ..scheduler.gateways import GatewayGrant
-                grant = await outcome(self.gateway_registry().grant, self.network_attempt, identity)
-                if not isinstance(grant, GatewayGrant):
-                    detail = getattr(grant, "reason", "gateway grant unavailable")
-                    self.record({"failure": {"class": "launch", "retryable": True,
-                        "detail_code": "isolation_unavailable", "excerpt": detail}})
-                    resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
-                    if isinstance(resolved, Unknown):
-                        return resolved
-                    raise RuntimeError("isolation_unavailable: " + detail)
-                environment.update(grant.environment)
+                for service in ("auth", "egress"):
+                    grant = await outcome(self.gateway_registry(service).grant, self.network_attempt, identity)
+                    if grant is None and service == "auth":
+                        continue
+                    if not isinstance(grant, GatewayGrant):
+                        detail = getattr(grant, "reason", "gateway grant unavailable")
+                        self.record({"failure": {"class": "launch", "retryable": True,
+                            "detail_code": "isolation_unavailable", "excerpt": detail}})
+                        resolved = await self._resolve_failure(creation_key, invocation_key, run_dir)
+                        if isinstance(resolved, Unknown):
+                            return resolved
+                        raise RuntimeError("isolation_unavailable: " + detail)
+                    environment.update(grant.environment)
             invocation = InvocationSpec(argv=list(argv), env=environment, cwd=self.spec.guest_repo,
                                         stdin=stdin, kind="agent")
             reply = await outcome(self.backend.run, identity, invocation, invocation_key)
