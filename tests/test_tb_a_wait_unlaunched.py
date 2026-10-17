@@ -15,9 +15,10 @@ Assumptions where the contract is silent (kept loose):
 - a node created with another principal's capability (a subagent's token) is
   not "caller-created" for the root's wait.
 - the in-flight tests need the wait to have taken its snapshot before the test
-  acts; there is no observable for that, so they give the call QUIET seconds
-  of head start. A correct implementation is not hurt by acting early (the
-  node then simply has a run already); a missing one fails at its assertion.
+  acts. The snapshot is followed by the wait's first read of the snapshot
+  nodes' transitions on the scheduler socket (`wait_for_nodes` with node ids); `InFlight` observes
+  that request at the in-process client seam and `settle()` waits for it, so
+  the test acts only after the snapshot, however slow a cold start is.
 - the tests of "launches and finishes during the wait" and "parks" use a
   dependent of a node held by TB-R1 (`needs_info`) as the run-less open node,
   because it is the only run-less blocked node that no running run keeps
@@ -38,7 +39,7 @@ from nc_fixture.m4_world import M4World  # noqa: E402
 from nc_fixture.world import call_tool  # noqa: E402
 
 WAIT = 8
-HEAD_START = 1.0     # the in-flight wait's time to take its snapshot
+SNAPSHOT_BOUND = 15  # cold start: imports + config load come before the snapshot
 WAIT_TIMEOUT = 4     # `timeout` of a wait that must not run out
 ASK = "NEED_INFO(q): ASK-QUESTION-903?"
 
@@ -50,6 +51,8 @@ def w(tmp_path, monkeypatch):
     world.agent("wk", "fxw", writes=True)
     world.start_scheduler()
     yield world
+    for patch in getattr(world, "patches", []):
+        patch.undo()          # a wait that never returned must not leak its seam
     world.close()
 
 
@@ -57,7 +60,20 @@ class InFlight:
     """`wait_for_agents()` running in a thread."""
 
     def __init__(self, w, timeout: int = WAIT_TIMEOUT, ids=None):
+        from multiagents import server
         self.box: dict = {}
+        self.snapshotted = threading.Event()
+        real = server._node_rpc
+
+        def seen(op, *a, **kw):
+            args = a[0] if a else kw.get("args") or {}
+            if op == "wait_for_nodes" and args.get("node_ids"):
+                self.snapshotted.set()
+            return real(op, *a, **kw)
+
+        self._patch = pytest.MonkeyPatch()
+        self._patch.setattr(server, "_node_rpc", seen)
+        w.patches = getattr(w, "patches", []) + [self._patch]
         self.t = threading.Thread(target=self._run, args=(w, timeout, ids), daemon=True)
         self.t.start()
 
@@ -67,12 +83,20 @@ class InFlight:
         except BaseException as exc:      # noqa: BLE001 - reported by the test
             self.box["error"] = exc
 
-    def settle(self, w) -> None:
-        w.quiet(HEAD_START)
+    def settle(self, w, snapshot: bool = True) -> None:
+        """Return once the wait has taken its snapshot (bounded). A wait with
+        no run-less node to follow has no snapshot to observe: it only yields."""
+        if snapshot:
+            self.snapshotted.wait(SNAPSHOT_BOUND)
+        else:
+            w.quiet(0.2)
 
     def returned(self, within: float) -> bool:
         self.t.join(within)
-        return not self.t.is_alive()
+        alive = self.t.is_alive()
+        if not alive:
+            self._patch.undo()
+        return not alive
 
     def result(self, within: float = WAIT) -> dict:
         assert self.returned(within), "the wait did not return"
@@ -135,7 +159,7 @@ def test_tb_r3_the_caller_runs_are_still_covered(w):
     h = w.simple("H", "wk", fx={"gate": "gh", "text": "done"})
     w.wait_running(h, timeout=WAIT)
     wait = InFlight(w)
-    wait.settle(w)
+    wait.settle(w, snapshot=False)
     assert not wait.returned(0), "returned while the only run was still gated"
     w.gate("gh", w.fxw)
     assert mentions(w, wait.result(), h)
