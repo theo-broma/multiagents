@@ -242,9 +242,10 @@ def egress(w, **fields):
 
 
 def guest_files(w, name: str) -> list[Path]:
-    """Files the guest wrote to its workspace: the backend keeps guest storage
-    under the project root (`<root>/.docker-guests/<guest>/...`)."""
-    return list((Path(w.root) / ".docker-guests").rglob(name))
+    """Files the guest wrote to its workspace: the probe runs with cwd in the
+    guest checkout, which is attached to the project worktree under the
+    project root, so search the root and everything below it (its worktree)."""
+    return list(Path(w.root).rglob(name))
 
 
 def test_ic_c27_docker_the_run_reaches_only_the_gateway_and_every_bypass_fails(world):
@@ -305,7 +306,7 @@ def test_d_s4b_7_docker_logs_hold_only_sanitised_frames_and_the_pid1_redactor_is
     node, r = egress(world, echo=True, hold=True)
     password = password_of(issued_proxy_url(world, node))
     world.stop_victim(node)
-    world.wait(lambda: world.get(node)["state"] in ("done", "held", "failed"), dk.PROBE_WAIT, "the end")
+    world.wait(lambda: world.get(node)["state"] in ("done", "held", "failed", "cancelled"), dk.PROBE_WAIT, "the end")
     ids = dk.docker("ps", "-aq", "--filter", f"label=multiagents.project={world.slug}").stdout.split()
     assert ids
     for cid in ids:
