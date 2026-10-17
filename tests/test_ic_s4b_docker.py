@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -65,8 +66,11 @@ if probe == "egress":
     url = ins.get("credential") or proxy
     m = re.match(r"http://([^:]+):([^@]+)@", url)
     basic = base64.b64encode((m.group(1) + ":" + m.group(2)).encode()).decode() if m else ""
-    def req(target, extra="", method="GET"):
-        return "%s %s HTTP/1.1\r\nHost: x\r\nProxy-Authorization: Basic %s\r\n%s\r\n" % (method, target, basic, extra)
+    def authority(target):
+        return target.split("://", 1)[-1].split("/", 1)[0]
+    def req(target, extra="", method="GET", host=None):
+        host = authority(target) if host is None else host      # Host must agree with the request authority (K4B.5)
+        return "%s %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic %s\r\n%s\r\n" % (method, target, host, basic, extra)
     try: dns = socket.gethostbyname(ins.get("dns_name", "example.org"))
     except OSError as e: dns = repr(e)
     say(dict(common(), cred=cred_facts(proxy), no_proxy=os.environ.get("NO_PROXY"), all_proxy=os.environ.get("ALL_PROXY"),
@@ -77,7 +81,8 @@ if probe == "egress":
              dns_external=dns,
              evil=via(req("http://evil.test/")),
              connect_ssh=via(req("example.org:22", method="CONNECT")),
-             no_auth=via("GET http://evil.test/ HTTP/1.1\r\nHost: x\r\n\r\n"),
+             no_auth=via("GET http://evil.test/ HTTP/1.1\r\nHost: evil.test\r\n\r\n"),
+             host_conflict=via(req("http://evil.test/", host="x")),
              forged=via(req("http://evil.test/", "X-Forwarded-For: 10.0.0.2\r\nForwarded: for=10.0.0.2\r\n")),
              ))
     if ins.get("echo"):
@@ -246,10 +251,13 @@ def egress(w, **fields):
 
 
 def guest_files(w, name: str) -> list[Path]:
-    """Files the guest wrote to its workspace: the probe runs with cwd in the
-    guest checkout, which is attached to the project worktree under the
-    project root, so search the root and everything below it (its worktree)."""
-    return list(Path(w.root).rglob(name))
+    """Files the guest wrote to its workspace. The probe's cwd is the agent run
+    worktree, `<state dir>/worktrees/proj-<hash>/ag-<run>/`, under the
+    multiagents state dir (MULTIAGENTS_STATE_DIR), not under `w.root`; search
+    only the state dir's worktrees."""
+    state = os.environ.get("MULTIAGENTS_STATE_DIR")
+    assert state, "MULTIAGENTS_STATE_DIR is not set by the test fixture"
+    return list((Path(state) / "worktrees").rglob(name))
 
 
 def test_ic_c27_docker_the_run_reaches_only_the_gateway_and_every_bypass_fails(world):
@@ -278,6 +286,7 @@ def test_ic_c26_docker_the_real_gateway_answers_403_407_and_ignores_forged_heade
     assert " 403 " in r["connect_ssh"] + " ", r["connect_ssh"]
     assert " 407 " in r["no_auth"] + " ", r["no_auth"]
     assert " 403 " in r["forged"] + " ", "forged forwarding headers must prove nothing and must not widen policy"
+    assert " 400 " in r["host_conflict"] + " ", f"a Host conflicting with the request authority must be 400 (K4B.5): {r['host_conflict']}"
     assert r["no_proxy"] == "localhost,127.0.0.1,::1,ma-auth" and r["all_proxy"] is None
     world.stop_victim(node)
 
