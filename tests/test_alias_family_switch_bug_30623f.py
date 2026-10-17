@@ -9,11 +9,15 @@ Fixtures are those of test_alias_pin_admission_bug_30623f.py.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from multiagents.tree import Tree
 from nc_fixture.m4_world import M4World, commit_entry, finding, verdict_entry
 
 BOUND = 10
+COOLDOWN = 30 * 86400    # far beyond the wait-for-reset window, so the work moves instead of waiting
 
 PAIR = """\
 template: alias-auto
@@ -64,9 +68,11 @@ def first_round(w):
 def test_automatic_switch_to_another_family_clears_the_alias_session(w):
     top, rv, before = first_round(w)
     assert before["session_id"]
-    w.fxr.entry["enabled"] = False          # exhausted: the fallback in another family serves
-    w.fxb.entry["enabled"] = False          # no same-family sibling is available
-    w.write_config()
+    # fxr is cooling down and so is its same-family sibling: the fallback in
+    # another family serves. (A DISABLED own provider is refused before routing.)
+    tree = Tree(w.paths.tree_file, w.paths.events_file)
+    tree.set_cooldown("fxr", time.time() + COOLDOWN, "test cooling down")
+    tree.set_cooldown("fxb", time.time() + COOLDOWN, "test cooling down")
     w.gate("work", w.fxw)
     w.until(lambda: w.fxc.calls() or None, timeout=BOUND,
             what="the other-family fallback to run the alias node")
