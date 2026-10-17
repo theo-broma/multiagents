@@ -66,6 +66,7 @@ def spawn_watch(jobs, session=SESSION, owner="orchestrator"):
                             stderr=subprocess.PIPE, text=True)
     proc.stdin.write(json.dumps({"session_id": session}))
     proc.stdin.close()
+    proc.stdin = None
     return proc
 
 
