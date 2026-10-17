@@ -158,7 +158,7 @@ class Screen:
                 self.put(y, 14, line, curses.color_pair(4))
                 y += 1
 
-        questions = [q for q in self.state.get("questions") or [] if not q.get("answered_at")]
+        questions = [q for q in self.state.get("questions") or [] if q.get("status") == "open"]
         if questions:
             y += 1
             self.put(y, 0, f" WAITING ON YOU ({len(questions)})",
@@ -383,7 +383,7 @@ class Screen:
                 self.do("discard_agent", agent_id=agent["id"], force=True)
         elif char == ord("a"):
             open_questions = [q for q in self.state.get("questions") or []
-                              if not q.get("answered_at")]
+                              if q.get("status") == "open"]
             if open_questions:
                 answer = self.prompt(f"answer for {open_questions[0].get('agent', '?')}:")
                 if answer:

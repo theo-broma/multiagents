@@ -465,7 +465,7 @@ function renderLive() {
       s.conversations.map(conversationCard)));
   }
 
-  const openQ = s.questions.filter((q) => !q.answered_at);
+  const openQ = s.questions.filter((q) => q.status === "open");
   if (openQ.length) {
     left.append(el("div", { class: "panel" },
       el("h2", {}, `waiting on you — ${openQ.length}`),

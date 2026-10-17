@@ -11566,10 +11566,13 @@ class Runner(QuotaHandover):
         record = self.tree.get_question(question_id)
         if record is None:
             return {"error": f"unknown question {question_id!r}"}
-        if record.get("status") == "answered":
+        if record.get("status") in {"answered", "handled"}:
             return {"error": f"{question_id} was already answered by "
                              f"{record.get('answered_by') or 'someone'}",
                     "answer": record.get("answer", "")}
+
+        if record.get("status") != "open":
+            return {"error": f"{question_id} is {record.get('status')}"}
 
         agent_id = record["agent"]
         node = self.tree.get(agent_id)
@@ -11594,8 +11597,13 @@ class Runner(QuotaHandover):
                                               agent_id, self.self_id())
             if refusal.get("error") or refusal.get("blocked"):
                 return refusal
-        claimed = self.tree.answer_question(question_id, answer, answered_by)
-        if claimed is None or claimed.get("already_answered"):
+        from .decisions import DecisionError
+        try:
+            claimed = self.tree.answer_question(question_id, answer, answered_by)
+        except DecisionError as exc:
+            return {"error": f"{question_id}: {exc}"}
+        if (claimed is None or claimed.get("already_answered")
+                or claimed.get("status") != "answered"):
             return {"error": f"{question_id} was answered by someone else first"}
 
         topic = record.get("topic") or "your question"

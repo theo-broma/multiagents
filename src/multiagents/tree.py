@@ -1251,52 +1251,21 @@ class Tree:
 
     def add_question(self, agent_id: str, topic: str, question: str,
                      proposed: str = "") -> dict:
-        record = {
-            "id": "q-" + uuid.uuid4().hex[:6],
-            "agent": agent_id,
-            "topic": topic,
-            "question": question,
-            "proposed_default": proposed,
-            "asked_at": now(),
-            "status": "open",
-            "answer": "",
-            "answered_at": None,
-            "answered_by": "",
-        }
-        with self.transaction() as data:
-            data["questions"].append(record)
-        self.emit(agent_id, "question", topic=topic, question=question[:300],
-                  proposed=proposed[:200], question_id=record["id"])
-        return record
+        from . import decisions
+        return decisions.add_question(self, agent_id, topic, question, proposed)
 
     def open_questions(self, agent_id: str | None = None) -> list[dict]:
-        return [
-            q for q in self.read()["questions"]
-            if q.get("status") == "open" and (agent_id is None or q.get("agent") == agent_id)
-        ]
+        from . import decisions
+        return decisions.legacy_questions(self, agent=agent_id)
 
     def get_question(self, question_id: str) -> dict | None:
-        return next((q for q in self.read()["questions"] if q["id"] == question_id), None)
+        from . import decisions
+        return decisions.get_question(self, question_id)
 
     def answer_question(self, question_id: str, answer: str,
                         answered_by: str = "user") -> dict | None:
-        """Record an answer. Returns the updated record, or None if unknown.
-
-        Claiming and answering happen in one locked transaction so two
-        processes cannot both decide they are the one resuming the agent.
-        """
-        with self.transaction() as data:
-            record = next((q for q in data["questions"] if q["id"] == question_id), None)
-            if record is None:
-                return None
-            if record.get("status") == "answered":
-                return dict(record, already_answered=True)
-            record.update({"status": "answered", "answer": answer,
-                           "answered_at": now(), "answered_by": answered_by})
-            result = dict(record)
-        self.emit(result["agent"], "answered", question_id=question_id,
-                  answered_by=answered_by, answer=answer[:300])
-        return result
+        from . import decisions
+        return decisions.answer_question(self, question_id, answer, answered_by)
 
     # -------------------------------------------------------------- tickets --
     #
@@ -2101,7 +2070,8 @@ class Tree:
                     continue             # the heading already named it
                 walk(node, "  " if (session and driver is not None) else "",
                      True, top=True)
-        pending = [q for q in data.get("questions", []) if q.get("status") == "open"]
+        from . import decisions
+        pending = decisions.legacy_questions(self)
         if pending:
             lines.append("")
             for q in pending[:6]:

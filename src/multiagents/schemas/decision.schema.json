@@ -1,0 +1,429 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(q-[0-9a-f]{6}|d-[0-9a-f]{8})$"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "asked_by": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "enum": [
+            "orchestrator",
+            "initializer",
+            "agent"
+          ]
+        },
+        "agent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "agent"
+      ],
+      "additionalProperties": false
+    },
+    "audience": {
+      "enum": [
+        "orchestrator",
+        "user"
+      ]
+    },
+    "asked_at": {
+      "type": "number"
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60,
+      "pattern": "^[^\\r\\n]*$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\r\\n]*$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
+    },
+    "context": {
+      "type": "string",
+      "minLength": 1
+    },
+    "implications": {
+      "type": "object",
+      "properties": {
+        "blocks": {
+          "type": "string"
+        },
+        "if_unanswered": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blocks",
+        "if_unanswered"
+      ],
+      "additionalProperties": false
+    },
+    "mode": {
+      "enum": [
+        "single",
+        "multi",
+        "free_text"
+      ]
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+          },
+          "label": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "implies": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "description",
+          "implies"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "min": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "recommended": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+      }
+    },
+    "allow_free_text": {
+      "type": "boolean",
+      "default": true
+    },
+    "default_text": {
+      "type": "string"
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "commit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "commit"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "status": {
+      "enum": [
+        "open",
+        "answered",
+        "handled",
+        "withdrawn",
+        "superseded"
+      ]
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "enum": [
+              "open",
+              "answered",
+              "handled",
+              "withdrawn",
+              "superseded"
+            ]
+          },
+          "at": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "by": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "agent": {
+                "type": "string"
+              },
+              "channel": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "role",
+              "agent",
+              "channel"
+            ],
+            "additionalProperties": false
+          },
+          "reason": {
+            "type": "string"
+          },
+          "superseded_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "at",
+          "by"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "answer": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "comment": {
+              "type": "string"
+            },
+            "free_text": {
+              "type": "string"
+            },
+            "answered_by": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "channel": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "agent",
+                "channel"
+              ],
+              "additionalProperties": false
+            },
+            "answered_at": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "options",
+            "comment",
+            "free_text",
+            "answered_by",
+            "answered_at",
+            "revision",
+            "request_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "delivery": {
+      "type": "null"
+    },
+    "handled": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "at": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "by": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "channel": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "agent",
+                "channel"
+              ],
+              "additionalProperties": false
+            },
+            "outcome": {
+              "enum": [
+                "applied",
+                "not_applied",
+                "error"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "at",
+            "by",
+            "outcome",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "schema_version",
+    "revision",
+    "asked_by",
+    "audience",
+    "asked_at",
+    "topic",
+    "title",
+    "context",
+    "implications",
+    "mode",
+    "options",
+    "recommended",
+    "allow_free_text",
+    "default_text",
+    "refs",
+    "status",
+    "history",
+    "answer",
+    "delivery",
+    "handled"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "multi"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "min",
+          "max"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "min"
+              ]
+            },
+            {
+              "required": [
+                "max"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

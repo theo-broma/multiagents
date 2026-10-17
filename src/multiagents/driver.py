@@ -2035,12 +2035,13 @@ def _activity_fingerprint(tree) -> tuple:
     Event count moves on any agent activity; the node and merge counts catch a
     turn whose only product was starting or finishing work.
     """
+    from . import decisions
     data = tree.read()
     nodes = data.get("nodes", {})
     events = tree.events_path.stat().st_size if tree.events_path.is_file() else 0
     return (events, len(nodes),
             sum(1 for n in nodes.values() if n.get("status") == "merged"),
-            len(data.get("tickets", [])), len(data.get("questions", [])))
+            len(data.get("tickets", [])), len(decisions.legacy_questions(tree, status=None)))
 
 def _orchestrator_hold(paths, config, spec=None, role="orchestrator") -> tuple[str, float | None] | None:
     """Is the orchestrator's own provider out of headroom? `(why, until)`.

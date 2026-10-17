@@ -55,6 +55,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
+from . import decisions
 from . import notify as notify_mod
 
 log = logging.getLogger(__name__)
@@ -348,8 +349,7 @@ def scan(service, store, tree, project_name: str, now: float) -> None:
         log.exception("ntfy scan: store snapshot failed")
         return
     try:
-        questions = [q for q in (tree.read().get("questions") or [])
-                     if isinstance(q, dict) and q.get("status") == "open"]
+        questions = decisions.legacy_questions(tree)
     except Exception:
         log.exception("ntfy scan: tree read failed")
         return
@@ -656,9 +656,7 @@ class Sender(threading.Thread):
                     held_seqs = _held_seqs(db, asked_held)
                 open_ids: set = set()
                 if any(row["kind"] == "question" for row in rows):
-                    open_ids = {q.get("id") for q in
-                                (self.tree.read().get("questions") or [])
-                                if isinstance(q, dict) and q.get("status") == "open"}
+                    open_ids = {q["id"] for q in decisions.legacy_questions(self.tree)}
             except Exception:
                 log.exception("ntfy sender: staleness read failed")
                 return

@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import decisions
 from ..budget import read_all, reset_display, reset_label, reserved_providers
 from ..config import Config
 from ..paths import ProjectPaths, global_config_dir
@@ -570,7 +571,7 @@ def alerts(paths: ProjectPaths, config: Config, tree: Tree,
                         "text": f"{entry['name']} is configured but not installed"})
 
     data = tree.read()
-    open_questions = [q for q in data.get("questions", []) if not q.get("answered_at")]
+    open_questions = decisions.legacy_questions(tree)
     if open_questions:
         out.append({"level": "warn", "kind": "question",
                     "text": f"{len(open_questions)} agent(s) waiting on an answer",
@@ -678,7 +679,7 @@ def snapshot(paths: ProjectPaths, config: Config,
         "totals": totals(nodes, {name for name, p in load_providers(config.providers).items()
                                  if p.billing == "plan"}),
         "tickets": data.get("tickets", []),
-        "questions": data.get("questions", []),
+        "questions": decisions.legacy_questions(tree, status=None),
         "deferred": data.get("deferred", []),
         "pause": tree.pause_state(),
         # LN-C3: active notices, and the last ones that cleared.
@@ -690,8 +691,7 @@ def snapshot(paths: ProjectPaths, config: Config,
             "conversations": len(parked),
             "open_tickets": sum(1 for t in data.get("tickets", [])
                                 if t.get("status") == "open"),
-            "open_questions": sum(1 for q in data.get("questions", [])
-                                  if not q.get("answered_at")),
+            "open_questions": len(decisions.legacy_questions(tree)),
         },
         **scheduler,
     }
