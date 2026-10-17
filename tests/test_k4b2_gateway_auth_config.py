@@ -19,6 +19,7 @@ import ic_support as ic  # noqa: E402
 import sc_harness as sc  # noqa: E402
 from multiagents import config as config_mod  # noqa: E402
 from multiagents.paths import ProjectPaths  # noqa: E402
+from multiagents.providers import load_providers  # noqa: E402
 
 ENDED = ("held", "failed", "done", "cancelled")
 
@@ -41,7 +42,8 @@ def load(tmp_path, monkeypatch, **fields):
 
 
 def declared(loaded, name="acme"):
-    return getattr(loaded.providers[name], "gateway_auth", "<missing>")
+    providers = load_providers(loaded.providers, loaded.provider_sources)
+    return getattr(providers[name], "gateway_auth", "<missing>")
 
 
 def test_k4b2_4_the_default_is_none(tmp_path, monkeypatch):
@@ -81,8 +83,10 @@ def test_k4b2_4_an_invalid_value_in_an_extending_provider_is_a_config_error_nami
 
 
 def test_k4b2_4_the_field_adds_no_url_account_or_proxy_setting_to_the_provider(tmp_path, monkeypatch):
-    plain = load(tmp_path / "plain", monkeypatch).providers["acme"]
-    marked = load(tmp_path / "marked", monkeypatch, gateway_auth="anthropic").providers["acme"]
+    plain_config = load(tmp_path / "plain", monkeypatch)
+    marked_config = load(tmp_path / "marked", monkeypatch, gateway_auth="anthropic")
+    plain = load_providers(plain_config.providers, plain_config.provider_sources)["acme"]
+    marked = load_providers(marked_config.providers, marked_config.provider_sources)["acme"]
     for field in ("env", "needs", "auth", "docker"):
         assert getattr(marked, field, None) == getattr(plain, field, None), field
 
