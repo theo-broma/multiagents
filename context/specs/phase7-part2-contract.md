@@ -1973,6 +1973,12 @@ No allowlist entry or new external host is added by this slice.
     - files the child writes keep the host UID;
     - the host can read the output.
 
+- **K4B.8 — grant publication against IC-C29 recovery (2026-10-17, implementer nd-4fa20bcc).**
+  - In normal operation, the published grant set is the host-recorded set of unrevoked grants of attempts the journal has not ended. A momentary `Unknown` inspect does not withdraw a grant. Only an attempt confirmed Exited or Absent, or revoked, loses it.
+  - IC-C29's "unknown liveness grants no access" applies to scheduler recovery: after a restart, an attempt whose liveness is unknown is not served until it is confirmed running.
+  - A revoked grant is never re-admitted, even if it reappears.
+- **K4B.9 — every root start separates or fails.** An entrypoint started as uid 0 always performs the K4B.7 separation. If it cannot, because secrets are missing or anything else fails, it exits nonzero without starting the child. No root start runs the child unseparated, test mode included.
+
 ### Slice 4B work split (orchestrator, 2026-10-16)
 
 4B ships in two sub-slices, each with its own tester → implementer-deep →
