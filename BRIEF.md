@@ -6576,3 +6576,4 @@ Pending user: RB-R1 re-wording (above).
     - an open DNS-bypass question: whether `--dns 127.0.0.1` can reach the host loopback resolver. Not covered by a test yet: put it in the 4B.2 contract or an adversary pass.
   - bug-535139: reviewer nd-26e7257c approved. Suite running on /var/tmp/b535-comb (main + nd-81a1e751, src only, clean branch). If clean: merge_node nd-81a1e751, resolve_ticket bug-535139 fixed. The advisor then works again.
   - Next after that: the 4B.2 contract (auth gateway, IC-C28 and IC-C29/C30 for auth), drafted from the spec section; UD slices 2-5 contract. Both need the user's yes.
+- 2026-10-17 ~15:45 CEST. In parallel with the bug-535139 suite (2a9f0277ac8b): tester nd-24e71627 is writing the real-Docker DNS-bypass test (IC-C27; I run it on the host after); researcher nd-d025efcd is doing the 4B.2 groundwork (auth proxy, 4B.1 reuse, IC-C28 gaps). I am drafting the UD slices 2-5 contract, uncommitted until the user says yes.
