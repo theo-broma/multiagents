@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,9 @@ from nt_part2_harness import (HOUR, INTERVAL, TOPIC, FakeNtfy, NtWorld, field,  
                               wait_until)
 from test_nt_part2_events import message_after  # noqa: E402,F401  (also re-exports the fixtures)
 from test_nt_part2_events import fake, make  # noqa: E402,F401
+
+
+RESUME_BOUND = 20.0   # real seconds for the queued message to follow a cleared pause on a loaded host
 
 
 def settled(w, count, seconds=1.0):
@@ -122,12 +126,18 @@ def test_nt_r4_a_401_pauses_sending_until_notify_test_succeeds(make):
     assert settled(w, n), "sending resumed without anything clearing the pause"
     done = w.cli("notify", "test")
     assert done.returncode == 0, done.stdout + done.stderr
-    sent = len(w.fake.requests)             # the test message itself is among them
-    assert sent == n + 1
-    w.advance(seconds=INTERVAL + 1)
-    assert wait_until(lambda: first_body in w.bodies(sent), 4.0), \
+    # The test message is among the new requests. The queued message may already
+    # have followed it by the time the CLI returns, so count from `n`, not from now.
+    assert len(w.fake.requests) >= n + 1, "notify test sent nothing"
+    # Nudge the clock again each second until the queued message shows up: a
+    # tick that lands before the scheduler has seen the cleared pause is lost.
+    deadline = time.monotonic() + RESUME_BOUND
+    while first_body not in w.bodies(n) and time.monotonic() < deadline:
+        w.advance(seconds=INTERVAL + 1)
+        wait_until(lambda: first_body in w.bodies(n), 1.0)
+    assert first_body in w.bodies(n), \
         "the queued message was not sent after notify test cleared the pause"
-    assert wait_until(lambda: pending_of(w) == 0, 3.0)
+    assert wait_until(lambda: pending_of(w) == 0, 6.0)
 
 
 def test_nt_r8_a_failing_notify_test_does_not_clear_the_pause(make):

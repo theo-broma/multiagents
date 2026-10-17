@@ -110,6 +110,14 @@ def test_ic_c23_confirmation_with_a_different_session_id_is_failed(world):
     assert any(c.get('class') == 'other' for c in ic.causes(view)), view
 
 
+# The test drives two rounds, each a worker launch and a reviewer launch. A launch
+# measures 2.5-3 s alone and up to ~10 s on a loaded host, so the bound is the sum
+# of per-launch budgets rather than the shared LOOP_WAIT (8 s) that fits one hold.
+ALIAS_ROUNDS = 2
+ALIAS_LAUNCHES_PER_ROUND = 2
+ALIAS_LAUNCH_BUDGET = 15
+ALIAS_WAIT = ALIAS_ROUNDS * ALIAS_LAUNCHES_PER_ROUND * ALIAS_LAUNCH_BUDGET
+
 @pytest.mark.parametrize('mode', ['home','export'])
 def test_ic_c23_loop_alias_resumes_on_next_round(tmp_path, monkeypatch, mode):
     import ic_prov as ip
@@ -119,7 +127,7 @@ def test_ic_c23_loop_alias_resumes_on_next_round(tmp_path, monkeypatch, mode):
         w.fxw.queue(commit_entry('a.txt','one\n','r1'), commit_entry('b.txt','two\n','r2'))
         w.fxr.queue(verdict_entry('rejected',[finding('redo')],tag='R1'), verdict_entry('approved',tag='R2'))
         top,wk,rv = ip.start_pair(w)
-        w.wait_state(top,'done',timeout=a.LOOP_WAIT)
+        w.wait_state(top,'done',timeout=ALIAS_WAIT)
         first_call, second_call = w.fxr.calls()
         assert second_call['resume'] == first_call['session']
         assert a.loop_reports(w)[1]['prior']['session'] == first_call['session']
