@@ -18,6 +18,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -75,7 +76,7 @@ _MODEL_RX = re.compile(r"\b(" + _MODEL_C + r"|Opus|Sonnet|Haiku|Fable|GPT|Codex|
                        re.IGNORECASE)
 
 _EXAMPLE_DOMAINS = ("example.com", "example.org", "example.net",
-                    "example.invalid")
+                    "example", "example.test", "example.invalid")
 _AGENT_DOMAINS = ("multiagents.local", "multiagents.invalid")
 
 
@@ -363,14 +364,39 @@ def load_private_patterns(raw_path: str) -> tuple[PrivatePatterns, str]:
 # detectors
 # --------------------------------------------------------------------------
 
-def _email_excluded(addr: str, own: str, allowed: set[str]) -> bool:
+def _unicode_host_continuation(char: str) -> bool:
+    """Whether `char` continues a domain label or separator (GG-R10).
+
+    Covers IDNA dot-equivalents (U+3002, U+FF0E, U+FF61), combining marks (M*),
+    format characters (Cf), and characters that IDNA keeps inside a label.
+    """
+    if not char or char.isascii():
+        return False
+    if char in "\u3002\uff0e\uff61":
+        return True
+    category = unicodedata.category(char)
+    if category.startswith("M") or category == "Cf":
+        return True
+    try:
+        mapped = char.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9.-]+", mapped))
+
+
+def _email_excluded(addr: str, own: str, allowed: set[str],
+                    domain_suffix: str = "", *, domain_complete: bool = True) -> bool:
     low = addr.lower()
     if low == own.lower() or low in allowed:
         return True
     if "noreply" in low:
         return True
     domain = low.rsplit(_AT, 1)[-1]
-    return domain in _EXAMPLE_DOMAINS or domain in _AGENT_DOMAINS
+    example_domain = (domain + domain_suffix.lower()).rstrip(".")
+    return (domain_complete
+            and any(example_domain == reserved or example_domain.endswith("." + reserved)
+                    for reserved in _EXAMPLE_DOMAINS)
+            or domain in _AGENT_DOMAINS)
 
 
 def _tailnet_ip(match: str) -> bool:
@@ -461,11 +487,17 @@ class Scanner:
                 return None
             return self._fp(match)
 
-        for found in _EMAIL_RX.findall(text):
-            if (not _email_excluded(found, self.own_email, self.allowed)):
-                fp = keep(found)
+        for found in _EMAIL_RX.finditer(text):
+            match = found.group(0)
+            # Keep the reported match intact, but only exempt a complete domain.
+            suffix = re.match(r"[\w.-]*", text[found.end():]).group(0)
+            end = found.end() + len(suffix)
+            complete = not _unicode_host_continuation(text[end:end + 1])
+            if (not _email_excluded(match, self.own_email, self.allowed, suffix,
+                                    domain_complete=complete)):
+                fp = keep(match)
                 if fp is not None:
-                    out.append(("email", found, fp))
+                    out.append(("email", match, fp))
         for found in _TAILNET_IP_RX.finditer(text):
             match = found.group(0)
             if not _tailnet_ip(match):
