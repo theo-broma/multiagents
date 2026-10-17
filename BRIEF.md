@@ -6528,3 +6528,4 @@ Pending user: RB-R1 re-wording (above).
   - LOW 4: log_entrypoint.py reads TEST_MODE from PID 1's image env, so a root start can run unseparated. Fix it anyway: refuse test mode when euid 0.
   - Open: --dns 127.0.0.1 may reach the host's loopback resolver. Check under real Docker.
   NEXT: once researcher nd-9193e451 finishes the Docker triage, relaunch implementer nd-4fa20bcc (codex-b) on the adversary findings plus the implementer-side Docker defects. In parallel, the tester handles the test/probe-side Docker defects (KeyError proxy_env/gateway_reachable, stale c16, orphans if they are test defects). Then real Docker again, a new reviewer, the suite, and the merge (src only if readonly reverts appear).
+- 2026-10-17 ~06:45 CEST. Bug-reporter nd-bbf8b1ea timed out (agy 12-minute print timeout, 326 steps, no ticket); relaunched to file quickly. Researcher nd-9193e451 (Docker triage) still running.
