@@ -491,6 +491,32 @@ Approved by the user on 2026-10-17.
 - **`snapshot` errors.** `snapshot` for a path the decision does not refer
   to raises `invalid_argument`.
 
+### Slice 2 clarifications, round 2 (2026-10-18, answering adversary nd-fbd40e50)
+
+- **Delegates: descendants only, enforced.** The legacy `answer_question`
+  from `mcp_run` is allowed only when the question's asker run is a
+  descendant of the calling run, checked through the run tree. Every other
+  `mcp_run` answer is `forbidden`. This closes a gap present since before
+  slice 2. The contract text is what counts.
+- **The legacy tool derives its caller like the new tools (D-UD2.1).**
+  - A root `MULTIAGENTS_ROLE=initializer` answers as `initializer`, which
+    `authorize` refuses for `orchestrator` questions.
+  - An unknown role is `forbidden`.
+  - Identity arguments are refused with `invalid_argument`.
+- **A run capability always means `mcp_run`.** `MULTIAGENTS_RPC_TOKEN` or a
+  present `MULTIAGENTS_AGENT_ID`, even an empty one, makes the caller
+  `mcp_run`. An `mcp_run` caller without a usable agent id is `forbidden`.
+- **Escalation.** Only role `orchestrator` may escalate, on `mcp_root`.
+- **Ref reads are race-free.**
+  - The file is opened once, with `O_NOFOLLOW` (and `O_NONBLOCK`, to refuse
+    a FIFO).
+  - It is checked through `fstat` on the open descriptor: a regular file,
+    inside the root after resolving the directory path, and within the
+    size limit.
+  - Hashing and the snapshot use that same descriptor.
+- **Below the bar, left as they are:** a hardlink to an outside file; the
+  CLI's channel name `legacy` (slice 4 gives the CLI its `cli` channel).
+
 ### Slice 2 work split
 1. tester: tests/test_ud_c7_*.py .. tests/test_ud_c10_*.py.
 2. implementer.
