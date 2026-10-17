@@ -173,7 +173,7 @@ def test_nc_r35_a_verdict_child_that_ends_without_a_verdict_holds_the_round_unre
     w.fxr.queue({"text": "looks fine to me"})
     w.start_scheduler()
     loop, _, _ = w.mkloop(3)
-    held = w.wait_held(loop, "unresolved_round", timeout=WAIT)
+    held = w.wait_held(loop, "unresolved_round", timeout=WAIT_ROUNDS)
     assert held["loop"]["rounds_rejected"] == 0
     kinds = w.transitions(loop)
     assert "unresolved_round" in kinds

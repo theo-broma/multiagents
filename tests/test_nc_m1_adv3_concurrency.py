@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "support"))
 
 from nc_harness import live, nc  # noqa: E402,F401
 
+ISSUE_PAUSE = 0.1    # between background issues; unthrottled, they starve the RPC thread
+
 
 def test_adv3_rpc_creates_and_host_capability_issues_interleave_without_internal_errors(live):
     node = live.create()
@@ -26,6 +28,7 @@ def test_adv3_rpc_creates_and_host_capability_issues_interleave_without_internal
             except Exception as exc:     # surfaced by the assertion below
                 failures.append(exc)
             i += 1
+            stop.wait(ISSUE_PAUSE)   # throttled: each issue is an fsynced transaction
 
     threads = [threading.Thread(target=issue, args=(w,)) for w in range(3)]
     for t in threads:
