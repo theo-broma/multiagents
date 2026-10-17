@@ -6620,3 +6620,8 @@ Pending user: RB-R1 re-wording (above).
   - global ~/.config/multiagents/agents.yaml: the tester and dev-advisor kimi fallbacks become empty routes; characterizer moves to claude/sonnet;
   - effective merged routes checked: no kimi left.
   Backups are in the orchestrator scratchpad. Shipped defaults src/multiagents/defaults/agents.yaml: implementer-quick nd-46089cf2, then reviewer. The code fix (models atomic per layer) stays a later spec; ticket from nd-22fe3762 still open.
+- 2026-10-18 ~03:40 CEST. **bug-535139 MERGED** (c1f743fc, nd-81a1e751; src only; the publish touched no tests). Ticket resolved fixed.
+  - Suite on main+branch: all non-family reds pass alone or are pre-existing. tb_r3 snapshot_cancelled is red 2/2 on main too: a pre-existing failure, to give a tester.
+  - Orchestrator-suite round counter: 1 round, for this candidate, out of the candidates checked so far.
+  - The advisor fix lives in the runner. It takes effect for scheduler runs after a daemon restart, and for consult calls after the MCP server restarts, which means a session restart. Restart the daemon at the next quiet moment.
+  - SI tests on main (ceb2d5a0); SI implementer nd-60d73226 launches now.
