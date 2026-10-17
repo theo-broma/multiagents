@@ -6519,3 +6519,4 @@ Pending user: RB-R1 re-wording (above).
   - Advisor triage in flight (task kn2n3f2ni). It will say what to capture in a host rerun.
   - The adversary nd-4c12a544 and the tester (c25 wait) run meanwhile.
   - 4B.1 must NOT merge until real Docker passes.
+- 2026-10-17 ~05:50 CEST. Tester's shared retry-budget wait (c25 create_failure) is on main (09a8140b). Waiting on adversary nd-4c12a544 and the advisor's Docker triage (kn2n3f2ni).
