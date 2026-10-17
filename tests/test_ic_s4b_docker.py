@@ -15,6 +15,7 @@ with a live tunnel.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -33,6 +34,14 @@ import ic_workload as wl  # noqa: E402
 pytestmark = pytest.mark.skipif(not dk.OPT_IN, reason="real Docker is opt-in: SG_TEST_DOCKER=1")
 
 EXTRA = r'''
+def cred_facts(url):
+    # the probe never prints the credential: only non-secret facts and a salted
+    # hash the host recomputes from the password it holds itself
+    import hashlib
+    m = re.fullmatch(r"http://([^:@/]+):([^@/]*)@([^/]+)", url or "")
+    if not m: return {"parsed": False, "length": len(url or "")}
+    return {"parsed": True, "user": m.group(1), "hostport": m.group(3), "pw_len": len(m.group(2)),
+            "pw_salted_sha256": hashlib.sha256((ins.get("salt", "") + m.group(2)).encode()).hexdigest()}
 if probe == "egress":
     proxy = os.environ.get("HTTP_PROXY", "")
     def can(addr, port, udp=False):
@@ -60,7 +69,7 @@ if probe == "egress":
         return "%s %s HTTP/1.1\r\nHost: x\r\nProxy-Authorization: Basic %s\r\n%s\r\n" % (method, target, basic, extra)
     try: dns = socket.gethostbyname(ins.get("dns_name", "example.org"))
     except OSError as e: dns = repr(e)
-    say(dict(common(), proxy_env=proxy, no_proxy=os.environ.get("NO_PROXY"), all_proxy=os.environ.get("ALL_PROXY"),
+    say(dict(common(), cred=cred_facts(proxy), no_proxy=os.environ.get("NO_PROXY"), all_proxy=os.environ.get("ALL_PROXY"),
              gateway_reachable=can("ma-egress", 8888),
              management={str(p): can("ma-egress", p) for p in ins.get("ports", [])},
              direct={a: can(a.split(":")[0], int(a.split(":")[1])) for a in ins.get("direct", [])},
@@ -70,7 +79,9 @@ if probe == "egress":
              connect_ssh=via(req("example.org:22", method="CONNECT")),
              no_auth=via("GET http://evil.test/ HTTP/1.1\r\nHost: x\r\n\r\n"),
              forged=via(req("http://evil.test/", "X-Forwarded-For: 10.0.0.2\r\nForwarded: for=10.0.0.2\r\n")),
-             writes=[print(proxy, file=sys.stderr, flush=True)] and None))
+             ))
+    if ins.get("echo"):
+        print(proxy, file=sys.stderr, flush=True)       # deliberate: the redactor must scrub stderr too
     if ins.get("echo"):
         sys.stdout.write("pw="); sys.stdout.flush()
         pw = m.group(2) if m else ""
@@ -130,17 +141,26 @@ elif probe == "privsep":
         class Hdr(ctypes.Structure): _fields_ = [("v", ctypes.c_uint32), ("pid", ctypes.c_int)]
         class Dat(ctypes.Structure): _fields_ = [("e", ctypes.c_uint32), ("p", ctypes.c_uint32), ("i", ctypes.c_uint32)]
         data = (Dat * 2)(); data[0].e = data[0].p = data[0].i = 1 << 19
-        res["capset"] = libc.syscall(125, ctypes.byref(Hdr(0x20080522, 0)), data) == 0
+        hdr = Hdr(0x20080522, 0)
+        sc = ctypes.CDLL(None, use_errno=True).syscall
+        sc.restype = ctypes.c_long
+        sc.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+        ctypes.set_errno(0)
+        ret = sc(125, ctypes.addressof(hdr), ctypes.addressof(data))   # SYS_capset (x86-64)
+        res["capset"] = True if ret == 0 else errno.errorcode.get(ctypes.get_errno(), "?")
         return res
     path = os.path.join(CWD, "ic-priv-" + ins["nonce"])
     open(path, "w").write("child-wrote")
     os.makedirs(os.path.join(CWD, "ic-priv-dir-" + ins["nonce"]), exist_ok=True)
-    say(dict(common(), phase="ready", proxy_env=proxy, uids=os.getresuid(), gids=os.getresgid(), groups=os.getgroups(),
+    regained = regain()
+    after = status_of("self")
+    say(dict(common(), phase="ready", cred=cred_facts(proxy), uids=os.getresuid(), gids=os.getresgid(), groups=os.getgroups(),
              caps={k: me.get(k) for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")},
              pid=os.getpid(), pid1=status_of(1).get("Name"), pid1_uid=status_of(1).get("Uid"),
              signal_pid1=sig1(), cont_pid1=sigterm_probe(), ptrace_pid1=ptrace1(),
              fd_scan=fds_of_1(), pid1_mem=readable("/proc/1/mem"), pid1_environ=readable("/proc/1/environ"),
-             pid1_cmdline=readable("/proc/1/cmdline"), regain=regain(), file=path))
+             pid1_cmdline=readable("/proc/1/cmdline"), regain=regained, file=path,
+             caps_after={k: after.get(k) for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs")}))
     def on_term(*_):
         open(os.path.join(CWD, "ic-term-" + ins["nonce"]), "w").write("graceful"); sys.exit(0)
     signal.signal(signal.SIGTERM, on_term)
@@ -193,9 +213,38 @@ def world(tmp_path, monkeypatch, st_live_docker, request):
     dk.cleanup(w)
 
 
+def issued_proxy_url(w, node) -> str:
+    """The credential URL the scheduler issued to `node`'s latest attempt, read
+    host-side from the invocation file the guest is started from (never from
+    anything the guest prints, which the redactor scrubs)."""
+    attempt = w.runs(node)[-1]["attempt_id"]
+    ids = dk.docker("ps", "-aq", "--no-trunc", "--filter", f"label=multiagents.owner={attempt}").stdout.split()
+    assert len(ids) == 1, (attempt, ids)
+    info = json.loads(dk.docker("inspect", ids[0]).stdout)[0]
+    mounts = [m for m in info["Mounts"] if m["Destination"] == "/multiagents-input"]
+    assert mounts, "the invocation mount is missing"
+    return json.loads((Path(mounts[0]["Source"]) / "invocation.json").read_text())["env"]["HTTP_PROXY"]
+
+
+def password_of(url: str) -> str:
+    m = re.fullmatch(r"http://(ma1-[^:@/\s]+):([0-9a-f]{64})@ma-egress:8888", url)
+    assert m, "credential URL"
+    return m.group(2)
+
+
+def salted(salt: str, password: str) -> str:
+    return hashlib.sha256((salt + password).encode()).hexdigest()
+
+
 def egress(w, **fields):
     node = w.probe_node("egress", **fields)
     return node, w.report(node, timeout=dk.START_WAIT)
+
+
+def guest_files(w, name: str) -> list[Path]:
+    """Files the guest wrote to its workspace: the backend keeps guest storage
+    under the project root (`<root>/.docker-guests/<guest>/...`)."""
+    return list((Path(w.root) / ".docker-guests").rglob(name))
 
 
 def test_ic_c27_docker_the_run_reaches_only_the_gateway_and_every_bypass_fails(world):
@@ -213,18 +262,24 @@ def test_ic_c27_docker_the_run_reaches_only_the_gateway_and_every_bypass_fails(w
 
 
 def test_ic_c26_docker_the_real_gateway_answers_403_407_and_ignores_forged_headers(world):
-    node, r = egress(world)
-    assert re.fullmatch(r"http://ma1-[^:@]+:[0-9a-f]{64}@ma-egress:8888", r["proxy_env"]), "credential URL"
+    node, r = egress(world, salt="s26", hold=True)
+    url = issued_proxy_url(world, node)
+    password = password_of(url)
+    cred = r["cred"]
+    assert cred["parsed"] and cred["user"] == url.split("//")[1].split(":")[0] and cred["user"].startswith("ma1-")
+    assert cred["hostport"] == "ma-egress:8888" and cred["pw_len"] == 64
+    assert cred["pw_salted_sha256"] == salted("s26", password), "the guest holds a different password than the one issued"
     assert " 403 " in r["evil"] + " ", r["evil"]
     assert " 403 " in r["connect_ssh"] + " ", r["connect_ssh"]
     assert " 407 " in r["no_auth"] + " ", r["no_auth"]
     assert " 403 " in r["forged"] + " ", "forged forwarding headers must prove nothing and must not widen policy"
     assert r["no_proxy"] == "localhost,127.0.0.1,::1,ma-auth" and r["all_proxy"] is None
+    world.stop_victim(node)
 
 
 def test_ic_c26_docker_a_credential_copied_to_another_attempt_network_is_407(world):
     a, ra = egress(world, hold=True)
-    b, rb = egress(world, credential=ra["proxy_env"])
+    b, rb = egress(world, credential=issued_proxy_url(world, a))
     assert " 407 " in rb["evil"] + " ", f"another network's copied credential was accepted: {rb['evil']}"
     assert " 407 " in rb["forged"] + " ", rb["forged"]
     world.stop_victim(a)
@@ -233,7 +288,10 @@ def test_ic_c26_docker_a_credential_copied_to_another_attempt_network_is_407(wor
 def test_ic_c26_docker_two_simultaneous_attempts_have_separate_networks_and_credentials(world):
     a, ra = egress(world, hold=True)
     b, rb = egress(world, hold=True)
-    assert ra["proxy_env"] != rb["proxy_env"]
+    ua, ub = issued_proxy_url(world, a), issued_proxy_url(world, b)
+    assert ua != ub and password_of(ua) != password_of(ub)
+    assert ra["cred"]["user"] != rb["cred"]["user"]
+    assert ra["cred"]["pw_salted_sha256"] != rb["cred"]["pw_salted_sha256"]
     assert " 403 " in ra["evil"] + " " and " 403 " in rb["evil"] + " "
     nets = dk.docker("network", "ls", "--filter", f"label=multiagents.project={world.slug}", "-q").stdout.split()
     assert len(nets) == 2, nets
@@ -244,8 +302,9 @@ def test_ic_c26_docker_two_simultaneous_attempts_have_separate_networks_and_cred
 
 
 def test_d_s4b_7_docker_logs_hold_only_sanitised_frames_and_the_pid1_redactor_is_out_of_reach(world):
-    node, r = egress(world, echo=True)
-    password = r["proxy_env"].split(":")[2].split("@")[0]
+    node, r = egress(world, echo=True, hold=True)
+    password = password_of(issued_proxy_url(world, node))
+    world.stop_victim(node)
     world.wait(lambda: world.get(node)["state"] in ("done", "held", "failed"), dk.PROBE_WAIT, "the end")
     ids = dk.docker("ps", "-aq", "--filter", f"label=multiagents.project={world.slug}").stdout.split()
     assert ids
@@ -311,7 +370,9 @@ def test_d_s4b_7_docker_the_child_runs_as_the_host_identity_with_no_capabilities
     zero = "0" * 16
     for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
         assert r["caps"][name] == zero, (name, r["caps"])
-    assert r["caps"]["NoNewPrivs"] == "1"
+        assert r["caps_after"][name] == zero, f"{name} changed after the regain attempts: {r['caps_after']}"
+    assert r["caps"]["NoNewPrivs"] == "1" and r["caps_after"]["NoNewPrivs"] == "1"
+    assert r["regain"]["capset"] == "EPERM", f"capset must be refused with EPERM: {r['regain']['capset']}"
     assert [k for k, v in r["regain"].items() if v is True] == [], r["regain"]
     world.stop_victim(node)
 
@@ -338,7 +399,7 @@ def test_d_s4b_7_docker_a_graceful_stop_reaches_the_child_through_the_relay(worl
     node, nonce, r = privsep(world)
     world.stop_victim(node)
     world.wait(lambda: world.get(node)["state"] in ("done", "held", "failed", "cancelled"), dk.PROBE_WAIT, "the stop")
-    seen = list(Path(world.tmp_marker).rglob("ic-term-" + nonce))
+    seen = guest_files(world, "ic-term-" + nonce)
     assert seen, "the child's SIGTERM handler never ran: the stop did not reach the child gracefully"
     assert seen[0].read_text() == "graceful"
 
@@ -346,7 +407,7 @@ def test_d_s4b_7_docker_a_graceful_stop_reaches_the_child_through_the_relay(worl
 def test_d_s4b_7_docker_files_the_child_writes_keep_the_host_uid_and_the_host_can_read_them(world):
     import os
     node, nonce, r = privsep(world)
-    found = list(Path(world.tmp_marker).rglob("ic-priv-" + nonce)) + list(Path(world.tmp_marker).rglob("ic-priv-dir-" + nonce))
+    found = guest_files(world, "ic-priv-" + nonce) + guest_files(world, "ic-priv-dir-" + nonce)
     assert found, "the child's workspace files are not visible on the host"
     for f in found:
         st = f.stat()
@@ -357,9 +418,9 @@ def test_d_s4b_7_docker_files_the_child_writes_keep_the_host_uid_and_the_host_ca
 
 def test_d_s4b_7_docker_the_host_reads_the_redacted_output_through_the_separation(world):
     from multiagents.paths import ProjectPaths
-    node, nonce, r = privsep(world, echo=True)
-    password = r["proxy_env"].split(":")[2].split("@")[0]
-    assert len(password) == 64
+    node, nonce, r = privsep(world, echo=True, salt="s7")
+    password = password_of(issued_proxy_url(world, node))
+    assert r["cred"]["pw_len"] == 64 and r["cred"]["pw_salted_sha256"] == salted("s7", password)
     def host_out():
         return b"".join((ProjectPaths(world.root).run_dir(run["run_id"]) / "output.ndjson").read_bytes()
                         for run in world.runs(node) if run.get("run_id")
