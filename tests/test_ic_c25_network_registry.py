@@ -172,7 +172,8 @@ def test_ic_c25_a_confirmed_create_failure_is_a_launch_failure_and_leaves_no_net
         s.fd.rule("network", "create", effect="fail", stderr="Error response from daemon: cannot create network")
         s.start()
         node = s.launch()
-        view = s.wait(lambda: (v := s.get(node)) and v["state"] in ("held", "failed") and v, nb.WAIT, "the launch failure")
+        view = s.wait(lambda: (v := s.get(node)) and v["state"] in ("held", "failed") and v, nb.DECIDED_WAIT,
+                       "the launch failure")
         assert any(c.get("class") == "launch" for c in ic.causes(view)), ic.text_of(ic.causes(view))[:500]
         assert s.fd.networks() == {} and s.fd.containers() == {}
         assert s.fake.spawns() == 0

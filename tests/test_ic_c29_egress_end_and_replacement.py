@@ -200,14 +200,9 @@ def test_ic_c29_unrelated_members_stop_deletion_and_are_reported(ns):
 
 # ============================================================= IC-C30: replacement
 
-# A launch whose attachment keeps failing runs the node's whole TF retry budget:
-# 1 + RETRY_BUDGET attempts (default budget 3), each given up to nb.WAIT to
-# launch and fail, plus the fixture's configured backoff (ic_support: 0.1 s) before
-# each retry. The wait is bounded by that sum; a launch that is never decided
-# still fails, just not before every attempt has had its time.
-RETRY_BUDGET = 3
-RETRY_BACKOFF = 0.1
-DECIDED_WAIT = (1 + RETRY_BUDGET) * nb.WAIT + RETRY_BUDGET * RETRY_BACKOFF
+# A launch whose attachment keeps failing runs the node's whole TF retry budget;
+# nb.DECIDED_WAIT bounds the wait by it.
+DECIDED_WAIT = nb.DECIDED_WAIT
 
 
 def decided(s, node):

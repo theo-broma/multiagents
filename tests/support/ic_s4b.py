@@ -48,6 +48,13 @@ import ic_support as ic
 
 WAIT = 6                    # a bounded wait for anything the scheduler does against the fake CLI
 SHORT = 3                   # a bounded wait for a local socket
+# A launch that keeps failing runs the node's whole TF retry budget: 1 + RETRY_BUDGET
+# attempts (default budget 3), each given up to WAIT, plus the fixture's backoff
+# (ic_support: 0.1 s) before each retry. Waits for a node that goes through its
+# retries are bounded by that sum.
+RETRY_BUDGET = 3
+RETRY_BACKOFF = 0.1
+DECIDED_WAIT = (1 + RETRY_BUDGET) * WAIT + RETRY_BUDGET * RETRY_BACKOFF
 GATEWAY_IMAGE = "multiagents/workspace:latest"
 ALLOW = ["example.com"]
 PROBE_ENV = "MULTIAGENTS_TEST_GATEWAY_PROBE"          # K4B.2
