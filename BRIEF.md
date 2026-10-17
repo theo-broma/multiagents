@@ -6563,3 +6563,16 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-17 ~13:10 CEST. bug-535139 implementer nd-81a1e751 at 6bace7d2 (sessions.family_switch, freeze switch, engine renew; runner._family_session). Held needs_info: the alias test disables fxr, and the runner refuses disabled own providers before routing. DECISION: the test uses a cooldown instead; disabled-provider rerouting stays out of scope. Tester nd-b6c8748c relaunched for it. Then: close nd-81a1e751 approved, relaunch reviewer nd-26e7257c, run the suite, merge, resolve_ticket bug-535139. Note from the implementer: ic_c23 loop_alias_resumes_on_next_round is borderline on its 8 s wait (flaky on base too).
 - 2026-10-17 ~13:30 CEST. 4B.1 second reviewer nd-66ee19f1 APPROVED with no findings. Waiting for suite a4bc57961cda before the merge.
 - 2026-10-17 ~14:00 CEST. bug-535139 test change (long cooldown) on main (26986963). nd-81a1e751 closed approved (tip 6bace7d2). Reviewer nd-26e7257c relaunched. Then: the bug-535139 suite, merge, resolve_ticket. 4B.1 suite a4bc57961cda still running.
+- 2026-10-17 ~15:30 CEST. **Slice 4B.1 MERGED** (0464a63a, nd-4fa20bcc; src only, 13 files, +1832/-71; no test files in the publish).
+  - Evidence:
+    - real Docker -k docker: 360 passed, 2 skipped;
+    - suite on main+branch: only phase2, the bug-535139 tests (red without that fix), and 2 flakes (c3_k10 start-3, nc_r17) that pass 5/5 alone on both;
+    - two reviewer approvals (nd-66ee19f1);
+    - adversary nd-4c12a544's findings fixed;
+    - K4B.1-K4B.10 recorded.
+  - Carried forward to note:
+    - K4B.10 subnet binding residual (the host bridge address);
+    - disabled-own-provider rerouting is out of scope;
+    - an open DNS-bypass question: whether `--dns 127.0.0.1` can reach the host loopback resolver. Not covered by a test yet: put it in the 4B.2 contract or an adversary pass.
+  - bug-535139: reviewer nd-26e7257c approved. Suite running on /var/tmp/b535-comb (main + nd-81a1e751, src only, clean branch). If clean: merge_node nd-81a1e751, resolve_ticket bug-535139 fixed. The advisor then works again.
+  - Next after that: the 4B.2 contract (auth gateway, IC-C28 and IC-C29/C30 for auth), drafted from the spec section; UD slices 2-5 contract. Both need the user's yes.
