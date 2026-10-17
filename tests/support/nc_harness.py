@@ -12,8 +12,8 @@ developer can see which spelling the suite does not care about. The few
 assumptions that cannot be made tolerant are listed at the top of each test
 module that relies on them.
 
-A scheduler a test starts is always stopped by the fixture finalizer, by the
-pid it itself reported, never by pattern.
+A scheduler a test starts is stopped by the fixture finalizer through its
+owner marker or an owned Popen handle.
 """
 from __future__ import annotations
 
@@ -49,7 +49,6 @@ RPC_TIMEOUT = 40         # one request on the socket (plus the op's own `timeout
 CONNECT_TIMEOUT = 10     # a bare connection's socket timeout
 THREAD_START_TIMEOUT = 5   # in_threads: all callables reaching the barrier
 THREAD_JOIN_TIMEOUT = 20   # in_threads: each callable finishing
-TEARDOWN_STOP = 8        # close(): the polite `scheduler stop`
 REAP_TIMEOUT = 3         # close(): waiting for a killed child
 
 ROOT = object()          # token sentinel: the root capability
@@ -206,7 +205,8 @@ class Sched:
     def cli(self, *args: str, timeout: float = CLI_TIMEOUT) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-m", "multiagents.cli", "--path", str(self.root), *args],
-            capture_output=True, text=True, timeout=timeout, cwd=self.root)
+            capture_output=True, text=True, timeout=timeout, cwd=self.root,
+            env=owner_seam.harness_env(self.root))
 
     def start(self, wait: float = START_TIMEOUT) -> None:
         """`multiagents scheduler start`, then wait until the socket answers.
@@ -281,34 +281,18 @@ class Sched:
         self.start()
 
     def close(self) -> None:
-        """Finalizer: never raises, never signals a process it did not start
-        (or, with the owner module, that this process did not mark: SL-R8)."""
+        """Stop only marked processes and children whose Popen we own."""
         try:
-            if self.sock.exists():
-                self.cli("scheduler", "stop", timeout=TEARDOWN_STOP)
+            owner_seam.harness_reap(self.root)
         except Exception:
             pass
-        for pid in list(self._pids):
-            if alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
         for proc in self._procs:
-            if proc.poll() is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                proc.kill()
             try:
+                if proc.poll() is None:
+                    proc.kill()
                 proc.wait(timeout=REAP_TIMEOUT)
-            except Exception:
+            except (OSError, subprocess.TimeoutExpired):
                 pass
-        try:
-            owner_seam.harness_reap(self.root)      # SL-R8: what this process marked
-        except Exception:
-            pass
         try:
             self._reset_server()
         except Exception:

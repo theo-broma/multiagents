@@ -68,3 +68,16 @@ What the code does today:
 3. reviewer;
 4. full suite;
 5. merge.
+
+## Clarifications (2026-10-18, answering tester nd-40908215)
+
+- **`process.json` keys:** `pid`, `pid_start`, `project` (the resolved
+  absolute project root) and `nonce` (32 random hex characters).
+- **Socket status reply:** it gains a `nonce` field, with the live
+  scheduler's nonce.
+- **Old records:** a `process.json` without `project` or `nonce` (an older
+  scheduler, or a test fake) is refused by `stop()` with a message that
+  names the missing keys. Nothing is signalled, so the check fails closed.
+- **Test fakes:** the ST6 fake daemons are migrated to write and report the
+  nonce. That is test code, so the tester does it, after this
+  clarification.

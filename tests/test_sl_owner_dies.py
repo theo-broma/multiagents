@@ -269,14 +269,18 @@ def start_unmarked(w: World, reaper: Reaper):
     """Like `run_worker`, but the daemon is started by hand with no marker."""
     w.write_config()
     proc = reaper.popen([sys.executable, "-c", "import sys; from multiagents.cli import main; sys.exit(main(sys.argv[1:]))",
-                         "--path", str(w.root), "scheduler", "start"],
+                         "--path", str(w.root), "scheduler", "start", "--foreground"],
                         cwd=w.root, env=dict(clean_env(), MULTIAGENTS_PROJECT=str(w.root)))
     assert poll(lambda: w.sock_answers(), 12), "the unmarked scheduler did not come up"
-    daemon = int(w.status()["pid"])
+    daemon = proc.pid
     node = w.simple("A", agent="pcworker", fx={"gate": "gA"})
     w.wait_running(node)
     assert poll(lambda: worker_pids(w.root), RUN_TIMEOUT)
-    return node, daemon, tree_of(daemon)
+    # This daemon is deliberately unmarked: World.close must leave it alone.
+    # The test owns its foreground Popen and the descendants of that handle.
+    tree = tree_of(proc.pid)
+    reaper.procs.extend(tree)
+    return node, daemon, tree
 
 
 def test_sl_r6_an_unmarked_daemon_still_leaves_its_worker_running_and_adopts_it(tmp_path, monkeypatch, reaper):

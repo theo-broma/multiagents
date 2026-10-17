@@ -55,7 +55,7 @@ MAX_WAIT = float(os.environ.get("NC_MAX_WAIT", 120))  # cap on any `until`; Worl
 LAUNCH_GRACE = 8        # wait_state: an open, unblocked simple node that long is not being launched
 WAIT_TIMEOUT = 10       # `until` / `wait_state` / `wait_running` / `wait_spawn`
 HOLD_TIMEOUT = 15       # `hold_lock`: the holder reaching `running`
-TEARDOWN_GRACE = 3      # how long close() lets a scheduler exit before SIGKILL
+TEARDOWN_GRACE = 3      # close(): waiting for an owned Popen child
 UNREACHABLE_GRACE = 5   # `until` gives up when the scheduler socket is dead this long
 REFUSED_GRACE = 3       # ... or answers the same refusal this long
 LEGACY_TIMEOUT = 20     # legacy_start: the helper's first output line
@@ -166,7 +166,7 @@ class World:
 
     def cli(self, *args: str, timeout: float = CLI_TIMEOUT) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, "-c", CLI, "--path", str(self.root), *args],
-                              cwd=self.root, env=self._env(), capture_output=True,
+                              cwd=self.root, env=self.daemon_env(), capture_output=True,
                               text=True, timeout=timeout)
 
     @property
@@ -224,92 +224,31 @@ class World:
             return False
 
     def close(self) -> None:
-        """Finalizer: never raises, bounded by a few seconds even when the
-        scheduler is wedged. Stops the scheduler it started by pid, then kills
-        what is left (its process group, the fixture runs)."""
-        pid = None
-        try:
-            pid = int(self.status().get("pid") or 0)
-        except Exception:                                   # noqa: BLE001
-            pass
-        if pid and alive(pid):
+        """Reap this owner's marked project and Popen handles we launched.
+
+        Socket replies, provider pid files and argv scans are observations,
+        never authority to signal a process.
+        """
+        self._reap_workers()
+        for proc in self._popen:
             try:
-                self.cli("scheduler", "stop", timeout=TEARDOWN_GRACE * 2)
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=TEARDOWN_GRACE)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
             except Exception:                               # noqa: BLE001
                 pass
-            end = time.monotonic() + TEARDOWN_GRACE
-            while alive(pid) and time.monotonic() < end:
-                time.sleep(0.05)
-            if alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-        for proc in self._popen:
-            if proc.poll() is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                proc.kill()
-            for stream in (proc.stdout,):
-                try:
-                    stream and stream.close()
-                except Exception:                           # noqa: BLE001
-                    pass
-        for fx in self.providers.values():
-            for pid in fx.pids():
-                if alive(pid):
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-        self._reap_workers()
 
     def _reap_workers(self) -> None:
-        """SL-R2: a `scheduler.worker` of this world's project outlives the
-        scheduler's stop when its run is parked on a question. SL-R8: with the
-        owner module, `reap(os.getpid(), project)` kills what this process
-        marked for this project, never selecting by argv. Without it, today's
-        fallback: kill each worker by exact pid (the project root is its
-        argument), children first."""
+        """Ownership failure leaves unknown processes alone; no PID fallback."""
         try:
-            if owner_seam.harness_reap(self.root):
-                return
+            owner_seam.harness_reap(self.root)
         except Exception:                                   # noqa: BLE001
-            return
-        root = str(self.root)
-        end = time.monotonic() + TEARDOWN_GRACE
-        while True:
-            procs = {}
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
-                try:
-                    raw = Path("/proc", entry, "cmdline").read_bytes()
-                    stat = Path("/proc", entry, "stat").read_text()
-                except OSError:
-                    continue
-                argv = raw.decode(errors="replace").split("\0")
-                procs[int(entry)] = (argv, int(stat.rsplit(")", 1)[1].split()[1]))
-            victims = {pid for pid, (argv, _) in procs.items()
-                       if "multiagents.scheduler.worker" in argv and root in argv}
-            if not victims:
-                return
-            doomed = set(victims)
-            grew = True
-            while grew:
-                kids = {pid for pid, (_, ppid) in procs.items() if ppid in doomed}
-                grew = not kids <= doomed
-                doomed |= kids
-            for pid in sorted(doomed - victims) + sorted(victims):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            if time.monotonic() >= end:
-                return
-            time.sleep(0.05)
+            pass
 
     # ------------------------------------------------------------------ rpc
     def raw(self, op: str, token: str | None, args: dict | None = None,
