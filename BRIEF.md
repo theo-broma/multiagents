@@ -6672,3 +6672,6 @@ Pending user: RB-R1 re-wording (above).
   - Tester nd-47d8d9fd is fixing it.
   - Decision: once the fix is applied, re-run only tests/test_ud_*.py on u3-comb, not the full suite. The fix is a test-only one-liner and cannot affect src. Then merge nd-83907cc8.
 - 2026-10-18: UD slice 3 MERGED (da07d64b, nd-83907cc8) after the c12 harness fix 2a89ea6c. Validation: tests/test_ud_*.py on u3-comb plus the fix gave 685 passed. Next for UD: the contract for slices 4-5.
+- 2026-10-18: MR (spec context/specs/agent-models-replace.md, bug-d491e8, user-approved with the addition that an empty `models` cancels every fallback). Tests are on main (e58bf4eb: 45 tests, 17 red). NEXT: implementer (default tier) once 4C merges, since both touch config.py. The implementer must report which agents in this repo's agents.yaml change their effective routes (the `models: {}` entries).
+- UD slices 4-5: researcher nd-66914635 is gathering facts. I then draft the contract and show it to the user before committing.
+- Flake researcher nd-c2476a56 (adv3 nc_m1, nc_r35) relaunched: its first run ended without a report.
