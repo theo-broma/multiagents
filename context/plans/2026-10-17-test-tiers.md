@@ -1,5 +1,6 @@
 ---
-status: ready
+status: applied
+applied_in: 23182bcb
 ---
 # Test tiers: stop agent full suites now, test queues after part 2
 
