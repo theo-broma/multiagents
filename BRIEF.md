@@ -6501,3 +6501,11 @@ Pending user: RB-R1 re-wording (above).
   - Still open: 4B.1 implementer nd-4fa20bcc, held. See the 03:45 entry for the decision to take with the advisor.
   - UD slices 2-5 contract: next to write.
 - 2026-10-17 ~03:20 CEST. Advisor consult on the 4B.1 stuck decision in flight (task k35fms3rg; it does not survive a session restart). If it is lost, re-ask: options (a), (b) or (c) from the 03:45 entry, and investigate the c29/c25 failures on nodes/nd-4fa20bcc at 32f8b59e.
+- 2026-10-17 ~03:40 CEST. 4B.1 decision: option (a), from advisor turn 15.
+  - Advisor run at 32f8b59e: c25+c29 gave 63 passed, 11 failed. 6 are fixture failures, from empty-output exits that TF-R2 retries. 5 are implementation failures: DockerBackend.stop() returns a synthetic Exited for a Created container while inspect still says Created, and predecessor_verdict (isolated.py:216-232, docker_lifecycle.py:560-585) then treats it as alive, so the retry stalls. Both C31 requests are legitimate.
+  - Option (b), splitting replacement, is rejected: egress replacement safety belongs in 4B.1.
+  - Escalate to opus (option c) if the next fresh run fails.
+  - Step 1: tester nd-754de4be relaunched for the fixture cleanup in c25/c29/c31.
+  - Step 2: apply its tests to main.
+  - Step 3: relaunch nd-4fa20bcc as a fresh scoped run: Created-container rollback, predecessor liveness, bounded retry and exhaustion, replacement recovery that keeps attempts and grants. Keep c26, c27 and the redaction work green.
+  - Then the reviewer nd-66ee19f1 and adversary nd-4c12a544 chain, and real Docker.
