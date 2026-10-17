@@ -363,6 +363,12 @@ def ended_auth_attempt_with_stuck_network(tmp_path, monkeypatch):
     s.wait(lambda: any(o.get("resource_id") == network["Id"] for o in (listing(s)["orphans"] or [])) or None,
            nb.WAIT, "the stuck network to be reported")
     s.fd.clear_rules()
+    # IC-C29's cleanup detached the gateways before the network turned orphan; attach them again so
+    # the stuck network is one that still holds both (the removal must check both memberships).
+    for cid in s.gateway_ids.values():
+        if cid not in s.fd.members(network["Id"]):
+            s.fd.attach(network["Name"], cid)
+    assert set(s.gateway_ids.values()) <= set(s.fd.members(network["Id"])), "setup: both gateways attached"
     return s, node, run, container, network
 
 
