@@ -357,7 +357,184 @@ These override the behaviours above where they differ.
 3. reviewer. No adversary on slice 1: the adversary is mandatory on
    slices 2 and 3.
 
-## Slices 2–5
+## Slice 2 — asking, authority and refs (UD-R4, R5, R8)
 
-These are written after slice 1 merges, from UD-R4..R10 and R12. UD-R4's
-scoped-RPC refusal relies on the 4A endpoint, which is now merged.
+Approved by the user on 2026-10-17.
+
+### Decisions pinned by slice 2
+
+- **D-UD2.1 — the caller is derived from the channel, never from an
+  argument.** There are four channels:
+  - `mcp_root`: an MCP server with no run capability. Its role is
+    `MULTIAGENTS_ROLE` (`orchestrator` or `initializer`).
+  - `mcp_run`: an MCP server or scoped RPC call that carries a run
+    capability. Its role is `agent`, and its agent is the run's id.
+  - `cli`: the interactive host CLI (slice 4). Its role is `user`.
+  - `monitor`: the monitor, with its page token (C20). Its role is `user`.
+
+  No tool accepts `by`, `answered_by`, `asked_by`, `role` or `channel` as
+  an argument. One that is passed anyway is refused with `invalid_argument`.
+- **D-UD2.2 — authority is one function.** `decisions.authorize(record,
+  actor, operation)` decides, and every surface calls it. It is never
+  re-implemented per surface.
+- **D-UD2.3 — snapshots.** Snapshots are content-addressed, under
+  `.multiagents/decisions/snapshots/<sha256>`, with mode 0600 in a 0700
+  directory. They are kept as long as a decision refers to them. Slice 2
+  never deletes one.
+
+### Behaviours
+
+**UD-C7 — asking (UD-R8).**
+- **Tools.** New MCP tools, available on `mcp_root` only (refused
+  `forbidden` on `mcp_run`):
+  - `ask_user(topic, title, context, implications, mode, options=[],
+    min=None, max=None, recommended=[], allow_free_text=True, refs=[],
+    audience="user", supersedes=None)` returns {`id`, `revision`,
+    `status`, `refs`}. It never blocks.
+  - `withdraw_decision(id, revision, reason)`;
+  - `mark_decision_handled(id, revision, outcome, reason="")`;
+  - `escalate_decision(id, revision)`;
+  - `answer_decision(id, revision, options=[], comment="", free_text="",
+    request_id=None)`.
+- **Who may withdraw or mark handled.** The asker's role only. The
+  orchestrator may also mark an agent question handled.
+- **Supersession.** `supersedes` creates the new decision and supersedes
+  the old one in ONE tree transaction. If the old decision is not `open`,
+  or the caller is not its asker, nothing is created, with `not_open` or
+  `forbidden`.
+- **Agent questions.** Agents keep `NEED_DECISION(topic): question` and
+  `DEFAULT:`. They still create a `free_text` decision with `audience:
+  orchestrator` (slice 1), with `asked_by` {`agent`, run id}.
+- Verified by:
+  - each tool on `mcp_root`, and refused on `mcp_run`;
+  - identity arguments refused;
+  - the atomic supersession and its two refusals.
+
+**UD-C8 — who may answer (UD-R4).**
+- `authorize` allows `answer` on:
+  - an `orchestrator` decision, from `mcp_root` with role `orchestrator`,
+    and from `cli` and `monitor`;
+  - a `user` decision, from `cli` and `monitor` ONLY.
+- `mcp_run` may never answer any decision.
+- Refusals are `forbidden` with reason `user_only` or `not_answerable_here`,
+  and change nothing.
+- The legacy `answer_question` (MCP and runner) goes through `authorize`
+  too. An escalated agent question (audience `user`) is refused there.
+- `answered_by` and every history entry record the channel.
+- **Residual, stated.** The host orchestrator can run the same CLI as the
+  user, so `cli` does not prove a human answered. The instructions forbid
+  it (slice 5), and the channel is in the record.
+- Verified by:
+  - the authority matrix: every channel against every audience and every
+    operation;
+  - a `user` decision answered over MCP is refused and stays unchanged;
+  - a scoped-RPC answer is refused;
+  - the legacy answer of an escalated question is refused.
+
+**UD-C9 — refs bind a "yes" to exact bytes (UD-R5).**
+- **Ref shapes.** A ref is {`path`} or {`path`, `sha256`} for a file
+  inside the project root, or {`commit`}.
+- **Path refs.**
+  - The path must be relative, with no `..`. It must resolve, after
+    symlinks, inside the project root, to a regular file of at most 1 MiB.
+  - At creation the module reads the bytes, records {`path`, `sha256`},
+    and stores the snapshot.
+  - A caller-given `sha256` that differs from the file is `invalid_record`.
+- **Commit refs.** A `commit` must resolve with git to a full SHA, which is
+  recorded.
+- **Limits.** At most 8 refs per decision. Anything else is
+  `invalid_record`, naming the field.
+- **At answer time.** The answer records `approved_refs`, the recorded
+  digests.
+- **`decisions.check_refs(tree, id)`** returns {`ok`, `changed`: [paths],
+  `missing`: [paths]}. It compares each path ref's current bytes with the
+  approved digest; a commit ref is always ok. The asker calls it before
+  acting. Slice 5 writes this into the instructions.
+- **`decisions.snapshot(tree, id, path)`** returns the stored bytes, for the
+  CLI or monitor diff of slice 4.
+- Verified by:
+  - each ref rule and refusal;
+  - a draft edited after the ask, which `check_refs` reports as changed;
+  - a snapshot that survives the file's deletion;
+  - a symlink escaping the root, refused.
+
+**UD-C10 — nothing else changes in slice 2.**
+- No CLI command or monitor route is added yet; that is slice 4.
+- Delivery and wake are slice 3.
+- Verified by: the existing tests stay green, and UD-C6's guards are updated
+  deliberately by the tester for the new MCP tools only.
+
+### Slice 2 work split
+1. tester: tests/test_ud_c7_*.py .. tests/test_ud_c10_*.py.
+2. implementer.
+3. reviewer.
+4. **adversary, mandatory:** answering a `user` decision over MCP or RPC;
+   forged identity arguments; a ref path escape; editing a draft between
+   ask and yes; supersession races.
+
+## Slice 3 — delivery and wake (UD-R6, R7)
+
+Approved by the user on 2026-10-17.
+
+**UD-C11 — delivery to the asker's session (UD-R6).**
+- **What is delivered.** A decision whose asker role is `orchestrator` or
+  `initializer` is delivered once it is `answered`.
+- **The `delivery` record.** {`delivered_at`, `session`}, where `session`
+  is the root session id bound to that role (the DJ binding).
+  - Recording a delivery increments `revision`. It is not a status
+    transition and adds no history entry.
+  - It emits a `decision` event with transition `delivered`, with UD-C4's
+    payload rules.
+- **Redelivery**, for an `answered` decision that is not yet `handled`:
+  - to a different session;
+  - or to the same session after 900 s, the DJ watcher's rule.
+
+  A `handled`, `withdrawn` or `superseded` decision is never delivered.
+- **Agent questions** keep today's path. The runner resumes the agent. A
+  successful resume marks the decision `handled` (outcome `applied`, by
+  `{role: runner}`). A failed resume leaves it `answered`, so the existing
+  retry applies.
+- Verified by:
+  - first delivery;
+  - no repeat within 900 s to the same session;
+  - redelivery to a new session;
+  - nothing after handled;
+  - an agent question handled on a successful resume;
+  - an agent question left answered when the resume fails.
+
+**UD-C12 — wake through the Stop hook (UD-R7).**
+- **The new source.** `bg.py watch()` gains a second notification source,
+  for the watcher's owner role: answered decisions that are due for
+  delivery under UD-C11.
+- **The report.** One line per decision: its id, its title, the chosen
+  option ids, and the comment or free text, cut to 300 characters. It is
+  local to that session; nothing goes to ntfy (UD-R10).
+- **Ordering.** Delivery is recorded in the same pass, after the report is
+  written.
+- **No fake jobs.** No bg job row is created for a decision.
+- **Concurrency.** The existing `watch-<owner>.lock` serialises watchers,
+  so two watchers of one role never both deliver.
+- Verified by:
+  - the watcher reports an answered decision once and records the delivery;
+  - a decision answered while no session runs is delivered to the next
+    session, exactly once;
+  - an initializer decision never reaches the orchestrator's watcher.
+
+**UD-C13 — nothing else changes in slice 3.**
+- Verified by: the DJ watcher tests stay green.
+
+### Slice 3 work split
+1. tester.
+2. implementer.
+3. reviewer.
+4. **adversary, mandatory:**
+   - an answer while no orchestrator runs, then two sessions starting
+     concurrently;
+   - redelivery storms;
+   - delivery to the wrong role;
+   - secrets in a comment, scrubbed on write and never in ntfy.
+
+## Slices 4–5
+
+These are written after slice 3 merges: the readers, CLI/MCP/monitor/ntfy
+(UD-R9, R10), and the instructions (UD-R12).
