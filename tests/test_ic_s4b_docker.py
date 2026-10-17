@@ -19,8 +19,11 @@ import hashlib
 import json
 import os
 import re
+import socket
+import struct
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -94,6 +97,57 @@ if probe == "egress":
     if ins.get("hold"):
         import signal
         signal.pause()
+elif probe == "dns":
+    import struct, concurrent.futures
+    def query(name):
+        q = struct.pack(">HHHHHH", 0x4d41, 0x0100, 1, 0, 0, 0)
+        for part in name.split("."): q += bytes([len(part)]) + part.encode()
+        return q + b"\x00" + struct.pack(">HH", 1, 1)
+    def summarise(data):
+        if len(data) < 12: return {"reply": True, "short": len(data)}
+        _, flags, _, an = struct.unpack(">HHHH", data[:8])
+        return {"reply": True, "rcode": flags & 15, "answers": an}
+    def ask(server, proto, name):
+        # never prints a credential: only the server, protocol, name and the reply header
+        try:
+            q = query(name)
+            if proto == "udp":
+                c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); c.settimeout(2)
+                c.sendto(q, (server, 53)); data = c.recv(2048)
+            else:
+                c = socket.create_connection((server, 53), timeout=2); c.settimeout(2)
+                c.sendall(struct.pack(">H", len(q)) + q)
+                data = c.recv(2)
+                if len(data) < 2: return {"reply": False, "error": "closed"}
+                data = c.recv(struct.unpack(">H", data)[0])
+            c.close()
+            return summarise(data)
+        except OSError as e: return {"reply": False, "error": repr(e)}
+    resolvers = []
+    try:
+        for line in open("/etc/resolv.conf"):
+            f = line.split()
+            if len(f) >= 2 and f[0] == "nameserver": resolvers.append(f[1])
+    except OSError: pass
+    gw = None
+    try:
+        for line in open("/proc/net/route").read().splitlines()[1:]:
+            f = line.split()
+            if f[1] == "00000000" and int(f[3], 16) & 2:
+                gw = socket.inet_ntoa(struct.pack("<I", int(f[2], 16))); break
+    except (OSError, ValueError, IndexError): pass
+    servers = sorted(set(["127.0.0.1", "127.0.0.11"] + [r for r in resolvers if "." in r] + ([gw] if gw else [])))
+    names = {"external": ins["external"], "random": ins["label"] + "." + ins["zone"]}
+    jobs = [(s, pr, k) for s in servers for pr in ("udp", "tcp") for k in names]
+    with concurrent.futures.ThreadPoolExecutor(16) as ex:
+        got = list(ex.map(lambda j: ask(j[0], j[1], names[j[2]]), jobs))
+    def libc(name):
+        try: return {"resolved": socket.gethostbyname(name)}
+        except OSError as e: return {"resolved": None, "error": repr(e)}
+    say(dict(common(), resolvers=resolvers, gateway=gw, servers=servers,
+             replies={"%s/%s/%s" % j: r for j, r in zip(jobs, got)},
+             libc={"external": libc(names["external"]), "random": libc(names["random"]),
+                   "ma-egress": libc("ma-egress"), "ma-auth": libc("ma-auth")}))
 elif probe == "privsep":
     import ctypes, errno, signal
     libc = ctypes.CDLL(None, use_errno=True)
@@ -447,3 +501,122 @@ def test_d_s4b_7_docker_the_host_reads_the_redacted_output_through_the_separatio
         logs = dk.docker("logs", cid)
         assert password not in logs.stdout + logs.stderr, "a raw Docker log copy holds the issued password"
     world.stop_victim(node)
+
+
+CANARY_ADDRESS = "192.0.2.53"          # TEST-NET-1: only a host resolver that answered could hand it to the guest
+DNS_ZONE = "dns-bypass-canary.invalid"
+
+
+class HostCanary:
+    """A UDP+TCP DNS server on the host's 127.0.0.1:53, if the host lets the test
+    bind it. It answers every A query with CANARY_ADDRESS and records the names
+    asked, so a guest query that reached a host resolver is observable. When port
+    53 cannot be bound (unprivileged, or a resolver already owns it) it is
+    `armed == False` and the test falls back to asserting the guest got no answer."""
+
+    def __init__(self):
+        self.seen: list[str] = []
+        self.armed = False
+        self.socks = []
+        self._stop = threading.Event()
+        try:
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            u.bind(("127.0.0.1", 53))
+            t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            t.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            t.bind(("127.0.0.1", 53)); t.listen(8)
+        except OSError:
+            for sk in locals().values():
+                if isinstance(sk, socket.socket):
+                    sk.close()
+            return
+        self.armed = True
+        self.socks = [u, t]
+        for target, sk in ((self._udp, u), (self._tcp, t)):
+            sk.settimeout(0.2)
+            threading.Thread(target=target, args=(sk,), daemon=True).start()
+
+    def _answer(self, q: bytes) -> bytes | None:
+        if len(q) < 17:
+            return None
+        i, labels = 12, []
+        while i < len(q) and q[i]:
+            labels.append(q[i + 1:i + 1 + q[i]].decode("latin-1")); i += q[i] + 1
+        self.seen.append(".".join(labels).lower())
+        question = q[12:i + 5]
+        head = q[:2] + b"\x81\x80" + b"\x00\x01\x00\x01\x00\x00\x00\x00"
+        return head + question + b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04" + socket.inet_aton(CANARY_ADDRESS)
+
+    def _udp(self, sk):
+        while not self._stop.is_set():
+            try:
+                q, addr = sk.recvfrom(2048)
+            except (TimeoutError, OSError):
+                continue
+            a = self._answer(q)
+            if a:
+                sk.sendto(a, addr)
+
+    def _tcp(self, sk):
+        while not self._stop.is_set():
+            try:
+                c, _ = sk.accept()
+                c.settimeout(1)
+                n = struct.unpack(">H", c.recv(2))[0]
+                a = self._answer(c.recv(n))
+                if a:
+                    c.sendall(struct.pack(">H", len(a)) + a)
+                c.close()
+            except (TimeoutError, OSError, struct.error):
+                continue
+
+    def close(self):
+        self._stop.set()
+        for sk in self.socks:
+            sk.close()
+
+
+@pytest.fixture
+def canary():
+    c = HostCanary()
+    yield c
+    c.close()
+
+
+def test_ic_c27_docker_no_dns_server_reaches_a_host_resolver_or_resolves_an_external_name(world, canary):
+    label = "q" + os.urandom(6).hex()
+    node, r = egress_dns(world, label=label)
+    # positive control: the gateway alias resolves, so the probe's resolver path works at all
+    assert r["libc"]["ma-egress"]["resolved"], r["libc"]["ma-egress"]
+    # every resolver the guest is configured with, plus the three named ones, was queried
+    assert {"127.0.0.1", "127.0.0.11"} <= set(r["servers"]), r["servers"]
+    assert r["resolvers"], "the guest has no configured resolver at all"
+
+    # libc, through /etc/resolv.conf
+    assert r["libc"]["external"]["resolved"] is None, f"example.org resolved inside the run: {r['libc']['external']}"
+    assert r["libc"]["random"]["resolved"] != CANARY_ADDRESS, "a host resolver answered the guest"
+    assert r["libc"]["random"]["resolved"] is None, r["libc"]["random"]
+
+    # direct queries, UDP and TCP, to every candidate server
+    replies = r["replies"]
+    assert len(replies) == 2 * 2 * len(r["servers"]), replies
+    for key, rep in replies.items():
+        server, proto, kind = key.split("/")
+        assert not rep.get("answers"), f"{key} produced an answer record (external resolution or tunnel): {rep}"
+        if server in ("127.0.0.1", r["gateway"]):
+            # nothing in the guest's own namespace or on the bridge may speak DNS at all
+            assert not rep["reply"], f"{key} replied: {rep}"
+
+    # host side: no resolver on the host's loopback received the guest's unique label
+    if canary.armed:
+        leaked = [n for n in canary.seen if label in n or n.startswith("example.org")]
+        assert leaked == [], f"a guest query reached the host's loopback resolver: {leaked}"
+    else:
+        # host :53 is not bindable, so not observable here: the assertions above (no answer record, no reply from loopback or the
+        # bridge gateway) are what holds.
+        pass
+
+
+def egress_dns(w, **fields):
+    node = w.probe_node("dns", external="example.org", zone=DNS_ZONE, **fields)
+    return node, w.report(node, timeout=dk.START_WAIT)
