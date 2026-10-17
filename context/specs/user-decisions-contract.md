@@ -523,6 +523,29 @@ Approved by the user on 2026-10-17.
 **UD-C13 — nothing else changes in slice 3.**
 - Verified by: the DJ watcher tests stay green.
 
+### Slice 3 clarifications (2026-10-17, answering tester nd-9d1a6412)
+
+- **Delivery API.**
+  - `decisions.due_for_delivery(tree, *, role, session, now)` returns the
+    decisions UD-C11 says are due.
+  - `decisions.record_delivery(tree, id, *, session, now)` records one
+    delivery.
+  - The watcher uses both.
+- **Clock.** The wall clock. `MULTIAGENTS_BG_NOW` overrides it, as for the
+  DJ watcher. Redelivery happens strictly after 900 s (`>`), as DJ does.
+- **Report shape.**
+  - One line per decision. A multi-line comment or free text is folded onto
+    that line.
+  - Text cut to 300 characters is 299 characters plus "…".
+  - A header line is allowed. Job ends and decisions may share one report.
+- **Idle watcher.** It behaves like the DJ watcher: it does not wait for a
+  decision to be answered. A later answer is picked up at the next Stop-hook
+  run.
+- **Failed resume.** The record stays `answered`. Resuming it again is a
+  later slice's matter.
+- **The runner actor** is {`role: runner`, `agent`: the run id, `channel:
+  runner`}.
+
 ### Slice 3 work split
 1. tester.
 2. implementer.
