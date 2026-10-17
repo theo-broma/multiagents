@@ -274,9 +274,26 @@ def test_c2_p4_a_ref_the_scrubber_would_alter_is_refused(tmp_path, ref):
 
 
 def test_c2_p4_structural_values_are_stored_exactly(tmp_path):
-    ref = {"path": "docs/a-b_c.md", "sha256": "ab" * 32}
-    rec = create(make_tree(tmp_path), "multi", recommended=["yes", "no"], refs=[ref, {"commit": "deadbeef"}])
-    assert rec["refs"] == [ref, {"commit": "deadbeef"}]
+    # UD-C9 (slice 2): refs are resolved against a real project, so the file
+    # exists and the commit is a full sha that resolves.
+    import os
+    import subprocess
+    from multiagents.tree import Tree
+    root = tmp_path / "proj"
+    (root / ".multiagents").mkdir(parents=True)
+    (root / "docs").mkdir()
+    (root / "docs" / "a-b_c.md").write_text("abc")
+    env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "PATH": os.environ["PATH"]}
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "m"]):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True, env=env, capture_output=True)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, env=env,
+                          capture_output=True, text=True).stdout.strip()
+    import hashlib
+    ref = {"path": "docs/a-b_c.md", "sha256": hashlib.sha256(b"abc").hexdigest()}
+    tree = Tree(root / ".multiagents" / "tree.json", root / ".multiagents" / "events.jsonl")
+    rec = create(tree, "multi", recommended=["yes", "no"], refs=[ref, {"commit": head}])
+    assert rec["refs"] == [ref, {"commit": head}]
     assert rec["recommended"] == ["yes", "no"]
 
 

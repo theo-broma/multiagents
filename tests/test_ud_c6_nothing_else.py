@@ -9,8 +9,10 @@ import pytest
 
 from support.ud_support import REPO
 
-NEW_TOOLS = {"ask_user", "list_decisions", "get_decision", "answer_decision",
-             "withdraw_decision", "escalate_decision"}
+# Slice 2 (UD-C7) deliberately adds exactly five tools: ask_user, withdraw_decision,
+# mark_decision_handled, escalate_decision, answer_decision (tests/test_ud_c7_asking.py).
+# The readers (list_decisions, get_decision) are slice 4 and stay forbidden here.
+NEW_TOOLS = {"list_decisions", "get_decision", "decisions", "list_decision", "get_decisions"}
 
 
 def test_c6_no_new_mcp_tool():
@@ -43,10 +45,11 @@ def test_c6_no_decisions_route_on_the_monitor():
 
 
 def test_c6_no_instruction_text_mentions_the_new_tool():
+    # Slice 2 puts the tool's definition in server.py; instruction text (slice 5) stays clean.
     offenders = []
     for path in (REPO / "src" / "multiagents").rglob("*"):
         if path.is_file() and path.suffix in {".md", ".txt", ".yaml", ".py"} \
-                and path.name != "decisions.py":
+                and path.name not in {"decisions.py", "server.py"}:
             if re.search(r"\bask_user\b", path.read_text(errors="ignore")):
                 offenders.append(str(path.relative_to(REPO)))
     assert offenders == []

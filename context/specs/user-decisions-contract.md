@@ -464,6 +464,33 @@ Approved by the user on 2026-10-17.
 - Verified by: the existing tests stay green, and UD-C6's guards are updated
   deliberately by the tester for the new MCP tools only.
 
+### Slice 2 clarifications (2026-10-17, answering tester nd-b66bf1b3)
+
+- **Project root.** It is the `ProjectPaths` root of the tree, that is,
+  `tree.path.parent.parent`. Ref paths are relative to it, and snapshots
+  live under `<root>/.multiagents/decisions/snapshots/`.
+- **Channel.**
+  - `mcp_run` applies when the server runs for an agent:
+    `MULTIAGENTS_AGENT_ID` is set, with or without an RPC token. It wins
+    over `MULTIAGENTS_ROLE`.
+  - A root server without `MULTIAGENTS_ROLE` is the orchestrator.
+  - Any other role value is `forbidden`.
+- **`authorize`.** It returns `None` when the operation is allowed and
+  raises `DecisionError("forbidden", reason=…)` when it is not. The
+  operations are `answer`, `withdraw`, `supersede`, `mark_handled` and
+  `escalate`.
+- **Tool errors.** A tool returns `{"error": <code>, …details}`, as
+  `give_verdict` does. A refused identity argument names the argument.
+- **`approved_refs`.** It appears only on decisions that have refs. A
+  decision without refs keeps the slice 1 answer shape.
+- **Delegates (amends UD-C8).** A run with the `delegate` permission may
+  still answer, through the legacy `answer_question`, an `orchestrator`
+  question asked by one of its own descendants, as today. It may never
+  answer a `user` decision, and never through `answer_decision`, which
+  stays `mcp_root` only.
+- **`snapshot` errors.** `snapshot` for a path the decision does not refer
+  to raises `invalid_argument`.
+
 ### Slice 2 work split
 1. tester: tests/test_ud_c7_*.py .. tests/test_ud_c10_*.py.
 2. implementer.
