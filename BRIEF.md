@@ -6615,3 +6615,8 @@ Pending user: RB-R1 re-wording (above).
   - Risk counter: count the rounds caused by the orchestrator's suite, and the suite hours. Alert the user if more than 1 candidate in 3 needs such a round. Counter so far: bug-535139 (1 round, nc_r30 and worktree_vanished).
   - The TQ-D5 exceptions are added to IC-R5 (phase7-part2-containers.md) and IC-C14 (phase7-part2-contract.md).
   - Item 2 (TQ-R1..R15 test tiers and queues) comes after phase 7 part 2: contract from context/specs/test-tiers-and-queues.md; milestone 0 (TQ-R14) is a quiet-host measurement, shown to the user first; the adversary is mandatory on slices 2 and 4.
+- 2026-10-18 ~03:00 CEST. User: remove kimi everywhere. Done:
+  - project .multiagents/config/agents.yaml: tester and dev-advisor get 'opencode-go: ""';
+  - global ~/.config/multiagents/agents.yaml: the tester and dev-advisor kimi fallbacks become empty routes; characterizer moves to claude/sonnet;
+  - effective merged routes checked: no kimi left.
+  Backups are in the orchestrator scratchpad. Shipped defaults src/multiagents/defaults/agents.yaml: implementer-quick nd-46089cf2, then reviewer. The code fix (models atomic per layer) stays a later spec; ticket from nd-22fe3762 still open.
