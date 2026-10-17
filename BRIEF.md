@@ -6471,3 +6471,18 @@ Pending user: RB-R1 re-wording (above).
   - 4B.2 (auth gateway) after 4B.1. Tell the user that K4B.7 amends slice 3's no-capabilities rule (done in chat, 02:20).
   - codex quota is out until 2026-10-22 08:16 CEST; codex-b is in use.
   - Clean up /var/tmp/{r59,ud,gg}-comb after merging.
+- 2026-10-17 ~03:45 CEST. 4B.1 implementer nd-4fa20bcc (ag-c0e6ef) is held needs_info at 32f8b59e (src b50df184).
+  - Counts: 1436 passed, 43 failed. Per file:
+    - c25: 6 failed;
+    - c29: 12 failed;
+    - c31: 2 failed;
+    - every other 4B.1 file is green (config, d_s4b_7, c26, c27).
+  - It is going backwards: 30 failures last round, 43 now. Retry exhaustion and replacement are still unresolved, and its dev-advisor consults keep timing out.
+  - Two new C31 fixture defects reported:
+    - `after_a_clean_end_nothing_remains` omits the completion events, so TF-R2 retries;
+    - `removal_of_an_ended_attempts_network_keeps_the_gateway` reads `egress_gateways()[0]` after the gateway is detached, giving an IndexError.
+  - NEXT, after compaction. This is a stuck-agent decision, so consult the advisor first, with these options:
+    (a) tester fixes the 2 C31 fixtures, then a fresh implementer-deep run focused only on C29/C30 replacement, retry exhaustion and the C25 regressions, with the dev-advisor reachable;
+    (b) split C30 egress replacement into a separate node;
+    (c) escalate to opus per the round-3 rule (4 implementer runs so far, no review rejection yet).
+    Ask the advisor to investigate the c29 failures on the branch itself.
