@@ -97,7 +97,7 @@ def _insert(tree, rec, supersedes=None, enforce=False):
                 _not_open(old)
             if enforce:
                 authorize(old, rec["history"][0]["by"], "supersede")
-        used = {q["id"] for q in data["questions"]}
+        used = {q["id"] for q in data["questions"] if _usable(q)}
         prefix, length = ("q-", 6) if rec["id"].startswith("q-") else ("d-", 8)
         while rec["id"] in used:
             rec["id"] = prefix + uuid.uuid4().hex[:length]
@@ -356,8 +356,17 @@ def create(tree, *, by, audience, topic, title, context, implications, mode,
     return _insert(tree, rec, supersedes, enforce)
 
 
+def _usable(raw):
+    """UD-C13: whether a stored record has the one field every pass keys on.
+
+    The store sits in tree.json, which a docker agent can write (SG-R7), and
+    a hand edit or an older writer can leave a record without a string id.
+    Passes skip such a record rather than raising on a neighbour."""
+    return isinstance(raw, dict) and isinstance(raw.get("id"), str) and bool(raw["id"])
+
+
 def get(tree, id):
-    raw = next((q for q in tree.read()["questions"] if q["id"] == id), None)
+    raw = next((q for q in tree.read()["questions"] if _usable(q) and q["id"] == id), None)
     return _project(raw) if raw is not None else None
 
 
@@ -386,20 +395,29 @@ def list(tree, *, status=None, audience=None, cursor=None, limit=50):
                 raise ValueError()
         except (ValueError, TypeError, KeyError):
             raise DecisionError("invalid_cursor") from None
-    records = [_project(q) for q in tree.read()["questions"]]
-    records = sorted((r for r in records if (status is None or r["status"] == status)
-                      and (audience is None or r["audience"] == audience)
-                      and (last is None or _key(r) > last)), key=_key)
-    page, following = records[:limit], None
+    records = []
+    for raw in tree.read()["questions"]:
+        try:
+            rec = _project(raw)
+            key = _key(rec)
+            if ((status is None or rec["status"] == status)
+                    and (audience is None or rec["audience"] == audience)
+                    and (last is None or key > last)):
+                records.append((key, rec))
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            continue    # UD-C13: a damaged neighbour never breaks the listing
+    records.sort(key=lambda pair: pair[0])
+    page = [rec for _, rec in records[:limit]]
+    following = None
     if len(records) > limit:
         following = base64.urlsafe_b64encode(json.dumps(dict(
-            v=1, status=status, audience=audience, key=_key(page[-1]))).encode()).decode()
+            v=1, status=status, audience=audience, key=records[limit - 1][0])).encode()).decode()
     return {"decisions": page, "next": following}
 
 
 def _find(data, id):
     for i, raw in enumerate(data["questions"]):
-        if raw["id"] == id:
+        if _usable(raw) and raw["id"] == id:
             return i, _project(raw)
     raise DecisionError("unknown")
 
@@ -520,7 +538,8 @@ def _transition(tree, id, revision, by, operation, *, reason="", outcome=None,
             details["reason"] = reason
         if operation == "superseded":
             _struct(superseded_by, "superseded_by", "invalid_argument")
-            other = next((q for q in data["questions"] if q["id"] == superseded_by), None)
+            other = next((q for q in data["questions"]
+                          if _usable(q) and q["id"] == superseded_by), None)
             if other is None or superseded_by == id or other["status"] != "open":
                 raise DecisionError("invalid_argument", field="superseded_by")
             details["superseded_by"] = superseded_by
@@ -533,6 +552,73 @@ def _transition(tree, id, revision, by, operation, *, reason="", outcome=None,
         _advance(rec, by, "open" if operation == "escalated" else operation, **details)
         data["questions"][index] = rec
     _emit(tree, rec, operation)
+    return copy.deepcopy(rec)
+
+
+REDELIVERY_WINDOW = 900
+
+
+def _skipped(raw, exc):
+    ident = raw.get("id") if isinstance(raw, dict) else None
+    ident = ident if isinstance(ident, str) and ident else "(no id)"
+    return (f"{ident}: skipped, unreadable decision record "
+            f"({type(exc).__name__}: {exc})")[:200]
+
+
+def scan_for_delivery(tree, *, role, session, now):
+    """UD-C11/UD-C13: one delivery pass for asker role `role` at `session`.
+
+    Returns `(due, skipped)`: what `due_for_delivery` returns, and one line
+    per record this pass could not read. tree.json is agent-writable
+    (SG-R7), and a watcher runs this on every poll, so a damaged record is
+    skipped — never delivered, never allowed to raise past the pass that
+    reports the healthy decisions and the job ends beside them — and the
+    read is `Tree.peek_questions`, which is read-only: an unparseable tree
+    is no decisions this pass, with no recovery copy, no rewrite and no
+    warning to flood the report with."""
+    if role not in ("orchestrator", "initializer"):
+        raise DecisionError("invalid_argument", field="role")
+    due, skipped = [], []
+    for raw in tree.peek_questions() or []:
+        try:
+            rec = _project(raw)
+            if rec["status"] != "answered" or rec["asked_by"]["role"] != role:
+                continue
+            delivery = rec["delivery"]
+            if delivery is not None and delivery.get("session") == session:
+                at = delivery.get("delivered_at") or 0
+                if isinstance(at, bool) or not isinstance(at, (int, float)):
+                    raise TypeError(f"delivered_at is {type(at).__name__}")
+                if now - at <= REDELIVERY_WINDOW:
+                    continue
+            due.append(rec)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            skipped.append(_skipped(raw, exc))
+    return due, skipped
+
+
+def due_for_delivery(tree, *, role, session, now):
+    """UD-C11: the answered decisions asker-role `role` must have reported to
+    `session` now: never delivered, delivered to another session, or last
+    delivered more than one window ago. Terminal statuses never resume. A
+    record the pass cannot read is skipped and never delivered (UD-C13)."""
+    due, _ = scan_for_delivery(tree, role=role, session=session, now=now)
+    return due
+
+
+def record_delivery(tree, id, *, session, now):
+    """UD-C11: record one delivery. Not a transition: no history entry, the
+    status stays `answered`, only the revision moves."""
+    if not isinstance(session, str) or not session:
+        raise DecisionError("invalid_argument", field="session")
+    with tree.transaction() as data:
+        index, rec = _find(data, id)
+        if rec["status"] != "answered":
+            raise DecisionError("bad_transition", status=rec["status"])
+        rec["delivery"] = {"delivered_at": now, "session": session}
+        rec["revision"] += 1
+        data["questions"][index] = rec
+    _emit(tree, rec, "delivered")
     return copy.deepcopy(rec)
 
 
@@ -566,13 +652,22 @@ def _legacy(rec):
 
 
 def legacy_questions(tree, *, status="open", agent=None):
-    return [_legacy(q) for q in tree.read()["questions"]
-            if q["id"].startswith("q-") and (status is None or q.get("status") == status)
-            and (agent is None or _legacy(q)["agent"] == agent)]
+    out = []
+    for raw in tree.read()["questions"]:
+        try:
+            if not _usable(raw) or not raw["id"].startswith("q-"):
+                continue
+            rec = _legacy(raw)
+            if ((status is None or rec["status"] == status)
+                    and (agent is None or rec["agent"] == agent)):
+                out.append(rec)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            continue    # UD-C13: a damaged neighbour never breaks the listing
+    return out
 
 
 def get_question(tree, id):
-    raw = next((q for q in tree.read()["questions"] if q["id"] == id), None)
+    raw = next((q for q in tree.read()["questions"] if _usable(q) and q["id"] == id), None)
     return _legacy(raw) if raw is not None else None
 
 

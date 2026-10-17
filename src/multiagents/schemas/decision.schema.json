@@ -345,7 +345,30 @@
       ]
     },
     "delivery": {
-      "type": "null"
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delivered_at": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivered_at",
+            "session"
+          ],
+          "additionalProperties": false
+        }
+      ]
     },
     "handled": {
       "anyOf": [

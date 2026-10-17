@@ -16,8 +16,10 @@ import tempfile
 import time
 import uuid
 
+from . import decisions
 from .paths import ProjectPaths, state_root
 from .procs import start_time
+from .tree import Tree
 
 ROLES = ('orchestrator', 'initializer')
 ENDED = {'finished', 'stopped', 'failed_to_start', 'lost'}
@@ -317,6 +319,29 @@ def supervise():
     atomic(path / f'{ident}.exit', result + '\n')
 
 
+def decision_report(records):
+    """UD-C12: one line per answered decision due for delivery — its id, its
+    title, the chosen option ids, then the answer's free text and its
+    comment. Local to the session: nothing here reaches ntfy."""
+    chunks = ['Answered decisions:']
+    for rec in records:
+        answer = rec.get('answer') or {}
+        options = ', '.join(answer.get('options') or [])
+        # both, when both were given: a comment alone told the asker the user
+        # answered "(free text)" without ever saying what they answered
+        text = ' — '.join(part for part in (
+            ' '.join(str(answer.get('free_text') or '').split()),
+            ' '.join(str(answer.get('comment') or '').split())) if part)
+        if len(text) > 300:
+            text = text[:299] + '…'
+        line = (f"{rec['id']} {' '.join(str(rec.get('title') or '').split())}: "
+                f"answered {options or '(free text)'}")
+        if text:
+            line += f" — {text}"
+        chunks.append(''.join(c for c in line if c.isprintable()))
+    return '\n'.join(chunks)
+
+
 def watch(registry, args):
     started = now()
     try:
@@ -343,6 +368,7 @@ def watch(registry, args):
         from .config import load
         timeout = load(args.paths).project.get('bg', {}).get('watch_timeout', 3600)
     deadline = started + max(0, timeout - 60)
+    tree = Tree(args.paths.tree_file, args.paths.events_file)
     try:
         while True:
             with registry.lock():
@@ -350,12 +376,42 @@ def watch(registry, args):
                 rows = registry.rows(args.owner)
                 due = [r for r in rows if r['unacked'] and (r['emitted_at'] is None
                     or r['emitted_session'] != session or now() - r['emitted_at'] > 900)]
-                if due:
+                # UD-C11/UD-C12: answered decisions of this owner role are a
+                # second notification source, reported in the same pass.
+                # UD-C13: a decision record another writer damaged — or a
+                # tree this pass cannot read at all — must never take the
+                # job report down with it, so the pass cannot raise here.
+                try:
+                    wake, skipped = decisions.scan_for_delivery(
+                        tree, role=args.owner, session=session, now=now())
+                except Exception:
+                    wake, skipped = [], []
+                if due or wake:
                     if not cli_alive(): return 0
                     for row in due:
                         row.update(emitted_at=now(), emitted_session=session)
                         registry.save(row)
-                    print(registry.report(due), file=sys.stderr, end='')
+                    report = registry.report(due) if due else ''
+                    if wake:
+                        section = decision_report(wake)
+                        if skipped:
+                            section += ('\n' + '\n'.join(
+                                ''.join(c for c in line if c.isprintable())
+                                for line in skipped))
+                        report = (report.rstrip('\n') + '\n' + section) if report else section
+                    try:
+                        # UD-C12: the report is written first; only a session
+                        # that received it has the delivery recorded.
+                        sys.stderr.write(report)
+                        sys.stderr.flush()
+                    except OSError:
+                        return 0
+                    for rec in wake:
+                        try:
+                            decisions.record_delivery(tree, rec['id'], session=session,
+                                                      now=now())
+                        except decisions.DecisionError:
+                            pass    # answered elsewhere between the two locks
                     return 2
                 active = [r for r in rows if r['state'] in ('starting', 'running')]
                 if not active: return 0

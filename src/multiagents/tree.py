@@ -904,6 +904,26 @@ class Tree:
         with self._locked():
             return self._read_unlocked()
 
+    def peek_questions(self) -> list | None:
+        """UD-C13: the question records, read without the recovering loader.
+
+        `read()` is for callers that may write: on a damaged file it
+        recovers, which copies the damage aside, rewrites the tree and warns
+        on stderr — correct once, wrong on every 0.1 s poll of a watcher.
+        This read is read-only: an unreadable tree is None (nothing to act
+        on this pass, no side effects, no warning), and a readable one yields
+        its questions as stored. Writes go through atomic replaces, so a
+        plain read never sees a torn file and needs neither the lock nor a
+        recovery.
+        """
+        try:
+            raw = self._raw(self.path)
+            data = json.loads(raw) if raw is not None else None
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, OSError):
+            return None
+        questions = data.get("questions") if isinstance(data, dict) else None
+        return questions if isinstance(questions, list) else None
+
     # --------------------------------------------------------------- events --
 
     def emit(self, agent_id: str, kind: str, /, **fields: Any) -> None:

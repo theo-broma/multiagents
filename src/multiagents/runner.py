@@ -11674,10 +11674,29 @@ class Runner(QuotaHandover):
             f"Continue from where you stopped, on that basis."
         )
         result = await self.steer(agent_id, message)
+        if result.get("steered"):
+            # UD-C11: the resume applied the answer. A failed resume leaves
+            # the record `answered`, so the existing retry applies.
+            self._mark_question_handled(question_id, agent_id)
         return {"question_id": question_id, "agent_id": agent_id,
                 "answered_by": claimed.get("answered_by") or answered_by,
                 "resumed": result.get("steered", False),
                 **({"error": result["error"]} if result.get("error") else {})}
+
+    def _mark_question_handled(self, question_id: str, agent_id: str) -> None:
+        """UD-C11: a successful resume marks the agent question handled."""
+        from . import decisions
+        from .decisions import DecisionError, get as get_decision
+        try:
+            current = get_decision(self.tree, question_id)
+            if current is not None and current["status"] == "answered":
+                decisions.mark_handled(self.tree, question_id,
+                                       revision=current["revision"],
+                                       by={"role": "runner", "agent": agent_id,
+                                           "channel": "runner"},
+                                       outcome="applied")
+        except DecisionError:
+            pass    # a concurrent transition wins; the record is the contract
 
     def _idle_capacity_note(self) -> dict[str, Any]:
         """Capacity, plus a nudge when slots are sitting idle.
