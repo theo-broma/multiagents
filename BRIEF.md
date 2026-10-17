@@ -6538,3 +6538,4 @@ Pending user: RB-R1 re-wording (above).
   - Researcher nd-a9877721 is triaging it: capset succeeding, the stop relay, workspace visibility, and c26 reading proxy_env through redacted stdout.
   - Next: a tester and/or implementer round, then real Docker on the full -k docker set, a new reviewer on the whole diff, the suite, and the merge.
   - Advisor still down (bug-535139); its tester is nd-b6c8748c.
+- 2026-10-17 ~08:40 CEST. bug-535139, real path found in tree.json (ag-5d0962 segments): a codex quota triggered a quota handover to opencode-go (ses_ id), that segment failed, and the retry on codex was handed the ses_ id. Tester nd-b6c8748c relaunched to reproduce exactly that sequence. Its first pass: 8 consult tests green (plain path already guarded) and 1 red alias test (unpinned alias blocked instead of going fresh; kept). Researcher nd-a9877721 is still triaging 4B.1 Docker.
