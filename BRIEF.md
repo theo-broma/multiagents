@@ -6548,3 +6548,8 @@ Pending user: RB-R1 re-wording (above).
   - Reviewer nd-26e7257c had started on the partial work; I stopped it (ag-3fe6b9). Relaunch it once the implementer is done.
   - implementer-deep runs now land on claude opus. agents.yaml allows that as the fallback after codex-b, so codex-b is probably exhausted too.
   - Researcher nd-bdfc3a3c is triaging 4B.1 Docker round 4.
+- 2026-10-17 ~11:00 CEST. Researcher nd-bdfc3a3c on 4B.1 Docker round 4 found three implementation defects and two test defects.
+  - Implementation: the grant is published before the source IP is known (407); the child can still capset CAP_SYS_PTRACE; the relay needs a subreaper and drain.
+  - Test: the guest_files path; 'cancelled' missing from a wait.
+  - Implementer nd-4fa20bcc relaunched; it must also validate the untested 2851f727. Tester nd-754de4be relaunched.
+  - bug-535139 implementer nd-81a1e751 is on part 2. Its reviewer nd-26e7257c, stopped earlier, needs a relaunch after it.
