@@ -167,7 +167,9 @@ class FakeProvider:
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
         base = shipped_opencode()
         for key in ("auth", "mcp", "home_links", "bin_search", "models_cmd",
-                    "models_parse", "models_include", "notes"):
+                    "models_parse", "models_include", "notes",
+                    "isolated_credentials", "gateway_auth", "container_private_home",
+                    "isolated_projection_path", "isolated_credential_reason"):
             base.pop(key, None)
         base["bin"] = str(script)
         base.update(extra)

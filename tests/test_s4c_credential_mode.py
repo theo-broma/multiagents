@@ -38,7 +38,7 @@ def load(tmp_path, monkeypatch, **fields):
         # K4C.4: gateway needs `gateway_auth: anthropic`, projection a declared path (`container_private_home`).
         # The parent carries what the modes of the parent and of the extending child need; an extending provider
         # inherits the prerequisite through `extends` layering (it is checked on the effective provider).
-        wanted = {fields.get("isolated_credentials"), (child or {}).get("isolated_credentials")}
+        wanted = [fields.get("isolated_credentials"), (child or {}).get("isolated_credentials")]
         if "gateway" in wanted:
             p.providers["acme"]["gateway_auth"] = "anthropic"
         if "projection" in wanted:
