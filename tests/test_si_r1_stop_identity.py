@@ -61,7 +61,7 @@ def test_si_r1_live_unrelated_pid_is_not_stop_authority(world):
             decoy.wait(timeout=BOUND)
 
 
-@pytest.mark.parametrize("mismatch", ["pid_start", "project", "nonce"])
+@pytest.mark.parametrize("mismatch", ["project", "nonce"])
 def test_si_r1_identity_mismatch_is_refused_and_scheduler_survives(world, mismatch):
     pid = world.start_scheduler()
     info = json.loads(record(world).read_text())
@@ -74,6 +74,24 @@ def test_si_r1_identity_mismatch_is_refused_and_scheduler_survives(world, mismat
     assert procs.living(pid), f"stop signalled a scheduler despite mismatched {mismatch}"
     assert world.sock_answers(), "the mismatched scheduler must remain available"
     refuse(result)
+
+
+def test_si_r1_start_time_mismatch_means_already_stopped_and_signals_nothing(world):
+    """A reused PID (different start time) is a stale record, as in ST6-R2."""
+    with subprocess.Popen(["sleep", "60"]) as decoy:
+        try:
+            record(world).parent.mkdir(parents=True, exist_ok=True)
+            record(world).write_text(json.dumps({
+                "project": str(world.root.resolve()), "nonce": "stale-instance",
+                "pid": decoy.pid,
+                "pid_start": str(int(procs.start_time(decoy.pid)) - 1)}))
+            result = scheduler.stop(world.root)
+            assert result.get("stopped") is True, result
+            assert procs.living(decoy.pid), "stop signalled a reused PID"
+        finally:
+            if decoy.poll() is None:
+                decoy.kill()
+            decoy.wait(timeout=BOUND)
 
 
 def test_si_r1_process_record_identifies_the_resolved_project_and_instance(world):
