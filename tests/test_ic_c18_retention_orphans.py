@@ -72,7 +72,9 @@ def test_k17_5_orphan_listing_matches_status_sorted_and_never_deletes(fs):
     assert value["orphans_error"] is None
     assert [v["container_id"] for v in value["orphans"]] == ids
     for item in value["orphans"]:
-        assert set(item) == {"container_id", "name", "labels", "created_at", "project", "attempt_id", "reason"}
+        assert set(item) == {"container_id", "name", "labels", "created_at", "project", "attempt_id", "reason",
+                            "resource_kind", "resource_id"}
+        assert item["resource_kind"] == "container" and item["resource_id"] == item["container_id"]
         assert item["reason"] == "unrecorded_attempt" and item["project"] == fs.slug
         assert item["labels"][ic.PROJECT_LABEL] == fs.slug
         datetime.datetime.fromisoformat(item["created_at"].replace("Z", "+00:00"))

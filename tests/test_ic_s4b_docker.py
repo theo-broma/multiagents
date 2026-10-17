@@ -146,7 +146,11 @@ elif probe == "privsep":
         sc.restype = ctypes.c_long
         sc.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
         ctypes.set_errno(0)
-        ret = sc(125, ctypes.addressof(hdr), ctypes.addressof(data))   # SYS_capset (x86-64)
+        import platform
+        # SYS_capset per architecture (x86-64: 126; 125 is capget); generic table for arm64 et al.
+        nr = {"x86_64": 126, "aarch64": 91, "arm64": 91, "riscv64": 91}.get(platform.machine())
+        if nr is None: res["capset"] = "UNSUPPORTED_ARCH"; return res
+        ret = sc(nr, ctypes.addressof(hdr), ctypes.addressof(data))
         res["capset"] = True if ret == 0 else errno.errorcode.get(ctypes.get_errno(), "?")
         return res
     path = os.path.join(CWD, "ic-priv-" + ins["nonce"])
