@@ -2248,6 +2248,40 @@ Approved by the user on 2026-10-18: choices 1-4 (Claude through the gateway only
   for it, with a stated reason.
   - Verified by: the refusal test.
 
+### Slice 4C clarifications (2026-10-18, answering tester nd-d1093480)
+
+- **K4C.1 — which gateway values are redacted.** For gateway providers,
+  only the guest-visible values join the redactor: the `ma-auth-v1` bearer
+  and its header form. The vault token never enters the attempt (K4B2.7),
+  so it never needs redacting there.
+- **K4C.2 — redaction of a renewed secret.**
+  - The host appends a renewed projected secret to the redactor's secret
+    file BEFORE it atomically replaces the projection.
+  - That file sits in the invocation input, read-only to the guest.
+  - The redactor re-reads the file when it changes, so no renewed value is
+    ever printable unredacted.
+- **K4C.3 — a missing vault credential.** A `projection` or `gateway`
+  provider whose vault holds no credential for the pinned account is
+  refused before launch: held, reason `credential_missing`, never retried
+  silently, never launched without credentials.
+- **K4C.4 — config combinations.** These are config errors at load, naming
+  the key:
+  - `isolated_credentials: gateway` without `gateway_auth: anthropic`;
+  - `projection` without a declared projection path.
+- **K4C.5 — modes.** The projection directory is 0700 and its files 0600,
+  owned by the attempt's host UID.
+- **K4C.6 — the refresh clock.**
+  - The host decides refresh from the vault's expiry, never from the
+    projection, which the guest could edit.
+  - A refresh is due within the existing margin of
+    `refresh_private_credentials`.
+- **K4C.7 — the agy refusal reason** names `agy` and that no gateway exists
+  for it.
+- **K4C.8 — a refused `unsupported` attempt** still records its credential
+  mode, `unsupported`.
+- **K4C.9 — pins.** Pins are the provider-level `container_account`, as
+  today.
+
 ### Slice 4C work split
 
 1. Researcher: the IC-C34 codex experiment, on the host, with the user's
