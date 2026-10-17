@@ -6659,3 +6659,9 @@ Pending user: RB-R1 re-wording (above).
 - 2026-10-18: 4B.2 merged (3acb37a9, node nd-38242c3f). Reds from its suite were flakes on rerun. `test_adv3_rpc_creates_and_host_capability_issues_interleave_without_internal_errors` also fails or times out on main; follow-up flake, not 4B.2. 4C started: implementer-deep nd-23e07423, then reviewer nd-14db9ede and adversary nd-b5f8bbea. Codex is `unsupported` until IC-C34. The experiment awaits a user choice: it runs 10+ days (10-day access token), and a refresh from a copy may invalidate the real codex-b login.
 
 - 2026-10-18: UD slice 2 merged (51910e79, nd-c4fbed89) and the kimi defaults (51a2aabe, nd-46089cf2) after the combined suite 7cdd98234efa. The 14 unexplained reds all passed twice serially on the combination and on main, so they are flakes. UD slice 3 deposited: implementer nd-83907cc8, then reviewer nd-ae208f83 and adversary nd-eb2cb4e2. 4C test fixes on main (58890780, bc07c5b4). SI round 2 done (0cee2061), reviewer nd-f386dc59. Tier-2 brief nd-62ed4f40 approved; it is waiting for the SI combined suite.
+
+- 2026-10-17 (local): The IC-C34 codex experiment runs as bg job d05d3eaf5f04 (`/var/tmp/ic-c34/run.sh`, log `/var/tmp/ic-c34/result.log`, no secrets). It uses a dedicated login made by the user, so codex-b's login is not affected. It ends 2026-10-27 19:03Z.
+  - First finding: codex ignores an `auth.json` without the `refresh_token` key ("401 missing bearer"), so the guest keeps the key as an empty string. It then authenticates.
+  - The login's account is quota-limited until 2026-10-22 06:16Z, so `FAIL usage limit` means authenticated.
+  - Verdict after the original expiry (2026-10-27 13:03Z): projection or unsupported.
+- UD slice 3: reviewer approved; adversary rejected with 3 findings (tests ee4801d3). Implementer nd-83907cc8 relaunched with those findings, plus the run-id actor check.
