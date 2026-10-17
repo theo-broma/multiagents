@@ -1979,6 +1979,11 @@ No allowlist entry or new external host is added by this slice.
   - A revoked grant is never re-admitted, even if it reappears.
 - **K4B.9 — every root start separates or fails.** An entrypoint started as uid 0 always performs the K4B.7 separation. If it cannot, because secrets are missing or anything else fails, it exits nonzero without starting the child. No root start runs the child unseparated, test mode included.
 
+- **K4B.10 — source binding is the attempt network's subnet (2026-10-17, implementer nd-4fa20bcc).** Docker gives a container its address only at start, but readiness must be confirmed before start (IC-C25). So a grant is bound to the subnets of the attempt's own network, which Docker reports from creation. It is not bound to the container's single address.
+  - A grant with no known subnet is not ready: it gives `Unknown`.
+  - The binding never narrows after start, because narrowing would cut live streams under IC-C29.
+  - Accepted residual: the host's bridge address on that subnet could present the credential, and the host is trusted.
+
 ### Slice 4B work split (orchestrator, 2026-10-16)
 
 4B ships in two sub-slices, each with its own tester → implementer-deep →
