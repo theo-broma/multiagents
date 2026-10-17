@@ -6488,3 +6488,4 @@ Pending user: RB-R1 re-wording (above).
     Ask the advisor to investigate the c29 failures on the branch itself.
 - 2026-10-17 ~03:55 CEST. NC-R59 suite 3a82a4911ef2 finished ('lost' status, 690 failed). Almost all are expected reds: phase2, plus the UD/4B.1/GG-R10 tests now on main without their src. 12 others remain (/tmp scratchpad r59.s); rerunning them alone on r59-comb and on main in the background (task bjc96evf4).
 - 2026-10-17 ~04:00 CEST. UD suite 06a18ce0bde7 done: every UD test is green. 9 unexpected reds (scratchpad ud.s); rerunning them alone in the background (task baac4nkfs).
+- 2026-10-17 ~04:05 CEST. GG suite 4ad6a5ba2016 done: no gg test red. 8 unexpected reds (scratchpad gg.s); rerunning them alone in the background (task b0kpwj41x).
